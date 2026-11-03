@@ -69,6 +69,7 @@ hybrid-array = { version = "0.4", default-features = false, features = ["alloc",
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 indexmap = { version = "2", features = ["serde"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 md-5-93f6ce9d446188ac = { package = "md-5", version = "0.10" }
@@ -190,6 +191,7 @@ hybrid-array = { version = "0.4", default-features = false, features = ["alloc",
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 indexmap = { version = "2", features = ["serde"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 md-5-93f6ce9d446188ac = { package = "md-5", version = "0.10" }
