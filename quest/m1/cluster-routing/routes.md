@@ -117,9 +117,10 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   drain. Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
 - Fresh routing identity per process/tab restart, declared by the origin and
-  shared across its live sessions, decided 2026-10-13. It is unverified:
-  recognizing a routing identity needs key proof, which
-  [Peer grants](/quest/m2/p2p/peer-grant.md) owns (decided 2026-10-25).
+  shared across its live sessions, decided 2026-10-13. It is unverified.
+  Decided 2026-11-02 (maintainer, /quest-unblock): peer grants are dropped and no key proof is
+  planned; a provable identity, if a use case needs one, makes this route
+  identity a public key, independent of P2P.
   Decided 2026-10-26 (maintainer): receivers do not stamp a fresh identity
   per session. In a mesh, two relays stamping their sessions from one origin
   forward its routes as two identities a third relay cannot recognize as

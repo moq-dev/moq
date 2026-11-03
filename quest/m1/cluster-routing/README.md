@@ -39,9 +39,9 @@ Decided with the maintainer, 2026-10-13:
   refresh from the origin; instant failover is not required. Measure failure
   detection, additional routing recovery, and total interruption separately.
 - An origin declares its own routing identity, fresh per process or tab
-  restart and shared across its live sessions. It is unverified: recognizing
-  a routing identity needs key proof, which
-  [Peer grants](/quest/m2/p2p/peer-grant.md) owns. Receiver-stamped
+  restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
+  key proof is planned; if a use case needs a provable identity, moq-lite-07's
+  route identity becomes a public key, independent of P2P. Receiver-stamped
   per-session identities were dropped 2026-10-26 (maintainer): in a mesh,
   two relays stamping their sessions from one origin forward its routes as
   two identities a third relay cannot recognize as one. Keep administrative
