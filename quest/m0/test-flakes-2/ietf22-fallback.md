@@ -51,4 +51,27 @@ NAMESPACE and closing only at teardown after grading. Neither failure
 recurred. None of these runs recreated the original host load of 30 to 70, so
 they are a baseline, not evidence that either failure is fixed.
 
+Two more focused runs on 2026-11-02 (2026-11-03 UTC), at
+[622d7bc0c5](https://github.com/moq-dev/moq/commit/622d7bc0c5), passed all three
+versions with Chromium 156.0.8078.4. They used the same debug filter, with
+`HARNESS_KEEP=1 HARNESS_RUNS="$PWD/.tmp/runs"`, in the Nix dev shell through
+`quest gate`. IETF22 replaced in 168 and 169 ms and fell back in 929 and
+408 ms. The browser graded both fallbacks at 30.0 fps, synchronized audio, and no
+reconnect warning. Relay connection 9 sent the fallback NAMESPACE at
+04:15:15.293658Z, accepted fresh catalog/audio/video subscriptions at
+04:15:15.337120Z, 04:15:15.364698Z, and 04:15:15.371115Z, and closed with
+`cancelled` at 04:15:20.224340Z, after playback grading. There was only one
+IETF22 viewer connection in each run; the browser's namespace-stream close
+message appeared only at teardown.
+
+The one-minute host load was 30.97 near the end of the first build, before
+media playback; the second invocation began at 20.16 and ended at 14.83.
+These spot samples do not establish sustained load of 30 to 70 during playback.
+
+Both runs retain their relay and browser logs in the implementation checkout's
+`.tmp/runs/interop-h9Ciuig2/` and `.tmp/runs/interop-6BlHQ6Mj/`. The browser log
+in each is `media-chromium--media-cases--replacement.log`; the relay log is
+`relay.log`. Neither recorded failure recurred, so the cause remains unknown
+and no production or test change is justified.
+
 Public API: none expected. Wire: none expected.
