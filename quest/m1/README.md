@@ -143,7 +143,6 @@ per-frame CPU growth since #5926.
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
-- [JSON writes take a broadcast-clock timestamp](/quest/m1/json-required-timestamp.md) - every binding's JSON write requires one, moq-c's NULL fails, and C gains `moq_publish_catalog_now()`, so C media stops advertising an 8 s delay
 - [Catalog delay is the least a track trails](/quest/m1/catalog-delay-min.md) - the estimator keeps the minimum trail, so B-frame reorder never becomes `delay`
 - [Byte-stream renditions form a ladder](/quest/m1/stream-ladder.md) - moq-ffi stream producers link as `lower` and disable unfundable rungs like frame producers
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
