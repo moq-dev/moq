@@ -40,9 +40,15 @@ start, consumers.md swaps the first-frame pts for the group start.
   publisher counter (per-producer state again).
   - Each group belongs to one segment, numbered by grid line: the first line
     it contains, so segment N starts at the group containing pts
-    N × interval. A group containing no line joins the segment of the group
-    before it, or after a gap, the segment of the line it starts after. The
-    edge trims each segment to its own groups. The media sequence number is N.
+    N × interval. A group spans from its first-frame pts to the next group's.
+    A group containing no line belongs to the segment of the line it starts
+    after, floor(pts / interval): the grid slots an overrun or a pause skips
+    count as gaps (maintainer, 2026-11-03). On a 2s grid, A = [0s, 7s) is
+    segment 0, slots 1 and 2 are gaps, and a contiguous B = [7s, 7.2s) starts
+    segment 3. An edge joining at B derives its number from B's and its
+    successor's timestamps alone. Rejected: B joining A's segment 0, which an
+    edge joining at B cannot derive without older groups. The edge trims each
+    segment to its own groups. The media sequence number is N.
   - Whole groups only. Never split a group: a segment starting mid-GOP is not
     independent.
   - A segment with no groups is `EXT-X-GAP`, so numbering never skips across a
@@ -76,6 +82,15 @@ start, consumers.md swaps the first-frame pts for the group start.
   draft and the HLS, CLI, and archive docs this makes stale, including
   `doc/concept/archives.md`, whose HLS paragraph says a recording needs its
   `hls` record tracks.
+- **Open: an unhinted broadcast's interval.** moq-mux declares the interval
+  from its GOP hint, but RTMP, SRT, and file or pipe imports (`moq import` of
+  fMP4, TS, MKV, or FLV) carry none. Today their first segment declares the
+  `hls` duration, at least the 4s default grid. Options: declare the 4s
+  default for an unhinted broadcast at once, its GOPs packing or overrunning
+  (recommended, keeps ingest HLS-renderable with today's segment length);
+  declare the first complete video group, measured once; or leave an
+  unhinted broadcast not HLS-renderable, as the Catalog bullet reads.
+  Implementation waits on this answer.
 
 Public API: breaking. `hang::hls` and the per-rendition `hls` field are
 deleted, `clock` moves to `media.clock`, and `moq_mux::hls` shrinks to
@@ -89,19 +104,6 @@ segment opens on a sync sample. No renderer emits it today, and
 [export-sync-flags](/quest/m2/intra-refresh/export-sync-flags.md) assumes it, so
 that quest only has to omit it for warmup renditions. #7387's conformance probe
 then checks the tag against each segment's first sample.
-
-## Waiting
-
-- Maintainer: clarify whether the empty grid slots created by an overrun count
-  as "after a gap" for the next group containing no grid line. With a 2s
-  interval, group A covers [0s, 7s) and is segment 0; contiguous group B covers
-  [7s, 7.2s) and contains no line. Joining B to its predecessor assigns it to
-  segment 0; treating the skipped grid slots as a gap assigns it to segment 3.
-  An edge joining at B cannot derive segment 0 without older group metadata.
-  Options: treat skipped grid slots as gaps and assign B to segment 3
-  (recommended, preserves timestamp-derived numbering), or retain segment 0
-  and specify how a new edge recovers the predecessor's segment before listing
-  B. Resume once the Plan states which rule applies.
 
 ## Related
 
