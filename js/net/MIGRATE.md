@@ -43,7 +43,7 @@ Pass canonical components: `Path.from("room/cam")` or `Path.from(prefix, "cam")`
 
 ### moq-transport drafts 14 through 17, 19, and 21 are removed ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753), [moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754))
 
-The `DRAFT_14` through `DRAFT_17`, `DRAFT_19`, and `DRAFT_21` members of `Ietf.Version` and `Ietf.ALPN` are gone; replace references with a supported draft. A peer offering only removed drafts fails the handshake.
+A peer offering only removed drafts fails the handshake.
 The moql SETUP (no ALPN, or `moql`) negotiates only moq-lite versions.
 Peers must speak moq-transport draft 18, 20, or 22, or moq-lite.
 
