@@ -266,7 +266,7 @@ impl Session {
 		self.opening.poll(waiter, |opening, cx| {
 			if opening.uni.is_none() {
 				let send = std::task::ready!(self.conn.poll_open_uni(
-					waiter,
+					opening.park.hold(cx),
 					send::Options {
 						group: None,
 						priority: i64::MAX
@@ -321,7 +321,7 @@ impl Session {
 					pair
 				} else {
 					std::task::ready!(self.conn.poll_open_bi(
-						waiter,
+						opening.park.hold(cx),
 						send::Options {
 							group: None,
 							priority: i64::MAX
@@ -614,6 +614,8 @@ impl Session {
 
 #[derive(Default)]
 struct Opening {
+	// Driver wakes must go through the bridge, so they cannot reenter its held lock.
+	park: kio::Park,
 	uni: Option<(send::Stream, Bytes)>,
 	bi: Option<(send::Stream, crate::quic::driver::recv::Stream, Bytes)>,
 	request: Option<(send::Stream, crate::quic::driver::recv::Stream, Bytes)>,
@@ -727,6 +729,7 @@ struct SessionAccept {
 	bi_park: kio::Park,
 	// Pending WebTransport headers must be decoded before returning this error.
 	uni_end: Option<SessionError>,
+	bi_end: Option<SessionError>,
 
 	// Keep track of work being done to read/write the WebTransport stream header.
 	pending_uni: FuturesUnordered<Pin<Box<PendingUni>>>,
@@ -772,6 +775,7 @@ impl SessionAccept {
 			uni_park: Default::default(),
 			bi_park: Default::default(),
 			uni_end: None,
+			bi_end: None,
 
 			pending_uni: early.into_iter().collect(),
 			pending_bi: FuturesUnordered::new(),
@@ -869,18 +873,18 @@ impl SessionAccept {
 
 		loop {
 			// Accept any new streams.
-			if let Poll::Ready(res) = self.conn.poll_accept_bi(self.bi_park.hold(cx)) {
+			if self.bi_end.is_none()
+				&& let Poll::Ready(res) = self.conn.poll_accept_bi(self.bi_park.hold(cx))
+			{
 				// Start decoding the header and add the future to the list of pending streams.
-				let (send, recv) = match res {
-					Ok(pair) => pair,
-					Err(e) => {
-						return Poll::Ready(Err(e.into()));
+				match res {
+					Ok((send, recv)) => {
+						self.pending_bi
+							.push(Box::pin(Self::decode_bi(send, recv, self.session_id)));
+						continue;
 					}
-				};
-				let pending = Self::decode_bi(send, recv, self.session_id);
-				self.pending_bi.push(Box::pin(pending));
-
-				continue;
+					Err(err) => self.bi_end = Some(err.into()),
+				}
 			}
 
 			// Poll the list of pending streams.
@@ -890,7 +894,8 @@ impl SessionAccept {
 					log_header_error(err, "bidirectional");
 					continue;
 				}
-				Poll::Ready(None) | Poll::Pending => return Poll::Pending,
+				Poll::Ready(None) => return self.bi_end.clone().map_or(Poll::Pending, |err| Poll::Ready(Err(err))),
+				Poll::Pending => return Poll::Pending,
 			};
 
 			if let Some((send, recv)) = res {
@@ -1284,6 +1289,31 @@ mod tests {
 				assert!(recv.read_chunk(1).await.unwrap().is_none());
 			}
 		}
+	}
+
+	/// Accepted headers buffered before the connection closed precede its terminal error.
+	#[tokio::test]
+	async fn buffered_stream_headers_precede_the_close() {
+		let (client, server, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+		let mut uni = client.open_uni(Default::default()).await.unwrap();
+		uni.write_all(&b"uni"[..]).await.unwrap();
+		assert!(uni.finish().await.unwrap().is_none());
+		let (mut bi, _recv) = client.open_bi(Default::default()).await.unwrap();
+		bi.write_all(&b"bi"[..]).await.unwrap();
+		assert!(bi.finish().await.unwrap().is_none());
+		client.close(0, "done");
+		server.closed().await;
+		let mut uni = server.accept_uni().await.unwrap();
+		assert_eq!(uni.read_to_end(3).await.unwrap(), b"uni");
+		let (_send, mut bi) = server.accept_bi().await.unwrap();
+		assert_eq!(bi.read_to_end(2).await.unwrap(), b"bi");
+		assert!(server.accept_uni().await.is_err());
+		assert!(server.accept_bi().await.is_err());
 	}
 
 	#[tokio::test]

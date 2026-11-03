@@ -331,6 +331,8 @@ struct Web {
 }
 
 struct State {
+	uni_park: kio::Park,
+	bi_park: kio::Park,
 	/// Incoming streams whose headers are still being read.
 	pending_uni: FuturesUnordered<PendingUni>,
 	pending_bi: FuturesUnordered<PendingBi>,
@@ -457,6 +459,8 @@ impl Session {
 			header_bi: header_bi.into(),
 			header_datagram: header_datagram.into(),
 			state: kio::Bridge::new(State {
+				uni_park: Default::default(),
+				bi_park: Default::default(),
 				// Still mid-header when the control stream turned up; the
 				// session finishes classifying them, so a pipelined
 				// WebTransport stream is not lost to the handshake ending.
@@ -523,6 +527,8 @@ impl std::fmt::Debug for Session {
 
 #[derive(Default)]
 struct Opening {
+	// Driver wakes must go through the bridge, so they cannot reenter its held lock.
+	park: kio::Park,
 	uni: Option<(SendStream, Bytes)>,
 	bi: Option<(SendStream, RecvStream, Bytes)>,
 	request: Option<(SendStream, RecvStream, Bytes)>,
@@ -543,7 +549,7 @@ impl Session {
 					return Poll::Ready(Ok(RecvStream::new(recv, &self.handles)));
 				}
 				let ended = loop {
-					match self.conn.poll_accept_uni(waiter) {
+					match self.conn.poll_accept_uni(state.uni_park.hold(cx)) {
 						Poll::Ready(Ok(recv)) => state.pending_uni.push(PendingUni::new(recv)),
 						Poll::Ready(Err(err)) => break Some(err),
 						Poll::Pending => break None,
@@ -580,7 +586,7 @@ impl Session {
 					)));
 				}
 				let ended = loop {
-					match self.conn.poll_accept_bi(waiter) {
+					match self.conn.poll_accept_bi(state.bi_park.hold(cx)) {
 						Poll::Ready(Ok((send, recv))) => state.pending_bi.push(PendingBi::new(send, recv)),
 						Poll::Ready(Err(err)) => break Some(err),
 						Poll::Pending => break None,
@@ -607,7 +613,7 @@ impl Session {
 		self.opening.poll(waiter, |opening, cx| {
 			if opening.uni.is_none() {
 				let inner = ready!(self.conn.poll_open_uni(
-					waiter,
+					opening.park.hold(cx),
 					driver_send::Options {
 						group: None,
 						priority: i64::MAX
@@ -662,7 +668,7 @@ impl Session {
 					pair
 				} else {
 					ready!(self.conn.poll_open_bi(
-						waiter,
+						opening.park.hold(cx),
 						driver_send::Options {
 							group: None,
 							priority: i64::MAX
