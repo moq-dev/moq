@@ -188,7 +188,9 @@ for (const [version, alpn] of [
 					// Next Object may first open an empty tail of the previous group.
 					if (header.groupId < i) {
 						while (!(await reader.done())) {
-							const frame = await reader.decode((cursor) => Frame.decode(cursor, header.flags, undefined));
+							const frame = await reader.decode((cursor) =>
+								Frame.decode(cursor, header.flags, undefined),
+							);
 							expect(frame.payload).toBeUndefined();
 						}
 						continue;
