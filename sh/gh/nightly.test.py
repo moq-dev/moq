@@ -60,10 +60,12 @@ class FeaturesTest(unittest.TestCase):
                         for arg in args:
                             if arg.startswith('mir='):
                                 Path(arg[4:]).write_text('' if package == 'kio' else '\\n'.join(
-                                    '{async fn body of ' + name + '()}' for name in ('until', 'run_front', 'serve_front')
+                                    '{async fn body of ' + name + '()}'
+                                    for name in ('until', 'run_front', 'serve_front')
                                 ))
                     elif args[0] == 'check' and '-p' in args and args[args.index('-p') + 1] == 'moq-tokio':
-                        print('a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature')
+                        print('a rustls QUIC backend requires a crypto provider: '
+                              'enable either the `aws-lc-rs` or `ring` feature')
                         sys.exit(1)
                     """)
                 )
