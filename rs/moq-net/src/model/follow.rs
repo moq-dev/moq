@@ -309,9 +309,18 @@ impl Following {
 			let resolved = ready!(kio::Task::poll(resolving, waiter));
 			self.resolving = None;
 			// A refusal answers for the routes serving the path now: wait for another instance
-			// to serve it before asking again, rather than asking the same handler at once.
+			// to serve it before asking again, rather than asking the same handler at once. That
+			// includes the broadcast handed out last moving off the path, which led here.
 			self.unseen = false;
-			let broadcast = resolved?;
+			let broadcast = match resolved {
+				Ok(broadcast) => broadcast,
+				Err(err) => {
+					self.last = None;
+					self.moved = None;
+					self.absorbed = false;
+					return Poll::Ready(Err(err));
+				}
+			};
 
 			// Resolving can run ahead of the follower: a takeover resolves at once while the
 			// origin holds its restart, and that restart then names the instance handed out.
@@ -753,6 +762,27 @@ mod tests {
 		// A publisher takes the path over from the claim, and is handed out.
 		let _publisher = origin.publish("live", route(&Instance::random())).unwrap();
 		let _served = available(&mut announced).await;
+	}
+
+	/// A refusal by the route that took over from a closed broadcast is not retried when that
+	/// broadcast's movement is seen: the follower waits for another instance.
+	#[kio::test]
+	async fn announced_does_not_retry_a_refusal_after_a_takeover() {
+		let origin = Hop::new(1).unwrap().produce();
+		let dynamic = origin.requests_route("", route(&Instance::random()), None).unwrap();
+		let exact = origin.publish("live", route(&Instance::random())).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let _first = available(&mut announced).await;
+
+		drop(exact);
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async { requested(&dynamic).await.reject(Error::NotFound) }
+		);
+		assert!(matches!(result.expect("the refusal answers"), Err(Error::NotFound)));
+		none(&mut announced).await;
+		let again = kio::clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast()).await;
+		assert!(again.is_err(), "the refusing handler was asked again");
 	}
 
 	/// A path no pattern can spell is refused rather than followed through the whole scope,
