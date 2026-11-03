@@ -263,8 +263,8 @@ interface Opened {
 	close: () => Promise<void>;
 }
 
-async function open(identity: Identity & { counted?: boolean }): Promise<Opened> {
-	const { variant, kind, counted } = identity;
+async function open({ counted, ...identity }: Identity & { counted?: boolean }): Promise<Opened> {
+	const { variant, kind } = identity;
 	const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
 	const page = await context.newPage();
 	const errors: string[] = [];

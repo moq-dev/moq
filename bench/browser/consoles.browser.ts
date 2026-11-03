@@ -23,10 +23,15 @@ window.environment = () => {
 };
 window.transport = {
   publish() {
+    if ("__copies" in window) throw new Error("publisher must not install copy counters");
     console.error("publisher diagnostic");
     if (${JSON.stringify(failure)} === "publish") throw new Error("fixture publish failure");
   },
-  prepare() { console.log("consumer ready"); return "fixture"; },
+  prepare({full}) {
+    if (("__copies" in window) !== full) throw new Error("consumer copy counters do not match the pass");
+    console.log("consumer ready");
+    return "fixture";
+  },
   consume({size, frames}) {
     return { frames, bytes: size * frames,
       digest: size === 160 ? ${digest(160, 200)} : ${digest(131072, 16)},
@@ -73,7 +78,16 @@ if (${JSON.stringify(failure)} === "pageerror") throw new Error("fixture pageerr
 			expect(entries.some((entry) => entry.type === "warning" && entry.text === "page warning")).toBe(true);
 			const loaded = entries.filter((entry) => entry.text === "page loaded");
 			expect(new Set(loaded.map((entry) => entry.page)).size).toBe(loaded.length);
-			expect(loaded[0]).toMatchObject({ role: "publisher", variant: "current", round: 0, pass: "timed" });
+			expect(loaded[0]).toMatchObject({
+				kind: "transport",
+				key: "transport 160B x200",
+				role: "publisher",
+				variant: "current",
+				round: 0,
+				pass: "timed",
+			});
+			expect(Number.isFinite(loaded[0].time)).toBe(true);
+			expect(entries.some((entry) => "counted" in entry)).toBe(false);
 			if (failure !== "startup") expect(loaded[1].role).toBe("consumer");
 			if (failure === "pageerror")
 				expect(
@@ -84,6 +98,9 @@ if (${JSON.stringify(failure)} === "pageerror") throw new Error("fixture pageerr
 			const report = JSON.parse(await readFile(join(root, "report.json"), "utf8"));
 			expect(report.samples.length).toBe(failure === "none" ? 6 : 0);
 			if (failure === "none") {
+				expect(entries.some((entry) => entry.type === "error" && entry.text === "publisher diagnostic")).toBe(
+					true,
+				);
 				expect(loaded.length).toBe(12);
 				expect(entries.filter((entry) => entry.text === "page stopped").length).toBe(12);
 			}
