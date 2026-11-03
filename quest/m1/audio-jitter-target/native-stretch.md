@@ -56,7 +56,7 @@ WebRTC is BSD-3-Clause; keep its notice with any code ported from it.
 implemented in both languages. Whichever of this quest and the browser stretch lands first
 adds the stretch to `doc/concept/audio-jitter.md` (normative), with test
 vectors beside the [conformance corpus](/doc/concept/audio-jitter.md):
-input PCM, a requested accelerate or expand, and the expected output. The
+input PCM, buffered distance, target, and hysteresis state, the expected accelerate, expand, or hold, and the expected output. The
 second one conforms to them. Neither waits on the other, since the design
 is NetEq's, not either implementation's.
 
