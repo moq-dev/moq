@@ -150,7 +150,6 @@ per-frame CPU growth since #5926.
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Binding subscriptions take a Delay { min, max }](/quest/m1/subscription-delay.md) - the bindings take the Rust and JS subscription Delay, and an omitted max means 0 in every one
 - [A step back smaller than the delay keeps the TS export](/quest/m1/ts-small-step-back.md) - audio restarts instead of regressing; video stays within its declared depth
-- [A replaced copy's grace wakes its reader](/quest/m1/grace-deadline.md) - the grace arms a deadline, so a clean end is on time
 - [moq-boy's status loop stops on an errored track](/quest/m1/moq-boy-status-loop.md) - only schema errors are caught
 - [JS tests and docs say what keeps a group cached](/quest/m1/js-cache-window.md) - none assume maxAge is retention
 - [release carries the fanout-threads bench](/quest/m1/release-fanout-bench.md) - a bench-only port of session_fanout_threads for the pre-cut pairing
