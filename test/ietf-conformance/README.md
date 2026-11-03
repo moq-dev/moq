@@ -52,7 +52,9 @@ The profile therefore accepts:
 
 Every other check is upstream's: forwarded object IDs, properties, payloads,
 END\_OF\_GROUP status objects and header bits, and FIRST\_OBJECT. Any other
-priority, a second END\_OF\_TRACK, or one anywhere else still fails.
+priority, a second END\_OF\_TRACK, or one anywhere else still fails. So does
+an END\_OF\_GROUP status past the last group, which the profile adds because
+upstream logs that marker's other mismatches without failing the verdict.
 
 Measured on the current pin:
 

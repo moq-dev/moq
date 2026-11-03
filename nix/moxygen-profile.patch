@@ -11,7 +11,25 @@
    // Validate the received data
    if (header.status != ObjectStatus::END_OF_GROUP) {
      XLOG(ERR)
-@@ -579,6 +583,35 @@
+@@ -546,6 +550,17 @@
+         << header.status;
+     return;
+   }
++  // The terminal stream past the last group skips the header's end-of-group
++  // check, so a group marker there must still fail. No such group exists.
++  if (header.group > window_.last.group) {
++    recordSemanticsFailure(
++        folly::to<std::string>(
++            "End of Group Marker Past Last Group: group=",
++            header.group,
++            "  Last=",
++            window_.last.group));
++    return;
++  }
+ 
+   if (!state.expectEndOfGroup) {
+     XLOG(ERR)
+@@ -579,6 +594,35 @@
    }
  }
  
@@ -47,7 +65,7 @@
  void MoQTestClient::onEndOfStream() {
    XLOG(DBG1) << "MoQTest DEBUGGING: calling onEndOfStream";
  }
-@@ -778,6 +811,16 @@
+@@ -778,6 +822,16 @@
    publishDoneReceived_ = true;
  }
  
@@ -64,7 +82,7 @@
  void MoQTestClient::validateSubgroupHeader(
      const ReceiveState& state,
      uint64_t groupID,
-@@ -796,8 +839,11 @@
+@@ -796,8 +850,11 @@
      return;
    }
  
@@ -77,7 +95,7 @@
      recordSemanticsFailure(
          folly::to<std::string>(
              "End of Group Signal Mismatch for group=",
-@@ -824,7 +870,7 @@
+@@ -824,7 +881,7 @@
    // The publisher may elide the priority from the wire, but the value the
    // subscriber ends up with must still be the one the publisher chose.
    auto expectedPriority = publisherPriorityForGroup(groupID);
@@ -86,7 +104,7 @@
      recordSemanticsFailure(
          folly::to<std::string>(
              "Subgroup Priority Mismatch for group=",
-@@ -861,7 +907,7 @@
+@@ -861,7 +918,7 @@
    }
  
    auto expectedPriority = publisherPriorityForGroup(header.group);
