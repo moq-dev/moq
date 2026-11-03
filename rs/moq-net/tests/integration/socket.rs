@@ -328,21 +328,35 @@ async fn a_stream_is_accepted_only_while_listed() {
 	drop(live);
 }
 
-/// Opening a bi stream of a name still being opened fails without disturbing the first,
-/// and dropping the socket ends it for the peer even while an open is pending.
+/// Two bi opens of one name are two streams, each answered on its own, and dropping the
+/// socket ends it for the peer even while an open is pending.
 #[kio::test]
-async fn a_pending_open_neither_doubles_nor_outlives_its_socket() {
+async fn a_pending_open_neither_merges_nor_outlives_its_socket() {
 	let fixture = Fixture::new().await;
 	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
 	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
 
 	let first = dialer.open_bi("chat", None).unwrap();
-	assert!(matches!(dialer.open_bi("chat", None), Err(moq_net::Error::Duplicate)));
-	let (opened, answered) = kio::clock::timeout(TIMEOUT, async { futures::join!(first, accepted.accept_bi()) })
-		.await
-		.expect("bi timeout");
-	opened.expect("open");
-	answered.expect("accept").expect("a stream");
+	let second = dialer.open_bi("chat", None).unwrap();
+	let (first, second, answers) = kio::clock::timeout(TIMEOUT, async {
+		futures::join!(first, second, async {
+			(accepted.accept_bi().await, accepted.accept_bi().await)
+		})
+	})
+	.await
+	.expect("bi timeout");
+	let (first, second) = (first.expect("first open"), second.expect("second open"));
+	let one = answers.0.expect("accept").expect("a stream");
+	let two = answers.1.expect("accept").expect("a stream");
+	assert_eq!((&*one.name, &*two.name), ("chat", "chat"));
+	send(&first.producer, b"one");
+	send(&second.producer, b"two");
+	assert_eq!(recv(&one.consumer).await, b"one");
+	assert_eq!(recv(&two.consumer).await, b"two");
+	send(&one.producer, b"one back");
+	send(&two.producer, b"two back");
+	assert_eq!(recv(&first.consumer).await, b"one back");
+	assert_eq!(recv(&second.consumer).await, b"two back");
 
 	let pending = dialer.open_bi("unanswered", None).unwrap();
 	drop(dialer);
@@ -401,32 +415,50 @@ async fn closing_a_socket_ends_its_opens() {
 	drop(answered);
 }
 
-/// A bi stream's name opens again only once the peer released its answer to the earlier
-/// open, which the peer could not answer before then.
+/// A name opened again is a new stream: a handle to the earlier one never reads it, and
+/// a bi reopen is answered while the peer still holds its earlier answer.
 #[kio::test]
-async fn a_bi_name_reopens_once_its_answer_is_released() {
+async fn a_reopened_name_is_a_new_stream() {
 	let fixture = Fixture::new().await;
 	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
 	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
 
-	let first = dialer.open_bi("chat", None).unwrap();
+	// Accepted and held without subscribing, then the opener moves on to a new "chat".
+	let old = dialer.open_uni("chat", None).unwrap();
+	let held = kio::clock::timeout(TIMEOUT, accepted.accept_uni())
+		.await
+		.expect("accept timeout")
+		.unwrap()
+		.expect("a stream");
+	drop(old);
+	let new = dialer.open_uni("chat", None).unwrap();
+	send(&new, b"new");
+	let fresh = kio::clock::timeout(TIMEOUT, accepted.accept_uni())
+		.await
+		.expect("accept timeout")
+		.unwrap()
+		.expect("a stream");
+	assert_eq!(&*fresh.name, "chat");
+	assert_eq!(recv(&fresh.consumer).await, b"new");
+	let stale = kio::clock::timeout(SETTLE, async {
+		let mut subscriber = held.consumer.subscribe(None).await.ok()?;
+		let mut group = subscriber.recv_group().await.ok()??;
+		Some(group.read_frame().await.ok()??.payload.to_vec())
+	})
+	.await;
+	assert!(
+		!matches!(stale, Ok(Some(payload)) if payload == b"new"),
+		"the earlier stream's handle read the new one"
+	);
+
+	// A bi answer the peer keeps does not stop the name opening again.
+	let first = dialer.open_bi("call", None).unwrap();
 	let (opened, answered) = kio::clock::timeout(TIMEOUT, async { futures::join!(first, accepted.accept_bi()) })
 		.await
 		.expect("bi timeout");
-	let answered = answered.expect("accept").expect("a stream");
+	let _kept = answered.expect("accept").expect("a stream");
 	drop(opened.expect("open"));
-
-	// The peer still holds its answer.
-	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
-	assert!(
-		matches!(dialer.open_bi("chat", None), Err(moq_net::Error::Duplicate)),
-		"reopened a name the peer still answers"
-	);
-
-	drop(answered);
-	// Let the dialer's listing hear the answer go.
-	assert!(kio::clock::timeout(SETTLE, dialer.accept_bi()).await.is_err());
-	let again = dialer.open_bi("chat", None).unwrap();
+	let again = dialer.open_bi("call", None).unwrap();
 	let (opened, answered) = kio::clock::timeout(TIMEOUT, async { futures::join!(again, accepted.accept_bi()) })
 		.await
 		.expect("reopen timeout");

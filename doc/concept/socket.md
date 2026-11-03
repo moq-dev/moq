@@ -64,27 +64,31 @@ announcements without limit, and its broadcast is requested only on accept.
 
 ## Streams
 
-A stream is a track, named by who opened it and which way it carries data:
+A stream is a track, named by who opened it, which way it carries data, and
+its number:
 
 ```text
-.<opener>/<kind>/<name>
+.<opener>/<kind>/<number>/<name>
 ```
 
-`<opener>` is `dial` or `accept`, `<kind>` is `uni` or `bi`, and `<name>` is
-the application's name for the stream, which may hold `/`.
+`<opener>` is `dial` or `accept`, and `<kind>` is `uni` or `bi`. `<number>`
+counts the opener's streams in decimal from 0 with no leading zeros, uni and bi
+alike, and is never reused within a socket. `<name>` is the application's name
+for the stream, which may hold `/` and may repeat: each open is a new stream.
 
 - **Uni.** The opener publishes the track in its own broadcast. The peer
   accepts it and subscribes.
 - **Bi.** The opener publishes the track in its own broadcast. The peer accepts
   it by publishing the same name in its broadcast, with the opener's track
   info, and each side subscribes to the other's. The opener's stream resolves
-  once the answer is listed. A peer still holding its answer to an earlier open
-  of a name can't answer the name again, so the opener refuses to reopen a name
-  while the peer lists its answer.
+  once the answer is listed.
 
-The opener prefix keeps the two sides' names apart, the way the low bit of a
-QUIC stream ID does: the dialer's bi `chat` and the listener's bi `chat` are
-two streams. A track's info, priority included, is the opener's to choose.
+The opener prefix and the number together work like a QUIC stream ID. The
+prefix keeps the two sides' names apart, the way the ID's low bit does, so the
+dialer's bi `chat` and the listener's bi `chat` are two streams. The number
+keeps one side's opens apart, so a track name always means one stream: a
+handle the peer kept to an earlier `chat` never reads a later one. A track's
+info, priority included, is the opener's to choose.
 
 The peer learns of new streams from the broadcast's track listing (the Tracks
 stream, `TRACKS_ADD`). A listing reports every track the broadcast holds, so

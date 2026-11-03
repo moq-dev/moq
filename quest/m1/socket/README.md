@@ -63,8 +63,10 @@ replacement arc):
   `FINISH`), which pushes them like QUIC's accept. `requested_track` was
   declined because it is pull-shaped: only the side being subscribed to can
   accept. Settled by the Rust implementation: tracks are named
-  `.<opener>/<uni|bi>/<name>` with `<opener>` `dial` or `accept`, so the two
-  sides' names never collide; accept skips names outside the scheme, so fixed
+  `.<opener>/<uni|bi>/<number>/<name>` with `<opener>` `dial` or `accept`, so
+  the two sides' names never collide, and `<number>` counting the opener's
+  streams, so a track never carries two streams and a name may be reopened;
+  accept skips names outside the scheme, so fixed
   track names coexist; the opener chooses the track info (priority included)
   and a bi answer mirrors it. [`doc/concept/socket.md`](/doc/concept/socket.md)
   is the convention JS and Python follow.
