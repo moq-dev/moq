@@ -267,8 +267,13 @@ impl Connection {
 	/// # Panics
 	/// - when `options.group` belongs to another connection
 	pub async fn open_uni(&self, options: send::Options<'_>) -> Result<send::Stream, Error> {
-		let (conn, id) = kio::wait(|waiter| poll_open(waiter, &self.0, options, Dir::Uni)).await?;
-		Ok(send::Stream::new(conn, id))
+		kio::wait(|waiter| self.poll_open_uni(waiter, options)).await
+	}
+
+	/// See [`Self::open_uni`].
+	pub fn poll_open_uni(&self, waiter: &kio::Waiter, options: send::Options<'_>) -> Poll<Result<send::Stream, Error>> {
+		let (conn, id) = ready!(poll_open(waiter, &self.0, options, Dir::Uni))?;
+		Poll::Ready(Ok(send::Stream::new(conn, id)))
 	}
 
 	/// Open a send group at `priority`, for streams and datagrams to join with [`send::Options`]
@@ -289,8 +294,17 @@ impl Connection {
 	/// # Panics
 	/// - when `options.group` belongs to another connection
 	pub async fn open_bi(&self, options: send::Options<'_>) -> Result<(send::Stream, recv::Stream), Error> {
-		let (conn, id) = kio::wait(|waiter| poll_open(waiter, &self.0, options, Dir::Bi)).await?;
-		Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id)))
+		kio::wait(|waiter| self.poll_open_bi(waiter, options)).await
+	}
+
+	/// See [`Self::open_bi`].
+	pub fn poll_open_bi(
+		&self,
+		waiter: &kio::Waiter,
+		options: send::Options<'_>,
+	) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		let (conn, id) = ready!(poll_open(waiter, &self.0, options, Dir::Bi))?;
+		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 
 	/// Open a request stream using only the credit already granted by the peer.
@@ -316,8 +330,13 @@ impl Connection {
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
 	pub async fn accept_uni(&self) -> Result<recv::Stream, Error> {
-		let (conn, id) = kio::wait(|waiter| poll_accept(waiter, &self.0, Dir::Uni)).await?;
-		Ok(recv::Stream::new(conn, id))
+		kio::wait(|waiter| self.poll_accept_uni(waiter)).await
+	}
+
+	/// See [`Self::accept_uni`].
+	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
+		let (conn, id) = ready!(poll_accept(waiter, &self.0, Dir::Uni))?;
+		Poll::Ready(Ok(recv::Stream::new(conn, id)))
 	}
 
 	/// Accept the next incoming bidirectional stream
@@ -333,8 +352,13 @@ impl Connection {
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
 	pub async fn accept_bi(&self) -> Result<(send::Stream, recv::Stream), Error> {
-		let (conn, id) = kio::wait(|waiter| poll_accept(waiter, &self.0, Dir::Bi)).await?;
-		Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id)))
+		kio::wait(|waiter| self.poll_accept_bi(waiter)).await
+	}
+
+	/// See [`Self::accept_bi`].
+	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		let (conn, id) = ready!(poll_accept(waiter, &self.0, Dir::Bi))?;
+		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 
 	/// Receive an application datagram
@@ -343,13 +367,14 @@ impl Connection {
 	///
 	/// This method is cancellation safe. If this does not resolve, no datagrams were consumed.
 	pub fn read_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + '_ {
-		kio::wait(|waiter| {
-			let mut state = self.0.state.lock();
-			// moq-quic yields the datagrams received before checking for the connection error,
-			// so they, which are necessarily finite, drain from a closed connection.
-			let datagram = ready!(state.inner.datagrams().poll_recv(waiter));
-			Poll::Ready(datagram.map_err(|err| state.lost_as(err)))
-		})
+		kio::wait(|waiter| self.poll_recv_datagram(waiter))
+	}
+
+	/// Receive the next datagram, draining what arrived before the connection closed.
+	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		let mut state = self.0.state.lock();
+		let datagram = ready!(state.inner.datagrams().poll_recv(waiter));
+		Poll::Ready(datagram.map_err(|err| state.lost_as(err)))
 	}
 
 	/// Wait for the connection to be closed for any reason
@@ -358,12 +383,14 @@ impl Connection {
 	/// application layer. Cases that might be routine include [`Error::LocallyClosed`]
 	/// and [`Error::ApplicationClosed`].
 	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| {
-			let mut state = self.0.state.lock();
-			let err = ready!(state.inner.poll_closed(waiter));
-			Poll::Ready(state.lost_as(err))
-		})
-		.await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Wait for the connection to close, returning why.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		let mut state = self.0.state.lock();
+		let err = ready!(state.inner.poll_closed(waiter));
+		Poll::Ready(state.lost_as(err))
 	}
 
 	/// Whether the connection is closed, and why.
