@@ -26,3 +26,6 @@ workspace-members = ["moq-mux-fuzz", "moq-net-fuzz", "moq-quic-fuzz", "moq-rtmp-
 
 [final-excludes]
 workspace-members = ["kio-macros"]
+# Keep native media dependencies out of unrelated test builds. Final excludes
+# preserve feature unification for their other dependencies.
+third-party = [{ name = "pipewire" }, { name = "libspa" }, { name = "clang-sys" }]

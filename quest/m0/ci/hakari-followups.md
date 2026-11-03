@@ -1,40 +1,59 @@
-# [XS] The workspace-hack refuses trybuild edges and spares non-media builds
+# [S] Measure the Linux cache effect of native media exclusions
 
 ## Goal
 
-`sh/rs/hakari.py` fails when a crate that dev-depends on trybuild also
-dev-depends on `workspace-hack`, and a Linux test build of a crate with no
-media dependency needs neither libpipewire nor libclang.
+Scheduled Linux jobs record the cache hit rate and build-time effect of
+removing native media requirements from unrelated test builds. Bring a
+material cache regression to the maintainer before declaring the tradeoff
+settled.
 
 ## Plan
 
-Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985). Milestone: ✅ m0 (user: "use recommended for any CI/flakes").
+The implementation in [moq-dev/moq#7713](https://github.com/moq-dev/moq/pull/7713)
+adds the derived trybuild-edge guard and excludes `pipewire`, `libspa`, and
+`clang-sys` from the workspace-hack's final output. Other transitive features
+remain unified. Linux x86_64 and ARM test graphs of `moq-json` no longer reach
+PipeWire or libclang; an uncached x86_64 nextest run passes with native media
+pkg-config probes refused and an invalid libclang path. The original manifests
+fail under the same restriction.
 
-- **trybuild edge**: trybuild copies a crate's dev-dependencies into the
-  project it compiles each UI case in, so `kio-macros`' hack edge made
-  `kio-macros::ui` compile the whole hack (88-120 s), time out, and starve
-  the tests beside it; #6985 (merged) was ejected from the land queue for it
-  ([run 41074871604](https://github.com/moq-dev/moq/actions/runs/41074871604))
-  and fixed it by excluding `kio-macros` by hand (`.config/hakari.toml`'s
-  `[final-excludes]`). `sh/rs/hakari.py:37-53` (at be39188000) only checks
-  that excluded members lack the edge and the rest carry it as a path
-  dev-dependency. Make it derive the rule: a crate with `trybuild` in its
-  dev-dependencies must not carry the `workspace-hack` edge, with a test
-  that plants one.
-- **libpipewire**: CodeRabbit flagged on #6985 that the hack's unified
-  features pull PipeWire (through cpal) and libclang into ordinary Linux
-  test builds of crates that use no media; `rs/workspace-hack/Cargo.toml`
-  still lists `pipewire` (`:353`) and `clang-sys` (`:372`). The dev shell
-  provides both, so only builds outside it notice. Recommended: exclude the
-  pipewire/cpal feature from the hack with hakari's final-excludes, then
-  measure that the cache hit rate across jobs barely moves. If it does
-  move, bring the numbers to the maintainer instead.
+Local Cargo 1.98.1 unit graphs for `moq-json`, `moq-video --features pipewire`,
+and `moq-audio --features pipewire`, each built with `--tests`, have 531 distinct
+third-party recursive compilation identities both before and after. The JSON
+build loses 30 units; video retains 501 total units. Four media identities
+change. These are graph identities, not mbx hit rates or CPU measurements.
 
-`cargo-hakari` is already in the dev shell (`flake.nix:162`, in `rustDeps`),
-so that part of the original quest is done.
+Use the same scheduled Linux job before and after this PR's merge, beginning
+with `Nightly (Rust benchmark tests)`, and retain its mbx cache summaries and
+available compiler-time fields. Compare the last scheduled `main` run before
+the merge with the first two after it. Failed or cancelled builds and missing summaries
+are incomplete evidence, not zero cache hits. Record source/build differences
+that prevent attributing a change to these exclusions.
+
+The 2026-11-02 scheduled run is a pre-merge candidate:
+[run 41483654426](https://github.com/moq-dev/moq/actions/runs/41483654426),
+[Rust benchmark tests](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408205554).
+Its 12 mbx object-cache summaries total 986 hits, 721 misses, 323 not
+looked up, 8 bypassed, and 11 remote failures. The conditional hit rate is
+57.76% (`986 / (986 + 721)`); this excludes not-looked-up and bypassed units.
+The summaries report estimated compiler time avoided, not measured CPU totals.
+The remote failures and mixed build phases limit attribution. Replace this
+candidate if a later scheduled run precedes this PR's merge.
 
 Public API: none. Wire: none.
 
+## Waiting
+
+- moq-dev/moq: after the native-media exclusions merge, collect the last
+  scheduled Linux baseline and first two post-merge Nightlies' mbx hit rates
+  and available compiler-time fields. No post-merge evidence for these
+  exclusions exists yet. If the cache cost is material, present the measured tradeoff to the
+  maintainer; recommend keeping the narrow final exclusions unless the
+  measurements justify another design.
+
 ## Related
 
-- [Unify dependency features with cargo-hakari](/quest/m0/ci/hakari.md) - records the hosted jobs' cache hit rate around the workspace-hack, the measurement the pipewire exclusion needs
+- [Unify dependency features with cargo-hakari](/quest/m0/ci/hakari.md) - owns
+  the separate macOS/Windows evidence and FFI invocation alignment in
+  [moq-dev/moq#7666](https://github.com/moq-dev/moq/pull/7666); do not duplicate
+  those measurements or depend on its unmerged implementation
