@@ -53,7 +53,11 @@ test("tag runs reach their publishers without workflow_run", async () => {
 	expect(lib.if).toContain("github.ref_type == 'tag'");
 	expect(lib.if).toContain("needs.kotlin.result == 'success'");
 	expect(lib.with).toEqual({ "dry-run": false });
-	expect((await read("release-kt-lib")).on.workflow_run).toBeUndefined();
+	const kt = await read("release-kt-lib");
+	expect(kt.on.workflow_run).toBeUndefined();
+	// The call inherits its caller's event, which can be a Nightly dispatched
+	// on the tag; its non-dry input, not the event, lets it publish.
+	expect(kt.jobs.publish.if).toContain("toJSON(inputs.dry-run) == 'false'");
 });
 
 test("release dispatches name a release ref", async () => {
@@ -65,7 +69,7 @@ test("release dispatches name a release ref", async () => {
 	expect(dispatches).toEqual([
 		'gh workflow run apt-repo.yml --ref release -f "tag=$TAG"',
 		'gh workflow run rpm-repo.yml --ref release -f "tag=$TAG"',
-		'gh workflow run release-winget.yml --ref "$TAG"',
 		"gh workflow run moq-sh.yml --ref release",
+		'gh workflow run release-winget.yml --ref "$TAG"',
 	]);
 });
