@@ -846,8 +846,9 @@ export class Encoder {
 							this.#history = this.#next;
 						}
 						deadline.set(backlog.deadline);
-						// The audio retained before a disable is all encoded, so the break follows it.
-						if (paused && breakPending && backlog.empty) {
+						// The audio retained before a disable is all encoded, so the break follows it, even
+						// when re-enabled since: resumed audio then waits behind the flush.
+						if (breakPending && backlog.empty) {
 							breakPending = false;
 							cutAfterFlush();
 						}

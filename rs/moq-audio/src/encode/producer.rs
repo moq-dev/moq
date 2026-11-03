@@ -468,6 +468,10 @@ impl Producer {
 	#[cfg(any(feature = "capture", test))]
 	pub(crate) fn set_active(&mut self, active: bool, now: Timestamp) -> Result<(), Error> {
 		self.backlog.expire(now);
+		// Live input completes the partial frame within one codec frame, so only idle refreshes expire it.
+		if !active {
+			self.expire_partial(now)?;
+		}
 		if self.backlog.take_evicted() {
 			self.reset_pending = true;
 			self.pending_discontinuity = true;
@@ -477,6 +481,23 @@ impl Producer {
 		if active && let Some(raw) = self.backlog.pop() {
 			self.track.history(raw.timestamp);
 			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
+		}
+		Ok(())
+	}
+
+	/// The partial codec frame and the resampler's tail follow the retained frames, so once those
+	/// are gone they expire on the same window, rather than reaching the track stale when it finishes.
+	#[cfg(any(feature = "capture", test))]
+	fn expire_partial(&mut self, now: Timestamp) -> Result<(), Error> {
+		let Some(anchor_us) = self.anchor_us else { return Ok(()) };
+		if !self.backlog.is_empty() {
+			return Ok(());
+		}
+		let channels = self.encoder()?.codec_channels() as usize;
+		let frames = self.frames_produced + (self.pending.len() / channels) as u64;
+		let end = Self::timestamp(anchor_us, frames, 0, self.encoder()?.codec_rate())?;
+		if self.backlog.expired(end, now) {
+			self.reanchor();
 		}
 		Ok(())
 	}
@@ -1027,8 +1048,9 @@ mod tests {
 		producer.write(&pcm_frame(&vec![0.1; 1920], 1_020_000)).unwrap();
 		// Half a codec frame stays pending, then the retention expires the backlog as capture stops.
 		producer.write(&pcm_frame(&vec![0.1; 960], 1_040_000)).unwrap();
+		// The full frames' retention ended at 31.04 s; the partial one's runs to 31.05 s.
 		producer
-			.set_active(false, Timestamp::from_micros(31_100_000).unwrap())
+			.set_active(false, Timestamp::from_micros(31_045_000).unwrap())
 			.unwrap();
 		producer.finish().unwrap();
 
@@ -1040,6 +1062,58 @@ mod tests {
 			matches!(next, moq_mux::container::Read::End { end, .. } if end.as_micros() < 1_040_000),
 			"the final partial frame joined the epoch before the gap: {next:?}"
 		);
+	}
+
+	#[tokio::test]
+	async fn the_partial_frame_expires_with_the_history_before_it() {
+		let input = Input::default();
+		let options = Options {
+			track: Some("audio".into()),
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let track = consumer
+			.track("audio")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+			)
+			.await
+			.unwrap();
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
+		producer.write(&pcm_frame(&vec![0.1; 1920], 1_000_000)).unwrap();
+		producer
+			.set_active(false, Timestamp::from_micros(1_020_000).unwrap())
+			.unwrap();
+		// A full retained frame, then half of one.
+		producer.write(&pcm_frame(&vec![0.1; 2880], 1_020_000)).unwrap();
+		// Past the partial frame's retention too, as when a failed source's history runs out.
+		producer
+			.set_active(false, Timestamp::from_micros(31_100_000).unwrap())
+			.unwrap();
+		producer.finish().unwrap();
+
+		let first = reader.read().await.unwrap().unwrap();
+		assert!(
+			matches!(first, moq_mux::container::Read::Frame { ref frame, .. } if frame.timestamp.as_micros() == 1_000_000),
+			"{first:?}"
+		);
+		// Nothing retained reaches the track after it expired.
+		loop {
+			match reader.read().await.unwrap() {
+				Some(moq_mux::container::Read::Frame { frame, .. }) => {
+					panic!("expired audio at {:?} reached the track", frame.timestamp)
+				}
+				Some(_) => {}
+				None => break,
+			}
+		}
 	}
 
 	#[test]

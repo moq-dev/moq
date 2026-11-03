@@ -1493,3 +1493,56 @@ test("a break after expired history keeps the resumed audio flowing", async () =
 		installed.close();
 	}
 });
+
+// Demand that arrives after a re-enable but before any resumed frame drains the retained audio first,
+// so the break still flushes it rather than cutting it off with the codec mid-flight.
+test("demand between a re-enable and the resumed audio still flushes the break", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const enabled = new Signal(true);
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("between.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, enabled, capture: fakeCapture(feed) as never });
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const push = async (start: number, count: number) => {
+			for (let index = 0; index < count; index++) {
+				await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Nano.fromMilli(Milli(20)));
+			}
+		};
+		await push(0, 4);
+		enabled.set(false);
+		await settle();
+		enabled.set(true);
+		await settle();
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
+		await settle(20);
+		expect(encoder.out.stats.peek().frames).toBe(4);
+		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Micro(80_000)]);
+
+		await push(200_000, 3);
+		// The restarted codec holds two of the three resumed frames.
+		expect(encoder.out.stats.peek().frames).toBe(5);
+		expect(discontinuity).toHaveBeenCalledTimes(1);
+	} finally {
+		discontinuity.mockRestore();
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
