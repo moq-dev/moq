@@ -139,7 +139,6 @@ per-frame CPU growth since #5926.
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Vendored code has every upstream fix it needs](/quest/m1/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
-- [Mesh dials recover from a stuck flow](/quest/m1/mesh-fresh-port.md) - a relay redials a failing cluster peer from a fresh UDP port, so one dropped 5-tuple can't strand a link
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
@@ -154,12 +153,11 @@ per-frame CPU growth since #5926.
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
-- [moq-crypto replaces moq-sign and moq-e2ee](/quest/m1/moq-crypto.md) - one Rust crate and one JS package hold signing and end-to-end encryption, sharing moq-net's timestamp check
 - [Register moq-dev draft 20 in the interop runner](/quest/m1/ietf-drop/README.md) - land the external registry, notes, and README correction for drafts 18, 20, and 22
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [On-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md) - browser publishers answer IETF FETCH for evicted or uncached groups through the JS ranges request surface
 - [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
-- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
+- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; time-stretched browser playback without steady-state underruns and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
@@ -182,7 +180,7 @@ per-frame CPU growth since #5926.
 - [A cancelled MoqTrackDemand wait never loses the next change](/quest/m1/demand-cancel-race.md) - cancelling a `MoqTrackDemand::wanted_changed` call, from any binding, never consumes a demand change
 - [moq-ffi reports an unsupported media configuration as a typed error](/quest/m1/ffi-unsupported-config.md) - `MoqAudioConsumer::subscribe` and the matching video subscribe fail with a typed "unsupported configuration" error
 - [A live keyframe interval change never outruns the declared HLS duration](/quest/m1/js-hls-keyframe-duration.md) - raising a live keyframe interval, even to infinite, never pushes a segment past the declared HLS target duration, and the browser interop cell asserts the catalog `hls` field
-- [One Ed25519 public key type with one z-base-32 codec](/quest/m1/mesh-key-codec.md) - `moq_auth::mesh::EndpointId` is merged into `moq_sign::PublicKey`
+- [One Ed25519 public key type with one z-base-32 codec](/quest/m1/mesh-key-codec.md) - `moq_auth::mesh::EndpointId` is merged into `moq_crypto::sign::PublicKey`
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get

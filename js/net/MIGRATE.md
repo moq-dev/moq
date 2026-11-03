@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.
+Catch `TimestampMismatch` where you caught that `RangeError`.
+
+### A timestamp finer than the track's timescale is rounded down ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A timestamp that is fractional at the track's timescale, such as 1500µs on a millisecond track or a fractional `Timestamp.now()`, now goes out rounded down instead of to the nearest unit: 1500µs is 1 ms, not 2. Rust's `Timestamp::convert` and `track::Info::rescale` already round down, and `Track.rescale` does too.
+Write timestamps at the track's own scale where the exact value matters.
+
 ### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
 
 Every group sequence is a `bigint`, so a group ID past 2^53 decodes, relays, and encodes again instead of being refused: `Group.Producer`/`Consumer.sequence`, `Track.Position.group`, `Track.Bound`, an `absolute` `Track.Anchor`, `Track.Datagram.sequence`, `Track.Demand.wanted`, the `group` of `Ordered.readFrame()`, and the `sequence` that `createGroup`, `insertDatagram`, and `fetchGroup` take and `appendDatagram` returns.

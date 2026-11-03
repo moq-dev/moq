@@ -30,7 +30,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import { ALPN_05, ALPN_06, ALPN_07_WIP, keepsSubscribeOpen, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastPublication = origin.createBroadcast(path);
@@ -892,8 +892,9 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 });
 
 // A bounded window that resolves empty has no group to answer it, so the publisher answers it
-// at once and ends the subscription as covered, as a local read of it ends at once.
-test("lite-07 answers and ends a bounded window that resolves empty", async () => {
+// at once. The stream stays open for an update until the subscriber FINs, and the publisher
+// FINs in reply.
+test("lite-07 answers a bounded window that resolves empty and FINs in reply", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
 		version,
@@ -905,6 +906,7 @@ test("lite-07 answers and ends a bounded window that resolves empty", async () =
 		const resp = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
 		expect(resp.start.starts).toEqual([undefined]);
+		sub.client.writer.close();
 		expect(await decodeSubscribeResponseMaybe(sub.client.reader, version)).toBeUndefined();
 	} finally {
 		await sub.close();
@@ -1041,6 +1043,8 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
 				if (!resp) break;
 				if ("drop" in resp) codes.push(resp.drop.error);
+				// Lite-07 keeps the stream open past SUBSCRIBE_END, after the sweep's drops.
+				if ("end" in resp && keepsSubscribeOpen(version)) break;
 			}
 			expect(codes).toEqual([version === Version.DRAFT_07 ? StreamCode.NotFound : 0]);
 		} finally {
@@ -2124,7 +2128,8 @@ test("blocked DROP responses stop opening later groups", async () => {
 		track.finish();
 		track.close();
 		let dropped = 0;
-		for (;;) {
+		// Lite-07 keeps the stream open past SUBSCRIBE_END, so read until every group is named.
+		while (dropped < 72) {
 			const response = await decodeSubscribeResponseMaybe(client.reader, Version.DRAFT_07);
 			if (!response) break;
 			if ("drop" in response) dropped += Number(response.drop.end - response.drop.start) + 1;

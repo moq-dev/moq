@@ -307,7 +307,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		6 => roundtrip::<lite::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
 		7 => roundtrip::<lite::SubscribeOk, _>(rest, &mut Vec::new(), version),
 		8 => roundtrip::<lite::SubscribeStart, _>(rest, &mut Vec::new(), version),
-		9 => roundtrip::<lite::SubscribeEnd, _>(rest, &mut Vec::new(), version),
+		9 => roundtrip::<lite::SubscribeFinish, _>(rest, &mut Vec::new(), version),
 		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
 		11 => roundtrip::<lite::SubscribeDrop, _>(rest, &mut Vec::new(), version),
 		12 => roundtrip::<lite::SubscribeResponse, _>(rest, &mut Vec::new(), version),
