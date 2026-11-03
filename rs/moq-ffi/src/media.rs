@@ -424,11 +424,21 @@ impl MoqMediaProducer {
 		match self {
 			Self::Track { producer } => {
 				let guard = producer.inner.lock().unwrap();
-				guard.as_ref().ok_or(MoqError::Closed)?.video.ok_or_else(|| MoqError::Codec {
-					reason: "the lower rendition is not a video track".into(),
-				})
+				guard
+					.as_ref()
+					.ok_or(MoqError::Closed)?
+					.video
+					.ok_or_else(|| MoqError::Codec {
+						reason: "the lower rendition is not a video track".into(),
+					})
 			}
-			Self::Stream { producer } => Ok(producer.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.priority),
+			Self::Stream { producer } => Ok(producer
+				.inner
+				.lock()
+				.unwrap()
+				.as_ref()
+				.ok_or(MoqError::Closed)?
+				.priority),
 		}
 	}
 }
