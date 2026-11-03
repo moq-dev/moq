@@ -2,14 +2,17 @@
 
 ## Goal
 
-Condition: every crate that `release-rs.yml` publishes has a crates.io trusted
-publisher for `moq-dev/moq`, workflow `release-rs.yml` (and its environment,
-if the job uses one). This is a maintainer action in each crate's crates.io
-settings and blocks
-[Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md).
+Every crate that `release-rs.yml` publishes has a crates.io trusted publisher
+for `moq-dev/moq`, workflow `release-rs.yml`, and environment `publish`, so
+[Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md) can start.
+Delete this quest once every crate has one.
 
-Check: for each crate that release-plz publishes, its crates.io settings page
-lists that configuration. Delete this quest once every crate has one.
+## Waiting
+
+- Maintainer: add the trusted publisher in each crate's crates.io settings,
+  after a first publish by token for the crates not yet on crates.io (listed
+  under Plan). Settings pages need a crates.io login, so check with a
+  `release-rs.yml` run that publishes through OIDC.
 
 ## Plan
 

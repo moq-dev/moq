@@ -9,15 +9,17 @@ declaring every merged flag a second time) are deleted after a bump. Source
 presence, precedence, deprecated-name rejection, and provenance keep working.
 CLI behavior and wire are unchanged.
 
+## Waiting
+
+- jdx/usage: a usage-rs release ships
+  [jdx/usage#1608](https://github.com/jdx/usage/issues/1608). Check the issue
+  and usage-rs releases. If upstream declines, delete this quest and keep the
+  drift test.
+
 ## Plan
 
-Filed 2026-11-02 (maintainer-approved, /quest-unblock): [jdx/usage#1608](https://github.com/jdx/usage/issues/1608), building on the one-source-of-truth goal of jdx/usage#896, #1180 and #1202. If upstream declines, keep the drift test.
-
-Waits on two outside conditions, in order:
-
-1. The maintainer approves posting the proposal on jdx/usage. Decided
-   2026-10-27 (maintainer interview): ask before posting; no approval yet.
-2. Upstream ships it. Check the issue and usage-rs releases.
+Filed 2026-11-02 (maintainer-approved, /quest-unblock), building on the
+one-source-of-truth goal of jdx/usage#896, #1180 and #1202.
 
 Today `usage::Cli` and `usage::Config` reject each other's attributes, and
 `Registry::drift` tests the two declarations agree. The Cli side already names
