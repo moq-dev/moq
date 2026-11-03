@@ -4,10 +4,10 @@
 
 A hostile publisher can't make a subscriber allocate hundreds of megabytes
 from one frame. Every place a subscriber parses received CMAF with mp4-atom
-refuses a `moof` (or init `moov`) larger than `MAX_METADATA_BYTES` before
-parsing it, and a peak-memory test like
+refuses any top-level box whose body exceeds `MAX_METADATA_BYTES`, and any
+count over the importer's cap, before parsing it. A peak-memory test like
 [moq-dev/moq#7687](https://github.com/moq-dev/moq/pull/7687)'s shows the
-bound holding on each path.
+bounds holding on each path.
 
 ## Plan
 
