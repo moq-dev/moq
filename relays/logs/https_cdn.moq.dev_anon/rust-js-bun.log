@@ -2,16 +2,16 @@ https://cdn.moq.dev/anon connected via WebTransport
 https://cdn.moq.dev/anon negotiated ALPN: moq-lite-06
 announced: prefix=
 connected version=moq-lite-06
-announced: broadcast=lcb-6817779-4bcd.hang active=true
-announced: broadcast=smoke-rust-5192-11424.hang active=true
-subscribe start: id=0 broadcast=smoke-rust-5192-11424.hang track=catalog.json
+announced: broadcast=smoke-rust-4811-1547.hang active=true
+subscribe start: id=0 broadcast=smoke-rust-4811-1547.hang track=catalog.json
+announced: broadcast=vs-529c3f7f7e7a77d13c0fb25eb9bba7b4 active=true
 announce: prefix=
-subscribe ok: id=0 broadcast=smoke-rust-5192-11424.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-rust-5192-11424.hang track=0.avc3
-subscribe ok: id=1 broadcast=smoke-rust-5192-11424.hang track=0.avc3
-received 6721 bytes from smoke-rust-5192-11424.hang
-subscribe close: id=0 broadcast=smoke-rust-5192-11424.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-rust-5192-11424.hang track=0.avc3
+subscribe ok: id=0 broadcast=smoke-rust-4811-1547.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-rust-4811-1547.hang track=0.avc3
+subscribe ok: id=1 broadcast=smoke-rust-4811-1547.hang track=0.avc3
+received 6721 bytes from smoke-rust-4811-1547.hang
+subscribe close: id=0 broadcast=smoke-rust-4811-1547.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-rust-4811-1547.hang track=0.avc3
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,

@@ -1,17 +1,17 @@
-publishing smoke-js-web-5192-21938.hang (fake camera, vite) to https://cdn.moq.dev/anon
+publishing smoke-js-web-4811-6114.hang (fake camera, vite) to https://cdn.moq.dev/anon
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
+[page] announced: broadcast=vs-529c3f7f7e7a77d13c0fb25eb9bba7b4 active=true
 [page] announce: prefix=
-[page] announced: broadcast=lcb-6817779-4bcd.hang active=true
-[page] announce: broadcast=smoke-js-web-5192-21938.hang active=true
-[page] track info: broadcast=smoke-js-web-5192-21938.hang track=catalog.json
-[page] track info: broadcast=smoke-js-web-5192-21938.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-5192-21938.hang track=catalog.json
-[page] track info: broadcast=smoke-js-web-5192-21938.hang track=video
-[page] track info: broadcast=smoke-js-web-5192-21938.hang track=video
-[page] publish ok: broadcast=smoke-js-web-5192-21938.hang track=video
-[page] subscribe update: broadcast=smoke-js-web-5192-21938.hang track=video
-[page] publish error: broadcast=smoke-js-web-5192-21938.hang track=catalog.json error=remote error: 1
-[page] datagram send stopped: sub=0 error=remote error: 1
-[page] publish error: broadcast=smoke-js-web-5192-21938.hang track=video error=remote error: 1
+[page] announce: broadcast=smoke-js-web-4811-6114.hang active=true
+[page] track info: broadcast=smoke-js-web-4811-6114.hang track=catalog.json
+[page] track info: broadcast=smoke-js-web-4811-6114.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4811-6114.hang track=catalog.json
+[page] track info: broadcast=smoke-js-web-4811-6114.hang track=video
+[page] track info: broadcast=smoke-js-web-4811-6114.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4811-6114.hang track=video
+[page] subscribe update: broadcast=smoke-js-web-4811-6114.hang track=video
+[page] publish error: broadcast=smoke-js-web-4811-6114.hang track=video error=remote error: 1
 [page] datagram send stopped: sub=1 error=remote error: 1
+[page] publish error: broadcast=smoke-js-web-4811-6114.hang track=catalog.json error=The stream was aborted by the remote server
+[page] datagram send stopped: sub=0 error=The stream was aborted by the remote server
