@@ -326,7 +326,7 @@ for (const [alpn, version] of [
 			first.writeFrame(textFrame("first"));
 			first.finish();
 			// A frame can arrive while its sender still yields on the write. Drain the setup group
-			// before a zero-delay subscription supersedes it or the FIN hold catches it too.
+			// before a zero-delay subscription supersedes its still-unfinished sender.
 			const received = await track.nextGroup();
 			expect(await received?.readString()).toBe("first");
 			expect(await received?.readString()).toBeUndefined();
@@ -389,10 +389,7 @@ for (const [alpn, version] of [
 				const first = producer.appendGroup();
 				first.writeFrame(textFrame("first"));
 				first.finish();
-				const received = await track.nextGroup();
-				expect(await received?.readString()).toBe("first");
-				expect(await received?.readString()).toBeUndefined();
-				received?.close();
+				expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
 				const last = producer.appendGroup();

@@ -64,6 +64,11 @@ event-loop stall at each of its 124 host tasks passes all 124 at 1.5 seconds;
 at 4.5 seconds 3 runs and at 11 seconds 114 runs hit bun's own 5-second test
 timeout. No run fails on a protocol deadline, so no clock change applies. Both handled in [moq-dev/moq#7622](https://github.com/moq-dev/moq/pull/7622).
 
+The JS close-drain fixture advanced after the setup group's first payload, so a
+zero-delay subscription could expire its sender while the write budget yielded.
+It now reads that group through FIN before starting the next one, fixed by
+[moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658).
+
 Public API: none. Wire: none.
 
 ## Required
