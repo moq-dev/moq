@@ -74,6 +74,22 @@ async fn wait_dialed(http: &reqwest::Client, internal: u16, dialed: usize) {
 			.filter(|node| !node["connections"].as_array().expect("connections").is_empty())
 			.count() == dialed
 		{
+			for node in nodes["nodes"].as_array().unwrap() {
+				let connections = node["connections"].as_array().unwrap();
+				if connections.is_empty() {
+					continue;
+				}
+				assert!(
+					node["last_connected_seconds_ago"].is_number(),
+					"live peer has no successful connect: {node}"
+				);
+				for connection in connections {
+					assert!(
+						connection["transport"].is_string(),
+						"live peer has no transport: {node}"
+					);
+				}
+			}
 			return;
 		}
 		assert!(kio::clock::now() < deadline, "the mesh never formed: {nodes}");
