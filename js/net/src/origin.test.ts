@@ -282,7 +282,7 @@ test("a superseded broadcast closes, and its subscribers keep reading", async ()
 
 	// A track already subscribed is not the broadcast: it keeps serving until it ends.
 	track.writeFrame(textFrame("late"));
-	expect((await subscriber.recvGroup())?.sequence).toBe(0);
+	expect((await subscriber.recvGroup())?.sequence).toBe(0n);
 
 	subscriber.close();
 	mine?.close();
@@ -2470,8 +2470,8 @@ test("demand held across an instance change asks again, unless it named the old 
 	const track = next.createTrack("video");
 	hooks.acceptRequest((await it.next()).value, next);
 	const subscription = (await unpinned)?.track("video").subscribe();
-	track.createGroup(7);
-	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+	track.createGroup(7n);
+	expect((await subscription?.recvGroup())?.sequence).toBe(7n);
 
 	subscription?.close();
 	await it.return?.();
@@ -2518,8 +2518,8 @@ test("demand held across an instance round trip still asks again", async () => {
 	const track = next.createTrack("video");
 	hooks.acceptRequest((await it.next()).value, next);
 	const subscription = (await demanded)?.track("video").subscribe();
-	track.createGroup(7);
-	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+	track.createGroup(7n);
+	expect((await subscription?.recvGroup())?.sequence).toBe(7n);
 
 	subscription?.close();
 	await it.return?.();
@@ -2652,7 +2652,7 @@ test.each([
 
 	const sticky = resolved?.track("video").subscribe();
 	oldTrack.appendGroup().finish();
-	expect((await sticky?.recvGroup())?.sequence).toBe(0);
+	expect((await sticky?.recvGroup())?.sequence).toBe(0n);
 
 	// A re-price at the same instance keeps every handle, and the handler is not asked again.
 	dynamic.updateRoute({ ...dynamic.route, cost: 5n });
@@ -2674,7 +2674,7 @@ test.each([
 
 	// The subscription already open stays on the old answer.
 	oldTrack.appendGroup().finish();
-	expect((await sticky?.recvGroup())?.sequence).toBe(1);
+	expect((await sticky?.recvGroup())?.sequence).toBe(1n);
 
 	// A re-request, local or from a session, asks the handler again and never reads the
 	// old answer.
@@ -2687,15 +2687,15 @@ test.each([
 	expect(fresh.active.peek()?.instance).toBe(to);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
 	const forwarded = (await demanded)?.track("video").subscribe();
-	nextTrack.createGroup(7);
-	expect((await subscription?.recvGroup())?.sequence).toBe(7);
-	expect((await forwarded?.recvGroup())?.sequence).toBe(7);
+	nextTrack.createGroup(7n);
+	expect((await subscription?.recvGroup())?.sequence).toBe(7n);
+	expect((await forwarded?.recvGroup())?.sequence).toBe(7n);
 
 	// Existing request handles can still subscribe, but never join the new answer.
 	const retained = held.active.peek()?.track("video").subscribe();
-	expect((await retained?.recvGroup())?.sequence).toBe(1);
+	expect((await retained?.recvGroup())?.sequence).toBe(1n);
 	oldTrack.appendGroup().finish();
-	expect((await retained?.recvGroup())?.sequence).toBe(2);
+	expect((await retained?.recvGroup())?.sequence).toBe(2n);
 	expect(held.active.peek()).toBe(resolved);
 
 	// Retracting the new claim does not retract the resolved old request.
@@ -2782,8 +2782,8 @@ test("a session's re-request after an instance update asks the handler again", a
 	const track = next.createTrack("video");
 	hooks.acceptRequest((await requests.next()).value, next);
 	const subscription = (await after)?.track("video").subscribe();
-	track.createGroup(7);
-	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+	track.createGroup(7n);
+	expect((await subscription?.recvGroup())?.sequence).toBe(7n);
 
 	subscription?.close();
 	await requests.return?.();
@@ -2820,8 +2820,8 @@ test("an update does not override route selection: another claim at the instance
 	expect(held.active.peek()?.instance).toBe(INSTANCE);
 	expect(fresh.active.peek()?.instance).toBe(INSTANCE);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
-	track.createGroup(7);
-	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+	track.createGroup(7n);
+	expect((await subscription?.recvGroup())?.sequence).toBe(7n);
 
 	subscription?.close();
 	await firstRequests.return?.();

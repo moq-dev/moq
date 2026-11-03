@@ -1220,7 +1220,7 @@ export interface Reader {
 	request(path: Path.Valid, options?: RequestOptions): Requesting;
 
 	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
-	follow(path: Path.Valid, options?: RequestOptions): Following;
+	follow(path: Path.Valid, options?: FollowOptions): Following;
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -1258,9 +1258,15 @@ export interface Table extends Reader {
 	): Requests;
 }
 
-/** Options for resolving a broadcast path, by {@link Consumer.request} or {@link Consumer.follow}. */
+/** Options for resolving one publisher instance with {@link Consumer.request}. */
 export interface RequestOptions {
 	/** Refuse a different publisher instance, including an asynchronous answer or a retry. */
+	instance?: Instance.Valid;
+}
+
+/** Options for following a broadcast path with {@link Consumer.follow}. */
+export interface FollowOptions {
+	/** Follow only this publisher instance, waiting for it to return across gaps. */
 	instance?: Instance.Valid;
 }
 
@@ -1662,7 +1668,7 @@ export class Producer implements Table {
 	}
 
 	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
-	follow(path: Path.Valid, options?: RequestOptions): Following {
+	follow(path: Path.Valid, options?: FollowOptions): Following {
 		return this.#reader.follow(path, options);
 	}
 
@@ -1959,7 +1965,7 @@ export class Consumer implements Reader {
 	 * its path until closed. Requires discovery: a session without it never serves a follower.
 	 * A selected handler's refusal or the origin closing ends it.
 	 */
-	follow(path: Path.Valid, options: RequestOptions = {}): Following {
+	follow(path: Path.Valid, options: FollowOptions = {}): Following {
 		const instance = options.instance;
 		const absolute = this.#scope.path(path);
 		Path.Pattern.literal(path);

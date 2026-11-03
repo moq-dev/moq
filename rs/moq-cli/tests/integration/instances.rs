@@ -1,26 +1,14 @@
 //! Real relay routing keeps held catalog/media identities while fresh readers follow replacements.
+//!
+//! Wait for route events over real sockets. The origin's controlled-time tests cover update holds;
+//! elapsed host time here also includes scheduling and cannot bound that behavior.
 
 use std::time::Duration;
-
-use kio::clock::Instant;
 
 use hang::moq_net::{self, Instance, Timestamp, origin, track};
 use moq_mux::catalog::Stream;
 
 const LITE_07: &str = "moq-lite-07-wip";
-
-/// A loopback round trip, charged at QUIC's timer granularity (RFC 9002's kGranularity).
-const ROUND_TRIP: Duration = Duration::from_millis(1);
-
-/// How long an announcement-following reader may take to see a replacement or a fallback: the
-/// relay's and the reader's origins may each hold the route change for their update hold, and
-/// the announcement crosses both links in one round trip. The idle timeout never enters it.
-fn routing() -> Duration {
-	origin::Config::default()
-		.update_hold
-		.saturating_mul(2)
-		.saturating_add(ROUND_TRIP)
-}
 
 struct Relay {
 	url: url::Url,
@@ -110,14 +98,6 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 	}
 }
 
-/// Finish a route change within [`routing`] of `started`.
-async fn within<T>(started: Instant, change: impl Future<Output = T>) -> T {
-	let deadline = started + routing();
-	kio::clock::timeout_at(deadline, change)
-		.await
-		.unwrap_or_else(|_| panic!("route change took longer than {:?}", routing()))
-}
-
 /// Ignore same-instance metadata updates, but keep the actual replacement representation.
 async fn changed(follow: &mut origin::Routes) -> bool {
 	loop {
@@ -197,7 +177,6 @@ async fn replacement(version: &str) {
 		.established()
 		.await
 		.unwrap();
-	let started = Instant::now();
 	let second = publish(&second_origin, &b, "B");
 	write(&second.media, "B:1");
 	write(&second.media, "B:2");
@@ -205,21 +184,14 @@ async fn replacement(version: &str) {
 		.sibling
 		.create_track("late", track::Info::default().with_priority(17))
 		.unwrap();
-	let (catalog_restart, media_restart) = within(started, async {
-		(changed(&mut catalog_follow).await, changed(&mut media_follow).await)
-	})
-	.await;
+	let catalog_restart = changed(&mut catalog_follow).await;
+	let media_restart = changed(&mut media_follow).await;
 	assert_eq!(
 		catalog_restart,
 		version == LITE_07,
 		"only lite-07 carries the instance, which restarts in place"
 	);
 	assert_eq!(media_restart, catalog_restart);
-	println!(
-		"{version}: relay replacement observed in {:?} of {:?} (publisher already connected)",
-		started.elapsed(),
-		routing()
-	);
 
 	// Later catalog snapshots stay on A and resolving again keeps A's sibling pin.
 	first
@@ -279,26 +251,17 @@ async fn replacement(version: &str) {
 	assert!(new_frame.starts_with("B:"), "fresh subscription read {new_frame}");
 
 	// A still serves its held reader. Withdrawing B reveals A to fresh readers too.
-	let started = Instant::now();
 	second_connection.abort(moq_net::Error::Cancel);
 	drop(second);
 	drop(second_origin);
-	within(started, async {
-		changed(&mut catalog_follow).await;
-		changed(&mut media_follow).await;
-	})
-	.await;
+	changed(&mut catalog_follow).await;
+	changed(&mut media_follow).await;
 	let returned = viewer.request("live/media", None).await.unwrap();
 	let mut returned = returned.track("audio").unwrap().subscribe(None).await.unwrap();
 	write(&first.media, "A:3");
 	let returned_frame = read(&mut returned).await;
 	assert!(returned_frame.starts_with("A:"), "fallback read {returned_frame}");
 	assert_eq!(read(&mut subscription).await, "A:3");
-	println!(
-		"{version}: relay fallback observed in {:?} of {:?}",
-		started.elapsed(),
-		routing()
-	);
 }
 
 macro_rules! versions {

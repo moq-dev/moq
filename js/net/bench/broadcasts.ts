@@ -213,7 +213,7 @@ for (const patternCount of [8, 32, 128]) {
 			grant,
 		);
 		const groups = await Promise.all(
-			Array.from({ length: fetchCount }, (_, i) => subscriber.fetchGroup(Path.from(`room/${i}`), "video", 0)),
+			Array.from({ length: fetchCount }, (_, i) => subscriber.fetchGroup(Path.from(`room/${i}`), "video", 0n)),
 		);
 		const start = performance.now();
 		for (let i = 0; i < 1024; i++) {

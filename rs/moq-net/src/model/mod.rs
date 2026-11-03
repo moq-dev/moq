@@ -24,6 +24,8 @@ mod clock;
 pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+// The early exit a read nothing woke takes.
+mod idle;
 mod skipped;
 // How far a group's writer reads ahead of its fastest reader.
 mod pace;

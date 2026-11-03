@@ -21,14 +21,14 @@ const DEFAULT_PREFIX = Moq.Path.from("boy");
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
 /**
- * `<moq-boy>` web component — discovers and manages Game Boy streaming sessions,
+ * `<moq-boy>` web component - discovers and manages Game Boy streaming sessions,
  * and renders the interactive UI in a Shadow DOM.
  *
  * Attributes:
- *   - `url` — MoQ relay URL
- *   - `prefix` — Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
- *   - `prefix-game` — Path prefix for game broadcasts (default: `{prefix}/game`)
- *   - `prefix-viewer` — Path prefix for viewer broadcasts (default: `{prefix}/viewer`)
+ *   - `url` - MoQ relay URL
+ *   - `prefix` - Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
+ *   - `prefix-game` - Path prefix for game broadcasts (default: `{prefix}/game`)
+ *   - `prefix-viewer` - Path prefix for viewer broadcasts (default: `{prefix}/viewer`)
  */
 export default class MoqBoy extends HTMLElement {
 	/** The attributes the browser reports changes to. */

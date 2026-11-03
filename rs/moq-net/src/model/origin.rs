@@ -3261,8 +3261,9 @@ impl TrackIo {
 	/// Serve the track from `asked`'s copy, accepting it with that copy's info first.
 	fn splice(&mut self, asked: Asked) {
 		self.ready.wake_by_ref();
-		if let Some(request) = self.request.take() {
-			let info = asked.info.clone().unwrap_or_default();
+		if let Some(info) = asked.info.clone()
+			&& let Some(request) = self.request.take()
+		{
 			self.accepted = Some(request.accept(info));
 		}
 		self.routes.splice(asked.copy.clone(), asked.staged);
@@ -3319,10 +3320,14 @@ struct FrontListing {
 struct InFlight {
 	weak: track::TrackWeak,
 	routes: super::resume::Producer,
+	/// Why the front ended, used if its pending copy cannot answer.
+	end: Error,
+	/// Still owed when the front ended before the copy's info arrived.
+	request: Option<track::Request>,
 	// Kept for its readers: the logical track, the query holding its copy, and the copy's
 	// subscription, which follows their demand as it did while the front served it.
 	accepted: Option<track::Producer>,
-	_copy: Option<track::Resolving>,
+	query: Option<track::Resolving>,
 	held: Option<kio::Pending<track::Subscribing>>,
 }
 
@@ -3336,10 +3341,12 @@ fn follow_demand(
 	routes: &super::resume::Producer,
 	waiter: &kio::Waiter,
 ) {
-	let (Some(hold), Some(accepted)) = (held.as_mut(), accepted) else {
+	let Some(hold) = held.as_mut() else {
 		return;
 	};
-	while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+	if let Some(accepted) = accepted {
+		while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+	}
 	match weak.subscription() {
 		Some((subscription, subscribers)) => {
 			let _ = hold.update(routes.subscription(subscription, subscribers));
@@ -3353,6 +3360,9 @@ impl InFlight {
 	/// as a cancel rather than as a producer dropped unfinished.
 	fn release(self) {
 		self.routes.release();
+		if let Some(request) = self.request {
+			request.reject(Error::Cancel);
+		}
 		if let Some(accepted) = self.accepted {
 			let _ = accepted.abort(Error::Cancel);
 		}
@@ -3372,9 +3382,40 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 		// Dropped without a release, so a reader on its way keeps the copy; it stays held
 		// only while the logical track's state does, for an origin nobody owns.
 		if origin.poll_orphaned(waiter).is_ready() {
+			for io in &mut in_flight {
+				if let Some(request) = io.request.take() {
+					request.reject(io.end.clone());
+				}
+			}
 			return Poll::Ready(());
 		}
 		for mut io in std::mem::take(&mut in_flight) {
+			if let Some(request) = &mut io.request {
+				while let Poll::Ready(Some(_)) = request.poll_subscription_changed(waiter) {}
+			}
+			if io.request.is_some() {
+				match io
+					.query
+					.as_ref()
+					.expect("a pending request holds its query")
+					.poll_ok(waiter)
+				{
+					Poll::Ready(Ok(info)) => {
+						io.accepted = Some(io.request.take().expect("pending above").accept(info));
+					}
+					Poll::Ready(Err(err)) => {
+						// No metadata ever arrived: a lost route cannot answer the request.
+						let err = match super::resume::route_failed(&err) {
+							true => io.end.clone(),
+							false => err,
+						};
+						io.request.take().expect("pending above").reject(err.clone());
+						io.routes.end(Err(err));
+						continue;
+					}
+					Poll::Pending => {}
+				}
+			}
 			follow_demand(&mut io.held, io.accepted.as_mut(), &io.weak, &io.routes, waiter);
 			match io.weak.poll_unwanted(waiter) {
 				Poll::Pending => in_flight.push(io),
@@ -3723,17 +3764,14 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							asked_renewals: serve.renewals.load(Ordering::Acquire),
 						});
 					}
-					Action::Detach { source } => {
-						// Readers keep reading the source's copy until a replacement is
-						// spliced, so a route being beaten keeps serving until then; a
-						// route that died ends its copy, which says so.
+					Action::Detach { source, drain } => {
 						sources.remove(&source);
 						instances.remove(&source);
 						for io in tracks.values_mut() {
-							if io.query.as_ref().is_some_and(|asked| asked.source == source) {
+							if !drain && io.query.as_ref().is_some_and(|asked| asked.source == source) {
 								io.query = None;
 							}
-							if io.staged.as_ref().is_some_and(|asked| asked.source == source) {
+							if !drain && io.staged.as_ref().is_some_and(|asked| asked.source == source) {
 								io.staged = None;
 							}
 							// Any source leaving is rare: drop every parked shortcut rather
@@ -3903,6 +3941,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							let TrackIo {
 								weak,
 								routes,
+								request,
 								accepted,
 								copy,
 								held,
@@ -3911,8 +3950,10 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							in_flight.push(InFlight {
 								weak,
 								routes,
+								end: err.clone(),
+								request,
 								accepted,
-								_copy: copy.map(|(_, _, query)| query),
+								query: copy.map(|(_, _, query)| query),
 								held,
 							});
 						}
@@ -9658,38 +9699,72 @@ mod tests {
 		assert!(!again.is_clone(&resolved));
 	}
 
-	/// A subscriber still waiting on the source's track info is in flight too:
-	/// unannouncing leaves it on the copy it asked for, which the source can
-	/// still answer and finish.
+	/// Ending a publication leaves a subscriber waiting on its track info in flight:
+	/// the source can still answer and finish the copy it already handed out.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn unannounce_keeps_a_track_awaiting_its_info() {
-		let producer = origin(1).produce();
-		let consumer = producer.consume();
+	async fn ending_a_publication_keeps_a_track_awaiting_its_info() {
+		for close in [false, true] {
+			for replacement in [false, true] {
+				let producer = origin(1).produce();
+				let consumer = producer.consume();
 
-		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
-		let mut dynamic = broadcast.requests();
-		let resolved = consumer.request("room/alice", None).await.expect("resolves");
-		let track = resolved.track("video").unwrap();
-		let subscribing = kio::clock::sim::spawn(async move { track.subscribe(None).await });
-		let request = kio::clock::timeout(Duration::from_secs(1), dynamic.requested_track())
-			.await
-			.expect("the front asked the source")
-			.expect("request");
+				let broadcast = producer
+					.publish(
+						"room/alice",
+						Route::default().with_instance(crate::Instance::random(), 0),
+					)
+					.unwrap();
+				let mut dynamic = broadcast.requests();
+				let resolved = consumer.request("room/alice", None).await.expect("resolves");
+				let track = resolved.track("video").unwrap();
+				let mut subscribing = track.subscribe(crate::track::Subscription::default().with_priority(3));
+				assert!((&mut subscribing).now_or_never().is_none());
+				let request = kio::clock::timeout(Duration::from_secs(1), dynamic.requested_track())
+					.await
+					.expect("the front asked the source")
+					.expect("request");
+				let _replacement = replacement.then(|| {
+					producer
+						.requests_route(
+							"room/alice",
+							Route::default()
+								.with_instance(crate::Instance::random(), 0)
+								.with_hops(hops(&[10])),
+							None,
+						)
+						.unwrap()
+				});
 
-		broadcast.unannounce();
-		settle(|| resolved.is_closed()).await;
+				if close {
+					broadcast.close();
+				} else {
+					broadcast.unannounce();
+				}
+				settle(|| resolved.is_closed()).await;
+				subscribing
+					.update(crate::track::Subscription::default().with_priority(7))
+					.unwrap();
+				settle(|| {
+					request
+						.subscription()
+						.is_some_and(|subscription| subscription.priority == 7)
+				})
+				.await;
 
-		let source = request.accept(crate::track::Info::timed());
-		let mut group = source.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
-		group.finish().unwrap();
-		source.finish().unwrap();
+				let source = request.accept(crate::track::Info::timed());
+				let mut group = source.append_group().unwrap();
+				group.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
+				group.finish().unwrap();
+				source.finish().unwrap();
 
-		let mut subscription = subscribing.await.unwrap().expect("subscribe survives the retraction");
-		let mut group = subscription.recv_group().await.unwrap().expect("the source's group");
-		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"late");
-		assert!(matches!(subscription.recv_group().await, Ok(None)), "ends cleanly");
+				let mut subscription = subscribing.await.expect("subscribe survives the retraction");
+				assert_eq!(subscription.info(), source.info(), "the source's actual track info");
+				let mut group = subscription.recv_group().await.unwrap().expect("the source's group");
+				assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"late");
+				assert!(matches!(subscription.recv_group().await, Ok(None)), "ends cleanly");
+			}
+		}
 	}
 
 	/// A front resolved through a served route, as a relay's upstream session serves

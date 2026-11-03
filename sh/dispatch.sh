@@ -192,6 +192,7 @@ module python '(\.pyi?|(^|/)pyproject\.toml)$' \
 module shell '' \
     tools='shellcheck shfmt' fix
 module large_files ''
+module text ''
 module toml '' \
     tools='taplo' fix
 module nix '' \
@@ -375,6 +376,7 @@ step() {
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:text) sh/text.sh ;;
         check:python)
             files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
             files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude

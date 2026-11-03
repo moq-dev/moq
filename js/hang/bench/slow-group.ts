@@ -14,9 +14,9 @@ for (const count of [1, 16, 256, 1024]) {
 		format: new Format("data"),
 		delay,
 	});
-	const write = (sequence: number) => {
+	const write = (sequence: bigint) => {
 		const group = track.createGroup(sequence);
-		group.writeFrame({ payload: Varint.encode(sequence * 1000), timestamp: Time.Timestamp.now() });
+		group.writeFrame({ payload: Varint.encode(Number(sequence) * 1000), timestamp: Time.Timestamp.now() });
 	};
 	const buffered = async (timestamp: number) => {
 		while (consumer.buffered.peek().at(-1)?.end !== timestamp) await consumer.buffered.changed();
@@ -29,11 +29,11 @@ for (const count of [1, 16, 256, 1024]) {
 		bytes += JSON.stringify(args).length;
 	};
 	try {
-		for (let i = 0; i < count; i++) write(i);
+		for (let i = 0n; i < BigInt(count); i++) write(i);
 		await buffered(count - 1);
 		delay.set({ max: Milli.zero });
 		const started = performance.now();
-		write(count);
+		write(BigInt(count));
 		await buffered(count);
 		console.log(`${count},${warnings},${bytes},${(performance.now() - started).toFixed(3)}`);
 	} finally {

@@ -230,8 +230,9 @@ impl Origin {
 
 	/// Follow the broadcast at `path`, delivering each publisher instance's handle via the callback.
 	///
-	/// The callback fires a broadcast handle (> 0) for each instance serving the path, until a
-	/// single terminal code (`0` on close, negative on error). Returns a task handle for
+	/// The callback fires a broadcast handle (> 0) for each instance serving the path, and
+	/// [`crate::MOQ_FOLLOW_OFFLINE`] once it goes offline, until a single terminal code (`0` on
+	/// close, negative on error). Returns a task handle for
 	/// cancellation via [`Self::resolve_close`].
 	pub fn follow(
 		&mut self,
@@ -278,9 +279,10 @@ impl Origin {
 				_ = &mut close => return Ok(()),
 				available = announced.available() => match available {
 					Ok(Some(broadcast)) => broadcast,
-					// The path went offline: the delivered handle's tracks end on their own, and the
-					// announce listing reports the absence.
-					Ok(None) => continue,
+					Ok(None) => {
+						callback.call(crate::MOQ_FOLLOW_OFFLINE);
+						continue;
+					}
 					// The origin closing ends the wait, cleanly once a handle was delivered.
 					Err(moq_net::Error::Closed) if delivered => return Ok(()),
 					Err(moq_net::Error::Closed) => return Err(Error::BroadcastNotFound),

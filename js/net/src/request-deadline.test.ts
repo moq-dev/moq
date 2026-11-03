@@ -112,7 +112,7 @@ for (const operation of ["info", "fetch"] as const) {
 			const request = (
 				operation === "info"
 					? subscriber.resolveTrackInfo(Path.from("room"), "video")
-					: subscriber.fetchGroup(Path.from("room"), "video", 0)
+					: subscriber.fetchGroup(Path.from("room"), "video", 0n)
 			).catch((err: unknown) => {
 				failure = err;
 			});

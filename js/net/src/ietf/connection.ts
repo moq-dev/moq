@@ -5,7 +5,7 @@ import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
-import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
+import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
@@ -169,6 +169,7 @@ export class Connection implements Established {
 		this.url = url;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
+		detect(this, quic);
 		this.#quic = quic;
 		this.#client = client;
 		this.peerImplementation = Promise.resolve(peerImplementation);

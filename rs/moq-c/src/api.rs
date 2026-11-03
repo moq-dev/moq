@@ -2258,6 +2258,11 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 	})
 }
 
+/// What a [moq_origin_follow] callback receives once the path goes offline, or, for a pinned
+/// follow, once another instance takes it over. Positive, so not terminal; no handle ever
+/// takes this value.
+pub const MOQ_FOLLOW_OFFLINE: i32 = i32::MAX;
+
 /// Follow a broadcast on an origin by path, delivering each publisher instance that serves it.
 ///
 /// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
@@ -2267,13 +2272,14 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 /// announced, like a remote one.
 ///
 /// `instance` is the only stream to follow, or NULL (or empty) to follow every instance serving
-/// the path. A pinned follow never delivers another instance taking over, and delivers its own
-/// again if it returns after an end.
+/// the path. A pinned follow never delivers another instance taking over: that ends it, and its
+/// own instance is delivered again when it returns.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
 /// new handle each time another publisher instance takes over (a restarted publisher, or a
-/// replacement session) or the broadcast returns after it went offline. Drop what was read
-/// from the previous handle then: its tracks end when its session does. The wait ends with
+/// replacement session) or the broadcast returns after it went offline. It is invoked with
+/// [MOQ_FOLLOW_OFFLINE] once the path goes offline, before whatever serves it next. Drop what
+/// was read from the previous handle on either: its tracks end when its session does. The wait ends with
 /// exactly one terminal code: `0` (after [moq_origin_follow_cancel], or the origin closing
 /// once a handle was delivered) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_broadcast` is never called again and `user_data` is never touched again, so release
@@ -3998,6 +4004,10 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 ///   `user_data` is never touched again, so release `user_data` there. The
 ///   terminal callback fires even after [moq_consume_video_cancel].
 ///
+/// The catalog rendition's `warmup` reaches that much further back for decoder history and
+/// increases the subscription's max delay by the same amount. The steady-state skip budget
+/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
+///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
@@ -4045,6 +4055,10 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 /// terminal callback fires even after [moq_consume_audio_cancel].
 /// `delay` is how far behind the live edge to play: where a cold join starts and when
 /// frames are skipped. NULL uses the defaults (see [moq_delay]).
+///
+/// The catalog rendition's `warmup` reaches that much further back for decoder history and
+/// increases the subscription's max delay by the same amount. The steady-state skip budget
+/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///

@@ -1,10 +1,11 @@
 //! Publish, discover, and route broadcasts.
 
 use std::sync::Arc;
+use std::task::{Poll, ready};
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::{Background, Task};
+use crate::ffi::{Background, Polled};
 use crate::producer::MoqBroadcastProducer;
 
 /// Config used when creating an origin.
@@ -128,7 +129,7 @@ pub struct MoqOriginConsumer {
 /// A stream of broadcast announcement changes.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounceConsumer {
-	task: Task<Announced>,
+	reads: Polled<moq_net::announce::Consumer>,
 }
 
 #[derive(uniffi::Object)]
@@ -138,8 +139,8 @@ pub struct MoqAnnounceConsumer {
 /// Keeps its origin running, like a published broadcast, after every
 /// `MoqOriginProducer` is gone.
 pub struct MoqOriginRequests {
-	slot: Slot,
-	task: std::sync::Mutex<Option<Arc<Task<OriginRequests>>>>,
+	reads: Polled<moq_net::origin::Requests>,
+	driver: Background,
 }
 
 #[derive(uniffi::Object)]
@@ -164,78 +165,6 @@ pub struct MoqBroadcastPrepared {
 	inner: std::sync::Mutex<Option<moq_net::origin::Prepared>>,
 	broadcast: Arc<MoqBroadcastProducer>,
 	driver: Background,
-}
-
-struct Announced {
-	inner: moq_net::announce::Consumer,
-	driver: Background,
-}
-
-/// The served route behind one `MoqOriginProducer::requests` handle, shared
-/// between the handle and the task draining it. Emptied by the handle's cancel,
-/// which retracts the route: the task sees the empty slot and ends.
-type Slot = Arc<std::sync::Mutex<Option<moq_net::origin::Requests>>>;
-
-struct OriginRequests {
-	slot: Slot,
-	driver: Background,
-}
-
-impl OriginRequests {
-	async fn requested_broadcast(&mut self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
-		let request = self
-			.driver
-			.watch(async {
-				kio::wait(|waiter| match self.slot.lock().unwrap().as_ref() {
-					Some(dynamic) => dynamic.poll_requested_broadcast(waiter),
-					None => std::task::Poll::Ready(Err(moq_net::Error::Closed)),
-				})
-				.await
-				.map_err(|err| match err {
-					moq_net::Error::Closed => MoqError::Closed,
-					other => other.into(),
-				})
-			})
-			.await?;
-		Ok(Arc::new(MoqBroadcastRequest::new(request, self.driver.clone())))
-	}
-}
-
-impl Announced {
-	async fn next(&mut self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
-		self.driver
-			.watch(async { Ok(self.inner.next().await.map(Into::into)) })
-			.await
-	}
-}
-
-/// Follows one exact path, resolving each publisher instance that serves it.
-struct Following {
-	inner: moq_net::origin::Following,
-	origin: moq_net::origin::Consumer,
-	driver: Background,
-}
-
-impl Following {
-	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		// An end only precedes the next instance here: the old one's tracks end on their own, and
-		// the announcement stream reports the path's absence.
-		let broadcast = self
-			.driver
-			.watch(async {
-				loop {
-					if let Some(broadcast) = self.inner.available().await? {
-						return Ok(broadcast);
-					}
-				}
-			})
-			.await?;
-		Ok(Arc::new(MoqBroadcastConsumer::routed(
-			broadcast,
-			self.origin.clone(),
-			self.driver.clone(),
-		)))
-	}
 }
 
 /// A route over a prefix, carried by a [`MoqAnnounceEvent`].
@@ -303,7 +232,9 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 /// Follows a specific broadcast across the publisher instances that serve it.
 #[derive(uniffi::Object)]
 pub struct MoqFollowing {
-	task: Task<Following>,
+	reads: Polled<moq_net::origin::Following>,
+	origin: moq_net::origin::Consumer,
+	driver: Background,
 }
 
 impl MoqOriginProducer {
@@ -396,13 +327,9 @@ impl MoqOriginProducer {
 		let result = self.inner.requests(prefix);
 		self.inner.driver.check()?;
 		let dynamic = result?;
-		let slot = Arc::new(std::sync::Mutex::new(Some(dynamic)));
 		Ok(Arc::new(MoqOriginRequests {
-			slot: slot.clone(),
-			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginRequests {
-				slot,
-				driver: self.inner.driver.clone(),
-			})))),
+			reads: Polled::new(dynamic).supervised(self.inner.driver.clone()),
+			driver: self.inner.driver.clone(),
 		}))
 	}
 
@@ -450,10 +377,7 @@ impl MoqOriginConsumer {
 			.scope("", &moq_net::Patterns::from(filter))?
 			.with_hidden(config.hidden);
 		Ok(Arc::new(MoqAnnounceConsumer {
-			task: Task::new(Announced {
-				inner: origin.announced(),
-				driver: self.driver.clone(),
-			}),
+			reads: Polled::new(origin.announced()).supervised(self.driver.clone()),
 		}))
 	}
 
@@ -461,8 +385,8 @@ impl MoqOriginConsumer {
 	///
 	/// Unlike `request`, this waits for future announcements and keeps following the
 	/// instances serving the path. A local broadcast resolves once announced, like a remote
-	/// one. Pass an `instance` to follow only that stream: another one taking over is never
-	/// handed out, and the stream is handed out again if it returns after an end.
+	/// one. Pass an `instance` to follow only that stream: another one taking over ends it,
+	/// and the stream is handed out again if it returns.
 	#[uniffi::method(default(instance = None))]
 	pub fn follow(&self, path: String, instance: Option<String>) -> Result<Arc<MoqFollowing>, MoqError> {
 		let _guard = crate::ffi::enter();
@@ -473,11 +397,9 @@ impl MoqOriginConsumer {
 		let inner = self.inner.follow(path.as_str(), instance)?;
 
 		Ok(Arc::new(MoqFollowing {
-			task: Task::new(Following {
-				inner,
-				origin: self.inner.clone(),
-				driver: self.driver.clone(),
-			}),
+			reads: Polled::new(inner).supervised(self.driver.clone()),
+			origin: self.inner.clone(),
+			driver: self.driver.clone(),
 		}))
 	}
 
@@ -514,21 +436,28 @@ impl MoqOriginRequests {
 	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or reject
 	/// it with an application error code. The requesting consumer stays pending until then.
 	pub async fn requested_broadcast(&self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
-		let task = self.task.lock().unwrap().clone().ok_or(MoqError::Closed)?;
-		task.run(|mut state| async move { state.requested_broadcast().await })
-			.await
+		// A call after cancel finds the route retracted, rather than racing the cancel.
+		if self.reads.is_cancelled() {
+			return Err(MoqError::Closed);
+		}
+		let request = self
+			.reads
+			.wait(|dynamic, waiter| {
+				Poll::Ready(match ready!(dynamic.poll_requested_broadcast(waiter)) {
+					Ok(request) => Ok(request),
+					Err(moq_net::Error::Closed) => Err(MoqError::Closed),
+					Err(err) => Err(err.into()),
+				})
+			})
+			.await?;
+		Ok(Arc::new(MoqBroadcastRequest::new(request, self.driver.clone())))
 	}
 
 	/// Stop serving and retract the route. Terminal: this handler is released
 	/// here, not when the handle is, so pending requests are rejected before
 	/// this returns.
 	pub fn cancel(&self) {
-		let _guard = crate::ffi::enter();
-		let dynamic = self.slot.lock().unwrap().take();
-		drop(dynamic);
-		if let Some(task) = self.task.lock().unwrap().take() {
-			task.cancel();
-		}
+		self.reads.cancel();
 	}
 }
 
@@ -642,14 +571,16 @@ impl MoqPublication {
 impl MoqAnnounceConsumer {
 	/// Get the next announce event. Returns `None` when the origin is closed.
 	pub async fn next(&self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
+		self.reads
+			.wait(|announced, waiter| Poll::Ready(Ok(ready!(announced.poll_next(waiter)).map(Into::into))))
+			.await
 	}
 
 	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the announcement stream is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -657,23 +588,34 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqFollowing {
-	/// Wait for the next publisher instance serving the broadcast. Returns `Closed` if cancelled
-	/// or the origin is closed.
+	/// Wait for the next change to the publisher instance serving the broadcast. Returns `Closed`
+	/// if cancelled or the origin is closed.
 	///
 	/// The first call resolves the instance serving the path, once one is announced. Each later
-	/// call waits for another to take over, as a restarted publisher or a replacement session
-	/// does, or for the broadcast to return after it went offline. Drop everything read from the
-	/// previous instance then and read the new one: the old one's tracks end when its route
-	/// dies, with an error unless this side closed that session.
-	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		self.task.run(|mut state| async move { state.available().await }).await
+	/// call returns another instance taking over, as a restarted publisher or a replacement
+	/// session does, or `None` once the path goes offline (or, with an `instance`, another
+	/// instance takes it over), then whatever serves it next. Drop everything read from the
+	/// previous instance then: its tracks end when its route dies, with an error unless this
+	/// side closed that session.
+	pub async fn available(&self) -> Result<Option<Arc<MoqBroadcastConsumer>>, MoqError> {
+		let broadcast = self
+			.reads
+			.wait(|following, waiter| Poll::Ready(Ok(ready!(following.poll_available(waiter))?)))
+			.await?;
+		Ok(broadcast.map(|broadcast| {
+			Arc::new(MoqBroadcastConsumer::routed(
+				broadcast,
+				self.origin.clone(),
+				self.driver.clone(),
+			))
+		}))
 	}
 
 	/// Cancel all current and future `available()` calls.
 	///
 	/// Terminal: the announcement watch is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 

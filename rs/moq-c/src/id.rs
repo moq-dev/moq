@@ -19,7 +19,11 @@ impl std::fmt::Display for Id {
 	}
 }
 
-/// Process-wide counter wrapping from i32::MAX back to 1.
+/// The highest ID issued. `i32::MAX` stays free for [`crate::MOQ_FOLLOW_OFFLINE`], so a
+/// follow callback can tell it from a broadcast handle.
+const MAX_ID: u32 = crate::MOQ_FOLLOW_OFFLINE as u32 - 1;
+
+/// Process-wide counter wrapping from [`MAX_ID`] back to 1.
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Map that assigns IDs from a process-wide counter, skipping live entries.
@@ -36,14 +40,14 @@ impl<T> NonZeroSlab<T> {
 	}
 
 	fn insert_next(&mut self, value: T, next: &AtomicU32) -> Result<Id, Error> {
-		if self.map.len() == i32::MAX as usize {
+		if self.map.len() == MAX_ID as usize {
 			return Err(Error::InvalidId);
 		}
 
 		loop {
 			let raw = next
 				.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
-					Some(if id == i32::MAX as u32 { 1 } else { id + 1 })
+					Some(if id >= MAX_ID { 1 } else { id + 1 })
 				})
 				.unwrap();
 			let id = Id::try_from(raw)?;
@@ -109,11 +113,11 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn wrap_uses_the_whole_positive_i32_range() {
-		let next = AtomicU32::new(i32::MAX as u32);
+	fn wrap_uses_the_positive_i32_range_below_the_offline_code() {
+		let next = AtomicU32::new(MAX_ID);
 		let mut slab = NonZeroSlab::default();
 		let high = slab.insert_next((), &next).unwrap();
-		assert_eq!(i32::from(high), i32::MAX);
+		assert_eq!(i32::from(high), i32::MAX - 1);
 		let low = slab.insert_next((), &next).unwrap();
 		assert_eq!(i32::from(low), 1);
 		assert_eq!(slab.remove(high), Some(()));
@@ -122,15 +126,15 @@ mod tests {
 
 	#[test]
 	fn wrap_skips_live_handles_and_preserves_their_values() {
-		let next = AtomicU32::new(i32::MAX as u32 - 1);
+		let next = AtomicU32::new(MAX_ID - 1);
 		let mut slab = NonZeroSlab::default();
 		let low = Id::try_from(1u32).unwrap();
-		let high = Id::try_from(i32::MAX).unwrap();
+		let high = Id::try_from(MAX_ID).unwrap();
 		slab.map.insert(low, "low");
 		slab.map.insert(high, "high");
 
 		let before = slab.insert_next("before wrap", &next).unwrap();
-		assert_eq!(i32::from(before), i32::MAX - 1);
+		assert_eq!(i32::from(before), i32::MAX - 2);
 		let after = slab.insert_next("after wrap", &next).unwrap();
 		assert_eq!(i32::from(after), 2);
 		assert_eq!(slab.get(low), Some(&"low"));
@@ -148,6 +152,7 @@ mod tests {
 	fn benchmark_handles() {
 		use std::hint::black_box;
 
+		println!("live,wrap,ns_per_iteration");
 		for live in [0, 64, 4096] {
 			for wrap in [false, true] {
 				let next = AtomicU32::new(live + 1);
@@ -159,15 +164,15 @@ mod tests {
 				let start = kio::clock::Instant::now();
 				for _ in 0..iterations {
 					if wrap {
-						next.store(i32::MAX as u32, Ordering::Relaxed);
+						next.store(MAX_ID, Ordering::Relaxed);
 						let high = slab.insert_next(black_box(42), &next).unwrap();
 						black_box(slab.remove(high).unwrap());
 					}
 					let id = slab.insert_next(black_box(42), &next).unwrap();
 					black_box(slab.remove(id).unwrap());
 				}
-				eprintln!(
-					"handles live={live} wrap={wrap}: {:.0} ns/iteration",
+				println!(
+					"{live},{wrap},{:.0}",
 					start.elapsed().as_nanos() as f64 / f64::from(iterations)
 				);
 			}
