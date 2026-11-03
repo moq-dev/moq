@@ -2088,6 +2088,9 @@ export class Subscriber {
 	// The last read waited on a fill, so the staleness deadline it armed wakes the next one: a
 	// fill that never answers cannot pin a reader in either order.
 	#fillWait = false;
+	// Bumped whenever the fills this reader joined are rejudged, which may withdraw groups it reads
+	// again by the time it looks (a narrowing undone in one turn moves no signal), so it asks anew.
+	#fillMoves = new Signal(0);
 
 	#drift(): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
@@ -2312,8 +2315,23 @@ export class Subscriber {
 		else this.#forgetPastBudget(this.#delivered);
 		// What it hands out, and forgets below it, it no longer wants from a fill: tell the fills
 		// it joined, as a move of its bounds does, so their handlers stop serving it.
+		this.#fillsMoved();
+	}
+
+	// What this reader wants from the fills it joined may have narrowed: rejudge them, so their
+	// handlers hear it.
+	#fillsMoved(): void {
 		const producer = this.#state.producer;
-		if (this.#state.asker && producer) fillsOf(producer).moved(this.#state.asker);
+		if (!this.#state.asker || !producer) return;
+		fillsOf(producer).moved(this.#state.asker);
+		this.#fillMoves.update((moves) => moves + 1);
+	}
+
+	// Raise the sequence cursor to `floor`: what lies below it is passed for good.
+	#raiseNext(floor: bigint | undefined): void {
+		if (floor === undefined || floor <= this.#nextSequence) return;
+		this.#nextSequence = floor;
+		this.#fillsMoved();
 	}
 
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
@@ -2483,16 +2501,15 @@ export class Subscriber {
 			end: end === undefined ? local.end : min(local.end ?? end, end),
 		});
 		// A fill this reader alone waited on for a group it no longer reads is withdrawn.
-		const producer = this.#state.producer;
-		if (this.#state.asker && producer) fillsOf(producer).moved(this.#state.asker);
+		this.#fillsMoved();
 	}
 
-	// The parts of `[start, end)` this reader still reads: inside its cursor and window, and not
-	// handed out.
+	// The parts of `[start, end)` this reader still reads: inside its cursor and window, not
+	// handed out, and not passed by the sequence cursor, which never goes back.
 	#wants(start: bigint, end: bigint): Run[] {
 		if (this.#closed || this.#state.closed.peek() !== undefined) return [];
 		const cursor = this.#cursor.peek();
-		const from = max(start, cursor.start);
+		const from = max(max(start, cursor.start), this.#nextSequence);
 		const to = cursor.end === undefined ? end : min(end, cursor.end);
 		return this.#window.runs(from, to).flatMap((run) => this.#delivered.gaps(run.start, run.end));
 	}
@@ -2733,11 +2750,11 @@ export class Subscriber {
 			return subscriber.#window.starts(from);
 		};
 		hooks.tryNextGroup = (subscriber, floor) => {
-			subscriber.#nextSequence = max(subscriber.#nextSequence, floor ?? 0n);
+			subscriber.#raiseNext(floor);
 			return subscriber.#tryNextGroup();
 		};
 		hooks.peekGroup = (subscriber, ordered, floor) => {
-			if (ordered) subscriber.#nextSequence = max(subscriber.#nextSequence, floor ?? 0n);
+			if (ordered) subscriber.#raiseNext(floor);
 			return subscriber.#peekGroup(ordered);
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
@@ -3283,6 +3300,7 @@ export class Subscriber {
 		const dispose = [
 			this.#state.groups.changed(fn),
 			this.#state.drops.changed(fn),
+			this.#fillMoves.changed(fn),
 			this.#state.startChanged.changed(fn),
 			// A group starting may settle a time end, or move the cap it holds reads back with.
 			...(this.#window.settled ? [] : [this.#state.timelineChanged.changed(fn)]),
@@ -3495,6 +3513,8 @@ export class Subscriber {
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.sequence, drift)) {
 				this.#pass(groups, index);
+				// The cursor passed what lies below it, which a fill no longer owes this reader.
+				this.#fillsMoved();
 				// Holes below a skipped group are undeliverable, even ones the wall clock
 				// still spares because their successor arrived late.
 				start = this.#nextSequence;
@@ -3633,8 +3653,11 @@ export class Subscriber {
 	update(options: Subscription) {
 		const subscription = subscriptionDefaults(options);
 		const replaced = !sameRanges(subscription.ranges ?? [], this.#window.ranges);
+		const reordered = subscription.order !== this.#state.update.peek()?.order;
 		this.#state.update.set(subscription);
 		if (replaced) this.#resolve();
+		// A fill's order follows its readers, so its handler wakes to serve the new first group.
+		else if (reordered) this.#fillsMoved();
 	}
 }
 

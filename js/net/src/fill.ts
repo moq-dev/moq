@@ -76,6 +76,9 @@ class Pending {
 	readonly askers = new Set<Asker>();
 	// The groups answered: accepted, delivered live, dropped, or refused.
 	readonly resolved: Run[] = [];
+	// The groups no reader read any more at some point: withdrawn for good, so a handler that
+	// stopped serving one is never asked for it again. A reader widening back asks a new fill.
+	readonly withdrawn: Run[] = [];
 	// Still in the queue, not yet handed to a handler.
 	queued = true;
 	// Withdrawn or settled: owes nothing more.
@@ -92,10 +95,12 @@ class Pending {
 		this.revision.update((revision) => revision + 1);
 	}
 
-	// The parts of `[start, end)` within the fill that are still unanswered.
+	// The parts of `[start, end)` within the fill still unanswered and not withdrawn.
 	unresolved(start = this.start, end = this.end): Run[] {
 		if (this.done) return [];
-		return runGaps(this.resolved, max(start, this.start), min(end, this.end));
+		return runGaps(this.resolved, max(start, this.start), min(end, this.end)).flatMap((gap) =>
+			runGaps(this.withdrawn, gap.start, gap.end),
+		);
 	}
 
 	// The parts of `[start, end)` still unanswered that a reader still reads.
@@ -241,10 +246,14 @@ export class FillState {
 		}
 	}
 
-	// Withdraw `pending` once no reader still reads any of what it owes.
+	// Withdraw what no reader reads any more for good, and `pending` once that is all of it.
 	#judge(pending: Pending): void {
 		if (pending.done) return;
-		if (pending.owed().length > 0) {
+		const owed = pending.owed();
+		for (const gap of pending.unresolved()) {
+			for (const run of runGaps(owed, gap.start, gap.end)) insertRun(pending.withdrawn, run.start, run.end);
+		}
+		if (owed.length > 0) {
 			pending.bump();
 			return;
 		}

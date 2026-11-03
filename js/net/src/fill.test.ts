@@ -541,6 +541,77 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 	broadcast.close();
 });
 
+test("fill: a group no reader reads any more stays withdrawn, and widening back asks a new fill", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const ranges = (start: bigint) => [{ start: { absolute: start }, end: { absolute: 5n } }];
+	const reader = track.subscribe({ ranges: ranges(0n), delay: { max: null }, order: "ascending" });
+	void drain(reader);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect([fill.start, fill.end]).toEqual([0n, 5n]);
+
+	reader.update({ ranges: ranges(3n), delay: { max: null }, order: "ascending" });
+	expect(fill.isWanted(1n)).toBe(false);
+	expect(fill.wanted()).toBe(3n);
+
+	// Widening back does not revive the group in this fill: the handler may have stopped on it.
+	reader.update({ ranges: ranges(0n), delay: { max: null }, order: "ascending" });
+	await yieldNow();
+	expect(fill.isWanted(1n)).toBe(false);
+	const again = await requests.requestedFill();
+	expect([again?.start, again?.end]).toEqual([0n, 3n]);
+
+	again?.close();
+	fill.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: what a reader's sequence cursor passes, a fill no longer owes it", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const reader = track.subscribe(history);
+	// A logical reader that already holds what lies below the floor raises its copy's cursor.
+	expect(hooks.tryNextGroup(reader, 0n).kind).toBe("idle");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect(fill.wanted()).toBe(0n);
+	const changed = fill.wantedChanged();
+	await changed;
+	const next = fill.wantedChanged();
+
+	hooks.tryNextGroup(reader, 3n);
+	expect(await next).toBe(3n);
+	expect(fill.isWanted(1n)).toBe(false);
+
+	fill.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a reader changing only its order wakes the handler", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const reader = track.subscribe(history);
+	void drain(reader);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect(await fill.wantedChanged()).toBe(0n);
+	const changed = fill.wantedChanged();
+
+	reader.update({ ...history, order: "descending" });
+	expect(await changed).toBe(4n);
+	expect(fill.order).toBe("descending");
+
+	fill.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a reader joins a fill still served after its handler's handle closed", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
