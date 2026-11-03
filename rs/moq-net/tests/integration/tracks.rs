@@ -56,7 +56,8 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 	kio::clock::timeout(TIMEOUT, origin.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("announce timeout")
-		.expect("routed").unwrap()
+		.expect("routed")
+		.unwrap()
 }
 
 /// A session syncs at once, then lists the peer's tracks and their changes until the

@@ -57,7 +57,8 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves").unwrap();
+		.expect("broadcast resolves")
+		.unwrap();
 
 	// The publisher only learns of a subscription once the subscriber polls it.
 	let (ready, active) = futures::channel::oneshot::channel();
@@ -113,7 +114,13 @@ async fn track_info_interest_precedes_a_subscription() {
 		options.client_subscribe = Some(subscriber.clone());
 		let _pair = connect_mock(options).await;
 		let consumer = subscriber.consume();
-		let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap().unwrap();
+		let remote = consumer
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let copy = remote.track("video").unwrap();
 		copy.info().await.expect("TRACK_INFO");
 		crate::support::wanted(track.demand())

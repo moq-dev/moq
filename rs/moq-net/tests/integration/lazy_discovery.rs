@@ -283,12 +283,14 @@ async fn waiting_on_a_path_asks_about_it() {
 		kio::clock::timeout(SETTLE, consumer.follow("a/x", None).unwrap().available())
 			.await
 			.expect("routed in time")
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let mut followed = consumer.follow("b/y", None).unwrap();
 		kio::clock::timeout(SETTLE, followed.available())
 			.await
 			.expect("announced in time")
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		assert_eq!(lazy.requests(), 2, "{version}");
 	}
 }
@@ -526,7 +528,8 @@ async fn ietf_waiting_on_a_path_asks_about_it() {
 		kio::clock::timeout(SETTLE, consumer.follow("a/x", None).unwrap().available())
 			.await
 			.expect("routed in time")
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		assert!(!lazy.routes("b/y").await, "{version}");
 	}
 }

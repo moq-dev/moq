@@ -63,7 +63,8 @@ async fn setup(version: Version) -> Setup {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves").unwrap();
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let (tx, frames) = futures::channel::mpsc::unbounded();
 	kio::clock::sim::spawn(async move {

@@ -210,7 +210,8 @@ async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path) ->
 	let mut following = subscriber.follow(path, None)?;
 	let broadcast = kio::clock::timeout_at(deadline, following.available())
 		.await
-		.map_err(|_| Error::Moq(moq_net::Error::Unroutable))??;
+		.map_err(|_| Error::Moq(moq_net::Error::Unroutable))??
+		.ok_or(Error::Moq(moq_net::Error::Unroutable))?;
 	kio::clock::timeout_at(
 		deadline,
 		EgressSource::new(moq_mux::Source::new(subscriber.clone(), broadcast)),

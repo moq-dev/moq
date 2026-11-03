@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Hops, Instance, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
+use moq_net::{Hop, Hops, Instance, Pattern, Patterns, Timestamp, auth, broadcast, kio, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -1166,7 +1166,8 @@ async fn watching(routes: usize, subscribers: usize) -> Watching {
 			.unwrap()
 			.available()
 			.await
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let subscription = remote.track("video").unwrap().subscribe(None).await.unwrap();
 		subscriptions.push(subscription);
 	}

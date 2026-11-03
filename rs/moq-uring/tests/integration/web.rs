@@ -346,7 +346,8 @@ fn lite_session_over_webtransport() {
 					.unwrap()
 					.available()
 					.await
-					.expect("broadcast resolves").unwrap()
+					.expect("broadcast resolves")
+					.unwrap()
 			};
 			let mut track = bc
 				.track("data")

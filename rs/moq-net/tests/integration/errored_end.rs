@@ -99,7 +99,8 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves").unwrap();
+			.expect("broadcast resolves")
+			.unwrap();
 
 		session.server_transport.split_unis();
 		if subscribe_first {

@@ -89,7 +89,8 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 			.unwrap()
 			.available()
 			.await
-			.expect("broadcast resolves").unwrap();
+			.expect("broadcast resolves")
+			.unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut got = 0;

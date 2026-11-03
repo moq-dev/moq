@@ -982,7 +982,9 @@ async fn run_container(
 	// rendition's `broadcast` field references (e.g. "./source") through the same origin.
 	let mut follow = consumer.follow(name.as_str(), None)?;
 	let broadcast = tokio::select! {
-		broadcast = follow.available() => broadcast.with_context(|| format!("failed to resolve broadcast `{name}`"))?,
+		broadcast = follow.available() => broadcast
+			.with_context(|| format!("failed to resolve broadcast `{name}`"))?
+			.context("went offline before serving")?,
 		() = finish.cancelled() => return Ok(()),
 	};
 
@@ -1405,7 +1407,8 @@ mod tests {
 						.unwrap()
 						.available()
 						.await
-						.unwrap().unwrap();
+						.unwrap()
+						.unwrap();
 					let mut track = broadcast
 						.track("status")
 						.unwrap()
@@ -1515,7 +1518,8 @@ mod tests {
 			.unwrap()
 			.available()
 			.await
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.track("live")
 			.unwrap()
 			.subscribe(None)

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
-use hang::moq_net::{self, Instance, Timestamp, announce, origin, track};
+use hang::moq_net::{self, Instance, Timestamp, origin, track};
 use moq_mux::catalog::Stream;
 
 const LITE_07: &str = "moq-lite-07-wip";
@@ -160,7 +160,10 @@ async fn replacement(version: &str) {
 		.established()
 		.await
 		.unwrap();
-	assert!(matches!(catalog_follow.next().await, Some(origin::RouteEvent::Start(_))));
+	assert!(matches!(
+		catalog_follow.next().await,
+		Some(origin::RouteEvent::Start(_))
+	));
 	assert!(matches!(media_follow.next().await, Some(origin::RouteEvent::Start(_))));
 
 	let held = viewer.request("live/catalog.hang", None).await.unwrap();

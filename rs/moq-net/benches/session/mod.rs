@@ -720,7 +720,8 @@ impl Viewer {
 			.unwrap()
 			.available()
 			.await
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		for track in tracks {
 			self.subscribers.push(
 				broadcast
@@ -790,7 +791,8 @@ impl<B: Backend> Room<B> {
 						.unwrap()
 						.available()
 						.await
-						.unwrap().unwrap();
+						.unwrap()
+						.unwrap();
 					viewer.fetches.push((broadcast, source.track(TRACK).unwrap()));
 				} else {
 					viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
@@ -1596,7 +1598,8 @@ impl<B: Backend> ChurnRoom<B> {
 					.unwrap()
 					.available()
 					.await
-					.unwrap().unwrap(),
+					.unwrap()
+					.unwrap(),
 			);
 			viewers.push(viewer);
 		}

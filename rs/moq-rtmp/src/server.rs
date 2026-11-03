@@ -836,7 +836,7 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
-		let Ok(broadcast) = broadcast else {
+		let Ok(Some(broadcast)) = broadcast else {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
 		};
@@ -1900,7 +1900,13 @@ mod tests {
 		let (mut client, server) = tokio::io::duplex(64 * 1024);
 		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::ZERO));
 		let catalog = async {
-			let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap().unwrap();
+			let broadcast = consumer
+				.follow("live/cam0", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
 			let track = broadcast.track(hang::Catalog::DEFAULT_NAME).unwrap();
 			track.subscribe(None).await.unwrap()
 		};
@@ -2210,7 +2216,13 @@ mod tests {
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap().unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -2803,7 +2815,13 @@ mod tests {
 		let stale_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
-		let stale = consumer.follow("live/cam0", None).unwrap().available().await.unwrap().unwrap();
+		let stale = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()

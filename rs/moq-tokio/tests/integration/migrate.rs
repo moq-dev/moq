@@ -106,7 +106,8 @@ fn view(origin: &moq_net::origin::Producer, name: &str) -> tokio::sync::mpsc::Un
 			.expect("follow")
 			.available()
 			.await
-			.expect("the broadcast resolves").unwrap();
+			.expect("the broadcast resolves")
+			.unwrap();
 		// A budget, so a group the move delays is late rather than skipped.
 		let subscription = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));

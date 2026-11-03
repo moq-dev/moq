@@ -43,7 +43,8 @@ async fn a_segmented_frame_crosses_whole() {
 		let remote = kio::clock::timeout(TIMEOUT, viewer.consume().follow("room", None).unwrap().available())
 			.await
 			.expect("broadcast timeout")
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let mut sub = remote.track("file").unwrap().subscribe(None).await.unwrap();
 		subscribed(&track).await;
 

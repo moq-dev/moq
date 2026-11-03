@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, origin, stats};
+use moq_net::{origin, stats};
 use moq_stats::produce::bench::{Driver, FrameBytes};
 
 struct Counter;

@@ -218,7 +218,8 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 		.unwrap()
 		.available()
 		.await
-		.map_err(|err| format!("broadcast unroutable: {err}"))?;
+		.map_err(|err| format!("broadcast unroutable: {err}"))?
+		.ok_or("the first change is an instance")?;
 
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the

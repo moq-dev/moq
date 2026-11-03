@@ -577,7 +577,8 @@ async fn the_same_instance_within_the_follow_continues() {
 	let back = kio::clock::timeout(TIMEOUT, relay.origin.follow("demo", None).unwrap().available())
 		.await
 		.expect("the relay observes the returning publication")
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
 	for chunk in chunks {

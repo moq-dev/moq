@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use moq_auth::{Grant, Pattern, lease};
-use moq_net::{announce, origin};
+use moq_net::origin;
 use moq_relay::{
 	Connection, auth,
 	cluster::{self, Peer},
@@ -181,7 +181,8 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 		consumer.follow(path, None).unwrap().available(),
 	)
 	.await
-	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"));
+	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"))
+	.expect("the first change is an instance");
 	let subscription = moq_net::track::Subscription::default()
 		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)));
 	let mut track = within(

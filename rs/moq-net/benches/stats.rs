@@ -6,7 +6,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, fuzz, origin, stats, transport};
+use moq_net::{fuzz, origin, stats, transport};
 
 /// `(broadcasts, tiers)` shapes; every broadcast records under every tier.
 const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10)];

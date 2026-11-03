@@ -77,10 +77,7 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Present(route)
-			| moq_net::announce::Event::Present(route)
-			| moq_net::announce::Event::Present(route)
-			| moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Present(route) => Some((route, true)),
 			moq_net::announce::Event::Absent(route) => Some((route, false)),
 		}
 	}
@@ -289,7 +286,13 @@ mod tests {
 		let source = moq_mux::Source::new(source, broadcast);
 		let pushed = tokio::spawn(async move { client.publish(url, source).await });
 		let ingested = ingest_origin.consume();
-		let ingested = ingested.follow("ingested", None).unwrap().available().await.unwrap().unwrap();
+		let ingested = ingested
+			.follow("ingested", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let mut played = opus_output(&ingested).await;
 		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
 

@@ -43,7 +43,8 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 			.unwrap()
 			.available()
 			.await
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 		subscribed(&track).await;
 		let mut group = track.append_group().unwrap();

@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 	// subscribes upstream on demand.
 	let mut following = remote.consume().follow(&source_path, None)?;
 	let source = tokio::select! {
-		resolved = following.available() => resolved.context("source broadcast unavailable")?,
+		resolved = following.available() => resolved.context("source broadcast unavailable")?.context("went offline before serving")?,
 		closed = session.closed() => {
 			closed.context("session failed before the source broadcast was announced")?;
 			anyhow::bail!("session closed before the source broadcast was announced");

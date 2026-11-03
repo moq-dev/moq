@@ -281,7 +281,8 @@ async fn a_lite_request_keeps_one_copy_of_its_track_name() {
 			.unwrap()
 			.available()
 			.await
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		WATCH.with(|watch| watch.set(TRACK.len()));
 		SIZED.with(|sized| sized.set((0, 0)));
 		let subscriber = remote.track(TRACK).unwrap().subscribe(None).await.unwrap();

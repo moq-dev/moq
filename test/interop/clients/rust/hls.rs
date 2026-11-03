@@ -114,7 +114,12 @@ async fn main() -> anyhow::Result<()> {
 		.established()
 		.await?;
 	kio::clock::timeout(Duration::from_secs(30), async {
-		let broadcast = origin.consume().follow(path, None)?.available().await?;
+		let broadcast = origin
+			.consume()
+			.follow(path, None)?
+			.available()
+			.await?
+			.context("went offline before serving")?;
 		let mut catalogs =
 			moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang).await?;
 		// Both renditions, each advertising its records.

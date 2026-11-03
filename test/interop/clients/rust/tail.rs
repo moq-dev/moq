@@ -186,7 +186,11 @@ async fn main() -> anyhow::Result<()> {
 				.connect(url)
 				.established()
 				.await?;
-			let broadcast = consumer.follow(&args[3], None)?.available().await?;
+			let broadcast = consumer
+				.follow(&args[3], None)?
+				.available()
+				.await?
+				.context("went offline before serving")?;
 			let remote = broadcast.track("tail")?;
 			if status {
 				// Query before subscribing so draft-18+ must use TRACK_STATUS,

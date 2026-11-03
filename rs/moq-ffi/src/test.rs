@@ -263,7 +263,7 @@ async fn next_event(announced: &MoqAnnounceConsumer) -> MoqAnnounceEvent {
 /// The next newly announced route.
 async fn next_announced(announced: &MoqAnnounceConsumer) -> MoqAnnounce {
 	match next_event(announced).await {
-		MoqAnnounceEvent::Start { announce } => announce,
+		MoqAnnounceEvent::Present { announce } => announce,
 		other => panic!("expected an announcement, got {other:?}"),
 	}
 }
@@ -412,8 +412,7 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	// Reading an advertisement preserves its static production price.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let route = loop {
-		if let MoqAnnounceEvent::Start { announce } | MoqAnnounceEvent::Update { announce } =
-			next_event(&announced).await
+		if let MoqAnnounceEvent::Present { announce } = next_event(&announced).await
 			&& announce.prefix == "priced-route"
 		{
 			break announce.route;
@@ -457,10 +456,11 @@ fn instance_routes_parse_and_refuse() {
 }
 
 #[tokio::test]
-async fn announced_restarts_on_a_new_instance() {
+async fn following_restarts_on_a_new_instance() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let following = consumer.follow("instance-route".into(), None).unwrap();
 	let publication = origin.create_broadcast("instance-route".into()).unwrap();
 
 	let first = moq_net::Instance::random().to_string();
@@ -472,8 +472,10 @@ async fn announced_restarts_on_a_new_instance() {
 		.unwrap();
 	let announce = next_announced(&announced).await;
 	assert_eq!(announce.route.instance, first);
+	following.available().await.unwrap();
 
-	// A new run of the same publisher is another instance: consumers restart onto it.
+	// A new run of the same publisher is another instance: followers restart onto it, while
+	// the path stays listed.
 	let second = moq_net::Instance::random().to_string();
 	publication
 		.announce(MoqAnnounceRoute {
@@ -481,13 +483,16 @@ async fn announced_restarts_on_a_new_instance() {
 			..Default::default()
 		})
 		.unwrap();
-	match next_event(&announced).await {
-		MoqAnnounceEvent::Restart { announce } => {
-			assert_eq!(announce.prefix, "instance-route");
-			assert_eq!(announce.route.instance, second);
-		}
-		other => panic!("expected a restart, got {other:?}"),
-	}
+	tokio::time::timeout(std::time::Duration::from_secs(1), following.available())
+		.await
+		.expect("the new instance is handed out")
+		.unwrap();
+	assert!(
+		tokio::time::timeout(std::time::Duration::from_millis(100), announced.next())
+			.await
+			.is_err(),
+		"a restart is not listed"
+	);
 
 	publication.broadcast().close().unwrap();
 }
@@ -3253,7 +3258,7 @@ async fn create_broadcast_is_invisible_until_announced() {
 		.expect("announce reaches the cursor")
 		.expect("the cursor is still open");
 	assert!(
-		matches!(&update, MoqAnnounceEvent::Start { announce } if announce.prefix == "live"),
+		matches!(&update, MoqAnnounceEvent::Present { announce } if announce.prefix == "live"),
 		"{update:?}"
 	);
 	publication.broadcast().close().unwrap();
@@ -3679,8 +3684,8 @@ async fn announce_and_unannounce_toggles_discovery() {
 	async fn wait_live(announced: &MoqAnnounceConsumer, active: bool) {
 		loop {
 			match next_event(announced).await {
-				MoqAnnounceEvent::Start { announce } if active && announce.prefix == "live" => return,
-				MoqAnnounceEvent::End { announce } if !active && announce.prefix == "live" => return,
+				MoqAnnounceEvent::Present { announce } if active && announce.prefix == "live" => return,
+				MoqAnnounceEvent::Absent { announce } if !active && announce.prefix == "live" => return,
 				_ => {}
 			}
 		}
@@ -4626,7 +4631,7 @@ fn close_twice_is_a_noop() {
 /// Wait for the announcement of `path` to end, failing the test if it doesn't.
 async fn await_unannounced(announced: &MoqAnnounceConsumer) {
 	match next_event(announced).await {
-		MoqAnnounceEvent::End { .. } => {}
+		MoqAnnounceEvent::Absent { .. } => {}
 		other => panic!("expected the announcement to end, got {other:?}"),
 	}
 }
@@ -5873,7 +5878,7 @@ fn without_runtime() {
 
 		let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 		let announcement = match pollster::block_on(announced.next()).unwrap().unwrap() {
-			MoqAnnounceEvent::Start { announce } => announce,
+			MoqAnnounceEvent::Present { announce } => announce,
 			other => panic!("expected an announcement, got {other:?}"),
 		};
 		assert_eq!(announcement.prefix, "test");
@@ -6085,7 +6090,7 @@ async fn server_client_run_end(version: &str) {
 
 	// The announcement, not the track's error, ends the run.
 	match next_event(&announced).await {
-		MoqAnnounceEvent::End { announce } => assert_eq!(announce.prefix, "hello"),
+		MoqAnnounceEvent::Absent { announce } => assert_eq!(announce.prefix, "hello"),
 		other => panic!("{version}: expected the run's end, got {other:?}"),
 	}
 

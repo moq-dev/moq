@@ -163,7 +163,8 @@ fn partial_frame_gives_way() {
 				consumer.follow("room", None).unwrap().available(),
 			)
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.expect("the first change is an instance");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
@@ -320,7 +321,8 @@ fn javascript_partial_frame_gives_way() {
 				consumer.follow("room", None).unwrap().available(),
 			)
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.expect("the first change is an instance");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {

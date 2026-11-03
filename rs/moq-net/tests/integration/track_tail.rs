@@ -94,7 +94,8 @@ async fn connect(version: &str) -> Pair {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves").unwrap();
+		.expect("broadcast resolves")
+		.unwrap();
 
 	Pair {
 		pair,

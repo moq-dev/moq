@@ -414,7 +414,8 @@ async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 	let broadcast = kio::clock::timeout(TIMEOUT, origin.follow(path, None).unwrap().available())
 		.await
 		.expect("announcement timed out")
-		.expect("origin closed before announcing").unwrap();
+		.expect("origin closed before announcing")
+		.unwrap();
 
 	let track = broadcast.track(TRACK).expect("track");
 	let groups = kio::clock::timeout(TIMEOUT, track.subscribe(None))
@@ -1447,7 +1448,8 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	let remote = kio::clock::timeout(TIMEOUT, consumed.follow("live", None).unwrap().available())
 		.await
 		.unwrap()
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let mut groups = remote
 		.track(TRACK)
 		.unwrap()

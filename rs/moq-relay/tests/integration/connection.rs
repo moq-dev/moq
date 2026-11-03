@@ -46,7 +46,8 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			.unwrap()
 			.available()
 			.await
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 			// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.

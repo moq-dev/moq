@@ -176,7 +176,8 @@ pub async fn connect_export(
 		.follow(&name, None)?
 		.available()
 		.await
-		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+		.with_context(|| format!("failed to resolve broadcast `{name}`"))?
+		.context("went offline before serving")?;
 	let source = moq_mux::Source::new(origin, broadcast);
 
 	// The stream key is the ingest credential, so log the dial target and app instead.

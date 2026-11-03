@@ -175,7 +175,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		.unwrap()
 		.available()
 		.await
-		.expect("broadcast resolves").unwrap();
+		.expect("broadcast resolves")
+		.unwrap();
 	let mut sub = within("subscribe", bc.track("video").expect("track").subscribe(None))
 		.await
 		.expect("subscribe");
@@ -319,7 +320,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 			.unwrap()
 			.available()
 			.await
-			.expect("broadcast resolves").unwrap();
+			.expect("broadcast resolves")
+			.unwrap();
 		let mut sub = bc
 			.track("video")
 			.expect("track handle")
@@ -560,7 +562,13 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
 		let consumer = sub_origin.consume();
-		consumer.follow("diamond", None).unwrap().available().await.ok()
+		consumer
+			.follow("diamond", None)
+			.unwrap()
+			.available()
+			.await
+			.ok()
+			.flatten()
 	})
 	.await
 	.expect("broadcast announced");

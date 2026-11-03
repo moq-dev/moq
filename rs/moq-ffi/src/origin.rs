@@ -46,8 +46,8 @@ pub struct MoqAnnounceRoute {
 	/// publisher is a new stream viewers restart onto. Set one only for a publisher that
 	/// continues its group sequences across restarts and raises `epoch` on each: readers
 	/// stitch every route of one instance together, so restarting the sequences under an
-	/// old instance splices unrelated groups into their tracks. Changing it is a
-	/// `MoqAnnounceEvent::Restart`.
+	/// old instance splices unrelated groups into their tracks. Changing it hands
+	/// `MoqFollowing` a new broadcast.
 	#[uniffi(default = None)]
 	pub instance: Option<String>,
 	/// Which run of a stable `instance` this is: only its highest epoch is eligible, cheaper
@@ -218,7 +218,18 @@ struct Following {
 
 impl Following {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let broadcast = self.driver.watch(async { Ok(self.inner.available().await?) }).await?;
+		// An end only precedes the next instance here: the old one's tracks end on their own, and
+		// the announcement stream reports the path's absence.
+		let broadcast = self
+			.driver
+			.watch(async {
+				loop {
+					if let Some(broadcast) = self.inner.available().await? {
+						return Ok(broadcast);
+					}
+				}
+			})
+			.await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
 			broadcast,
 			self.origin.clone(),
@@ -257,37 +268,21 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 	}
 }
 
-/// What a [`MoqAnnounceConsumer`] yields.
+/// What a [`MoqAnnounceConsumer`] yields: a path becoming present or absent.
+///
+/// Another publisher instance taking a path over keeps it present: follow it with
+/// `MoqOriginConsumer::follow` to see the broadcast change.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqAnnounceEvent {
-	/// A route now covers the prefix; the stream had none there.
-	Start {
-		/// The broadcast announcement affected by this event.
+	/// A route now covers the path, which was absent.
+	Present {
+		/// The announcement that made the path present.
 		announce: MoqAnnounce,
 	},
-	/// The route covering the prefix changed hops or cost.
-	Update {
-		/// The broadcast announcement affected by this event.
+	/// No route covers the path any more. Carries its last advertised route.
+	Absent {
+		/// The announcement that went.
 		announce: MoqAnnounce,
-	},
-	/// No route covers the prefix any more. Carries its last advertised route.
-	End {
-		/// The broadcast announcement affected by this event.
-		announce: MoqAnnounce,
-	},
-	/// Another publisher instance now serves the prefix: drop what was resolved under
-	/// it and request afresh.
-	Restart {
-		/// The broadcast announcement affected by this event.
-		announce: MoqAnnounce,
-	},
-	/// A route now covers the prefix and continues what the route at `predecessor`
-	/// served beneath it: keep what was resolved through that one.
-	Takeover {
-		/// The broadcast announcement affected by this event.
-		announce: MoqAnnounce,
-		/// The prefix of the route it continues, at or above `announce`'s.
-		predecessor: String,
 	},
 }
 
@@ -295,21 +290,11 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 	fn from(event: moq_net::announce::Event) -> Self {
 		use moq_net::announce::Event;
 		match event {
-			Event::Start(announce) => Self::Start {
+			Event::Present(announce) => Self::Present {
 				announce: announce.into(),
 			},
-			Event::Update(announce) => Self::Update {
+			Event::Absent(announce) => Self::Absent {
 				announce: announce.into(),
-			},
-			Event::End(announce) => Self::End {
-				announce: announce.into(),
-			},
-			Event::Restart(announce) => Self::Restart {
-				announce: announce.into(),
-			},
-			Event::Takeover { announce, predecessor } => Self::Takeover {
-				announce: announce.into(),
-				predecessor: predecessor.to_string(),
 			},
 		}
 	}

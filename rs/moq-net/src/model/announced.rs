@@ -179,7 +179,9 @@ mod tests {
 		assert_eq!(listed(&mut announced).await, "present live");
 		assert!(matches!(routes.next().await, Some(RouteEvent::Start(_))));
 
-		first.announce(route(&Instance::random()).with_cost(Cost::new(5))).unwrap();
+		first
+			.announce(route(&Instance::random()).with_cost(Cost::new(5)))
+			.unwrap();
 		quiet(&mut announced).await;
 		// The relay-level stream still reports the replacement.
 		assert!(matches!(routes.next().await, Some(RouteEvent::Restart(_))));

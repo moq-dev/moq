@@ -117,7 +117,8 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves").unwrap();
+		.expect("broadcast resolves")
+		.unwrap();
 
 	let mut readers = Vec::new();
 	for (index, track) in tracks.iter().enumerate() {

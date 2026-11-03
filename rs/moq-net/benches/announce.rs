@@ -20,6 +20,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use moq_net::{
 	Hop, Hops, Path, announce,
 	fuzz::{AnnounceWriter, Announced, decode_announces, encode_announces},
+	origin,
 };
 
 // Compile the actual private replay code, as the priority bench does for its queue.

@@ -228,7 +228,8 @@ mod tests {
 				kio::clock::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
 					.await
 					.expect("relay routes the broadcast")
-					.expect("broadcast").unwrap();
+					.expect("broadcast")
+					.unwrap();
 			}
 
 			Self {

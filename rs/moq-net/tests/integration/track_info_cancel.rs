@@ -87,7 +87,8 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let mut query = remote.track("video").unwrap().info();
 	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut query).await {
 		futures::future::Either::Left((request, _)) => request.expect("TRACK reaches the publisher"),

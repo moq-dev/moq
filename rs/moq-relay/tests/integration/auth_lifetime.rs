@@ -816,7 +816,8 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow(path, None).unwrap().available())
 				.await
 				.expect("announcement timeout")
-				.expect("announced broadcast resolves").unwrap();
+				.expect("announced broadcast resolves")
+				.unwrap();
 			subs.push(
 				broadcast
 					.track("media")
@@ -879,7 +880,8 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow("alice/audio", None).unwrap().available())
 			.await
 			.expect("the undeafened path was never announced again")
-			.expect("announced broadcast resolves").unwrap();
+			.expect("announced broadcast resolves")
+			.unwrap();
 		let mut audio = broadcast
 			.track("media")
 			.unwrap()
@@ -1780,7 +1782,8 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let a_read = kio::clock::timeout(TIMEOUT, read.follow("a/cam", None).unwrap().available())
 			.await
 			.unwrap()
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
 		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
@@ -1792,7 +1795,8 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = b_track.append_group().unwrap();
 		group

@@ -1498,9 +1498,13 @@ impl AnnounceRun {
 			};
 
 			let (update, active, restart, predecessor) = match next {
-				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => (update, true, false, None),
+				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => {
+					(update, true, false, None)
+				}
 				Some(origin::RouteEvent::Restart(update)) => (update, true, true, None),
-				Some(origin::RouteEvent::Takeover { announce, predecessor }) => (announce, true, false, Some(predecessor)),
+				Some(origin::RouteEvent::Takeover { announce, predecessor }) => {
+					(announce, true, false, Some(predecessor))
+				}
 				Some(origin::RouteEvent::End(update)) => (update, false, false, None),
 				None => {
 					if self.initial.take().is_some() {
@@ -7138,7 +7142,14 @@ mod serve_group_test {
 				broadcast.announce(Default::default()).unwrap();
 				let relay = origin(2);
 				let _upstream = connect(version, &publisher, &relay).await;
-				let remote = relay.consume().follow("room", None).unwrap().available().await.unwrap().unwrap();
+				let remote = relay
+					.consume()
+					.follow("room", None)
+					.unwrap()
+					.available()
+					.await
+					.unwrap()
+					.unwrap();
 				let mut keeper = match warm {
 					true => Some(
 						remote
@@ -7169,7 +7180,8 @@ mod serve_group_test {
 					.unwrap()
 					.available()
 					.await
-					.unwrap().unwrap();
+					.unwrap()
+					.unwrap();
 				let mut live = remote
 					.track("test")
 					.unwrap()

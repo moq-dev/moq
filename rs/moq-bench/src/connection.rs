@@ -315,7 +315,11 @@ async fn subscribe_named(
 	max_delay: Duration,
 	stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
-	let broadcast = consume.follow(path.as_str(), None)?.available().await?;
+	let broadcast = consume
+		.follow(path.as_str(), None)?
+		.available()
+		.await?
+		.ok_or_else(|| anyhow::anyhow!("the first change is an instance"))?;
 	drain(broadcast, max_delay, &stats).await
 }
 
@@ -357,9 +361,7 @@ async fn subscribe(
 			update = announced.next() => {
 				let update = match update {
 					Some(
-						moq_net::announce::Event::Present(update)
-						| moq_net::announce::Event::Present(update)
-						| moq_net::announce::Event::Present(update) | moq_net::announce::Event::Present(update),
+						moq_net::announce::Event::Present(update),
 					) => update,
 					Some(moq_net::announce::Event::Absent(_)) => continue,
 					None => break,
@@ -386,12 +388,7 @@ async fn subscribe(
 	// there is nothing to spread over.
 	while selected < want {
 		let update = match announced.next().await {
-			Some(
-				moq_net::announce::Event::Present(update)
-				| moq_net::announce::Event::Present(update)
-				| moq_net::announce::Event::Present(update)
-				| moq_net::announce::Event::Present(update),
-			) => update,
+			Some(moq_net::announce::Event::Present(update)) => update,
 			Some(moq_net::announce::Event::Absent(_)) => continue,
 			None => break,
 		};

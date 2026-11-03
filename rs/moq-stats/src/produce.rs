@@ -1638,7 +1638,7 @@ mod tests {
 	use std::collections::BTreeMap;
 
 	use moq_net::stats::{Registry, Tier};
-	use moq_net::{Timestamp, announce, broadcast, track};
+	use moq_net::{Timestamp, broadcast, track};
 
 	use super::*;
 	use crate::{PrefixFrame, PresenceFrame, TotalsFrame};

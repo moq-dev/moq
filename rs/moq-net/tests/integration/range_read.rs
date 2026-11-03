@@ -95,7 +95,8 @@ async fn fixture(
 	let remote = kio::clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves").unwrap();
+		.expect("broadcast resolves")
+		.unwrap();
 	(remote, track, (sessions, broadcast, publisher, middle, client))
 }
 

@@ -395,7 +395,8 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 			.unwrap()
 			.available()
 			.await
-			.expect("broadcast resolves").unwrap();
+			.expect("broadcast resolves")
+			.unwrap();
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");

@@ -227,7 +227,10 @@ impl Server {
 			return Some(followed.clone());
 		}
 
-		let instances = self.inner.origin.follow(name, None)
+		let instances = self
+			.inner
+			.origin
+			.follow(name, None)
 			.map_err(|err| tracing::warn!(%err, %name, "failed to follow broadcast"))
 			.ok()?;
 		// A request answers once the origin has synced with the relay, so a path with no route

@@ -38,7 +38,8 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let mut announced = subscriber.consume().routes();
 	let old_cost = match announced.next().await {
 		Some(moq_net::origin::RouteEvent::Start(announce)) => announce.route.cost,

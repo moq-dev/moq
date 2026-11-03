@@ -994,7 +994,13 @@ mod tests {
 		let relay = origin(2);
 		let _link = link(&publisher, &relay).await;
 		let consumer = relay.consume();
-		let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap().unwrap();
+		let remote = consumer
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 
 		// A first reader warms the relay's copy with every group.
 		{
@@ -1066,7 +1072,13 @@ mod tests {
 		let subscriber = origin(2);
 		let _link = link(&publisher, &subscriber).await;
 		let consumer = subscriber.consume();
-		let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap().unwrap();
+		let remote = consumer
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.warmup = Some(Duration::from_millis(80));

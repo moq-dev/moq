@@ -7988,10 +7988,7 @@ mod tests {
 		let announced = producer.consume().routes();
 		let _stats = producer.snapshot(".stats");
 		assert!(announced.is_synced(), "a snapshot in flight under a hidden segment");
-		assert!(
-			producer.consume().routes().is_synced(),
-			"a reader registering past one"
-		);
+		assert!(producer.consume().routes().is_synced(), "a reader registering past one");
 		assert!(!producer.consume().with_hidden(true).routes().is_synced());
 	}
 
@@ -14259,10 +14256,7 @@ mod tests {
 		let mut selected = project.routes();
 		selected.expect_next_active(".svc/.private/lobby.chat").await;
 		selected.assert_next_wait();
-		let mut inside = project
-			.scope(".svc", &Patterns::from(Pattern::all()))
-			.unwrap()
-			.routes();
+		let mut inside = project.scope(".svc", &Patterns::from(Pattern::all())).unwrap().routes();
 		inside.expect_next_active(".private/lobby.chat").await;
 		inside.assert_next_wait();
 		let live = producer.announce(".svc/p1/lobby.chat", Route::default()).unwrap();

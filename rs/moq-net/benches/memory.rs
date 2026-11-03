@@ -155,7 +155,13 @@ impl Link {
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		let remote = consumer.follow("bench", None).unwrap().available().await.unwrap().unwrap();
+		let remote = consumer
+			.follow("bench", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let mut subscribers = Vec::new();
 		for index in 0..streams {
 			let track = remote.track(&format!("{index}")).unwrap();

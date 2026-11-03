@@ -30,7 +30,8 @@ async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net
 	let handle = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves").unwrap();
+		.expect("broadcast resolves")
+		.unwrap();
 	handle.track("video").expect("a live broadcast serves its track");
 
 	broadcast.close();

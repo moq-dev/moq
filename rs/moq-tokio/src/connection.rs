@@ -3377,7 +3377,8 @@ mod tests {
 		let cam = kio::clock::timeout(WAIT, consumer.follow("cam", None).unwrap().available())
 			.await
 			.unwrap()
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track.append_group().unwrap();
@@ -3460,7 +3461,8 @@ mod tests {
 		kio::clock::timeout(WAIT, subscriber.consume().follow("late", None).unwrap().available())
 			.await
 			.expect("the drained session stopped serving")
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		assert!(
 			connection
 				.draining()

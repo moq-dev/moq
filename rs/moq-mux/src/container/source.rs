@@ -1101,7 +1101,13 @@ mod tests {
 			.unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let consumer = subscriber.consume();
-		let remote = consumer.follow("room", None).unwrap().available().await.unwrap().unwrap();
+		let remote = consumer
+			.follow("room", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let source = crate::Source::new(consumer, remote);
 		let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_secs(1))
 			.unwrap()
@@ -1178,7 +1184,13 @@ mod tests {
 				.unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			let consumer = subscriber.consume();
-			let remote = consumer.follow("room", None).unwrap().available().await.unwrap().unwrap();
+			let remote = consumer
+				.follow("room", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
 			let source = crate::Source::new(consumer, remote);
 
 			// MPEG-1 audio from TS: one 24 ms frame per group, a PES of five written at once.

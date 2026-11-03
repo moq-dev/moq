@@ -1,7 +1,7 @@
 use std::task::{Poll, ready};
 
 use super::WeakEntry;
-use super::origin_impl::{Announce, Routes, RouteEvent, Consumer, Moved, Requesting};
+use super::origin_impl::{Announce, Consumer, Moved, Requesting, RouteEvent, Routes};
 use crate::{Error, Instance, Path, broadcast};
 
 /// The announcements covering one path, as one broadcast coming online, being replaced, and
@@ -671,10 +671,7 @@ mod tests {
 			available(&mut announced).await.info().instance.as_ref(),
 			Some(&instance)
 		);
-		assert_eq!(
-			available(&mut unpinned).await.info().instance.as_ref(),
-			Some(&instance)
-		);
+		assert_eq!(available(&mut unpinned).await.info().instance.as_ref(), Some(&instance));
 	}
 
 	/// A follower started before anything serves the path waits for it, reports its end, and

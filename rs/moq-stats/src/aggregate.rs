@@ -1133,7 +1133,7 @@ mod tests {
 
 	use std::time::Duration;
 
-	use moq_net::{Path, Timestamp, announce, broadcast, origin, track};
+	use moq_net::{Path, Timestamp, broadcast, origin, track};
 
 	use moq_net::stats::Tier;
 

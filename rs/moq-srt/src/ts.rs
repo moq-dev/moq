@@ -292,7 +292,9 @@ impl Subscriber {
 		// Join the broadcast once announced. The export resolves any referenced sibling
 		// broadcast (the catalog `broadcast` field) through the same origin.
 		let broadcast = match following.available().await {
-			Ok(broadcast) => broadcast,
+			Ok(Some(broadcast)) => broadcast,
+			// The first change is always an instance.
+			Ok(None) => return Ok(None),
 			Err(moq_net::Error::Closed) => return Ok(None),
 			Err(err) => return Err(err.into()),
 		};
@@ -727,7 +729,13 @@ mod tests {
 		publisher.feed(Bytes::from_static(BBB5S)).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap().unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let start = kio::clock::now();
 		let wait = tokio::spawn(publisher.finish(linger).unwrap().wait());
 		kio::clock::sleep(linger / 2).await;
@@ -760,7 +768,13 @@ mod tests {
 		publisher.feed(Bytes::from(ts)).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap().unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -831,7 +845,13 @@ mod tests {
 		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("ingest", None).unwrap().available().await.unwrap().unwrap();
+		let broadcast = consumer
+			.follow("ingest", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 
 		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 

@@ -8812,7 +8812,8 @@ async fn same_instance_returns(finish: bool) {
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
 	frames.extend(drain_frames(&mut export).await);
@@ -8890,7 +8891,8 @@ async fn a_return_keeps_catalog_and_group_history() {
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the withdrawn front is replaced");
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
@@ -9174,7 +9176,8 @@ async fn export_stats_count_only_returned_output() {
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
 	for ms in (1_000..1_200).step_by(20) {
@@ -11315,7 +11318,8 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 			.unwrap()
 			.available()
 			.await
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 		export = export.follow(back, stream).unwrap();
 		drain_frames(&mut export).await;
@@ -11381,7 +11385,8 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
 	drain_frames(&mut export).await;
@@ -11787,7 +11792,8 @@ async fn an_expired_follow_stops_healthy_input_but_drains_its_buffered_tail() {
 				.unwrap()
 				.available()
 				.await
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
 				.unwrap();
@@ -11944,7 +11950,8 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 				.unwrap()
 				.available()
 				.await
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			let stream = crate::catalog::Consumer::new(&target, Default::default())
 				.await
 				.unwrap();
@@ -12074,7 +12081,8 @@ async fn an_empty_finished_replacement_drains_the_old_program() {
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
 		.unwrap();
@@ -12132,7 +12140,8 @@ async fn cold_same_instance_return(pending: bool) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		let stream = crate::catalog::Consumer::new(&target, Default::default())
 			.await
 			.unwrap();
@@ -12162,7 +12171,8 @@ async fn cold_same_instance_return(pending: bool) {
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let stream = crate::catalog::Consumer::new(&target, Default::default())
 		.await
 		.unwrap();

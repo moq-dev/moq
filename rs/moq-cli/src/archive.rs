@@ -70,6 +70,10 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
 	let prefix = moq_net::Path::new(&prefix)?;
 	let mut announced = origin.clone().with_hidden(hidden).announced();
+	// A follower per listed path, reporting each instance that serves it, stopped with the export.
+	let mut following = tokio::task::JoinSet::new();
+	let mut followers: HashMap<moq_net::Path, tokio::task::AbortHandle> = HashMap::new();
+	let (served, mut instances) = tokio::sync::mpsc::unbounded_channel::<Instance>();
 	let mut recordings = tokio::task::JoinSet::new();
 	let mut running = Running::default();
 	let claims = Claims::default();
@@ -80,18 +84,25 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	loop {
 		let instance = tokio::select! {
 			event = announced.next() => {
-				let announce = match event.context("announcements ended")? {
-					// Another instance, or the same one announced again.
-					moq_net::announce::Event::Present(announce) | moq_net::announce::Event::Present(announce) | moq_net::announce::Event::Present(announce) => announce,
-					_ => continue,
-				};
-				if !announce.prefix.has_prefix(&prefix) {
-					continue;
+				match event.context("announcements ended")? {
+					moq_net::announce::Event::Present(announce) if announce.prefix.has_prefix(&prefix) => {
+						let path = announce.prefix;
+						let follower = following.spawn(follow(origin.clone(), path.clone(), served.clone()));
+						if let Some(old) = followers.insert(path, follower) {
+							old.abort();
+						}
+					}
+					moq_net::announce::Event::Absent(announce) => {
+						if let Some(follower) = followers.remove(&announce.prefix) {
+							follower.abort();
+						}
+					}
+					moq_net::announce::Event::Present(_) => {}
 				}
-				let Some(instance) = announce.route.instance else {
-					continue;
-				};
-				let instance: Instance = (announce.prefix, instance);
+				continue;
+			}
+			Some(_) = following.join_next() => continue,
+			Some(instance) = instances.recv() => {
 				if !running.start(&instance) {
 					continue;
 				}
@@ -112,6 +123,26 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 		// whichever one serves by the time its task runs.
 		let request = origin.request(&instance.0, Some(instance.1.clone()));
 		recordings.spawn(record(request, instance, store, config.clone(), claims.clone()));
+	}
+}
+
+/// Report each instance serving `path` as it comes online or takes over. An instance comes
+/// again after the path went offline, since a return is announced anew.
+async fn follow(
+	origin: moq_net::origin::Consumer,
+	path: moq_net::Path,
+	served: tokio::sync::mpsc::UnboundedSender<Instance>,
+) {
+	let Ok(mut following) = origin.follow(&path, None) else {
+		return;
+	};
+	while let Ok(change) = following.available().await {
+		let Some(instance) = change.and_then(|broadcast| broadcast.info().instance.clone()) else {
+			continue;
+		};
+		if served.send((path.clone(), instance)).is_err() {
+			return;
+		}
 	}
 }
 

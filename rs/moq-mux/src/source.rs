@@ -506,7 +506,14 @@ fn poll_first(
 	waiter: &kio::Waiter,
 ) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
 	let result = match following {
-		Ok(following) => ready!(following.poll_available(waiter)),
+		// The first change is always an instance: an end follows only one handed out.
+		Ok(following) => loop {
+			match ready!(following.poll_available(waiter)) {
+				Ok(Some(broadcast)) => break Ok(broadcast),
+				Ok(None) => continue,
+				Err(err) => break Err(err),
+			}
+		},
 		Err(err) => Err(err.clone()),
 	};
 	if let Err(err) = &result {
@@ -708,6 +715,7 @@ mod tests {
 		let catalog = kio::clock::timeout(timeout, consumer.follow("a/pub", None).unwrap().available())
 			.await
 			.expect("the catalog resolves")
+			.unwrap()
 			.unwrap();
 		let source = Source::new(consumer, catalog);
 		let sibling = kio::clock::timeout(timeout, source.resolve(Some(&Relative::new("./source").unwrap()), None))

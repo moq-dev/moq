@@ -172,7 +172,7 @@ mod tests {
 
 	use std::time::Duration;
 
-	use moq_net::{Consume, Path, Timestamp, announce, origin, track};
+	use moq_net::{Consume, Path, Timestamp, origin, track};
 
 	use crate::{Producer, Tier, produce};
 

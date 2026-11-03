@@ -417,7 +417,8 @@ pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> an
 		.follow(path.as_str(), None)?
 		.available()
 		.await
-		.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
+		.with_context(|| format!("failed to resolve broadcast `{path}`"))?
+		.context("went offline before serving")?;
 	let source = moq_mux::Source::new(origin, broadcast.clone());
 	let mut catalog = Some(source.catalog::<()>(CatalogFormat::Hang).await?);
 
@@ -488,12 +489,8 @@ async fn write_echo(
 			event = announced.next() => {
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
-					// A restart is another publisher instance, which a reader still on the old one never sees.
-					moq_net::announce::Event::Present(announce) | moq_net::announce::Event::Present(announce) | moq_net::announce::Event::Present(announce) => {
-						(announce, true)
-					}
+					moq_net::announce::Event::Present(announce) => (announce, true),
 					moq_net::announce::Event::Absent(announce) => (announce, false),
-					_ => continue,
 				};
 				let path = announce.prefix;
 				if !path.has_prefix(&prefix) || !hang::echo::is_echo(&path) {
@@ -565,28 +562,55 @@ impl Readers {
 
 /// Send a line for each feedback snapshot the broadcast at `path` publishes, until it ends.
 async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines: tokio::sync::mpsc::Sender<String>) {
-	let read = async {
-		let broadcast = origin.request(&path, None).await?;
-		let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
-		let mut track = reader(subscriber);
-		while let Some(moq_net::Timed { value: feedback, .. }) = track.latest().await? {
-			let line = EchoLine {
-				broadcast: path.as_str(),
-				feedback,
-			};
-			if lines
-				.send(format!("{}\n", serde_json::to_string(&line)?))
-				.await
-				.is_err()
-			{
-				break;
+	let mut following = match origin.follow(&path, None) {
+		Ok(following) => following,
+		Err(err) => return tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback"),
+	};
+	// The instance being read; a restarted publisher replaces it, and going offline keeps it
+	// draining its final snapshot.
+	let mut reading = None;
+	loop {
+		tokio::select! {
+			change = following.available() => match change {
+				Ok(Some(broadcast)) => reading = Some(Box::pin(read_feedback(broadcast, path.clone(), lines.clone()))),
+				Ok(None) => {}
+				Err(err) => return tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback"),
+			},
+			read = async { reading.as_mut().expect("guarded").await }, if reading.is_some() => {
+				reading = None;
+				if let Err(err) = read {
+					tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback");
+				}
+				if lines.is_closed() {
+					return;
+				}
 			}
 		}
-		anyhow::Ok(())
-	};
-	if let Err(err) = read.await {
-		tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback");
 	}
+}
+
+/// Write one publisher instance's feedback to `lines` until its track ends or `lines` closes.
+async fn read_feedback(
+	broadcast: moq_net::broadcast::Consumer,
+	path: moq_net::Path,
+	lines: tokio::sync::mpsc::Sender<String>,
+) -> anyhow::Result<()> {
+	let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
+	let mut track = reader(subscriber);
+	while let Some(moq_net::Timed { value: feedback, .. }) = track.latest().await? {
+		let line = EchoLine {
+			broadcast: path.as_str(),
+			feedback,
+		};
+		if lines
+			.send(format!("{}\n", serde_json::to_string(&line)?))
+			.await
+			.is_err()
+		{
+			break;
+		}
+	}
+	Ok(())
 }
 
 #[cfg(test)]

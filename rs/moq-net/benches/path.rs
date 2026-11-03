@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::FutureExt;
 use moq_net::{
-	Hop, Hops, Path, Pattern, Patterns, announce,
+	Hop, Hops, Path, Pattern, Patterns,
 	fuzz::{Announced, Messages, decode_announces, decode_namespaces, encode_announces, encode_namespaces},
 	kio, origin,
 };

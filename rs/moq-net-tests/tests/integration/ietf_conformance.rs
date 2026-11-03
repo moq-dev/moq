@@ -62,7 +62,8 @@ async fn routing(version: &str, cluster: bool) {
 		.unwrap()
 		.available()
 		.await
-		.unwrap().unwrap();
+		.unwrap()
+		.unwrap();
 	let mut subscription = remote.track("test").unwrap().subscribe(None).await.unwrap();
 	crate::support::harness::subscribed(&track).await;
 	let mut group = track.append_group().unwrap();

@@ -43,7 +43,8 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 	kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves").unwrap()
+		.expect("broadcast resolves")
+		.unwrap()
 }
 
 async fn relayed(version: &str) -> Relayed {

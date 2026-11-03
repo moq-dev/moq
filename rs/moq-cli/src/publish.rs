@@ -1711,7 +1711,8 @@ pub(crate) mod tests {
 			let consumer = kio::clock::timeout(WAIT, remote.consume().follow("pt.hang", None).unwrap().available())
 				.await
 				.unwrap()
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 			let catalog = kio::clock::timeout(WAIT, catalogs.next())
 				.await
@@ -2283,7 +2284,7 @@ pub(crate) mod tests {
 				instance = async {
 					loop {
 						use moq_net::announce::Event;
-						if let Event::Start(announce) | Event::Restart(announce) = announced.next().await.unwrap() {
+						if let Event::Present(announce) = announced.next().await.unwrap() {
 							break announce.route.instance.unwrap();
 						}
 					}

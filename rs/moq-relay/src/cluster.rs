@@ -2627,7 +2627,8 @@ mod tests {
 		)
 		.await
 		.expect("stats broadcast announced within 5s")
-		.expect("stats broadcast resolves").unwrap();
+		.expect("stats broadcast resolves")
+		.unwrap();
 		assert!(broadcast.info().instance.is_some(), "stats announce under an instance");
 
 		// Several publish intervals (1s each by default) after the handle went out
@@ -3282,7 +3283,8 @@ mod tests {
 		)
 		.await
 		.expect("stats announced")
-		.expect("stats present").unwrap();
+		.expect("stats present")
+		.unwrap();
 	}
 
 	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop

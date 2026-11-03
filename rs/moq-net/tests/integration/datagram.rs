@@ -54,7 +54,13 @@ async fn connect_datagram_track() -> Fixture {
 	let pair = connect_mock(options).await;
 
 	let consumer = consumer_origin.consume();
-	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap().unwrap();
+	let remote = consumer
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 	// The subscriber is handed over once TRACK_INFO answers, before its SUBSCRIBE reaches
 	// the publisher, and a datagram only goes to a subscription already there.
@@ -143,7 +149,13 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let _pair = connect_mock(options).await;
 
 	let consumer = consumer_origin.consume();
-	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap().unwrap();
+	let remote = consumer
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
 	let mut subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 
 	// A group first, so the subscription's alias is bound before any datagram lands.
@@ -246,7 +258,13 @@ async fn a_fetched_datagram_is_refused_per_version() {
 		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
 
 		let consumer = nodes.last().unwrap().consume();
-		let remote = consumer.follow("room", None).unwrap().available().await.unwrap().unwrap();
+		let remote = consumer
+			.follow("room", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let err = match remote.track("datagrams").unwrap().fetch_group(sequence, None).await {
 			Ok(_) => panic!("{versions:?}: a datagram was fetched"),
 			Err(err) => err,
