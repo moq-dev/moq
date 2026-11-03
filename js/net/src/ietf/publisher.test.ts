@@ -3,7 +3,6 @@ import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clo
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import * as Epoch from "../epoch.ts";
 import {
 	error,
 	fromTransport,
@@ -15,6 +14,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import { type Hop, HopSchema } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, SessionBroadcast } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -1342,16 +1342,16 @@ test("republishing a path clears a refusal without unannouncing first", async ()
 });
 
 /**
- * A new epoch on the same broadcast handle is another publisher instance, so a refusal of
- * the old one does not strand it. Rust gets this from the END and START an epoch change
+ * A new instance on the same broadcast handle is another publisher instance, so a refusal of
+ * the old one does not strand it. Rust gets this from the END and START an instance change
  * delivers.
  */
-test("a new epoch at the same path clears a refusal", async () => {
+test("a new instance at the same path clears a refusal", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	const broadcast = origin.createBroadcast(Path.from("restarted"));
-	broadcast.announce({ epoch: Epoch.mint() });
+	broadcast.announce({ instance: Instance.random() });
 
 	void pub.runPublishNamespaces();
 
@@ -1361,7 +1361,7 @@ test("a new epoch at the same path clears a refusal", async () => {
 	await declinePublishNamespace(declined, 0n);
 	await sleep(Nano.fromMilli(Milli(SETTLE)));
 
-	broadcast.announce({ ...broadcast.route, epoch: Epoch.mint() });
+	broadcast.announce({ ...broadcast.route, instance: Instance.random() });
 
 	const retried = await nextStream(pair.client);
 	if (!retried) throw new Error("the new instance was never offered");
@@ -2387,7 +2387,7 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 		// The request forwarded upstream carries the model's exclusive end, one past the
 		// filter's inclusive last group.
 		expect(track.subscription.peek()).toMatchObject({
-			groups: { start: { included: 1 }, end: { excluded: 3 } },
+			ranges: [{ start: { absolute: 1 }, end: { absolute: 3 } }],
 		});
 
 		const first = await nextUni(fx.uni);
@@ -2771,9 +2771,12 @@ test("LARGEST_OBJECT is the live edge", async () => {
  * INCLUDE_PROPERTIES=0 opts the response out of Track Properties, which also opts the track
  * out of timestamps: with no declared Timescale there are no units to read one in.
  */
-test("draft-22: an opt-out peer gets no track properties", async () => {
+test.each([
+	[ALPN.DRAFT_20, Version.DRAFT_20],
+	[ALPN.DRAFT_22, Version.DRAFT_22],
+] as const)("%s: opt-out omits timestamps", async (_alpn, version) => {
 	for (const propertiesWanted of [true, false]) {
-		const fx = fixture();
+		const fx = fixture(version);
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 		const { client, ok } = await runSubscribe(
@@ -2796,8 +2799,8 @@ test("draft-22: an opt-out peer gets no track properties", async () => {
 
 		const served = await nextUni(fx.uni);
 		if (!served) throw new Error("the group was never served");
-		const reader = new Reader(served, undefined, V22);
-		const header = await GroupMessage.decode(reader, V22);
+		const reader = new Reader(served, undefined, version);
+		const header = await GroupMessage.decode(reader, version);
 		expect(header.flags.hasExtensions).toBe(propertiesWanted);
 
 		await reader.u53(); // object id delta
@@ -3440,8 +3443,8 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await RequestOk.decode(client.reader, fx.version);
 		expect(track.subscription.peek()?.priority).toBe(117);
 		// Only the priority changes; retention and the group range survive.
-		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
-		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
+		expect(track.subscription.peek()?.delay?.max).toBe(before?.delay?.max);
+		expect(track.subscription.peek()?.ranges).toEqual(before?.ranges);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
@@ -3945,7 +3948,7 @@ test("IETF draft-18: range updates preserve the shared subscription", async () =
 			await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, fx.version);
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
-			expect(track.subscription.peek()?.groups).toEqual({ start: { included: 6 }, end: { excluded: 8 } });
+			expect(track.subscription.peek()?.ranges).toEqual([{ start: { absolute: 6 }, end: { absolute: 8 } }]);
 		}
 	} finally {
 		client.close();
@@ -4436,19 +4439,19 @@ test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async
 		}),
 	);
 	try {
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(250));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(250));
 		const parameters = new Parameters();
 		parameters.maxAge = 900;
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(900));
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 4n }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(900));
 	} finally {
 		client.close();
 		track.finish();

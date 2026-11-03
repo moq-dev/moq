@@ -55,8 +55,8 @@ Decided with the maintainer on 2026-10-20:
   the next breaking release. Their rung disable needs the target and native
   probing, not padding.
 - Padding is browser-only (WebTransport in `js/net`). moq-quic with BBR3 is
-  the only native backend with a probing hook; other native backends (iroh
-  on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
+  the only native backend with a probing hook; moq-quic under CUBIC
+  has no sender, keep `Report`, and never
   disable a rung. lite-07 reserves its stream
   type before the cut (Padding Stream 0x2), and
   the sender stays here.
@@ -83,13 +83,14 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
+- [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
 - [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
 - [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
+- [Viewer targets are tested end to end and documented in Python](/quest/m2/probe/viewer-followups.md) - three gaps moq-dev/moq#7090 left are closed
 
 ## Related
 

@@ -53,11 +53,10 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts-js.md).
 
 ## Required
 
+- [Each export-clock rule kept by the jitter audit has its own test](/quest/m1/cut-audit/jitter-rule-tests.md) - `stale`, `unheard_lag`, and the horizon shift in `rs/moq-mux/src/jitter.rs` each have a test that fails when that rule alone is removed
 - [Text and data sections keep a prototype-named ID](/quest/m1/cut-audit/catalog-proto-ids.md) - text and data entries keep the ID JS's `z.record` drops
 
 ## Related
 
-- [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - would have caught the media parser findings here
 - [Announce interest streams share one route table](/quest/m2/announce-interest-memory.md) - the audit's inherited announce memory finding
 - [A parked read of a resumed group reads its budget without re-syncing](/quest/m2/recover-budget.md) - measure-first resume cost
-- [Transcode rungs scale off the runtime](/quest/m2/transcode-rungs.md) - the audit's transcode findings

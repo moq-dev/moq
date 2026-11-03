@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moq_net::{Epoch, Hop, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Hop, Timestamp, Version, broadcast, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 
@@ -46,7 +46,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 				.requested_broadcast()
 				.await
 				.unwrap()
-				.prepare(Epoch::mint())
+				.prepare()
 				.unwrap();
 			let track = prepared
 				.broadcast()

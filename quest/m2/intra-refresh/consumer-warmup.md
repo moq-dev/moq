@@ -55,7 +55,3 @@ The fix is history rather than a withhold rule:
 ## Required
 
 - [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - K derives from `warmup`, which must be a safe upper bound
-
-## Related
-
-- [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - the range read the history fetch uses

@@ -97,8 +97,8 @@ enum Family {
 
 /// The track-publishing handles of one broadcast.
 ///
-/// Closing the broadcast ends every child still open with `Unroutable`, the way a reader sees a
-/// publisher leave, and frees its handle. A finished track stops being served once its last
+/// Closing the broadcast ends every child still open with `Unroutable` (`Internal` to a
+/// moq-transport reader), and frees its handle. A finished track stops being served once its last
 /// producer drops, and a `*_finish` call frees its handle, so the broadcast keeps the finished
 /// producer here instead: a subscriber arriving after the end still finds the track until
 /// [`State::publish_close`].
@@ -1369,20 +1369,28 @@ impl Publish {
 	}
 
 	/// Append one record to the back of a JSON window.
-	pub fn json_window_push(&mut self, window: Id, value: serde_json::Value) -> Result<(), Error> {
+	pub fn json_window_push(
+		&mut self,
+		window: Id,
+		value: serde_json::Value,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window
-			.producer
-			.push(moq_net::Timed::from(&value).at(window.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| window.clock.now());
+		window.producer.push(moq_net::Timed::from(&value).at(at))?;
 		Ok(())
 	}
 
 	/// Drop `count` records from the front of a JSON window, clamped to what it holds.
-	pub fn json_window_pop(&mut self, window: Id, count: u64) -> Result<(), Error> {
+	pub fn json_window_pop(
+		&mut self,
+		window: Id,
+		count: u64,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window
-			.producer
-			.pop(moq_net::Timed::from(count).at(window.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| window.clock.now());
+		window.producer.pop(moq_net::Timed::from(count).at(at))?;
 		Ok(())
 	}
 
@@ -1630,12 +1638,7 @@ mod supervision_tests {
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin.requests("room").unwrap();
 		let pending = origin.consume().request("room/first", None);
-		let prepared = claim
-			.requested_broadcast()
-			.await
-			.unwrap()
-			.prepare(moq_net::Epoch::mint())
-			.unwrap();
+		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
 		let mut publish = Publish::default();
 		let first = publish
 			.create((prepared.broadcast().clone(), Default::default()))
@@ -1659,12 +1662,7 @@ mod supervision_tests {
 		publish.unannounce(publication).unwrap();
 
 		let pending = origin.consume().request("room/second", None);
-		let prepared = claim
-			.requested_broadcast()
-			.await
-			.unwrap()
-			.prepare(moq_net::Epoch::mint())
-			.unwrap();
+		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
 		publish
 			.create((prepared.broadcast().clone(), Default::default()))
 			.unwrap();

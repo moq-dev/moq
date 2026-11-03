@@ -22,14 +22,14 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
-import { hiddenBelow, hooks, presented } from "../internal.ts";
+import { firstEligible, hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Groups, Info, Range, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
@@ -497,13 +497,17 @@ export class Publisher {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
 			const fixed = subscribeRange(msg, {}, version);
-			return source.track(msg.trackName).subscribe({
-				priority: fromWire(msg.subscriberPriority),
-				order: msg.groupOrder,
-				// An absent budget preserves everything retained by the producer.
-				maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
-				groups: fixed.start ? rangeGroups(fixed) : undefined,
-			});
+			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
+			return hooks.parked(
+				source.track(msg.trackName).subscribe({
+					priority: fromWire(msg.subscriberPriority),
+					order: msg.groupOrder,
+					// An absent budget preserves everything retained by the producer.
+					// moq-transport has no field for a minimum.
+					delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
+					ranges: fixed.start ? serveRanges(fixed) : undefined,
+				}),
+			);
 		};
 		let track = subscribe(broadcast);
 
@@ -707,8 +711,9 @@ export class Publisher {
 			track.update({
 				priority,
 				order,
-				maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
-				groups: rangeGroups(range),
+				// moq-transport has no field for a minimum.
+				delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
+				ranges: serveRanges(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
 			if (startGroup !== undefined) track.withRange({ ...rangeGroups(range), start: { included: startGroup } });
@@ -721,7 +726,7 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			cache =
 				fill && fill.kind !== "empty"
-					? track.fork({ priority, order, maxDelay: Milli(Varint.MAX_U53) })
+					? track.fork({ priority, order, delay: { max: Milli(Varint.MAX_U53), min: null } })
 					: undefined;
 
 			const ranked = new Priority(track, info.priority);
@@ -834,8 +839,11 @@ export class Publisher {
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
-					if (params.maxAge !== undefined)
-						track.update({ ...track.subscription.peek(), maxDelay: Milli(params.maxAge) });
+					const maxAge = params.maxAge;
+					if (maxAge !== undefined) {
+						const current = track.subscription.peek();
+						track.update({ ...current, delay: { ...current?.delay, max: Milli(maxAge) } });
+					}
 					// A fill holds one cache view. At most this decoded update waits behind
 					// it; request parsing then backpressures any further fill requests.
 					if (params.fillParameters) await filling;
@@ -859,7 +867,7 @@ export class Publisher {
 						range.start = tail.start;
 						range.end = tail.end;
 						bounds.set(requested, true);
-						track.update({ ...track.subscription.peek(), groups: rangeGroups(range) });
+						track.update({ ...track.subscription.peek(), ranges: serveRanges(range) });
 						// Below its floor the live cursor already passed every group or never owned it,
 						// so lowering it for a fill-only update would hand those groups out a second time.
 						let start = range.start ? Number(range.start.group) : 0;
@@ -904,7 +912,7 @@ export class Publisher {
 							? track.fork({
 									priority: fromWire(msg.subscriberPriority),
 									order: msg.groupOrder,
-									maxDelay: Milli(Varint.MAX_U53),
+									delay: { max: Milli(Varint.MAX_U53), min: null },
 								})
 							: undefined;
 					try {
@@ -1692,13 +1700,9 @@ export class Publisher {
 				for (const [covered, candidates] of advertised) {
 					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
 					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
-					if (
-						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
-						!this.#gate.allows(covered) ||
-						candidates.length === 0
-					)
-						continue;
-					updated.set(covered, candidates[0]);
+					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || !this.#gate.allows(covered)) continue;
+					const best = firstEligible(candidates);
+					if (best) updated.set(covered, best);
 				}
 				// Another broadcast at the path starts its backoff fresh, as a refusal does.
 				for (const [key, lapse] of lapses) {
@@ -2366,7 +2370,9 @@ export class Publisher {
 
 		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
-		const cache = broadcast.track(named.trackName).subscribe({ priority, maxDelay: Milli(Varint.MAX_U53) });
+		const cache = broadcast
+			.track(named.trackName)
+			.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
 		let answer: FetchAnswer | undefined;
 		try {
 			const info = await untilAborted(cache.info(), signal);
@@ -2846,6 +2852,14 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 }
 
 /** The model's group bounds for a {@link ServeRange}: an absent start joins at the latest group. */
+/** The model ranges a {@link ServeRange} asks for, whole groups through its last one. */
+function serveRanges(range: ServeRange): Range[] {
+	const out: Range = {};
+	if (range.start) out.start = { absolute: Number(range.start.group) };
+	if (range.end) out.end = { absolute: Number(range.end.group) + 1 };
+	return [out];
+}
+
 function rangeGroups(range: ServeRange): Groups {
 	return {
 		start: range.start ? { included: Number(range.start.group) } : undefined,

@@ -42,11 +42,11 @@ These land with the next breaking release.
   hang's media priorities now sit above that default rather than below it.
   Mixed versions only differ in how an unset priority ranks against a set one,
   so upgrade publishers and players in either order.
-- **moq-transport drafts 14 through 17 are dropped.** Rust and JavaScript
-  speak moq-transport drafts 18 and 22 only, and the `moql` SETUP
-  negotiates moq-lite only. A peer that offers nothing newer fails
-  to connect instead of falling back, so move such peers to draft 18, draft 22, or a
-  moq-lite version before upgrading what they connect to.
+- **moq-transport drafts 14 through 17, 19, and 21 are dropped.** Rust and
+  JavaScript speak moq-transport drafts 18, 20, and 22, and the `moql` SETUP
+  negotiates moq-lite only. Before upgrading, move peers that offer only
+  dropped drafts to draft 18, 20, or 22, or a moq-lite version, so they can
+  still connect.
 - **WebSocket needs a QMux subprotocol** (#6231). Relays answer a WebSocket
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
   to the legacy `webtransport` format, so upgrade such clients before relays.
@@ -66,14 +66,15 @@ These land with the next breaking release.
   Neither side reads the other's shape, so upgrade HLS exporters and their
   publishers together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
-  publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
-  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport carries no epoch;
+  instance, or a higher epoch of the same one, now serves the prefix. lite-06's
+  `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it always meant. Elsewhere,
   a restart is still an end then a start.
-- **Publisher epochs ride the route** (#4942). moq-lite 07 carries the epoch
-  after the path in `ANNOUNCE_START`, `TRACK`, `SUBSCRIBE`, and `FETCH`.
-  Routes without an epoch no longer resume across routes, so default lite-06
-  sessions, including cluster GOAWAY redials, lose seamless cross-route
-  failover until lite-07 is the default.
+- **Publisher instances ride the route.** moq-lite 07 carries the instance and
+  epoch after the path in `ANNOUNCE_START` and `ANNOUNCE_RESTART`, and the
+  pinned instance in `TRACK`, `TRACKS`, `SUBSCRIBE`, and `FETCH`. Older wires
+  carry none, so the receiving session mints an instance per announcement:
+  default lite-06 sessions, including cluster GOAWAY redials, lose seamless
+  cross-route failover until lite-07 is the default.
 - **Route cost is one value** (#4661). Upgraded nodes write lite-06's cold
   cost at 2^62-1, so an older relay that still ranks on `(warm, cold)` breaks
   equal-warm ties against routes that crossed an upgraded node. It is only a

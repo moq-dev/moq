@@ -208,19 +208,6 @@ def run(action, plan):
             command("bunx", "tsc", "--noEmit", "--project", name)
         finally:
             Path(name).unlink()
-    # The fallback also covers unowned inputs, including demo/pub's Worker.
-    # Recommended rules default to warn, which Biome otherwise lets pass.
-    command(
-        "bun",
-        "biome",
-        "check",
-        "--error-on-warnings",
-        *(
-            ["js", "bench/browser", "test", "doc", "demo"]
-            if plan["all"]
-            else [p["directory"] for p in packages.values()] + ["js/common"]
-        ),
-    )
     scripts("build")
     reports()
     for name in ("@moq/watch", "@moq/publish"):

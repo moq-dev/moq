@@ -219,7 +219,7 @@ The in-tree control lanes also run with `--tail`:
   TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
 - On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
-  the same publisher epoch. The JS reconnect loop retains its reader across the
+  the same publisher instance. The JS reconnect loop retains its reader across the
   move. A separate read through the replacement proves it serves data before the
   original transport is cut; only the replacement can deliver the final group.
   The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
@@ -491,7 +491,7 @@ pass makes no claim about those omitted checks.
 `just test media --media-cases replacement` keeps publisher A open while B takes
 the same path, then closes B and follows A again. Lite-07, lite-06, and IETF draft
 22 viewers must present each run's marked pixels and synchronized audio, with
-no A pictures spliced into B. Epoch-aware viewers also check the broadcast
+no A pictures spliced into B. Instance-aware viewers also check the broadcast
 identities. Both publishers use lite-07. Each switch must present within a bound
 derived from its parts, counted from B's readiness (connected, with catalogs) or
 B's withdrawal: the relay's 300 ms announcement hold, five loopback round trips
@@ -499,7 +499,7 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The CLI integration suite's `epochs` cases exercise the real QUIC relay with
+The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
 subscriptions keep A while fresh catalog handles resolve B with fresh sibling
 pins. Later metadata and FETCH work cannot join B through A's retired handle;

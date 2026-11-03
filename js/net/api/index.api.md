@@ -4,8 +4,8 @@
 import { $ZodBranded } from "zod/v4/core";
 import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
-import { ZodMiniBigInt } from "@zod/mini";
-import { infer } from "@zod/mini";
+import { ZodMiniBigInt } from "zod/mini";
+import { infer } from "zod/mini";
 
 export namespace Announce {
 	export interface Announce {
@@ -80,7 +80,7 @@ export namespace Broadcast {
 		clone(): Broadcast.Consumer;
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
-		get epoch(): Epoch.Valid | undefined;
+		get instance(): Instance.Valid | undefined;
 		get path(): Path.Valid;
 		protected shareState(): never;
 		track(name: string): Track.Consumer;
@@ -244,14 +244,6 @@ export class Connection {
 	versions: Signals.Signal<readonly string[] | undefined>;
 }
 
-export namespace Epoch {
-	export type Valid = string & {
-		readonly _brand: "epoch";
-	};
-	export function mint(): Epoch.Valid;
-	export function parse(text: string): Epoch.Valid;
-}
-
 export namespace Error {
 	export class ConnectTimeout extends Error {
 		constructor(timeout: Milli);
@@ -382,15 +374,33 @@ export namespace Group {
 
 export const IMPLEMENTATION: string;
 
+export namespace Instance {
+	export type Valid = string & {
+		readonly _brand: "instance";
+	};
+	export function isMinted(instance: Instance.Valid): boolean;
+	export function parse(text: string): Instance.Valid;
+	export function random(): Instance.Valid;
+}
+
 export namespace Origin {
-	export class Consumer {
+	export class Consumer implements Origin.Reader {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export type Cost = bigint;
+	export interface FollowOptions {
+		instance?: Instance.Valid;
+	}
+	export class Following {
+		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
+		close(): void;
+		readonly closed: Signals.GetPromise<Error | null>;
+		readonly path: Path.Valid;
+	}
 	export type Hop = infer<typeof Origin.HopSchema>;
 	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
 	export class Prepared {
@@ -407,7 +417,7 @@ export namespace Origin {
 		consume(): Origin.Consumer;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
@@ -418,19 +428,27 @@ export namespace Origin {
 			cost?: Origin.Route["cost"];
 			epoch?: Origin.Route["epoch"];
 			hops?: Origin.Route["hops"];
+			instance?: Origin.Route["instance"];
 		}): void;
 		readonly broadcast: Broadcast.Producer;
 		get route(): Origin.Route | undefined;
 		unannounce(): void;
 	}
+	export interface Reader {
+		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		readonly closed: Signals.GetPromise<Error | null>;
+		readonly discovery: Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
+		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+	}
 	export class Request {
 		readonly path: Path.Valid;
-		prepare(epoch: Epoch.Valid): Origin.Prepared;
+		prepare(): Origin.Prepared;
 		reject(err: Error): void;
 		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
 	}
 	export interface RequestOptions {
-		epoch?: Epoch.Valid;
+		instance?: Instance.Valid;
 	}
 	export class Requesting {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
@@ -447,16 +465,12 @@ export namespace Origin {
 	export interface Route {
 		auth?: Auth.Credential;
 		cost: Origin.Cost;
-		epoch?: Epoch.Valid;
+		epoch?: bigint;
 		hops: Origin.Hop[];
+		instance?: Instance.Valid;
 	}
-	export interface Table {
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
-		readonly closed: Signals.GetPromise<Error | null>;
+	export interface Table extends Origin.Reader {
 		createBroadcast(path: Path.Valid): Origin.Publication;
-		readonly discovery: Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
-		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 	}
 	export function isAnonymous(route: Origin.Route): boolean;
@@ -571,6 +585,19 @@ export interface Timed<T> {
 }
 
 export namespace Track {
+	export type Anchor = {
+		absolute: number;
+		relative?: never;
+		time?: never;
+	} | {
+		absolute?: never;
+		relative: number;
+		time?: never;
+	} | {
+		absolute?: never;
+		relative?: never;
+		time: Time.Timestamp;
+	};
 	export type Bound = {
 		excluded?: never;
 		included: number;
@@ -588,6 +615,10 @@ export namespace Track {
 		payload: Uint8Array;
 		sequence: number;
 		timestamp?: Time.Timestamp;
+	}
+	export interface Delay {
+		max?: Milli | null;
+		min?: Milli | null;
 	}
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
@@ -657,6 +688,10 @@ export namespace Track {
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
 	}
+	export interface Range {
+		end?: Track.Anchor;
+		start?: Track.Anchor;
+	}
 	export class Request {
 		accept(info?: Partial<Track.Info>): Track.Producer;
 		demand(): Track.Demand;
@@ -684,10 +719,10 @@ export namespace Track {
 		default(): Track.Subscription;
 	};
 	export interface Subscription {
-		groups?: Track.Groups;
-		maxDelay?: Milli | null;
+		delay?: Track.Delay;
 		order?: Track.Order;
 		priority?: number;
+		ranges?: Track.Range[];
 	}
 	export function infoDefaults(info?: Partial<Track.Info>): Track.Info;
 }

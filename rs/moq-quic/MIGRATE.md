@@ -4,9 +4,53 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Waits replace stream and connection events
+
+Every wait is a `poll_*` taking the caller's `&kio::Waiter`, which moq-quic registers and wakes itself, so a driver keeps no waiter tables.
+`StreamEvent` is gone, and so are the `Event` variants a handle waited on; `Event` keeps only `PathUpdated`, and `mux::Event` and `mux::Connection::poll` are gone.
+
+| Before | After |
+| --- | --- |
+| `Event::HandshakeDataReady` | `Connection::poll_handshake_data` |
+| `Event::Connected` | `Connection::poll_connected` |
+| `Event::HandshakeConfirmed` | `Connection::poll_handshake_confirmed` |
+| `Event::ConnectionLost { reason }` | `Connection::poll_closed`, or `Connection::error` |
+| `Event::DatagramReceived` | `Datagrams::poll_recv` |
+| `StreamEvent::Opened { dir }` | `Streams::poll_accept` |
+| `StreamEvent::Available { dir }` | `Streams::poll_open` |
+| `StreamEvent::Readable { id }` | `recv::Chunks::poll_next`, `recv::Stream::poll_lease`, or `recv::Stream::poll_received_reset` |
+| `StreamEvent::Writable { id }` | `send::Stream::poll_write` |
+| `StreamEvent::Finished { id }`, `StreamEvent::Stopped { id, .. }` | `send::Stream::poll_end` |
+| `StreamEvent::Acked { id, .. }` | `send::Stream::poll_acked` |
+
+`poll_transmit` is the driver's wait, so a handle no longer kicks its driver after a call.
+`Connection::poll_transmit(now, max_datagrams, buf) -> Option<Transmit>` becomes `poll_transmit(waiter, now, max_datagrams, buf) -> Poll<Transmit>`, and `mux::Connection::poll_transmit(now) -> Option<Bytes>` becomes `poll_transmit(waiter, now) -> Poll<Bytes>`.
+With nothing to send it registers `waiter`, which the next call that queues something wakes; keep waiting on `poll_timeout` for pacing and loss recovery.
+
+A wake only schedules: moq-quic wakes under whatever lock guards the connection, so the woken task polls again under it.
+Stream waits fail with `send::Error::ConnectionLost` or `recv::Error::ConnectionLost` once the connection is lost, after accepted streams, readable bytes, and received datagrams drain.
+
+### Crypto is sealed to rustls ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+Build configs with `client::Config::new(Arc::new(rustls_client))` and `server::Config::new(Arc::new(rustls_server))`; both are infallible.
+`crypto::rustls::QuicClientConfig`, `QuicServerConfig`, their `TryFrom` and `with_initial`, and `NoInitialCipherSuite` are gone, as are the public `client::Config::crypto` and `server::Config::crypto` fields.
+A custom crypto implementation is no longer supported: the `crypto` traits, `Keys`, and `KeyPair` are crate-private.
+Replace `conn.crypto_session().handshake_data()` and its downcast to `crypto::rustls::HandshakeData` with `conn.handshake_data()`, which returns `Option<crypto::HandshakeData>`.
+Its `protocol` field is now `alpn`, and `protocol_version` and `cipher_suite` are dropped.
+Replace `crypto_session().peer_identity()` and its downcast with `conn.peer_identity()`, which returns `Option<Vec<CertificateDer<'static>>>`.
+`Connection::export_keying_material` and `transport_parameters` are no longer public.
+A rustls config without TLS 1.3 or the AES-128-GCM-SHA256 suite now fails each connection: the client's connect returns `ConnectError::Tls`, and the server closes the connection or drops its Initial.
+`ConnectError` no longer implements `Eq`.
+rustls is a required dependency; the `ring` and `aws-lc-rs` features pick only the provider.
+
+### An evicted stream fails `received_reset` ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`recv::Stream::received_reset` returns `Err(Error::Evicted)` for a stream evicted to free a stuck receive window, until the application stops it, rather than `Err(Error::Closed)`.
+Treat it as a failed read and stop the stream: a reader that watches for a reset instead of reading would otherwise leave its leased bytes holding further eviction off.
+
 ### Early data is removed
 
-Wait for `Event::Connected` before opening streams or sending application data.
+Wait for `Connection::poll_connected` before opening streams or sending application data.
 `Connection::has_0rtt`, `accepted_0rtt`, and the `crypto::Session::early_crypto` and `early_data_accepted` hooks are gone.
 Custom crypto sessions no longer implement those hooks.
 Rustls configs disable early data, including caller-supplied configs, while session tickets still resume 1-RTT handshakes.

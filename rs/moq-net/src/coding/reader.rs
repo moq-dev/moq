@@ -561,6 +561,14 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(lease.has_remaining()))
 	}
 
+	/// Poll until the stream fails without reading it: reset, evicted, or its session closed.
+	/// For a stream left unread until a control message says how to read it, so a failure
+	/// still ends it. See [`RecvStream::poll_reset`].
+	pub(crate) fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let err = ready!(self.stream.poll_reset(waiter));
+		Poll::Ready(self.version.transport_error(err))
+	}
+
 	/// Rank the stream for eviction under receive pressure. See [`RecvStream::set_priority`].
 	pub fn set_priority(&mut self, priority: i64) {
 		self.stream.set_priority(priority);

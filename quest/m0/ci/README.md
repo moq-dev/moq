@@ -152,19 +152,21 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
-- [Check on ready PRs](/quest/m0/ci/pr-check.md) - Check runs again on non-draft main PRs as a signal for `/quest-merge` and the land fixer, never as a gate
 - [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - one PR at a time on the self-hosted runner; the host's Codex fixer fixes and re-enqueues every dropped PR
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
-- [Every io_uring test in the io-uring group](/quest/m0/ci/io-uring-test-group.md) - the parallel tests of one `just ci` stop exhausting the shared `RLIMIT_MEMLOCK`, and a too-low limit fails clearly
 - [Cheap checks skip the queue](/quest/m0/ci/gate-quick.md) - condition: quest ships `quest gate --quick`; then cheap modules wait at most a minute
 - [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check` and `just test` each finish within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
 - [Unify dependency features](/quest/m0/ci/hakari.md) - align the FFI builds' features and record the hosted platform jobs' hits once the workspace-hack lands
-- [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
+- [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
+- [Binary release publishers run on their tag](/quest/m0/ci/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main
 - [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
-- [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
-- [Dispatcher tool changes run the dispatcher tests](/quest/m0/ci/dispatch-selection-gaps.md) - a tool-list change runs `sh/dispatch-query.test.py` in CI, and `sh/rs/uring.test.py` stops printing jq errors
-- [dispatch.sh's tests pass without KVM](/quest/m0/ci/dispatch-test-kvm.md) - `sh/dispatch-query.test.py` fakes the KVM probe instead of failing 20 tests on hosts without `/dev/kvm`
-- [mbx launches Cargo with any argument length](/quest/m0/ci/mbx-arg-max.md) - no "Argument list too long" in `sh/rs/select.test.py`'s recipe test
+- [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"
+- [A jq error in the Rust selection fails the run](/quest/m0/ci/check-selection.md) - `just check`'s Rust selection fails the run when one of its jq filters errors, instead of selecting less
+- [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
+- [Pullfrog reviews finish inside their time limit](/quest/m0/ci/pullfrog-timeout.md) - A Pullfrog review of a large PR finishes instead of failing on the action's run limit
+- [Long test runs keep their built binaries](/quest/m0/ci/shared-target.md) - A long `just test interop` or wire-compat run never fails because the binaries it built were removed from the shared Cargo target mid-run, such as by mbx pruning its managed build storage
+- [One nextest pin](/quest/m0/ci/nextest-pin.md) - cargo-nextest's version lives in one place
+- [The flake lane skips hosts that can't map user namespaces](/quest/m0/ci/userns-uid-map.md) - `check flake` skips instead of failing where `/proc/self/uid_map` is unwritable

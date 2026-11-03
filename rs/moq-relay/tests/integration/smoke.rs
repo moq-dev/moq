@@ -49,7 +49,7 @@ async fn build_web(ws: bool) -> web::Web {
 
 /// A standalone cluster with default options.
 fn new_cluster() -> cluster::Cluster {
-	cluster::Cluster::new(cluster::Options::default()).expect("cluster init")
+	crate::spawn_cluster(cluster::Options::default())
 }
 
 /// [`build_web`] for a test that configures the listeners or the cluster itself (e.g. HTTPS).
@@ -569,7 +569,7 @@ async fn spawn_accept_relay(
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let mut server = server.listen().await.expect("listen");
 	let quic = server.local_addr().ok();
 	let tcp = server.tcp_local_addr();
@@ -950,8 +950,8 @@ async fn health_endpoint_reports_ok() {
 /// left to redial, and dropping the connection closes the transport because it
 /// holds the last session clone.
 ///
-/// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the connection it just got.
+/// The client comes back because it owns the transport endpoint, and the caller
+/// has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_tokio::Client,
 	url: url::Url,

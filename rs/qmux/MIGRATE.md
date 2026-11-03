@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `RecvStream` leases its credit ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`RecvStream` keeps leased bytes' connection credit until `Lease::release`, rather than returning it as it reads through `poll::Buffered`, so `receive_window` bounds what incomplete messages hold together. When they fill it and no reader can progress, the lowest priority stream is evicted and its next lease fails with `Error::Evicted`. Its lease type is now `RecvLease`.
+`Config::limits.receive_window` below moq-net's `transport::MIN_RECEIVE_WINDOW` (1 MiB) is refused with `Error::ReceiveWindowTooSmall`, and a lease past the window fails with `Error::LeaseTooLarge`.
+`Session::set_limits` changes the windows and stream counts of a running session.
+`RecvStream::poll_reset` completes with `Error::Evicted` once the stream is evicted, so a reader that stopped reading it still learns of it.
+
 ### Framing belongs to session establishment
 
 Wrap byte streams with `transport::Stream::new(io)` and pass the sole `Config` to `Session::connect` or `Session::accept`; wrapping no longer starts I/O. Custom `Transport` implementations receive `&Config` in `split` and bind their framing there.
