@@ -92,7 +92,6 @@ pub struct Relay {
 	/// The cluster's origin, cache, and stats work, polled for as long as [`Self::run`]
 	/// runs. `None` only once `run` took it.
 	driver: Option<cluster::Driver>,
-	stats: moq_stats::Producer,
 	internal: internal::Internal,
 	web: web::Web,
 	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
@@ -336,17 +335,15 @@ impl Relay {
 		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
-		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
+		let mut cluster_options = cluster::Options::new(config.cluster)
+			.with_cache(cache)
+			.with_stats(config.stats);
 		cluster_options.session = config.limits.client;
 		cluster_options.peer = config.limits.peer;
 		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
 		let cluster = cluster
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
-		let (stats, publisher) = config.stats.build(cluster.origin.clone())?;
-		// The cluster takes over keeping the publish task alive, so an embedder that
-		// drops the producer keeps publishing for as long as it serves.
-		let cluster = cluster.with_stats(stats.clone(), publisher);
 
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(Startup::Starting);
@@ -411,7 +408,6 @@ impl Relay {
 			admissions,
 			cluster,
 			driver: Some(driver),
-			stats,
 			internal,
 			web,
 			#[cfg(feature = "acme")]
@@ -507,9 +503,10 @@ impl Relay {
 	}
 
 	/// The stats producer, for publishing extra counters through the same registry.
-	/// The cluster retains a clone; its driver must keep running to publish.
+	/// The cluster holds it, so publishing lasts as long as the cluster and its
+	/// driver do, whether or not this handle is cloned.
 	pub fn stats(&self) -> &moq_stats::Producer {
-		&self.stats
+		&self.cluster.stats_producer
 	}
 
 	/// Graceful-shutdown signal shared by every accepted session and web handler.

@@ -2,7 +2,6 @@
 //! holds waiting on the decider. A slope means admitting one request costs more as others
 //! wait, rather than what the request itself touches.
 //! The real web listener runs over loopback TCP; timings include one request round trip.
-#![expect(clippy::disallowed_methods, reason = "host time measures benchmark throughput")]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::{StreamExt, stream::FuturesUnordered};

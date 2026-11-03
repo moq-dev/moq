@@ -114,12 +114,14 @@ impl Config {
 	/// Build a [`moq_stats::Producer`] and its [`moq_stats::Publisher`] from this
 	/// config, publishing on `origin`.
 	///
-	/// Returns a no-op producer when [`Self::enabled`] is false, so the relay can
-	/// attach the result unconditionally. Hand both to
-	/// [`Cluster::with_stats`](crate::cluster::Cluster::with_stats), which takes over
-	/// the registry and keeps the producer alive while its driver runs the publisher.
-	/// Fails on a zero interval.
-	pub fn build(&self, origin: origin::Producer) -> anyhow::Result<(moq_stats::Producer, moq_stats::Publisher)> {
+	/// Returns a no-op producer when [`Self::enabled`] is false, so
+	/// [`Cluster::new`](crate::cluster::Cluster::new) can build one unconditionally,
+	/// keep the producer, and run the publisher on its driver. Fails on a zero
+	/// interval.
+	pub(crate) fn build(
+		&self,
+		origin: origin::Producer,
+	) -> anyhow::Result<(moq_stats::Producer, moq_stats::Publisher)> {
 		if !self.enabled {
 			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
 		}

@@ -902,8 +902,7 @@ root = ["ca.pem"]
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.stats.enabled);
-		let cluster = cluster::Cluster::spawn(cluster::Options::default()).expect("cluster");
-		let _ = config.stats.build(cluster.origin.clone()).expect("stats build");
+		let _ = cluster::Cluster::new(cluster::Options::default().with_stats(config.stats)).expect("stats build");
 	}
 
 	/// Bare defaults loaded from TOML survive when the CLI does not mention them.
