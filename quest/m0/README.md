@@ -38,5 +38,5 @@ since cutting segments from first-frame pts waits on nothing in m1.
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
 - [Release's MKV importer bounds what it buffers](/quest/m0/backport-mkv-buffer.md) - on `release`, an MKV input that declares a huge element and trickles its bytes no longer grows the importer's memory without limit
 - [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the catalog's `hls` field and record tracks go away, and the export numbers segments on `media.join.interval` from media tracks
-- [quest init keeps moq's nix-wrapped worktree hooks](/quest/m0/quest-worktree-hooks.md) - pin bumps keep the hooks that run moq's pinned `quest`, and PR and workflow worktrees behave under them
+- [quest init keeps moq's nix-wrapped worktree hooks](/quest/m0/quest-worktree-hooks.md) - quest pin bumps keep the hooks that run moq's pinned `quest`
 - [HLS lists contributions](/quest/m0/hls-contributions.md) - an HLS master lists each catalog contribution's renditions, and a contribution's media is subscribed only while players fetch it
