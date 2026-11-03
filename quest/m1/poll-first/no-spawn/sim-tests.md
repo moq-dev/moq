@@ -16,3 +16,7 @@ m2, or require the part of the spawn audit that converts those two helpers.
 Decide that when it starts.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Admissions and stats are polled](/quest/m1/poll-first/no-spawn/admissions.md) - admissions stop spawning on tokio

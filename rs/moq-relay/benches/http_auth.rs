@@ -5,6 +5,7 @@
 #![expect(clippy::disallowed_methods, reason = "host time measures benchmark throughput")]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use futures::{StreamExt, stream::FuturesUnordered};
 use moq_auth::{Grant, lease};
 use moq_relay::{auth, cluster, web};
 use std::task::Poll;
@@ -91,17 +92,25 @@ impl Fixture {
 			held.push((send, responses));
 		}
 		let measured = connect(addr, &mut tasks).await;
-		drop(
-			waiting
+		let mut responses: FuturesUnordered<_> = held
+			.iter_mut()
+			.flat_map(|(_, responses)| responses.iter_mut())
+			.collect();
+		tokio::select! {
+			biased;
+			result = responses.next(), if !responses.is_empty() => {
+				panic!("a held admission completed during setup: {result:?}");
+			}
+			_ = waiting
 				.wait(|count| {
 					if **count == connections * streams {
 						Poll::Ready(())
 					} else {
 						Poll::Pending
 					}
-				})
-				.await,
-		);
+				}) => {}
+		}
+		drop(responses);
 
 		Self {
 			measured,
@@ -167,9 +176,16 @@ fn admission(c: &mut Criterion) {
 		group.sample_size(10);
 		group.warm_up_time(Duration::from_millis(100));
 		group.measurement_time(Duration::from_millis(300));
+		// A held HTTP/1.1 auth POST takes two sockets, unlike a multiplexed web
+		// stream. Keep its full sweep below a process's standard 1024-fd budget.
+		let (connections, streams) = if server {
+			([1, 4, 16], [0, 4, 16])
+		} else {
+			([1, 16, 64], [0, 16, 64])
+		};
 		// Each connection may hold up to the verification budget (128 by default) at once.
-		for connections in [1, 16, 64] {
-			for streams in [0, 16, 64] {
+		for connections in connections {
+			for streams in streams {
 				let mut fixture = runtime.block_on(Fixture::new(connections, streams, server));
 				group.bench_with_input(
 					BenchmarkId::new(format!("connections={connections}"), streams),
