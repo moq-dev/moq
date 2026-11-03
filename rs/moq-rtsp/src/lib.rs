@@ -8,11 +8,11 @@
 //! [`Client::pull`] ingests exactly one session and never reconnects. It returns once the
 //! session ends, fails, or its RTP timeline jumps ([`End::Jumped`]). A broadcast name always
 //! means the same content, so a restarted timeline is never spliced onto the old broadcast:
-//! the caller finishes it and starts a fresh one under a new epoch, with a fresh catalog. Two
+//! the caller finishes it and starts a fresh one under a new instance, with a fresh catalog. Two
 //! sessions (say a camera's SD and HD URLs) can publish renditions of one broadcast by
 //! sharing its catalog; each shifts onto the catalog's clock.
 //!
-//! `moq import rtsp` in `moq-cli` wraps this with reconnect and a fresh epoch per run.
+//! `moq import rtsp` in `moq-cli` wraps this with reconnect and a fresh instance per run.
 //!
 //! Pure Rust: RTSP and depacketizing come from [`retina`](https://docs.rs/retina).
 

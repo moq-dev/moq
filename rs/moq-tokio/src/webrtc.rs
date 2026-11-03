@@ -56,8 +56,9 @@ const SEND_WINDOW: usize = RECORD_SIZE as usize * 4;
 /// ignores it has the channel closed instead of growing memory without limit.
 const READ_SLACK: u64 = 16 * RECORD_SIZE;
 
-/// The connection-level receive window a data channel session grants, qmux's default.
-const RECEIVE_WINDOW: u64 = 1 << 20;
+/// The connection-level receive window a data channel session grants, the `[quic]` default
+/// every qmux session takes.
+const RECEIVE_WINDOW: u64 = crate::quic::DEFAULT_RECEIVE_WINDOW;
 
 /// The default STUN port (RFC 8489 section 18.10).
 const STUN_PORT: u16 = 3478;
@@ -502,7 +503,7 @@ pub(crate) struct Opened {
 /// The qmux session settings for a channel carrying `protocol`, advertising
 /// `max_record_size`: 16 KiB, capped by the peer's SCTP message limit.
 fn session_config(protocol: &str, max_record_size: u64) -> qmux::Config {
-	let mut config = crate::qmux_config();
+	let mut config = crate::qmux_default();
 	config.version = qmux::Version::QMux01;
 	config.protocol = qmux::Protocol::Negotiated(protocol.to_string());
 	config.max_record_size = max_record_size;
@@ -534,7 +535,7 @@ struct Open {
 	protocol: String,
 	reads: channel::Inbox,
 	/// `None` once the session's writer closed.
-	writes: Option<mpsc::Receiver<Bytes>>,
+	writes: Option<channel::Outbox>,
 	config: qmux::Config,
 	/// The session's halves, until a session takes them.
 	halves: Option<channel::Channel>,
@@ -765,21 +766,14 @@ impl Driver {
 
 		let config = session_config(&protocol, max_record_size);
 		let (reads, reader) = channel::queue(RECEIVE_WINDOW + READ_SLACK);
-		let (tx, writes) = mpsc::channel(1);
+		let (writes, writer) = channel::outbox(usize::try_from(max_message).unwrap_or(usize::MAX));
 		Ok(Open {
 			id,
 			protocol,
 			reads,
 			writes: Some(writes),
 			config,
-			halves: Some(channel::Channel {
-				writer: channel::Writer {
-					tx: Some(tx),
-					max: usize::try_from(max_message).unwrap_or(usize::MAX),
-					_driver: None,
-				},
-				reader,
-			}),
+			halves: Some(channel::Channel { writer, reader }),
 		})
 	}
 
@@ -808,9 +802,9 @@ impl Driver {
 }
 
 /// The session's next record, or `None` when its writer closed. Pends without a channel.
-async fn next_write(writes: Option<&mut mpsc::Receiver<Bytes>>) -> Option<Bytes> {
+async fn next_write(writes: Option<&mut channel::Outbox>) -> Option<Bytes> {
 	match writes {
-		Some(writes) => writes.recv().await,
+		Some(writes) => writes.next().await,
 		None => std::future::pending().await,
 	}
 }

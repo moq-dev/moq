@@ -44,10 +44,9 @@ including a stalled reader:
 - moq-quic's lease `extend` copies out of datagram backing to bound what a
   slice retains (deliberate), and `fill` builds a temporary `Vec` of chunks
   per call.
-- A partial MoQ frame copies into canonical frame storage, which
-  `Segment::new` zero-fills first
-  ([streaming frame read owners](/quest/m2/perf/frame-read-owners.md) owns
-  that fill). Whole-frame `Bytes` writes skip this copy.
+- A partial MoQ frame copies into canonical frame storage, left
+  uninitialized rather than zero-filled first. Whole-frame `Bytes` writes
+  skip this copy.
 
 Decided 2026-10-08: `SENDMSG_ZC`
 ([#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md))

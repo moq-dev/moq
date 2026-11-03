@@ -15,10 +15,6 @@ Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run).
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Tenant matrix](/quest/m2/tenant-matrix.md) - its PR, #7366, lands the dot-segment refusal on main
-
 ## Related
 
 - [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - the earlier backport in the same patch release

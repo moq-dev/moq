@@ -39,7 +39,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const reader = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ maxDelay: Milli(100) });
+			.subscribe({ delay: { max: Milli(100) } });
 
 		const track = await Stream.accept(pair.server, version);
 		if (!track) throw new Error("the subscriber never asked for TRACK_INFO");
