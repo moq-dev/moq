@@ -6917,7 +6917,7 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from(section(value)))
 				.unwrap();
 			assert!(
-				poll_frames(&mut rig.exporter).is_empty(),
+				drain_frames(&mut rig.exporter).await.is_empty(),
 				"SI alone cannot advance media"
 			);
 		}
