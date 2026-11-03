@@ -19,6 +19,7 @@ import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
 import * as Varint from "./varint.ts";
+import type { Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
@@ -347,6 +348,12 @@ export interface ResumeSource {
 	 * copy that still holds a group for a later group read is kept.
 	 */
 	tryDatagram(delivered: Delivered): RecvDatagram;
+	/**
+	 * Whether the reader's bounded `window` has nothing left to deliver, judged by the serving
+	 * copy against what it and the logical reader (`delivered`) handed out. A copy that may still
+	 * deliver keeps it open. Mirrors the Rust `Reader::exhausted`.
+	 */
+	exhausted(delivered: Delivered, window: Window): boolean;
 	/** Wake once a read may go differently; fires at most once. */
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
@@ -357,6 +364,15 @@ export interface ResumeSource {
 	start(): number | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
+	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
+	starts(from: number): (number | undefined)[] | undefined;
+	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
+	runs(start: number, end: number): Run[] | undefined;
+	/**
+	 * The exclusive end past every group the serving copy reads: undefined while one of its
+	 * ranges stays open or without a serving copy.
+	 */
+	servingEnd(): number | undefined;
 	/** The error the logical track's end carries, if it does not end cleanly. */
 	endError(): Error | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
@@ -469,6 +485,12 @@ export const hooks: {
 	 * waits on its START, as the Rust `request_start`.
 	 */
 	startTrack: (producer: Producer, served: { start?: number | null; requested?: number }) => void;
+	/**
+	 * Mark a track as a copy received over a wire without ranges, which cannot carry a relative
+	 * anchor other than the live start, so its readers refuse one rather than guess from a
+	 * partial copy. Mirrors the Rust `Holdings::drops_anchors`; assigned by `track.ts`.
+	 */
+	dropAnchors: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -519,6 +541,21 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/**
+	 * The runs of `[start, end)` a subscriber reads: inside its ranges and its local bounds.
+	 * Assigned by `track.ts`.
+	 */
+	servingRuns: (subscriber: Subscriber, start: number, end: number) => Run[];
+	/**
+	 * The exclusive end past every group a subscriber reads, or undefined while one of its ranges
+	 * stays open. Assigned by `track.ts`.
+	 */
+	servingEnd: (subscriber: Subscriber) => number | undefined;
+	/**
+	 * Where each of a subscriber's ranges starts once delivery starts at `from`, undefined for one
+	 * with no group there: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
+	 */
+	servingStarts: (subscriber: Subscriber, from: number) => (number | undefined)[];
 	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes sequences taken on other copies. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: number) => number | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
@@ -534,6 +571,17 @@ export const hooks: {
 	 * cursor, and no group in `[start, end)` that `delivered` lacks.
 	 */
 	spent: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
+	/**
+	 * Mark a wire publisher's reader to park past the end of a bounded window rather than end the
+	 * read there, since its peer reads the end of a stream as the track's. Mirrors the Rust
+	 * crate-private `track::Subscriber::parked`. Returns the subscriber.
+	 */
+	parked: (subscriber: Subscriber) => Subscriber;
+	/**
+	 * Whether a route copy's bounded window has nothing left for the logical reader that handed
+	 * out `delivered`, counting what the copy handed out itself. Mirrors the Rust `exhausted_for`.
+	 */
+	exhaustedFor: (subscriber: Subscriber, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** Whether the subscriber already handed out group `sequence`, or no longer expects it. */
@@ -694,6 +742,18 @@ export const hooks: {
 	startTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
+	dropAnchors: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingEnd: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -764,6 +824,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	spent: () => {
+		throw new Error("track.ts not loaded");
+	},
+	parked: () => {
+		throw new Error("track.ts not loaded");
+	},
+	exhaustedFor: () => {
 		throw new Error("track.ts not loaded");
 	},
 	staleAt: () => {

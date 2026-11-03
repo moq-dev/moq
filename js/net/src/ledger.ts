@@ -15,6 +15,12 @@ const BTree = (btree.default as unknown as { default?: typeof btree.default }).d
  */
 export const GRACE = Milli(1000);
 
+/**
+ * How long idle cached content is kept, matching Rust `cache::DEFAULT_EXPIRY`: a group older
+ * than this is evicted, so nothing waits for one longer.
+ */
+export const CACHE_EXPIRY = Milli(30_000);
+
 /** The grace for a subscription with `delay.max`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
 export function grace(maxDelay: Milli): Milli {
 	return maxDelay > 0 ? maxDelay : GRACE;
@@ -111,6 +117,12 @@ export class Ledger {
 	/** The lowest sequence accounted for. */
 	first(): number | undefined {
 		return this.#runs.minKey();
+	}
+
+	/** The exclusive end of the run accounting for `sequence`, undefined when none does. */
+	runEnd(sequence: number): number | undefined {
+		const run = this.#runs.getPairOrNextLower(sequence)?.[1];
+		return run !== undefined && sequence < run.end ? run.end : undefined;
 	}
 
 	/** Whether every sequence in `[start, end)` is accounted for. */
