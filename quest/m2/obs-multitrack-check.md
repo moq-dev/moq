@@ -28,12 +28,13 @@ OBS, so the manual run never happened.
   since stock Settings > Stream can't select `moq_service`.
 - Cover the dock's layers with `just obs test`; verify with
   `just obs compile` and the manual run.
-- Once [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029) lands,
-  its multi-encoder ladder test can also assert each rendition advertises
-  its own bitrate; add that here if this lands second.
+- [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029) (merged)
+  added a multi-encoder ladder to the OBS output tests
+  (`g_ladder` in `cpp/obs/test/moq-output-test.cpp`). Extend it to assert
+  each rendition advertises its own bitrate in the catalog.
 
 Public API: none. Wire: none.
 
 ## Related
 
-- [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029), which disables these layers as the grant falls
+- [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - the shaped-uplink proof of the rung disable [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029) added, which turns these layers off as the grant falls
