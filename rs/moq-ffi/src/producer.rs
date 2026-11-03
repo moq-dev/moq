@@ -522,7 +522,7 @@ impl MoqFill {
 	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
 	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
 		let fill = self.inner.clone();
-		crate::ffi::detached(async move {
+		crate::ffi::run(async move {
 			fill.unwanted(sequence).await;
 			Ok::<_, MoqError>(())
 		})

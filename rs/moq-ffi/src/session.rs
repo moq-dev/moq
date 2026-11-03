@@ -648,7 +648,7 @@ impl MoqTokens {
 	pub async fn answered(&self) -> Result<(), MoqError> {
 		{
 			let tokens = self.inner.clone();
-			crate::ffi::detached(async move { tokens.answered().await.map_err(MoqError::from) }).await
+			crate::ffi::run(async move { tokens.answered().await.map_err(MoqError::from) }).await
 		}
 	}
 }
