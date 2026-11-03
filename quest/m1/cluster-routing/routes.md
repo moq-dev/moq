@@ -13,6 +13,62 @@ claim whose withdrawal is already known.
 
 ## Plan
 
+Progress in [moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676):
+the route layer exists as a crate-private, sans-IO `Router` in
+`rs/moq-net/src/route/`, generic over the neighbor key and the claim
+attributes, with every holding rule of the contract below (checked metric,
+down-only bit, GOAWAY rank, hop-by-hop seqno requests, ROUTE_END echoes
+draining the feasibility distance, qualified keys with no own-identity
+exemption, merged per-region floors, held and let-go). Each message
+recomputes only the identity it names. The handoff fixtures, both sweeps,
+and the route-layer fixtures of the contract run against it in
+`route/tests/`; the forwarding and first-hop selection fixtures
+(`Forward`, `Aggregate`, pool ties) still run only on the reference model,
+which stays until they are ported. Nothing drives the router on the wire
+yet. Remaining, in order:
+
+1. lite-07 wire: ROUTE_START/UPDATE/END, ANNOUNCE_FLOOR, and on the request
+   side ROUTE_REQUEST and the ROUTE_END echo; ANNOUNCE_START/UPDATE carry a
+   Route ID and the origin's seed instead of hops; draft text; rerun the
+   [moq-dev/moq#4196](https://github.com/moq-dev/moq/pull/4196) announce
+   bench on path-less ANNOUNCE before keeping `Path Base`/`Path Keep`.
+2. Session integration: one router per origin node, fed by every lite-07
+   session, its shown claims and selected routes driving the origin's
+   routes, and its outbox driving each announce stream; the first hop pins
+   requests to an identity; a lite-06 peer translated at the relay. Per-
+   session bounds on the routes and claims a peer makes the router hold.
+   Config: zero-cost links refused, `cluster.id` removed, per-connection
+   `proxy`.
+3. Reader API: availability and the offline event in Rust and JS.
+4. `js/net` encodes, decodes, and resolves the route layer, including the
+   detached-request fix from [moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947).
+5. Acceptance: port the forwarding fixtures, then delete the reference
+   model; the `residual_*` and toggle fixtures in `mesh_withdraw.rs`; the
+   tiered-cluster and partition end-to-end checks; benchmarks.
+
+Implementation choices so far, for review:
+
+- Every lite-07 claim covers its own path and everything below it, so the
+  model's exact-versus-wildcard distinction is gone: a claim above an
+  interest overlaps it (`a_claim_above_an_interest_overlaps_it`).
+- The region list is ordered by path, as a sorted map yields it, and a lost
+  region keeps the proof's rule: keep every still-certified region, or
+  rebuild them all if a lost floor is newer than a kept one.
+- An interest change keys the router by announce stream: the old stream
+  stays open, its routes counting and its batches discarded, until the new
+  stream has answered, so no route drops in between. Not yet built; the
+  router already supports it, since a stream is just another neighbor key.
+- The qualified key's derivation stays open (below): the router takes it
+  from the caller per scoped neighbor (`Scope::qualify`), and the fixtures
+  use a stand-in keyed by a label.
+- A rotated identity ends the old one with ROUTE_END on every stream rather
+  than closing sessions, since the own identity is no longer proven per
+  session.
+- A batch carries changes against the last batch on that stream; the
+  receiver keeps each stream's last view to apply it, as the contract says.
+  Restricting a view to an interest is still linear in that origin's
+  claims per change; make it incremental with the session integration.
+
 Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
 2026-10-13 [decisions](/quest/m1/cluster-routing/README.md) and the routing
 contract below. The routing contract's fixtures live in
