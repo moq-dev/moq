@@ -222,11 +222,11 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 
 ### Data
 
-`moq.json.SnapshotProducer.update(value, timestamp)` and
-`moq.json.StreamProducer.append(value, timestamp)` require a capture time on the broadcast clock,
-read with `media.CatalogProducer.now()`, so their track needs a `timescale`.
-`moq.json.WindowProducer.push(value, timestamp=None)` / `.pop(count, timestamp=None)` preserve
-optional capture time. A window keeps a sliding run of records a reader can join at any point,
+`moq.json.SnapshotProducer.update(value, timestamp)`,
+`moq.json.StreamProducer.append(value, timestamp)`, and
+`moq.json.WindowProducer.push(value, timestamp)` / `.pop(count, timestamp)` require a capture time
+on the broadcast clock, read with `media.CatalogProducer.now()`, so their track needs a `timescale`.
+A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
 Omitting time leaves data untimed; choose the track's `timescale` to match. Publish JSON tracks with

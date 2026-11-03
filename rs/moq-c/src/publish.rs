@@ -252,11 +252,9 @@ impl<T> std::ops::DerefMut for Kept<T> {
 	}
 }
 
-// C window methods stamp a write the caller left unstamped on one fixed broadcast clock,
-// without retaining another catalog handle.
+/// A data producer, kept beside its broadcast's children.
 struct Data<T> {
 	producer: T,
-	clock: moq_mux::Clock,
 	children: Children,
 }
 
@@ -1219,7 +1217,6 @@ impl Publish {
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {
 			producer,
-			clock: broadcast.catalog.clock(),
 			children: broadcast.children.clone(),
 		})
 	}
@@ -1374,29 +1371,23 @@ impl Publish {
 		)
 	}
 
-	/// Append one record to the back of a JSON window.
+	/// Append one record to the back of a JSON window at `timestamp` on the broadcast clock.
 	pub fn json_window_push(
 		&mut self,
 		window: Id,
 		value: serde_json::Value,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		let at = timestamp.unwrap_or_else(|| window.clock.now());
-		window.producer.push(moq_net::Timed::from(&value).at(at))?;
+		window.producer.push(moq_net::Timed::from(&value).at(timestamp))?;
 		Ok(())
 	}
 
-	/// Drop `count` records from the front of a JSON window, clamped to what it holds.
-	pub fn json_window_pop(
-		&mut self,
-		window: Id,
-		count: u64,
-		timestamp: Option<moq_net::Timestamp>,
-	) -> Result<(), Error> {
+	/// Drop `count` records from the front of a JSON window, clamped to what it holds, at
+	/// `timestamp` on the broadcast clock.
+	pub fn json_window_pop(&mut self, window: Id, count: u64, timestamp: moq_net::Timestamp) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		let at = timestamp.unwrap_or_else(|| window.clock.now());
-		window.producer.pop(moq_net::Timed::from(count).at(at))?;
+		window.producer.pop(moq_net::Timed::from(count).at(timestamp))?;
 		Ok(())
 	}
 

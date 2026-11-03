@@ -9,9 +9,10 @@ as well as by name. Values are any JSON-serializable Python object.
 Compression is the track's: publish it with ``TrackInfo(compress=True)``, which JSON benefits from,
 and a consumer reads it with no option of its own.
 
-Every snapshot update and stream append takes a timestamp on the broadcast clock, the epoch every
-track in the broadcast shares: read it with :meth:`moq.media.CatalogProducer.now`. Their track
-needs a timescale (``TrackInfo(timescale=1000)``); one without is refused.
+Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
+broadcast clock, the epoch every track in the broadcast shares: read it with
+:meth:`moq.media.CatalogProducer.now`. The track needs a timescale (``TrackInfo(timescale=1000)``);
+one without is refused.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from moq_ffi import (
 )
 
 from . import publish, subscribe
-from ._records import Timestamp, _opt_from_ts, _opt_ts
+from ._records import Timestamp, _opt_from_ts
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand
 
@@ -198,13 +199,13 @@ class WindowProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def push(self, value: Any, *, timestamp: Timestamp | None = None) -> None:
-        """Append one record to the back of the window."""
-        self._inner.push(json.dumps(value), _opt_ts(timestamp))
+    def push(self, value: Any, timestamp: Timestamp) -> None:
+        """Append one record to the back of the window at ``timestamp`` on the broadcast clock."""
+        self._inner.push(json.dumps(value), timestamp._ffi())
 
-    def pop(self, count: int, *, timestamp: Timestamp | None = None) -> None:
-        """Drop ``count`` records from the front of the window, clamped to what it holds."""
-        self._inner.pop(count, _opt_ts(timestamp))
+    def pop(self, count: int, timestamp: Timestamp) -> None:
+        """Drop ``count`` records from the front of the window at ``timestamp``, clamped to what it holds."""
+        self._inner.pop(count, timestamp._ffi())
 
     def cut(self) -> None:
         """Close the open group, so the next edit opens one restating the retained window.

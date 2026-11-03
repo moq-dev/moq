@@ -2768,10 +2768,12 @@ fn recv_window(cb: &Callback) -> WindowEvent {
 	(event.kind, event.start..event.end, json, timestamp)
 }
 
+/// Push record `n` at `n` milliseconds.
 fn window_push(handle: u32, n: u64) {
 	let value = format!(r#"{{"n":{n}}}"#);
+	let at = micros(n * 1_000);
 	assert_eq!(
-		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len(), std::ptr::null()) },
+		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len(), &at) },
 		0
 	);
 }
@@ -2788,8 +2790,8 @@ fn window_consume(consume: u32, name: &[u8], cb: &Callback) -> u32 {
 	})
 }
 
-/// A live reader sees each push and pop in order, stamped by the broadcast clock, and closing the
-/// broadcast ends a window still open.
+/// A live reader sees each push and pop in order at its timestamp, a NULL timestamp is refused, and
+/// closing the broadcast ends a window still open.
 #[test]
 fn json_window_publish_consume() {
 	use moq_json_window_kind::*;
@@ -2811,32 +2813,50 @@ fn json_window_publish_consume() {
 	let event_cb = Callback::new();
 	let consumer = window_consume(consume, name, &event_cb);
 
+	// Nothing stamps an edit for the caller, so a NULL timestamp publishes nothing.
+	let value = br#"{"n":-1}"#;
+	assert_eq!(
+		unsafe { moq_publish_json_window_push(producer, value.as_ptr().cast(), value.len(), std::ptr::null()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+	assert_eq!(
+		unsafe { moq_publish_json_window_pop(producer, 1, std::ptr::null()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
 	for n in 0..3 {
 		window_push(producer, n);
 	}
-	assert_eq!(unsafe { moq_publish_json_window_pop(producer, 2, std::ptr::null()) }, 0);
+	assert_eq!(unsafe { moq_publish_json_window_pop(producer, 2, &micros(3_000)) }, 0);
 
-	let mut last = moq_net::Timestamp::ZERO;
 	for n in 0..3 {
 		let (kind, range, json, timestamp) = recv_window(&event_cb);
 		assert_eq!(
-			(kind, range, json),
-			(MOQ_JSON_WINDOW_KIND_PUSH, n..n + 1, Some(serde_json::json!({ "n": n })))
+			(kind, range, json, timestamp),
+			(
+				MOQ_JSON_WINDOW_KIND_PUSH,
+				n..n + 1,
+				Some(serde_json::json!({ "n": n })),
+				Some(moq_net::Timestamp::from_millis(n).unwrap())
+			)
 		);
-		let timestamp = timestamp.expect("the producer stamps each edit with the broadcast clock");
-		assert!(timestamp >= last);
-		last = timestamp;
 	}
 	let (kind, range, json, timestamp) = recv_window(&event_cb);
-	assert_eq!((kind, range, json), (MOQ_JSON_WINDOW_KIND_POP, 0..2, None));
-	assert!(timestamp.expect("the pop is stamped too") >= last);
+	assert_eq!(
+		(kind, range, json, timestamp),
+		(
+			MOQ_JSON_WINDOW_KIND_POP,
+			0..2,
+			None,
+			Some(moq_net::Timestamp::from_millis(3).unwrap())
+		)
+	);
 
 	// Closing the broadcast ends the open window and releases its handle.
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert!(event_cb.recv_terminal() < 0, "an aborted window is not a clean end");
 	assert!(moq_consume_json_cancel(consumer) < 0, "the task removed itself");
 	assert!(
-		unsafe { moq_publish_json_window_pop(producer, 1, std::ptr::null()) } < 0,
+		unsafe { moq_publish_json_window_pop(producer, 1, &micros(4_000)) } < 0,
 		"the handle was released"
 	);
 	assert!(moq_publish_json_window_finish(producer) < 0, "the handle was released");

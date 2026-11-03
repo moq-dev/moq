@@ -1642,9 +1642,9 @@ async fn json_window_roundtrip() {
 	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await).unwrap();
 
 	for n in 0..3 {
-		producer.push(format!(r#"{{"n":{n}}}"#), Some(us(n * 1000))).unwrap();
+		producer.push(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 	}
-	producer.pop(2, Some(us(3000))).unwrap();
+	producer.pop(2, us(3000)).unwrap();
 
 	for n in 0..3 {
 		let event = next_window(&consumer).await.expect("expected a push");
@@ -1666,10 +1666,10 @@ async fn json_window_roundtrip() {
 
 	producer.finish().unwrap();
 	assert!(matches!(
-		producer.push(r#"{"n":3}"#.into(), Some(us(4000))),
+		producer.push(r#"{"n":3}"#.into(), us(4000)),
 		Err(MoqError::Closed)
 	));
-	assert!(matches!(producer.pop(1, Some(us(4000))), Err(MoqError::Closed)));
+	assert!(matches!(producer.pop(1, us(4000)), Err(MoqError::Closed)));
 	assert_eq!(next_window(&consumer).await, None);
 }
 
@@ -1681,31 +1681,34 @@ async fn json_window_cut_restates_the_window() {
 	let config = MoqJsonWindowConfig {
 		checkpoint_records: None,
 	};
-	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
 	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
 	let raw = subscribe(&broadcast, "log").await;
 	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await).unwrap();
 
 	for n in 0..3 {
-		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+		producer.push(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 	}
-	producer.pop(1, None).unwrap();
+	producer.pop(1, us(3000)).unwrap();
 	let events = [
-		window_push(0, 0),
-		window_push(1, 1),
-		window_push(2, 2),
-		MoqJsonWindowEvent::Pop { start: 0, end: 1 },
+		(window_push(0, 0), 0),
+		(window_push(1, 1), 1000),
+		(window_push(2, 2), 2000),
+		(MoqJsonWindowEvent::Pop { start: 0, end: 1 }, 3000),
 	];
-	for event in events {
+	for (event, at) in events {
 		assert_eq!(
 			next_window(&consumer).await,
-			Some(MoqJsonWindowTimed { event, timestamp: None })
+			Some(MoqJsonWindowTimed {
+				event,
+				timestamp: Some(us(at)),
+			})
 		);
 	}
 
 	producer.cut().unwrap();
 	producer.cut().unwrap();
-	producer.push(r#"{"n":3}"#.into(), None).unwrap();
+	producer.push(r#"{"n":3}"#.into(), us(4000)).unwrap();
 
 	let group = kio::clock::timeout(TIMEOUT, async {
 		loop {
@@ -1729,7 +1732,7 @@ async fn json_window_cut_restates_the_window() {
 		next_window(&consumer).await,
 		Some(MoqJsonWindowTimed {
 			event: window_push(3, 3),
-			timestamp: None,
+			timestamp: Some(us(4000)),
 		})
 	);
 
@@ -1749,7 +1752,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 				priority: 127,
 				max_age: None,
 				refresh: Some(1),
-				timescale: None,
+				timescale: Some(1_000_000),
 				compress: false,
 			}),
 		)
@@ -1759,7 +1762,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 	};
 	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
 	for n in 0..5 {
-		producer.push(format!(r#"{{"n":{n}}}"#), None).unwrap();
+		producer.push(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 	}
 
 	// The join crosses the ratio, so the producer restates the window without another edit.
@@ -1777,10 +1780,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 		window_push(4, 4),
 	];
 	for event in events {
-		assert_eq!(
-			next_window(&consumer).await,
-			Some(MoqJsonWindowTimed { event, timestamp: None })
-		);
+		assert_eq!(next_window(&consumer).await.map(|timed| timed.event), Some(event));
 	}
 
 	producer.finish().unwrap();
@@ -1800,6 +1800,23 @@ fn json_window_refuses_zero_checkpoint_records() {
 	assert!(track.demand().is_ok(), "a refused config leaves the track open");
 }
 
+/// Every edit is timed, so a track without a timescale is refused up front and handed back.
+#[test]
+fn json_window_refuses_an_untimed_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let config = MoqJsonWindowConfig {
+		checkpoint_records: None,
+	};
+	let refused = MoqJsonWindowProducer::new(&track, config);
+	assert!(
+		matches!(&refused, Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch),
+		"{:?}",
+		refused.err()
+	);
+	assert!(track.demand().is_ok(), "a refused track stays open");
+}
+
 /// The window producer reports subscriber demand, and drops it once finished.
 #[tokio::test]
 async fn json_window_demand() {
@@ -1807,7 +1824,7 @@ async fn json_window_demand() {
 	let config = MoqJsonWindowConfig {
 		checkpoint_records: None,
 	};
-	let track = broadcast.publish_track("log".into(), None).unwrap();
+	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
 	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
 	let demand = producer.demand().unwrap();
 	assert_eq!(demand.name(), "log");
@@ -4797,7 +4814,7 @@ async fn closing_a_broadcast_ends_its_open_data_tracks() {
 	assert!(matches!(json_snapshot.update("1".into(), us(0)), Err(MoqError::Closed)));
 	assert!(matches!(json_stream.append("1".into(), us(0)), Err(MoqError::Closed)));
 	assert!(matches!(
-		json_window.push("1".into(), Some(us(0))),
+		json_window.push("1".into(), us(0)),
 		Err(MoqError::Closed)
 	));
 }

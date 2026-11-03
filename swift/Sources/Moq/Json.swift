@@ -13,9 +13,10 @@ import MoqFFI
 /// Compression is the track's: publish JSON with `TrackInfo(compress: true)`, and a consumer reads
 /// it with no option of its own.
 ///
-/// Every snapshot update and stream append takes a timestamp on the broadcast clock, the epoch every
-/// track in the broadcast shares: read it with `Media.CatalogProducer.now()`. Their track needs a
-/// timescale (`TrackInfo(timescale: 1000)`); one without is refused.
+/// Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
+/// broadcast clock, the epoch every track in the broadcast shares: read it with
+/// `Media.CatalogProducer.now()`. The track needs a timescale (`TrackInfo(timescale: 1000)`); one
+/// without is refused.
 public enum Json {}
 
 extension Json {
@@ -190,7 +191,7 @@ extension Json {
         let ffi: MoqJsonWindowProducer
 
         /// Publish `track` as a JSON window track. Takes over `track`, whose handle is closed
-        /// afterward.
+        /// afterward; throws if `track` has no timescale.
         ///
         /// `checkpointRecords` bounds the records retained and restated for a window that is never
         /// popped: a reader that keeps up still sees every record, while a later joiner is told the
@@ -203,13 +204,14 @@ extension Json {
             )
         }
 
-        /// Append one record to the back of the window.
-        public func push(_ value: Value, timestamp: Timestamp? = nil) throws {
+        /// Append one record to the back of the window at `timestamp` on the broadcast clock.
+        public func push(_ value: Value, timestamp: Timestamp) throws {
             try ffi.push(value: encodeJson(value), timestamp: timestamp)
         }
 
-        /// Drop `count` records from the front of the window, clamped to what it holds.
-        public func pop(_ count: UInt64, timestamp: Timestamp? = nil) throws {
+        /// Drop `count` records from the front of the window at `timestamp` on the broadcast
+        /// clock, clamped to what it holds.
+        public func pop(_ count: UInt64, timestamp: Timestamp) throws {
             try ffi.pop(count: count, timestamp: timestamp)
         }
 

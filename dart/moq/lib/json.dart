@@ -5,9 +5,10 @@
 /// which has no window mode), and a consumer takes over a `TrackConsumer` that
 /// has not read a group yet. Values cross as JSON strings. Compression is the
 /// track's: publish JSON with `MoqTrackInfo(compress: true)`, and a consumer
-/// reads it with no option of its own. Every snapshot update and stream append
-/// takes a timestamp on the broadcast clock, the epoch every track in the
-/// broadcast shares, so their track needs a timescale; one without is refused.
+/// reads it with no option of its own. Every write (a snapshot update, a stream
+/// append, a window push or pop) takes a timestamp on the broadcast clock, the
+/// epoch every track in the broadcast shares, so the track needs a timescale;
+/// one without is refused.
 /// Import it with a prefix, since `dart:convert` has a `json` too:
 ///
 /// ```dart

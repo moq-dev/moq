@@ -6,14 +6,14 @@ How to update your code for each breaking change, newest first.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
-`moq_publish_json_snapshot_update` and `moq_publish_json_stream_append` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.
-Read the broadcast clock with the new `moq_publish_catalog_now(broadcast, &now)` and stamp both media frames and JSON writes from it, so every track shares its epoch; media on a timeline of its own advertises the gap to the JSON tracks as catalog `delay`. The JSON window calls still stamp a NULL timestamp.
+`moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.
+Read the broadcast clock with the new `moq_publish_catalog_now(broadcast, &now)` and stamp both media frames and JSON writes from it, so every track shares its epoch; media on a timeline of its own advertises the gap to the JSON tracks as catalog `delay`.
 
-### JSON window edits take an optional timestamp
+### JSON window edits take a timestamp
 
 `moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
-`const moq_timestamp *timestamp`. Pass `NULL` to keep stamping the broadcast
-clock, or a pointer to the edit's capture time, converted to track milliseconds.
+`const moq_timestamp *timestamp`: a pointer to the edit's capture time on the
+broadcast clock, converted to track milliseconds. NULL fails, as above.
 Recompile callers against the regenerated `moq.h`.
 
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))

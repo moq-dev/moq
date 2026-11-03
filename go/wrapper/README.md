@@ -114,7 +114,7 @@ carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a s
 of records a reader can join at any point; the catalog has no window mode, so the producer
 takes only the track. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
-`Update` / `Append` take a final `moq.Timestamp` on the broadcast clock, so their track needs a timescale; `Push` / `Pop` take a `*moq.Timestamp`, where nil publishes untimed.
+`Update` / `Append` / `Push` / `Pop` take a final `moq.Timestamp` on the broadcast clock, so their track needs a timescale.
 Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
 `media.CatalogProducer.Now()` samples and fixes the broadcast clock, the epoch every track in the broadcast shares; stamp media and JSON from it.
 Opaque bytes go on a plain `TrackProducer`.

@@ -5,9 +5,9 @@ package dev.moq.json
 // producers also advertise it in the broadcast's catalog, which has no window
 // mode), and a consumer takes over a `dev.moq.TrackConsumer` that has not read
 // a group yet. Compression is the track's, set through `TrackInfo(compress = true)`.
-// Every snapshot update and stream append takes a timestamp on the broadcast
-// clock, the epoch every track in the broadcast shares, so their track needs a
-// timescale; one without is refused:
+// Every write (a snapshot update, a stream append, a window push or pop) takes a
+// timestamp on the broadcast clock, the epoch every track in the broadcast
+// shares, so the track needs a timescale; one without is refused:
 //
 //     val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL, compress = true))
 //     val status = SnapshotProducer(broadcast, track, SnapshotConfig())
@@ -88,8 +88,8 @@ inline fun <reified T> StreamProducer.append(value: T, timestamp: Timestamp) {
     append(MoqJson.encodeToString(serializer<T>(), value), timestamp)
 }
 
-/** Push [value] onto the window at [timestamp] on the broadcast clock; null is untimed. */
-inline fun <reified T> WindowProducer.push(value: T, timestamp: Timestamp? = null) {
+/** Push [value] onto the window at [timestamp] on the broadcast clock. */
+inline fun <reified T> WindowProducer.push(value: T, timestamp: Timestamp) {
     push(MoqJson.encodeToString(serializer<T>(), value), timestamp)
 }
 

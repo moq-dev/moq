@@ -471,12 +471,16 @@ impl MoqJsonWindowProducer {
 	///
 	/// Not advertised in the broadcast's catalog, which has no window mode; a reader names the
 	/// track itself. Takes over `track`, whose handle is closed afterward. Errors if
-	/// [`MoqJsonWindowConfig::checkpoint_records`] is zero.
+	/// [`MoqJsonWindowConfig::checkpoint_records`] is zero, or if `track` has no timescale, since
+	/// every edit is timed.
 	#[uniffi::constructor]
 	pub fn new(track: &MoqTrackProducer, config: MoqJsonWindowConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = config.try_into()?;
 		let this = track.adopt(|track| {
+			if track.info().timescale.is_none() {
+				return Err(moq_net::Error::TimestampMismatch.into());
+			}
 			Ok(Self {
 				demand: track.demand(),
 				inner: Arc::new(std::sync::Mutex::new(Some(moq_json::window::Producer::new(
@@ -490,20 +494,20 @@ impl MoqJsonWindowProducer {
 	}
 
 	/// Append one record to the back of the window. `value` is a JSON document.
-	/// `timestamp` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp = None))]
-	pub fn push(&self, value: String, timestamp: Option<MoqTimestamp>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock, which
+	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
+	pub fn push(&self, value: String, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let value: Value = serde_json::from_str(&value)?;
-		let at = timestamp.map(TryInto::try_into).transpose()?;
-		self.edit(|producer| producer.push(moq_net::Timed { value: &value, at }))
+		let at = timestamp.try_into()?;
+		self.edit(|producer| producer.push(moq_net::Timed::from(&value).at(at)))
 	}
 
 	/// Drop `count` records from the front of the window, clamped to what it holds.
-	/// `timestamp` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp = None))]
-	pub fn pop(&self, count: u64, timestamp: Option<MoqTimestamp>) -> Result<(), MoqError> {
-		let at = timestamp.map(TryInto::try_into).transpose()?;
-		self.edit(|producer| producer.pop(moq_net::Timed { value: count, at }))
+	/// `timestamp` is on the broadcast clock, which
+	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
+	pub fn pop(&self, count: u64, timestamp: MoqTimestamp) -> Result<(), MoqError> {
+		let at = timestamp.try_into()?;
+		self.edit(|producer| producer.pop(moq_net::Timed::from(count).at(at)))
 	}
 
 	/// Close the open group, so the next push or pop opens a new one whose header restates the

@@ -155,11 +155,11 @@ func TestWindow(t *testing.T) {
 		return &moq.Timestamp{Value: uint64(n) * 1000, Scale: scale}
 	}
 	for n := range 3 {
-		if err := window.Push(map[string]any{"n": n}, ms(n)); err != nil {
+		if err := window.Push(map[string]any{"n": n}, *ms(n)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := window.Pop(2, ms(3)); err != nil {
+	if err := window.Pop(2, *ms(3)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -183,7 +183,7 @@ func TestWindow(t *testing.T) {
 	if err := window.Cut(); err != nil {
 		t.Fatal(err)
 	}
-	if err := window.Push(map[string]any{"n": 3}, ms(4)); err != nil {
+	if err := window.Push(map[string]any{"n": 3}, *ms(4)); err != nil {
 		t.Fatal(err)
 	}
 	if err := window.Finish(); err != nil {
