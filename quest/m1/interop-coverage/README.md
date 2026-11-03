@@ -39,10 +39,11 @@ coverage on `main` at `3ab6cbf81d`.
   in-process codec tests (`rs/moq-net/src/test_interop.rs`), the public
   relays page (published clients), and the Cloudflare and Moxygen smoke
   lanes.
-- Drafts 18 and 22 only, nightly: the only drafts left once
-  [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) lands
-  (decided 2026-10-24, maintainer). The request-limits case went with
-  drafts 14 and 16, the only ones with MAX_REQUEST_ID.
+- Drafts 18, 20, and 22 only, nightly. Protocol removal and draft-20
+  restoration have landed; only the
+  [runner registry correction](/quest/m1/ietf-drop/README.md) remains.
+  The request-limits case went with drafts 14 and 16, the only ones with
+  MAX_REQUEST_ID.
 - Case ranking follows interop bug history: subgroup data and namespace
   discovery, then late join and FETCH, then GOAWAY, TRACK_STATUS,
   and datagrams.
