@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
+
+`track::Producer::{append_datagram, insert_datagram}` and `track::Consumer::{poll_recv_datagram, recv_datagram}` are removed. Create a datagram track with `broadcast::Producer::create_datagrams(name, info)` and read it with `broadcast::Consumer::datagrams(name)`, which return `datagram::Producer` (`append`, `insert`) and `datagram::Consumer` (`recv`, yielding the same `datagram::Event`). Its sequence is its own, not the stream track's group counter, and its key domain stays separate.
+
 ### Tracks are named semantically through `broadcast` wrappers (#5876)
 
 `generation::Producer::produce` and `generation::Consumer::consume` are private.
