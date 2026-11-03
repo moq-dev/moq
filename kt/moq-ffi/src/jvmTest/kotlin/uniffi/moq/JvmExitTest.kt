@@ -19,15 +19,15 @@ import kotlinx.coroutines.runBlocking
 
 class JvmExitTest {
     @Test
-    fun `main can return inside continuations on both runtime workers`() {
+    fun `main can return inside the root driver continuation`() {
         for (backtrace in listOf(false, true)) {
             val lines = child(backtrace, daemon = false)
             assertEquals(
-                2,
+                1,
                 lines.count { it == "callback-entered:daemon=false" },
                 lines.joinToString("\n"),
             )
-            assertEquals(2, lines.count { it == "callback-returning" }, lines.joinToString("\n"))
+            assertEquals(1, lines.count { it == "callback-returning" }, lines.joinToString("\n"))
             val returned = lines.indexOf("main-returned")
             assertTrue(returned >= 0)
             assertTrue(
@@ -43,7 +43,7 @@ class JvmExitTest {
     fun `daemon continuation control exits before returning to Rust`() {
         val lines = child(backtrace = false, daemon = true)
         assertEquals(
-            2,
+            1,
             lines.count { it == "callback-entered:daemon=true" },
             lines.joinToString("\n"),
         )
@@ -80,8 +80,8 @@ class JvmExitTest {
             }
         try {
             if (!daemon) {
-                // The daemon controller joins main before announcing this marker. Both native
-                // callbacks remain attached and gated until the parent explicitly releases them.
+                // The daemon controller joins main before announcing this marker. The native
+                // callback remains attached and gated until the parent explicitly releases them.
                 mainReturned.get(30, TimeUnit.SECONDS)
                 process.outputStream.write('R'.code)
                 process.outputStream.flush()
@@ -111,7 +111,7 @@ internal object ExitDuringContinuation {
     fun main(args: Array<String>) {
         val daemon = args.single().toBooleanStrict()
         val main = Thread.currentThread()
-        val entered = CountDownLatch(2)
+        val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         if (daemon) {
             Native.setCallbackThreadInitializer(
@@ -122,49 +122,40 @@ internal object ExitDuringContinuation {
         val scope = CoroutineScope(Dispatchers.Unconfined)
         roots.add(scope)
 
-        val servers =
-            List(2) {
-                MoqServer(
-                    MoqServerConfig(
-                        bind = "127.0.0.1:0",
-                        tls = MoqServerTls(generate = listOf("localhost")),
-                    )
+        val server =
+            MoqServer(
+                MoqServerConfig(
+                    bind = "127.0.0.1:0",
+                    tls = MoqServerTls(generate = listOf("localhost")),
                 )
-            }
-        roots.addAll(servers)
-        val addresses = runBlocking { servers.map { it.listen() } }
-        // Unconfined resumes inline inside the actual generated continuation callback. Socket
-        // readiness wakes it on a native worker, and the gate keeps that JNA callback in flight.
-        roots.addAll(
-            servers.map { server ->
-                scope.launch {
-                    checkNotNull(server.accept())
-                    check(Thread.currentThread() !== main) {
-                        "continuation must run on a native runtime worker"
-                    }
-                    println("callback-entered:daemon=${Thread.currentThread().isDaemon}")
-                    entered.countDown()
-                    release.await()
-                    println("callback-returning")
+            )
+        roots.add(server)
+        val address = runBlocking { server.listen() }
+        // Accept loops share one root driver. Holding one callback blocks that root; a second
+        // accept cannot enter until it returns. Unconfined keeps this real JNA callback in flight
+        // across main's return, proving the callback's attachment protects the Rust worker.
+        roots.add(
+            scope.launch {
+                checkNotNull(server.accept())
+                check(Thread.currentThread() !== main) {
+                    "continuation must run on a native runtime worker"
                 }
+                println("callback-entered:daemon=${Thread.currentThread().isDaemon}")
+                entered.countDown()
+                release.await()
+                println("callback-returning")
             }
         )
-        val clients =
-            List(2) {
-                MoqClient(
-                    MoqClientConfig(
-                        bind = "127.0.0.1:0",
-                        tls = MoqClientTls(insecure = true),
-                        once = true,
-                    )
+        val client =
+            MoqClient(
+                MoqClientConfig(
+                    bind = "127.0.0.1:0",
+                    tls = MoqClientTls(insecure = true),
+                    once = true,
                 )
-            }
-        roots.addAll(clients)
-        roots.addAll(
-            clients.zip(addresses).map { (client, address) ->
-                scope.launch { client.connect("https://$address") }
-            }
-        )
+            )
+        roots.add(client)
+        roots.add(scope.launch { client.connect("https://$address") })
         entered.await()
         thread(isDaemon = true, name = "jvm-exit-controller") {
             main.join()

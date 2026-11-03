@@ -489,7 +489,7 @@ impl MoqFill {
 
 	/// Wait for `wanted` to change and return the new value. The first call returns at once.
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
-		// Polled in place, not detached: a cancelled call left unfreed must not advance the
+		// Polled in place: a cancelled call left unfreed must not advance the
 		// watcher and swallow the change the next call waits for.
 		self.changes
 			.wait(|fill, waiter| Poll::Ready(Ok(ready!(fill.poll_wanted_changed(waiter)))))
@@ -521,9 +521,8 @@ impl MoqFill {
 
 	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
 	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
-		let fill = self.inner.clone();
-		crate::ffi::run(async move {
-			fill.unwanted(sequence).await;
+		crate::ffi::run(async {
+			self.inner.unwanted(sequence).await;
 			Ok::<_, MoqError>(())
 		})
 		.await

@@ -646,10 +646,7 @@ impl MoqTokens {
 	/// [`MoqError::Unsupported`] when the session cannot carry an in-band token, and the
 	/// connection's end, such as a refused dial, is its close reason.
 	pub async fn answered(&self) -> Result<(), MoqError> {
-		{
-			let tokens = self.inner.clone();
-			crate::ffi::run(async move { tokens.answered().await.map_err(MoqError::from) }).await
-		}
+		crate::ffi::run(self.inner.answered()).await
 	}
 }
 
