@@ -233,10 +233,7 @@ c-tests:
 features:
     #!/usr/bin/env bash
     set -euo pipefail
-    failed=()
-    run() {
-        if ! "$@"; then failed+=("$*"); fi
-    }
+    source sh/checks.sh
     run just rs net-features --all
     run just rs coroutines
     run just rs quic-features --all
@@ -256,10 +253,7 @@ features:
     run bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     run bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
-    if ((${#failed[@]})); then
-        printf 'features: failed: %s\n' "${failed[@]}" >&2
-        exit 1
-    fi
+    finish
 
 # Compile and test the explicit-time model without async helpers or sessions.
 [positional-arguments]
@@ -269,9 +263,13 @@ net-features *args:
 # Prove the poll-only library builds compile no coroutines and document cleanly.
 # moq-net allows the async fns still waiting on a poll conversion.
 coroutines:
-    bash sh/rs/coroutines.sh kio -- --no-default-features --features macros,runtime,manual,serde
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
-    bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source sh/checks.sh
+    run bash sh/rs/coroutines.sh kio -- --no-default-features --features macros,runtime,manual,serde
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
+    run bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
+    finish
 
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
@@ -285,12 +283,17 @@ quic-features *args:
         echo 'usage: just rs quic-features [--all]' >&2
         exit 2
     fi
-    graph=$(cargo tree --locked -p moq-quic -e normal --prefix none)
-    if grep -E '^tokio ' <<<"$graph"; then
-        echo "moq-quic must not depend on a native runtime" >&2
-        exit 1
-    fi
-    bash sh/local.sh cargo clippy --locked -p moq-quic "${targets[@]}" --no-default-features -- -D warnings
+    source sh/checks.sh
+    dependencies() {
+        graph=$(cargo tree --locked -p moq-quic -e normal --prefix none) || return
+        if grep -E '^tokio ' <<<"$graph"; then
+            echo "moq-quic must not depend on a native runtime" >&2
+            return 1
+        fi
+    }
+    run dependencies
+    run bash sh/local.sh cargo clippy --locked -p moq-quic "${targets[@]}" --no-default-features -- -D warnings
+    finish
 
 # Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.

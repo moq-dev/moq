@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class FeaturesTest(unittest.TestCase):
-    def run_features(self, failures=()):
+    def run_features(self, failures=(), nested=False, leaks=()):
         runner = shutil.which("just")
         (ROOT / ".tmp").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
@@ -25,12 +26,46 @@ class FeaturesTest(unittest.TestCase):
             for command in ("just", "cargo"):
                 stub = scratch / command
                 stub.write_text(
-                    "#!/usr/bin/env python3\n"
-                    "import json, os, sys\n"
-                    "call = [os.path.basename(sys.argv[0]), *sys.argv[1:]]\n"
-                    "with open(os.environ['FEATURE_CALLS'], 'a') as output:\n"
-                    "    output.write(json.dumps(call) + '\\n')\n"
-                    "sys.exit(call in json.loads(os.environ['FEATURE_FAILURES']))\n"
+                    textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, os, subprocess, sys
+                    from pathlib import Path
+                    args = sys.argv[1:]
+                    call = [os.path.basename(sys.argv[0]), *[
+                        'mir=<output>' if arg.startswith('mir=') else arg for arg in args
+                    ]]
+                    with open(os.environ['FEATURE_CALLS'], 'a') as output:
+                        output.write(json.dumps(call) + '\\n')
+                    if call in json.loads(os.environ['FEATURE_FAILURES']):
+                        sys.exit(1)
+                    if call[0] == 'just':
+                        if os.environ['FEATURE_NESTED'] == '1' and args[1] in (
+                            'net-features', 'quic-features', 'tokio-features', 'media-features', 'coroutines'
+                        ):
+                            sys.exit(subprocess.call([os.environ['FEATURE_REAL_JUST'], *args]))
+                        sys.exit(0)
+                    if args[0] == 'tree':
+                        for crate in json.loads(os.environ['FEATURE_LEAKS']):
+                            print(crate + ' v1.0.0')
+                        features = args[args.index('--features') + 1].split(',') if '--features' in args else []
+                        for feature, crates in {
+                            'openh264': ['openh264', 'openh264-sys2'], 'nvidia': ['moq-nvenc'],
+                            'render': ['wgpu'], 'vpx': ['libvpx-native-sys'], 'capture': ['cpal'],
+                        }.items():
+                            if feature in features:
+                                for crate in crates:
+                                    print(crate + ' v1.0.0')
+                    elif args[0] == 'rustc':
+                        package = args[args.index('-p') + 1]
+                        for arg in args:
+                            if arg.startswith('mir='):
+                                Path(arg[4:]).write_text('' if package == 'kio' else '\\n'.join(
+                                    '{async fn body of ' + name + '()}' for name in ('until', 'run_front', 'serve_front')
+                                ))
+                    elif args[0] == 'check' and '-p' in args and args[args.index('-p') + 1] == 'moq-tokio':
+                        print('a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature')
+                        sys.exit(1)
+                    """)
                 )
                 stub.chmod(0o755)
             result = subprocess.run(
@@ -41,6 +76,9 @@ class FeaturesTest(unittest.TestCase):
                     PATH=f"{scratch}:{os.environ['PATH']}",
                     FEATURE_CALLS=str(calls),
                     FEATURE_FAILURES=json.dumps(failures),
+                    FEATURE_REAL_JUST=runner,
+                    FEATURE_NESTED=str(int(nested)),
+                    FEATURE_LEAKS=json.dumps(leaks),
                     LOCAL_SUPERVISED="1",
                     GITHUB_ACTIONS="false",
                     BASH_ENV="/dev/null",
@@ -59,10 +97,35 @@ class FeaturesTest(unittest.TestCase):
                 failed, calls = self.run_features(failures)
                 self.assertNotEqual(failed.returncode, 0)
                 self.assertEqual(calls, expected)
-                summary = [line for line in failed.stderr.splitlines() if line.startswith("features: failed: ")]
+                summary = [line for line in failed.stderr.splitlines() if line.startswith("checks: failed: ")]
                 self.assertEqual(len(summary), len(failures))
                 for failure in failures:
                     self.assertTrue(any(" ".join(failure) in line for line in summary))
+
+    def test_nested_feature_checks_continue_after_compile_failures(self):
+        passed, expected = self.run_features(nested=True)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        failures = []
+        for package in ("kio", "moq-net", "moq-quic", "moq-tokio", "moq-video"):
+            failures.append(
+                next(call for call in expected if call[0] == "cargo" and call[1] != "tree" and package in call)
+            )
+        failed, calls = self.run_features(failures, nested=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(calls, expected)
+        summary = "\n".join(line for line in failed.stderr.splitlines() if line.startswith("checks: failed: "))
+        for package in ("kio", "moq-net", "moq-quic", "moq-tokio", "moq-video"):
+            self.assertIn(package, summary)
+        self.assertIn("checks: just rs coroutines", failed.stdout)
+
+    def test_dependency_contract_failures_do_not_hide_checks(self):
+        passed, expected = self.run_features(nested=True)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        failed, calls = self.run_features(nested=True, leaks=("tokio", "cpal"))
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(calls, expected)
+        self.assertIn("must not depend on a native runtime", failed.stderr)
+        self.assertIn("moq-video minimal unexpectedly contains cpal", failed.stderr)
 
 
 class NightlyTest(unittest.TestCase):

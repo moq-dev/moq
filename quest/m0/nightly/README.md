@@ -20,8 +20,9 @@ Decided 2026-10-27 (maintainer), from the coverage audit's triage of run
 [40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673): more
 children for the causes nothing owned.
 
-The Features recipe now runs every independent top-level check and reports all
-failed commands before exiting nonzero. Audio quality's independent benchmarks
+The Features recipe and its nested checks now run independent commands and
+report every failure before exiting nonzero. The shared runner announces each
+command so an error can be tied to its check. Audio quality's independent benchmarks
 and playback checks also continue after a failure, provided setup succeeded;
 cancellation still stops them. The benchmark groups already collect failures.
 
