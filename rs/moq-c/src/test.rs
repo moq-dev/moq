@@ -4823,8 +4823,9 @@ struct Gate {
 
 extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
 	let gate = unsafe { &*(user_data as *const Gate) };
-	let _ = gate.tx.send(code);
+	// The receiver may free gate as soon as it receives the terminal code.
 	let hold = gate.hold.lock().unwrap().take();
+	let _ = gate.tx.send(code);
 	if let Some(hold) = hold {
 		let _ = hold.recv();
 	}
