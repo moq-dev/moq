@@ -12,7 +12,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as ZBase32 from "../js/sign/src/zbase32.ts";
+import * as ZBase32 from "../js/crypto/src/sign/zbase32.ts";
 
 export const PROFILE = "moq-sign-00";
 export const LABEL = utf8(PROFILE);

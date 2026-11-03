@@ -75,6 +75,8 @@ var (
 	ErrNotFound = ffi.ErrMoqErrorNotFound
 	// ErrUnsupported is returned when the requested operation is not supported by this build or peer, however it is asked for.
 	ErrUnsupported = ffi.ErrMoqErrorUnsupported
+	// ErrUnsupportedConfig is returned when media setup refuses a rendition or decoder output.
+	ErrUnsupportedConfig = ffi.ErrMoqErrorUnsupportedConfig
 	// ErrAlreadyCommitted is returned when a track already reading one way (arrival order, sequence order, or a typed reader) is asked to read another; subscribe again for a second cursor.
 	ErrAlreadyCommitted = ffi.ErrMoqErrorAlreadyCommitted
 	// ErrInvalidInstance is returned when an instance is empty.

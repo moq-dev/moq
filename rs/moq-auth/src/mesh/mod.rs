@@ -21,7 +21,7 @@
 
 use std::fmt;
 
-use moq_sign::PublicKey;
+use moq_crypto::sign::PublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 

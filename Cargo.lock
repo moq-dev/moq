@@ -1039,6 +1039,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "c-enum"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd17eb909a8c6a894926bfcc3400a4bb0e732f5a57d37b1f14e8b29e329bace8"
+
+[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4456,6 +4462,7 @@ dependencies = [
  "objc2-core-media",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
+ "perf-event2",
  "rand 0.10.3",
  "ringbuf",
  "rubato",
@@ -4483,8 +4490,8 @@ dependencies = [
  "kio",
  "moq-auth 0.2.1",
  "moq-auth 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moq-crypto",
  "moq-pattern 0.1.2",
- "moq-sign",
  "moq-token",
  "pkcs1",
  "pkcs8 0.11.0",
@@ -4685,22 +4692,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-e2ee"
+name = "moq-crypto"
 version = "0.0.11"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.23.1",
  "bench-harness",
  "bytes",
+ "data-encoding",
  "hex",
  "kio",
  "moq-net",
  "rind",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "uuid",
  "workspace-hack",
  "zeroize",
+]
+
+[[package]]
+name = "moq-e2ee"
+version = "0.0.11"
+dependencies = [
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5192,26 +5210,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-sign"
-version = "0.0.1"
-dependencies = [
- "aws-lc-rs",
- "bench-harness",
- "bytes",
- "data-encoding",
- "hex",
- "kio",
- "moq-net",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "workspace-hack",
- "zeroize",
-]
-
-[[package]]
 name = "moq-sock"
 version = "0.2.0"
 dependencies = [
@@ -5315,7 +5313,6 @@ dependencies = [
  "moq-sock",
  "moq-tokio",
  "notify",
- "pin-project-lite",
  "qmux 0.7.0",
  "rand 0.10.3",
  "rcgen 0.14.10",
@@ -6661,6 +6658,41 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "perf-event-data"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "575828d9d7d205188048eb1508560607a03d21eafdbba47b8cade1736c1c28e1"
+dependencies = [
+ "bitflags 2.13.2",
+ "c-enum",
+ "perf-event-open-sys2",
+]
+
+[[package]]
+name = "perf-event-open-sys2"
+version = "5.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c25955321465255e437600b54296983fab1feac2cd0c38958adeb26dbae49e"
+dependencies = [
+ "libc",
+ "memoffset",
+]
+
+[[package]]
+name = "perf-event2"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0939b8fad77dfaeb29ebbd35faaeaadbf833167f30975f1b8993bbba09ea0a0f"
+dependencies = [
+ "bitflags 2.13.2",
+ "c-enum",
+ "libc",
+ "memmap2",
+ "perf-event-data",
+ "perf-event-open-sys2",
+]
 
 [[package]]
 name = "pest"
@@ -11236,6 +11268,7 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "futures-sink",
+ "futures-task",
  "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.4.3",

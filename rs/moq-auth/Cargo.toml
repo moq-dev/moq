@@ -22,8 +22,8 @@ base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
 # `async` for `Shared::wait`, until moq-auth grows an `async` feature of its own.
 kio = { workspace = true, features = ["async", "serde"] }
+moq-crypto = { workspace = true, features = ["serde"] }
 moq-pattern = { workspace = true, features = ["serde"] }
-moq-sign = { workspace = true }
 pkcs1 = { workspace = true, features = ["std"] }
 pkcs8 = { workspace = true }
 rand = { workspace = true, optional = true }

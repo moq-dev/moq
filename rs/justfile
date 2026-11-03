@@ -236,6 +236,7 @@ features:
     just rs net-features --all
     just rs coroutines
     just rs quic-features --all
+    just rs crypto-key
     just rs tokio-features --all
     just rs media-features --all
     bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
@@ -264,6 +265,19 @@ coroutines:
     bash sh/rs/coroutines.sh kio -- --no-default-features --features macros,runtime,manual,serde
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
     bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
+
+# Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport and aws-lc-rs, then lint and test it alone; a workspace build unifies the default features back in.
+crypto-key:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    graph=$(cargo tree --locked -p moq-crypto --no-default-features --features serde -e normal --prefix none)
+    if grep -E '^(aws-lc-rs|moq-net) ' <<<"$graph"; then
+        echo "moq-crypto without sign or e2ee must not depend on moq-net or aws-lc-rs" >&2
+        exit 1
+    fi
+    bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --all-targets -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --features serde --all-targets -- -D warnings
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-crypto --no-default-features --features serde
 
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
@@ -498,7 +512,7 @@ gst-smoke *args:
 # rind is built to skip that one startup check, or it refuses the simulated CPU.
 codspeed:
     VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation \
-        -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
+        -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
         --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
         --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \

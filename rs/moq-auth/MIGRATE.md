@@ -6,8 +6,9 @@ How to update your code for each breaking change, newest first.
 
 ### Mesh endpoints use the signing public key
 
-Replace `moq_auth::mesh::EndpointId` with `moq_sign::PublicKey` and
-`mesh::InvalidEndpoint` with `moq_sign::InvalidKey`.
+Replace `moq_auth::mesh::EndpointId` with `moq_crypto::sign::PublicKey` and
+`mesh::InvalidEndpoint` with `moq_crypto::sign::InvalidKey`.
+Auth depends on `moq-crypto` with default features off, so it adds only the key and its text codec, not `moq-net` or aws-lc-rs.
 `Proof`, `Member`, `Device`, `Signer::endpoint`, and `Coordinator::revoke_device`
 use that type directly; byte access and canonical z-base-32 text are unchanged.
 Build the publish pattern with `Pattern::subtree(&format!("mesh/{endpoint}"))`

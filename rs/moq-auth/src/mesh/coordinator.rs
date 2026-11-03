@@ -21,7 +21,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use moq_sign::PublicKey;
+use moq_crypto::sign::PublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
