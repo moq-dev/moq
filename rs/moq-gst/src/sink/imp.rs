@@ -943,7 +943,11 @@ impl MoqSink {
 										observe_caps(state, catalog, sink_pad, &mut lifecycle, &caps).0
 									});
 									changes.or_else(|| {
-										lifecycle.restore_bandwidth(state.session.bandwidth(), sink_pad, state.watch.listed())
+										lifecycle.restore_bandwidth(
+											state.session.bandwidth(),
+											sink_pad,
+											state.watch.listed(),
+										)
 									})
 								}
 							}
@@ -1145,9 +1149,7 @@ impl MoqSink {
 			self.pads_locked(&control)
 				.into_iter()
 				.filter_map(|pad| {
-					let changes = pad
-						.lifecycle()
-						.expose_listed(state.session.bandwidth(), &pad, listed)?;
+					let changes = pad.lifecycle().expose_listed(state.session.bandwidth(), &pad, listed)?;
 					Some(PadUpdate { pad, changes })
 				})
 				.collect::<Vec<_>>()
@@ -1826,9 +1828,18 @@ mod tests {
 			.broadcast
 			.consume();
 		let _reader = broadcast.track("camera").unwrap().subscribe(None);
-		assert!(next_catalog(&mut catalog).is_pending(), "the video config is still owed");
-		assert!(demand(&video).is_none(), "a direct subscriber does not expose unlisted media");
-		assert!(demand(&text).is_none(), "listed text still waits for the gated first catalog");
+		assert!(
+			next_catalog(&mut catalog).is_pending(),
+			"the video config is still owed"
+		);
+		assert!(
+			demand(&video).is_none(),
+			"a direct subscriber does not expose unlisted media"
+		);
+		assert!(
+			demand(&text).is_none(),
+			"listed text still waits for the gated first catalog"
+		);
 
 		video_frame(&video);
 		let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
@@ -1865,7 +1876,9 @@ mod tests {
 			.consume();
 		let _reader = broadcast.track("levels").unwrap().subscribe(None);
 		let wanted = await_demand(&levels, |state| {
-			state.as_ref().is_some_and(|state| state.get::<bool>("wanted") == Ok(true))
+			state
+				.as_ref()
+				.is_some_and(|state| state.get::<bool>("wanted") == Ok(true))
 		});
 		assert!(wanted.is_some());
 		assert!(next_catalog(&mut catalog).is_pending(), "the catalog never lists it");
