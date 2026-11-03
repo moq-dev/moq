@@ -914,9 +914,7 @@ impl<E: catalog::Catalog> Import<E> {
 			section.finish()?;
 			self.pending.remove(&pid);
 			self.headers.remove(&pid);
-			let name = section.entry.name.clone();
 			drop(section);
-			self.retire_track(Some(name))?;
 		}
 		// A private PES stream follows the PMT's PCR_PID: refused while there is none to place
 		// its PES by, and routed again once there is, or once the PID carries another type.
@@ -1145,15 +1143,6 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 	}
 
-	/// Retire the timeline of a track whose route has ended. Every route mints its own name, so
-	/// nothing enrolls it again, and a source revising its PMT holds only its live routes.
-	fn retire_track(&mut self, name: Option<String>) -> anyhow::Result<()> {
-		if let Some(name) = name {
-			self.catalog.retire(&name)?;
-		}
-		Ok(())
-	}
-
 	/// End the route on `pid` for a PMT that dropped or revised its stream, as the end of input
 	/// ends every route: the PES it began goes out, what waits on the clock is placed from the
 	/// PCRs so far or counted unplaced (refusing the import, as end of input does, if no media
@@ -1180,9 +1169,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		if let Some(section) = self.sections.remove(&pid.as_u16()) {
 			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
-			let name = section.entry.name.clone();
 			drop(section);
-			self.retire_track(Some(name))?;
 		}
 		self.unclocked.remove(&pid);
 		if let Some(stream) = self.streams.get_mut(&pid)
@@ -1211,9 +1198,7 @@ impl<E: catalog::Catalog> Import<E> {
 		if let Some(stream) = self.streams.remove(&pid) {
 			// Finishing can publish a held frame, which its counters then include.
 			self.keep_stats(pid, stream.stats());
-			let name = stream.track_name();
 			drop(stream);
-			self.retire_track(name)?;
 		}
 		if unplaced > 0 {
 			*self.unplaced.entry(pid.as_u16()).or_default() += unplaced;
@@ -1550,17 +1535,13 @@ impl<E: catalog::Catalog> Import<E> {
 		self.pending.remove(&pid);
 		self.headers.remove(&pid);
 		if let Some(section) = self.retire_section(pid) {
-			let name = section.entry.name.clone();
 			section.abort(moq_net::Error::Unsupported);
-			self.retire_track(Some(name))?;
 		}
 		// MPEG-1/2 video still paces the program once its PES are refused.
 		let clock = match self.retire_stream(pid) {
 			Some(stream) => {
 				let video = stream.video();
-				let name = stream.track_name();
 				stream.abort(moq_net::Error::Unsupported);
-				self.retire_track(name)?;
 				video
 			}
 			None => false,
@@ -1997,20 +1978,12 @@ impl<E: catalog::Catalog> Import<E> {
 }
 
 impl<E: catalog::Catalog> Drop for Import<E> {
-	/// End the input unless it already ended, then retire every route's HLS records: each route
-	/// mints its own name, so nothing publishes it again.
+	/// End the input unless it already ended.
 	fn drop(&mut self) {
 		if !self.finished
 			&& let Err(err) = self.finish()
 		{
 			tracing::warn!(%err, "failed to finish a dropped TS import");
-		}
-		for stream in std::mem::take(&mut self.streams).into_values() {
-			let name = stream.track_name();
-			drop(stream);
-			if let Some(name) = name {
-				self.catalog.retire_dropped(&name);
-			}
 		}
 	}
 }
@@ -2239,8 +2212,8 @@ impl<E: catalog::Catalog> Drop for VerbatimEntry<E> {
 /// track and catalog entry and places each section on the PCR clock.
 struct SectionStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	/// Clears this track's catalog entry on drop; its name retires the timeline when the route ends.
-	entry: VerbatimEntry<E>,
+	/// Clears this track's catalog entry on drop.
+	_entry: VerbatimEntry<E>,
 	reassembler: SectionReassembler,
 	/// Sections waiting for the next PCR or the timebase's offset, in input order.
 	held: VecDeque<Held>,
@@ -2268,7 +2241,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		};
 		Ok(Self {
 			track,
-			entry,
+			_entry: entry,
 			reassembler: SectionReassembler::default(),
 			held: VecDeque::new(),
 			staging: Arc::default(),
@@ -2425,8 +2398,8 @@ fn adjust_splice(section: &mut [u8], offset: Offset) {
 /// header begins in it.
 struct PesPacketStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	/// Clears this track's catalog entry on drop; its name retires the timeline when the route ends.
-	entry: VerbatimEntry<E>,
+	/// Clears this track's catalog entry on drop.
+	_entry: VerbatimEntry<E>,
 	/// The PMT `stream_type`, which says whether an unbounded PES is video.
 	stream_type: u8,
 	/// Whole PES waiting for the PCR after them or the timebase's offset, in input order, each
@@ -2492,7 +2465,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		};
 		Ok(Self {
 			track,
-			entry,
+			_entry: entry,
 			stream_type,
 			held: VecDeque::new(),
 			lost: false,
@@ -3478,14 +3451,6 @@ impl<E: catalog::Catalog> Stream<E> {
 		})
 	}
 
-	/// The MoQ track name this route publishes, decoded or verbatim, once its track exists.
-	fn track_name(&self) -> Option<String> {
-		match self {
-			Stream::PesPacket(stream) => Some(stream.entry.name.clone()),
-			stream => stream.media_track_name(),
-		}
-	}
-
 	/// The MoQ track name of a decoded media stream, once its (lazily created) track
 	/// exists. `None` for verbatim/clock/ignored streams (verbatim self-registers).
 	fn media_track_name(&self) -> Option<String> {
@@ -3889,10 +3854,7 @@ impl<E: CatalogExt> AacStream<E> {
 					"AAC format changed mid-stream, starting a new track"
 				);
 				import.finish()?;
-				let name = import.name().to_string();
-				// The name is never published again, so its HLS records end once its recorder is gone.
 				self.import = None;
-				self.timebase.retire(&name)?;
 			}
 			let import = match &mut self.import {
 				Some(import) => {
@@ -4485,10 +4447,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					"audio format changed mid-stream, starting a new track"
 				);
 				import.finish()?;
-				let name = import.name().to_string();
-				// The name is never published again, so its HLS records end once its recorder is gone.
 				self.import = None;
-				self.timebase.retire(&name)?;
 			}
 			let import = match &mut self.import {
 				Some(import) => import,

@@ -220,12 +220,6 @@ impl Media {
 		}
 	}
 
-	fn name(&self) -> &str {
-		match self {
-			Self::Video(track) => track.name(),
-			Self::Audio(track) => track.name(),
-		}
-	}
 }
 
 /// How the importer consumes an element.
@@ -983,13 +977,11 @@ impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 		// A frame cut short fails its group before the track ends.
 		self.abort_block(moq_net::Error::Dropped);
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
-			let name = track.track.name().to_string();
 			let ended = track.track.end();
 			drop(track);
 			if let Err(err) = ended {
 				tracing::warn!(%err, "failed to end a dropped MKV track");
 			}
-			self.catalog.retire_dropped(&name);
 		}
 	}
 }

@@ -214,6 +214,7 @@ impl Estimator {
 		Reading {
 			estimate: self.estimate(),
 			period: self.window.shortest,
+			interval: self.window.interval,
 		}
 	}
 
@@ -238,11 +239,17 @@ pub(crate) struct Reading {
 	/// The shortest advance between frames, which a published `jitter` or `delay` rises in whole
 	/// steps of when no framerate says the frame duration.
 	pub period: Option<Duration>,
+	/// The longest group, once a window has closed: the track's measured join interval.
+	pub interval: Option<Duration>,
 }
 
 impl From<Estimate> for Reading {
 	fn from(estimate: Estimate) -> Self {
-		Self { estimate, period: None }
+		Self {
+			estimate,
+			period: None,
+			interval: None,
+		}
 	}
 }
 
@@ -342,6 +349,10 @@ impl Bitrate {
 /// per frame whatever the order. Sampled at cuts, so every window starts and ends at the same point
 /// of the group structure.
 ///
+/// The interval is the longest advance of the highest timestamp from one cut to the next, a group's
+/// span, reported once a window closes and the largest across windows. A window lasts a second or a
+/// group, whichever is longer, so even one group longer than a second is measured whole.
+///
 /// The delay is the least trail behind the other tracks within a window, and the largest of those
 /// across windows. A constant offset is in every window, so it shows; lateness only some frames
 /// have, such as B-frame reorder, has a frame trailing nothing in every window, so it never does.
@@ -364,6 +375,12 @@ struct Window {
 	/// The shortest advance of the highest timestamp: a frame's duration, or a reordered group's
 	/// span of them.
 	shortest: Option<Duration>,
+	/// The highest timestamp at the previous cut, which the next cut's group span is measured from.
+	cut: Option<u128>,
+	/// The longest group span since the window opened.
+	group: Option<Duration>,
+	/// The longest group span of any closed window.
+	interval: Option<Duration>,
 }
 
 impl Window {
@@ -386,6 +403,13 @@ impl Window {
 		let Some(high) = self.high else {
 			return;
 		};
+		// A cut with nothing written since the last one bounds no group.
+		if let Some(span) = self.cut.and_then(|cut| elapsed(cut, high)) {
+			self.group = self.group.max(Some(span));
+		}
+		if self.cut.is_none_or(|cut| high > cut) {
+			self.cut = Some(high);
+		}
 		// The first window opens at a cut too, not at the first frame, which may be a join that
 		// starts partway into the group structure.
 		let Some(open) = self.open else {
@@ -408,6 +432,7 @@ impl Window {
 			self.framerate = Some(framerate);
 		}
 		self.delay = self.delay.max(self.trail);
+		self.interval = self.interval.max(self.group);
 		self.reopen(high);
 	}
 
@@ -415,6 +440,7 @@ impl Window {
 		self.open = Some(high);
 		self.frames = 0;
 		self.trail = None;
+		self.group = None;
 	}
 
 	/// Time nothing across a break in the timeline.
@@ -423,6 +449,7 @@ impl Window {
 			framerate: self.framerate,
 			delay: self.delay,
 			shortest: self.shortest,
+			interval: self.interval,
 			..Self::default()
 		};
 	}
@@ -714,6 +741,42 @@ mod tests {
 			let expected = (i >= 200).then_some(ms(100));
 			assert_eq!(video.estimate().delay, expected, "frame {i}");
 		}
+	}
+
+	/// The join interval is the longest group of the first window, a second or a group, whichever
+	/// is longer: two-second GOPs report two seconds once the second GOP closes, and audio cut every
+	/// frame reports its frame.
+	#[test]
+	fn the_interval_is_the_longest_group_of_a_window() {
+		let [mut audio, mut video] = tracks();
+		for i in 0..250u64 {
+			send(&mut audio, i * 20);
+			if i % 100 == 0 {
+				video.cut(None);
+			}
+			video.write(micros(i * 20_000), 1);
+			let expected = (i >= 200).then_some(ms(2000));
+			assert_eq!(video.reading().interval, expected, "frame {i}");
+		}
+		assert_eq!(audio.reading().interval, Some(ms(20)));
+	}
+
+	/// A longer group in a later window raises the interval; a discontinuity keeps it.
+	#[test]
+	fn the_interval_keeps_the_longest_group() {
+		let mut video = Estimator::new();
+		let mut pts = 0;
+		for gop in [1000, 1000, 3000, 1000] {
+			video.cut(None);
+			for _ in 0..gop / 20 {
+				video.write(micros(pts * 1_000), 1);
+				pts += 20;
+			}
+		}
+		video.cut(None);
+		assert_eq!(video.reading().interval, Some(ms(3000)));
+		video.discontinuity();
+		assert_eq!(video.reading().interval, Some(ms(3000)));
 	}
 
 	/// Two renditions of one 50 fps source with two B-frames (I0 P60 B20 B40 P120 B80 B100 …) and

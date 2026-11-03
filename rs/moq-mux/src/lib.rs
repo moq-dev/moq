@@ -23,8 +23,6 @@
 //!   part of the format (MPEG-TS).
 //! - [`rate`] turns bandwidth grants into stable media bitrate targets shared
 //!   by audio, video, and transcode senders.
-//! - [`hls`](mod@hls) publishes HLS segment records per rendition by default, so
-//!   an edge can build HLS/DASH playlists without downloading media.
 //! - [`follow`] follows a broadcast across the publisher instances that
 //!   serve it, for a reader that restarts on each one.
 //! - [`Linger`] keeps a cleanly ended broadcast up for a fixed time, so a
@@ -43,7 +41,6 @@ pub mod follow;
 #[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
 pub mod fuzz;
-pub mod hls;
 pub mod import;
 mod jitter;
 pub mod json;
