@@ -69,7 +69,7 @@ export function graph(parent: Signals.Effect, title: string, opts?: GraphOptions
 	const value = document.createElement("span");
 	value.className = "font-mono";
 	value.style.color = color;
-	value.textContent = "—";
+	value.textContent = "-";
 	header.append(label, value);
 
 	const canvas = document.createElement("canvas");
@@ -134,7 +134,7 @@ export function graph(parent: Signals.Effect, title: string, opts?: GraphOptions
 	const push = (v: number | undefined) => {
 		samples.push(v !== undefined && Number.isFinite(v) ? Math.max(0, v) : 0);
 		while (samples.length > capacity) samples.shift();
-		value.textContent = v !== undefined && Number.isFinite(v) ? (opts?.format?.(v) ?? v.toFixed(0)) : "—";
+		value.textContent = v !== undefined && Number.isFinite(v) ? (opts?.format?.(v) ?? v.toFixed(0)) : "-";
 		draw();
 	};
 

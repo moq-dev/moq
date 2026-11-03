@@ -217,6 +217,24 @@ remove FETCH from Rust and JS together, as decided on 2026-10-25. Tests: a
 group still in flight on the existing subscription sends no second SUBSCRIBE,
 and a dropped group is recovered exactly once.
 
+### JavaScript mirrors the explicit end
+
+Moved here from JS ranges on 2026-11-03 (maintainer, on
+[moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)), with
+[moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675). `js/net` mirrors
+the explicit end as the Rust side implements it: SUBSCRIBE_END is renamed
+SUBSCRIBE_FINISH, and neither it nor a covered bounded subscription closes the
+Subscribe Stream. The JS publisher keeps reading updates past SUBSCRIBE_FINISH
+instead of FINing, and once no group can resolve a held start (every group of
+a bounded subscription given up, or the track finished) sends SUBSCRIBE_OK,
+then the drops it held. The JS subscriber FINs once its tail settles past
+SUBSCRIBE_FINISH, reads on to the publisher's FIN in reply, and waits for
+SUBSCRIBE_OK before judging the tail. Until then the JS wire FINs a covered
+bounded subscription without SUBSCRIBE_END, and the JS subscriber reopens
+demand it no longer covers on the same track, as the Rust copy does. Interop
+passes meanwhile: a JS reader ends at the declared end, and the stream closes
+when the consumer releases it.
+
 ### Draft and checks
 
 Update `drafts/draft-lcurley-moq-lite.md` with each wire change here,

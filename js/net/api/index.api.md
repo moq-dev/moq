@@ -322,7 +322,7 @@ export namespace Group {
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
 		readable(): Promise<void>;
-		readonly sequence: number;
+		readonly sequence: bigint;
 		tryReadFrame(): Group.Frame | undefined;
 		tryReadFrameSequence(): {
 			sequence: number;
@@ -354,17 +354,17 @@ export namespace Group {
 		write(chunk: Uint8Array): void;
 	}
 	export interface Info {
-		sequence: number;
+		sequence: bigint;
 	}
 	export class Producer {
-		constructor(sequence: number);
+		constructor(sequence: bigint);
 		abort(error: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
 		createFrame(info: Group.FrameInfo): Group.FrameProducer;
 		finish(): void;
 		get isClosed(): boolean;
-		readonly sequence: number;
+		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;
 	}
 	export interface ReadOptions {
@@ -388,10 +388,13 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export type Cost = bigint;
+	export interface FollowOptions {
+		instance?: Instance.Valid;
+	}
 	export class Following {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
 		close(): void;
@@ -414,7 +417,7 @@ export namespace Origin {
 		consume(): Origin.Consumer;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
@@ -435,7 +438,7 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly discovery: Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export class Request {
@@ -582,7 +585,7 @@ export interface Timed<T> {
 
 export namespace Track {
 	export type Anchor = {
-		absolute: number;
+		absolute: bigint;
 		relative?: never;
 		time?: never;
 	} | {
@@ -596,20 +599,20 @@ export namespace Track {
 	};
 	export type Bound = {
 		excluded?: never;
-		included: number;
+		included: bigint;
 	} | {
-		excluded: number;
+		excluded: bigint;
 		included?: never;
 	};
 	export class Consumer {
-		fetchGroup(sequence: number, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
+		fetchGroup(sequence: bigint, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
 		info(): Promise<Track.Info>;
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
 	export interface Datagram {
 		payload: Uint8Array;
-		sequence: number;
+		sequence: bigint;
 		timestamp?: Time.Timestamp;
 	}
 	export interface Delay {
@@ -619,7 +622,7 @@ export namespace Track {
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
-		get wanted(): Signals.Getter<number | undefined>;
+		get wanted(): Signals.Getter<bigint | undefined>;
 	}
 	export interface FetchGroupOptions {
 		maxDelay?: Milli;
@@ -665,7 +668,7 @@ export namespace Track {
 		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<{
 			frame: number;
-			group: number;
+			group: bigint;
 		} & Group.Frame | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
@@ -677,22 +680,22 @@ export namespace Track {
 	}
 	export interface Position {
 		frame: number;
-		group: number;
+		group: bigint;
 	}
 	export class Producer {
 		constructor(name: string);
 		abort(error: Error): void;
 		accept(info?: Partial<Track.Info>): this;
-		appendDatagram(timestamp: Time.Timestamp | undefined, payload: Uint8Array): number;
+		appendDatagram(timestamp: Time.Timestamp | undefined, payload: Uint8Array): bigint;
 		appendGroup(): Group.Producer;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		createGroup(sequence: number): Group.Producer;
+		createGroup(sequence: bigint): Group.Producer;
 		demand(): Track.Demand;
 		finish(): void;
 		finishAt(end: Track.Position, error?: Error): void;
 		info(): Promise<Track.Info>;
-		insertDatagram(sequence: number, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
+		insertDatagram(sequence: bigint, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
 		largest(): Track.Position | undefined;
 		readonly name: string;
 		get priority(): number;

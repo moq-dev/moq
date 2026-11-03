@@ -28,7 +28,7 @@ JS_DIR="$SMOKE_DIR/clients/token/js"
 GENERATORS="rust"
 VERIFIERS="rust"
 # Cover both code paths in each impl: symmetric (HS256) and every asymmetric
-# family they support — EdDSA (OKP/Ed25519), ES256 (EC), RS256 (RSA) — so the
+# family they support - EdDSA (OKP/Ed25519), ES256 (EC), RS256 (RSA) - so the
 # default matrix (and `just token-full` / CI, which don't pass --algorithms)
 # can't silently stop exercising one. Override with --algorithms / TOKEN_ALGORITHMS.
 ALGORITHMS="${TOKEN_ALGORITHMS:-HS256,EdDSA,ES256,RS256}"

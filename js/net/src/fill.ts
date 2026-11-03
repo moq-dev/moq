@@ -16,10 +16,11 @@ import { NotFound } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { insertRun, NO_MAX_DELAY, runGaps } from "./internal.ts";
 import type { Info, Order } from "./track.ts";
+import { checkSequence, max, min } from "./util/sequence.ts";
 
 // A half-open run of group sequences, as `internal.ts` has it, kept local so the published
 // declarations never reach the package internals.
-type Run = { start: number; end: number };
+type Run = { start: bigint; end: bigint };
 
 /**
  * What the fills need from the track they serve.
@@ -30,11 +31,11 @@ export interface FillTrack {
 	/** The track's name. */
 	readonly name: string;
 	/** Insert group `sequence` into the cache, committing `info` first if the track has none. */
-	accept(sequence: number, info: Partial<Info> | undefined): GroupProducer;
+	accept(sequence: bigint, info: Partial<Info> | undefined): GroupProducer;
 	/** Record `[start, end)` as never to be delivered. */
-	drop(start: number, end: number, error: Error): void;
+	drop(start: bigint, end: bigint, error: Error): void;
 	/** Whether the track still caches group `sequence`, not failed. */
-	holds(sequence: number): boolean;
+	holds(sequence: bigint): boolean;
 	/** Whether the track closed, so nothing more can be served. */
 	closed(): boolean;
 	/** Settles once the track closes. */
@@ -48,7 +49,7 @@ export interface FillTrack {
  */
 export interface Asker {
 	/** The parts of `[start, end)` it still reads. */
-	wants(start: number, end: number): Run[];
+	wants(start: bigint, end: bigint): Run[];
 	/** Its delivery priority. */
 	priority(): number;
 	/** Its age budget in milliseconds: `Infinity` for none, so the publisher's alone bounds it. */
@@ -56,22 +57,22 @@ export interface Asker {
 	/** Which end it reads first. */
 	order(): Order;
 	/** Stop waiting for `[start, end)`, which a fill refused with `error`, without asking again. */
-	refuse(start: number, end: number, error: Error): void;
+	refuse(start: bigint, end: bigint, error: Error): void;
 }
 
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
-	accept(state: FillState, pending: Pending, sequence: number, info: Partial<Info> | undefined): GroupProducer;
-	drop(state: FillState, pending: Pending, start: number, end: number): void;
-	refuse(state: FillState, pending: Pending, start: number, end: number, error: Error): void;
+	accept(state: FillState, pending: Pending, sequence: bigint, info: Partial<Info> | undefined): GroupProducer;
+	drop(state: FillState, pending: Pending, start: bigint, end: bigint): void;
+	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error): void;
 	settle(state: FillState, pending: Pending): void;
 	name(state: FillState): string;
 };
 
 // One fill: a run of groups some readers miss, until each is answered or nobody wants it.
 class Pending {
-	readonly start: number;
-	readonly end: number;
+	readonly start: bigint;
+	readonly end: bigint;
 	readonly askers = new Set<Asker>();
 	// The groups answered: accepted, delivered live, dropped, or refused.
 	readonly resolved: Run[] = [];
@@ -82,7 +83,7 @@ class Pending {
 	// Bumped on every change to what the fill owes, for its handler to wake on.
 	readonly revision = new Signal(0);
 
-	constructor(start: number, end: number) {
+	constructor(start: bigint, end: bigint) {
 		this.start = start;
 		this.end = end;
 	}
@@ -94,7 +95,7 @@ class Pending {
 	// The parts of `[start, end)` within the fill that are still unanswered.
 	unresolved(start = this.start, end = this.end): Run[] {
 		if (this.done) return [];
-		return runGaps(this.resolved, Math.max(start, this.start), Math.min(end, this.end));
+		return runGaps(this.resolved, max(start, this.start), min(end, this.end));
 	}
 
 	// The parts of `[start, end)` still unanswered that a reader still reads.
@@ -133,7 +134,7 @@ export class FillState {
 	}
 
 	/** Ask for `[start, end)` for `asker`, joining the fills already bringing part of it. */
-	ask(start: number, end: number, asker: Asker): void {
+	ask(start: bigint, end: bigint, asker: Asker): void {
 		if (!this.serving || start >= end) return;
 		let missing: Run[] = [{ start, end }];
 		for (const pending of this.#pending) {
@@ -155,12 +156,12 @@ export class FillState {
 	}
 
 	/** The first sequence of `[start, end)` a fill still owes `asker`. */
-	owed(start: number, end: number, asker: Asker): number | undefined {
+	owed(start: bigint, end: bigint, asker: Asker): bigint | undefined {
 		return this.covered(start, end, asker)[0]?.start;
 	}
 
 	/** The parts of `[start, end)` a fill `asker` joined still owes, in order. */
-	covered(start: number, end: number, asker: Asker): Run[] {
+	covered(start: bigint, end: bigint, asker: Asker): Run[] {
 		const covered: Run[] = [];
 		for (const pending of this.#pending) {
 			if (!pending.askers.has(asker)) continue;
@@ -185,8 +186,13 @@ export class FillState {
 	}
 
 	/** Group `sequence` landed in the cache, through a fill or live: it is answered. */
-	arrived(sequence: number): void {
-		for (const pending of this.#pending) this.#resolve(pending, sequence, sequence + 1);
+	arrived(sequence: bigint): void {
+		for (const pending of this.#pending) this.#resolve(pending, sequence, sequence + 1n);
+	}
+
+	/** `[start, end)` was given up, by a fill or otherwise: nobody waits for it from a fill. */
+	dropped(start: bigint, end: bigint): void {
+		for (const pending of this.#pending) this.#resolve(pending, start, end);
 	}
 
 	/** Open a handler. */
@@ -229,7 +235,7 @@ export class FillState {
 	}
 
 	// Record `[start, end)` of `pending` answered.
-	#resolve(pending: Pending, start: number, end: number): void {
+	#resolve(pending: Pending, start: bigint, end: bigint): void {
 		const unresolved = pending.unresolved(start, end);
 		if (unresolved.length === 0) return;
 		for (const run of unresolved) insertRun(pending.resolved, run.start, run.end);
@@ -294,8 +300,8 @@ export class FillState {
 // The parts of `gap` outside `run`.
 function subtract(gap: Run, run: Run): Run[] {
 	return [
-		{ start: gap.start, end: Math.min(gap.end, run.start) },
-		{ start: Math.max(gap.start, run.end), end: gap.end },
+		{ start: gap.start, end: min(gap.end, run.start) },
+		{ start: max(gap.start, run.end), end: gap.end },
 	].filter((part) => part.start < part.end);
 }
 
@@ -385,14 +391,14 @@ export class Requests {
  */
 export class Fill {
 	/** The first group to fill. */
-	readonly start: number;
+	readonly start: bigint;
 	/** The exclusive end group. */
-	readonly end: number;
+	readonly end: bigint;
 
 	#state: FillState;
 	#pending: Pending;
 	// The value `wantedChanged` last returned, or unset before it returned any.
-	#prev?: { wanted: number | undefined };
+	#prev?: { wanted: bigint | undefined };
 
 	private constructor(state: FillState, pending: Pending) {
 		this.#state = state;
@@ -429,8 +435,9 @@ export class Fill {
 	}
 
 	/** Whether a reader still waits for group `sequence` from this fill. Once false, it stays false. */
-	isWanted(sequence: number): boolean {
-		return this.#pending.owed(sequence, sequence + 1).length > 0;
+	isWanted(sequence: bigint): boolean {
+		checkSequence(sequence);
+		return this.#pending.owed(sequence, sequence + 1n).length > 0;
 	}
 
 	/**
@@ -438,10 +445,10 @@ export class Fill {
 	 * neither answered nor delivered live since it was asked. `undefined` once none is, so stop
 	 * serving the fill.
 	 */
-	wanted(): number | undefined {
+	wanted(): bigint | undefined {
 		const owed = this.#pending.owed();
 		if (owed.length === 0) return undefined;
-		return this.order === "ascending" ? owed[0].start : (owed.at(-1) as Run).end - 1;
+		return this.order === "ascending" ? owed[0].start : (owed.at(-1) as Run).end - 1n;
 	}
 
 	/**
@@ -450,7 +457,7 @@ export class Fill {
 	 * at = await fill.wantedChanged())` serves each group as it becomes owed, and ends once the
 	 * fill is answered or withdrawn.
 	 */
-	async wantedChanged(): Promise<number | undefined> {
+	async wantedChanged(): Promise<bigint | undefined> {
 		for (;;) {
 			const wanted = this.wanted();
 			if (!this.#prev || this.#prev.wanted !== wanted) {
@@ -462,7 +469,8 @@ export class Fill {
 	}
 
 	/** Resolves once no reader waits for group `sequence` from this fill, so stop serving it. */
-	async unwanted(sequence: number): Promise<void> {
+	async unwanted(sequence: bigint): Promise<void> {
+		checkSequence(sequence);
 		while (this.isWanted(sequence)) await this.#pending.revision.changed();
 	}
 
@@ -472,7 +480,8 @@ export class Fill {
 	 * if it has none yet. Throws a `RangeError` outside the fill, and an error if the group was
 	 * already answered or cached, or the track is closed.
 	 */
-	accept(sequence: number, info?: Partial<Info>): GroupProducer {
+	accept(sequence: bigint, info?: Partial<Info>): GroupProducer {
+		checkSequence(sequence);
 		return fillOps.accept(this.#state, this.#pending, sequence, info);
 	}
 
@@ -481,7 +490,9 @@ export class Fill {
 	 * waiting for them, and the track records them so nobody asks again. Only the groups a reader
 	 * still reads count; the rest of the fill was never owed.
 	 */
-	dropGroups(start: number, end: number): void {
+	dropGroups(start: bigint, end: bigint): void {
+		checkSequence(start);
+		checkSequence(end);
 		fillOps.drop(this.#state, this.#pending, start, end);
 	}
 
@@ -490,7 +501,9 @@ export class Fill {
 	 * failed for now. The readers waiting now stop waiting and get `error`; a later reader asks
 	 * again.
 	 */
-	refuseGroups(start: number, end: number, error: Error): void {
+	refuseGroups(start: bigint, end: bigint, error: Error): void {
+		checkSequence(start);
+		checkSequence(end);
 		fillOps.refuse(this.#state, this.#pending, start, end, error);
 	}
 

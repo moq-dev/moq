@@ -214,24 +214,35 @@ function largest(state: BroadcastState, name: string): track.Position | undefine
 	return producer && hooks.cachedLargest(producer);
 }
 
-// Fetch one group as a one-range subscription: the cached group at once, or one the track's
-// {@link track.Requests} fills, or `NotFound` once the track can no longer deliver it. A group
-// not written yet waits for the producer. The default for a produced broadcast; the consuming
-// wire layer overrides it to fetch over the network (or to reject when the transport has no FETCH).
+// Fetch one group as a one-range subscription: the cached group at once, or else one the track's
+// {@link track.Requests} handler answers, asked at once whether the group was written yet or not,
+// as the Rust `fetch_group` does. A group the producer writes meanwhile answers it too. With no
+// handler open, a miss fails at once with `NotFound`. The default for a produced broadcast; the
+// consuming wire layer overrides it to fetch over the network (or to reject when the transport has
+// no FETCH).
 async function fetchGroup(
 	state: BroadcastState,
 	name: string,
-	sequence: number,
+	sequence: bigint,
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
 	const subscriber = subscribe(state, name, {
 		...track.Subscription.default(),
 		priority: options.priority,
-		ranges: [{ start: { absolute: sequence }, end: { absolute: sequence + 1 } }],
+		ranges: [{ start: { absolute: sequence }, end: { absolute: sequence + 1n } }],
 	});
 	hooks.fetchBudget(subscriber, options.maxDelay);
 	try {
+		// Judged in this turn when the track is known, so a cached group is taken before anything
+		// else can change it. A track requested on demand opens its handler once accepted, so its
+		// miss is judged then.
+		let asked = hooks.askFetch(subscriber, sequence);
+		if (asked === "pending") {
+			await untilAborted(subscriber.info(), options.signal);
+			asked = hooks.askFetch(subscriber, sequence);
+		}
+		if (asked !== true) throw new NotFound(`group ${sequence}`);
 		for (;;) {
 			const recv = hooks.tryRecvGroup(subscriber, true);
 			switch (recv.kind) {
