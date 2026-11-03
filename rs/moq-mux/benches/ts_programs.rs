@@ -291,7 +291,8 @@ fn programs(c: &mut Criterion) {
 }
 
 /// Packet batching and program fanout vary independently while each PCR repeats its first
-/// value. This exercises the running arrival clock even on packets routed to no program.
+/// value, so no rate is measured and each program's health clock falls back to arrival,
+/// settled per input chunk, even for programs no packet routes to.
 fn stalled(c: &mut Criterion) {
 	let mut group = c.benchmark_group("ts_stalled");
 	group.measurement_time(Duration::from_secs(2));

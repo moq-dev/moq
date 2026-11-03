@@ -600,17 +600,21 @@ rebase.
 
 ## Input health
 
-Import's timing counters use bounded PCR progression and elapsed arrival time,
-so stalled PCR cannot freeze PAT, PMT or PTS checks. Arrival is sampled per
-input chunk; the next input or EOF grades a fully stopped feed without a timer.
-This diagnoses ingestion, including upstream delays, and does not certify the
-encoder's insertion schedule or PCR accuracy. An instantly read file needs a
-running PCR to establish its interval lengths.
+Import's timing counters grade the encoder's insertion. Each program's health
+clock follows its PCR and, across a stall, the packets the multiplex carries at
+the constant rate the PCR measured, so a stalled PCR cannot freeze PAT, PMT or
+PTS checks, and delivery batching or delay counts nothing. Before a rate is
+measured, or on VBR input, the clock falls back to arrival once each input
+chunk is read: that diagnoses ingestion, upstream delays included. A fully
+stopped input adds no time, by timer or at EOF. PCR accuracy is not certified.
 
 | Coverage | Automated evidence (`just rs test -p moq-mux`) |
 | --- | --- |
-| Single program, PCR absent or repeating while tables/PES continue or stop | [`health::test::a_stalled_pcr_does_not_freeze_timing_checks`](../../rs/moq-mux/src/container/ts/health.rs) |
-| Fully stopped input, next packet or EOF; PCR return rearms the next outage | [`health::test::a_stopped_input_counts_at_the_next_packet_or_eof_and_recovers`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Measured multiplex, PCR absent or frozen while tables/PES continue or stop | [`health::test::a_measured_multiplex_times_a_stalled_pcr_by_its_packets`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Unmeasured input, the same on arrival | [`health::test::a_stalled_pcr_does_not_freeze_timing_checks`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Clean feed delivered in delayed batches, measured or not | [`health::test::batched_delivery_of_a_clean_feed_counts_nothing`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Fully stopped input, judged by what resumes it or ended at EOF | [`health::test::a_stopped_input_is_judged_by_what_resumes_it`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Input held behind a suspected clock step keeps its arrival | [`health::test::held_input_is_graded_at_its_own_arrival`](../../rs/moq-mux/src/container/ts/health.rs) |
 | Shared PES PID, stalled owner or shared PCR PID; each input fault counted once | [`programs::test::a_stalled_owner_cannot_hide_a_shared_pids_outage`](../../rs/moq-mux/src/container/ts/programs.rs) |
 
 These paused-time tests run in the Rust PR gate. `ts_stalled` in the

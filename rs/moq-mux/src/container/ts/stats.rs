@@ -98,11 +98,12 @@ pub struct Snapshot {
 	#[serde(skip_serializing_if = "is_zero")]
 	pub transport_error: u64,
 	/// 2.3a `PCR_repetition_error`: consecutive PCR values more than 100 ms apart, or no
-	/// advancing PCR for over 100 ms of health clock, counted once until PCR returns.
-	/// The health clock advances by the larger of bounded PCR progression and arrival time,
-	/// sampled per input chunk and at EOF without a timer. Arrival includes upstream delays;
-	/// offline input needs ingestion time to expose a stalled PCR. A PCR-bearing signalled
-	/// discontinuity resets the outage, and its PCR value difference is not graded.
+	/// advancing PCR for over 100 ms of health clock, counted once until the PCR advances.
+	/// The health clock follows the PCR and, across a stall, the packets the multiplex carries
+	/// at the constant rate the PCR measured, so it grades the encoder's insertion however the
+	/// input is batched. Without a measured rate it falls back to arrival, read once per input
+	/// chunk, which includes upstream delays. A PCR-bearing signalled discontinuity resets the
+	/// outage, and its PCR value difference is not graded.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub pcr_repetition_error: u64,
 	/// 2.3b `PCR_discontinuity_indicator_error`: consecutive PCR values outside 0 to 100 ms

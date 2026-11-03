@@ -74,9 +74,10 @@ pub struct Programs {
 	clock: Clock,
 	/// The [`Clock`] reading past which the longest-waiting program is late, while one waits.
 	deadline: Option<u64>,
-	/// Earliest arrival that can expire a running program's health check. Kept early when
-	/// a routed packet moves its check later, avoiding a program scan on every input chunk.
-	health_deadline: Option<kio::clock::Instant>,
+	/// Where the input can next expire a program's health check, so a program that reads no
+	/// packet is advanced without a scan of every program per packet. Kept early when a routed
+	/// packet moves its check later.
+	due: health::Due,
 	/// The packets on PIDs no program reads.
 	unclaimed: Unclaimed,
 }
@@ -320,7 +321,7 @@ impl Programs {
 			announced: false,
 			clock: Clock::default(),
 			deadline: None,
-			health_deadline: None,
+			due: health::Due::default(),
 			unclaimed: Unclaimed::default(),
 		}
 	}
@@ -335,17 +336,20 @@ impl Programs {
 
 	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
 		demux.push(data);
-		let arrival = demux.arrival();
-		if self.health_deadline.is_none_or(|deadline| arrival >= deadline) {
-			self.health_deadline = None;
-			for program in &mut self.programs {
-				program.import.arrived(arrival);
-				if let Some(deadline) = program.import.timing().deadline() {
-					self.health_deadline = Some(self.health_deadline.map_or(deadline, |at| at.min(deadline)));
+		let mut read = None;
+		while let Some(packet) = demux.next() {
+			let at = health::At {
+				count: packet.count,
+				arrival: packet.arrival,
+			};
+			read = Some(at.arrival);
+			if self.due.count.is_some_and(|due| at.count >= due) {
+				self.due = health::Due::default();
+				for program in &mut self.programs {
+					program.import.timing_mut().advance(at);
+					self.due = self.due.min(program.import.timing().due());
 				}
 			}
-		}
-		while let Some(packet) = demux.next() {
 			if let Some(pat) = &packet.pat {
 				self.follow(pat)?;
 			} else if self.pmt_pids[usize::from(packet.pid)] {
@@ -371,9 +375,7 @@ impl Programs {
 				let before = (self.pmt_pids[usize::from(packet.pid)] && import.pmt_pid() == Some(packet.pid))
 					.then(|| Before::of(import));
 				import.packet(&packet)?;
-				if let Some(deadline) = import.timing().deadline() {
-					self.health_deadline = Some(self.health_deadline.map_or(deadline, |at| at.min(deadline)));
-				}
+				self.due = self.due.min(import.timing().due());
 				self.clock.offer(index, import);
 				if import.claims_changed() {
 					changed.push((index, before));
@@ -398,6 +400,16 @@ impl Programs {
 			}
 		}
 		demux.drain();
+		// Every packet this chunk completed is read: grade the input through its arrival.
+		if let Some(arrival) = read
+			&& self.due.arrival.is_some_and(|due| arrival >= due)
+		{
+			self.due = health::Due::default();
+			for program in &mut self.programs {
+				program.import.timing_mut().settle(arrival);
+				self.due = self.due.min(program.import.timing().due());
+			}
+		}
 		// Only a program that read something has anything to flush or announce, so a call
 		// costs what it carried rather than one pass over every program.
 		for index in self.touched.drain(..) {
@@ -757,7 +769,7 @@ impl Programs {
 	/// that moved them, if that was a PMT.
 	fn reclaim(&mut self, index: usize, before: Option<&Before>) {
 		// A handover may bring an older interval into another program's health checks.
-		self.health_deadline = Some(kio::clock::Instant::ZERO);
+		self.due = health::Due::NOW;
 		let program = &mut self.programs[index];
 		let claims = program.import.claims();
 		for &pid in program.claims.iter().filter(|pid| claims.binary_search(pid).is_err()) {

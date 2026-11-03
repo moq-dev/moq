@@ -36,28 +36,24 @@ Milestone: ✅ m1. Not chosen: m2.
   tables and PES continue, and with all three stopping: the outage shows in
   the counters either way. Add the case to the TS guide's coverage table.
 
-The draft implements running arrival extrapolation, once-per-outage PCR counts,
-shared-PID handover and EOF checks, with paused-time tests and a batching/fanout
-benchmark. It is incomplete: review found that healthy batching is graded as an
-arrival fault, and packets held by clock-step admission lose their original
-arrival times and are graded before release. Resolve the policy below before
-finishing that accounting. Keep the original arrival time with held input and
-settle it before EOF grading. The draft's clean-feed CLI fixture was changed to
-continuous smaller writes; revisit it under the selected policy.
+Decided 2026-11-03 (maintainer, on
+[moq-dev/moq#7727](https://github.com/moq-dev/moq/pull/7727)): grade insertion.
+
+- ✅ Preserve insertion grading on clean batched delivery: use the multiplex
+  clock where it is measurable, define the fallback for unmeasured or VBR input,
+  and keep held input's arrival history. Not chosen: accept arrival-based
+  ingestion grading, where upstream buffering and batched writes raise the
+  counters on clean insertion.
+
+This changes the fallback above: each program's health clock follows its PCR
+and, across a stall, the packets the multiplex carries at the constant rate the
+PCR measured. Without a measured rate (before the first 2 s window, on VBR
+input, or after the PCR breaks) it falls back to arrival, applied once each
+input chunk is read whole, and a chunk's own PCR, tables and PTS answer for its
+delivery delay. A fully stopped input adds no time, by timer or at EOF: the
+PCR's step when it resumes counts an encoder outage. Input held by clock-step
+admission keeps the arrival of the chunk that completed each packet.
 
 Public API: none expected (stats fields only if a new counter is needed).
 Wire: none.
 
-## Waiting
-
-- Maintainer: settle the clock policy exposed by local review of
-  [moq-dev/moq#7727](https://github.com/moq-dev/moq/pull/7727).
-  1. Preserve encoder-insertion grading on clean batched delivery (recommended):
-     use a multiplex-clock fallback where measurable and settle the supported
-     unmeasured/VBR fallback profile before completing the implementation.
-  2. Accept arrival-based ingestion grading: upstream buffering and batched
-     writes may raise the existing PCR, PAT, PMT and PTS error counters even
-     when encoder insertion is clean.
-  The Plan permits arrival fallback but does not explicitly settle this change
-  in counter meaning. Check: record the choice on the draft PR, then finish
-  held-packet arrival accounting and rerun checks and local review.

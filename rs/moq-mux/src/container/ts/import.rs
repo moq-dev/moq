@@ -373,9 +373,15 @@ impl<E: catalog::Catalog> Import<E> {
 		&self.health
 	}
 
-	/// Advance input health even when no packet routes to this program.
-	pub(super) fn arrived(&mut self, at: kio::clock::Instant) {
-		self.health.arrived(at);
+	/// Input bytes held for a later call, such as behind a suspected clock step.
+	#[cfg(test)]
+	pub(super) fn held(&self) -> usize {
+		self.demux.held()
+	}
+
+	/// The TR 101 290 intervals, for a caller to advance while no packet routes to this program.
+	pub(super) fn timing_mut(&mut self) -> &mut Health {
+		&mut self.health
 	}
 
 	/// Take over the TR 101 290 intervals `health` timed on `pid`, from a
@@ -422,7 +428,6 @@ impl<E: catalog::Catalog> Import<E> {
 
 	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
 		demux.push(data);
-		self.arrived(demux.arrival());
 		// Route one whole packet at a time, so a PMT is parsed (and any PID it declares
 		// registered) before the packets that follow it in the same chunk route.
 		loop {
@@ -444,7 +449,11 @@ impl<E: catalog::Catalog> Import<E> {
 			};
 			match self.steps.judge(demux, &routes) {
 				super::step::Verdict::Route => {}
-				super::step::Verdict::Hold => break,
+				// Held input keeps its arrival, and is graded once routed.
+				super::step::Verdict::Hold => {
+					demux.drain();
+					return self.flush_batch();
+				}
 				super::step::Verdict::Restart(step) => {
 					let remainder = demux.remainder();
 					demux.drain();
@@ -455,6 +464,8 @@ impl<E: catalog::Catalog> Import<E> {
 			let Some(packet) = demux.next() else { break };
 			self.packet(&packet)?;
 		}
+		// Every packet this chunk completed is read: grade the input through its arrival.
+		self.health.flush();
 		demux.drain();
 		self.flush_batch()
 	}
@@ -526,8 +537,11 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// Every packet is graded, but only the media PIDs and the clock route on the
 		// verdict: PSI and section PIDs keep their reassemblers' own.
-		self.health.arrived(packet.arrival);
-		self.health.packet(pkt, continuation);
+		let at = super::health::At {
+			count: packet.count,
+			arrival: packet.arrival,
+		};
+		self.health.packet(pkt, continuation, at);
 		let continuation = Pid::new(pid)
 			.ok()
 			.filter(|pid| self.streams.contains_key(pid) || self.pcr_pid == Some(*pid))
@@ -1866,9 +1880,6 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		if !self.finished {
-			self.arrived(kio::clock::Instant::now());
-		}
 		// A step still being judged never completed: what it held routes as read.
 		if !self.finished && self.steps.settle() {
 			self.decode(&[])?;

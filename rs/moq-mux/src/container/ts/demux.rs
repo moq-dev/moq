@@ -1,6 +1,6 @@
 //! The packet layer of a TS import, run once however many programs read the input.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bytes::Bytes;
 use mpeg2ts::ts::{Pid, TsPacket};
@@ -26,8 +26,10 @@ pub(super) struct Demux {
 	position: u64,
 	/// Packets framed so far, every PID and null stuffing included.
 	packets: u64,
-	/// One arrival timestamp for every packet supplied in a decode call.
-	arrival: Option<kio::clock::Instant>,
+	/// When each pushed input chunk not yet wholly framed arrived, oldest first, with the input
+	/// offset it ends at. A packet is stamped with the chunk that completed it, so input held
+	/// back for a later call keeps its own arrival.
+	arrivals: VecDeque<(u64, kio::clock::Instant)>,
 	health: Multiplex,
 	pat: PatReader,
 	/// PAT sections dropped for a bad CRC.
@@ -71,14 +73,11 @@ impl Demux {
 
 	/// Append input; [`next`](Self::next) frames it.
 	pub fn push(&mut self, data: &[u8]) {
-		if !data.is_empty() {
-			self.arrival = Some(kio::clock::Instant::now());
-		}
 		self.scratch.extend_from_slice(data);
-	}
-
-	pub fn arrival(&self) -> kio::clock::Instant {
-		self.arrival.unwrap_or_else(kio::clock::Instant::now)
+		if !data.is_empty() {
+			let end = self.position + self.scratch.len() as u64;
+			self.arrivals.push_back((end, kio::clock::Instant::now()));
+		}
 	}
 
 	/// The next whole packet pushed, or `None` once only a partial packet remains, at which
@@ -121,9 +120,16 @@ impl Demux {
 			self.sections.extend(sections.into_iter().map(Bytes::from));
 		}
 
+		// Chunks that ended before this packet did are framed already: forget them.
+		let end = offset + TsPacket::SIZE as u64;
+		while self.arrivals.len() > 1 && self.arrivals[0].0 < end {
+			self.arrivals.pop_front();
+		}
+		let arrival = self.arrivals.front().expect("a packet was pushed").1;
+
 		Some(Packet {
 			pkt,
-			arrival: self.arrival.expect("pushed input"),
+			arrival,
 			pid,
 			offset,
 			count: self.packets,
