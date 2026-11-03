@@ -40,6 +40,11 @@ matter.
 
 `tls::Reload` is in `rs/moq-tokio/src/tls.rs:3323` (at be39188000), and
 `Reload::spawn` runs its watcher with a plain `runtime::spawn`.
+These two spawns were planned on 2026-10-30 (maintainer) in a separate
+certificate-reload quest, folded in here on 2026-11-02 since both quests
+named them: the reload watcher's panic surfaces as an error from
+`Listener::accept`, as [moq-dev/moq#7360](https://github.com/moq-dev/moq/pull/7360)
+does for a dead QUIC endpoint.
 [moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494) (merged) folded qmux's reader, writer, and
 WebSocket pump tasks into one caller-spawned `qmux::Driver` per session, so
 qmux spawns nothing and the only task left is the one moq-tokio's

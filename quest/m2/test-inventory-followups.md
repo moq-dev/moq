@@ -1,11 +1,11 @@
-# [S] The test inventory follows every branch selection and covers JS benches
+# [S] The test inventory follows every branch selection
 
 ## Goal
 
 `sh/gh/test-inventory.py` judges every check by the dispatcher branch its
 caller actually selects, including the cargo-fuzz caller check, the
 recipe-runs-tests check, and Python orchestrators' subcommands. It reports
-each orphan once, and it checks JS bench scripts too.
+each orphan once.
 
 ## Plan
 
@@ -25,12 +25,16 @@ for the `#[ignore]` check. Left over:
   counted; follow only the selected one, or report it as unresolved.
 - The failure output lists `benchmark_stream_import` twice. Deduplicate
   orphans by name and location.
-- JS bench scripts: Nightly's JS bench list passes names through
-  `{{ name }}`, which the walk skips. Teach it that pattern (or list the
-  names literally) and require each JS bench a caller.
+- JS bench scripts are left to
+  [JS bench inventory](/quest/m2/js-bench-inventory.md), which plans the
+  same checker change by its 2026-10-30 maintainer decision.
 
 Each fix gets a case in `sh/gh/test-inventory.test.py` that fails on the
 old walk. Optional, only if it falls out: trim `#[ignore]` reasons that
 now duplicate the allowlist's owner (WGC, MediaCodec, NVIDIA).
 
 Public API: none. Wire: none.
+
+## Related
+
+- [The test inventory sees JS bench scripts](/quest/m2/js-bench-inventory.md) - the JS bench half of the same checker
