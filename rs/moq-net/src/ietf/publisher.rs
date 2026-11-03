@@ -764,8 +764,9 @@ impl Served {
 				| Error::Stream(crate::StreamError::Unauthorized),
 			)) => (ietf::PublishDoneStatus::Unauthorized, "not granted"),
 			// PUBLISH_DONE registers no token expiry, and its EXPIRED means the subscription's
-			// own lifetime ran out, so an expired token is reported as no longer granted.
-			Self::Track(Err(Error::Expired | Error::Session(crate::SessionError::Expired))) => {
+			// own lifetime ran out, so an expired token is reported as no longer granted. Its
+			// group streams said EXPIRED_AUTH_TOKEN (see [`Lapse`]).
+			Self::Track(Err(err)) if super::error::token_expired(err) => {
 				(ietf::PublishDoneStatus::Unauthorized, "token expired")
 			}
 			// The code its group streams reset with, so a relay passes a malformed upstream on
@@ -1445,6 +1446,8 @@ impl Publisher {
 			let mut acked: Option<Arc<AtomicU64>> = None;
 			// Set once the track ran to its end, which is all that leaves a join worth keeping.
 			let mut track_ended = false;
+			// Set once the request token lapses, just before the subscription's streams drop.
+			let lapse = Lapse::default();
 			let rendezvous = msg.rendezvous;
 			let subscribed = {
 				let serve = async {
@@ -1479,7 +1482,7 @@ impl Publisher {
 						Ok(track) => track,
 						Err(err) => return refused(err, true),
 					};
-					let (mut track_serve, edge) = match self.subscribe_track(&mut stream, &track, &msg).await {
+					let (mut track_serve, edge) = match self.subscribe_track(&mut stream, &track, &msg, &lapse).await {
 						Some(Ok(subscribed)) => subscribed,
 						Some(Err(err)) => return refused(err, true),
 						None => return Ok(Subscribed::Withdrawn),
@@ -1600,7 +1603,7 @@ impl Publisher {
 						}
 						let resumed = match broadcast.track(&msg.track_name) {
 							Ok(track) => self
-								.subscribe_track(&mut stream, &track, &msg)
+								.subscribe_track(&mut stream, &track, &msg, &lapse)
 								.await
 								.map(|subscribed| subscribed.map(|(serve, edge)| (serve, edge, track))),
 							Err(err) => Some(Err(err)),
@@ -1662,6 +1665,9 @@ impl Publisher {
 						// PUBLISH_DONE carries a fixed reason per status, so only the code reaches
 						// the peer once SUBSCRIBE_OK went out.
 						tracing::info!(broadcast = %broadcast(), track = %track_name, err = %refusal.error, reason = %refusal.reason, "request token grant ended");
+						if super::error::token_expired(&refusal.error) {
+							lapse.set();
+						}
 						return Poll::Ready(refusal);
 					}
 					if gate.poll_denied(waiter).is_ready() {
@@ -2116,6 +2122,7 @@ impl Publisher {
 		stream: &mut Stream<Transport, Version>,
 		track: &crate::track::Consumer,
 		msg: &ietf::Subscribe<'_>,
+		lapse: &Lapse,
 	) -> Option<Result<(TrackServe, LiveEdge), Error>> {
 		let declared = self
 			.until_withdrawn(stream, super::request_stream::fin_cancels(self.version), |waiter| {
@@ -2198,6 +2205,7 @@ impl Publisher {
 		.ranked(self.priority.clone());
 		let mut serve = serve;
 		serve.filter = msg.filter;
+		serve.ranking.lapse = lapse.clone();
 		// A fixed start is no join, so its NEW_GROUP_REQUEST asks as an update's would.
 		if fixed.start.is_some()
 			&& let Some(value) = msg.new_group
@@ -2542,7 +2550,7 @@ impl Publisher {
 			}
 		};
 		opened.fetch_add(1, Ordering::Relaxed);
-		let mut stream = Writer::new(Ranked::new(stream, rank), self.version);
+		let mut stream = Writer::new(Ranked::new(stream, rank).lapsing(&ranking.lapse), self.version);
 
 		let res = async {
 			stream.varint(FetchHeader::TYPE).await?;
@@ -3079,6 +3087,7 @@ impl Publisher {
 					priority: kio::Producer::new(priority).consume(),
 					publisher: 0,
 					order: Order::Descending,
+					lapse: Lapse::default(),
 				};
 				(track, start, end, false, ranking, gate)
 			}
@@ -3153,10 +3162,20 @@ impl Publisher {
 					.is_ready()
 			})
 		};
-		let expired = |waiter: &kio::Waiter| {
-			token_grant
-				.as_ref()
-				.is_some_and(|grant: &crate::auth::RequestGrant| grant.poll_ended(waiter).is_ready())
+		// A standalone FETCH's own token, which its gate holds, or a joining one's subscription's.
+		let token_grant = token_grant.or_else(|| gate.token_guard());
+		// Set once that token lapses, so the streams this FETCH answers on say so.
+		let lapse = Lapse::default();
+		// Ready with why the token's grant ended, ahead of the gate it also closes, so a lapse
+		// is refused as one.
+		let token_ended = |waiter: &kio::Waiter| match &token_grant {
+			Some(grant) => grant.poll_ended(waiter).map(|refusal| {
+				if super::error::token_expired(&refusal.error) {
+					lapse.set();
+				}
+				refusal
+			}),
+			None => Poll::Pending,
 		};
 
 		// Read the group before FETCH_OK promises it, while a refusal is still possible.
@@ -3182,7 +3201,10 @@ impl Publisher {
 				{
 					return Poll::Ready(None);
 				}
-				if gate.poll_denied(waiter).is_ready() || unsubscribed(waiter) || expired(waiter) {
+				if let Poll::Ready(refusal) = token_ended(waiter) {
+					return Poll::Ready(Some(Err((refusal.error, refusal.reason))));
+				}
+				if gate.poll_denied(waiter).is_ready() || unsubscribed(waiter) {
 					let err = Error::Unauthorized;
 					let reason = err.to_string();
 					return Poll::Ready(Some(Err((err, reason))));
@@ -3269,7 +3291,10 @@ impl Publisher {
 		let res = {
 			let mut ok = std::pin::pin!(ok);
 			kio::wait(|waiter| {
-				if gate.poll_denied(waiter).is_ready() || unsubscribed(waiter) || expired(waiter) {
+				if let Poll::Ready(refusal) = token_ended(waiter) {
+					return Poll::Ready(Err(refusal.error));
+				}
+				if gate.poll_denied(waiter).is_ready() || unsubscribed(waiter) {
 					return Poll::Ready(Err(Error::Unauthorized));
 				}
 				waiter.poll_future(ok.as_mut())
@@ -3277,7 +3302,7 @@ impl Publisher {
 			.await
 		};
 		if let Err(err) = res {
-			stream.writer.abort(&err);
+			lapse.abort(stream.writer, &err);
 			return Err(err);
 		}
 
@@ -3290,7 +3315,7 @@ impl Publisher {
 				.open_uni(rank.options())
 				.await
 				.map_err(Error::from_transport)?;
-			let mut writer = Writer::new(Ranked::new(uni, Some(rank)), self.version);
+			let mut writer = Writer::new(Ranked::new(uni, Some(rank)).lapsing(&lapse), self.version);
 			writer.varint(FetchHeader::TYPE).await?;
 			writer
 				.encode(&FetchHeader {
@@ -3316,7 +3341,10 @@ impl Publisher {
 				{
 					return Poll::Ready(None);
 				}
-				if gate.poll_denied(waiter).is_ready() || expired(waiter) {
+				if let Poll::Ready(refusal) = token_ended(waiter) {
+					return Poll::Ready(Some(Err(refusal.error)));
+				}
+				if gate.poll_denied(waiter).is_ready() {
 					return Poll::Ready(Some(Err(Error::Unauthorized)));
 				}
 				waiter.poll_future(respond.as_mut()).map(Some)
@@ -3330,7 +3358,7 @@ impl Publisher {
 		if let Err(err) = res {
 			// The fetch stream, if open, reset as it dropped with the response. Once FETCH_OK
 			// is out, no REQUEST_ERROR can follow it, so the reset is the whole refusal.
-			stream.writer.abort(&err);
+			lapse.abort(stream.writer, &err);
 			return Err(err);
 		}
 
@@ -4732,6 +4760,37 @@ struct Terminal {
 	sent: AtomicBool,
 }
 
+/// Whether the request token that admitted a request lapsed, shared by the streams the
+/// request answers on.
+///
+/// A grant's end drops the request's serving from outside, so its streams learn why only
+/// here: each one torn down after a lapse resets with EXPIRED_AUTH_TOKEN instead of its usual
+/// code, telling the requester to renew its token rather than give up. A revoked or narrowed
+/// grant leaves it unset, as does every other end, and so does an error that only says a
+/// token expired elsewhere, such as an upstream's.
+#[derive(Clone, Default)]
+struct Lapse(Arc<AtomicBool>);
+
+impl Lapse {
+	/// Record the lapse, before the subscription's streams are dropped.
+	fn set(&self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
+
+	fn lapsed(&self) -> bool {
+		self.0.load(Ordering::Relaxed)
+	}
+
+	/// Cancel a request whose answer is already out, with EXPIRED_AUTH_TOKEN once its token
+	/// lapsed, as no [`StreamError`](crate::StreamError) says, and otherwise as `err` does.
+	fn abort<S: crate::transport::poll::SendStream>(&self, writer: Writer<S, Version>, err: &Error) {
+		match self.lapsed() {
+			true => writer.reset(super::error::EXPIRED_AUTH_TOKEN),
+			false => writer.abort(err),
+		}
+	}
+}
+
 struct SubscriptionFill {
 	fill: FillServe,
 	largest: Option<Location>,
@@ -4874,6 +4933,7 @@ impl TrackServe {
 			priority: priority.consume(),
 			publisher,
 			order: track.subscription().order,
+			lapse: Lapse::default(),
 		};
 
 		Self {
@@ -5119,6 +5179,7 @@ impl TrackServe {
 		)
 		.counted(self.opened.clone())
 		.terminal(self.terminal.clone())
+		.lapsing(self.ranking.lapse.clone())
 		.bounded(self.bounds.consume(), retired)
 	}
 
@@ -5356,6 +5417,9 @@ struct Ranking<G> {
 	publisher: i8,
 	/// The request's GROUP_ORDER, fixed for its life: no update carries it.
 	order: Order,
+	/// A subscription's, which its streams opt into. A joining FETCH copies its subscription's
+	/// ranking but never attaches this: its own stream is not the subscription's.
+	lapse: Lapse,
 }
 
 impl<G: Clone> Ranking<G> {
@@ -5398,14 +5462,26 @@ struct RankedInner<T: crate::transport::poll::SendStream> {
 	stream: T,
 	/// Absent for a stream that only carries a refusal.
 	rank: Option<Rank<T::Group>>,
+	/// The subscription's, for a stream it opened, so a reset once its token lapsed says so.
+	lapse: Option<Lapse>,
 }
 
 impl<T: crate::transport::poll::SendStream> Ranked<T> {
 	/// Wrap a stream opened with its rank's [options](Rank::options).
 	fn new(stream: T, rank: Option<Rank<T::Group>>) -> Self {
 		Self {
-			inner: std::sync::Mutex::new(RankedInner { stream, rank }),
+			inner: std::sync::Mutex::new(RankedInner {
+				stream,
+				rank,
+				lapse: None,
+			}),
 		}
+	}
+
+	/// Reset with EXPIRED_AUTH_TOKEN once `lapse` is set, whatever the reset says.
+	fn lapsing(mut self, lapse: &Lapse) -> Self {
+		self.get_mut().lapse = Some(lapse.clone());
+		self
 	}
 
 	fn get_mut(&mut self) -> &mut RankedInner<T> {
@@ -5452,7 +5528,13 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.get_mut().stream.reset(code);
+		let inner = self.get_mut();
+		// Set only once the subscription is being dropped, so this is its writer's fallback.
+		let code = match inner.lapse.as_ref().is_some_and(Lapse::lapsed) {
+			true => super::error::EXPIRED_AUTH_TOKEN,
+			false => code,
+		};
+		inner.stream.reset(code);
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
@@ -5513,7 +5595,7 @@ impl EndOfTrack {
 		let stream =
 			wait!(Open => serve.session.poll_open_uni(waiter, rank.options())).map_err(Error::from_transport)?;
 		serve.opened.fetch_add(1, Ordering::Relaxed);
-		let stream = Ranked::new(stream, Some(rank));
+		let stream = Ranked::new(stream, Some(rank)).lapsing(&serve.ranking.lapse);
 		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
 			Writer::new(stream, serve.version);
 		writer.buffer(&ietf::GroupHeader {
@@ -5664,6 +5746,8 @@ struct GroupServe {
 	ended: bool,
 	terminal: Option<Arc<Terminal>>,
 	marked: bool,
+	/// The subscription's, so a stream dropped once its token lapsed says so.
+	lapse: Option<Lapse>,
 	state: GroupState,
 	/// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
@@ -5707,6 +5791,18 @@ impl kio::Task for GroupServe {
 	}
 }
 
+impl Drop for GroupServe {
+	fn drop(&mut self) {
+		// The writer's own fallback would say CANCELLED, which a lapse is not.
+		if self.lapse.as_ref().is_some_and(Lapse::lapsed)
+			&& let GroupState::Serve { writer, .. } | GroupState::Closed { writer } =
+				std::mem::replace(&mut self.state, GroupState::Done)
+		{
+			writer.reset(super::error::EXPIRED_AUTH_TOKEN);
+		}
+	}
+}
+
 impl GroupServe {
 	fn new(
 		session: Transport,
@@ -5738,6 +5834,7 @@ impl GroupServe {
 			ended: false,
 			terminal: None,
 			marked: false,
+			lapse: None,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
 		}
@@ -5776,6 +5873,11 @@ impl GroupServe {
 
 	fn terminal(mut self, terminal: Arc<Terminal>) -> Self {
 		self.terminal = Some(terminal);
+		self
+	}
+
+	fn lapsing(mut self, lapse: Lapse) -> Self {
+		self.lapse = Some(lapse);
 		self
 	}
 
@@ -9580,7 +9682,7 @@ mod serve_tests {
 			auth.handle().authorize(&nothing());
 			let output = crate::broadcast::Info::new().produce();
 			let _track = output.create_track("video", None).unwrap();
-			request.accept(&output);
+			request.serve(&output);
 			answer.await;
 
 			let code = refusal_code(&h.log.writes.lock().unwrap()[mark..], version);
@@ -10494,6 +10596,7 @@ mod serve_tests {
 			priority: priority.consume(),
 			publisher: 0,
 			order: Order::Descending,
+			lapse: Lapse::default(),
 		};
 		let [higher, _older, _later, _lower] = rival_streams(&queue, ranking.request_id);
 		// Newest first: the subscription's group 5 goes ahead of the fill, and group 3 after.
@@ -10554,6 +10657,7 @@ mod serve_tests {
 			priority: kio::Producer::new(PRIORITY).consume(),
 			publisher: 0,
 			order: Order::Descending,
+			lapse: Lapse::default(),
 		};
 		// The live stream, from object 1 on, queued first so the slab id alone would favor it.
 		let Rank::Queue(mut live) = ranking.rank(Location { group: 4, object: 1 }) else {
@@ -11477,6 +11581,106 @@ mod serve_tests {
 		}
 	}
 
+	/// How a token subscription's grant ends while its group stream is still open.
+	#[derive(Clone, Copy, Debug)]
+	enum TokenEnd {
+		/// The grant's deadline passes.
+		Lapsed,
+		/// The acceptor revokes it as expired.
+		RevokedExpired,
+		/// The acceptor revokes it.
+		Revoked,
+	}
+
+	/// A token subscription's group stream still open when its grant ends resets with
+	/// EXPIRED_AUTH_TOKEN once the token expired, so the subscriber knows to renew it, and
+	/// with CANCELLED when it was revoked. PUBLISH_DONE says UNAUTHORIZED either way.
+	#[kio::test]
+	async fn a_lapsed_token_resets_its_groups_as_expired() {
+		for version in ALL_VERSIONS {
+			for end in [TokenEnd::Lapsed, TokenEnd::RevokedExpired, TokenEnd::Revoked] {
+				let (auth, mut requests, _cred) = auth_covering_other();
+				let h = serve_with_auth(version, auth, Vec::new());
+				let rt = h.publisher.runtime.clone();
+
+				let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+					.await
+					.unwrap();
+				let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+				let accepted = async { requests.next().await.expect("a request") };
+				let request = match futures::future::select(std::pin::pin!(accepted), serving.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request,
+					futures::future::Either::Right((res, _)) => panic!("{version} {end:?}: ended unverified: {res:?}"),
+				};
+				let enforced = request.accept(grant_all_expiring(&rt, Some(60)));
+				serve_until(serving.as_mut(), "SUBSCRIBE_OK was sent", || !h.log.trail().is_empty()).await;
+
+				// A group left open, so its stream is still serving when the grant ends.
+				let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+				group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
+				serve_until(serving.as_mut(), "the group stream opened", || {
+					!data_streams(&h.log).is_empty()
+				})
+				.await;
+
+				match end {
+					TokenEnd::Lapsed => kio::clock::sleep(Duration::from_secs(61)).await,
+					TokenEnd::RevokedExpired => enforced.revoke(crate::SessionError::Expired, "expired"),
+					TokenEnd::Revoked => enforced.revoke(crate::SessionError::Unauthorized, "revoked"),
+				}
+				let _ = kio::clock::timeout(Duration::from_secs(1), serving.as_mut())
+					.await
+					.unwrap_or_else(|_| panic!("{version} {end:?}: the subscription outlived its grant"));
+
+				let resets: Vec<u32> = data_streams(&h.log)
+					.into_values()
+					.filter_map(|sent| {
+						sent.into_iter().find_map(|sent| match sent {
+							Sent::Reset(code) => Some(code),
+							_ => None,
+						})
+					})
+					.collect();
+				let expected = match end {
+					TokenEnd::Lapsed | TokenEnd::RevokedExpired => 0x7,
+					TokenEnd::Revoked => crate::StreamError::Cancel.to_code(),
+				};
+				assert_eq!(resets, vec![expected], "{version} {end:?}");
+				let wire = Wire::read(&h.log, version);
+				let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
+				assert_eq!(
+					status,
+					ietf::PublishDoneStatus::Unauthorized.code(),
+					"{version} {end:?}"
+				);
+				wire.assert_streams_closed_before_publish_done();
+				drop(group);
+			}
+		}
+	}
+
+	/// A subscription's fill and END_OF_TRACK streams reset as its group streams do: dropped
+	/// once its token lapsed, with EXPIRED_AUTH_TOKEN, and otherwise as the writer does.
+	#[test]
+	fn a_lapsed_subscriptions_ranked_streams_reset_as_expired() {
+		for lapsed in [false, true] {
+			let log = Log::default();
+			let lapse = Lapse::default();
+			let stream =
+				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone()));
+			let writer = Writer::new(Ranked::new(stream, None).lapsing(&lapse), Version::Draft22);
+			if lapsed {
+				lapse.set();
+			}
+			drop(writer);
+			let expected = match lapsed {
+				true => 0x7,
+				false => crate::StreamError::Cancel.to_code(),
+			};
+			assert_eq!(log.resets(), vec![expected], "lapsed: {lapsed}");
+		}
+	}
+
 	#[kio::test]
 	async fn a_joining_fetch_rejects_unsupported_filters() {
 		for version in JOINING_DRAFTS {
@@ -11758,6 +11962,152 @@ mod serve_tests {
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([2]), "{version}");
 			assert!(h.log.resets().is_empty(), "{version}");
+		}
+	}
+
+	/// Where a token FETCH waits when its grant ends.
+	#[derive(Clone, Copy, Debug)]
+	enum FetchParked {
+		/// Resolving a broadcast whose route never answers, before FETCH_OK.
+		Resolving,
+		/// After FETCH_OK, on a data stream whose FIN the peer never acknowledges.
+		Responding,
+	}
+
+	/// A standalone FETCH's request token ending ends it wherever it waits. Once the token
+	/// expired, it is refused with REQUEST_ERROR EXPIRED_AUTH_TOKEN before FETCH_OK, and after
+	/// it, its data and request streams reset with EXPIRED_AUTH_TOKEN. A revoked token is
+	/// refused as UNAUTHORIZED, and after FETCH_OK cancels the data stream and resets the
+	/// request stream with INTERNAL_ERROR.
+	#[kio::test]
+	async fn a_lapsed_token_ends_a_fetch_as_expired() {
+		for version in FETCH_DRAFTS {
+			for parked in [FetchParked::Resolving, FetchParked::Responding] {
+				for end in [TokenEnd::Lapsed, TokenEnd::RevokedExpired, TokenEnd::Revoked] {
+					lapsed_fetch(version, parked, end).await;
+				}
+			}
+		}
+	}
+
+	async fn lapsed_fetch(version: Version, parked: FetchParked, end: TokenEnd) {
+		let (auth, mut requests, _cred) = auth_covering_other();
+		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_uni_fins(1);
+		let mut h = serve_on(version, auth, session);
+		let rt = h.publisher.runtime.clone();
+		publish_pairs(&mut h, 1, None);
+		settle().await;
+
+		let mut fetch_type = fetch_range(
+			version,
+			"video",
+			Location { group: 0, object: 0 },
+			Location { group: 0, object: 0 },
+		);
+		// A namespace whose route never answers, so the FETCH waits on resolving it.
+		let _route = match parked {
+			FetchParked::Resolving => {
+				if let FetchType::Standalone { namespace, .. } | FetchType::Filtered { namespace, .. } = &mut fetch_type
+				{
+					*namespace = crate::Path::from_static("lobby");
+				}
+				Some(
+					h._origin
+						.requests_route("lobby", crate::origin::Route::default(), None)
+						.unwrap(),
+				)
+			}
+			FetchParked::Responding => None,
+		};
+		let msg = ietf::Fetch {
+			authorization_token: Some(request_token()),
+			request_id: FETCH_ID,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Ascending,
+			fetch_type,
+			range_filters: false,
+			fill_timeout: false,
+			properties_wanted: true,
+		};
+		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+			.await
+			.unwrap();
+		let mut fetching = std::pin::pin!(h.publisher.clone().run_fetch_stream(stream, msg));
+		let accepted = async { requests.next().await.expect("a request") };
+		let request = match futures::future::select(std::pin::pin!(accepted), fetching.as_mut()).await {
+			futures::future::Either::Left((request, _)) => request,
+			futures::future::Either::Right((res, _)) => {
+				panic!("{version} {parked:?} {end:?}: ended unverified: {res:?}")
+			}
+		};
+		let enforced = request.accept(grant_all_expiring(&rt, Some(60)));
+		match parked {
+			FetchParked::Resolving => {
+				for _ in 0..50 {
+					assert!(
+						futures::poll!(fetching.as_mut()).is_pending(),
+						"{version} {parked:?} {end:?}: ended before its grant did"
+					);
+					settle().await;
+				}
+				assert!(h.log.trail().is_empty(), "{version} {parked:?} {end:?}: answered");
+			}
+			FetchParked::Responding => {
+				serve_until(fetching.as_mut(), "the fetch stream finished", || {
+					data_streams(&h.log).values().any(|sent| sent.contains(&Sent::Finish))
+				})
+				.await;
+			}
+		}
+
+		match end {
+			TokenEnd::Lapsed => kio::clock::sleep(Duration::from_secs(61)).await,
+			TokenEnd::RevokedExpired => enforced.revoke(crate::SessionError::Expired, "expired"),
+			TokenEnd::Revoked => enforced.revoke(crate::SessionError::Unauthorized, "revoked"),
+		}
+		let _ = kio::clock::timeout(Duration::from_secs(1), fetching.as_mut())
+			.await
+			.unwrap_or_else(|_| panic!("{version} {parked:?} {end:?}: outlived its grant"));
+
+		let expired = !matches!(end, TokenEnd::Revoked);
+		let trail = h.log.trail();
+		let request = request_stream(&trail);
+		let resets = |on_request: bool| -> Vec<u32> {
+			trail
+				.iter()
+				.filter(|(stream, _)| (*stream == request) == on_request)
+				.filter_map(|(_, sent)| match sent {
+					Sent::Reset(code) => Some(*code),
+					_ => None,
+				})
+				.collect()
+		};
+		match parked {
+			FetchParked::Resolving => {
+				let err = match expired {
+					true => Error::Expired,
+					false => Error::Unauthorized,
+				};
+				let wire = h.log.writes.lock().unwrap().clone();
+				assert_eq!(
+					refusal_code(&wire, version),
+					Some(request::to_code(&err, request::Kind::Fetch, version)),
+					"{version} {parked:?} {end:?}"
+				);
+				assert!(resets(true).is_empty(), "{version} {parked:?} {end:?}");
+			}
+			FetchParked::Responding => {
+				let (data, request) = match expired {
+					true => (0x7, 0x7),
+					false => (crate::StreamError::Cancel.to_code(), 0x0),
+				};
+				assert_eq!(resets(false), vec![data], "{version} {parked:?} {end:?}: data stream");
+				assert_eq!(
+					resets(true),
+					vec![request],
+					"{version} {parked:?} {end:?}: request stream"
+				);
+			}
 		}
 	}
 
@@ -12940,7 +13290,15 @@ mod serve_tests {
 			let finished = matches!(end, JoinEnd::Ended | JoinEnd::TokenEnded);
 			match finished {
 				true => assert!(res.is_ok(), "{version} {end:?}: {res:?}"),
-				false => assert!(matches!(res, Err(Error::Unauthorized)), "{version} {end:?}: {res:?}"),
+				// The token's own refusal, as the subscription reports it: the acceptor's code for a
+				// revocation, and no longer granted for a narrowing.
+				false => assert!(
+					matches!(
+						res,
+						Err(Error::Unauthorized | Error::Session(crate::SessionError::Unauthorized))
+					),
+					"{version} {end:?}: {res:?}"
+				),
 			}
 			if let Some(subscription) = subscription {
 				let _ = kio::clock::timeout(std::time::Duration::from_secs(1), subscription)
@@ -13079,7 +13437,7 @@ mod serve_tests {
 			.expect("the fetch never ended")
 			.expect("the fetch panicked");
 		assert!(
-			matches!(res, Err(Error::Unauthorized)),
+			matches!(res, Err(Error::Session(crate::SessionError::Unauthorized))),
 			"kept serving under the refused token: {res:?}"
 		);
 		assert_eq!(occurrences(&join.h.log, ANSWERED_HEAD), 0, "the head on the wire");
@@ -13101,7 +13459,12 @@ mod serve_tests {
 			.await
 			.expect("the fetch outlived its token")
 			.expect("the fetch panicked");
-		assert!(matches!(res, Err(Error::Unauthorized)), "{res:?}");
+		assert!(matches!(res, Err(Error::Expired)), "{res:?}");
+		assert!(
+			join.h.log.resets().contains(&crate::ietf::error::EXPIRED_AUTH_TOKEN),
+			"the lapse was not reset as one: {:?}",
+			join.h.log.resets()
+		);
 		assert_eq!(occurrences(&join.h.log, ANSWERED_HEAD), 0, "the head on the wire");
 	}
 

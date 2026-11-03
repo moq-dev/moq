@@ -11,16 +11,17 @@
 //!   per platform: a microphone via cpal (CoreAudio / WASAPI / ALSA) everywhere,
 //!   or macOS system audio via ScreenCaptureKit. `capture::Source` picks between
 //!   them and `capture::devices` lists the inputs and hands back the ids it
-//!   takes. Requires the `capture` feature, so these names are unlinked here:
+//!   takes. Open `capture::Producer` once, give each bus or encoder a consumer,
+//!   and drive its `run` alongside them. Requires the `capture` feature:
 //!   they don't exist in a default build.
 //! - [`encode`] encodes PCM and publishes it through `moq_mux::container`,
 //!   registering the rendition in the `hang` catalog. Two entry points:
-//!   - `encode::Control::new` returns a `Control` handle and the `Driver`
-//!     that captures the microphone. The handle starts, stops, and replaces
-//!     the input while preserving one track identity, and reports the active
-//!     device, failures, and post-processing level.
-//!   - `encode::publish_capture` is the turnkey shorthand. The track and
-//!     catalog are advertised up front. Capture keeps running while raw audio
+//!   - `encode::Control::new` takes a capture consumer and returns a `Control`
+//!     and `Driver`. The handle starts, stops, and replaces this track's reader,
+//!     preserving track identity without controlling the shared device.
+//!   - `encode::publish_capture` is the turnkey shorthand for an already-open
+//!     capture consumer. Its rendition is registered before processing samples.
+//!     Capture keeps running while raw audio
 //!     waits for a subscriber, then encodes that history and continues live.
 //!     Set `encode::Capture::on_demand` to false to encode continuously instead.
 //!   - [`encode::Producer`] publishes PCM you hand it.

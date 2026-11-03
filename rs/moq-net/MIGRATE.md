@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `group::on_track` is `track::Info::rescale` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+The free function `moq_net::group::on_track(timestamp, timescale)` is removed.
+Call `rescale(timestamp)` on the track's `Info` instead (`track.info().rescale(timestamp)` on a producer); it returns the same result and the same `Error::TimestampMismatch`.
+
 ### `Subscription::max_delay` is `delay: track::Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `track::Subscription` carries a `track::Delay { min, max }` in place of `max_delay`, and `with_max_delay(d)` is `with_delay(Delay)`.
@@ -75,10 +80,10 @@ Pass a prefix without a trailing `/`: `Path::from_static("room")` covers `room/c
 `Path::from_escaped` is gone, and `path::TooLong` is `path::Error::TooLong`. `Path::head(n)` returns the path's first `n` segments.
 moq-lite decoding refuses a path with an empty segment as a protocol violation, and moq-transport decoding refuses a namespace field ending in `/`, which escapes to one.
 
-### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+### moq-transport drafts 14 through 17, 19, and 21 are removed ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753), [moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754))
 
-`ietf::Version::Draft14` through `Draft17` are gone, and a peer offering only those versions, by ALPN or in the moql SETUP, fails the handshake.
-Peers must speak moq-transport draft 18 or later, or moq-lite.
+`ietf::Version::Draft14` through `Draft17`, `Draft19`, and `Draft21` are gone, and a peer offering only those versions, by ALPN or in the moql SETUP, fails the handshake.
+Peers must speak moq-transport draft 18, 20, or 22, or moq-lite.
 The moql SETUP (no ALPN, or `moql`) now negotiates only moq-lite versions.
 `session::Limits::requests` is removed: stream credit bounds every peer request, so drop the field and keep `announces`.
 
@@ -308,7 +313,8 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 Answer each `origin::Request` with `request.prepare()?`, fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under a fresh instance of its own and returns its producer.
 Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
-`Request::accept`, `Producer::dynamic_route`, and `Dynamic::update_route` are crate-private (#6496): only the built-in sessions answer with a broadcast they already hold.
+`Producer::requests_route` and `Requests::update_route` remain crate-private (#6496).
+`Request::serve(consumer)` additively exposes the former private `accept`: answer with a held broadcast without announcing an exact route. The prefix route promises the same bytes and continuous sequences at each served path; start a new prefix route for different content, or prepare and publish an independent job.
 Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
 
 ### Anchors can name a time (#6074)
