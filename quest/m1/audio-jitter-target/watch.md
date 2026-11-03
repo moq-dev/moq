@@ -69,21 +69,66 @@ each after 30 s) exceed it by a median of 10 to 16 ms and at most 44 to 81 ms.
 Stretching the cushion across that wait means playing at `1 - k` of real time
 from the moment the ring dips, with `k = excess / delay`. That is 11 to 31% at
 the median, 30 to 47% at p90, and up to 38 to 71%. A bound of a few percent
-per quantum cannot meet the Goal. The stretch has to deepen as the ring drains
-below its cushion, repeating pitch periods of received audio for tens of
-milliseconds, as NetEq's preemptive expand does, and accelerate by removing
-pitch periods where the ring would otherwise skip ahead.
+per quantum cannot meet the Goal.
 
-### Implementation
+### Implementation: copy NetEq
 
-- WSOLA-style expand and accelerate on the PCM the ring hands out, driven by
-  the distance between buffered audio and the target. Put it where
-  `js/watch/src/audio/replay.ts` exercises it, such as `AudioRingBuffer`'s read
-  path or a module the render worklet and the replay share, so the replay rows
-  measure the stretch and not a model of it.
-- A re-stall remains for a ring that empties despite the stretch, and a
-  skip-ahead remains only for a distance the stretch cannot close within a
-  bound.
+Decided 2026-11-03 (maintainer): copy what WebRTC's NetEq does. The stretch
+removes or repeats whole pitch periods of received audio, found by
+autocorrelation, and cross-fades across the seam. It is not a generic
+resampler or a phase vocoder. The mirrored files are in WebRTC's
+`modules/audio_coding/neteq/`, read at `a057d00e46` (2026-11-03):
+
+- `time_stretch.cc` and `time_stretch.h`, the shared search. Downsample to
+  4 kHz and autocorrelate over lags `kMinLag` 10 to `kMaxLag` 60 (2.5 to 15 ms
+  pitch periods), over `kCorrelationLen` 50. Then refine the best peak at full
+  rate (`DspHelper::PeakDetection`), and normalise the cross-correlation by
+  the two segments' energies. `SpeechDetection` treats a segment as passive
+  when its energy per pitch sample is at most 8 times the background noise's
+  (a fixed 75000 before noise is estimated). Passive audio may stretch
+  regardless of correlation.
+- `accelerate.cc`. With at least 30 ms of input, keep the first 15 ms,
+  cross-fade one pitch period onto it, and drop that period. It stretches only
+  when the correlation is over `kCorrelationThreshold` (0.9 in Q14) or the
+  audio is passive. Fast accelerate lowers the bar to 0.5 and removes as many
+  whole periods as fit in 15 ms.
+- `preemptive_expand.cc`. Under the same 0.9 test, with at most 15 ms of old
+  data ahead of the seam, repeat one pitch period after the unmodified part
+  and cross-fade it in.
+- `decision_logic.cc` and `decision_logic.h`, when to stretch. The low limit
+  is the target and the high limit is the target plus the arrival history's
+  maximum delay plus `kDelayAdjustmentGranularityMs` (20 ms).
+  - Preemptive expand when the playout delay is under the low limit.
+  - Accelerate at or above the high limit.
+  - Fast accelerate at four times the high limit.
+  - At most one stretch every `kMinTimescaleInterval` (5) ticks of 10 ms.
+
+  Here the target is `Sync`'s resolved delay, and the arrival history's
+  maximum is the estimator's.
+
+NetEq decides once per 10 ms of output, and our worklet renders 128-sample
+quanta. So the stretch runs on blocks of decoded PCM before they reach the
+render quantum, where at least 30 ms are buffered.
+
+One boundary differs from NetEq. NetEq preemptive-expands only while the next
+packet is already buffered (`ExpectedPacketAvailable`). Once it is missing,
+NetEq runs Expand, which is concealment and outside this quest. At NetEq's
+cadence, one period of at most 15 ms every 50 ms, preemptive expand slows
+playback by about a quarter at most. That covers the median late frame above
+but not the 38 to 71% tail. So the work is: start at NetEq's thresholds,
+measure `relay-mic-rtt40`, and only then decide how to close the tail. Options
+are expanding sooner or more often as the ring nears empty, or accepting the
+remaining re-stalls. Each departure from NetEq's constants is recorded with
+the replay numbers that justify it.
+
+- Put the stretch where `js/watch/src/audio/replay.ts` exercises it, such as
+  `AudioRingBuffer`'s read path or a module the render worklet and the replay
+  share, so the replay rows measure the stretch and not a model of it. Port
+  the search with unit tests against NetEq's behaviour on synthetic periodic
+  and noise signals.
+- Accelerate replaces the skip-ahead when the ring sits above the high
+  limit. A re-stall remains for a ring that empties despite the stretch, and a
+  skip-ahead remains only above what fast accelerate can close.
 - Verification: `relay-mic-rtt40` reaches 0 `player_underruns_per_min` and its
   budget is tightened to the new measurement. No other replay row regresses,
   and the nightly browser rows are re-measured by the budgets note's rule. A
@@ -108,10 +153,11 @@ A/V clock work.
 ## Waiting
 
 - Maintainer: Safari with 40 ms or more of added RTT, the baseline row the
-  2026-11-03 run could not shape. On the MacBook Air, install Network Link
-  Conditioner (Additional Tools for Xcode) or allow `sudo dnctl`/`pfctl`, then
-  play `cdn.moq.dev/anon` in Safari with the stats panel open for two minutes,
-  and record its audio Underruns after 30 s and the latency tab's auto delay.
+  2026-11-03 run could not shape. On the MacBook Air (`kixtop`), install
+  Network Link Conditioner (Additional Tools for Xcode) or allow
+  `sudo dnctl`/`pfctl`, then play `cdn.moq.dev/anon` in Safari with the stats
+  panel open for two minutes, and record its audio Underruns after 30 s and the
+  latency tab's auto delay.
 
 ## Required
 
