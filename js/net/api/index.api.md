@@ -626,6 +626,22 @@ export namespace Track {
 		priority?: number;
 		signal?: AbortSignal;
 	}
+	export class Fill {
+		[Symbol.dispose](): void;
+		accept(sequence: number, info?: Partial<Track.Info>): Group.Producer;
+		close(): void;
+		dropGroups(start: number, end: number): void;
+		readonly end: number;
+		isWanted(sequence: number): boolean;
+		get maxDelay(): Milli | null;
+		get order(): Track.Order;
+		get priority(): number;
+		refuseGroups(start: number, end: number, error: Error): void;
+		readonly start: number;
+		unwanted(sequence: number): Promise<void>;
+		wanted(): number | undefined;
+		wantedChanged(): Promise<number | undefined>;
+	}
 	export interface Groups {
 		end?: Track.Bound;
 		start?: Track.Bound;
@@ -680,6 +696,7 @@ export namespace Track {
 		largest(): Track.Position | undefined;
 		readonly name: string;
 		get priority(): number;
+		requests(): Track.Requests;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
@@ -695,6 +712,12 @@ export namespace Track {
 		get priority(): number;
 		reject(err: Error): void;
 		get subscription(): Readonly<Track.Subscription>;
+	}
+	export class Requests {
+		[Symbol.dispose](): void;
+		close(): void;
+		get name(): string;
+		requestedFill(): Promise<Track.Fill | undefined>;
 	}
 	export class Subscriber {
 		close(abort?: Error): void;

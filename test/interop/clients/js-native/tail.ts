@@ -54,7 +54,8 @@ if (
 function frames(sequence: number): Uint8Array[] {
 	if (compress)
 		return [new Uint8Array(BYTES / 2).fill(sequence), new Uint8Array(0), new Uint8Array(BYTES / 2).fill(sequence)];
-	if (cached || history || late) return [0, 1, 2].map((index) => new Uint8Array(BYTES / 4).fill(sequence * 16 + index));
+	if (cached || history || late)
+		return [0, 1, 2].map((index) => new Uint8Array(BYTES / 4).fill(sequence * 16 + index));
 	return [new Uint8Array(BYTES).fill(sequence)];
 }
 

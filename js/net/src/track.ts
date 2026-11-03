@@ -2496,16 +2496,21 @@ export class Subscriber {
 	// the newest one received that the cache does not hold and nobody gave up. A run whose newest
 	// group the budget already convicts is not asked, so a reader at the live edge never asks.
 	// Returns the first sequence a fill still owes this reader. Mirrors the Rust `Misses::judge`.
-	#askFills(start: number, end: number, drift: Drift): number | undefined {
+	#askFills(start: number, end: number, drift?: Drift): number | undefined {
 		const producer = this.#state.producer;
 		if (this.#resume || !producer || this.#closed) return undefined;
 		const fills = fillsOf(producer);
 		if (fills.serving) {
+			drift ??= this.#drift();
 			const asker = this.#askerOf();
 			const timeline = this.#state.timeline;
-			const drops = this.#state.drops.peek();
+			// A datagram still buffered took its sequence, so no group is missed there; the Rust
+			// fetch names it `NotFetchable`.
+			const gone = [...this.#state.drops.peek()];
+			for (const datagram of this.#state.datagrams.peek())
+				insertRun(gone, datagram.sequence, datagram.sequence + 1);
 			for (const run of this.#wants(start, Math.min(end, this.#state.received.peek()))) {
-				for (const open of runGaps(drops, run.start, run.end)) {
+				for (const open of runGaps(gone, run.start, run.end)) {
 					let next = open.start;
 					for (let i = timelineIndex(timeline, open.start); i < timeline.length; i++) {
 						const group = timeline[i];
@@ -2594,9 +2599,8 @@ export class Subscriber {
 		const end = this.#window.end();
 		if (end === undefined) return false;
 		// A fill still owes a group it reads.
-		const drift = this.#drift();
-		const filling = this.#askFills(this.#window.floor() ?? 0, end, drift);
-		if (filling !== undefined && !this.#staleAt(filling, drift, true)) return false;
+		const filling = this.#askFills(this.#window.floor() ?? 0, end);
+		if (filling !== undefined && !this.#staleAt(filling, this.#drift(), true)) return false;
 		const held = this.#state.groups.peek();
 		const received = this.#state.received.peek();
 		const drops = this.#state.drops.peek();

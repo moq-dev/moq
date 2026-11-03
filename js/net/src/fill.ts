@@ -201,16 +201,20 @@ export class FillState {
 		for (const pending of this.#queue.splice(0)) this.#settle(pending);
 	}
 
-	/** The next queued fill, or `undefined` once the track closes with none queued. */
-	async next(): Promise<Pending | undefined> {
+	/**
+	 * The next queued fill, or `undefined` once the track closes with none queued or `closed`, the
+	 * asking handle's, is set.
+	 */
+	async next(closed: Signal<boolean>): Promise<Pending | undefined> {
 		for (;;) {
+			if (closed.peek()) return undefined;
 			const pending = this.#queue.shift();
 			if (pending) {
 				pending.queued = false;
 				return pending;
 			}
 			if (this.#track.closed()) return undefined;
-			await Signal.race(this.#queued, this.#track.released);
+			await Signal.race(this.#queued, this.#track.released, closed);
 		}
 	}
 
@@ -321,7 +325,7 @@ export function requestsOf(state: FillState): Requests {
  */
 export class Requests {
 	#state: FillState;
-	#closed = false;
+	#closed = new Signal(false);
 
 	private constructor(state: FillState) {
 		this.#state = state;
@@ -339,11 +343,11 @@ export class Requests {
 
 	/**
 	 * Wait until readers miss a run of groups, returning the {@link Fill} to serve. Resolves
-	 * `undefined` once the track closes with nothing queued, or this handle is closed.
+	 * `undefined` once the track closes with nothing queued, or this handle closes, even while
+	 * it waits.
 	 */
 	async requestedFill(): Promise<Fill | undefined> {
-		if (this.#closed) return undefined;
-		const pending = await this.#state.next();
+		const pending = await this.#state.next(this.#closed);
 		if (!pending) return undefined;
 		return makeFill(this.#state, pending);
 	}
@@ -353,8 +357,8 @@ export class Requests {
 	 * readers stop waiting; a fill already handed out keeps its own handle. Idempotent.
 	 */
 	close(): void {
-		if (this.#closed) return;
-		this.#closed = true;
+		if (this.#closed.peek()) return;
+		this.#closed.set(true);
 		this.#state.removeHandler();
 	}
 

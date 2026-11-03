@@ -59,36 +59,43 @@ wire FINs a covered bounded subscription without SUBSCRIBE_END, and the JS
 subscriber reopens demand it no longer covers on the same track, as the Rust
 copy does.
 
+Landed in [moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696): the
+on-demand request surface and `fetchGroup`. `track.Producer.requests()` opens a
+`Track.Requests` handle, the Rust `Producer::requests`; while one is open, a
+reader's misses (groups its ranges name below the newest written that the
+cache does not hold, and its budget still wants) queue a `Track.Fill` that
+readers missing the same groups join. A fill is an owned handle: `accept`,
+`dropGroups`, `refuseGroups`, `wanted`, and `close`, which names what is still
+wanted dropped. With no handle open a miss is given up, as before. A produced
+broadcast's `fetchGroup` is a one-range subscription on it, judging staleness
+against the whole track as the Rust `fetch_group` does, and the lite-07
+SUBSCRIBE_START names the lowest group a fill brings, as the Rust `poll_start`
+does. Lite FETCH and lite-07 ranged SUBSCRIBE serve history from it, covered
+in-process and by the `CLI FETCH history` interop lane.
+
 What remains:
 
-- **On-demand request surface.** Decided in the 2026-10-05 audit: the producer
-  half of JavaScript FETCH folds in here, so
-  `@moq/net`'s on-demand request surface takes range requests from the start
-  instead of the per-group `requested_group` shape Rust replaced with
-  `requested_fill`. IETF FETCH dispatch onto it is
-  [on-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md).
-  - Expose an owned request handle rather than a storage callback; dropping a
-    request refuses it rather than leaving the subscriber waiting. Preserve
-    group sequence, frame boundaries, payload bytes, and track properties.
-    Storage, retention, and media catalog interpretation stay outside `js/net`.
-  - One logical dynamic track per broadcast and name: a cache-miss request
-    never creates a duplicate live producer.
-  - Verify with an in-memory responder, without OPFS or an archive writer: a
-    browser publisher serves a native subscriber after a group is evicted or
-    was never cached, covering exact replay, empty and missing groups,
-    concurrent requests, and cancellation while awaiting a reply.
-- **`fetchGroup`.** Becomes a one-range subscription on the request surface
-  above, or is removed.
-- **Fills.** Mirror Rust's rule from [#7168](https://github.com/moq-dev/moq/pull/7168)
-  (decided 2026-10-29, maintainer): give up a run below a start already
-  resolved under a budget at least as loose as the reader's, and on a pre-06
-  wire fill below the start only when the reader names a floor. `js/net`
-  requests no fills today, so nothing over-fetches yet; this keeps it that way
-  once it does. With fills, a bounded read also mirrors Rust's head fill
-  ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): it hands out
-  a cached group missing its first frames only once a fill answers from frame
-  0, and gives one whose fill is refused up as a miss. Until then a JS reader
-  counts a hole the feed no longer owes as given up, with no fill asked.
+- **Received copies fill.** A JavaScript subscriber session serves its copy's
+  misses by asking upstream, the Rust lite subscriber's `requested_fill` loop,
+  so a JS relay or reader fills what its copy missed. Today no handle can reach
+  a received copy, so nothing over-fetches. When it does, mirror Rust's rule
+  from [#7168](https://github.com/moq-dev/moq/pull/7168) (decided 2026-10-29,
+  maintainer): give up a run below a start already resolved under a budget at
+  least as loose as the reader's, and on a pre-06 wire fill below the start
+  only when the reader names a floor. A bounded read also mirrors Rust's head
+  fill ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): it hands
+  out a cached group missing its first frames only once a fill answers from
+  frame 0, and gives one whose fill is refused up as a miss. Until then a JS
+  reader counts a hole the feed no longer owes as given up, with no fill asked.
+- **Time lookups.** The Rust `Fill::time` asks a handler for the group
+  containing a time start no held group resolves. A JS time anchor still
+  resolves from the groups the track holds alone, reaching back to the oldest.
+- **Lite-07 SUBSCRIBE_FINISH.** Mirror it once
+  [moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675) lands, as the
+  paragraph above says.
+
+IETF FETCH dispatch onto the request surface is
+[on-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md).
 
 Ranges stay whole groups ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)),
 so the group model keeps refusing a nonzero lite `frameStart` as a protocol
