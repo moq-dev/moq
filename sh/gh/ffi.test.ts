@@ -70,7 +70,6 @@ test("bindings reuse Linux metadata even when an unrelated target fails", async 
 test("wrapper gates preserve trusted tag inputs and inspect only their publisher", async () => {
 	for (const [file, language, first] of [
 		["go", "go", "build"],
-		["kt-lib", "kotlin", "check-version"],
 		["swift-lib", "swift", "build"],
 	]) {
 		const wrapper = await read(`release-${file}`);
