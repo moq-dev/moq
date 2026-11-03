@@ -37,8 +37,11 @@ pub const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
 /// Metadata parses only once its last byte arrives, so a larger declaration is refused at its
 /// header rather than retaining later input (across HLS segments, too) until it completes.
 /// Parsing expands a body up to tenfold (a 4-byte `trun` entry becomes a 40-byte
-/// [`TrunEntry`](mp4_atom::TrunEntry)), so this keeps a parse within [`MAX_HELD_BYTES`]. Real
-/// fMP4 metadata is kilobytes.
+/// [`TrunEntry`](mp4_atom::TrunEntry)), so this keeps a parse within [`MAX_HELD_BYTES`]. The
+/// exception is a box whose entries cost no input, such as a version 0 `sgpd` in mp4-atom 0.17.0,
+/// which parses past it until mp4-atom bounds the count
+/// ([kixelated/mp4-atom#264](https://github.com/kixelated/mp4-atom/pull/264)). Real fMP4 metadata
+/// is kilobytes.
 pub const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
 
 /// The most samples [`Import`] plans for one `moof`.
