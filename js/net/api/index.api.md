@@ -445,6 +445,7 @@ export namespace Origin {
 		readonly path: Path.Valid;
 		prepare(): Origin.Prepared;
 		reject(err: Error): void;
+		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
 	}
 	export interface RequestOptions {
 		instance?: Instance.Valid;
@@ -724,6 +725,7 @@ export namespace Track {
 		ranges?: Track.Range[];
 	}
 	export function infoDefaults(info?: Partial<Track.Info>): Track.Info;
+	export function rescale(info: Pick<Track.Info, "timescale">, timestamp: Time.Timestamp | undefined): Time.Timestamp | undefined;
 }
 
 export namespace Varint {
