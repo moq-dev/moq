@@ -1444,6 +1444,39 @@ mod tests {
 		headers_survive_reset(VideoFormat::Av01, av1c[4..].to_vec(), vec![0x32, 0x01, 0x10]).await;
 	}
 
+	/// A keyframe after a pre-picture seek carries the retained init header ahead of its own. The
+	/// keyframe's own, which the decoder applies, configures the catalog.
+	#[tokio::test(start_paused = true)]
+	async fn av01_keyframe_header_supersedes_retained_init() {
+		let (av1c, keyframe) = av1_init_and_keyframe();
+		let mut stale = av1c[4..].to_vec();
+		// seq_level_idx 9 (the fixture's level) becomes 8, in the fourth payload byte.
+		assert_eq!(stale[5], 0x4a);
+		stale[5] = 0x42;
+		let (broadcast, catalog) = new_broadcast();
+		let mut import = Track::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Av01, stale.clone()),
+		)
+		.unwrap();
+		let codecs = |catalog: &crate::catalog::Producer| {
+			let snapshot = catalog.snapshot();
+			snapshot
+				.video
+				.renditions
+				.values()
+				.map(|rendition| rendition.codec.to_string()[..10].to_string())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(codecs(&catalog), ["av01.0.08M"]);
+		import.seek(7).unwrap();
+		import
+			.decode(&keyframe, Some(Timestamp::from_micros(1_000).unwrap()))
+			.unwrap();
+		assert_eq!(codecs(&catalog), ["av01.0.09M"]);
+	}
+
 	/// Every video format a binding can hand [`Track::video`] lands a keyframe on
 	/// its track. The facade dispatches per codec, and before this only Avc3,
 	/// Hvc1, and VP8 had ever decoded through it.

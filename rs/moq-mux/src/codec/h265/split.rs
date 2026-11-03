@@ -86,19 +86,14 @@ impl Split {
 		}
 	}
 
-	/// Consume a complete init buffer, retaining its parameter sets before any picture arrives.
+	/// Consume a complete init buffer as the stream's leading bytes, and retain its parameter sets.
+	///
+	/// The init's sets replace the retained ones, so a reset before the first keyframe still
+	/// re-injects them. Framing is unchanged: the final NAL stays buffered, so a picture the init
+	/// carries completes with the caller's next timestamp rather than a generated one.
 	pub(crate) fn initialize(&mut self, data: &[u8]) -> Result<Vec<crate::container::Frame>> {
-		let mut frames = self.decode(data, None)?;
-		frames.extend(self.flush(None)?);
-		if !self.current.vps_seen.is_empty() {
-			self.vps.clone_from(&self.current.vps_seen);
-		}
-		if !self.current.sps_seen.is_empty() {
-			self.sps.clone_from(&self.current.sps_seen);
-		}
-		if !self.current.pps_seen.is_empty() {
-			self.pps.clone_from(&self.current.pps_seen);
-		}
+		let frames = self.decode(data, None)?;
+		InBandCodec::H265.adopt_init(data, &mut [&mut self.vps, &mut self.sps, &mut self.pps])?;
 		Ok(frames)
 	}
 
@@ -380,6 +375,34 @@ mod tests {
 		assert_eq!(frames.len(), 1);
 		assert!(!frames[0].keyframe);
 		assert_eq!(frames[0].payload, annexb(&[AUD, TRAIL]));
+	}
+
+	/// A picture inside the init completes with the caller's next timestamp rather than a
+	/// generated one, and a later init replaces the retained sets rather than adding to them.
+	#[tokio::test(start_paused = true)]
+	async fn initialize_keeps_framing_and_replaces_retained_sets() {
+		// PPS with pps_pic_parameter_set_id 1.
+		let pps1: &[u8] = &[0x44, 0x01, 0x41, 0x72, 0xb4, 0x62, 0x40];
+		let next = moq_net::Timestamp::from_micros(5_000).unwrap();
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS, IDR])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].payload, annexb(&[VPS, SPS, PPS, IDR]));
+		assert_eq!(frames[0].timestamp, next);
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS])).unwrap().is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[VPS, SPS, PPS, IDR]),
+			"the superseded PPS is dropped"
+		);
 	}
 
 	/// Length-prefix each NAL with a 4-byte big-endian length: the hvc1 wire shape.

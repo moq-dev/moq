@@ -88,16 +88,14 @@ impl Split {
 		}
 	}
 
-	/// Consume a complete init buffer, retaining its parameter sets before any picture arrives.
+	/// Consume a complete init buffer as the stream's leading bytes, and retain its parameter sets.
+	///
+	/// The init's sets replace the retained ones, so a reset before the first keyframe still
+	/// re-injects them. Framing is unchanged: the final NAL stays buffered, so a picture the init
+	/// carries completes with the caller's next timestamp rather than a generated one.
 	pub(crate) fn initialize(&mut self, data: &[u8]) -> Result<Vec<crate::container::Frame>> {
-		let mut frames = self.decode(data, None)?;
-		frames.extend(self.flush(None)?);
-		if !self.current.sps_seen.is_empty() {
-			self.sps.clone_from(&self.current.sps_seen);
-		}
-		if !self.current.pps_seen.is_empty() {
-			self.pps.clone_from(&self.current.pps_seen);
-		}
+		let frames = self.decode(data, None)?;
+		InBandCodec::H264.adopt_init(data, &mut [&mut self.sps, &mut self.pps])?;
 		Ok(frames)
 	}
 
@@ -480,6 +478,36 @@ mod tests {
 			"a damaged recovery point cannot mark the next picture"
 		);
 		assert_eq!(frames[0].payload, annexb(&[aud, delta]));
+	}
+
+	/// A picture inside the init completes with the caller's next timestamp rather than a
+	/// generated one, and a later init replaces the retained sets rather than adding to them.
+	#[tokio::test(start_paused = true)]
+	async fn initialize_keeps_framing_and_replaces_retained_sets() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		let pps0: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let pps1: &[u8] = &[0x68, 0x4e, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let next = moq_net::Timestamp::from_micros(5_000).unwrap();
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps0, idr])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps0, idr]));
+		assert_eq!(frames[0].timestamp, next);
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps0, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[sps, pps0])).unwrap().is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[sps, pps0, idr]),
+			"the superseded PPS is dropped"
+		);
 	}
 
 	/// A source that defines two PPS once, then sends a bare IDR (no inline
