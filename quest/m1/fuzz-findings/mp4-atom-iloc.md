@@ -7,29 +7,27 @@ target, 31 bytes of `iloc` no longer allocate about 6 MB.
 
 ## Plan
 
-`src/meta/iloc.rs` decodes `extent_count` extents per item. When the
+`src/meta/iloc.rs` decoded `extent_count` extents per item. When the
 offset, length and index sizes are all 0, each extent consumes no input, so
-every 6-byte item can push 65,535 extents (about 1.5 MB), and the item count
-repeats that.
+every 6-byte item could push 65,535 extents (about 1.5 MB), and the item
+count repeated that.
 
 [kixelated/mp4-atom#267](https://github.com/kixelated/mp4-atom/pull/267)
-fixes it, as [#264](https://github.com/kixelated/mp4-atom/pull/264) did for
-`sgpd`: decode fails with `OutOfBounds` on a zero-size extent (one that takes
-no bytes of the box) after an item's first extent, so a valid single
-zero-size extent still decodes (decided 2026-10-30, maintainer). A plain
-count-versus-remaining-bytes check, which `sgpd` and `evte` use, would refuse
-that valid extent at the end of the box. The fix does not cut a release.
+fixed it, merging on 2026-11-03 as
+kixelated/mp4-atom@2f1936206579b4c64d1d90538989246044e42ed6: decode fails
+with `OutOfBounds` on a zero-size extent after an item's first extent, so a
+valid single zero-size extent still decodes (decided 2026-10-30,
+maintainer). The pending release PR
+[kixelated/mp4-atom#260](https://github.com/kixelated/mp4-atom/pull/260)
+picks it up.
 
-Once #267 merges, moq-mux picks it up with the
-[mp4-atom bump](/quest/m1/fuzz-findings/mp4-atom-bump.md), or with its own
-bump if that one has already landed. Then commit the 31-byte `cmaf` input from
-[moq-dev/moq#7313's comment](https://github.com/moq-dev/moq/pull/7313#issuecomment-6520535160)
-(`AB0AAAAcaWxvYwAAcwAAACAAyP////8AAAD///8AAA==`) as
-`rs/moq-mux/fuzz/regressions/cmaf/mp4-atom-iloc`. Do not commit it before the
-bump, since the merge gate would fail on it.
+What remains is moq-mux's move to that release and the 31-byte `cmaf`
+regression input, both tracked in the
+[mp4-atom bump](/quest/m1/fuzz-findings/mp4-atom-bump.md); its PR completes
+this quest and deletes this file.
 
 Public API: none expected in moq-mux. Wire: none.
 
 ## Waiting
 
-- Maintainer: merge [kixelated/mp4-atom#267](https://github.com/kixelated/mp4-atom/pull/267); check that it is merged and that the mp4-atom release the bump moves to contains its commit
+- Maintainer: cut an mp4-atom 0.17.x release that contains kixelated/mp4-atom@2f1936206579b4c64d1d90538989246044e42ed6 (agents do not cut it); check that crates.io's latest mp4-atom is above 0.17.0 and that its tag contains that commit
