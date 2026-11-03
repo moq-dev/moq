@@ -290,12 +290,11 @@ async fn measure(version: &str, cell: Cell) {
 			0
 		};
 		println!(
-			"{version},{},{},{offered},{},{},{overflowed},{},{},{:.1},{:.1},{:.1}",
+			"{version},{},{},{offered},{},{overflowed},{},{},{:.1},{:.1},{:.1}",
 			cell.name,
 			viewer.name,
-			report.received,
 			offered as usize - report.received,
-			report.frames,
+			report.frames as i64 - report.received as i64,
 			report.reordered,
 			report.percentile(50),
 			report.percentile(99),
@@ -313,9 +312,12 @@ async fn measure(version: &str, cell: Cell) {
 }
 
 /// Datagram delivery to a loopback viewer and a bufferbloated one, below and above the
-/// bottleneck's rate. Reports per viewer the datagrams offered, received, lost, those the
+/// bottleneck's rate. Reports per viewer the datagrams offered and lost, those the
 /// bottleneck's full queue dropped (UDP packets, so approximate), QUIC DATAGRAM frames
-/// received, reordered arrivals, and append-to-receive latency percentiles. Nothing on the
+/// received that delivered no datagram (padding, or ones the session discarded),
+/// reordered arrivals, and append-to-receive latency percentiles. Only `offered` is a
+/// workload dimension; the counts are `_packets` columns, all smaller-is-better, so the
+/// nightly benchmark table records them as measurements (see bench/README.md). Nothing on the
 /// path expires a datagram by age: what the sender's QUIC datagram buffer holds waits
 /// there until it is sent or displaced. Fails if a datagram arrives twice or corrupted, or
 /// if the loopback viewer loses any. Run by nightly.
@@ -334,7 +336,9 @@ async fn benchmark_datagram_delivery() {
 			interval: Duration::from_millis(2),
 		},
 	];
-	println!("version,cell,viewer,offered,received,lost,overflowed,quic_frames,reordered,p50_ms,p99_ms,max_ms");
+	println!(
+		"version,cell,viewer,offered,lost_packets,overflowed_packets,undelivered_frame_packets,reordered_packets,p50_ms,p99_ms,max_ms"
+	);
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		for cell in cells {
 			measure(version, cell).await;

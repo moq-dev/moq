@@ -10,7 +10,7 @@ const PAYLOAD = 8;
 const APPENDS = 64;
 const REPS = 5;
 // Every retained group, however old: replay is the work being measured.
-const SUBSCRIPTION = { ranges: [{ start: { absolute: 0 } }], delay: { max: null } };
+const SUBSCRIPTION = { ranges: [{ start: { absolute: 0n } }], delay: { max: null } };
 
 // The arrival order of sequences 0..count-1: ascending, descending, or a seeded shuffle.
 function arrivals(count: number, order: Order): number[] {
@@ -29,7 +29,7 @@ function arrivals(count: number, order: Order): number[] {
 
 // Write one finished group whose payload names its sequence, so delivery can be checked.
 function publish(track: Track.Producer, sequence: number): void {
-	const group = track.createGroup(sequence);
+	const group = track.createGroup(BigInt(sequence));
 	const payload = new Uint8Array(PAYLOAD);
 	new DataView(payload.buffer).setUint32(0, sequence);
 	group.writeFrame({ payload });
@@ -40,7 +40,7 @@ function publish(track: Track.Producer, sequence: number): void {
 function drain(subscriber: Track.Subscriber, count: number): void {
 	let next = 0;
 	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup(), next++) {
-		if (group.sequence !== next) throw new Error(`group ${group.sequence} delivered, expected ${next}`);
+		if (group.sequence !== BigInt(next)) throw new Error(`group ${group.sequence} delivered, expected ${next}`);
 		const payload = group.tryReadFrame()?.payload;
 		if (payload?.byteLength !== PAYLOAD || new DataView(payload.buffer, payload.byteOffset).getUint32(0) !== next)
 			throw new Error(`group ${next} payload mismatch`);

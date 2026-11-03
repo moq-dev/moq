@@ -34,7 +34,7 @@ async function roundtrip(version: Version, fetch: Fetch): Promise<Fetch> {
 }
 
 function sample(): Fetch {
-	return new Fetch({ broadcast: Path.from("room/1"), track: "video", priority: 3, group: 42 });
+	return new Fetch({ broadcast: Path.from("room/1"), track: "video", priority: 3, group: 42n });
 }
 
 test("Fetch round-trips on draft-03/04/05", async () => {
@@ -43,7 +43,7 @@ test("Fetch round-trips on draft-03/04/05", async () => {
 		expect(got.broadcast).toBe(Path.from("room/1"));
 		expect(got.track).toBe("video");
 		expect(got.priority).toBe(3);
-		expect(got.group).toBe(42);
+		expect(got.group).toBe(42n);
 	}
 });
 
@@ -53,7 +53,7 @@ test("Fetch carries omitted and explicit maxDelay on draft-07", async () => {
 	for (const maxDelay of [Milli(0), Milli(250)]) {
 		const got = await roundtrip(
 			Version.DRAFT_07,
-			new Fetch({ broadcast: Path.from("room/1"), track: "video", priority: 3, maxDelay, group: 42 }),
+			new Fetch({ broadcast: Path.from("room/1"), track: "video", priority: 3, maxDelay, group: 42n }),
 		);
 		expect(got.maxDelay).toBe(maxDelay);
 	}
@@ -66,7 +66,7 @@ test("Fetch carries omitted and explicit maxDelay on draft-07", async () => {
 				track: "video",
 				priority: 3,
 				maxDelay: Milli(250),
-				group: 42,
+				group: 42n,
 			}),
 		),
 	).rejects.toThrow("maxDelay");

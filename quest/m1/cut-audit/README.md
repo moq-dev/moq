@@ -1,4 +1,4 @@
-# [S] Pre-cut audit findings
+# Pre-cut audit findings
 
 ## Goal
 
@@ -50,6 +50,10 @@ redesign evidence went into the quests that already own the mechanism:
 drafts 14-17 removal (since landed), and
 [buffered playback](/quest/m1/buffered-ascending.md). The audit recommends
 leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts-js.md).
+
+## Required
+
+- [Each export-clock rule kept by the jitter audit has its own test](/quest/m1/cut-audit/jitter-rule-tests.md) - `stale`, `unheard_lag`, and the horizon shift in `rs/moq-mux/src/jitter.rs` each have a test that fails when that rule alone is removed
 
 ## Related
 
