@@ -526,7 +526,8 @@ export class Consumer {
 					// Before the first item, a backlog that landed whole starts within the budget, so only
 					// the group covering the live edge less the reach is kept: one whose successor starts
 					// past that point. Rust's start skip, in `Consumer::poll_event_once`, measures the same.
-					const target = this.#startTarget(this.#reach(this.#delay.peek()));
+					// `max` is the live edge of the groups left, so this stays O(1) per skip.
+					const target = this.#startTarget(this.#reach(this.#delay.peek()), max);
 					if (target !== undefined && nextStart > target) break;
 				} else if (max - nextStart < threshold) {
 					// Once reading began, it is stale only once its successor starts a whole budget behind
@@ -980,14 +981,21 @@ export class Consumer {
 	// The point the start reaches back to: the live edge (the newest content) less `reach`. Undefined
 	// for a zero reach, which the newest group covers, and before any timed content, since untimed
 	// content such as a marker has no edge to reach back from.
-	#startTarget(reach: number): number | undefined {
+	// A caller that already knows the live edge passes it, sparing a scan of every group.
+	#startTarget(reach: number, known?: number): number | undefined {
 		if (reach === 0) return undefined;
+		const edge = known ?? this.#liveEdge();
+		// Media starts at zero, so a reach past it is covered there.
+		return edge === undefined ? undefined : Math.max(0, edge - reach);
+	}
+
+	// The newest known frame timestamp across the buffered groups.
+	#liveEdge(): number | undefined {
 		let edge: number | undefined;
 		for (const group of this.#groups) {
 			if (group.latest !== undefined && (edge === undefined || group.latest > edge)) edge = group.latest;
 		}
-		// Media starts at zero, so a reach past it is covered there.
-		return edge === undefined ? undefined : Math.max(0, edge - reach);
+		return edge;
 	}
 
 	// How stale the buffered span may get before the age skip drops its oldest group, in microseconds:
