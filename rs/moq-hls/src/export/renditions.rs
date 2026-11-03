@@ -2,8 +2,8 @@
 //!
 //! The `Producer` holds the current renditions, reconciled from the catalog by its `sync`;
 //! the HTTP serve path reads them synchronously (look one up, render the master playlist). Each
-//! rendition follows its own HLS records; the `Fanout` handle holds what they share: the
-//! discontinuity counts and the publisher run.
+//! rendition follows its own media track onto the broadcast's grid; the `Fanout` handle holds what
+//! they share: the discontinuity counts and the publisher run.
 //! A [`Consumer`] is a cursor for a recorder that mirrors the *whole* broadcast: [`next`](Consumer::next)
 //! yields one [`Event`] at a time as renditions are added or removed, replaying the current
 //! set as [`Added`](Event::Added) when first consumed, and returning `None` once the catalog
@@ -25,9 +25,9 @@ use super::rendition::{Kind, Rendition};
 /// and an audio rendition may share a name without colliding.
 pub(crate) type Key = (Kind, String);
 
-/// Numbers each rendition's content breaks: its segments after a stop, or after records nobody
-/// saw, start a new discontinuity, as does every rendition's next segment after a publisher-run
-/// restart.
+/// Numbers each rendition's content breaks: its segments after its media timestamps went back, or
+/// after a reconfigure's hand-over, start a new discontinuity, as does every rendition's next
+/// segment after a publisher-run restart.
 ///
 /// Counted per rendition, since each numbers its own segments. A break in one rendition only
 /// makes its count diverge from its siblings', which players resync across by
@@ -64,8 +64,8 @@ impl Discontinuities {
 /// A change to the rendition set, yielded by [`Consumer::next`].
 #[non_exhaustive]
 pub enum Event {
-	/// A rendition appeared, with its HLS records advertised (or was reconfigured: a `Removed`
-	/// for the old one precedes it).
+	/// A rendition appeared, once the catalog declares its join interval (or was reconfigured: a
+	/// `Removed` for the old one precedes it).
 	Added(Arc<Rendition>),
 	/// A rendition disappeared (removed from the catalog, or replaced by a reconfigure).
 	Removed {
@@ -538,10 +538,11 @@ impl Producer {
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
 	/// measured bitrate, jitter, or framerate moves.
 	///
-	/// A rendition joins the set only once its entry advertises HLS records (its `hls` field),
-	/// which an unhinted publisher declares after its first segment: without them there is
-	/// nothing to render its playlist from, so it is neither listed nor reported as
-	/// [`Event::Added`].
+	/// Renditions join the set only once the catalog declares `media.join.interval`, which a
+	/// publisher measures over its first second or group when it knows no GOP: without that grid
+	/// nothing numbers their segments, so none is listed or reported as [`Event::Added`]. The
+	/// interval is fixed for a broadcast instance; should it change anyway, every rendition is
+	/// rebuilt on the new grid.
 	///
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
@@ -550,7 +551,8 @@ impl Producer {
 	/// `..`, which no URL path segment can address, so the master playlist, the DASH manifest, and
 	/// the router agree on what is served.
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
-		let clock = catalog.clock;
+		let clock = catalog.media.clock;
+		let interval = catalog.media.interval();
 
 		let Ok(mut current) = self.state.write() else {
 			return;
@@ -563,6 +565,7 @@ impl Producer {
 			.renditions
 			.iter()
 			.filter(|((kind, name), rendition)| match kind {
+				_ if interval != Some(rendition.interval()) => true,
 				Kind::Video => !catalog
 					.video
 					.renditions
@@ -576,7 +579,7 @@ impl Producer {
 			})
 			.map(|(key, _)| key.clone())
 			.collect();
-		// A replacement lists the records its retired predecessor won't, so no record is muxed
+		// A replacement lists the segments its retired predecessor won't, so no segment is muxed
 		// under both configs.
 		let mut handoffs = BTreeMap::new();
 		for key in stale {
@@ -586,7 +589,9 @@ impl Producer {
 		}
 
 		let mut added = Vec::new();
-		for (name, video) in &catalog.video.renditions {
+		let video = catalog.video.renditions.iter().filter(|_| interval.is_some());
+		let audio = catalog.audio.renditions.iter().filter(|_| interval.is_some());
+		for (name, video) in video {
 			if !master::is_path_segment(name) {
 				tracing::warn!(
 					rendition = name,
@@ -602,15 +607,13 @@ impl Producer {
 				rendition.refresh(video.bitrate, video.framerate, video.enabled);
 				continue;
 			}
-			let Some(hls) = video.hls.clone() else {
-				continue;
-			};
-			match Rendition::video(name.clone(), video, source, hls, clock, self.fanout()) {
+			let interval = interval.expect("filtered above");
+			match Rendition::video(name.clone(), video, source, interval, clock, self.fanout()) {
 				Ok(rendition) => added.push(rendition.after(handoffs.get(&key))),
 				Err(err) => tracing::warn!(rendition = name, %err, "ignoring unservable video rendition"),
 			}
 		}
-		for (name, audio) in &catalog.audio.renditions {
+		for (name, audio) in audio {
 			if !master::is_path_segment(name) {
 				tracing::warn!(
 					rendition = name,
@@ -623,10 +626,8 @@ impl Producer {
 				rendition.refresh(audio.bitrate, None, audio.enabled);
 				continue;
 			}
-			let Some(hls) = audio.hls.clone() else {
-				continue;
-			};
-			match Rendition::audio(name.clone(), audio, source, hls, clock, self.fanout()) {
+			let interval = interval.expect("filtered above");
+			match Rendition::audio(name.clone(), audio, source, interval, clock, self.fanout()) {
 				Ok(rendition) => added.push(rendition.after(handoffs.get(&key))),
 				Err(err) => tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition"),
 			}
@@ -639,7 +640,7 @@ impl Producer {
 		if current.renditions.is_empty()
 			&& (!catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty())
 		{
-			tracing::debug!("no rendition advertises HLS records yet; nothing to serve");
+			tracing::debug!("the catalog declares no join interval yet; nothing to serve");
 		}
 
 		// Rank once per catalog update, keeping playlist reads linear. Updating state also wakes

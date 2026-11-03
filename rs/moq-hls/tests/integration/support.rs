@@ -138,11 +138,12 @@ impl Publisher {
 	}
 }
 
-/// A catalog config publishing HLS records, hinted so they are advertised before any media and a
-/// recorder can start first.
+/// A catalog config declaring a two-second join interval up front, so renditions are listed before
+/// any media and a recorder can start first.
 pub fn catalog_config() -> moq_mux::catalog::Config {
-	let hls = moq_mux::hls::Config::default().with_duration_hint(Duration::from_secs(2));
-	moq_mux::catalog::Config::default().with_hls(hls)
+	let mut catalog = moq_mux::catalog::hang::Catalog::default();
+	catalog.media.join = Some(hang::catalog::Join::new(Duration::from_secs(2)));
+	moq_mux::catalog::Config::default().with_catalog(catalog)
 }
 
 /// A millisecond track: the frames written here carry timestamps.

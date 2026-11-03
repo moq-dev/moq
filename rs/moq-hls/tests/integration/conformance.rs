@@ -60,11 +60,10 @@ async fn segments_match_their_manifests() {
 	let publication = pair.publisher.create_broadcast("live").expect("publish");
 	publication.announce(Default::default()).expect("announce");
 	let mut broadcast = publication.broadcast().clone();
-	let hls = moq_mux::hls::Config::default()
-		.with_duration(DURATION)
-		.with_duration_hint(DURATION);
+	let mut seeded = moq_mux::catalog::hang::Catalog::<()>::default();
+	seeded.media.join = Some(hang::catalog::Join::new(DURATION));
 	let mut catalog =
-		moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default().with_hls(hls))
+		moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default().with_catalog(seeded))
 			.expect("catalog");
 	let init = moq_mux::import::ContainerInit::new(moq_mux::import::ContainerFormat::Ts, Bytes::new());
 	let mut import = moq_mux::import::Container::new(broadcast, catalog.reserve(), &init).expect("import");

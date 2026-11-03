@@ -1,0 +1,395 @@
+//! Numbering a rendition's groups into HLS segments on the broadcast's join-interval grid.
+//!
+//! HLS numbers segments by position, so every edge and every reload has to derive the same
+//! consecutive numbers from timestamps alone. The catalog's `media.join.interval` draws a grid
+//! line at every multiple of the interval in pts, and every rendition numbers its segments on it,
+//! so they share segment numbers while each cuts its boundaries at its own groups.
+//!
+//! A group spans from its first frame's pts to the next group's. It belongs to one segment: the
+//! first line it contains, so segment N starts at the group containing pts N × interval; or, if it
+//! contains none, the line it starts after, `floor(pts / interval)`. Groups are never split, since a
+//! segment starting mid-GOP is not independent. A grid slot no group starts a segment in, because
+//! an overrun or a pause skipped it, is listed as a gap, so the numbering never skips: on a 2s grid,
+//! a group A = [0s, 7s) is segment 0, slots 1 and 2 are gaps, and a contiguous B = [7s, 7.2s)
+//! starts segment 3. An edge joining at B derives that from B's and its successor's timestamps,
+//! without A.
+//!
+//! A segment starts at its first group's pts, or a gap at its line, and its `EXTINF` runs to the
+//! next segment's start. A group overrunning the interval is listed at its first line, so its
+//! `EXTINF` understates its media, and the gaps after it overstate theirs; the playlist timeline
+//! still meets the media again at the next segment.
+
+use std::time::Duration;
+
+use moq_net::Timestamp;
+
+/// One segment the grid completed, oldest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Slot {
+	/// A segment holding groups.
+	Media {
+		/// The segment's number on the grid.
+		segment: u64,
+		/// Its groups, in sequence order: from its first group up to the next segment's.
+		groups: std::ops::Range<u64>,
+		/// Its first group's pts.
+		pts: Timestamp,
+		/// Where its `EXTINF` ends: the next segment's start.
+		end: Timestamp,
+		/// Where its last group's content ends, the next group's pts, when known: a fallback for
+		/// timing its last sample.
+		content: Option<Timestamp>,
+	},
+	/// A grid slot no group starts a segment in (`EXT-X-GAP`).
+	Gap {
+		/// The segment's number on the grid.
+		segment: u64,
+		/// Its line.
+		pts: Timestamp,
+		/// The next segment's start.
+		end: Timestamp,
+	},
+	/// A group went back past the open segment's slot, as a publisher restarting its timeline on
+	/// the same track does: what came before can't be numbered beside it.
+	Reset,
+}
+
+/// A group seen but not yet placed: placing it needs its end, the next group's pts.
+#[derive(Clone, Copy, Debug)]
+struct Group {
+	sequence: u64,
+	pts: Timestamp,
+}
+
+/// The segment collecting groups, completed once a group lands in a later one.
+#[derive(Clone, Debug)]
+struct Open {
+	segment: u64,
+	groups: std::ops::Range<u64>,
+	pts: Timestamp,
+}
+
+/// Places one rendition's groups, fed in sequence order, into segments on a grid of `interval`.
+pub(crate) struct Grid {
+	/// The grid's spacing in nanoseconds, at least one.
+	interval: u128,
+	/// The newest group, until the next one bounds it.
+	pending: Option<Group>,
+	open: Option<Open>,
+	/// The most gaps listed for one skip: older ones would slide out of every playlist window.
+	max_gaps: u64,
+}
+
+impl Slot {
+	/// The segment's number, or `None` for a [`Reset`](Self::Reset).
+	pub fn segment(&self) -> Option<u64> {
+		match self {
+			Self::Media { segment, .. } | Self::Gap { segment, .. } => Some(*segment),
+			Self::Reset => None,
+		}
+	}
+}
+
+impl Grid {
+	/// A grid of `interval`, listing at most `max_gaps` gaps for one skip.
+	pub fn new(interval: Duration, max_gaps: usize) -> Self {
+		Self {
+			interval: interval.as_nanos().max(1),
+			pending: None,
+			open: None,
+			max_gaps: max_gaps as u64,
+		}
+	}
+
+	/// The segment a group starting at `pts` and ending at `end` belongs to, or `None` while it
+	/// needs an `end` it doesn't have.
+	pub fn segment(&self, pts: Timestamp, end: Option<Timestamp>) -> Option<u64> {
+		let pts = pts.as_nanos();
+		let slot = pts / self.interval;
+		if pts % self.interval == 0 {
+			return Some(slot as u64);
+		}
+		let line = (slot + 1) * self.interval;
+		let end = end?.as_nanos();
+		Some(if end > line { slot + 1 } else { slot } as u64)
+	}
+
+	/// Whether `slot` is known whole to a reader that saw nothing before it: a gap, or a segment
+	/// whose first group contains its line, since the segment starts at that group. One whose first
+	/// group starts after its line may follow earlier groups of the same segment.
+	pub fn starts(&self, slot: &Slot) -> bool {
+		match slot {
+			Slot::Media { segment, pts, .. } => (*segment as u128).saturating_mul(self.interval) >= pts.as_nanos(),
+			Slot::Gap { .. } => true,
+			Slot::Reset => false,
+		}
+	}
+
+	/// The open segment, which a later group or the track's end completes.
+	pub fn open(&self) -> Option<u64> {
+		self.open.as_ref().map(|open| open.segment)
+	}
+
+	/// Whether a segment waits to be completed: one is open, or a group waits for its end.
+	pub fn waiting(&self) -> bool {
+		self.open.is_some() || self.pending.is_some()
+	}
+
+	/// The pts of line `segment`.
+	fn line(&self, segment: u64) -> Timestamp {
+		let nanos = (segment as u128).saturating_mul(self.interval);
+		Timestamp::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)).unwrap_or(Timestamp::ZERO)
+	}
+
+	/// A group `sequence` starts at `pts`, after every group already fed. Returns the segments it
+	/// completes.
+	pub fn group(&mut self, sequence: u64, pts: Timestamp) -> Vec<Slot> {
+		let mut out = Vec::new();
+		if let Some(pending) = self.pending.take() {
+			let segment = self.segment(pending.pts, Some(pts)).expect("bounded");
+			self.place(pending, segment, &mut out);
+		}
+		let group = Group { sequence, pts };
+		// A group starting on a line needs no end to place, so the segment before it completes now.
+		match self.segment(pts, None) {
+			Some(segment) => self.place(group, segment, &mut out),
+			None => self.pending = Some(group),
+		}
+		out
+	}
+
+	/// The track ended, its content reaching `end` when known. Returns the segments left.
+	pub fn finish(&mut self, end: Option<Timestamp>) -> Vec<Slot> {
+		let mut out = Vec::new();
+		if let Some(pending) = self.pending.take() {
+			// Without an end, the last group is placed as if it reached no further line.
+			let segment = self.segment(pending.pts, Some(end.unwrap_or(pending.pts))).expect("bounded");
+			self.place(pending, segment, &mut out);
+		}
+		if let Some(open) = self.open.take() {
+			let end = end.filter(|end| end.as_nanos() > open.pts.as_nanos()).unwrap_or(open.pts);
+			out.push(Slot::Media {
+				segment: open.segment,
+				groups: open.groups,
+				pts: open.pts,
+				end,
+				content: Some(end),
+			});
+		}
+		out
+	}
+
+	/// Place `group` in `segment`, completing the open segment and the gaps before it when it is a
+	/// later one.
+	fn place(&mut self, group: Group, segment: u64, out: &mut Vec<Slot>) {
+		let Some(open) = self.open.as_mut() else {
+			self.open = Some(Open {
+				segment,
+				groups: group.sequence..group.sequence + 1,
+				pts: group.pts,
+			});
+			return;
+		};
+		if segment == open.segment {
+			open.groups.end = group.sequence + 1;
+			return;
+		}
+		if segment < open.segment {
+			out.push(Slot::Reset);
+			self.open = Some(Open {
+				segment,
+				groups: group.sequence..group.sequence + 1,
+				pts: group.pts,
+			});
+			return;
+		}
+		let open = self.open.take().expect("checked above");
+		let start = |next: u64| match next == segment {
+			true => group.pts,
+			false => self.line(next),
+		};
+		out.push(Slot::Media {
+			segment: open.segment,
+			groups: open.groups,
+			pts: open.pts,
+			end: start(open.segment + 1),
+			content: Some(group.pts),
+		});
+		let first = (open.segment + 1).max(segment.saturating_sub(self.max_gaps));
+		for gap in first..segment {
+			out.push(Slot::Gap {
+				segment: gap,
+				pts: self.line(gap),
+				end: start(gap + 1),
+			});
+		}
+		self.open = Some(Open {
+			segment,
+			groups: group.sequence..group.sequence + 1,
+			pts: group.pts,
+		});
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	fn ms(ms: u64) -> Timestamp {
+		Timestamp::from_millis(ms).unwrap()
+	}
+
+	/// A slot as `(segment, groups, pts ms, end ms)`, with no groups for a gap.
+	type Listed = (u64, std::ops::Range<u64>, u64, u64);
+
+	fn listed(slots: Vec<Slot>) -> Vec<Listed> {
+		slots
+			.into_iter()
+			.map(|slot| match slot {
+				Slot::Media {
+					segment,
+					groups,
+					pts,
+					end,
+					..
+				} => (segment, groups, pts.as_millis() as u64, end.as_millis() as u64),
+				Slot::Gap { segment, pts, end } => (segment, 0..0, pts.as_millis() as u64, end.as_millis() as u64),
+				Slot::Reset => panic!("unexpected reset"),
+			})
+			.collect()
+	}
+
+	/// Feed groups starting at `starts` ms, numbered from zero, then end the track at `end` ms.
+	fn run(interval_ms: u64, starts: &[u64], end: u64) -> Vec<Listed> {
+		let mut grid = Grid::new(Duration::from_millis(interval_ms), 256);
+		let mut slots = Vec::new();
+		for (sequence, start) in starts.iter().enumerate() {
+			slots.extend(grid.group(sequence as u64, ms(*start)));
+		}
+		slots.extend(grid.finish(Some(ms(end))));
+		listed(slots)
+	}
+
+	/// Each case: interval, group starts, content end, and the segments listed.
+	#[test]
+	fn segmentation() {
+		#[allow(clippy::type_complexity)]
+		let cases: &[(&str, u64, &[u64], u64, &[Listed])] = &[
+			(
+				"regular GOPs on the grid",
+				2000,
+				&[0, 2000, 4000],
+				6000,
+				&[(0, 0..1, 0, 2000), (1, 1..2, 2000, 4000), (2, 2..3, 4000, 6000)],
+			),
+			(
+				"GOPs off the grid start at the group containing each line",
+				2000,
+				&[500, 1900, 3800, 5700],
+				7600,
+				&[(0, 0..1, 500, 1900), (1, 1..2, 1900, 3800), (2, 2..3, 3800, 5700), (3, 3..4, 5700, 7600)],
+			),
+			(
+				"short groups pack into their slot",
+				2000,
+				&[0, 500, 1000, 1500, 2000, 2500],
+				3000,
+				&[(0, 0..4, 0, 2000), (1, 4..6, 2000, 3000)],
+			),
+			(
+				"unequal GOPs, one containing no line joining the one before",
+				2000,
+				&[0, 1000, 2600, 3200, 6000],
+				8000,
+				&[(0, 0..1, 0, 1000), (1, 1..3, 1000, 3200), (2, 3..4, 3200, 6000), (3, 4..5, 6000, 8000)],
+			),
+			(
+				"an overrun lists its first line and the slots it covers as gaps",
+				2000,
+				&[0, 7000, 7200],
+				8000,
+				&[
+					(0, 0..1, 0, 2000),
+					(1, 0..0, 2000, 4000),
+					(2, 0..0, 4000, 7000),
+					(3, 1..3, 7000, 8000),
+				],
+			),
+			(
+				"an overrun followed by a group starting on a line",
+				2000,
+				&[0, 6000],
+				8000,
+				&[(0, 0..1, 0, 2000), (1, 0..0, 2000, 4000), (2, 0..0, 4000, 6000), (3, 1..2, 6000, 8000)],
+			),
+			(
+				"a pause ending between lines",
+				2000,
+				&[0, 500, 7300],
+				8000,
+				&[(0, 0..1, 0, 500), (1, 1..2, 500, 4000), (2, 0..0, 4000, 7300), (3, 2..3, 7300, 8000)],
+			),
+			(
+				"a pause ending past the next line",
+				2000,
+				&[0, 2000, 9000],
+				10000,
+				&[
+					(0, 0..1, 0, 2000),
+					(1, 1..2, 2000, 4000),
+					(2, 0..0, 4000, 6000),
+					(3, 0..0, 6000, 9000),
+					(4, 2..3, 9000, 10000),
+				],
+			),
+		];
+		for (name, interval, starts, end, expected) in cases {
+			assert_eq!(run(*interval, starts, *end), *expected, "{name}");
+		}
+	}
+
+	/// The maintainer's 2026-11-03 rule: an edge joining at B numbers it 3, as one that saw A does.
+	#[test]
+	fn a_late_join_numbers_like_an_early_one() {
+		let early = run(2000, &[0, 7000, 7200], 7400);
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		let mut late = grid.group(1, ms(7000));
+		late.extend(grid.group(2, ms(7200)));
+		late.extend(grid.finish(Some(ms(7400))));
+		assert_eq!(listed(late), [(3, 1..3, 7000, 7400)]);
+		assert_eq!(early.last(), Some(&(3, 1..3, 7000, 7400)));
+	}
+
+	/// A group off the grid waits for its successor; one on a line is placed at once.
+	#[test]
+	fn a_segment_completes_once_a_later_one_starts() {
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		assert!(grid.group(0, ms(0)).is_empty());
+		assert!(grid.group(1, ms(1000)).is_empty(), "its successor may still reach the next line");
+		assert_eq!(listed(grid.group(2, ms(2000))), [(0, 0..2, 0, 2000)]);
+		assert!(grid.group(3, ms(3500)).is_empty());
+		assert_eq!(listed(grid.group(4, ms(4500))), [(1, 2..3, 2000, 3500)], "3.5s reaches 4s");
+	}
+
+	/// A long pause lists only the newest gaps, the ones a playlist window can still hold.
+	#[test]
+	fn a_long_pause_lists_at_most_the_newest_gaps() {
+		let mut grid = Grid::new(Duration::from_secs(2), 3);
+		grid.group(0, ms(0));
+		let slots = listed(grid.group(1, ms(3_600_000)));
+		assert_eq!(slots.len(), 4);
+		assert_eq!(slots[0], (0, 0..1, 0, 2000));
+		assert_eq!(slots[1].0, 1797);
+		assert_eq!(slots[3], (1799, 0..0, 3_598_000, 3_600_000));
+	}
+
+	/// A group going back past the open slot resets the numbering.
+	#[test]
+	fn a_rewind_resets() {
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		grid.group(0, ms(10_000));
+		assert_eq!(grid.group(1, ms(0)), [Slot::Reset]);
+		assert_eq!(listed(grid.finish(Some(ms(2000)))), [(0, 1..2, 0, 2000)]);
+	}
+}
+

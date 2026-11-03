@@ -71,7 +71,7 @@ Set `encode::Config::color` to the first frame's `frame.surface.color()`, and re
 
 ### `encode::Producer` takes a catalog reservation (#5715)
 
-`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as the HLS hint.
+`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as its join interval.
 Pass `catalog.reserve().with_interval(gop)` instead of the catalog.
 
 ### Capture takes one `encode::Capture`
