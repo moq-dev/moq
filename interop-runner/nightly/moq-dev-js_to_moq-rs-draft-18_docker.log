@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/englishm/moq-interop-runner-moq-relay-ietf-draft-18:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    https://relay:4443
-time="2026-11-03T04:32:23Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-03T04:32:23Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-03T04:32:23Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-03T04:32:23Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-03T04:32:23Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T08:13:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T08:13:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T08:13:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T08:13:19Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T08:13:19Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1  Recreate
  Container runner-upstream-relay-1  Recreated
  Container runner-upstream-test-client-1  Recreate
@@ -18,70 +18,70 @@ relay-1        | Starting moq-rs relay on port 4443
 relay-1        |   Cert: /certs/cert.pem
 relay-1        |   Key:  /certs/priv.key
 relay-1        |   Mlog: /mlog
-relay-1        | [2m2026-11-03T04:32:23.235779Z[0m [32m INFO[0m [2mmoq_relay_ietf[0m[2m:[0m using file coordinator: /tmp/moq-coordinator.json
-relay-1        | [2m2026-11-03T04:32:23.235850Z[0m [32m INFO[0m [2mmoq_native_ietf::quic[0m[2m:[0m UDP socket bound [3mbind[0m[2m=[0m0.0.0.0:4443 [3mlocal[0m[2m=[0m0.0.0.0:4443 [3mdual_stack[0m[2m=[0mfalse
-relay-1        | [2m2026-11-03T04:32:23.236073Z[0m [32m INFO[0m [2mmoq_relay_ietf::relay[0m[2m:[0m mlog output enabled: /mlog
-relay-1        | [2m2026-11-03T04:32:23.236276Z[0m [32m INFO[0m [2mmoq_relay_ietf::relay[0m[2m:[0m listening on 0.0.0.0:4443
+relay-1        | [2m2026-11-03T08:13:19.507253Z[0m [32m INFO[0m [2mmoq_relay_ietf[0m[2m:[0m using file coordinator: /tmp/moq-coordinator.json
+relay-1        | [2m2026-11-03T08:13:19.507308Z[0m [32m INFO[0m [2mmoq_native_ietf::quic[0m[2m:[0m UDP socket bound [3mbind[0m[2m=[0m0.0.0.0:4443 [3mlocal[0m[2m=[0m0.0.0.0:4443 [3mdual_stack[0m[2m=[0mfalse
+relay-1        | [2m2026-11-03T08:13:19.507575Z[0m [32m INFO[0m [2mmoq_relay_ietf::relay[0m[2m:[0m mlog output enabled: /mlog
+relay-1        | [2m2026-11-03T08:13:19.507755Z[0m [32m INFO[0m [2mmoq_relay_ietf::relay[0m[2m:[0m listening on 0.0.0.0:4443
 test-client-1  | TAP version 14
 test-client-1  | # moq-dev-js-client v0.1.0 (@moq/net 0.4.7)
 test-client-1  | # Relay: https://relay:4443
 test-client-1  | 1..8
-relay-1        | [2m2026-11-03T04:32:29.141336Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:25.287682Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-relay-1        | [2m2026-11-03T04:32:29.144852Z[0m [32m INFO[0m [2mmoq_relay_ietf::auth::scope[0m[2m:[0m scope has no token authorization policy; admitting sessions on scope permissions alone [3mscope[0m[2m=[0m"<unscoped>"
+relay-1        | [2m2026-11-03T08:13:25.290422Z[0m [32m INFO[0m [2mmoq_relay_ietf::auth::scope[0m[2m:[0m scope has no token authorization policy; admitting sessions on scope permissions alone [3mscope[0m[2m=[0m"<unscoped>"
 test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 101
+test-client-1  |   duration_ms: 102
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T04:32:29.151052Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:25.295424Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-relay-1        | [2m2026-11-03T04:32:29.153857Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop } [3mnamespace[0m[2m=[0m/moq-test/interop
-relay-1        | [2m2026-11-03T04:32:29.154244Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
+relay-1        | [2m2026-11-03T08:13:25.297556Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop } [3mnamespace[0m[2m=[0m/moq-test/interop
+relay-1        | [2m2026-11-03T08:13:25.297900Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
 test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 506
+test-client-1  |   duration_ms: 504
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T04:32:29.656456Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:25.800706Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-relay-1        | [2m2026-11-03T04:32:29.658001Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop } [3mnamespace[0m[2m=[0m/moq-test/interop
-relay-1        | [2m2026-11-03T04:32:29.658088Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
-relay-1        | [2m2026-11-03T04:32:30.158370Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m PUBLISH_NAMESPACE closed [3mnamespace[0m[2m=[0m/moq-test/interop
+relay-1        | [2m2026-11-03T08:13:25.802077Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop } [3mnamespace[0m[2m=[0m/moq-test/interop
+relay-1        | [2m2026-11-03T08:13:25.802202Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
+relay-1        | [2m2026-11-03T08:13:26.303326Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m PUBLISH_NAMESPACE closed [3mnamespace[0m[2m=[0m/moq-test/interop
 test-client-1  | ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 704
+test-client-1  |   duration_ms: 706
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T04:32:30.361266Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:26.506739Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+test-client-1  | https://relay:4443/ connected via WebTransport
+test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
+relay-1        | [2m2026-11-03T08:13:26.510683Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
-relay-1        | [2m2026-11-03T04:32:30.365581Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m/moq-test/interop/subscribe-namespace-lifecycle/79eb1546cc6f0fb8d6a333badb592988
-relay-1        | [2m2026-11-03T04:32:30.365826Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
-test-client-1  | https://relay:4443/ connected via WebTransport
-test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-relay-1        | [2m2026-11-03T04:32:30.369045Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop/subscribe-namespace-lifecycle/79eb1546cc6f0fb8d6a333badb592988 } [3mnamespace[0m[2m=[0m/moq-test/interop/subscribe-namespace-lifecycle/79eb1546cc6f0fb8d6a333badb592988
-relay-1        | [2m2026-11-03T04:32:30.369147Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70.7375627363726962652d6e616d6573706163652d6c6966656379636c65.3739656231353436636336663066623864366133333362616462353932393838 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70.7375627363726962652d6e616d6573706163652d6c6966656379636c65.3739656231353436636336663066623864366133333362616462353932393838 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/79eb1546cc6f0fb8d6a333badb592988 active=true
-relay-1        | [2m2026-11-03T04:32:30.370618Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m PUBLISH_NAMESPACE closed [3mnamespace[0m[2m=[0m/moq-test/interop/subscribe-namespace-lifecycle/79eb1546cc6f0fb8d6a333badb592988
-test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/79eb1546cc6f0fb8d6a333badb592988 active=false
+relay-1        | [2m2026-11-03T08:13:26.511711Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m/moq-test/interop/subscribe-namespace-lifecycle/c73dd7e8528396922e130764f5c55225
+relay-1        | [2m2026-11-03T08:13:26.512852Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop/subscribe-namespace-lifecycle/c73dd7e8528396922e130764f5c55225 } [3mnamespace[0m[2m=[0m/moq-test/interop/subscribe-namespace-lifecycle/c73dd7e8528396922e130764f5c55225
+relay-1        | [2m2026-11-03T08:13:26.512948Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70.7375627363726962652d6e616d6573706163652d6c6966656379636c65.6337336464376538353238333936393232653133303736346635633535323235 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70.7375627363726962652d6e616d6573706163652d6c6966656379636c65.6337336464376538353238333936393232653133303736346635633535323235 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/c73dd7e8528396922e130764f5c55225 active=true
+relay-1        | [2m2026-11-03T08:13:26.514217Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m PUBLISH_NAMESPACE closed [3mnamespace[0m[2m=[0m/moq-test/interop/subscribe-namespace-lifecycle/c73dd7e8528396922e130764f5c55225
+test-client-1  | announced: broadcast=moq-test/interop/subscribe-namespace-lifecycle/c73dd7e8528396922e130764f5c55225 active=false
 test-client-1  | ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 13
+test-client-1  |   duration_ms: 12
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T04:32:30.373685Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:26.516681Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe start: id=2 broadcast=nonexistent/namespace track=test-track
 test-client-1  | subscribe_namespace written: requestId=0
 test-client-1  | subscribe written: id=2 broadcast=nonexistent/namespace track=test-track
-relay-1        | [2m2026-11-03T04:32:30.378723Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe: SubscribeInfo { id: 2, track_namespace: /nonexistent/namespace, track_name: test-track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3mnamespace[0m[2m=[0m/nonexistent/namespace [3mtrack[0m[2m=[0mtest-track
-relay-1        | [2m2026-11-03T04:32:30.378847Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m
-relay-1        | [2m2026-11-03T04:32:30.378883Z[0m [33m WARN[0m [2mmoq_transport::serve::error[0m[2m:[0m [ac904ae0-d35c-4b95-a1c3-97c1ca3061c9] Not found: track '/nonexistent/namespace/test-track' not found in local or remote tracks at /build/moq-relay-ietf/src/producer.rs:850
-relay-1        | [2m2026-11-03T04:32:30.378994Z[0m [33m WARN[0m [2mmoq_relay_ietf::producer[0m[2m:[0m failed serving subscribe [3mnamespace[0m[2m=[0m/nonexistent/namespace [3mtrack[0m[2m=[0mtest-track [3msubscribe_info[0m[2m=[0mSubscribeInfo { id: 2, track_namespace: /nonexistent/namespace, track_name: test-track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3merror[0m[2m=[0mnot found: Track not found [error:ac904ae0-d35c-4b95-a1c3-97c1ca3061c9]
-test-client-1  | subscribe error: id=2 broadcast=nonexistent/namespace track=test-track error=SUBSCRIBE error: does_not_exist (code=16) not found: Track not found [error:ac904ae0-d35c-4b95-a1c3-97c1ca3061c9]
+relay-1        | [2m2026-11-03T08:13:26.520659Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe: SubscribeInfo { id: 2, track_namespace: /nonexistent/namespace, track_name: test-track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3mnamespace[0m[2m=[0m/nonexistent/namespace [3mtrack[0m[2m=[0mtest-track
+relay-1        | [2m2026-11-03T08:13:26.520780Z[0m [33m WARN[0m [2mmoq_transport::serve::error[0m[2m:[0m [63b0a3a3-ee08-4c8d-9d80-de615104dac0] Not found: track '/nonexistent/namespace/test-track' not found in local or remote tracks at /build/moq-relay-ietf/src/producer.rs:850
+relay-1        | [2m2026-11-03T08:13:26.520803Z[0m [33m WARN[0m [2mmoq_relay_ietf::producer[0m[2m:[0m failed serving subscribe [3mnamespace[0m[2m=[0m/nonexistent/namespace [3mtrack[0m[2m=[0mtest-track [3msubscribe_info[0m[2m=[0mSubscribeInfo { id: 2, track_namespace: /nonexistent/namespace, track_name: test-track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3merror[0m[2m=[0mnot found: Track not found [error:63b0a3a3-ee08-4c8d-9d80-de615104dac0]
+relay-1        | [2m2026-11-03T08:13:26.520822Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m
+test-client-1  | subscribe error: id=2 broadcast=nonexistent/namespace track=test-track error=SUBSCRIBE error: does_not_exist (code=16) not found: Track not found [error:63b0a3a3-ee08-4c8d-9d80-de615104dac0]
 test-client-1  | subscribe_namespace error: session error: connection error: closed
 test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
 test-client-1  | 173 |             return false;
@@ -99,24 +99,24 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 5 - subscribe-error
 test-client-1  |   ---
-test-client-1  |   duration_ms: 310
+test-client-1  |   duration_ms: 307
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T04:32:30.684095Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:26.825339Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-relay-1        | [2m2026-11-03T04:32:30.685313Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop } [3mnamespace[0m[2m=[0m/moq-test/interop
-relay-1        | [2m2026-11-03T04:32:30.685394Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
-relay-1        | [2m2026-11-03T04:32:30.988810Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:26.826526Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop } [3mnamespace[0m[2m=[0m/moq-test/interop
+relay-1        | [2m2026-11-03T08:13:26.826595Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
 test-client-1  | https://relay:4443/ connected via WebTransport
+relay-1        | [2m2026-11-03T08:13:27.130139Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
-relay-1        | [2m2026-11-03T04:32:30.990680Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m
+relay-1        | [2m2026-11-03T08:13:27.131624Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m
 test-client-1  | announced: broadcast=moq-test/interop active=true
 test-client-1  | subscribe start: id=2 broadcast=moq-test/interop track=test-track
 test-client-1  | subscribe written: id=2 broadcast=moq-test/interop track=test-track
-relay-1        | [2m2026-11-03T04:32:30.993498Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe: SubscribeInfo { id: 2, track_namespace: /moq-test/interop, track_name: test-track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track
-relay-1        | [2m2026-11-03T04:32:30.993551Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe from local: Track { namespace: /moq-test/interop, name: test-track } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track [3msource[0m[2m=[0m"local"
-relay-1        | [2m2026-11-03T04:32:30.993574Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m forwarding subscribe: Track { namespace: /moq-test/interop, name: test-track } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track
+relay-1        | [2m2026-11-03T08:13:27.133714Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe: SubscribeInfo { id: 2, track_namespace: /moq-test/interop, track_name: test-track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track
+relay-1        | [2m2026-11-03T08:13:27.133786Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe from local: Track { namespace: /moq-test/interop, name: test-track } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track [3msource[0m[2m=[0m"local"
+relay-1        | [2m2026-11-03T08:13:27.133813Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m forwarding subscribe: Track { namespace: /moq-test/interop, name: test-track } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track
 test-client-1  | publish ok: broadcast=moq-test/interop track=test-track
 test-client-1  | subscribe ok: id=2 broadcast=moq-test/interop track=test-track
 test-client-1  | publish done: broadcast=moq-test/interop track=test-track
@@ -140,31 +140,31 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 318
+test-client-1  |   duration_ms: 315
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T04:32:31.001116Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
+relay-1        | [2m2026-11-03T08:13:27.140071Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | subscribe_namespace written: requestId=0
-relay-1        | [2m2026-11-03T04:32:31.002365Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m
-relay-1        | [2m2026-11-03T04:32:31.504747Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:27.141010Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m
+relay-1        | [2m2026-11-03T08:13:27.644498Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-relay-1        | [2m2026-11-03T04:32:31.506115Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop } [3mnamespace[0m[2m=[0m/moq-test/interop
-relay-1        | [2m2026-11-03T04:32:31.506213Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
+relay-1        | [2m2026-11-03T08:13:27.645773Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/interop } [3mnamespace[0m[2m=[0m/moq-test/interop
+relay-1        | [2m2026-11-03T08:13:27.645910Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.696e7465726f70 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.696e7465726f70 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
 test-client-1  | announced: broadcast=moq-test/interop active=true
 test-client-1  | subscribe start: id=2 broadcast=moq-test/interop track=test-track
 test-client-1  | subscribe written: id=2 broadcast=moq-test/interop track=test-track
-relay-1        | [2m2026-11-03T04:32:31.507834Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe: SubscribeInfo { id: 2, track_namespace: /moq-test/interop, track_name: test-track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track
-relay-1        | [2m2026-11-03T04:32:31.507884Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe from local: Track { namespace: /moq-test/interop, name: test-track } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track [3msource[0m[2m=[0m"local"
-relay-1        | [2m2026-11-03T04:32:31.507930Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m forwarding subscribe: Track { namespace: /moq-test/interop, name: test-track } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track
+relay-1        | [2m2026-11-03T08:13:27.647090Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe: SubscribeInfo { id: 2, track_namespace: /moq-test/interop, track_name: test-track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track
+relay-1        | [2m2026-11-03T08:13:27.647137Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe from local: Track { namespace: /moq-test/interop, name: test-track } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track [3msource[0m[2m=[0m"local"
+relay-1        | [2m2026-11-03T08:13:27.647148Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m forwarding subscribe: Track { namespace: /moq-test/interop, name: test-track } [3mnamespace[0m[2m=[0m/moq-test/interop [3mtrack[0m[2m=[0mtest-track
 test-client-1  | publish ok: broadcast=moq-test/interop track=test-track
 test-client-1  | subscribe ok: id=2 broadcast=moq-test/interop track=test-track
 test-client-1  | publish done: broadcast=moq-test/interop track=test-track
 test-client-1  | publish error: broadcast=moq-test/interop track=test-track error=session error: connection error: closed
-test-client-1  | announced: broadcast=moq-test/interop active=false
-test-client-1  | subscribe error: id=2 broadcast=moq-test/interop track=test-track error=publish done: status=0x0 reason=cancelled
+test-client-1  | subscribe error: id=2 broadcast=moq-test/interop track=test-track error=session error: connection error: closed
 test-client-1  | subscribe_namespace error: session error: connection error: closed
+test-client-1  | announced: broadcast=moq-test/interop active=false
 test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
 test-client-1  | 173 |             return false;
 test-client-1  | 174 |         }
@@ -183,30 +183,30 @@ test-client-1  | ok 7 - subscribe-before-announce
 test-client-1  |   ---
 test-client-1  |   duration_ms: 511
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T04:32:31.512388Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:27.650801Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
-relay-1        | [2m2026-11-03T04:32:31.514132Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc
-relay-1        | [2m2026-11-03T04:32:31.514200Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.646174612d73756267726f75702d6261736963.3533396461363564353266396630633434613332323635323465326333616263 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.646174612d73756267726f75702d6261736963.3533396461363564353266396630633434613332323635323465326333616263 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
-relay-1        | [2m2026-11-03T04:32:31.515235Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
+relay-1        | [2m2026-11-03T08:13:27.652302Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m serving PUBLISH_NAMESPACE: PublishNamespaceInfo { request_id: 0, namespace: /moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959 } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959
+relay-1        | [2m2026-11-03T08:13:27.652366Z[0m [32m INFO[0m [2mmoq_relay_ietf::file_coordinator[0m[2m:[0m registering namespace: 6d6f712d74657374.646174612d73756267726f75702d6261736963.6334333136613361663262303166613061393934623065643563613762393539 -> https://0.0.0.0:4443/ [3mnamespace[0m[2m=[0m6d6f712d74657374.646174612d73756267726f75702d6261736963.6334333136613361663262303166613061393934623065643563613762393539 [3mscope[0m[2m=[0m [3mrelay_url[0m[2m=[0mhttps://0.0.0.0:4443/
+relay-1        | [2m2026-11-03T08:13:27.653423Z[0m [33m WARN[0m [2mmoq_transport::session[0m[2m:[0m Failed to create mlog: Permission denied (os error 13)
 test-client-1  | https://relay:4443/ connected via WebTransport
 test-client-1  | https://relay:4443/ negotiated ALPN: moqt-18
 test-client-1  | subscribe_namespace written: requestId=0
-relay-1        | [2m2026-11-03T04:32:31.517658Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m/moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc active=true
-test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-relay-1        | [2m2026-11-03T04:32:31.519328Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe: SubscribeInfo { id: 2, track_namespace: /moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, track_name: track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack
-relay-1        | [2m2026-11-03T04:32:31.519375Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe from local: Track { namespace: /moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, name: track } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack [3msource[0m[2m=[0m"local"
-relay-1        | [2m2026-11-03T04:32:31.519399Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m forwarding subscribe: Track { namespace: /moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, name: track } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack
-test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
-relay-1        | [2m2026-11-03T04:32:31.552453Z[0m [33m WARN[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m failed forwarding subscribe: Track { namespace: /moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, name: track } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack [3merror[0m[2m=[0mclosed, code=2
-relay-1        | [2m2026-11-03T04:32:31.552577Z[0m [33m WARN[0m [2mmoq_relay_ietf::producer[0m[2m:[0m failed serving subscribe [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack [3msubscribe_info[0m[2m=[0mSubscribeInfo { id: 2, track_namespace: /moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, track_name: track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3merror[0m[2m=[0mserve error: closed, code=2
-test-client-1  | subscribe close: id=2 broadcast=moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+relay-1        | [2m2026-11-03T08:13:27.655180Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe namespace [3mnamespace_prefix[0m[2m=[0m/moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959 active=true
+test-client-1  | subscribe start: id=2 broadcast=moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe written: id=2 broadcast=moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+relay-1        | [2m2026-11-03T08:13:27.656602Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe: SubscribeInfo { id: 2, track_namespace: /moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, track_name: track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack
+relay-1        | [2m2026-11-03T08:13:27.656660Z[0m [32m INFO[0m [2mmoq_relay_ietf::producer[0m[2m:[0m serving subscribe from local: Track { namespace: /moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, name: track } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack [3msource[0m[2m=[0m"local"
+relay-1        | [2m2026-11-03T08:13:27.656678Z[0m [32m INFO[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m forwarding subscribe: Track { namespace: /moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, name: track } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack
+test-client-1  | publish ok: broadcast=moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | subscribe ok: id=2 broadcast=moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+test-client-1  | publish done: broadcast=moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
+relay-1        | [2m2026-11-03T08:13:27.689581Z[0m [33m WARN[0m [2mmoq_relay_ietf::consumer[0m[2m:[0m failed forwarding subscribe: Track { namespace: /moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, name: track } [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack [3merror[0m[2m=[0mclosed, code=2
+relay-1        | [2m2026-11-03T08:13:27.689855Z[0m [33m WARN[0m [2mmoq_relay_ietf::producer[0m[2m:[0m failed serving subscribe [3mnamespace[0m[2m=[0m/moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 [3mtrack[0m[2m=[0mtrack [3msubscribe_info[0m[2m=[0mSubscribeInfo { id: 2, track_namespace: /moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0, track_name: track, subscriber_priority: 255, group_order: Descending, forward: true, filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None, filter: Some(SubscriptionFilter { filter_type: AbsoluteStart, start_location: Some(Location { group_id: 0, object_id: 0 }), end_group_id: None }), params: { {16: 1}, {32: 255}, {33: [03 00 00]}, {34: 2} }, track_status: false } [3merror[0m[2m=[0mserve error: closed, code=2
+test-client-1  | subscribe close: id=2 broadcast=moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0 track=track
 test-client-1  | subscribe_namespace error: session error: connection error: closed
-test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/539da65d52f9f0c44a3226524e2c3abc active=false
+test-client-1  | announced: broadcast=moq-test/data-subgroup-basic/c4316a3af2b01fa0a994b0ed5ca7b959 active=false
 test-client-1  | broadcast discovery failed; broadcasts resolve on request only. 172 |         if (!this.#reader) {
 test-client-1  | 173 |             return false;
 test-client-1  | 174 |         }
@@ -223,7 +223,7 @@ test-client-1  |       at async <anonymous> (/app/node_modules/@moq/net/ietf/sub
 test-client-1  | 
 test-client-1  | ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 44
+test-client-1  |   duration_ms: 41
 test-client-1  |   test_spec_revision: 2
 test-client-1  |   ...
 [Ktest-client-1 exited with code 0
