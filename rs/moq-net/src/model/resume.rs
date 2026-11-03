@@ -1238,6 +1238,8 @@ impl Reader {
 		// group's in-flight tail. A fresh copy would replay it and retain one per flap. The
 		// newest is the route's own copy, not a backfill of it.
 		if let Some(index) = self.copies.iter().rposition(|copy| copy.track.same_channel(&track)) {
+			// The copy's own resolution ends at its old cap; the reader's does not.
+			let resolved = self.window().resolved();
 			let mut copy = self.copies.remove(index);
 			copy.generation = generation;
 			copy.replaced = false;
@@ -1255,7 +1257,9 @@ impl Reader {
 					self.groups.1.map_or(Bound::Unbounded, Bound::Excluded),
 				));
 			}
-			copy.update(&self.mirrored);
+			copy.resolved = resolved;
+			let wire = self.mirrored.clamped(copy.floor, None, &copy.resolved);
+			copy.send(wire);
 			self.copies.push(copy);
 			return;
 		}
@@ -3078,6 +3082,66 @@ mod test {
 		routes.serve(tracks[0].consume());
 		write(&tracks[0], 2);
 		assert_eq!(recv(&mut sub).sequence, 2);
+		drop(held);
+	}
+
+	#[kio::test]
+	async fn a_returning_route_keeps_its_relative_end() {
+		returning_route(Anchor::Relative(991)).await;
+	}
+
+	#[kio::test]
+	async fn a_returning_route_keeps_its_resolved_time_end() {
+		returning_route(Anchor::Time(ts(10))).await;
+	}
+
+	/// Its old cap bounds a replaced copy's wire, not the reader's resolved end. Reusing
+	/// that copy must ask past the cap while keeping the reader's range and local bounds.
+	async fn returning_route(end: Anchor) {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		// Both anchors resolve the reader's exclusive end at 11.
+		for sequence in 2..=11 {
+			write(&a, sequence);
+		}
+		write(&a, 1001);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Absolute(2),
+				end: Some(end),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.await
+			.unwrap()
+			.with_range(2..3);
+		let held = recv(&mut sub);
+		assert_eq!(held.sequence, 2);
+		assert_eq!(sub.next_in_range(11), None, "the reader resolved its end");
+		sub.set_range(4..9);
+
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 4);
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert_eq!(copies(&routes), 2, "the held group keeps A's capped copy");
+
+		routes.serve(a.consume());
+		for sequence in [1, 12] {
+			write(&a, sequence);
+		}
+		let mut resumed = drain(&mut sub, false);
+		resumed.sort_unstable();
+		assert_eq!(resumed, [5, 6, 7, 8], "end={end:?}");
+		// Widening the local cursor still respects the reader's resolved end.
+		sub.set_range(4..);
+		let mut widened = drain(&mut sub, false);
+		widened.sort_unstable();
+		assert_eq!(widened, [9, 10], "end={end:?}");
 		drop(held);
 	}
 

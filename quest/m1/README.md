@@ -199,10 +199,8 @@ per-frame CPU growth since #5926.
 - [A discontinuity before the first frame keeps the init's parameter sets](/quest/m1/mux-discontinuity-headers.md) - an avc3, hev1, or av01 track that marks a discontinuity before its first frame still publishes that first keyframe with its init's parameter sets
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
-- [A returning route serves past the cap its old copy was given](/quest/m1/returning-route-cap.md) - when a resumed reader's route returns, the reused serving copy asks with the reader's current resolution, not the capped resolution it was left with when it was replaced
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
 - [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - a resumed read gets every group or a drop on every wire version
-- [moq-quic's idle connections keep no burst-sized state](/quest/m1/quic-readable-dedupe.md) - readable events are deduplicated and a quiet connection keeps no per-peak-stream bytes
 - [Stats name the route instance's epoch with a type](/quest/m1/stats-epoch-type.md) - `GroupFrame::epoch` gets a dedicated type and tests stop mislabelling the instance
 
 ## Related
