@@ -3872,8 +3872,8 @@ impl Consumer {
 	/// only with its prefetch drained, so `take` does not change that answer.
 	///
 	/// The gate is set up once a read parks twice in a row, as it does for a task that polls
-	/// it whenever another reader wakes: a group read whose next poll is its own wake, as
-	/// one task per group has it, never pays for one.
+	/// it whenever another reader wakes, and arms on the read after: a group read whose next
+	/// poll is its own wake, as one task per group has it, never pays for one.
 	fn poll_read_as<T>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -3882,7 +3882,7 @@ impl Consumer {
 		if Idle::parked(&self.idle, (), waiter) {
 			return Poll::Pending;
 		}
-		let res = match self.idle.is_some() || self.parked {
+		let res = match self.idle.is_some() {
 			true => {
 				let mut idle = Idle::start(&mut self.idle, waiter);
 				let res = self.poll_read_frame_through(idle.waiter(), take);
@@ -3891,7 +3891,13 @@ impl Consumer {
 			}
 			false => {
 				let res = self.poll_read_frame_through(waiter, take);
-				self.parked = res.is_pending();
+				let parked = res.is_pending();
+				if parked && self.parked {
+					// Parked twice in a row: the next read parks through a gate. Unarmed, since
+					// this read registered on the task's own waiter, not the gate's.
+					Idle::start(&mut self.idle, waiter).finish(&mut self.idle, (), false);
+				}
+				self.parked = parked;
 				res
 			}
 		};
@@ -6731,6 +6737,22 @@ mod test {
 			.unwrap();
 		assert!(other.take(), "the next frame wakes the task that polled last");
 		assert!(matches!(group.poll_read_frame(&moved), Poll::Ready(Ok(Some(_)))));
+	}
+
+	/// A read that parks once and is then woken by its next frame never sets up a gate.
+	#[test]
+	fn a_read_woken_by_its_frame_takes_no_gate() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let mut group = producer.consume();
+		let waiter = kio::Waiter::new(Arc::new(Woken::default()).into());
+		for payload in [b"a", b"b", b"c"] {
+			assert!(group.poll_read_frame(&waiter).is_pending());
+			producer
+				.write_frame(crate::Timestamp::ZERO, Bytes::from_static(payload))
+				.unwrap();
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		}
+		assert!(group.idle.is_none(), "a reader its own wake polls paid for a gate");
 	}
 
 	/// A chunked read that takes the frame a whole-frame read parked on moves the cursor, so
