@@ -1269,7 +1269,7 @@ impl Connection {
 	}
 
 	/// Indicate what types of frames are ready to send for the given space
-	fn space_can_send(&self, space_id: SpaceId, frame_space_1rtt: usize) -> SendableFrames {
+	fn space_can_send(&mut self, space_id: SpaceId, frame_space_1rtt: usize) -> SendableFrames {
 		if self.spaces[space_id].crypto.is_none() {
 			// No keys available for this space
 			return SendableFrames::empty();

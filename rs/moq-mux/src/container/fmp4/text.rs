@@ -62,7 +62,7 @@ impl Track {
 		if self.end_decode_time.is_some_and(|end| dts < end) {
 			return Err(Error::InvalidSubtitle("subtitle fragment overlaps the previous one").into());
 		}
-		let mut samples = Vec::new();
+		let mut samples = Vec::with_capacity(sample::count(traf) as usize);
 		for resolved in resolver.resolve(traf, self.defaults)? {
 			let sample::Resolved { sample, cts, range } = resolved?;
 			// A text sample is staged whole before it is rewritten.

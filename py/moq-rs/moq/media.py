@@ -40,7 +40,6 @@ from moq_ffi import (
     MoqRendition,
 )
 from moq_ffi import MoqDecodeStart as DecodeStart
-from moq_ffi import MoqDelay as Delay
 from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
@@ -374,7 +373,7 @@ class GroupConsumer(_Stream[MediaFrame]):
 
         Frame timestamps are container media time, not the transport's. Which
         groups arrive, and how long a stalled one stays readable, is the
-        subscription's ``max_delay``. Takes over ``group``, whose handle is
+        subscription's ``delay.max``. Takes over ``group``, whose handle is
         closed afterward; raises ``Error.AlreadyCommitted`` if it has already
         read a frame.
         """
@@ -467,7 +466,6 @@ __all__ = [
     "Video",
     "Catalog",
     "Container",
-    "Delay",
     "Dimensions",
     "DecodeStart",
     "AudioFormat",
