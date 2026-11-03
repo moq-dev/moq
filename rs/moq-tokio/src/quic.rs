@@ -25,11 +25,8 @@ pub mod demux;
 #[cfg(feature = "driver")]
 pub mod driver;
 
-/// WebTransport over [`driver`], formerly the `web-transport-moq` crate.
-///
-/// Public only so the workspace's tests can dial a bare session; not a stable API.
+/// WebTransport over the moq-quic [`driver`], usable without a MoQ session.
 #[cfg(feature = "quic")]
-#[doc(hidden)]
 pub mod web;
 
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.

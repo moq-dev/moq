@@ -150,7 +150,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 
 	let accept = async {
 		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
-		let session = moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup);
+		let session = web::Session::raw(conn);
 		let (session, driver) = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_publisher(publisher.consume())
@@ -166,7 +166,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 			.unwrap()
 			.await
 			.unwrap();
-		let session = moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup);
+		let session = web::Session::raw(conn);
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
 			.with_subscriber(viewer.clone())

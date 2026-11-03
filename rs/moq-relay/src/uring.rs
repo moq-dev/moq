@@ -709,7 +709,6 @@ impl Deadline {
 		&mut self,
 		handshake: impl Future<Output = Result<T, E>>,
 	) -> anyhow::Result<T> {
-		use web_transport_trait::poll::Session as _;
 		let timer = std::pin::pin!(self.timer.wait());
 		let handshake = std::pin::pin!(handshake);
 		match futures::future::select(timer, handshake).await {
@@ -756,13 +755,13 @@ async fn serve_connection(
 				.bound(moq_uring::quic::web::Request::accept(conn))
 				.await
 				.context("WebTransport handshake failed")?;
-			let url = request.url().clone();
+			let url = request.url.clone();
 			let protocol = request
-				.protocols()
+				.protocols
 				.iter()
 				.find(|offered| serve.alpns.iter().any(|alpn| alpn == *offered))
 				.cloned();
-			let mut response = moq_uring::quic::web::Response::default();
+			let mut response = moq_uring::quic::web::proto::ConnectResponse::OK;
 			if let Some(protocol) = &protocol {
 				response = response.with_protocol(protocol);
 			}
@@ -779,13 +778,7 @@ async fn serve_connection(
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
 	let server = serve.moq.clone();
-	let address = match url {
-		Some(_) => moq_net::transport::Address::Uri,
-		None => moq_net::transport::Address::Setup,
-	};
-	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
-	// session meets; it still never leaves this worker.
-	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, address));
+	let session = moq_uring::transport::Local::new(transport);
 	let now = moq_net::time::Instant::now();
 	let mut accepted = Accepted {
 		handle,

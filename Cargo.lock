@@ -5092,7 +5092,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "usage-rs",
- "web-transport-trait",
  "workspace-hack",
  "x509-parser",
 ]
@@ -5342,7 +5341,6 @@ dependencies = [
  "url",
  "usage-rs",
  "web-transport-proto",
- "web-transport-trait",
  "webpki-roots 1.0.10",
  "workspace-hack",
  "x509-parser",
@@ -5378,6 +5376,7 @@ dependencies = [
  "anyhow",
  "bench-harness",
  "bytes",
+ "futures",
  "http",
  "io-uring",
  "kio",
@@ -5403,7 +5402,6 @@ dependencies = [
  "tracing",
  "url",
  "web-transport-proto",
- "web-transport-trait",
  "workspace-hack",
 ]
 

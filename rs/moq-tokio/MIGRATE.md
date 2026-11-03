@@ -4,6 +4,32 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Native WebTransport implements moq-net's poll traits ([#7771](https://github.com/moq-dev/moq/pull/7771))
+
+`quic::web` is supported as a WebTransport library without running MoQ.
+Pass its `Session` directly to moq-net.
+Remove the generic `transport::Session::new(session, address)` wrapper; a WebTransport session reports `Address::Uri` and `Session::raw(connection)` reports `Address::Setup`.
+The generic send/receive adapters, their error wrapper, and the sealed `Grouped`/`GroupedSend` traits are removed, along with every `web_transport_trait` implementation and dependency.
+Custom transports implement `moq_net::transport::poll` directly.
+
+Use `quic::web::send::Stream` and `recv::Stream` instead of `SendStream` and `RecvStream`.
+Their errors are `send::Error` and `recv::Error`.
+`finish(self)` returns a `send::Finished`, which can be awaited for acknowledgements or a peer stop; `reset(self, code)` and `stop(self, code)` consume their stream.
+Code using moq-net's poll traits keeps their mutable terminal methods.
+Session polls take `&self` and a caller-owned `&kio::Waiter`; opens also take the driver's `send::Options`, preserving full `i64` priorities and real send groups.
+
+`Session` no longer dereferences to its QUIC connection. Use `session.connection()` for QUIC-specific operations; `session.send_datagram` always applies WebTransport framing.
+`Session::stats` returns the driver's statistics snapshot. Use moq-net's `Session::metrics` for transport metrics.
+
+`Request` dereferences to `proto::ConnectRequest`; read its `url` and `protocols` fields there.
+`Request::connection()` names the underlying QUIC connection.
+`Request::respond` takes `impl Into<proto::ConnectResponse>` and requires status OK; `reject` takes an `http::StatusCode`.
+The Tokio `web::Server` helper and `Request::connect()` accessor are removed; accept from the driver endpoint, then call `Request::accept(connection)`.
+`send::Stream`, `send::Finished`, and `recv::Stream` expose their stream ID as `id()`.
+
+A receive stream's `closed()` observes an empty FIN without a read. When there is payload, read it before waiting for close. `poll_reset` still watches only failures, so it remains pending after a clean end.
+Invalid stream error codes fail as `InvalidReset` or `InvalidStopped`, rather than looking like a clean end.
+
 ### QUIC waits have caller-owned poll forms ([#7707](https://github.com/moq-dev/moq/pull/7707))
 
 The QUIC driver connection's stream opens, accepts, datagram receive and close waits,

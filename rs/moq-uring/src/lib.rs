@@ -14,7 +14,7 @@
 //!
 //! [`quic`] stacks a sans-IO QUIC stack on that path: a [`quic::Endpoint`]
 //! serves many connections on one socket (demuxed by connection id, dials
-//! included), each a [`quic::Connection`] wrapped by [`transport::Session`]
+//! included), each a [`quic::Connection`] wrapped by [`quic::web::Session`]
 //! and [`transport::Local`], which meets moq-net's `Send` bound by checking the
 //! thread on every use, so `moq_net::Client::connect` and `Server::accept` run
 //! real MoQ sessions on the worker. The socket is the identity: whatever is
