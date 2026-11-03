@@ -199,7 +199,9 @@ class NightlyTest(unittest.TestCase):
             r"^for benchmark in (.+); do\n\s+bun micro\.ts ", (ROOT / "bench/browser/run.sh").read_text(), re.M
         )
         self.assertIsNotNone(smoke)
-        entries |= {ROOT / "js/net/bench" / f"{name}.ts" for name in smoke[1].split()}
+        # As micro.ts resolves them: `pattern` is @moq/pattern's, the rest are @moq/net's.
+        outside = {"pattern": ROOT / "js/pattern/bench/algebra.ts"}
+        entries |= {outside.get(name, ROOT / "js/net/bench" / f"{name}.ts") for name in smoke[1].split()}
         # Bundled helpers only run through the entry that names them.
         helpers = {
             path for entry in entries for path in entry.parent.glob("*.ts") if f"/{path.name}" in entry.read_text()
