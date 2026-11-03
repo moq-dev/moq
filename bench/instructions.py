@@ -290,16 +290,18 @@ def lost(rows, start, end):
 
 
 def summarize(run, labels):
-    """Print each revision's median and range across rounds, and keep them beside the evidence."""
+    """Print each revision's median and range across rounds at each worker count, and keep them."""
     from statistics import median
 
     result = {}
     for label in labels:
-        cells = []
+        configurations = {}
         for path in sorted((run / "relay" / label).glob("round-*/instructions-*/*/instructions/instructions.json")):
+            # Worker counts are separate configurations, never one revision-wide range.
+            workers = path.relative_to(run / "relay" / label).parts[1].removeprefix("instructions-")
             cell = json.loads(path.read_text())
             rows = [json.loads(line) for line in (path.parent.parent / "load.jsonl").read_text().splitlines()]
-            cells.append(
+            configurations.setdefault(workers, dict(cells=[]))["cells"].append(
                 dict(
                     cell=str(path.relative_to(run)),
                     instructions_per_frame=cell["instructions_per_frame"],
@@ -309,24 +311,27 @@ def summarize(run, labels):
                     host_load_1m=max(cell.get("host_load_1m", [math.nan])),
                 )
             )
-        if not cells:
+        if not configurations:
             raise ValueError(f"no instruction cells for {label}")
-        result[label] = dict(cells=cells)
-        for key in ("instructions_per_frame", "cycles_per_frame", "recv_fps", "groups_lost", "host_load_1m"):
-            values = [cell[key] for cell in cells]
-            result[label][key] = dict(median=median(values), min=min(values), max=max(values))
+        for configuration in configurations.values():
+            cells = configuration["cells"]
+            for key in ("instructions_per_frame", "cycles_per_frame", "recv_fps", "groups_lost", "host_load_1m"):
+                values = [cell[key] for cell in cells]
+                configuration[key] = dict(median=median(values), min=min(values), max=max(values))
+        result[label] = dict(sorted(configurations.items(), key=lambda item: int(item[0])))
     (run / "instructions-summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(
-        f"\n{'revision':<20} {'kinstr/frame [min-max]':>26} {'kcycles/frame':>14} {'fps [min-max]':>24} "
-        f"{'lost':>6} {'load':>5}"
+        f"\n{'revision':<20} {'workers':>7} {'kinstr/frame [min-max]':>26} {'kcycles/frame':>14} "
+        f"{'fps [min-max]':>24} {'lost':>6} {'load':>5}"
     )
-    for label, row in result.items():
-        i, c, f = row["instructions_per_frame"], row["cycles_per_frame"], row["recv_fps"]
-        print(
-            f"{label:<20} {i['median'] / 1e3:>9.1f} [{i['min'] / 1e3:.1f}-{i['max'] / 1e3:.1f}] "
-            f"{c['median'] / 1e3:>14.1f} {f['median']:>9.0f} [{f['min']:.0f}-{f['max']:.0f}] "
-            f"{row['groups_lost']['max']:>6} {row['host_load_1m']['max']:>5.1f}"
-        )
+    for label, configurations in result.items():
+        for workers, row in configurations.items():
+            i, c, f = row["instructions_per_frame"], row["cycles_per_frame"], row["recv_fps"]
+            print(
+                f"{label:<20} {workers:>7} {i['median'] / 1e3:>9.1f} [{i['min'] / 1e3:.1f}-{i['max'] / 1e3:.1f}] "
+                f"{c['median'] / 1e3:>14.1f} {f['median']:>9.0f} [{f['min']:.0f}-{f['max']:.0f}] "
+                f"{row['groups_lost']['max']:>6} {row['host_load_1m']['max']:>5.1f}"
+            )
 
 
 def validate_data(path):

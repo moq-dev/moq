@@ -24,8 +24,12 @@ ROUNDS=$((10#$ROUNDS))
 # the performance cores it may already use. The kernel only lists them on Intel
 # hybrid parts.
 PINNED=
-# Builds don't affect what a benchmark measures, so instructions mode compiles on every allowed CPU.
-ALLOWED_CPUS=$(python3 -c 'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0)))))')
+# Builds don't affect what a benchmark measures, so instructions mode compiles on
+# every CPU this shell may use before it pins itself. Linux only, like that mode.
+ALLOWED_CPUS=
+if [[ $(uname -s) == Linux ]]; then
+    ALLOWED_CPUS=$(python3 -c 'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0)))))')
+fi
 if [[ -r /sys/devices/cpu_core/cpus ]]; then
     PINNED=$(
         python3 - "$$" <<'EOF'
@@ -187,6 +191,7 @@ RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
 printf 'Benchmark evidence: %s\n' "$RUN"
 WORKTREE=
 WORKTREES=()
+BUILD_PIDS=()
 RELAY_PID=
 HOST_PID=
 LOAD_PID=
@@ -212,7 +217,12 @@ cleanup() {
         kill "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
     fi
-    local worktree
+    # Builds read the worktrees below, so stop them first. Each leads its own group.
+    local build worktree
+    for build in ${BUILD_PIDS[@]+"${BUILD_PIDS[@]}"}; do
+        kill -- -"$build" 2>/dev/null || true
+        wait "$build" 2>/dev/null || true
+    done
     for worktree in ${WORKTREE:+"$WORKTREE"} ${WORKTREES[@]+"${WORKTREES[@]}"}; do
         git -C "$ROOT" worktree remove --force "$worktree" >/dev/null 2>&1 || true
         rmdir "$worktree" 2>/dev/null || true
@@ -926,7 +936,7 @@ revision_checkout() {
 run_instructions() {
     local label sha round index next generator built
     # Measured revisions, then what gets built: those plus a generator measured nowhere.
-    local -a labels=() targets=() checkouts=() builds=()
+    local -a labels=() targets=() checkouts=()
     for sha in ${BASES[@]+"${BASES[@]}"}; do
         label=base
         if ((${#BASES[@]} > 1)); then label=base-${sha:0:12}; fi
@@ -955,14 +965,20 @@ run_instructions() {
 
     # Fat LTO links on one thread, so revisions build side by side on every allowed CPU.
     mkdir -p "$RUN/build"
+    # setsid makes each build a group leader without forking, so cleanup stops its rustc too.
     for ((index = 0; index < ${#build_labels[@]}; index++)); do
-        taskset -c "$ALLOWED_CPUS" bash -c "$(declare -f build_workers); build_workers \"\$@\"" _ \
+        setsid taskset -c "$ALLOWED_CPUS" bash -c "$(declare -f build_workers); build_workers \"\$@\"" _ \
             "${build_checkouts[$index]}" "${build_targets[$index]}" profiling instructions \
             >"$RUN/build/${build_labels[$index]}.log" 2>&1 &
-        builds+=($!)
+        BUILD_PIDS+=($!)
     done
+    local status
     for ((index = 0; index < ${#build_labels[@]}; index++)); do
-        if ! wait "${builds[$index]}"; then
+        status=0
+        wait "${BUILD_PIDS[$index]}" || status=$?
+        # Reaped, so cleanup must not signal a group that ID may now name.
+        unset "BUILD_PIDS[$index]"
+        if ((status != 0)); then
             printf 'build failed for %s:\n' "${build_labels[$index]}" >&2
             tail -n 40 "$RUN/build/${build_labels[$index]}.log" >&2
             return 1

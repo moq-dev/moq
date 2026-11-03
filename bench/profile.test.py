@@ -75,9 +75,13 @@ class Instructions(unittest.TestCase):
     def test_summary_reports_each_revision_across_rounds(self):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
-            for label, values in [("base-0123", [12, 10, 11]), ("current", [20, 21])]:
+            for label, workers, values in [
+                ("base-0123", 4, [12, 10, 11]),
+                ("base-0123", 16, [40]),
+                ("current", 4, [20, 21]),
+            ]:
                 for round, value in enumerate(values, 1):
-                    cell = run / "relay" / label / f"round-{round}" / "instructions-4" / "chat"
+                    cell = run / "relay" / label / f"round-{round}" / f"instructions-{workers}" / "chat"
                     (cell / "instructions").mkdir(parents=True)
                     (cell / "instructions" / "instructions.json").write_text(
                         json.dumps(
@@ -96,11 +100,14 @@ class Instructions(unittest.TestCase):
             with patch("builtins.print"):
                 instructions.summarize(run, ["base-0123", "current"])
             summary = json.loads((run / "instructions-summary.json").read_text())
-            self.assertEqual(summary["base-0123"]["instructions_per_frame"], dict(median=11, min=10, max=12))
-            self.assertEqual(summary["current"]["instructions_per_frame"]["median"], 20.5)
+            # Each worker count is its own configuration, not part of one revision-wide range.
+            self.assertEqual(list(summary["base-0123"]), ["4", "16"])
+            self.assertEqual(summary["base-0123"]["4"]["instructions_per_frame"], dict(median=11, min=10, max=12))
+            self.assertEqual(summary["base-0123"]["16"]["instructions_per_frame"], dict(median=40, min=40, max=40))
+            self.assertEqual(summary["current"]["4"]["instructions_per_frame"]["median"], 20.5)
             # Loss counts between the reports bracketing the window, not over the lifetime.
-            self.assertEqual([cell["groups_lost"] for cell in summary["base-0123"]["cells"]], [0, 1, 2])
-            self.assertEqual(summary["base-0123"]["host_load_1m"], dict(median=2, min=1, max=3))
+            self.assertEqual([cell["groups_lost"] for cell in summary["base-0123"]["4"]["cells"]], [0, 1, 2])
+            self.assertEqual(summary["base-0123"]["4"]["host_load_1m"], dict(median=2, min=1, max=3))
             with self.assertRaisesRegex(ValueError, "no instruction cells"):
                 instructions.summarize(run, ["missing"])
 

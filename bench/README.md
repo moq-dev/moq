@@ -310,7 +310,7 @@ all: the current tree's, unless `BENCH_GENERATOR` names a revision. Hold it
 fixed across a bisect's runs, so client changes (flow control, subscription
 options) can't move what an old relay spends per frame.
 
-The run ends with each revision's median and range in
+The run ends with each revision's median and range at each worker count in
 `instructions-summary.json`, including the groups the generator confirmed lost
 between the reports bracketing each counter window and the host's highest
 one-minute load during it. Admission only waits for room when the run starts,
