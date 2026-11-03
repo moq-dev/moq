@@ -39,7 +39,7 @@ unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
 Each QUIC driver, moq-tokio's `quic::driver` and moq-uring's, gets the hook
-first, in the shape of [the driver poll waits](/quest/m1/quic-api/poll.md),
+first, in the drivers' caller-owned waiter shape,
 with an async wrapper:
 
 ```rust
@@ -97,8 +97,3 @@ close.
 Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
 [viewer lag histogram](/quest/m2/qos/lag-histogram.md) and the
 [delivery-delay histogram](/quest/m2/delivery-delay.md).
-
-## Required
-
-- [QUIC driver poll waits](/quest/m1/quic-api/poll.md) - the `&self, &kio::Waiter`
-  driver shape `poll_acked` takes

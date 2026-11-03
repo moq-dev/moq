@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of an optional `timestamp=` keyword. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale=1_000)`; one without is refused.
@@ -138,6 +142,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
 Replace `request.accept(broadcast)` with `prepared = request.prepare()`, fill `prepared.broadcast`, then `prepared.publish()`, which announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.serve(producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 

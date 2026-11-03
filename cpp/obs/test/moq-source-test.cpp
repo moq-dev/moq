@@ -1205,23 +1205,6 @@ int main()
 		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), held)) ==
 		       std::vector<std::string>{"c-low"}));
 		CHECK(moq_source_candidates(moq_source_ranked_audio(audios), none).empty());
-
-		// The codecs moq-audio decodes, with AAC-LC in either spelling hang parses.
-		const auto decodes = [&](const char *codec, uint32_t channels) {
-			auto config = base_audio;
-			config.codec = codec;
-			config.channel_count = channels;
-			return moq_source_audio_decodes(config);
-		};
-		for (const char *codec : {"opus", "pcm", "mp4a.40.2", "mp4a.40.02"})
-			CHECK(decodes(codec, 2));
-		for (const char *codec : {"flac", "mp4a.40.5", "mp4a.40.20", "mp4a.40.", "mp4a.40.0"})
-			CHECK(!decodes(codec, 2));
-		// moq-audio decodes AAC only in mono or stereo, unlike Opus and PCM.
-		CHECK(decodes("mp4a.40.2", 1));
-		CHECK(!decodes("mp4a.40.2", 6));
-		CHECK(decodes("opus", 6));
-		CHECK(decodes("pcm", 6));
 	}
 	report("renditions rank like hang");
 
@@ -1273,6 +1256,23 @@ int main()
 		he_aac_audio.description.reset();
 		he_aac_audio.bitrate = 5500000;
 		catalog.audio.emplace("he-aac", he_aac_audio);
+		// A recognized codec with a malformed description is also a setup refusal.
+		auto malformed_audio = audio;
+		malformed_audio.description = std::vector<uint8_t>{};
+		malformed_audio.bitrate = 5600000;
+		catalog.audio.emplace("malformed", malformed_audio);
+		// AAC-LC by name, but its description declares SBR, which moq-audio refuses.
+		auto sbr_audio = audio;
+		sbr_audio.codec = "mp4a.40.2";
+		sbr_audio.description = std::vector<uint8_t>{0x12, 0x10, 0x56, 0xe5, 0x98};
+		sbr_audio.bitrate = 5400000;
+		catalog.audio.emplace("sbr", sbr_audio);
+		// Two bytes can still be malformed: this ASC promises a missing explicit sample rate.
+		auto truncated_aac_audio = audio;
+		truncated_aac_audio.codec = "mp4a.40.2";
+		truncated_aac_audio.description = std::vector<uint8_t>{0x17, 0x90};
+		truncated_aac_audio.bitrate = 5450000;
+		catalog.audio.emplace("truncated-aac", truncated_aac_audio);
 		// 5.1 AAC-LC: OBS has the layout, but moq-audio decodes AAC only in mono or stereo.
 		auto surround_aac_audio = audio;
 		surround_aac_audio.codec = "mp4a.40.2";
@@ -1295,11 +1295,15 @@ int main()
 			moq_source_subscribe_video(ctx, conn, catalog);
 			moq_source_subscribe_audio(ctx, conn, catalog);
 			CHECK(conn->pending_video && conn->pending_video->id == "c");
-			CHECK(conn->pending_audio && conn->pending_audio->id == "c");
+			// Selection continues asynchronously when setup refuses a rendition.
 			// The playing tracks stay until the replacement delivers.
 			CHECK(conn->video && conn->video->id == video_id);
 			CHECK(conn->audio && conn->audio->id == audio_id);
 		}
+		CHECK(publisher.WriteUntil([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			return ctx->connection->audio && ctx->connection->audio->id == "c";
+		}));
 		destroySource(source);
 	}
 	report("disabled and undecodable renditions fall through");

@@ -141,11 +141,12 @@ case "$1" in
     rust-extra)
         # The allocation/window/play-buffer/batch/receive-bursts tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-e2ee -p moq-sign -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+        criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode --features moq-quic/fuzz \
             --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
             --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout
+        criterion audio-capture -p moq-audio --features capture --bench capture
         # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
         # The concurrent cases' latency percentiles stay in the run's stdout.
         criterion auth --manifest-path rs/moq-auth/Cargo.toml --bench verify --bench jwt

@@ -261,7 +261,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `.broadcast → BroadcastProducer`. The broadcast to fill.
   - `.announce(route=None)`, `.unannounce()`. Advertise or retract its exact path; both raise `Closed` once the broadcast closed.
 - **`OriginRequests`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare()`, fill its `.broadcast`, then `.publish() → Publication` to serve it as a new stream under a fresh instance, or `.reject(code)` to fail the requester.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.serve(consumer)` to answer with held content under the prefix route's continuous sequence space, `.prepare()` then fill its `.broadcast` and `.publish() → Publication` for an independently restarting job under a fresh instance, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.instance` names the stream; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards

@@ -2,6 +2,12 @@
 
 How to update your code for each breaking change, newest first.
 
+## Unreleased
+
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `MOQ_ERROR_UNSUPPORTED_CONFIG` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
 ## moq-c 0.7, the hand-written ABI
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
@@ -90,6 +96,7 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
 `moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
+To answer with a broadcast you already hold, `moq_broadcast_request_serve(request, consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to free.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
 ### `moq_track_info` gains `compress` (#5928)

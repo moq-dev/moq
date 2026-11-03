@@ -525,25 +525,29 @@ impl Encoder {
 	/// hang catalog entry describing this encoder's output stream.
 	pub fn catalog(&self) -> hang::catalog::AudioConfig {
 		let (rate, channels) = (self.codec_rate(), self.codec_channels());
-		let (codec, bitrate): (hang::catalog::AudioCodec, _) = match self.config.codec {
-			Codec::Opus => (
-				hang::catalog::AudioCodec::Opus,
-				self.config.bitrate.map(moq_net::bandwidth::Rate::as_bps),
-			),
-			Codec::Pcm => (
-				hang::catalog::AudioCodec::Pcm,
-				Some(pcm::bitrate(rate, channels).expect("pcm encoder bitrate validated at construction")),
-			),
-			Codec::Aac => (
-				hang::catalog::AAC { profile: AAC_LC }.into(),
-				self.config.bitrate.map(moq_net::bandwidth::Rate::as_bps),
-			),
+		let codec: hang::catalog::AudioCodec = match self.config.codec {
+			Codec::Opus => hang::catalog::AudioCodec::Opus,
+			Codec::Pcm => hang::catalog::AudioCodec::Pcm,
+			Codec::Aac => hang::catalog::AAC { profile: AAC_LC }.into(),
 		};
 
 		let mut config = hang::catalog::AudioConfig::new(codec, rate, channels);
-		config.bitrate = bitrate;
+		// The target the encoder opened at, even one it chose itself, so the catalog never waits on
+		// measuring it.
+		config.bitrate = match self.config.codec {
+			Codec::Pcm => Some(pcm::bitrate(rate, channels).expect("pcm encoder bitrate validated at construction")),
+			Codec::Opus | Codec::Aac => Some(self.bitrate().as_bps()).filter(|bps| *bps > 0),
+		};
 		config.description = self.description.clone();
 		config.container = hang::catalog::Container::Legacy;
+		// An Opus or PCM packet goes out as soon as its frame's last sample is in, stamped at its
+		// first, so it trails by its own duration and nothing else; the player adds that frame, and
+		// the catalog `delay` is a known zero. AAC folds its priming into the timestamps and a platform
+		// encoder may hold frames, so it is measured.
+		config.delay = match self.config.codec {
+			Codec::Opus | Codec::Pcm => Some(std::time::Duration::ZERO),
+			Codec::Aac => None,
+		};
 		if matches!(self.config.codec, Codec::Opus) {
 			config.warmup = Some(moq_mux::codec::opus::WARMUP);
 		}
@@ -988,6 +992,25 @@ mod tests {
 		assert_eq!(enc.bitrate(), moq_net::bandwidth::Rate::from_bps(96_000));
 		assert_eq!(enc.config().bitrate, Some(moq_net::bandwidth::Rate::from_bps(96_000)));
 		assert_eq!(enc.catalog().bitrate, Some(96_000));
+	}
+
+	/// An encoder left to pick its own rate still declares it, so the catalog never measures it.
+	#[test]
+	fn a_default_rate_is_declared() {
+		let enc = stub(&aac(Layout::Stereo)).unwrap();
+		assert_eq!(enc.config().bitrate, None);
+		assert_eq!(enc.catalog().bitrate, Some(128_000));
+	}
+
+	/// A codec whose packets trail by their own duration alone states a zero delay; AAC, whose
+	/// encoder may hold frames, leaves it to measurement.
+	#[test]
+	fn delay_is_stated_where_the_codec_fixes_it() {
+		assert_eq!(stub(&aac(Layout::Stereo)).unwrap().catalog().delay, None);
+		for codec in [Codec::Opus, Codec::Pcm] {
+			let enc = Encoder::new(&Config::from_input(codec, &Input::new(48_000, Layout::Stereo))).unwrap();
+			assert_eq!(enc.catalog().delay, Some(std::time::Duration::ZERO), "{codec:?}");
+		}
 	}
 
 	/// The drain pushes the encoder delay out through whole silent frames.

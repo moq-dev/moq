@@ -5765,6 +5765,12 @@ class FfiConverterMoqException {
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
+      case 34:
+        final lifted = UnsupportedConfigMoqException.read(subview);
+        return LiftRetVal<MoqException>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
@@ -6924,6 +6930,44 @@ class UnsupportedCatalogMoqException extends MoqException {
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterUInt64.write(
       version,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class UnsupportedConfigMoqException extends MoqException {
+  final String reason;
+  UnsupportedConfigMoqException(String this.reason);
+  UnsupportedConfigMoqException._(String this.reason);
+  static LiftRetVal<UnsupportedConfigMoqException> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final reason_lifted = FfiConverterString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final reason = reason_lifted.value;
+    new_offset += reason_lifted.bytesRead;
+    return LiftRetVal(UnsupportedConfigMoqException._(reason), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterString.allocationSize(reason) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 34);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterString.write(
+      reason,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -12444,6 +12488,7 @@ abstract class MoqBroadcastRequestInterface {
   String path();
   MoqBroadcastPrepared prepare();
   void reject({required int errorCode});
+  void serve({required MoqBroadcastConsumer broadcast});
 }
 
 final _MoqBroadcastRequestFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12510,6 +12555,16 @@ class MoqBroadcastRequest implements MoqBroadcastRequestInterface {
       uniffi_moq_ffi_fn_method_moqbroadcastrequest_reject(
         uniffiClonePointer(),
         FfiConverterUInt16.lower(errorCode),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  void serve({required MoqBroadcastConsumer broadcast}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqbroadcastrequest_serve(
+        uniffiClonePointer(),
+        FfiConverterMoqBroadcastConsumer.lower(broadcast),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -19506,6 +19561,15 @@ external void uniffi_moq_ffi_fn_method_moqbroadcastrequest_reject(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqbroadcastrequest_serve(
+  Pointer<Void> ptr,
+  Pointer<Void> broadcast,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -21379,6 +21443,9 @@ external int uniffi_moq_ffi_checksum_method_moqbroadcastrequest_prepare();
 external int uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqbroadcastrequest_serve();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqfollowing_available();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -22104,6 +22171,9 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject() != 9727) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_serve() != 16802) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
   if (uniffi_moq_ffi_checksum_method_moqfollowing_available() != 39867) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
@@ -22133,7 +22203,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginrequests_requested_broadcast() !=
-      31253) {
+      47029) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqpublication_announce() != 60624) {
@@ -22423,7 +22493,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqaudioconsumer_subscribe() !=
-      10630) {
+      42847) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqaudioencoder_new() != 52616) {
@@ -22509,7 +22579,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqvideoconsumer_subscribe() !=
-      15507) {
+      20518) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqvideoencoder_new() != 22531) {
