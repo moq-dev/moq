@@ -24,6 +24,7 @@ import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Producer } from "../track.ts";
+import { Budget } from "../util/yield.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Group } from "./group.ts";
@@ -2863,15 +2864,27 @@ test("a counted initial set cut short is a protocol violation", async () => {
 	}
 });
 
-test("a version without a boundary syncs once the request is out", async () => {
-	const { subscriber, settle } = announceHarness(Version.DRAFT_03);
-	const announced = subscriber.announced();
-	await settle();
-	expect(announced.synced.peek()).toBe(true);
-
-	announced.close();
-	subscriber.close();
-});
+test.each([Version.DRAFT_03, Version.DRAFT_04])(
+	"a version without a boundary syncs once the request is out on %s",
+	async (version) => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const yielding = spyOn(Budget.prototype, "poll").mockImplementation(() => yieldNow());
+		const { subscriber } = announceHarness(version);
+		const announced = subscriber.announced();
+		try {
+			expect(announced.synced.peek()).toBe(false);
+			// A single host turn can end while request writes still yield on the shared budget.
+			await clock.advance(Nano(0));
+			expect(announced.synced.peek()).toBe(true);
+		} finally {
+			announced.close();
+			subscriber.close();
+			yielding.mockRestore();
+			installed.close();
+		}
+	},
+);
 
 test("announce init is the initial set", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
