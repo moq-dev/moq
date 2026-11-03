@@ -80,6 +80,7 @@ import {
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
+	keepsSubscribeOpen,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -147,6 +148,10 @@ interface SubscribeEntry {
 	starts?: (bigint | undefined)[];
 	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
 	updated?: boolean;
+	// Whether SUBSCRIBE_START arrived, which `start` alone cannot say when no range starts.
+	started?: boolean;
+	// Whether our side is FINned, which lite-07 does once the tail settles past SUBSCRIBE_FINISH.
+	fin?: boolean;
 	// Set by the subscribe stream's FIN before lite-05, the track's only end there.
 	finished?: boolean;
 	// Settles once the subscribe stream's responses are read to its FIN or reset, which
@@ -1223,8 +1228,8 @@ export class Subscriber {
 
 			// A settled lite-05+ tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
-			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
-			else stream.close();
+			if (tailSettled && waitsForSubscriberFin(this.version)) this.#fin(stream, entry);
+			else if (!entry.fin) stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${producer.name}`);
 
 			// A publisher that covered the range before reading an update widening it sent fewer
@@ -1787,6 +1792,9 @@ export class Subscriber {
 						start === undefined || (lowest !== undefined && lowest <= start) ? lowest : start,
 					undefined,
 				);
+				entry.started = true;
+				// A lite-07 tail waits for SUBSCRIBE_START to say where delivery starts.
+				entry.tail.touch();
 				hooks.startTrack(entry.track, { start: entry.start ?? null, requested: entry.requested });
 				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
@@ -1811,6 +1819,13 @@ export class Subscriber {
 					}
 					console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
 				}
+				// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: FIN once the tail settles,
+				// and the publisher's FIN in reply ends this loop.
+				if (keepsSubscribeOpen(this.version))
+					void this.#settleTail(entry).then(
+						() => this.#fin(stream, entry),
+						() => {},
+					);
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups, so they are accounted for without a
 				// stream, and a reader of one still arriving ends with the drop's error now.
@@ -1818,6 +1833,13 @@ export class Subscriber {
 				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1n, resp.drop.cause(this.version));
 			}
 		}
+	}
+
+	// FIN our side once, acknowledging a settled tail without cancelling the publisher's half.
+	#fin(stream: Stream, entry: SubscribeEntry): void {
+		if (entry.fin) return;
+		entry.fin = true;
+		stream.writer.close();
 	}
 
 	// Wait for the group streams the publisher still owes once it has ended the subscription.
@@ -1861,8 +1883,10 @@ export class Subscriber {
 					: undefined
 				: min(entry.end, span.end ?? entry.end);
 		if (end === undefined) return false;
-		// Without SUBSCRIBE_START the publisher served no group at all.
-		if (entry.start === undefined) return true;
+		// Without SUBSCRIBE_START the publisher served no group at all, though lite-07 still
+		// answers with one once the track ends, unless nothing was asked below the end.
+		if (entry.start === undefined)
+			return !(keepsSubscribeOpen(this.version) && !entry.started && end > (rangesStart(ranges) ?? 0n));
 		// Owed from the floor the demand last asked for, which an update can move either
 		// way, or where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE
 		// asked for below its SUBSCRIBE_START were accounted for when it arrived. Only the

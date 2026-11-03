@@ -500,11 +500,11 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 	}
 });
 
-// A lite-07 publisher ends a bounded subscription once it covered the range, releasing its
-// demand, and the subscriber keeps the copy: the read ends with its window, the same range reads
-// again from the cache, and a wider one subscribes again for the rest. Mirrors the Rust
-// `a_covered_bounded_subscription_ends_on_lite07`; reads end as Rust's do since moq-dev/moq#7545.
-test("integration: lite-07 keeps a covered bounded subscription's copy", async () => {
+// A lite-07 publisher keeps a covered bounded subscription open for an update: the read ends
+// with its window, the same range reads again from the cache, and a wider one reaches upstream
+// for the rest, past a group that never existed. The demand goes with the readers. Mirrors the
+// Rust `a_covered_bounded_subscription_stays_open`.
+test("integration: lite-07 keeps a covered bounded subscription open", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -532,19 +532,20 @@ test("integration: lite-07 keeps a covered bounded subscription's copy", async (
 	try {
 		const reader = bounded(3n);
 		expect(await read(reader, 2)).toEqual([1n, 2n]);
-		// The publisher's demand ends with the covered subscription, and the read with its window.
-		while (producer.subscription.peek() !== undefined) await producer.subscription.changed();
+		// The read ends with its window, while the covered subscription stays open.
 		expect(await reader.recvGroup()).toBeUndefined();
+		expect(producer.subscription.peek()).toBeDefined();
 
 		const again = bounded(3n);
 		expect(await read(again, 2)).toEqual([1n, 2n]);
-		expect(producer.subscription.peek()).toBeUndefined();
 
 		const wider = bounded(6n);
 		expect(await read(wider, 4)).toEqual([1n, 2n, 4n, 5n]);
 		reader.close();
 		again.close();
 		wider.close();
+		// The demand goes with the readers.
+		while (producer.subscription.peek() !== undefined) await producer.subscription.changed();
 	} finally {
 		remote.close();
 		broadcast.close();
