@@ -27,6 +27,10 @@ closures to `nix-ci-moq-dev` on x86 Linux, Smoke's only current nix platform
 their dev shells first. Smoke reads the packages without write credentials. Verify the first
 post-merge Cache run uploads both and the next Smoke nix run substitutes
 them; a local build does not prove hosted publication.
+The runtime packages' existing Crane dependency artifacts are published
+first so source-only changes can reuse them. Cache finishes the active
+warm and keeps only the newest pending run rather than building every
+intermediate commit or repeatedly canceling cold dependency builds.
 
 [moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431) dropped Cachix
 from `main` (decided 2026-11-02): Smoke substitutes from `nix.moq.dev` and

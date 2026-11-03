@@ -9,6 +9,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Finish the active publication; new pushes replace only the pending warm.
+# Canceling active builds could starve a cold dependency upload on busy main.
+concurrency:
+  group: cache-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   warm:
     name: Warm (${{ matrix.runner }})

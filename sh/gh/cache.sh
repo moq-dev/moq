@@ -17,6 +17,11 @@ just infra nix push nix-ci-moq-dev "$profile/devshell"
 # Publish its runtime closures without making the dev shell wait on Rust.
 system=$(nix eval --impure --raw --expr builtins.currentSystem)
 if [[ "$system" == x86_64-linux ]]; then
+    # These existing Crane outputs survive source-only changes. Publish them
+    # first so a later package build can substitute its dependency layer.
+    nix build .#moq-relay.cargoArtifacts .#moq.cargoArtifacts --out-link "$profile/deps" --print-build-logs
+    just infra nix push nix-ci-moq-dev "$profile/deps" "$profile/deps-1"
+
     nix build .#moq-relay .#moq --out-link "$profile/runtime" --print-build-logs
     just infra nix push nix-ci-moq-dev "$profile/runtime" "$profile/runtime-1"
 fi
