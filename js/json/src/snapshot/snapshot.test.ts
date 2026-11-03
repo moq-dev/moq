@@ -201,12 +201,18 @@ test("next skips every superseded group, whatever the subscription's max delay",
 });
 
 // A session-fed track owes the groups between its arrivals. A snapshot reader never waits on one:
-// group 2 arriving while group 1 is still owed supersedes it at once.
-test("latest skips a group the subscription still owes", async () => {
+// group 2 arriving while group 1 is still owed supersedes it at once, whatever budget the caller
+// subscribed with or later restores through the subscriber it kept.
+test("reads skip a group the subscription still owes", async () => {
 	for (const max of [Milli.zero, Milli(1_000), null]) {
 		const track = new Track.Producer("test").accept({});
 		hooks.receiveTrack(track);
-		const consumer = new Consumer<Value>({ track: track.subscribe({ delay: { max } }) });
+		const subscribers = [track.subscribe({ delay: { max } }), track.subscribe({ delay: { max } })];
+		const [latest, next] = subscribers.map((subscriber) => new Consumer<Value>({ track: subscriber }));
+		const restore = () => {
+			for (const subscriber of subscribers) subscriber.update({ delay: { max } });
+		};
+		restore();
 		const put = (sequence: bigint) => {
 			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode(`{"n":${sequence}}`) });
@@ -214,15 +220,20 @@ test("latest skips a group the subscription still owes", async () => {
 		};
 
 		put(0n);
-		expect((await consumer.latest())?.value).toEqual({ n: 0 });
+		expect((await latest.latest())?.value).toEqual({ n: 0 });
+		expect((await next.next())?.value).toEqual({ n: 0 });
+		// Restored again while both reads wait, so the pin must come from the update itself.
+		const reads = [latest.latest(), next.next()];
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		restore();
 		put(2n);
-		expect((await consumer.latest())?.value).toEqual({ n: 2 });
+		expect((await Promise.all(reads)).map((state) => state?.value)).toEqual([{ n: 2 }, { n: 2 }]);
 
 		// The owed group landing late is superseded, not delivered.
 		put(1n);
-		const next = consumer.next();
+		const ends = [latest.latest(), next.next()];
 		track.finish();
-		expect(await next).toBeUndefined();
+		expect(await Promise.all(ends)).toEqual([undefined, undefined]);
 		track.close();
 	}
 });

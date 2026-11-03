@@ -22,8 +22,8 @@ const GAPS: Moq.StreamCode[] = [
  * When something else already owns the track, use the {@link Decoder} directly.
  *
  * A snapshot is superseded the moment a newer one exists, so the consumer always reads at a zero
- * `delay.max`, whatever the subscription asked for: a group is skipped once a newer one arrives,
- * and a lower group the subscription still owes never holds up a newer one.
+ * `delay.max`, whatever the subscription asks for, then or later: a group is skipped once a newer
+ * one arrives, and a lower group the subscription still owes never holds up a newer one.
  */
 export class Consumer<T> {
 	#track: Moq.Track.Ordered;
@@ -33,14 +33,20 @@ export class Consumer<T> {
 	#framesRead = 0;
 
 	constructor(config: Consumer.Config<T>) {
-		// The default subscription's budget is zero.
-		const zero = Moq.Track.Subscription.default().delay?.max;
-		const current = config.track.subscription.peek();
-		if (current?.delay?.max !== zero) {
-			config.track.update({ ...current, delay: { ...current?.delay, max: zero } });
-		}
 		this.#track = config.track.ordered();
+		this.#pin();
+		// A retained handle can update the subscription while a read waits; put the zero back at
+		// once, which also wakes a read that update left holding at an owed group. Writes coalesce
+		// per microtask, so an update undone in the same one never notifies: #read pins as well.
+		this.#track.subscription.subscribe(() => this.#pin());
 		this.#decoder = new Decoder(config);
+	}
+
+	// Hold the subscription's max delay at zero, the default subscription's, keeping the rest of it.
+	#pin(): void {
+		const zero = Moq.Track.Subscription.default().delay?.max;
+		const current = this.#track.subscription.peek();
+		if (current?.delay?.max !== zero) this.#track.update({ ...current, delay: { ...current?.delay, max: zero } });
 	}
 
 	/**
@@ -69,6 +75,7 @@ export class Consumer<T> {
 
 	async #read(skip: boolean): Promise<Timed<T> | undefined> {
 		for (;;) {
+			this.#pin();
 			if (skip) {
 				// Jump to the newest group the reader already has; a newer one supersedes the rest.
 				// Taking groups, not the track's largest position, ignores datagrams (which share

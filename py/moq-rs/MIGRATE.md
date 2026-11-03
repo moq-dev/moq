@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Snapshot consumers always read at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
-`moq.json.SnapshotConsumer` reads at a zero `delay.max`, whatever the subscription asked for: iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a window or stream track when every state must survive.
+`moq.json.SnapshotConsumer` reads at a zero `delay.max`, whatever the subscription asked for: iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

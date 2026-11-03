@@ -8,7 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `snapshot::Consumer::new` sets its subscription's `delay.max` to zero, replacing whatever the subscriber asked for.
 `next()` now skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes.
-A reader that set `delay.max` to replay a snapshot track's history or trail a playhead gets only the newest group: read the track's groups yourself and feed them to a `snapshot::Decoder`, or publish it as a `window` or `stream` track when every state must survive.
+A reader that set `delay.max` to replay a snapshot track's history or trail a playhead gets only the newest group: read the track's groups yourself and feed them to a `snapshot::Decoder`, or publish a `stream` track when every state must survive, or a `window` track for a bounded recent history.
 
 ### Compression moves to the track
 

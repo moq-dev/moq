@@ -2,8 +2,8 @@
 //!
 //! One value updated over time. `Consumer::next` yields each state with its frame timestamp,
 //! in order, skipping every group a newer one supersedes; `Consumer::latest` skips to the
-//! newest state. Superseded groups are lost, so use [`stream`](crate::stream) or
-//! [`window`](crate::window) when every record must survive.
+//! newest state. Superseded groups are lost, so use [`stream`](crate::stream) when every
+//! record must survive, or [`window`](crate::window) for a bounded recent history.
 //!
 //! On the wire the value is published as a series of groups, where each group is
 //! self-contained: its first frame is a full snapshot and any following frames are
