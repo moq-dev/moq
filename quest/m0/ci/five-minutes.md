@@ -117,9 +117,10 @@ The first FFI attempt exposed two base-branch failures:
 
 Final local validation also reproduced a namespace-probe race: a raw path
 flake copied ignored CMake output while another lane replaced a generated
-`render` file. The probe now uses Git's tracked source selection, excluding
-build output. It still reports the host builder's namespace failure, allowing
-the existing local skip; strict CI continues to require a capable builder.
+`render` file. The probe now reads `flake.lock` and fetches its pinned nixpkgs
+directly, without copying the checkout. It still reports the host builder's
+namespace failure, allowing the existing local skip; strict CI continues to
+require a capable builder.
 
 What remains:
 

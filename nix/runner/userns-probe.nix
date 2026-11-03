@@ -1,8 +1,9 @@
 { nonce }:
 let
-  # Other lanes rewrite ignored build output while this probe evaluates.
-  flake = builtins.getFlake "git+file://${toString ../..}";
-  pkgs = import flake.inputs.nixpkgs { system = builtins.currentSystem; };
+  # The capability probe needs only the pinned nixpkgs, independent of build output.
+  lock = builtins.fromJSON (builtins.readFile ../../flake.lock);
+  nixpkgs = builtins.fetchTree lock.nodes.${lock.nodes.root.inputs.nixpkgs}.locked;
+  pkgs = import nixpkgs.outPath { system = builtins.currentSystem; };
 in
 pkgs.runCommand "moq-userns-probe-${nonce}"
   {
