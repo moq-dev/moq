@@ -595,9 +595,9 @@ esac
                         deadline = time.monotonic() + 60
                         while b"ci: check rs started\n" not in live:
                             readable, _, _ = select.select([run.stderr], [], [], max(0, deadline - time.monotonic()))
-                            self.assertTrue(readable, live.decode())
+                            self.assertTrue(readable, live.decode(errors="replace"))
                             chunk = os.read(run.stderr.fileno(), 4096)
-                            self.assertTrue(chunk, live.decode())
+                            self.assertTrue(chunk, live.decode(errors="replace"))
                             live += chunk
                 finally:
                     run.terminate()
