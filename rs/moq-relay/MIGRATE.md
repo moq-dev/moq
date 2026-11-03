@@ -5,6 +5,10 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Stats publishing runs in the cluster driver ([#7673](https://github.com/moq-dev/moq/pull/7673))
+
+`Cluster::with_stats` queues its publisher for the `Driver` returned by `Cluster::new` instead of spawning it. Keep polling that driver while serving; `Relay::run` does this for you. Attaching stats needs no Tokio runtime, and dropping the driver cancels publishing too.
+
 ### Smaller default receive windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
 
 `[quic]` defaults to a 4 MiB `receive_window`, a 1 MiB `stream_receive_window`, and a 4 MiB `send_window`, down from 128 MiB, 4 MiB, and 16 MiB, and the smallest `receive_window` accepted here or in `[limits.peer.quic]` is 1 MiB instead of about 64 MiB.

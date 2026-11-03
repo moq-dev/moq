@@ -1019,14 +1019,16 @@ impl Options {
 	}
 }
 
-/// The work a [`Cluster`] needs to serve at all: its origin's lifecycle driver and,
-/// when the cache has one, the headroom governor. Returned by [`Cluster::new`].
+/// The work a [`Cluster`] needs to serve: its origin's lifecycle driver, cache
+/// governor, and stats publisher. Returned by [`Cluster::new`].
 ///
 /// Nothing runs on its own: poll it, or await [`run`](Self::run), for as long as the
 /// cluster serves. Dropping it tears the origin down, failing every later mutation.
 #[must_use = "the origin makes no progress unless its driver is polled"]
 pub struct Driver {
 	work: kio::Tasks<Child<()>>,
+	/// Owns queued work too, so dropping the driver cancels it before its first poll.
+	pending: kio::Producer<kio::Queue<Child<()>>>,
 }
 
 impl Driver {
@@ -1037,6 +1039,9 @@ impl Driver {
 	/// `"<task> panicked: <message>"`, the error [`Relay::run`](crate::Relay::run)
 	/// exits with. Polling on after that keeps driving the rest.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<()>> {
+		while let Poll::Ready(child) = self.pending.read().poll_pop(waiter) {
+			self.work.push(child.expect("only the driver owns the queue"));
+		}
 		let mut failed = None;
 		let poll = self.work.poll_each(waiter, |_, res| {
 			if let Err(err) = res {
@@ -1085,9 +1090,9 @@ impl Started {
 	}
 
 	/// Run the cluster's dials and peer sources on this task until they stop, or
-	/// until one of them or a task the relay cannot serve without (its stats
-	/// publisher, ACME renewal, or certificate reload) panics. The origin's own work
-	/// is the [`Driver`]'s.
+	/// until one of them or a task the relay cannot serve without (its
+	/// ACME renewal or certificate reload) panics. The origin, cache governor, and
+	/// stats publisher are the [`Driver`]'s work.
 	///
 	/// Standalone, this only waits for such a panic. Returning, a failure
 	/// included, closes every dial as [`Cluster::close`] does. A cancelled `run`
@@ -1261,9 +1266,12 @@ pub struct Cluster {
 	/// view always points at the same session in the logs.
 	connection_ids: Arc<AtomicU64>,
 
-	/// The stats publisher, ACME renewal, and certificate reload: a panic in any
-	/// of them stops [`Relay::run`](crate::Relay::run).
+	/// ACME renewal and certificate reload: a panic in either stops
+	/// [`Relay::run`](crate::Relay::run).
 	pub(crate) critical: crate::critical::Critical,
+
+	/// Attach work after construction without keeping the driver's queue alive.
+	pending: kio::Weak<kio::Queue<Child<()>>>,
 
 	/// All broadcasts, local and remote. Downstream sessions read from here
 	/// (filtered by their auth token) and remote dials both read and write here.
@@ -1276,8 +1284,8 @@ pub struct Cluster {
 	/// to a disabled (no-op) registry until [`with_stats`](Self::with_stats) is called.
 	pub stats: moq_net::stats::Registry,
 
-	/// Keeps the stats publish task running for as long as any handle on this
-	/// cluster lives. The task holds only a `Weak` to its producer, so it stops
+	/// Keeps the stats publisher alive while any cluster handle lives and its
+	/// driver runs. The task holds only a `Weak` to its producer, so it stops
 	/// when the last [`moq_stats::Producer`] clone drops; parking one here means
 	/// serving and publishing end together, instead of publishing ending early
 	/// because a caller dropped a producer it never asked for.
@@ -1335,10 +1343,10 @@ impl Cluster {
 	/// builders do not rebuild the origin.
 	///
 	/// Returns the cluster with its [`Driver`]: the origin's lifecycle work and the
-	/// cache governor, which run only while the owner polls it. Poll it for as long
-	/// as the cluster serves, whether or not [`start`](Self::start) (the mesh half)
-	/// is ever called; [`Relay::run`](crate::Relay::run) does. Dropping it tears the
-	/// origin down.
+	/// cache governor, plus any attached stats publisher. They run only while the
+	/// owner polls it. Poll it for as long as the cluster serves, whether or not
+	/// [`start`](Self::start) (the mesh half) is ever called;
+	/// [`Relay::run`](crate::Relay::run) does. Dropping it tears the origin down.
 	///
 	/// Errors if `config.id` is set to 0. An unset id picks a fresh random origin.
 	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint, or
@@ -1366,6 +1374,7 @@ impl Cluster {
 		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
 		let mut work = kio::Tasks::new();
+		let pending = kio::Producer::new(kio::Queue::new());
 		let mut origin_config = origin::Config::new(id);
 		if let Some(max) = config.max_hops {
 			origin_config.max_hops = origin::HopLimit::new(max).context("--cluster-max-hops must be from 1 to 32")?;
@@ -1401,11 +1410,12 @@ impl Cluster {
 			refusals: Default::default(),
 			connection_ids: Arc::default(),
 			critical: Default::default(),
+			pending: pending.downgrade(),
 			origin,
 			stats: moq_net::stats::Registry::disabled(),
 			_stats_publisher: None,
 		};
-		Ok((cluster, Driver { work }))
+		Ok((cluster, Driver { work, pending }))
 	}
 
 	/// Admit a gateway session and scope both origin directions from its grant.
@@ -1554,16 +1564,22 @@ impl Cluster {
 	}
 
 	/// Attach a stats producer, replacing the default disabled registry with its
-	/// registry, and run its publisher.
+	/// registry, and queue its publisher for the cluster's [`Driver`].
 	///
 	/// Build both with [`stats::Config::build`](crate::stats::Config::build), passing
 	/// [`Self::origin`] so it publishes through the same origin cluster peers read
 	/// from. The cluster holds the producer from here on, so the caller may drop
-	/// its own handle: publishing lasts exactly as long as the cluster does. A
-	/// panic in the publisher ends [`Relay::run`](crate::Relay::run), like the
-	/// cluster's other critical tasks. Must be called within a Tokio runtime.
+	/// its own handle. Publishing runs only while the driver is polled; dropping
+	/// the driver cancels it even if producer clones remain. A publisher panic ends
+	/// [`Relay::run`](crate::Relay::run), like the cluster's other critical tasks.
+	/// Needs no Tokio runtime; panics if the driver has already been dropped.
 	pub fn with_stats(mut self, stats: moq_stats::Producer, publisher: moq_stats::Publisher) -> Self {
-		self.critical.spawn("stats publisher", publisher.run());
+		self.pending
+			.upgrade()
+			.expect("the cluster driver was dropped")
+			.read()
+			.try_push(Child::new("stats publisher", publisher.run()))
+			.expect("only the driver owns the queue");
 		self.stats = stats.registry().clone();
 		self.refusals = crate::refusals::Refusals::new(&self.stats);
 		self._stats_publisher = Some(stats);
@@ -2594,6 +2610,47 @@ mod tests {
 			assert!(cluster.subscriber(&token).is_none(), "{mounts:?}");
 			assert!(cluster.publisher(&token).is_none(), "{mounts:?}");
 		}
+	}
+
+	#[test]
+	fn stats_can_be_attached_without_a_runtime() {
+		let (cluster, driver) = Cluster::new(Options::default()).unwrap();
+		let (stats, publisher) = crate::stats::Config {
+			enabled: true,
+			..Default::default()
+		}
+		.build(cluster.origin.clone())
+		.unwrap();
+		let cluster = cluster.with_stats(stats, publisher);
+		drop((cluster, driver));
+	}
+
+	#[kio::test]
+	async fn stats_wake_and_end_with_the_driver() {
+		let (cluster, driver) = Cluster::new(Options::default()).unwrap();
+		let (stats, publisher) = crate::stats::Config {
+			enabled: true,
+			..Default::default()
+		}
+		.build(cluster.origin.clone())
+		.unwrap();
+		let attach = async move {
+			let cluster = cluster.with_stats(stats, publisher);
+			let consumer = cluster.origin.consume();
+			let path = Path::from_static(".stats/node");
+			let broadcast = consumer.follow(&path, None).unwrap().available().await.unwrap();
+			(cluster, broadcast)
+		};
+		// Poll the driver before attaching, so a queued publisher must wake it.
+		let futures::future::Either::Right(((cluster, broadcast), driver)) =
+			futures::future::select(Box::pin(driver.run()), Box::pin(attach)).await
+		else {
+			panic!("the driver stopped before publishing stats");
+		};
+		assert!(!broadcast.is_closed());
+		drop(driver);
+		assert!(broadcast.is_closed(), "dropping the driver stopped the publisher");
+		drop(cluster);
 	}
 
 	/// The publish task holds only a `Weak` to its producer, so it stops when the

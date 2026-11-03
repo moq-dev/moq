@@ -89,7 +89,7 @@ pub struct Relay {
 	/// config named a source; `run` refuses to start while this is still held.
 	admissions: Option<Admissions>,
 	cluster: cluster::Cluster,
-	/// The cluster's origin and cache work, polled for as long as [`Self::run`]
+	/// The cluster's origin, cache, and stats work, polled for as long as [`Self::run`]
 	/// runs. `None` only once `run` took it.
 	driver: Option<cluster::Driver>,
 	stats: moq_stats::Producer,
@@ -137,7 +137,7 @@ impl Relay {
 	/// reading key material), so a returned `Relay` reports its ephemeral ports and
 	/// a taken port fails here. Nothing runs yet: the cluster's
 	/// [`Driver`](crate::cluster::Driver), which holds the origin's lifecycle work and
-	/// the cache governor, is only stored, and no session is admitted until
+	/// the cache governor and stats publisher, is only stored, and no session is admitted until
 	/// [`Self::run`] drives both.
 	pub async fn load(config: Config) -> anyhow::Result<Self> {
 		// Keep the large debug state machine off the embedder's main-thread stack.

@@ -7,10 +7,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_auth::{Grant, lease};
 use moq_relay::{auth, cluster, web};
-use std::sync::{
-	Arc,
-	atomic::{AtomicUsize, Ordering},
-};
+use std::task::Poll;
 use std::time::Duration;
 
 type Send = h2::client::SendRequest<bytes::Bytes>;
@@ -30,25 +27,35 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-	async fn new(connections: usize, streams: usize) -> Self {
+	async fn new(connections: usize, streams: usize, server: bool) -> Self {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-		let (auth, mut admissions) = auth::Auth::embedded("bench");
-		let waiting = Arc::new(AtomicUsize::new(0));
-		let decider = tokio::spawn({
+		let waiting = kio::Shared::new(0usize);
+		let (auth, decider) = if server {
+			let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let mut config = auth::Config::default();
+			config.url = Some(format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap());
+			let auth = config.init("bench", &Default::default(), false).unwrap();
+			let app = axum::Router::new()
+				.route("/", axum::routing::post(decide))
+				.with_state(waiting.clone());
+			let decider = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+			(auth, decider)
+		} else {
+			let (auth, mut admissions) = auth::Auth::embedded("bench");
 			let waiting = waiting.clone();
-			async move {
+			let decider = tokio::spawn(async move {
 				let mut held = Vec::new();
 				while let Some(admission) = admissions.next().await {
 					if admission.request.path.starts_with("/held") {
 						held.push(admission);
-						waiting.store(held.len(), Ordering::Release);
+						*waiting.lock() = held.len();
 						continue;
 					}
-					let grant = Grant::new(moq_auth::Patterns::new(), moq_auth::Pattern::all());
-					admission.grant(lease::Consumer::fixed(grant));
+					admission.grant(lease::Consumer::fixed(grant()));
 				}
-			}
-		});
+			});
+			(auth, decider)
+		};
 
 		let pem = rcgen::generate_simple_self_signed(vec!["localhost".into()])
 			.unwrap()
@@ -58,7 +65,7 @@ impl Fixture {
 		let mut config = web::Config::default();
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
-		tokio::spawn(driver.run());
+		let driver = tokio::spawn(async move { driver.run().await.unwrap() });
 		// No admission timeout, so held requests stay waiting however long setup and the
 		// measurement take.
 		let web = web::Web::new(auth, cluster, certificates, config)
@@ -71,7 +78,7 @@ impl Fixture {
 			let _ = web.serve(routes).await;
 		});
 
-		let mut tasks = vec![decider, server];
+		let mut tasks = vec![decider, server, driver];
 		let mut held = Vec::new();
 		for connection in 0..connections {
 			let mut send = connect(addr, &mut tasks).await;
@@ -84,9 +91,17 @@ impl Fixture {
 			held.push((send, responses));
 		}
 		let measured = connect(addr, &mut tasks).await;
-		while waiting.load(Ordering::Acquire) < connections * streams {
-			tokio::time::sleep(Duration::from_millis(1)).await;
-		}
+		drop(
+			waiting
+				.wait(|count| {
+					if **count == connections * streams {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				})
+				.await,
+		);
 
 		Self {
 			measured,
@@ -103,6 +118,22 @@ impl Fixture {
 			let chunk = chunk.unwrap();
 			body.flow_control().release_capacity(chunk.len()).unwrap();
 		}
+	}
+}
+
+fn grant() -> Grant {
+	Grant::new(moq_auth::Patterns::new(), moq_auth::Pattern::all())
+}
+
+async fn decide(
+	axum::extract::State(waiting): axum::extract::State<kio::Shared<usize>>,
+	axum::Json(request): axum::Json<moq_auth::Request>,
+) -> axum::Json<Grant> {
+	if request.path.starts_with("/held") {
+		*waiting.lock() += 1;
+		std::future::pending().await
+	} else {
+		axum::Json(grant())
 	}
 }
 
@@ -126,24 +157,31 @@ fn admission(c: &mut Criterion) {
 		.enable_all()
 		.build()
 		.unwrap();
-	let mut group = c.benchmark_group("relay_http_admission");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(100));
-	group.measurement_time(Duration::from_millis(300));
-	// Each connection may hold up to the verification budget (128 by default) at once.
-	for connections in [1, 16, 64] {
-		for streams in [0, 16, 64] {
-			let mut fixture = runtime.block_on(Fixture::new(connections, streams));
-			group.bench_with_input(
-				BenchmarkId::new(format!("connections={connections}"), streams),
-				&(connections, streams),
-				|b, _| {
-					b.iter(|| runtime.block_on(fixture.round()));
-				},
-			);
+	for server in [false, true] {
+		let name = if server {
+			"relay_http_auth_server"
+		} else {
+			"relay_http_admission"
+		};
+		let mut group = c.benchmark_group(name);
+		group.sample_size(10);
+		group.warm_up_time(Duration::from_millis(100));
+		group.measurement_time(Duration::from_millis(300));
+		// Each connection may hold up to the verification budget (128 by default) at once.
+		for connections in [1, 16, 64] {
+			for streams in [0, 16, 64] {
+				let mut fixture = runtime.block_on(Fixture::new(connections, streams, server));
+				group.bench_with_input(
+					BenchmarkId::new(format!("connections={connections}"), streams),
+					&(connections, streams),
+					|b, _| {
+						b.iter(|| runtime.block_on(fixture.round()));
+					},
+				);
+			}
 		}
+		group.finish();
 	}
-	group.finish();
 }
 
 criterion_group!(benches, admission);

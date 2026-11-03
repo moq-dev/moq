@@ -820,55 +820,54 @@ enum Decider {
 }
 
 impl Decider {
-	fn decide(&self, mut admission: Admission) -> Result<(), Error> {
+	fn decide(&self, request: Request, connection: Option<lease::Consumer>) -> Result<Answer, Error> {
 		match self {
-			Self::Embedded(admissions) => admissions
-				.send(admission)
-				.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?,
+			Self::Embedded(admissions) => {
+				let (reply, answer) = oneshot::channel();
+				admissions
+					.send(Admission {
+						request,
+						connection,
+						reply,
+					})
+					.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
+				Ok(Box::pin(async move {
+					answer
+						.await
+						.map_err(|_| Error::Unavailable("the admission went unanswered".into()))?
+				}))
+			}
 			Self::Server(client) => {
 				let client = client.clone();
-				// A panic drops the admission, which answers it as unavailable.
-				tokio::spawn(moq_tokio::panic::isolate(async move {
-					let ask = async {
-						match &admission.connection {
-							Some(connection) => client.attach(connection, admission.request.clone()).await,
-							None => client.connect(admission.request.clone()).await,
-						}
-					};
-					// The relay stopped waiting (its handshake deadline passed): drop the
-					// request to the server, so an expired admission leaves nothing in flight.
-					let lease = tokio::select! {
-						biased;
-						() = admission.reply.closed() => return,
-						lease = ask => lease,
-					};
-					match lease {
-						Ok(lease) => admission.grant(lease),
-						Err(err) => admission.refuse(err.into()),
-					}
-				}));
+				// The waiter owns the request, so dropping its answer cancels the HTTP
+				// exchange and a panic unwinds only the session being admitted.
+				Ok(Box::pin(async move {
+					Ok(match connection {
+						Some(connection) => client.attach(&connection, request).await?,
+						None => client.connect(request).await?,
+					})
+				}))
 			}
 			// Nothing here can verify a token, so one is refused rather than ignored:
 			// its holder expects it to count, and the public grant is not what it says.
-			Self::Public(_) if presents_token(&admission.request) => {
-				tracing::debug!(path = ?admission.request.path, "a token was presented to public rules");
-				admission.refuse(Error::Refused(Default::default()));
+			Self::Public(_) if presents_token(&request) => {
+				tracing::debug!(path = ?request.path, "a token was presented to public rules");
+				Ok(Box::pin(std::future::ready(Err(Error::Refused(Default::default())))))
 			}
-			Self::Public(rules) => match rules.authorize(&admission.request.path) {
-				Ok(access) => {
-					let grant = Grant::new(access.publish, access.subscribe);
-					admission.grant(lease::Consumer::fixed(grant));
-				}
-				// A path the rules don't reach is a refusal, never an outage a
-				// client would retry.
-				Err(err) => {
-					tracing::debug!(path = ?admission.request.path, ?err, "public rules refused");
-					admission.refuse(Error::Refused(Default::default()));
-				}
-			},
-			Self::Refuse => admission.refuse(Error::Refused(Default::default())),
+			Self::Public(rules) => {
+				let result = match rules.authorize(&request.path) {
+					Ok(access) => Ok(lease::Consumer::fixed(Grant::new(access.publish, access.subscribe))),
+					// A path the rules don't reach is a refusal, never an outage a
+					// client would retry.
+					Err(err) => {
+						tracing::debug!(path = ?request.path, ?err, "public rules refused");
+						Err(Error::Refused(Default::default()))
+					}
+				};
+				Ok(Box::pin(std::future::ready(result)))
+			}
+			Self::Refuse => Ok(Box::pin(std::future::ready(Err(Error::Refused(Default::default()))))),
 		}
-		Ok(())
 	}
 }
 
@@ -984,13 +983,7 @@ impl Auth {
 
 	/// Hand one admission to the decider, returning its pending answer.
 	fn submit(&self, request: Request, connection: Option<lease::Consumer>) -> Result<Answer, Error> {
-		let (reply, answer) = oneshot::channel();
-		self.decider.decide(Admission {
-			request,
-			connection,
-			reply,
-		})?;
-		Ok(answer)
+		self.decider.decide(request, connection)
 	}
 
 	/// Admit a session on a grant decided locally, bypassing the server: the LAN
@@ -1007,7 +1000,7 @@ fn navigates(path: &str) -> bool {
 }
 
 /// A decider's pending answer to one [`Admission`].
-type Answer = oneshot::Receiver<Result<lease::Consumer, Error>>;
+type Answer = futures::future::BoxFuture<'static, Result<lease::Consumer, Error>>;
 
 fn timed_out() -> Error {
 	Error::Unavailable("the admission timed out".into())
@@ -1016,10 +1009,8 @@ fn timed_out() -> Error {
 /// Check a decider's answer against the contract every decider is held to: a
 /// grant that admits nothing or asks for a re-check without a bound is a bug, not
 /// a refusal. Returns the grant snapshot it checked.
-fn answered_with(
-	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
-) -> Result<(lease::Consumer, Grant), Error> {
-	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
+fn answered_with(answered: Result<lease::Consumer, Error>) -> Result<(lease::Consumer, Grant), Error> {
+	let consumer = answered?;
 	let grant = consumer.grant();
 	grant.validate()?;
 	Ok((consumer, grant))
@@ -1183,6 +1174,45 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_server_answer_can_be_created_and_dropped_without_a_runtime() {
+		let client = moq_auth::Client::new("http://127.0.0.1:1/".parse().unwrap(), None).unwrap();
+		let auth = Auth::new("test", Decider::Server(client));
+		let answer = auth.submit(auth.request(moq_auth::Transport::Http, "/"), None).unwrap();
+		drop(answer);
+	}
+
+	#[tokio::test]
+	async fn dropping_a_server_answer_cancels_the_http_exchange() {
+		use tokio::io::AsyncReadExt;
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+		let auth = Auth::new("test", Decider::Server(moq_auth::Client::new(url, None).unwrap()));
+		let mut answer = auth.submit(auth.request(moq_auth::Transport::Http, "/"), None).unwrap();
+		let (mut socket, _) = tokio::select! {
+			accepted = listener.accept() => accepted.unwrap(),
+			result = &mut answer => panic!("answered before the server accepted: {result:?}"),
+		};
+		let mut buffer = [0; 1024];
+		let received = tokio::select! {
+			received = socket.read(&mut buffer) => received.unwrap(),
+			result = &mut answer => panic!("answered before the server replied: {result:?}"),
+		};
+		assert_ne!(received, 0, "the caller drove an HTTP request");
+		drop(answer);
+		// A request awaiting its response cannot return its connection to the pool.
+		// Cancelling it closes that connection even while the auth server is stalled.
+		loop {
+			match socket.read(&mut buffer).await {
+				Ok(0) => break,
+				Ok(_) => {}
+				Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => break,
+				Err(err) => panic!("reading the cancelled request: {err}"),
+			}
+		}
+	}
 
 	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
