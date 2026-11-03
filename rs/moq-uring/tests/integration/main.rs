@@ -24,6 +24,7 @@ mod mtu;
 mod qlog;
 mod receive_credit;
 mod session;
+mod socket_queues;
 mod support;
 mod teardown;
 mod transport;

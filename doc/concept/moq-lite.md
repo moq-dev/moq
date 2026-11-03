@@ -272,8 +272,8 @@ history.
 Native Rust subscriptions, track queries, and announcement interest on
 QUIC, WebTransport, or qmux fail locally when the peer has granted no stream
 credit, without retrying. Group fills on an accepted track and a subscription's
-joining FETCH wait for credit while their readers still want them. Iroh still
-waits; browser-backed Rust retains the browser's behavior. Once admitted, these requests have no answer deadline:
+joining FETCH wait for credit while their readers still want them.
+Browser-backed Rust retains the browser's behavior. Once admitted, these requests have no answer deadline:
 each lasts until answered, its demand leaves, or its session closes.
 Announcement-interest refusal is logged and releases discovery sync. The merged
 announcement listing keeps its existing event and sync API, with no per-source
@@ -283,7 +283,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
+| **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's retention window alone to bound it. |
 | **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
@@ -298,7 +298,10 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A group they cover below the live feed that the cache lacks (evicted
+served. A reader that has read every group its ranges cover waits rather than
+ends, since the track goes on: a moq-lite-07 publisher ends a bounded
+subscription once it covered it, and the copy stays cached for the same ranges
+until an update asks for groups it did not cover, wider or shifted. A group they cover below the live feed that the cache lacks (evicted
 before the subscriber first looked for it, skipped, or below where the feed
 starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
@@ -312,7 +315,8 @@ track, and over moq-lite-07, which carries a relative or time start upstream and
 reports the live edge and media time, so a copy resolves the ends itself. A Rust
 moq-transport copy resolves a relative anchor from the Largest Object its live join
 reports, accepts time anchors its cache can already resolve, and sends group bounds
-upstream; it refuses any other time anchor. Older
+upstream; it refuses any other time anchor. A JavaScript one refuses every time
+anchor. Older
 moq-lite versions accept absolute anchors but refuse time anchors and relative anchors other
 than the live and default starts. An untimed track refuses a time anchor. At the live
 edge, a time end
@@ -433,8 +437,8 @@ fallback, so a datagram that doesn't fit isn't delivered that way.
 
 A datagram shares its subscription's priority and group order with streams,
 so a low-priority datagram waits behind higher-priority groups instead of
-jumping the queue. From a native Rust publisher over QUIC or WebTransport
-(iroh excepted), a full send buffer drops the lowest-priority subscription's
+jumping the queue. From a native Rust publisher over QUIC or WebTransport,
+a full send buffer drops the lowest-priority subscription's
 oldest datagram.
 
 Nothing caches a datagram. A subscription gets the ones inside its group
