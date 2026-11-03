@@ -35,7 +35,7 @@ The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
-Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request_broadcast`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
+Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
 
 ### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
@@ -127,11 +127,16 @@ Snapshot groups roll on joiner demand, which the producer answers on its own: pu
 `MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+Rename `MoqOriginConsumer::request_broadcast(path)` to `request(path, instance)`, `announced_broadcast(path)` to `follow(path, instance)`, and `MoqAnnouncedBroadcast` to `MoqFollowing`.
+`instance` defaults to null in every generated binding, accepting whichever publisher instance serves the path; pass one to refuse every other.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with `MoqError::Unroutable` only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced` or `announced_broadcast`, instead of under its whole scope at connect.
-`MoqOriginConsumer::request_broadcast` watches nothing, so on a client it fails with `MoqError::Unroutable` for a path nothing watches, even when the relay announces it.
-Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced`, `request`, or `follow`, instead of under its whole scope at connect.
+`MoqOriginConsumer::request` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
@@ -220,7 +225,7 @@ let rate = bandwidth.as_ref().and_then(|b| b.rate());
 
 ### `available()` waits for the next publisher instance (#5700)
 
-`MoqAnnouncedBroadcast::available` returns the broadcast serving the path on its first call, as before.
+`MoqFollowing::available` returns the broadcast serving the path on its first call, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
 
 ### A timed track refuses a group that rewinds (#5803)
