@@ -42,6 +42,7 @@ test:
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
+    bash sh/local.sh python3 bench/build.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
     python3 sh/gh/gst-formula.test.py

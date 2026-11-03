@@ -176,8 +176,8 @@ module moq_sh '^infra/moq-sh/' \
     tools='dash'
 # Quest documents form one graph, so any change validates the whole tree,
 # as does a bump of the flake-pinned validator.
-module quest '^(quest/|flake\.lock$)' \
-    tools='quest'
+module quest '^(quest/|flake\.lock$|sh/quest\.sh$)' \
+    tools='nix'
 # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
 # nixpkgs, and the last moves on a flake.lock bump alone.
 module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)' \
@@ -337,7 +337,7 @@ step() {
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
             ;;
-        check:quest) quest check ;;
+        check:quest) bash sh/quest.sh check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
         check:flake)

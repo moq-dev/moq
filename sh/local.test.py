@@ -53,16 +53,18 @@ class LocalGate(unittest.TestCase):
     def test_admission_precedes_launch_and_nested_calls_skip_it(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "bun").symlink_to(BUN)
-            quest = Path(directory) / "quest"
-            quest.write_text(
+            (Path(directory) / "bash").symlink_to(BASH)
+            nix = Path(directory) / "nix"
+            nix.write_text(
                 f"#!{sys.executable}\n"
                 "import os, sys\n"
-                'assert sys.argv[1] == "gate"\n'
+                f'assert sys.argv[1:5] == ["run", "--no-update-lock-file", "{ROOT}#quest", "--"]\n'
+                'assert sys.argv[5] == "gate"\n'
                 'print("admitted", flush=True)\n'
                 'os.environ["QUEST_GATE_ADMITTED"] = "1"\n'
-                "os.execvp(sys.argv[2], sys.argv[2:])\n"
+                "os.execvp(sys.argv[6], sys.argv[6:])\n"
             )
-            quest.chmod(0o755)
+            nix.chmod(0o755)
             script = (
                 'import subprocess, sys; print("outer", flush=True); '
                 f"sys.exit(subprocess.call([{BASH!r}, {str(LAUNCHER)!r}, "
@@ -71,6 +73,33 @@ class LocalGate(unittest.TestCase):
             result = self.run_command(script, PATH=directory)
             self.assertEqual(result.returncode, 11, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["admitted", "outer", "inner"])
+
+    def test_pinned_review_preserves_arguments_cwd_and_failure_without_host_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nix = root / "nix"
+            nix.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                f'assert sys.argv[1:5] == ["run", "--no-update-lock-file", "{ROOT}#quest", "--"]\n'
+                'assert sys.argv[5:] == ["review", "--base", "origin/main", "--responses", "a file.json"]\n'
+                f"assert os.getcwd() == {directory!r}\n"
+                'print("pinned build failed", file=sys.stderr)\n'
+                "sys.exit(7)\n"
+            )
+            nix.chmod(0o755)
+            host = root / "quest"
+            host.write_text(f"#!{sys.executable}\nraise RuntimeError('host quest must not run')\n")
+            host.chmod(0o755)
+            result = subprocess.run(
+                [BASH, str(ROOT / "sh/quest.sh"), "review", "--base", "origin/main", "--responses", "a file.json"],
+                cwd=directory,
+                env=self.env(PATH=directory),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual(result.stderr.strip(), "pinned build failed")
 
     def test_external_admission_keeps_descendant_supervision(self):
         with tempfile.TemporaryDirectory() as directory:

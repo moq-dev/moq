@@ -737,7 +737,8 @@ nix develop --command just gh benchmark-report gate target/bench/nightly/rust-be
 
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
-`paired.json`.
+`paired.json`. The base build streams its diagnostics and retains them in
+`base-build.log`, including when it fails.
 
 ### CodSpeed
 

@@ -148,8 +148,12 @@ Local nextest runs default to at most four test workers; set
 `NEXTEST_TEST_THREADS` to override it. Bun workspace scripts run sequentially
 locally, preserving dependency order, while CI keeps its workspace parallelism.
 Selection and an empty JS selection do not wait for admission. For a build
-outside these entrypoints, use `quest gate COMMAND [ARGS...]`; gate thresholds
+outside these entrypoints, use `bash sh/quest.sh gate COMMAND [ARGS...]`; gate thresholds
 come from the host and have no configuration.
+
+Repository gates and quest tree checks use `sh/quest.sh` to resolve the quest
+build pinned by this checkout, regardless of the host's PATH. Use
+`bash sh/quest.sh review --base origin/main` for the same pinned local review.
 
 Run `just ci` before pushing. Ready PRs into `main` also run Check as a signal; only GitHub's merge queue gates landing. `just ci` runs what the merge queue runs, the same ground as `just check`, plus two settings: `CI_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
