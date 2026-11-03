@@ -23,6 +23,7 @@
 
 mod algorithm;
 mod claims;
+mod crypto;
 mod error;
 mod fs;
 mod generate;
