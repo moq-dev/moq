@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import type MoqWatch from "@moq/watch/element";
+import type { Locator } from "playwright";
 import { createServer } from "vite";
 import { worklet } from "../../../../js/common/vite-plugin-worklet";
-import { launch, open, pause, throwPageErrors } from "./harness";
+import { launch, open, pause, waitFor } from "./harness";
 
 test("pause activates its button when a canvas intercepts pointer input", async () => {
 	const browser = await launch();
@@ -28,6 +29,7 @@ test("pause activates its button when a canvas intercepts pointer input", async 
 
 for (const stall of ["audio", "video"]) {
 	test(`the paused play button stays clickable during ${stall} stalling`, async () => {
+		const deadline = Date.now() + 30_000;
 		const server = await createServer({
 			configFile: false,
 			root: `${import.meta.dir}/buffering`,
@@ -41,18 +43,22 @@ for (const stall of ["audio", "video"]) {
 				`${server.resolvedUrls?.local[0]}?${stall === "video" ? "video" : ""}`,
 				"buffering",
 			);
+			const visibility = (locator: Locator, visible: boolean) =>
+				waitFor(page, errors, () => locator.isVisible(), {
+					deadline,
+					description: `${locator} to be ${visible ? "visible" : "hidden"}`,
+					predicate: (shown) => shown === visible,
+				});
 			const spinner = page.locator(".buffering");
-			await spinner.waitFor({ state: "visible" });
-			throwPageErrors(errors);
+			await visibility(spinner, true);
 			await page.getByRole("button", { name: "Pause", exact: true }).click();
-			await page.locator('body[data-paused="true"]').waitFor();
-			await spinner.waitFor({ state: "hidden" });
+			await visibility(page.locator('body[data-paused="true"]'), true);
+			await visibility(spinner, false);
 
 			// Click normally: a forced click would miss the overlay intercepting pointer input.
 			await page.locator(".center-play").click({ timeout: 5000 });
-			await page.locator('body[data-paused="false"]').waitFor();
-			await spinner.waitFor({ state: "visible" });
-			throwPageErrors(errors);
+			await visibility(page.locator('body[data-paused="false"]'), true);
+			await visibility(spinner, true);
 		} finally {
 			await browser.close();
 			await server.close();
