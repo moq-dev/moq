@@ -918,7 +918,9 @@ impl Misses {
 		// budget is stale throughout.
 		let stale: Vec<ops::Range<u64>> = asks
 			.iter()
-			.filter(|run| state.drifted(run.end - 1, &drift.edge, drift.budget))
+			.filter(|run| {
+				state.unjudgeable(run.end - 1, drift.budget) || state.drifted(run.end - 1, &drift.edge, drift.budget)
+			})
 			.cloned()
 			.collect();
 		for run in stale {
@@ -962,7 +964,8 @@ impl Misses {
 		let mut next = self.wanted.iter().next().map(|run| run.start);
 		while let Some(from) = next {
 			let bound = state.arrival(from, servable).map(|slot| slot.group.sequence);
-			let drifted = state.poll_drifted(from, servable, drift.budget, None, waiter);
+			let drifted =
+				state.unjudgeable(from, drift.budget) || state.poll_drifted(from, servable, drift.budget, None, waiter);
 			next = self.stretches(state, from, bound, drifted, &mut stale, &mut arrived);
 		}
 		(stale, arrived)

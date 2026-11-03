@@ -1740,17 +1740,19 @@ impl TrackState {
 	/// against itself, and a group received from past its first frame carries a later
 	/// frame's timestamp on a low sequence without being an edge at all.
 	fn is_stale(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
-		self.lookup.contains_key(&sequence) && self.drifted(sequence, edge, budget)
+		self.lookup.contains_key(&sequence)
+			&& (self.unjudgeable(sequence, budget) || self.drifted(sequence, edge, budget))
 	}
 
-	/// [`Self::is_stale`] for group `sequence`, whether this track holds it or not: its
-	/// successor here starts a full `budget` behind the edge, or arrived a full `budget` ago.
+	/// A finite subscription cannot admit a cache whose reach its resumed feed cannot
+	/// bound. Unlimited history still owes it, and one-shot fetches judge their own budget.
+	fn unjudgeable(&self, sequence: u64, budget: Duration) -> bool {
+		budget != Duration::MAX && self.live_floor.is_some_and(|floor| sequence < floor)
+	}
+
+	/// Whether group `sequence`, cached or not, has a successor a full `budget` behind
+	/// the edge, or one that arrived a full `budget` ago.
 	fn drifted(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
-		// A gap after an idle cache gives its old groups no known reach. A finite
-		// budget cannot admit them, but an unlimited history read still owes them.
-		if budget != Duration::MAX && self.live_floor.is_some_and(|floor| sequence < floor) {
-			return true;
-		}
 		if self.superseded(sequence, &edge.servable, budget) {
 			return true;
 		}
@@ -1782,9 +1784,6 @@ impl TrackState {
 		superseded: Option<&Superseded>,
 		waiter: &kio::Waiter,
 	) -> bool {
-		if budget != Duration::MAX && self.live_floor.is_some_and(|floor| sequence < floor) {
-			return true;
-		}
 		// Unbounded until a group lands above. Registered before judging, so a racing abort
 		// is observed or wakes us, and armed for whichever successor this pass selected, so
 		// re-selecting re-arms it.
@@ -7259,17 +7258,12 @@ impl Cursor {
 				false => self.filter.owed.last(),
 			}
 			.cloned()?;
-			let from = *run.start();
-			let found = (from <= *run.end())
-				.then(|| {
-					let mut slots = state.lookup.range(from..=*run.end()).map(|(_, slot)| slot);
-					match ascending {
-						true => slots.find(|slot| slot.is_read()),
-						false => slots.rev().find(|slot| slot.is_read()),
-					}
-					.map(Slot::serving)
-				})
-				.flatten();
+			let mut slots = state.lookup.range(run.clone()).map(|(_, slot)| slot);
+			let found = match ascending {
+				true => slots.find(|slot| slot.is_read()),
+				false => slots.rev().find(|slot| slot.is_read()),
+			}
+			.map(Slot::serving);
 			let Some(group) = found else {
 				self.filter.owed.remove(run);
 				continue;
@@ -7414,7 +7408,9 @@ impl Cursor {
 			let Some(owed) = state.owed(groups.clone(), window) else {
 				return Poll::Ready(Ok(()));
 			};
-			if state.poll_drifted(owed, &drift.edge.servable, drift.budget, None, waiter) {
+			if state.unjudgeable(owed, drift.budget)
+				|| state.poll_drifted(owed, &drift.edge.servable, drift.budget, None, waiter)
+			{
 				return Poll::Ready(Ok(()));
 			}
 			// The ledger may stop owing it before the budget gives up on it.
@@ -7905,18 +7901,18 @@ impl Cursor {
 					let _ = state.cache.wakes().watch_landing(sequence, waiter);
 					// Judged whether or not the cache still holds the headless copy: an evicted
 					// one goes stale all the same, and counts as a group of unknown size.
-					state
-						.poll_drifted(sequence, &servable, drift.budget, None, waiter)
-						.then(|| {
-							let content = match state.lookup.get(&sequence) {
-								Some(slot) => slot.group.consume().content(),
-								None => stats::Content {
-									groups: 1,
-									..Default::default()
-								},
-							};
-							(sequence, content)
-						})
+					(state.unjudgeable(sequence, drift.budget)
+						|| state.poll_drifted(sequence, &servable, drift.budget, None, waiter))
+					.then(|| {
+						let content = match state.lookup.get(&sequence) {
+							Some(slot) => slot.group.consume().content(),
+							None => stats::Content {
+								groups: 1,
+								..Default::default()
+							},
+						};
+						(sequence, content)
+					})
 				})
 				.collect();
 			Poll::Ready(Ok(stale))
@@ -12276,6 +12272,15 @@ mod test {
 		let mut subscriber = producer
 			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(400))));
 		assert_eq!(drain(&mut subscriber), vec![2]);
+		// A one-shot fetch still serves that cache: an unknown reach is no proof
+		// that the requested group exceeded the fetch's budget.
+		let mut fetched = producer
+			.consume()
+			.fetch_group(0, group::Fetch::default().with_max_delay(Duration::from_millis(400)))
+			.now_or_never()
+			.expect("the cache answers")
+			.expect("cached fetch");
+		assert!(fetched.read_frame().now_or_never().unwrap().unwrap().is_some());
 	}
 
 	/// An idle cache's old groups and the holes after them stay owed by unlimited reads.
