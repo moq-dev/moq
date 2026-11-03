@@ -6115,6 +6115,64 @@ fn send_quantum_bounds_the_gso_batch() {
 	);
 }
 
+/// A jumbo-frame MTU must not let a GSO train outgrow what one IPv4 UDP send can carry, however
+/// many datagrams the caller offers.
+#[test]
+fn gso_train_fits_one_udp_send() {
+	const MTU: u16 = 9000;
+
+	let _guard = subscribe();
+	let endpoint_config = || endpoint::Config {
+		max_udp_payload_size: MTU,
+		..endpoint::Config::default()
+	};
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(server_config()),
+			..endpoint_config()
+		},
+		true,
+	)
+	.unwrap();
+	let client = Endpoint::new(endpoint_config(), true).unwrap();
+	let mut pair = Pair::new_from_endpoint(client, server);
+	pair.mtu = usize::from(MTU);
+
+	let mut client_cfg = client_config();
+	client_cfg.transport = transport::Config {
+		initial_mtu: MTU,
+		mtu: None,
+		// Neither window, pacer, nor send quantum bounds the train, so only the byte cap can
+		congestion: Arc::new(FixedQuantumController { send_quantum: u64::MAX }),
+		..transport::Config::default()
+	};
+	let (client_ch, _) = pair.connect_with(client_cfg);
+
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s)
+		.write(&mut &[42; 256 * 1024][..])
+		.unwrap();
+
+	let now = pair.time;
+	let conn = pair.client_conn_mut(client_ch);
+	assert_eq!(conn.path_mtu(), MTU);
+	let mut buf = Vec::new();
+	let mut full = false;
+	while let Some(transmit) = conn.poll_transmit(now, 64, &mut buf) {
+		assert!(
+			transmit.size <= 65_507,
+			"a {} byte train exceeds one IPv4 UDP send",
+			transmit.size
+		);
+		full |= transmit.size > 65_507 - usize::from(MTU);
+		buf.clear();
+	}
+	assert!(full, "no train came close to the limit, so the test proves nothing");
+}
+
 /// A congestion callback, as the transport reported it. Packets are named by send time, which
 /// several packets can share.
 #[derive(Debug, Clone, Copy)]
