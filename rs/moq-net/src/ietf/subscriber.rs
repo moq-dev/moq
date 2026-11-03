@@ -2885,12 +2885,14 @@ impl Subscriber {
 
 		// Demand with nobody subscribing (fetches, or a TRACK_STATUS downstream) learns the
 		// track from TRACK_STATUS rather than a SUBSCRIBE: a finished track refuses one, and
-		// one made only to learn the track races the fetches it was for.
+		// one made only to learn the track races the fetches it was for. So does a bounded
+		// subscription, which may read only history below the Largest Object the status
+		// reports, as a fetch would: `linger` subscribes once it reaches past that.
 		let mut target = match request.subscription() {
 			subscription
-				if subscription
-					.as_ref()
-					.is_none_or(|subscription| subscription.ranges.is_empty()) =>
+				if subscription.as_ref().is_none_or(|subscription| {
+					subscription.ranges.is_empty() || subscription.start().is_some() && subscription.end().is_some()
+				}) =>
 			{
 				let Some(idle) = self
 					.track_status(&broadcast_path, &track_name, request, &mut group_fetches, &mut gate)
