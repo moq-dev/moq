@@ -336,7 +336,7 @@ fn delay_bound_keeps_a_shorter_queue() {
 #[test]
 #[ignore = "the realtime comparison, run nightly by `just rs quic-sim`"]
 fn compare() {
-	let _guard = subscribe_at(tracing::Level::WARN);
+	let _guard = subscribe();
 	println!(
 		"| preset | controller | queue p50 | p95 | p99 | p99 before the drop | utilization | after the drop | peak | reaction | drained | dropped | share beside CUBIC |"
 	);

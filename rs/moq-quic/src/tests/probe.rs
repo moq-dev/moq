@@ -69,7 +69,7 @@ fn frame_size(keyframe: u64, index: u64) -> u64 {
 
 /// The congestion controller the media's connection runs
 #[derive(Clone, Copy)]
-enum Controller {
+enum Congestion {
 	Bbr3,
 	/// BBR3 with the delay bound, reading the receive timestamps it asks for
 	DelayBound,
@@ -104,7 +104,7 @@ struct Scenario {
 	/// Bytes of bulk upload before the media starts, to learn the path's rate first
 	warmup: usize,
 	/// The media's congestion controller
-	controller: Controller,
+	congestion: Congestion,
 }
 
 impl Default for Scenario {
@@ -122,7 +122,7 @@ impl Default for Scenario {
 			receive_window: None,
 			ack_threshold: None,
 			warmup: 0,
-			controller: Controller::Bbr3,
+			congestion: Congestion::Bbr3,
 		}
 	}
 }
@@ -280,15 +280,15 @@ fn run(scenario: &Scenario) -> Outcome {
 		};
 		transport.ack_frequency = Some(ack);
 	}
-	match scenario.controller {
-		Controller::Bbr3 => {}
-		Controller::DelayBound => {
+	match scenario.congestion {
+		Congestion::Bbr3 => {}
+		Congestion::DelayBound => {
 			let mut bbr = bbr3::Config::default();
 			bbr.delay_bound(true).probe_rng_seed(entropy::rng().random());
 			transport.congestion = Arc::new(bbr);
 			transport.receive_timestamps = NonZeroU32::new(32);
 		}
-		Controller::Gcc => {
+		Congestion::Gcc => {
 			transport.congestion = Arc::new(gcc::Config::default());
 			transport.receive_timestamps = NonZeroU32::new(32);
 		}
@@ -716,7 +716,7 @@ fn rises_to_target() {
 fn rises_to_target_under_delay_bound() {
 	let _guard = subscribe();
 	let scenario = Scenario {
-		controller: Controller::DelayBound,
+		congestion: Congestion::DelayBound,
 		..opening()
 	};
 	rises(&compare("rises delay bound", scenario, GATE), Duration::from_secs(5));
@@ -737,7 +737,7 @@ fn rises_to_target_under_gcc() {
 		let scenario = Scenario {
 			duration: Duration::from_secs(20),
 			target,
-			controller: Controller::Gcc,
+			congestion: Congestion::Gcc,
 			..opening()
 		};
 		let trials = compare(&format!("rises gcc {target}"), scenario, SEEDS);
@@ -1043,7 +1043,7 @@ fn steps_keyframes() {
 fn steps_delay_bound() {
 	let _guard = subscribe();
 	let scenario = Scenario {
-		controller: Controller::DelayBound,
+		congestion: Congestion::DelayBound,
 		..steps()
 	};
 	let trials = compare("steps delay bound", scenario, SEEDS);

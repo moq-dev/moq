@@ -40,8 +40,8 @@ const SMOOTHING: f64 = 0.9;
 const THRESHOLD_GAIN: f64 = 4.0;
 /// The most groups the trend's scale counts.
 const MIN_DELTAS: u32 = 60;
-/// How long, in milliseconds, the trend must stay over the threshold to count as queue growth.
-const OVERUSE_TIME: f64 = 10.0;
+/// How long the trend must stay over the threshold to count as queue growth.
+const OVERUSE_TIME: Duration = Duration::from_millis(10);
 /// A trend this far past the threshold is a spike, such as a capacity drop, that the threshold
 /// does not adapt to, in milliseconds.
 const MAX_ADAPT_OFFSET: f64 = 15.0;
@@ -52,8 +52,8 @@ const K_DOWN: f64 = 0.039;
 const THRESHOLD_INITIAL: f64 = 12.5;
 const THRESHOLD_MIN: f64 = 6.0;
 const THRESHOLD_MAX: f64 = 600.0;
-/// The most time, in milliseconds, one threshold update accounts for.
-const THRESHOLD_MAX_STEP: f64 = 100.0;
+/// The most time one threshold update accounts for.
+const THRESHOLD_MAX_STEP: Duration = Duration::from_millis(100);
 
 /// What the forward delay's trend says of the bottleneck queue
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -292,7 +292,7 @@ impl Detector {
                 .map_or(send_delta / 2.0, |over| over + send_delta);
             self.overusing = Some(over);
             self.overuse_count += 1;
-            if over > OVERUSE_TIME && self.overuse_count > 1 && trend >= self.trend {
+            if over > millis(OVERUSE_TIME) && self.overuse_count > 1 && trend >= self.trend {
                 self.overusing = Some(0.0);
                 self.overuse_count = 0;
                 self.usage = Usage::Overusing;
@@ -323,7 +323,7 @@ impl Detector {
         } else {
             K_UP
         };
-        let elapsed = (arrival - last).clamp(0.0, THRESHOLD_MAX_STEP);
+        let elapsed = (arrival - last).clamp(0.0, millis(THRESHOLD_MAX_STEP));
         self.threshold += k * (modified.abs() - self.threshold) * elapsed;
         self.threshold = self.threshold.clamp(THRESHOLD_MIN, THRESHOLD_MAX);
     }
