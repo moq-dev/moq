@@ -148,6 +148,12 @@ class Run:
     words: list[str]
     where: str
     cwd: Path
+    # Reached only through calls passing `--no-run`, so it compiles but runs nothing.
+    build: bool = False
+
+    @property
+    def builds_only(self) -> bool:
+        return self.build or "--no-run" in self.words
 
 
 def evaluate(expression, assignments: dict, directory: Path, root: Path) -> str:
@@ -353,17 +359,20 @@ class Graph:
         self.justfiles = justfiles
         self.recipes = justfiles[root]
         self.reached: dict[str, Recipe] = {}
-        self.bindings: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
-        # Script files reached shell text names, whose own text is then walked.
+        self.bindings: set[tuple[str, tuple[tuple[str, str], ...], bool]] = set()
+        # Script files reached shell text names, whose own text is then walked, once as a
+        # build-only caller reaches it and once as any other does.
         self.files: set[Path] = set()
+        self.walked: set[tuple[Path, bool]] = set()
         # Files only another language names, like a test running a script under stubs or the
         # checker naming the runners it knows: reached, but nothing they call is.
         self.named: set[Path] = set()
         # Files a reached shell command runs, not merely names.
         self.executed: set[Path] = set()
-        self.branches: set[tuple[Path, int, int]] = set()
+        self.branches: set[tuple[Path, int, int, bool]] = set()
         self.runs: list[Run] = []
-        self.queue: list[tuple[str, str, Path, Path | None]] = []
+        # Text to walk: where it is from, its cwd, its file, and whether only build-only calls reach it.
+        self.queue: list[tuple[str, str, Path, Path | None, bool]] = []
 
     def context(self, cwd: Path) -> Module:
         """The justfile `just` finds from a directory."""
@@ -393,9 +402,11 @@ class Graph:
                 return [(node.recipes[node.first], [])]
         return []
 
-    def visit_recipe(self, recipe: Recipe, arguments: list[str] | None = None):
+    def visit_recipe(self, recipe: Recipe, arguments: list[str] | None = None, build: bool = False):
+        """Queue a recipe's text; build says its every caller passes `--no-run`. Its
+        dependencies run without the call's arguments, so they are never build-only."""
         bound = recipe.bind(arguments or [])
-        key = (recipe.path, tuple(sorted(bound.items())))
+        key = (recipe.path, tuple(sorted(bound.items())), build)
         if key in self.bindings:
             return
         self.bindings.add(key)
@@ -404,17 +415,18 @@ class Graph:
             if dependency in recipe.module.recipes:
                 self.visit_recipe(recipe.module.recipes[dependency])
         text = recipe.render(bound) if recipe.render and bound else recipe.text
-        self.queue.append((text, f"recipe {recipe.path}", recipe.cwd, None))
+        self.queue.append((text, f"recipe {recipe.path}", recipe.cwd, None, build))
 
-    def visit_file(self, path: Path, cwd: Path, arguments: list[list[str]] | None):
-        """Queue a script's text, once, and the branches of its `case "$1"` dispatch that the
-        calls' arguments select. A call whose first argument is unknown selects every branch."""
+    def visit_file(self, path: Path, cwd: Path, arguments: list[list[str]] | None, build: bool = False):
+        """Queue a script's text, once per build, and the branches of its `case "$1"` dispatch
+        that the calls' arguments select. A call whose first argument is unknown selects every branch."""
         text = path.read_text(errors="replace")
         rest, blocks = dispatch(text) if shell(text, path) else (text, [])
         where = str(path.relative_to(self.root))
-        if path not in self.files:
-            self.files.add(path)
-            self.queue.append((rest, where, cwd, path))
+        self.files.add(path)
+        if (path, build) not in self.walked:
+            self.walked.add((path, build))
+            self.queue.append((rest, where, cwd, path, build))
         for first in [call[0] if call else "" for call in arguments] if arguments is not None else [None]:
             for block, branches in enumerate(blocks):
                 if first is None or not literal(first):
@@ -430,9 +442,9 @@ class Graph:
                         [],
                     )
                 for index in chosen:
-                    if (path, block, index) not in self.branches:
-                        self.branches.add((path, block, index))
-                        self.queue.append((branches[index][1], where, cwd, path))
+                    if (path, block, index, build) not in self.branches:
+                        self.branches.add((path, block, index, build))
+                        self.queue.append((branches[index][1], where, cwd, path, build))
 
     def execute(self, path: Path):
         """Record that a reached command runs path, following what only a run implies."""
@@ -441,11 +453,10 @@ class Graph:
         self.executed.add(path)
         # The module dispatch passes its own names: `just <module> check` and the like.
         if path == self.root / "sh/dispatch.sh":
-            for line in re.findall(r"modules=\(([^)]*)\)", path.read_text(errors="replace")):
-                for name in line.split():
-                    for verb in ("check", "fix"):
-                        for recipe in self.resolve([name, verb], self.root):
-                            self.visit_recipe(recipe)
+            for name in re.findall(r"^module (\w+) ", path.read_text(errors="replace"), re.M):
+                for verb in ("check", "fix"):
+                    for recipe in self.resolve([name, verb], self.root):
+                        self.visit_recipe(recipe)
 
     def bases(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
         """The directories a script path in text may be relative to."""
@@ -475,29 +486,35 @@ class Graph:
 
     def walk(self, entries: list[tuple[str, str, Path]]):
         for text, where, cwd in entries:
-            self.queue.append((text, where, cwd, None))
+            self.queue.append((text, where, cwd, None, False))
         while self.queue:
-            text, where, cwd, file = self.queue.pop()
-            # The arguments each command that runs a script passes it.
-            arguments: dict[Path, list[list[str]]] = defaultdict(list)
+            text, where, cwd, file, build = self.queue.pop()
+            # The arguments each command that runs a script passes it, and whether it builds only.
+            arguments: dict[Path, list[tuple[list[str], bool]]] = defaultdict(list)
             bases = self.bases(text, cwd, file)
             runs = shell(text, file)
             for words in commands(text) if runs else []:
-                self.runs.append(Run(words, where, cwd))
+                self.runs.append(Run(words, where, cwd, build))
                 for index, word in enumerate(words):
+                    # A wrapper passes `--no-run` on to the cargo command it ends in.
+                    passed = build or "--no-run" in words[index + 1 :]
                     if word == "just":
                         for recipe, rest in self.calls(words[index + 1 :], cwd):
-                            self.visit_recipe(recipe, rest)
+                            self.visit_recipe(recipe, rest, passed)
                     elif SCRIPT.fullmatch(word) and (path := self.script(word, bases)):
-                        arguments[path].append(words[index + 1 :])
+                        arguments[path].append((words[index + 1 :], passed))
                         self.execute(path)
             mentions = Counter(self.scripts(text, cwd, file))
             for path, count in mentions.items():
+                calls = arguments[path]
                 # A shell mention that is not a command may pass any argument.
                 if not runs:
                     self.named.add(path)
+                elif len(calls) != count:
+                    self.visit_file(path, cwd, None, build)
                 else:
-                    self.visit_file(path, cwd, arguments[path] if len(arguments[path]) == count else None)
+                    for passed in {passed for _, passed in calls}:
+                        self.visit_file(path, cwd, [call for call, flag in calls if flag == passed], passed)
 
     def reaches(self, path: Path) -> bool:
         return path in self.files or path in self.named
@@ -532,7 +549,7 @@ def matrix_values(job) -> dict[str, list[str]]:
 
 
 def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
-    """Every `run:` step under .github and its directory, with `${{ matrix.* }}` expanded to the job's values."""
+    """Every command a step runs under .github and its directory, with `${{ matrix.* }}` expanded per job."""
     entries = []
     for path in sorted([*root.glob(".github/workflows/*.y*ml"), *root.glob(".github/actions/*/action.y*ml")]):
         document = yaml.safe_load(path.read_text()) or {}
@@ -544,8 +561,10 @@ def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
             matrix = matrix_values(job)
             directory = ((job.get("defaults") or {}).get("run") or {}).get("working-directory", defaults)
             for step in job.get("steps") or []:
-                # An action that runs a command takes it as `with: run:`, like CodSpeed's.
-                run = step.get("run") or (step.get("with") or {}).get("run")
+                # An action that runs a command takes it as `with: run:`, like
+                # CodSpeed's, or `with: script:`, like android-emulator-runner's.
+                inputs = step.get("with") or {}
+                run = step.get("run") or inputs.get("run") or inputs.get("script")
                 if not isinstance(run, str):
                     continue
                 cwd = (root / step.get("working-directory", directory)).resolve()
@@ -714,6 +733,11 @@ def selection(words: list[str], manifests: dict[Path, str], cwd: Path) -> Select
     # Parse from the last `just` or `cargo`, so a wrapper's own options stay out.
     heads = [position for position, word in enumerate(words) if word in ("just", "cargo")]
     words = words[heads[-1] :] if heads else words
+    # `cargo ndk` takes its own options ahead of the cargo subcommand it wraps.
+    if words[:2] == ["cargo", "ndk"]:
+        wrapped = next((position for position, word in enumerate(words) if word in ("test", "nextest", "bench")), None)
+        if wrapped is not None:
+            words = ["cargo", *words[wrapped:]]
     index = 0
     while index < len(words):
         word = words[index]
@@ -1034,7 +1058,9 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                 continue
             for test in ignored_tests(root, target, entry):
                 try:
-                    hit = any(chosen.ignored and selects(chosen, test) for chosen, _ in selections)
+                    hit = any(
+                        chosen.ignored and not run.builds_only and selects(chosen, test) for chosen, run in selections
+                    )
                 except ValueError as error:
                     errors.append(str(error))
                     continue
@@ -1119,7 +1145,7 @@ def benched(chosen: Selection, run: Run, target: Target, codspeed: bool) -> bool
         return False
     heads = [index for index, word in enumerate(run.words) if word == "cargo"]
     command = [word for word in run.words[heads[-1] + 1 :] if not word.startswith("+")][:2] if heads else []
-    if "--no-run" in run.words or command[:1] in (["build"], ["check"], ["clippy"], ["doc"]):
+    if run.builds_only or command[:1] in (["build"], ["check"], ["clippy"], ["doc"]):
         return False
     if command == ["codspeed", "build"] and not codspeed:
         return False

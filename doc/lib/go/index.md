@@ -77,7 +77,7 @@ for event, err := range announced.All(ctx) {
     default:
         continue // AnnounceEventUpdate or AnnounceEventEnd
     }
-    // Prefix stays origin-relative; Captures reports what each wildcard matched.
+    // Prefix stays origin-relative; Captures is a list, empty without wildcards.
     fmt.Printf("captures: %v\n", ann.Captures)
     broadcast, err := client.Request(ctx, ann.Prefix, nil)
     if err != nil {
@@ -113,14 +113,13 @@ video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
     Track: &track,
 })
 _ = video.Write(moqvideo.Frame{Timestamp: moq.Timestamp{Value: pts, Scale: 90_000}, Data: rgba})
-epoch := moq.MintEpoch() // a fresh epoch per run
-_ = publication.Announce(moq.AnnounceRoute{Epoch: &epoch})
+_ = publication.Announce(moq.AnnounceRoute{}) // each broadcast mints a fresh instance
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `Lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `Lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded video track takes `Lower` in its `media.VideoInit` too, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `SetEnabled(false)` after a `Discontinuity()`, and `SetEnabled(true)` on the keyframe that resumes it.
 
 ## Things to know
 
@@ -135,7 +134,7 @@ shows which module holds each.
 - **Timeline breaks.** On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `Start: media.DecodeStartLatest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
-- **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown()` requests that drain immediately; `session.Closed(ctx)` waits for its result, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+- **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown()` requests that drain immediately; `session.Closed(ctx)` waits for its result, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `Finish()` on its `media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.Close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
 - **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero. `Version` names the negotiated protocol. `Dial` returns a connecting session; read `Session().State()` and wait with `StateChanged(ctx, state.Revision)` to observe first-dial failures and reconnects. Hold the owned `BandwidthConsumer` returned by `Session().RecvBandwidth()` to receive bandwidth estimates. `Rate()` reads the current estimate in bits per second and `RateChanged(ctx)` waits for a new one. Calling `Close()` on the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ClientConfig.Versions`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `Session().Grants()` returns a `GrantConsumer`: `Grant()` is the `Grant` the relay sent back, nil until it answers and while a client session reconnects, and `Changed(ctx)` waits for the next one. `Close()` it when done.

@@ -27,8 +27,8 @@ Decided with the maintainer on 2026-10-13:
 - QUIC is `moq-quic`, fed datagrams from the nominated pair.
 - Authentication: each side generates a self-signed certificate and sends
   its SHA-256 fingerprint in its offer or answer, as DTLS fingerprints ride
-  in SDP. Both sides pin it with the existing `tls.fingerprint` check. MoQ
-  AUTH with a [peer grant](/quest/m2/p2p/peer-grant.md) still runs on top.
+  in SDP. Both sides pin it with the existing `tls.fingerprint` check. Peers
+  are trusted (decided 2026-11-02 (maintainer, /quest-unblock)), so no peer grant runs on top.
 - After nomination the session's socket carries ICE consent checks and
   QUIC, split by `moq_sock::demux::classify`: `Ice` and `Stun` go to the
   ICE agent and `Quic` to the endpoint. The tokio listener's `quic::demux`

@@ -64,10 +64,10 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// How a broadcast advertises its exact path: its static production cost and publisher epoch.
+/// How a broadcast advertises its exact path: its static production cost and stream instance.
 typedef AnnounceRoute = MoqAnnounceRoute;
 
-/// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
+/// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventStart],
@@ -169,6 +169,15 @@ typedef BandwidthConsumer = MoqBandwidthConsumer;
 
 /// One track's standing claim on an [Allocator].
 typedef Reservation = MoqReservation;
+
+/// Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame.
+typedef RateControl = MoqRateControl;
+
+/// How a [RateControl] maps a grant onto a bitrate, and the lower rendition that disables it.
+typedef RatePolicy = MoqRatePolicy;
+
+/// What a sender following a [RateControl] should be doing: an enabled bitrate, or disabled.
+typedef RateTarget = MoqRateTarget;
 
 /// A snapshot of transport connection statistics.
 typedef ConnectionStats = MoqConnectionStats;

@@ -9,10 +9,12 @@ criterion_group!(
 	benches,
 	session::session::<Model>,
 	session::group_cost::<Model>,
+	session::datagram::<Model>,
 	session::fetch_frames::<Model>,
 	session::fetch_range::<Model>,
 	session::range_updates::<Model>,
 	session::withdrawal::<Model>,
+	session::fanout_threads::<Model>,
 	session::idle
 );
 criterion_main!(benches);

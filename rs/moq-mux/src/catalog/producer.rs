@@ -1397,7 +1397,7 @@ fn packaging_of(container: &hang::catalog::Container) -> moq_msf::Packaging {
 
 /// Convert a catalog to its MSF equivalent: the media sections become MSF tracks and the
 /// extension rides the MSF root under the same member names it uses in the hang catalog.
-fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf::Catalog<E> {
+pub(crate) fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf::Catalog<E> {
 	let mut msf = to_msf_media(&catalog.media(), base);
 	msf.ext = catalog.ext.clone();
 	msf
@@ -1413,9 +1413,13 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	let mut tracks = Vec::new();
 	let reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
-		if let Some(epoch) = config.epoch() {
+		if let Some(instance) = config.instance() {
 			// MSF has nowhere to name an instance, so its readers take whichever resolves first.
-			tracing::warn!(rendition = id, %epoch, "MSF cannot carry a reference epoch; advertising without it");
+			tracing::warn!(
+				rendition = id,
+				?instance,
+				"MSF cannot carry a reference instance; advertising without it"
+			);
 		}
 		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
 			None => None,
@@ -2383,7 +2387,8 @@ mod test {
 				"video0",
 				"video0.hls",
 			] {
-				let all = moq_net::track::Subscription::default().with_max_delay(None);
+				let all =
+					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
 				let track = consumer.track(name).unwrap().subscribe(all).await.unwrap();
 				readers.push((name, track.ordered()));
 			}

@@ -61,8 +61,8 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
     case .start(let started), .restart(let started), .takeover(let started, _): announcement = started
     default: continue // .update or .end
     }
-    // Prefixes stay origin-relative; captures reports what each wildcard matched.
-    print(announcement.captures ?? [])
+    // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
+    print(announcement.captures)
     let broadcast = try await session.consume.request(path: announcement.prefix)
     for try await catalog in try await Media.CatalogConsumer.subscribe(broadcast: broadcast) {
         print(catalog)
@@ -86,7 +86,7 @@ let video = try Video.Producer(
     track: "camera"
 )
 try video.write(VideoFrame(timestamp: pts, data: rgba))
-try publication.announce(route: AnnounceRoute(epoch: mintEpoch())) // a fresh epoch per run
+try publication.announce(route: AnnounceRoute()) // the broadcast mints its own instance
 try audio.finish()
 try video.finish()
 try broadcast.close()
@@ -95,7 +95,7 @@ session.shutdown()
 try await session.closed()
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded `Media.TrackProducer.video` takes `lower` too, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `setEnabled(false)` after a `discontinuity()`, and `setEnabled(true)` on the keyframe that resumes it.
 
 ## Things to know
 
@@ -107,7 +107,7 @@ shows which module holds each.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `Media.TrackConsumer`, `Audio.Consumer`, and `Video.Consumer` yield `Read` cases in order: `.frame`, a `.gap` where media was lost, or an `.end` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: .latest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** Release each frame from a `Video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
-- **Closing.** `session.shutdown()` requests a drain immediately; `try await session.closed()` waits up to one second and reports its result. `session.cancel(code:)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+- **Closing.** `session.shutdown()` requests a drain immediately; `try await session.closed()` waits up to one second and reports its result. `session.cancel(code:)` closes at once. Finish or abort live tracks first. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `try finish()` on its `Media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
 - **Stats.** `session.stats()` reports `rtt`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `Client(versions:)`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `for try await grant in session.grants()` yields the `Grant` the relay sent back and each change, `nil` until it answers and while a client session reconnects. Cancelling the iterating task cancels the native wait.
