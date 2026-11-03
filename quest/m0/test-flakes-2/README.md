@@ -64,6 +64,11 @@ event-loop stall at each of its 124 host tasks passes all 124 at 1.5 seconds;
 at 4.5 seconds 3 runs and at 11 seconds 114 runs hit bun's own 5-second test
 timeout. No run fails on a protocol deadline, so no clock change applies. Both handled in [moq-dev/moq#7622](https://github.com/moq-dev/moq/pull/7622).
 
+The JS close-drain fixture advanced after the setup group's first payload, so a
+zero-delay subscription could expire its sender while the write budget yielded.
+It now reads that group through FIN before starting the next one, fixed by
+[moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658).
+
 Public API: none. Wire: none.
 
 ## Required
@@ -72,5 +77,4 @@ Public API: none. Wire: none.
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
 - [Timing-bound tests pass beside a busy build](/quest/m0/test-flakes-2/load-timing-bounds.md) - four tests that pass alone but have failed under a loaded `just check` pass reliably there, each fixed at its cause under the epic's rules
 - [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
-- [@moq/net's close-drain tests survive load](/quest/m0/test-flakes-2/js-close-drain.md) - the lite close-drain cases pass on every full suite run
 - [@moq/net's boundary-sync test survives load](/quest/m0/test-flakes-2/js-boundary-sync.md) - "a version without a boundary syncs" passes under load
