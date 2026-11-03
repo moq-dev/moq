@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`moq::JsonSnapshotProducer::update`, `moq::JsonStreamProducer::append`, and `moq::JsonWindowProducer::push` and `pop` take a required `moq::Timestamp` instead of an optional one. Stamp it from `moq::MediaCatalogProducer::now()`, the broadcast clock every track shares. Their constructors refuse a track created without a `timescale`. Regenerate bindings and rebuild with the matching native library.
+
+### Subscriptions take a `moq::Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`moq::Subscription::max_delay` is `moq::Delay delay`: set `delay.max` to the old `max_delay`, or start from `moq::subscription_defaults()`.
+`moq::Delay::min` is a `std::optional`: `std::nullopt` leaves the target latency unstated, which a decoder plays as zero. A bare `moq::Subscription{}` leaves both bounds unset, so its `delay.max` still sets no subscriber limit.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `moq::Announce.captures` is `std::vector<std::string>` instead of an optional vector. Remove optional checks and dereferences; an empty vector means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.

@@ -21,7 +21,7 @@ export async function run(): Promise<void> {
 				for (const ms of timestamps) group.writeFrame({ payload, timestamp: Time.Timestamp.fromMillis(ms) });
 				group.finish();
 			}
-			if ((await reader.recvGroup())?.sequence !== 1) throw new Error("B-frame tail rewound the drift edge");
+			if ((await reader.recvGroup())?.sequence !== 1n) throw new Error("B-frame tail rewound the drift edge");
 		} finally {
 			reader.close();
 			check.finish();
@@ -70,7 +70,7 @@ export async function run(): Promise<void> {
 								for (let sequence = 0; sequence < retained; sequence++)
 									for (const reader of ordered) {
 										const group = await reader.nextGroup();
-										if (group?.sequence !== sequence) throw new Error("history missing");
+										if (group?.sequence !== BigInt(sequence)) throw new Error("history missing");
 										await group.readFrame();
 									}
 								sources.push(track.appendGroup());
@@ -81,7 +81,7 @@ export async function run(): Promise<void> {
 								}
 								// A frameless candidate beyond one owed group keeps the ordered
 								// cursor parked while frames advance its presentation edge.
-								track.createGroup(retained + 2);
+								track.createGroup(BigInt(retained + 2));
 								waiting.push(...ordered);
 							}
 							let start = 0;
