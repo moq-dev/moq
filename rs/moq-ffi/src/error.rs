@@ -401,6 +401,22 @@ pub enum MoqError {
 		/// The catalog version this build cannot read.
 		version: u64,
 	},
+	/// The rendition or decoder output was refused during setup; another configuration may work.
+	#[error("unsupported configuration: {reason}")]
+	UnsupportedConfig {
+		/// A diagnostic message describing the refusal.
+		reason: String,
+	},
+}
+
+impl MoqError {
+	#[cfg(feature = "audio")]
+	pub(crate) fn audio_subscribe(err: moq_audio::Error) -> Self {
+		match err {
+			moq_audio::Error::Unsupported(reason) => Self::UnsupportedConfig { reason },
+			err => err.into(),
+		}
+	}
 }
 
 impl From<moq_net::Error> for MoqError {
@@ -502,8 +518,11 @@ impl From<moq_audio::Error> for MoqError {
 #[cfg(feature = "video")]
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
-		Self::Video {
-			reason: err.to_string(),
+		match err {
+			moq_video::Error::UnsupportedConfig(reason) => Self::UnsupportedConfig { reason },
+			err => Self::Video {
+				reason: err.to_string(),
+			},
 		}
 	}
 }

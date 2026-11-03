@@ -9154,3 +9154,116 @@ fn shutdown_waits_for_a_polled_call() {
 	let parked = parked.join().unwrap();
 	assert!(matches!(parked, Err(MoqError::Cancelled)), "{parked:?}");
 }
+
+/// Setup, rather than the first packet, decides whether a rendition is usable.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn audio_subscribe_configuration_boundary() {
+	use crate::audio::MoqAudioConsumer;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("audio".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+	// The names alone cannot decide: the AAC-LC description may declare SBR,
+	// and a present, malformed OpusHead must never be replaced by catalog fields.
+	for (codec, description, channels, supported) in [
+		("opus", None, 2, true),
+		("opus", Some(opus_head()), 2, true),
+		("opus", Some(vec![]), 2, false),
+		("opus", Some(opus_head()[..18].to_vec()), 2, false),
+		("opus", None, 6, false),
+		("pcm", None, 6, true),
+		("pcm", Some(vec![]), 2, false),
+		("flac", None, 2, false),
+		("unknown", None, 2, false),
+		("mp4a.40.bad", None, 2, false),
+		("mp4a.40.2", Some(vec![0x11, 0x90]), 2, true),
+		("mp4a.40.2", Some(vec![0x12, 0x10, 0x56, 0xe5, 0x98]), 2, false),
+		("mp4a.40.2", Some(vec![0x11]), 2, false),
+		("mp4a.40.2", None, 6, false),
+		("mp4a.40.5", None, 2, false),
+	] {
+		let mut config = sibling_audio("");
+		config.codec = codec.into();
+		config.description = description;
+		config.channel_count = channels;
+		let result = MoqAudioConsumer::subscribe(&consumer, "audio".into(), config, audio_output()).await;
+		if supported {
+			result.unwrap().cancel();
+		} else {
+			assert!(
+				matches!(result, Err(MoqError::UnsupportedConfig { .. })),
+				"{codec}/{channels}"
+			);
+		}
+	}
+	// Output refusals are setup errors too; a missing track is not.
+	for output in [
+		crate::audio::MoqAudioDecoderOutput {
+			sample_rate: Some(0),
+			..audio_output()
+		},
+		crate::audio::MoqAudioDecoderOutput {
+			channels: Some(0),
+			..audio_output()
+		},
+	] {
+		assert!(matches!(
+			MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), output).await,
+			Err(MoqError::UnsupportedConfig { .. })
+		));
+	}
+	let missing = MoqAudioConsumer::subscribe(&consumer, "missing".into(), sibling_audio(""), audio_output()).await;
+	assert!(matches!(missing, Err(MoqError::Audio { .. })));
+	broadcast.close().unwrap();
+}
+
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn video_subscribe_configuration_boundary() {
+	use crate::video::{MoqVideoConsumer, MoqVideoDecoderOutput};
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("video".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+	for (codec, description, supported) in [
+		("avc1.42001e", None, true),
+		("avc1.42001e", Some(vec![]), false),
+		("avc1.42001e", Some(vec![1, 0x42, 0, 0x1e]), false),
+		("hvc1.1.6.L93.B0", None, false),
+		("vp09.02.10.10", None, false),
+		("avc1.invalid", None, false),
+		("unknown", None, false),
+	] {
+		let config = MoqVideo {
+			codec: codec.into(),
+			description,
+			enabled: true,
+			container: MoqContainer::Legacy,
+			preference: 0,
+			label: None,
+			broadcast: None,
+			instance: None,
+			track: None,
+			coded: None,
+			display_aspect: None,
+			bitrate: None,
+			framerate: None,
+		};
+		let result = MoqVideoConsumer::subscribe(
+			&consumer,
+			"video".into(),
+			config.clone(),
+			MoqVideoDecoderOutput::default(),
+		)
+		.await;
+		if supported {
+			result.unwrap().cancel();
+			let missing =
+				MoqVideoConsumer::subscribe(&consumer, "missing".into(), config, MoqVideoDecoderOutput::default())
+					.await;
+			assert!(matches!(missing, Err(MoqError::Video { .. })));
+		} else {
+			assert!(matches!(result, Err(MoqError::UnsupportedConfig { .. })), "{codec}");
+		}
+	}
+	broadcast.close().unwrap();
+}

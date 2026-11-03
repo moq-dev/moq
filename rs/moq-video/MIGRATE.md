@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Consumer decoder setup refusals are typed
+
+`decode::Consumer::new` reports `Error::UnsupportedConfig` for a codec, description, or decoder output it cannot open. Direct `decode::Decoder::new` retains its detailed setup errors. Subscription failures and codec worker failures keep their existing errors.
+
 ### `decode::Options::max_delay` is `delay` ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `decode::Options::max_delay: Duration` is `delay: decode::Delay` (`moq_net::track::Delay`).

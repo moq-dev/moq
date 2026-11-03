@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfigMoqException` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
 ### `Transport.iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 Native sessions no longer arrive over iroh, so `Transport` loses its `iroh` value. Drop the case, and regenerate bindings and rebuild with the matching native library.

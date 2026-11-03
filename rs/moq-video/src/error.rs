@@ -2,6 +2,10 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The rendition or decoder output could not be configured before decoding started.
+	#[error("unsupported video configuration: {0}")]
+	UnsupportedConfig(String),
+
 	/// No encoder matching the requested codec / hardware preference could be
 	/// opened (none compiled in, or none available on this machine).
 	#[error("no usable video encoder found (tried: {0})")]

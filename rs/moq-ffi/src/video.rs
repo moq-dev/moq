@@ -1231,11 +1231,17 @@ impl MoqVideoConsumer {
 /// is rejected here; a recognized one the native backends can't open is rejected when the decoder
 /// opens, which is still before the first frame.
 fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::VideoConfig, MoqError> {
-	let codec: hang::catalog::VideoCodec = catalog_video.codec.parse().map_err(|_| MoqError::Unsupported)?;
-	// Parsing is total: an unrecognized name becomes `Unknown` rather than failing. Reject it here
-	// so a typo in the catalog is an error at subscribe, not an opaque backend failure later.
+	let codec = catalog_video
+		.codec
+		.parse::<hang::catalog::VideoCodec>()
+		.map_err(|err| MoqError::UnsupportedConfig {
+			reason: format!("{err}"),
+		})?;
+
 	if matches!(codec, hang::catalog::VideoCodec::Unknown(_)) {
-		return Err(MoqError::Unsupported);
+		return Err(MoqError::UnsupportedConfig {
+			reason: format!("unknown video codec: {codec}"),
+		});
 	}
 
 	let mut config = hang::catalog::VideoConfig::new(codec);
@@ -1278,8 +1284,8 @@ impl MoqVideoConsumer {
 	///
 	/// `catalog_video` comes from the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec is read
-	/// from it. Errors if no native backend handles that codec, rather than failing on the first
-	/// frame. Also fails with [`MoqError::Unsupported`] when
+	/// from it. A codec or description no native backend can open returns
+	/// [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
 	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
 	///
 	/// A [disabled](crate::media::MoqVideo::enabled) rendition subscribes too, and decodes once its
@@ -1372,7 +1378,7 @@ mod decode_tests {
 	#[test]
 	fn video_config_rejects_an_unknown_codec() {
 		let error = video_config(catalog_video("nope")).unwrap_err();
-		assert!(matches!(error, MoqError::Unsupported));
+		assert!(matches!(error, MoqError::UnsupportedConfig { .. }));
 	}
 }
 

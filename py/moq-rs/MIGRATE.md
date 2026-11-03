@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `list[str]` instead of `list[str] | None`. Remove `None` checks and pass `captures=[]` when constructing an announcement for a filter without wildcards. Rebuild with the matching generated bindings and native library.
