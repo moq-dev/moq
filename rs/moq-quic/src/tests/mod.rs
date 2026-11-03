@@ -4353,6 +4353,35 @@ fn connect_detects_mtu() {
 }
 
 #[test]
+fn migrate_without_mtud_respects_peer_max_udp_payload_size() {
+	let _guard = subscribe();
+	const PEER_MAX: u16 = 1200;
+	let transport = || transport::Config {
+		initial_mtu: 16000,
+		mtu: None,
+		..transport::Config::default()
+	};
+	let endpoint = endpoint::Config {
+		max_udp_payload_size: PEER_MAX,
+		..endpoint::Config::default()
+	};
+	let mut server_config = server_config();
+	server_config.transport = transport();
+	let mut client_config = client_config();
+	client_config.transport = transport();
+	let mut pair = Pair::new(endpoint, server_config);
+	let (client_ch, server_ch) = pair.connect_with(client_config);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+
+	// Moving to another IP, unlike a NAT rebinding, builds the server a fresh path.
+	pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive();
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+}
+
+#[test]
 fn migrate_detects_new_mtu_and_respects_original_peer_max_udp_payload_size() {
 	let _guard = subscribe();
 

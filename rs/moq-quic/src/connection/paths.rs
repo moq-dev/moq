@@ -71,17 +71,15 @@ impl PathData {
 		now: Instant,
 		config: &transport::Config,
 	) -> Self {
-		let mtud = config.mtu.as_ref().filter(|_| allow_mtud).map_or_else(
+		let mut mtud = config.mtu.as_ref().filter(|_| allow_mtud).map_or_else(
 			|| MtuDiscovery::disabled(config.get_initial_mtu(), config.min_mtu),
-			|mtud_config| {
-				MtuDiscovery::new(
-					config.get_initial_mtu(),
-					config.min_mtu,
-					peer_max_udp_payload_size,
-					mtud_config.clone(),
-				)
-			},
+			|mtud_config| MtuDiscovery::new(config.get_initial_mtu(), config.min_mtu, mtud_config.clone()),
 		);
+		// A migration's new path already knows the peer's limit, which binds with or without
+		// discovery.
+		if let Some(peer_max_udp_payload_size) = peer_max_udp_payload_size {
+			mtud.on_peer_max_udp_payload_size_received(peer_max_udp_payload_size);
+		}
 		Self {
 			remote,
 			rtt: RttEstimator::new(config.initial_rtt),
