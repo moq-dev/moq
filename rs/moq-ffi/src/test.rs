@@ -4813,10 +4813,7 @@ async fn closing_a_broadcast_ends_its_open_data_tracks() {
 
 	assert!(matches!(json_snapshot.update("1".into(), us(0)), Err(MoqError::Closed)));
 	assert!(matches!(json_stream.append("1".into(), us(0)), Err(MoqError::Closed)));
-	assert!(matches!(
-		json_window.push("1".into(), us(0)),
-		Err(MoqError::Closed)
-	));
+	assert!(matches!(json_window.push("1".into(), us(0)), Err(MoqError::Closed)));
 }
 
 /// A data writer released without a finish ends its track as a publisher leaving.
