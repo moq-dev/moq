@@ -7,6 +7,8 @@
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
+# Selection runs inside command substitutions, which otherwise clear -e.
+shopt -s inherit_errexit
 
 usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all"
 action=${1:?$usage}
@@ -40,7 +42,9 @@ select_packages() {
     # A changed path under `rs/` is a seed only because every crate directory
     # there is named after its crate. Under-selecting checks nothing, so fall
     # back to all.
-    if jq -e '.packages[] | (.manifest_path | split("/")) as $p | select($p[-3] == "rs" and $p[-2] != .name)' <<<"$metadata" >/dev/null; then
+    local mismatched
+    mismatched=$(jq 'any(.packages[]; (.manifest_path | split("/")) as $p | $p[-3] == "rs" and $p[-2] != .name)' <<<"$metadata")
+    if [[ "$mismatched" == true ]]; then
         echo "rs: a crate directory no longer matches its crate name; selecting everything." >&2
         echo ALL
         return
