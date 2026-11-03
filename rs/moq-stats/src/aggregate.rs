@@ -697,8 +697,8 @@ enum Reader<F> {
 	Resolving(Box<Pending<origin::Requesting>>),
 	/// Waiting for the node's listing to offer the track.
 	Waiting,
-	/// Awaiting the subscription handshake. Boxed: its task waiter dwarfs the other states.
-	Subscribing(Box<Pending<Subscribing>>),
+	/// Awaiting the subscription handshake.
+	Subscribing(Pending<Subscribing>),
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
 	/// and one lives per node in a map.
 	Active(Box<moq_json::snapshot::Consumer<F>>),
@@ -1001,7 +1001,7 @@ fn advance<S: Shape>(
 					}
 				},
 				Poll::Ready(Ok(broadcast)) => match broadcast.track(name) {
-					Ok(track) => node.reader = Reader::Subscribing(Box::new(track.subscribe(None))),
+					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
 					Err(err) => {
 						tracing::debug!(?err, name, "stats: node missing track");
 						return changed | node.depart();
@@ -1030,7 +1030,7 @@ fn advance<S: Shape>(
 				}
 				node.offered = false;
 				match listing.broadcast().track(name) {
-					Ok(track) => node.reader = Reader::Subscribing(Box::new(track.subscribe(None))),
+					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
 					Err(err) => {
 						tracing::debug!(?err, name, "stats: node missing track");
 						return changed | node.depart();
