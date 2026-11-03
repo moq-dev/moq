@@ -3045,29 +3045,64 @@ mod tests {
 		};
 		assert_eq!(
 			sub.owed(None),
-			Some(10..10),
+			Some(vec![]),
 			"without SUBSCRIBE_START nothing was served"
 		);
 
-		sub.served = Some(4);
+		// An update moves the floor, the ranges, and `updated` together, as
+		// `begin_subscription` does.
+		let update = |sub: &mut SubStream, start: Option<u64>, ranges: Vec<lite::Range>| {
+			sub.start = start;
+			sub.ranges = ranges;
+			sub.updated = true;
+		};
+		sub.started = true;
+		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
 		assert_eq!(
 			sub.owed(None),
-			Some(2..10),
+			Some(vec![1..10]),
+			"an update asks from a floor even when SUBSCRIBE_START started no range"
+		);
+
+		update(&mut sub, Some(2), vec![lite::Range::span(Some(2), 0, None, None)]);
+		sub.updated = false;
+		sub.served = Some(4);
+		sub.starts = vec![Some(4)];
+		assert_eq!(
+			sub.owed(None),
+			Some(vec![4..10]),
 			"the groups below START are accounted for on arrival"
 		);
-		sub.start = Some(6);
-		assert_eq!(sub.owed(None), Some(6..10), "a raised floor owes nothing below it");
-		sub.start = Some(1);
+		update(&mut sub, Some(6), vec![lite::Range::span(Some(6), 0, None, None)]);
 		assert_eq!(
 			sub.owed(None),
-			Some(1..10),
+			Some(vec![6..10]),
+			"a raised floor owes nothing below it"
+		);
+		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
+		assert_eq!(
+			sub.owed(None),
+			Some(vec![1..10]),
 			"a lowered floor owes what it newly asked for"
 		);
-		sub.start = None;
+		update(&mut sub, None, vec![lite::Range::span(None, 0, None, None)]);
 		assert_eq!(
 			sub.owed(Some(8)),
-			Some(4..8),
+			Some(vec![4..8]),
 			"a live-edge floor starts where START resolved it"
+		);
+		update(
+			&mut sub,
+			Some(1),
+			vec![
+				lite::Range::span(Some(1), 0, Some(3), None),
+				lite::Range::span(Some(6), 0, None, None),
+			],
+		);
+		assert_eq!(
+			sub.owed(None),
+			Some(vec![1..4, 6..10]),
+			"nothing is owed between disjoint ranges"
 		);
 	}
 
@@ -7456,21 +7491,40 @@ impl SubStream {
 		!self.started && self.end.as_ref().is_some_and(|end| end.group > self.start.unwrap_or(0))
 	}
 
-	/// The groups the publisher still owes once it has ended the subscription.
+	/// The groups the publisher still owes once it has ended the subscription, one run per
+	/// range: the publisher accounts for nothing between disjoint ranges.
 	///
 	/// `None` when nothing says which: drafts before SUBSCRIBE_FINISH only have the FIN.
-	/// Without a SUBSCRIBE_START the publisher served no group at all. Otherwise they start
-	/// at the floor the demand last asked for, which an update can move either way, or
-	/// where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE asked for
-	/// below its SUBSCRIBE_START are accounted for as unavailable when it arrives.
-	fn owed(&self, requested_end: Option<u64>) -> Option<std::ops::Range<u64>> {
+	/// Without a SUBSCRIBE_START the publisher served no group at all, unless an update since
+	/// moved the floor the demand asks from. Each range is owed from where SUBSCRIBE_START
+	/// said it starts while the ranges are still the SUBSCRIBE's, which accounts for a skipped
+	/// prefix and resolves a relative or time start; after an update, from its absolute start,
+	/// or else from the first group served. The groups the SUBSCRIBE asked for below its
+	/// SUBSCRIBE_START are accounted for as unavailable when it arrives.
+	fn owed(&self, requested_end: Option<u64>) -> Option<Vec<std::ops::Range<u64>>> {
 		let end = self.end.as_ref()?.group;
 		let end = requested_end.map_or(end, |requested| requested.min(end));
-		let start = match self.served {
-			Some(served) => self.start.unwrap_or(served),
-			None => end,
+		let moved = self.start.filter(|_| self.started && self.start != self.requested);
+		let Some(served) = self.served.or(moved) else {
+			return Some(Vec::new());
 		};
-		Some(start..end)
+		let owed = self.ranges.iter().enumerate().filter_map(|(index, range)| {
+			let start = match (self.updated, self.starts.get(index)) {
+				(false, Some(start)) => (*start)?,
+				_ => match range.start {
+					Some(lite::Anchor::Absolute(start)) => start.group,
+					_ => served,
+				},
+			};
+			// Our absolute ends name a group's first frame (see `wire_ranges`), and the rest
+			// go upstream open.
+			let stop = match range.end {
+				Some(lite::Anchor::Absolute(stop)) => stop.group.min(end),
+				_ => end,
+			};
+			(start < stop).then_some(start..stop)
+		});
+		Some(owed.collect())
 	}
 }
 
@@ -8623,9 +8677,20 @@ impl kio::Task for TrackServeRun {
 					while let Some(stream) = reader
 						&& let Poll::Ready(res) = stream.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
 					{
-						if !matches!(res, Ok(Some(_))) {
-							*reader = None;
-							break;
+						match res {
+							Ok(Some(_)) => {}
+							// The publisher's FIN in reply, or a reset: the stream is done.
+							Ok(None) => {
+								*reader = None;
+								break;
+							}
+							// Malformed bytes are a protocol violation here as on any Subscribe
+							// Stream, which closes the session; a short read at a FIN is not.
+							Err(err) => {
+								let _ = lite::error::control(&mut self.serve.subscriber.session.clone(), err);
+								*reader = None;
+								break;
+							}
 						}
 						ready!(budget.poll_yield(waiter));
 					}
@@ -9305,7 +9370,8 @@ impl ServeLoop {
 			false => active.owed(self.serving.subscription().and_then(|sub| sub.end())),
 		};
 		settle.poll(waiter, |tail| {
-			owed.as_ref().is_some_and(|owed| tail.covers(owed.clone()))
+			owed.as_ref()
+				.is_some_and(|owed| owed.iter().all(|owed| tail.covers(owed.clone())))
 		})
 	}
 
@@ -9375,7 +9441,8 @@ impl ServeLoop {
 						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
 					if settle
 						.poll(waiter, |tail| {
-							owed.as_ref().is_some_and(|owed| tail.covers(owed.clone()))
+							owed.as_ref()
+								.is_some_and(|owed| owed.iter().all(|owed| tail.covers(owed.clone())))
 						})
 						.is_ready()
 					{

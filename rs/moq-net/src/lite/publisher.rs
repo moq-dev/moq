@@ -4665,8 +4665,14 @@ impl TrackRun {
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
 		let fin = final_sequence(fin);
+		// Only the groups the ranges name: one between disjoint ranges is not owed, and
+		// naming it would keep a later update widening over it from delivering it.
 		let end = self.track.subscription().end().map_or(fin, |end| end.min(fin));
-		self.drop_range(start..end, &StreamError::NotFound, writer)
+		let mut dropped = false;
+		for run in self.track.runs_in_range(start, end) {
+			dropped |= self.drop_range(run, &StreamError::NotFound, writer)?;
+		}
+		Ok(dropped)
 	}
 }
 
@@ -7474,8 +7480,9 @@ mod serve_group_test {
 		track.finish_at(track::Position::group(6), None).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
-		// The feed gives up on 2..5 once its grace passes, a miss nothing fills.
-		assert_eq!(drops(&mut writer, &log, version).await, [(2, 4), (1, 1)]);
+		// The feed gives up on 2..5 once its grace passes, a miss nothing fills. Group 1 lies
+		// below the floor the ranges name, so the end sweep owes it nothing.
+		assert_eq!(drops(&mut writer, &log, version).await, [(2, 4)]);
 	}
 
 	/// A raised floor sends no early drop: a later update may lower it again, and the

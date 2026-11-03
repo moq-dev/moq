@@ -1884,9 +1884,17 @@ export class Subscriber {
 				: min(entry.end, span.end ?? entry.end);
 		if (end === undefined) return false;
 		// Without SUBSCRIBE_START the publisher served no group at all, though lite-07 still
-		// answers with one once the track ends, unless nothing was asked below the end.
-		if (entry.start === undefined)
-			return !(keepsSubscribeOpen(this.version) && !entry.started && end > (rangesStart(ranges) ?? 0n));
+		// answers with one once the track ends, unless nothing was asked below the end. One
+		// that started no range owes nothing either, unless an update since asked from a floor
+		// below the end, which lite-07's open stream still serves.
+		const floor = rangesStart(ranges);
+		let first = entry.start;
+		if (first === undefined) {
+			if (!keepsSubscribeOpen(this.version)) return true;
+			if (!entry.started) return !(end > (floor ?? 0n));
+			if (!entry.updated || floor === undefined || floor >= end) return true;
+			first = floor;
+		}
 		// Owed from the floor the demand last asked for, which an update can move either
 		// way, or where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE
 		// asked for below its SUBSCRIBE_START were accounted for when it arrived. Only the
@@ -1895,7 +1903,7 @@ export class Subscriber {
 		// accounts for a skipped prefix and resolves a relative or time start. Otherwise a time
 		// start resolved at the publisher, at the lowest start it named.
 		const starts = !entry.updated && sameRanges(ranges, entry.asked) && entry.starts;
-		const start = starts ? entry.start : (rangesStart(ranges) ?? entry.start);
+		const start = starts ? first : (floor ?? first);
 		const owed = starts
 			? ranges.flatMap((range, index) => {
 					const at = starts[index];
