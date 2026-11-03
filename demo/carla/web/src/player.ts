@@ -121,14 +121,14 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				// A broad route can cover the scope without naming one camera.
 				if (!parseCamera(entry.prefix)) continue;
 
-				// A restart is a new simulator instance on the same path; the watch
-				// broadcast follows it, so only an end removes the tile.
-				if (entry.kind !== "end" && !tiles.has(entry.prefix)) {
+				// A restarted simulator keeps its path present, and the watch broadcast
+				// follows it, so only an absence removes the tile.
+				if (entry.kind !== "absent" && !tiles.has(entry.prefix)) {
 					const truck = new Truck({ broadcastId: entry.prefix, connection, driving, focused, hovered });
 					tiles.set(entry.prefix, new TruckTile(truck));
 					vehicles.set(tiles.size);
 					refreshFocusLayout();
-				} else if (entry.kind === "end") {
+				} else if (entry.kind === "absent") {
 					const tile = tiles.get(entry.prefix);
 					tile?.dispose();
 					tiles.delete(entry.prefix);

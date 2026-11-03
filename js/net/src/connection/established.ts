@@ -1,5 +1,6 @@
 import type { GetPromise, Getter } from "@moq/signals";
 import type * as announce from "../announce.ts";
+import type { Routes } from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
 import type { Drain } from "./goaway.ts";
@@ -58,6 +59,9 @@ export interface Established {
 	 * discovery refuses or resets the stream.
 	 */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
+
+	/** Every route change matching `scope`, for code that forwards routes. @internal */
+	routes(scope?: Path.Pattern, options?: announce.Options): Routes;
 
 	/**
 	 * Snapshot the transport's counters, querying it fresh on each call.

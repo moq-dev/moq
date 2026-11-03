@@ -30,16 +30,26 @@ export interface Announce {
 }
 
 /**
- * What an announcement stream yields.
+ * What an announcement listing yields: a path becoming present or absent.
  *
- * `start`: a route now covers the prefix. `update`: the route covering it changed
- * hops or cost, in place. `restart`: another instance now serves the prefix, so request it
- * afresh; what was already resolved stays on the old one until dropped or its route goes.
- * `end`: no route covers it any more.
+ * `present`: a route now covers the path, which was absent. `absent`: no route covers it any
+ * more, carrying its last advertised route. Another instance taking a path over keeps it
+ * present: follow it with the origin's `follow(path)` to see the broadcast change.
  *
  * @public
  */
-export type Event = { kind: "start" | "update" | "restart" | "end" } & Announce;
+export type Event = { kind: "present" | "absent" } & Announce;
+
+/**
+ * Every change to a route, for code that forwards or routes them.
+ *
+ * `start`: a route now covers the prefix. `update`: the route covering it changed hops or cost,
+ * in place. `restart`: another instance now serves the prefix. `end`: no route covers it any
+ * more.
+ *
+ * @internal
+ */
+export type RouteEvent = { kind: "start" | "update" | "restart" | "end" } & Announce;
 
 /**
  * Options for an announcement stream.
@@ -67,7 +77,7 @@ export interface Options {
 
 /** Reactive backing state shared by announcement producers and consumers. */
 class AnnounceState {
-	queue = new Signal<Event[]>([]);
+	queue = new Signal<RouteEvent[]>([]);
 	closed = new Once<Error | null>();
 	synced = new Signal(false);
 	// The queued events still to read before the stream counts as synced, or undefined
@@ -100,9 +110,9 @@ function closeState(state: AnnounceState, abort?: Error) {
 }
 
 /**
- * The write side of an announcement stream.
+ * The write side of a route stream.
  *
- * @public
+ * @internal
  */
 export class Producer {
 	#state = new AnnounceState();
@@ -116,20 +126,20 @@ export class Producer {
 	}
 
 	/** A read handle for this announcement stream. */
-	consume(): Consumer {
-		return makeConsumer(this.#state);
+	consume(): Routes {
+		return makeRoutes(this.#state);
 	}
 
 	/**
 	 * Whether any consumer still holds the stream: false before the first {@link consume} and
-	 * once the last one {@link Consumer.close}s, which is how a reader cancels it.
+	 * once the last one {@link Routes.close}s, which is how a reader cancels it.
 	 */
 	get wanted(): Getter<boolean> {
 		return this.#state.wanted;
 	}
 
 	/** Writes an event to the queue. */
-	append(event: Event) {
+	append(event: RouteEvent) {
 		if (this.#state.closed.peek() !== undefined) throw new Error("announcements are closed");
 		this.#state.queue.mutate((queue) => {
 			queue.push(event);
@@ -167,18 +177,16 @@ export class Producer {
 	}
 }
 
-// Constructs a Consumer from within this module without exposing a public constructor
+// Constructs a Routes from within this module without exposing a public constructor
 // that would leak the unexported AnnounceState. Assigned in the class's static block.
-let makeConsumer: (state: AnnounceState) => Consumer;
+let makeRoutes: (state: AnnounceState) => Routes;
 
 /**
- * The read side of an announcement stream.
+ * The read side of a route stream: every change, for code that forwards or routes them.
  *
- * Created internally: obtain one from an origin or the connection's `announced(scope)`.
- *
- * @public
+ * @internal
  */
-export class Consumer {
+export class Routes {
 	#state: AnnounceState;
 	// Set once this handle closes, ending its own reads and guarding the consumer count.
 	#released = new Signal(false);
@@ -195,7 +203,7 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (state) => new Consumer(state);
+		makeRoutes = (state) => new Routes(state);
 	}
 
 	/**
@@ -212,7 +220,7 @@ export class Consumer {
 	}
 
 	/** The events as they arrive, until the stream closes. */
-	async *[Symbol.asyncIterator](): AsyncGenerator<Event, void, undefined> {
+	async *[Symbol.asyncIterator](): AsyncGenerator<RouteEvent, void, undefined> {
 		for (;;) {
 			const event = await this.next();
 			if (!event) return;
@@ -221,7 +229,7 @@ export class Consumer {
 	}
 
 	/** Returns the next event, or undefined once the stream or this handle closes. */
-	async next(): Promise<Event | undefined> {
+	async next(): Promise<RouteEvent | undefined> {
 		const state = this.#state;
 		state.reading = false;
 		settle(state);
@@ -252,4 +260,82 @@ export class Consumer {
 		this.#released.set(true);
 		if (--this.#state.consumers === 0) this.#state.wanted.set(false);
 	}
+}
+
+// Constructs a listing over a route stream without a public constructor. Declared before the
+// class, whose static block assigns it.
+let makeConsumer: (routes: Routes) => Consumer;
+
+/**
+ * The paths announced under a scope, each reported as it becomes present or absent.
+ *
+ * Created internally: obtain one from an origin or the connection's `announced(scope)`.
+ *
+ * @public
+ */
+export class Consumer {
+	#routes: Routes;
+
+	private constructor(routes: Routes) {
+		this.#routes = routes;
+	}
+
+	static {
+		makeConsumer = (routes) => new Consumer(routes);
+	}
+
+	/** Settles once the stream closes: `null` on a clean close, or the abort {@link Error}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#routes.closed;
+	}
+
+	/**
+	 * Whether the listing has delivered its source's initial announcements and the reader has
+	 * taken them, so a path not present by now is absent rather than not yet heard of.
+	 *
+	 * Flips once the reader asks for the event after the last of them, and is true once
+	 * closed. Through a session, the initial set is the peer's view when it answered: exact
+	 * on versions that count it, best-effort on the rest. Reading an origin, it is every
+	 * attached session's initial set, so a reconnect takes it back until the new one lands.
+	 */
+	get synced(): Getter<boolean> {
+		return this.#routes.synced;
+	}
+
+	/** The events as they arrive, until the listing closes. */
+	async *[Symbol.asyncIterator](): AsyncGenerator<Event, void, undefined> {
+		for (;;) {
+			const event = await this.next();
+			if (!event) return;
+			yield event;
+		}
+	}
+
+	/** Returns the next path that became present or absent, or undefined once the listing or this handle closes. */
+	async next(): Promise<Event | undefined> {
+		for (;;) {
+			const event = await this.#routes.next();
+			if (!event) return undefined;
+			const { kind, ...announce } = event;
+			if (kind === "start") return { kind: "present", ...announce };
+			if (kind === "end") return { kind: "absent", ...announce };
+		}
+	}
+
+	/**
+	 * Release this handle, like dropping a Rust handle: the source sees the listing as no
+	 * longer wanted. Idempotent.
+	 */
+	close() {
+		this.#routes.close();
+	}
+}
+
+/**
+ * The listing over a route stream: only paths becoming present or absent.
+ *
+ * @internal
+ */
+export function list(routes: Routes): Consumer {
+	return makeConsumer(routes);
 }

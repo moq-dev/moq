@@ -1671,6 +1671,11 @@ export class Producer implements Table {
 		return this.#reader.announced(scope, options);
 	}
 
+	/** Every route change under `scope`; see {@link Consumer.routes}. @internal */
+	routes(scope?: Path.Pattern, options?: Announce.Options): announce.Routes {
+		return this.#reader.routes(scope, options);
+	}
+
 	/**
 	 * Close the origin, every broadcast it still routes, and its announcement streams. Idempotent.
 	 *
@@ -2251,8 +2256,9 @@ export class Consumer implements Reader {
 	}
 
 	/**
-	 * The announced routes matching `scope`, as a live stream: every currently advertised
-	 * route arrives first as `start`, then changes as they happen.
+	 * The paths announced matching `scope`, each reported as it becomes present or absent:
+	 * every currently advertised one arrives first as `present`. Another instance taking a
+	 * path over keeps it present; {@link follow} it to see the broadcast change.
 	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
 	 * peer sees it. Only routes whose literal name matches the scope are listed, unless
 	 * `options.covering` also asks for every dynamic or received route whose subtree
@@ -2262,6 +2268,17 @@ export class Consumer implements Reader {
 	 * announcements there.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
+		return announce.list(this.routes(scope, options));
+	}
+
+	/**
+	 * Every change to the routes matching `scope`, for code that forwards routes: a re-price
+	 * is an `update`, and another instance serving a path a `restart`. Scope, options and the
+	 * watch are as for {@link announced}.
+	 *
+	 * @internal
+	 */
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): announce.Routes {
 		const producer = new announce.Producer();
 		const patterns = this.#scope.patterns(scope);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));

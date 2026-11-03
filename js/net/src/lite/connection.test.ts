@@ -685,7 +685,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 		connect({ url, transport: pair.client, consume: destination }),
 		accept({ url, transport: pair.server, publish: source.consume() }),
 	]);
-	const announced = destination.announced();
+	const announced = destination.routes();
 	let closed = false;
 	void pair.server.closed.then(() => {
 		closed = true;

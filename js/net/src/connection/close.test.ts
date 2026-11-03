@@ -65,7 +65,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 				connect({ url, transport: pair.client, consume: destination }),
 				accept({ url, transport: pair.server, publish: source.consume() }),
 			]);
-			const announced = destination.announced();
+			const announced = destination.routes();
 			let installed: Installed | undefined;
 			try {
 				expect((await announced.next())?.kind).toBe("start");

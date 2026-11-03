@@ -329,7 +329,7 @@ export class Subscriber {
 	 * The request goes out once every overlapping request already closed here is off the
 	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Routes {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
 		const filter: Asking = {

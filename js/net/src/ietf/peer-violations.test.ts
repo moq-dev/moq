@@ -146,7 +146,7 @@ for (const [version, alpn] of versions) {
 		});
 		const acquiring = spyOn(Slots.prototype, "tryAcquire");
 		try {
-			const announced = subscriber.announced();
+			const announced = subscriber.routes();
 			await announced.closed;
 			expect(acquiring).toHaveBeenCalledTimes(3); // a, b, c; neither DONE nor the repeat takes another slot.
 			expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
@@ -169,7 +169,7 @@ for (const [version, alpn] of versions) {
 				cluster: { self, peer },
 				limits: { announces: 1 },
 			});
-			const announced = subscriber.announced();
+			const announced = subscriber.routes();
 			const stream = await Stream.accept(pair.client, version);
 			if (!stream) throw new Error("missing namespace stream");
 			const answer = async (stream: Stream) => {
@@ -200,7 +200,7 @@ for (const [version, alpn] of versions) {
 				} else {
 					stream.abort(new StreamError(StreamCode.Cancel));
 					await announced.closed;
-					const next = subscriber.announced();
+					const next = subscriber.routes();
 					const replacement = await Stream.accept(pair.client, version);
 					if (!replacement) throw new Error("missing replacement namespace stream");
 					await answer(replacement);
@@ -223,7 +223,7 @@ for (const [version, alpn] of versions) {
 			quic: pair.server,
 			limits: { announces: 1 },
 		});
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		try {
 			const inline = await Stream.accept(pair.client, version);
 			if (!inline) throw new Error("missing namespace stream");

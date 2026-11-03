@@ -1,6 +1,6 @@
 import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
@@ -337,8 +337,14 @@ export class Connection implements Established {
 		}
 	}
 
+	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return this.#subscriber.announced(scope, options);
+		return announce.list(this.#subscriber.routes(scope, options));
+	}
+
+	/** Every route change matching `scope`, for code that forwards routes. @internal */
+	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
+		return this.#subscriber.routes(scope, options);
 	}
 
 	async #runSession() {

@@ -130,10 +130,10 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		accept({ transport: pair.server, url, publish: publish.consume() }),
 	]);
 
-	const announced = client.announced();
+	const announced = client.routes();
 	// Watching the origin has the session discover routes into it. Request once the route
 	// lands, so the request resolves through the table rather than blind.
-	const watching = consume.announced();
+	const watching = consume.routes();
 	expect((await watching.next())?.kind).toBe("start");
 	const request = consume.request(Path.from("room"));
 	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
@@ -185,7 +185,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		else await expect(fetched).rejects.toThrow(/not supported/);
 
 		// A new announce-interest opens too, and sees the route at the drain cost.
-		const interest = client.announced();
+		const interest = client.routes();
 		const drained = await interest.next();
 		expect(drained?.route.cost).toBe(DRAIN);
 		interest.close();
@@ -193,7 +193,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(pair.client.sendStreams.bidi.length).toBeGreaterThan(opened);
 		const drainingOpened = pair.client.sendStreams.bidi.length;
 
-		const routes = consume.consume().announced();
+		const routes = consume.consume().routes();
 		expect((await routes.next())?.kind).toBe("start");
 
 		const pair2 = createMockTransportPair(protocol);
@@ -274,7 +274,7 @@ test("announcing and subscribing after GOAWAY still open streams", async () => {
 		expect(opened).toBe(true);
 
 		opened = false;
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		await waitUntil(() => opened);
 		announced.close();
 	}
@@ -317,9 +317,9 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 		accept({ transport: pair.server, url, publish: publish.consume() }),
 	]);
 
-	const watching = consume.announced();
+	const watching = consume.routes();
 	const request = consume.request(Path.from("room"));
-	let routes: ReturnType<typeof consume.announced> | undefined;
+	let routes: ReturnType<typeof consume.routes> | undefined;
 	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
 	let replacementServer: Awaited<ReturnType<typeof accept>> | undefined;
 
@@ -335,7 +335,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 		else await sendLiteGoaway(pair.server);
 		await client.draining;
 
-		routes = consume.announced();
+		routes = consume.routes();
 		expect((await routes.next())?.kind).toBe("start");
 		const pair2 = createMockTransportPair(protocol);
 		[replacement, replacementServer] = await Promise.all([

@@ -369,7 +369,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		await waitFor(client.auth.grant, (g) => g !== undefined);
 		origin.createBroadcast(Path.from("a/x")).announce();
 
-		const announced = server.announced();
+		const announced = server.routes();
 		const first = await nextRoute(announced);
 		expect(first?.prefix).toBe(Path.from("a/x"));
 		expect(first?.kind).toBe("start");

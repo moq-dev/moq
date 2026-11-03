@@ -24,7 +24,7 @@ const LINGER = Milli(2000);
 
 /** One announce request open on the session, and the routes it currently reports. */
 interface Interest {
-	readonly announced: Announce.Consumer;
+	readonly announced: Announce.Routes;
 	readonly reported: Set<Path.Valid>;
 	/** The pending close, set while nothing at or beneath the prefix is watched. */
 	linger?: () => void;
@@ -89,7 +89,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 	void serveRequests(conn, origin);
 
-	const report = (interest: Interest, event: Announce.Event) => {
+	const report = (interest: Interest, event: Announce.RouteEvent) => {
 		const { prefix, route } = event;
 		if (event.kind === "end") {
 			unreport(interest, prefix);
@@ -173,7 +173,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 		// Hidden and covering routes are mirrored too; each local reader opts in on its own.
 		const interest: Interest = {
-			announced: conn.announced(Path.Pattern.subtree(prefix), { hidden: true, covering: true }),
+			announced: conn.routes(Path.Pattern.subtree(prefix), { hidden: true, covering: true }),
 			reported: new Set(),
 			closing: false,
 			held: new Map(),

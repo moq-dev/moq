@@ -209,7 +209,7 @@ for (const [version, alpn] of [
 			version,
 			client: true,
 		});
-		const announced = connection.announced();
+		const announced = connection.routes();
 		try {
 			const request = await Stream.accept(pair.server, version);
 			if (!request) throw new Error("no namespace subscription");

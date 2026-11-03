@@ -153,7 +153,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 				protocol === "lite"
 					? new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n))
 					: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
-			const announced = subscriber.announced();
+			const announced = subscriber.routes();
 			try {
 				await transport.created;
 				await clock.advance(Nano.zero);

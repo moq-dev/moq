@@ -42,7 +42,7 @@ class FakeSession {
 		});
 	}
 
-	announced(): Announce.Consumer {
+	routes(): Announce.Routes {
 		const stream = new Announce.Producer();
 		this.streams.push(stream);
 		// This peer has no initial routes; later announcements are live updates.

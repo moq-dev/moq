@@ -7,7 +7,7 @@
 import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Announce from "../announce.ts";
-import { Producer as AnnounceProducer } from "../announced.ts";
+import { Producer as AnnounceProducer, list, type Routes } from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
@@ -348,6 +348,15 @@ export class Connection {
 	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
+		return list(this.routes(scope, options));
+	}
+
+	/**
+	 * Every route change matching `scope`, spanning reconnects like {@link announced}.
+	 *
+	 * @internal
+	 */
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Routes {
 		const producer = new AnnounceProducer();
 		const consumer = producer.consume();
 
@@ -364,7 +373,7 @@ export class Connection {
 				return;
 			}
 			// A URL switch retracts what the old origin announced.
-			pumpAnnounced(effect, origin.announced(scope, options), producer);
+			pumpAnnounced(effect, origin.routes(scope, options), producer);
 		});
 
 		closeUnwanted(producer);

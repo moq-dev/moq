@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import type { Getter } from "@moq/signals";
-import type * as Announce from "./announce.ts";
+import type * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import {
 	type AcceptProps,
@@ -124,14 +124,14 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	})();
 
 	// Client discovers announced broadcast
-	const announced = client.announced();
+	const announced = client.routes();
 	const entry = await announced.next();
 	if (!entry) throw new Error("expected entry");
 	expect(entry.prefix).toBe("test" as Path.Valid);
 	expect(entry.kind).toBe("start");
 
 	// Scoped discovery only echoes the suffix on the wire, but presents the whole path.
-	const prefixed = client.announced(Path.Pattern.subtree(Path.from("root")));
+	const prefixed = client.routes(Path.Pattern.subtree(Path.from("root")));
 	const prefixedEntry = await prefixed.next();
 	if (!prefixedEntry) throw new Error("expected prefixed entry");
 	expect(prefixedEntry.prefix).toBe("root/child" as Path.Valid);
@@ -518,7 +518,7 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 	// Announced before the client asks, so it can ride the initial set.
 	const first = publish(origin, Path.from("first"));
 
-	const announced = client.announced();
+	const announced = client.routes();
 	let entry = await announced.next();
 	if (!entry) throw new Error("expected announce");
 	expect(entry.prefix).toBe("first" as Path.Valid);
@@ -554,7 +554,7 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 });
 
 /** Collect announced prefixes until `until` arrives. */
-async function announcedUntil(announced: Announce.Consumer, until: string) {
+async function announcedUntil(announced: Announce.Routes, until: string) {
 	const seen: string[] = [];
 	while (!seen.includes(until)) {
 		const entry = await withTimeout(announced.next(), Nano.fromMilli(Milli(1000)), `waiting for ${until}`);
@@ -583,17 +583,17 @@ for (const [protocol, carriesOptIn] of [
 		const hidden = publish(origin, Path.from(".x/y"));
 		const visible = publish(origin, Path.from("visible"));
 
-		const plain = client.announced();
+		const plain = client.routes();
 		expect(await announcedUntil(plain, "visible")).toEqual(["visible"]);
 
 		// An IETF reader shares the session's table, so `visible` may land before the
 		// opted-in request's own answer; wait on the hidden path itself where it is due.
-		const opted = client.announced(undefined, { hidden: true });
+		const opted = client.routes(undefined, { hidden: true });
 		if (carriesOptIn) await announcedUntil(opted, ".x/y");
 		else expect(await announcedUntil(opted, "visible")).toEqual(["visible"]);
 
 		if (carriesOptIn) {
-			const named = client.announced(Path.Pattern.parse(".x/**"));
+			const named = client.routes(Path.Pattern.parse(".x/**"));
 			expect(await announcedUntil(named, ".x/y")).toEqual([".x/y"]);
 			named.close();
 		}
@@ -2073,7 +2073,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 
 	// The announcement lands in the client's origin.
 	const reader = clientOrigin.consume();
-	const announced = reader.announced();
+	const announced = reader.routes();
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("test"), kind: "start" });
 
 	// Consuming through the origin reaches the wire.
@@ -2116,7 +2116,7 @@ test("origin: remote entries retract when the session dies, local ones survive",
 
 	const reader = clientOrigin.consume();
 	// Watching is what has the session discover the peer's routes.
-	const watching = reader.announced();
+	const watching = reader.routes();
 	await until(() => wireOf(reader).routes(Path.from("remote")));
 
 	client.abort();
@@ -2150,8 +2150,8 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	]);
 
 	// Both sides watch everything, so each session asks the other for announcements.
-	const watchingShared = shared.announced();
-	const watchingServer = serverSees.announced();
+	const watchingShared = shared.routes();
+	const watchingServer = serverSees.routes();
 
 	// The server announces a broadcast; it lands in the shared origin as a remote entry.
 	{
@@ -2254,7 +2254,7 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 
 		// Repeated watch cycles must each give their stream back, not pile up on the peer.
 		for (let i = 1; i <= 3; i++) {
-			const announced = client.announced(Path.Pattern.subtree(Path.from("room")));
+			const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
 			expect((await announced.next())?.kind).toBe("start");
 			announced.close();
 			await until(() => ended === i);
@@ -2284,7 +2284,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			accept(pair.server, url, { publish: new OriginProducer().consume() }),
 		]);
 
-		const announced = client.announced(Path.Pattern.subtree(Path.from("room")));
+		const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
 		await until(() => started === 1);
 		announced.close();
 		await until(() => ended === 1);
@@ -2330,7 +2330,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 
 			// Browse, then play what the listing found.
 			const reader = clientOrigin.consume();
-			const listing = reader.announced(Path.Pattern.subtree(Path.from("room")));
+			const listing = reader.routes(Path.Pattern.subtree(Path.from("room")));
 			expect((await listing.next())?.kind).toBe("start");
 			const request = reader[method](Path.from("room/cam"));
 			await until(() => request.active.peek() !== undefined);
@@ -2379,7 +2379,7 @@ test.each([Ietf.ALPN.DRAFT_18])(
 			accept(pair.server, url, { publish: new OriginProducer().consume() }),
 		]);
 
-		const announced = client.announced(Path.Pattern.subtree(Path.from("room")));
+		const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
 		await until(() => started === 1);
 		announced.close();
 		await until(() => ended === 1);
@@ -2501,7 +2501,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 		return { client, server, serverOrigin, broadcast, serving };
 	};
 
-	const watching = clientOrigin.announced();
+	const watching = clientOrigin.routes();
 	const first = await setup();
 	const second = await setup();
 
@@ -2594,7 +2594,7 @@ test("create then announce is discoverable on the wire", async () => {
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
-	const announced = client.announced();
+	const announced = client.routes();
 	const broadcastPublication = origin.createBroadcast(Path.from("later"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcast.createTrack("chat", { timescale: Timescale.MILLI });
@@ -2630,7 +2630,7 @@ test("a handle serves a request under live/** over the wire", async () => {
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
-	const announced = client.announced();
+	const announced = client.routes();
 	const entry = await announced.next();
 	expect(entry?.prefix).toBe("live" as Path.Valid);
 	expect(entry?.kind).toBe("start");

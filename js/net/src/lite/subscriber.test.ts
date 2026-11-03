@@ -176,7 +176,7 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 	} as unknown as WebTransport;
 	const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
 
-	const announced = subscriber.announced(Path.Pattern.subtree(Path.from("room")));
+	const announced = subscriber.routes(Path.Pattern.subtree(Path.from("room")));
 	announced.close();
 	// The slot frees up only after the consumer left.
 	opening.resolve();
@@ -192,7 +192,7 @@ test("a local empty hop chain is not anonymous", () => {
 
 test("a max-length chain plus withheld responder is dropped", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	const hops = Array.from({ length: MAX_HOPS }, (_, i) => HopSchema.parse(BigInt(i + 1)));
@@ -219,7 +219,7 @@ test("a max-length chain plus withheld responder is dropped", async () => {
 
 test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
@@ -242,7 +242,7 @@ test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
 
 test("a received hop list naming no publisher stays anonymous", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
@@ -259,7 +259,7 @@ test("a received hop list naming no publisher stays anonymous", async () => {
 
 test("a received chain starting with hop 0 is forwarded unchanged", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -280,7 +280,7 @@ test("a received chain starting with hop 0 is forwarded unchanged", async () => 
 
 test("an update moves the route in place, even from another publisher", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 	const room = Path.from("room");
 
@@ -333,7 +333,7 @@ test("an update moves the route in place, even from another publisher", async ()
 
 test("a lite-07 restart replaces the instance, and the next consume subscribes fresh", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 	const room = Path.from("room");
 
@@ -373,7 +373,7 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 test("a lite-07 takeover surfaces as a start beneath its predecessor, or a restart of it", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 	const pool = Path.from("pool");
 	const job = Path.from("pool/job");
@@ -425,7 +425,7 @@ test.each([
 	["a predecessor not covering it", 0n, "other"],
 ] as const)("a lite-07 takeover of %s ends the stream", async (_, predecessor, suffix) => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
@@ -462,7 +462,7 @@ test.each([
 	["an end then a start", Version.DRAFT_06],
 ] as const)("%s of a prefix stops sharing what was consumed beneath it", async (_, version) => {
 	const { subscriber, send, settle } = announceHarness(version);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 	const pool = Path.from("pool");
 	const job = Path.from("pool/job");
@@ -506,7 +506,7 @@ test.each([
 
 test("an update that re-prices the same publisher emits the new route", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -538,7 +538,7 @@ test("an update that re-prices the same publisher emits the new route", async ()
 
 test("a lite-05 duplicate announce follows the same update rule", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_05);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
@@ -562,7 +562,7 @@ test("a lite-05 duplicate announce follows the same update rule", async () => {
 // that updates in place and keeps the shared broadcast, as does one that names a publisher.
 test("an update from an unidentified publisher updates in place", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 	const room = Path.from("room");
 
@@ -669,7 +669,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	// The subscriber's own origin, so a chain naming it reflects back through us.
 	const SELF = 1n;
 	const { subscriber, send, abortReason, sessionEnded, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -711,7 +711,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 test("an update replaces an announce that was skipped as a reflected loop", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -741,7 +741,7 @@ test("an update replaces an announce that was skipped as a reflected loop", asyn
 test("an update keeps the instance of an announce skipped as a reflected loop", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07, SELF);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
@@ -770,7 +770,7 @@ test("an update keeps the instance of an announce skipped as a reflected loop", 
 test("retiring an id whose announce was skipped ends nothing", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -805,7 +805,7 @@ test("retiring an id whose announce was skipped ends nothing", async () => {
 
 test("a draft-02 initial announcement can still be retracted", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	// ANNOUNCE_INIT carries the initial set. These are advertisements like any other, so
@@ -823,7 +823,7 @@ test("a draft-02 initial announcement can still be retracted", async () => {
 test("a duplicate start is reported even when its own route reflects", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -857,7 +857,7 @@ test("a duplicate start is reported even when its own route reflects", async () 
 
 test("a draft-02 initial set naming a path twice is refused", async () => {
 	const { subscriber, send, abortReason, sessionEnded, settle } = announceHarness(Version.DRAFT_02);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	// One advertisement per path, and the initial set is advertisements. Two entries for
@@ -881,7 +881,7 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 test("a violation on a very long path still ends the session", async () => {
 	const SELF = 1n;
 	const { subscriber, send, sessionEnded, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -908,7 +908,7 @@ test.each([Version.DRAFT_02, Version.DRAFT_06])(
 		const { subscriber, send, sessionEnded, settle } = announceHarness(version);
 		// Each half fits on the wire alone; the joined path is one byte over.
 		const half = Path.from("x".repeat(Path.MAX_BYTES / 2));
-		const announced = subscriber.announced(Path.Pattern.subtree(half));
+		const announced = subscriber.routes(Path.Pattern.subtree(half));
 		await settle();
 
 		if (version === Version.DRAFT_02) {
@@ -933,7 +933,7 @@ test("a draft-04 duplicate start is a violation, not an update", async () => {
 	// update, is exempt. The Rust loop routes every other version through `start_announce`,
 	// which rejects it.
 	const { subscriber, send, sessionEnded, settle } = announceHarness(Version.DRAFT_04);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] };
@@ -950,7 +950,7 @@ test("a draft-04 duplicate start is a violation, not an update", async () => {
 
 test("a draft-05 duplicate start is still an update", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_05);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
@@ -974,7 +974,7 @@ test("a draft-05 duplicate start is still an update", async () => {
 // Mirrors the Rust `an_unknown_announce_type_keeps_the_stream`.
 test("an unknown announce type between starts keeps the stream", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	const start = (suffix: string) => (w: Writer) =>
@@ -1717,7 +1717,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	async (version) => {
 		const { quic, streams, opened } = fakeSession();
 		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		await opened(0);
 		const send = async (encode: (writer: Writer) => Promise<void>) => {
 			const writer = new Writer(
@@ -1837,7 +1837,7 @@ test.each([
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	try {
 		await opened(0);
 		const pool = await unpinnedPool(version, streams, announced);
@@ -1883,7 +1883,7 @@ test("a withdrawal while the subscribe opens closes the answered track", async (
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession([2]);
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	try {
 		await opened(0);
 		const pool = await unpinnedPool(version, streams, announced);
@@ -2001,7 +2001,7 @@ test("consumes resolve the serving prefix and pin its instance", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await opened(0);
 	const peer = new Writer(
 		new WritableStream<Uint8Array>({
@@ -2064,7 +2064,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 	"a more specific start replaces an existing consume on %s",
 	async (version) => {
 		const { subscriber, send, settle } = announceHarness(version);
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		await settle();
 		await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
 		const pool = Path.from("pool");
@@ -2103,7 +2103,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	async (version) => {
 		const { quic, streams, opened } = fakeSession();
 		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		await opened(0);
 		const peer = new Writer(
 			new WritableStream<Uint8Array>({
@@ -2806,7 +2806,7 @@ const announceStart = (suffix: string) => (w: Writer) =>
 
 test("a counted initial set syncs once the reader is past its last announce", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 2).encode(w, Version.DRAFT_06));
@@ -2830,7 +2830,7 @@ test("a counted initial set syncs once the reader is past its last announce", as
 
 test("an empty initial set syncs on the answer", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 	expect(announced.synced.peek()).toBe(false);
 
@@ -2845,7 +2845,7 @@ test("an empty initial set syncs on the answer", async () => {
 test("a counted initial set cut short is a protocol violation", async () => {
 	for (const cut of ["ended", "fin"] as const) {
 		const { subscriber, send, finish, sessionEnded, settle } = announceHarness(Version.DRAFT_06);
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		await settle();
 
 		await send((w) => new AnnounceOk(PEER, 2).encode(w, Version.DRAFT_06));
@@ -2865,7 +2865,7 @@ test("a counted initial set cut short is a protocol violation", async () => {
 
 test("a version without a boundary syncs once the request is out", async () => {
 	const { subscriber, settle } = announceHarness(Version.DRAFT_03);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 	expect(announced.synced.peek()).toBe(true);
 
@@ -2875,7 +2875,7 @@ test("a version without a boundary syncs once the request is out", async () => {
 
 test("announce init is the initial set", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
-	const announced = subscriber.announced();
+	const announced = subscriber.routes();
 	await settle();
 
 	await send((w) => new AnnounceInit([Path.from("room")]).encode(w, Version.DRAFT_02));

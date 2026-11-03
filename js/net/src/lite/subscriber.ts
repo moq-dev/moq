@@ -323,7 +323,7 @@ export class Subscriber {
 	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
 	 * also asks for those whose subtree overlaps it.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Routes {
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
 		const consumer = announced.consume();

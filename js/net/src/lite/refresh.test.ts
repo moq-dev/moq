@@ -37,7 +37,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 				accept({ url, transport: pair.server, publish: source.consume() }),
 			])),
 		);
-		const announcements = b.announced();
+		const announcements = b.routes();
 		while ((await announcements.next())?.kind !== "start") {}
 		const request = b.request(Path.from("room"));
 		while (request.active.peek() === undefined) await request.active.changed();

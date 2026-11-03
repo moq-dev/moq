@@ -847,7 +847,7 @@ export class Reload {
  *
  * @internal
  */
-export function pumpAnnounced(effect: Effect, upstream: Announce.Consumer, producer: Announce.Producer) {
+export function pumpAnnounced(effect: Effect, upstream: Announce.Routes, producer: Announce.Producer) {
 	// The last event per active route rides along for its retraction.
 	const active = new Map<Path.Valid, Announce.Announce>();
 	let live = true;

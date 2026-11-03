@@ -87,7 +87,7 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 					limits,
 				});
 	try {
-		const announced = subscriber.announced();
+		const announced = subscriber.routes();
 		const ended = await announced.closed;
 		expect(ended).toBeInstanceOf(SessionError);
 		expect((ended as SessionError).code).toBe(SessionCode.TooManyRequests);
