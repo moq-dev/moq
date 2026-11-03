@@ -3068,6 +3068,17 @@ mod tests {
 			"an update asks from a floor even when SUBSCRIBE_START started no range"
 		);
 
+		sub.start = Some(2);
+		sub.ranges = vec![
+			lite::Range::span(Some(2), 0, Some(3), None),
+			lite::Range::span(Some(6), 0, None, None),
+		];
+		assert_eq!(
+			sub.owed(None),
+			Some(vec![2..4, 6..10]),
+			"an update that keeps the floor but adds a range still owes it"
+		);
+
 		update(&mut sub, Some(2), vec![lite::Range::span(Some(2), 0, None, None)]);
 		sub.updated = false;
 		sub.served = Some(4);
@@ -7508,16 +7519,19 @@ impl SubStream {
 	fn owed(&self, requested_end: Option<u64>) -> Option<Vec<std::ops::Range<u64>>> {
 		let end = self.end.as_ref()?.group;
 		let end = requested_end.map_or(end, |requested| requested.min(end));
-		let moved = self.start.filter(|_| self.started && self.start != self.requested);
-		let Some(served) = self.served.or(moved) else {
+		// A SUBSCRIBE_START that started no range owes nothing, unless an update since asked
+		// for more, which the open stream still serves.
+		if self.served.is_none() && !(self.started && self.updated) {
 			return Some(Vec::new());
-		};
+		}
+		let fallback = self.served.or(self.start);
 		let owed = self.ranges.iter().enumerate().filter_map(|(index, range)| {
 			let start = match (self.updated, self.starts.get(index)) {
 				(false, Some(start)) => (*start)?,
 				_ => match range.start {
 					Some(lite::Anchor::Absolute(start)) => start.group,
-					_ => served,
+					// A start counted back from the latest group resolves where delivery did.
+					_ => fallback?,
 				},
 			};
 			// Our absolute ends name a group's first frame (see `wire_ranges`), and the rest
@@ -9218,6 +9232,14 @@ impl ServeLoop {
 		match serve.begin_subscription(&mut self.serving, &mut self.sub, pref, self.supports_update)? {
 			Begin::Establish(est) => self.mode = ServeMode::Establish(est),
 			Begin::None => {}
+		}
+		// A finished track's tail waits a fresh grace for what an update newly asked for,
+		// rather than a deadline that may have passed while an earlier stream was read.
+		if let Some((id, _)) = &self.finishing
+			&& let Sub::Active(active) = &self.sub
+			&& active.id == *id
+		{
+			self.finishing = Some((active.id, Self::settle(serve, &self.serving, active)));
 		}
 		Ok(())
 	}

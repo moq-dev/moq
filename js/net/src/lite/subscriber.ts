@@ -152,6 +152,9 @@ interface SubscribeEntry {
 	started?: boolean;
 	// Whether our side is FINned, which lite-07 does once the tail settles past SUBSCRIBE_FINISH.
 	fin?: boolean;
+	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_END waits a fresh
+	// grace for what one sent meanwhile asks for.
+	sent?: number;
 	// Set by the subscribe stream's FIN before lite-05, the track's only end there.
 	finished?: boolean;
 	// Settles once the subscribe stream's responses are read to its FIN or reset, which
@@ -1821,11 +1824,7 @@ export class Subscriber {
 				}
 				// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: FIN once the tail settles,
 				// and the publisher's FIN in reply ends this loop.
-				if (keepsSubscribeOpen(this.version))
-					void this.#settleTail(entry).then(
-						() => this.#fin(stream, entry),
-						() => {},
-					);
+				if (keepsSubscribeOpen(this.version)) void this.#finishTail(stream, entry).catch(() => {});
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups, so they are accounted for without a
 				// stream, and a reader of one still arriving ends with the drop's error now.
@@ -1833,6 +1832,17 @@ export class Subscriber {
 				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1n, resp.drop.cause(this.version));
 			}
 		}
+	}
+
+	// Settle a lite-07 tail past SUBSCRIBE_END, then FIN. An update sent meanwhile asks for more,
+	// which waits a fresh grace rather than one that may have passed while a stream was read.
+	async #finishTail(stream: Stream, entry: SubscribeEntry): Promise<void> {
+		for (;;) {
+			const sent = entry.sent ?? 0;
+			await this.#settleTail(entry);
+			if ((entry.sent ?? 0) === sent) break;
+		}
+		this.#fin(stream, entry);
 	}
 
 	// FIN our side once, acknowledging a settled tail without cancelling the publisher's half.
@@ -2007,6 +2017,9 @@ export class Subscriber {
 			if (refresh !== undefined) sentWanted = refresh;
 			entry.bounded ||= bounded(ranges);
 			entry.updated = true;
+			entry.sent = (entry.sent ?? 0) + 1;
+			// A tail settling past SUBSCRIBE_END re-judges what the update now asks for.
+			entry.tail.touch();
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
