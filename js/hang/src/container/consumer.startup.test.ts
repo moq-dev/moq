@@ -10,7 +10,7 @@ function setup(maxDelay = 100) {
 	// Drain the in-memory readers and their continuations without moving time.
 	const flush = () => clock.advance(Nano.zero);
 	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 		format: new Format("video"),
 		delay: { max: Milli(maxDelay) },
 	});

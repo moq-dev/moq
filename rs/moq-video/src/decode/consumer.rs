@@ -13,7 +13,7 @@ use super::select::{Lane, Next, Selector};
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
-pub use moq_mux::container::Delay;
+pub use moq_net::track::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: a decoded picture, or a break
 /// between them.
@@ -181,7 +181,7 @@ impl Consumer {
 			// so this decoder starts at a recovery point a whole sweep before the
 			// min-delay one.
 			let delay = Delay {
-				min: options.delay.min.saturating_add(warmup),
+				min: Some(options.delay.min.unwrap_or_default().saturating_add(warmup)),
 				max: options.delay.max.map(|max| max.saturating_add(warmup)),
 			};
 			Some(Reader::open(broadcast, catalog, &name, &options, delay, 1).await?)
@@ -302,8 +302,8 @@ impl Consumer {
 }
 
 impl Reader {
-	/// Subscribe with `delay`'s max, starting `lookback` groups before the live
-	/// edge when the caller asked for [`Start::Latest`].
+	/// Subscribe with `delay`, starting `lookback` groups before the live edge
+	/// when the caller asked for [`Start::Latest`].
 	async fn open(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
@@ -319,7 +319,9 @@ impl Reader {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_max_delay(delay.max),
+					// The whole delay from the first request, as the container keeps it, so the
+					// publisher never sees a stated zero min before the container's update.
+					.with_delay(delay),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -752,7 +754,7 @@ mod tests {
 
 		let subscription = published.subscription().expect("the consumer subscribed");
 		assert_eq!(
-			subscription.max_delay,
+			subscription.delay.max,
 			Some(max_delay),
 			"the age budget did not reach the publisher"
 		);
@@ -1222,7 +1224,7 @@ mod tests {
 		)
 		.await;
 		assert_eq!(
-			published.subscription().and_then(|sub| sub.max_delay),
+			published.subscription().and_then(|sub| sub.delay.max),
 			Some(WARMUP),
 			"the two subscriptions did not share one request at the larger budget"
 		);
@@ -1390,8 +1392,9 @@ mod tests {
 		group(&mut track, 1, &[4, 5]).finish().unwrap();
 		track.finish().unwrap();
 
-		// A budget that keeps every cached group, so both decoders read them all.
-		let mut consumer = dual(&broadcast, Start::Oldest, WARMUP, probe::BUFFERED_NAME).await;
+		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
+		// decoders read them all.
+		let mut consumer = dual(&broadcast, Start::Oldest, 2 * WARMUP, probe::BUFFERED_NAME).await;
 		let mut shown = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			shown.push(u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND);
@@ -1399,6 +1402,39 @@ mod tests {
 		assert_eq!(shown, [0, 1, 2, 3, 4, 5]);
 		assert!(consumer.next_frame().await.unwrap().is_none());
 		assert!(consumer.lanes.iter().all(|slot| matches!(slot, Slot::Closed)));
+	}
+
+	/// The first request already states the min delay: a latest start waits for the live edge
+	/// with its subscription open, before the container could update it.
+	#[tokio::test]
+	async fn the_first_subscription_states_the_min_delay() {
+		let (broadcast, mut track) = live_track();
+		let delay = Delay {
+			min: Some(std::time::Duration::from_millis(300)),
+			max: Some(std::time::Duration::from_millis(500)),
+		};
+		let consume = broadcast.consume();
+		let catalog = warmup_catalog(None);
+		let mut open = Box::pin(Consumer::new(
+			&consume,
+			&catalog,
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
+					..Config::new()
+				},
+				start: Start::Latest,
+				delay,
+			},
+		));
+		// The open waits for the live edge with its subscription open, so the first aggregate
+		// the publisher sees is the request itself.
+		let first = tokio::select! {
+			opened = &mut open => panic!("the open finished with no live edge (ok: {})", opened.is_ok()),
+			first = track.subscription_changed() => first.unwrap(),
+		};
+		assert_eq!(first.map(|sub| sub.delay), Some(delay));
 	}
 
 	/// A rendition without `warmup` opens one subscription and one decoder.
@@ -1426,7 +1462,7 @@ mod tests {
 			.await
 			.unwrap();
 			assert!(matches!(consumer.lanes[Lane::Max as usize], Slot::Closed));
-			assert_eq!(track.subscription().and_then(|sub| sub.max_delay), Some(max_delay));
+			assert_eq!(track.subscription().and_then(|sub| sub.delay.max), Some(max_delay));
 		}
 	}
 

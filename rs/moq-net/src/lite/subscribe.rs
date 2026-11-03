@@ -15,12 +15,15 @@ use crate::track::Order;
 pub struct Subscribe<'a> {
 	pub id: u64,
 	pub broadcast: Path,
-	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
 	/// Lite07+ only.
-	pub epoch: Option<crate::Epoch>,
+	pub instance: Option<crate::Instance>,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
 	pub max_delay: std::time::Duration,
+	/// The subscriber's `Subscriber Min Age`, or `None` when not stated. Lite07+ only; earlier
+	/// wires decode as not stated and drop it on encode.
+	pub min_delay: Option<std::time::Duration>,
 	/// The spans to deliver, never empty. Lite07+ carries any number; earlier wires carry
 	/// exactly one (see [`Range`]).
 	pub ranges: Vec<Range>,
@@ -35,10 +38,11 @@ impl Subscribe<'_> {
 		Subscribe {
 			id: self.id,
 			broadcast: self.broadcast,
-			epoch: self.epoch,
+			instance: self.instance,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
+			min_delay: self.min_delay,
 			ranges: self.ranges,
 			order: self.order,
 		}
@@ -123,26 +127,30 @@ impl<'a> Message<'a> for Subscribe<'a> {
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
-		let epoch = super::epoch::decode_epoch(r, version)?;
+		let instance = super::instance::decode_pin(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 
-		let (order, max_delay, ranges) = match version {
-			Version::Lite01 | Version::Lite02 => (Order::Descending, std::time::Duration::ZERO, vec![Range::OLDEST]),
+		let (order, max_delay, min_delay, ranges) = match version {
+			Version::Lite01 | Version::Lite02 => {
+				(Order::Descending, std::time::Duration::ZERO, None, vec![Range::OLDEST])
+			}
 			_ => {
 				let order = decode_order(r, version)?;
 				let max_delay = std::time::Duration::from_millis(r.varint()?);
-				(order, max_delay, decode_ranges(r, version)?)
+				let min_delay = decode_min_delay(r, version)?;
+				(order, max_delay, min_delay, decode_ranges(r, version)?)
 			}
 		};
 
 		Ok(Self {
 			id,
 			broadcast,
-			epoch,
+			instance,
 			track,
 			priority,
 			max_delay,
+			min_delay,
 			ranges,
 			order,
 		})
@@ -151,7 +159,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		w.varint(self.id)?;
 		self.broadcast.encode(w, version)?;
-		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
+		super::instance::encode_pin(w, version, self.instance.as_ref())?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 
@@ -161,12 +169,37 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			_ => {
 				encode_order(w, version, self.order)?;
 				w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+				encode_min_delay(w, version, self.min_delay)?;
 				encode_ranges(w, version, &self.ranges)?;
 			}
 		}
 
 		Ok(())
 	}
+}
+
+/// Decode the `Subscriber Min Age` after the max age: milliseconds plus one, zero meaning not
+/// stated. A wire without the field decodes as not stated.
+fn decode_min_delay(r: &mut Decoder<'_>, version: Version) -> Result<Option<std::time::Duration>, DecodeError> {
+	match version.has_min_delay() {
+		true => Ok(r.varint_opt()?.map(std::time::Duration::from_millis)),
+		false => Ok(None),
+	}
+}
+
+/// Encode the `Subscriber Min Age`, dropping it on a wire without the field.
+fn encode_min_delay(
+	w: &mut Encoder<'_>,
+	version: Version,
+	min_delay: Option<std::time::Duration>,
+) -> Result<(), EncodeError> {
+	if !version.has_min_delay() {
+		return Ok(());
+	}
+	let min_delay = min_delay
+		.map(|min| u64::try_from(min.as_millis()).map_err(|_| EncodeError::BoundsExceeded))
+		.transpose()?;
+	w.varint_opt(min_delay)
 }
 
 /// Decode the ranges SUBSCRIBE and SUBSCRIBE_UPDATE carry after the max age.
@@ -610,6 +643,8 @@ pub struct SubscribeUpdate {
 	pub wanted_group: Option<u64>,
 	pub priority: i8,
 	pub max_delay: std::time::Duration,
+	/// See [`Subscribe::min_delay`].
+	pub min_delay: Option<std::time::Duration>,
 	/// The replacement for every range; see [`Subscribe::ranges`].
 	pub ranges: Vec<Range>,
 	/// See [`Subscribe::order`].
@@ -629,6 +664,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		let priority = super::priority::from_wire(r.u8()?);
 		let order = decode_order(r, version)?;
 		let max_delay = std::time::Duration::from_millis(r.varint()?);
+		let min_delay = decode_min_delay(r, version)?;
 		let ranges = decode_ranges(r, version)?;
 
 		let wanted_group = match version.has_refresh() {
@@ -640,6 +676,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			wanted_group,
 			priority,
 			max_delay,
+			min_delay,
 			ranges,
 			order,
 		})
@@ -656,6 +693,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		w.u8(super::priority::to_wire(self.priority));
 		encode_order(w, version, self.order)?;
 		w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+		encode_min_delay(w, version, self.min_delay)?;
 		encode_ranges(w, version, &self.ranges)?;
 
 		if version.has_refresh() {
@@ -1032,12 +1070,13 @@ mod test {
 	fn subscribe_sample() -> Subscribe<'static> {
 		Subscribe {
 			order: crate::track::Order::Descending,
-			epoch: None,
+			instance: None,
 			id: 1,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 			priority: 3,
 			max_delay: std::time::Duration::from_millis(250),
+			min_delay: None,
 			// Group 7 from frame 4, through frame 2 of group 9.
 			ranges: vec![Range {
 				start: absolute(7, 4),
@@ -1218,6 +1257,7 @@ mod test {
 			wanted_group: None,
 			priority: 3,
 			max_delay: std::time::Duration::from_millis(250),
+			min_delay: None,
 			ranges: msg.ranges.clone(),
 			order: crate::track::Order::Ascending,
 		};
@@ -1312,6 +1352,7 @@ mod test {
 					wanted_group: wanted,
 					priority: 0,
 					max_delay: std::time::Duration::ZERO,
+					min_delay: None,
 					ranges: vec![Range::OLDEST],
 					order: crate::track::Order::Descending,
 				};
@@ -1319,6 +1360,39 @@ mod test {
 				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
 					.unwrap();
 				assert_eq!(got.wanted_group, if version.has_refresh() { wanted } else { None });
+			}
+		}
+	}
+
+	/// Lite-07 carries `Subscriber Min Age` on SUBSCRIBE and SUBSCRIBE_UPDATE, keeping a stated
+	/// zero apart from not stated; an earlier wire drops it, so it decodes as not stated.
+	#[test]
+	fn min_delay_roundtrips_only_on_lite07() {
+		let stated = [
+			None,
+			Some(std::time::Duration::ZERO),
+			Some(std::time::Duration::from_millis(250)),
+		];
+		for version in [Version::Lite03, Version::Lite06, Version::Lite07] {
+			for min_delay in stated {
+				let expected = if version.has_min_delay() { min_delay } else { None };
+				let mut msg = subscribe_sample();
+				msg.min_delay = min_delay;
+				msg.ranges = vec![Range::OLDEST];
+				assert_eq!(roundtrip(&msg, version).min_delay, expected, "{version:?}");
+
+				let update = SubscribeUpdate {
+					wanted_group: None,
+					priority: 0,
+					max_delay: std::time::Duration::ZERO,
+					min_delay,
+					ranges: vec![Range::OLDEST],
+					order: crate::track::Order::Descending,
+				};
+				let buf = update.encode_bytes(version).unwrap();
+				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
+					.unwrap();
+				assert_eq!(got.min_delay, expected, "{version:?}");
 			}
 		}
 	}
@@ -1339,6 +1413,7 @@ mod test {
 				wanted_group: None,
 				priority: 3,
 				max_delay: std::time::Duration::from_millis(250),
+				min_delay: None,
 				ranges: vec![Range::OLDEST],
 				order,
 			};

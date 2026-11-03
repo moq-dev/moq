@@ -9,8 +9,14 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in ("moq-net", "moq-quic", "moq-mux", "moq-rtmp"))
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
 LINUX = os.uname().sysname == "Linux"
+
+
+def dispatch_scope():
+    """The rs module's impact pattern, as sh/dispatch.sh registers it."""
+    return re.search(r"^module rs '([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
 
 
 class SelectTest(unittest.TestCase):
@@ -50,7 +56,7 @@ class SelectTest(unittest.TestCase):
                     suffix += " moq-relay/io-uring" if LINUX and action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
                     self.assertIn(
-                        f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
+                        f"rs {action} --workspace {FUZZ_EXCLUDES}{suffix}",
                         self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions),
                     )
         selected = self.selected("sh/rs/nextest.sh")
@@ -71,7 +77,7 @@ class SelectTest(unittest.TestCase):
             with self.subTest(paths=paths):
                 calls = self.selected(*paths)
                 self.assertTrue(any(call.startswith("rs lint --workspace ") for call in calls), calls)
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = dispatch_scope()
         self.assertRegex("clippy.toml", scope)
 
     def test_gate_runs_no_feature_matrix(self):
@@ -157,11 +163,11 @@ class SelectTest(unittest.TestCase):
         # moq-relay's tests read the module.
         calls = self.selected("nix/modules/moq-relay.nix", action="test")
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = dispatch_scope()
         self.assertRegex("nix/modules/moq-relay.nix", scope)
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = dispatch_scope()
         metadata = json.loads(
             subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, text=True)
         )

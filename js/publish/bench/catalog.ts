@@ -55,7 +55,7 @@ async function measure(tracks: number, viewers: number, clock: Manual) {
 			for (let index = 0; index < media.length; index++) {
 				// Model the player's changed latency floor with real subscription handles.
 				viewer.media[index].update({
-					maxDelay: Milli(root?.video?.renditions[media[index].name].jitter ?? 0),
+					delay: { max: Milli(root?.video?.renditions[media[index].name].jitter ?? 0) },
 				});
 				updates++;
 			}

@@ -9,8 +9,12 @@
 //!
 //! The crate root holds the transport-independent session API: [`Session`] and its
 //! [`SendStream`] / [`RecvStream`] halves, which implement
-//! [`moq_net::transport::poll`], plus the [`Config`], [`Version`], and [`Error`] types they
-//! share.
+//! [`moq_net::transport::poll`], the [`Driver`] that runs a session over the transport it
+//! owns, plus the [`Config`], [`Version`], and [`Error`] types they share.
+//!
+//! Every constructor returns a `(Session, Driver)` pair. The driver is one future that reads
+//! and writes the transport and runs the session's timers; spawn it on whatever executor
+//! owns the socket. qmux spawns nothing itself and needs no tokio runtime.
 //!
 //! Everything tied to a specific transport lives in that transport's module:
 //!
@@ -31,6 +35,7 @@
 #[cfg(any(feature = "tls", feature = "ws"))]
 mod alpn;
 mod config;
+mod driver;
 mod error;
 mod protocol;
 mod session;
@@ -56,6 +61,7 @@ pub mod tls;
 pub mod ws;
 
 pub use config::{Config, Protocol};
+pub use driver::Driver;
 pub use error::Error;
 pub use moq_quic::mux::Version;
 pub use moq_quic::{Limits, LimitsError};

@@ -92,6 +92,11 @@ impl Tail {
 		self.ledger.folds_at(group, self.ledger.grace())
 	}
 
+	/// Whether a data stream whose header arrived is still being read.
+	pub fn is_reading(&self) -> bool {
+		self.active > 0
+	}
+
 	/// Data streams received, whether they finished or were reset.
 	pub fn streams(&self) -> u64 {
 		self.streams
