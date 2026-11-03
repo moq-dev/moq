@@ -39,7 +39,10 @@ pub mod aggregate;
 pub mod consume;
 pub mod produce;
 
+mod epoch;
+
 pub use consume::Consumer;
+pub use epoch::{Epoch, InvalidEpoch};
 pub use produce::{Producer, Publisher};
 
 use std::collections::BTreeMap;
@@ -124,15 +127,13 @@ pub struct Prefix {
 }
 
 /// One frame off a group track: one instance of the track, and its counters.
-#[serde_with::serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct GroupFrame {
 	/// Minted each time the group's track is created, as the text of a UUIDv7. Every
 	/// counter in a frame with a new epoch starts from zero, so a reader keeps each
 	/// epoch's counters apart rather than diffing across them.
-	#[serde_as(as = "serde_with::DisplayFromStr")]
-	pub epoch: Instance,
+	pub epoch: Epoch,
 	/// Each tier's [`Group`] counters, keyed by tier label (`""` for the default
 	/// tier).
 	#[serde(default)]
@@ -270,18 +271,34 @@ pub enum Error {
 /// A [`Result`](std::result::Result) using this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A fresh [`GroupFrame::epoch`]: the text of a UUIDv7, so epochs sort by creation.
-pub(crate) fn mint_epoch() -> Instance {
-	uuid::Uuid::now_v7()
-		.hyphenated()
-		.to_string()
-		.parse()
-		.expect("a UUID is never empty")
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn group_epoch_wire_values() {
+		// Readers keep the text opaque, including values that are not UUIDs.
+		for text in ["0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f", "legacy", "~minted", "é/\0"] {
+			let json = serde_json::json!({ "epoch": text, "tiers": {} });
+			let frame: GroupFrame = serde_json::from_value(json.clone()).unwrap();
+			assert_eq!(frame.epoch.as_str(), text);
+			assert_eq!(serde_json::to_value(frame).unwrap(), json);
+			assert_eq!(Epoch::try_from(text.to_string()).unwrap(), text.parse().unwrap());
+		}
+
+		for epoch in [
+			serde_json::json!(""),
+			serde_json::json!(null),
+			serde_json::json!(1),
+			serde_json::json!([]),
+			serde_json::json!({}),
+		] {
+			assert!(serde_json::from_value::<GroupFrame>(serde_json::json!({ "epoch": epoch })).is_err());
+		}
+		assert!(serde_json::from_value::<GroupFrame>(serde_json::json!({})).is_err());
+		assert!("".parse::<Epoch>().is_err());
+		assert!(Epoch::try_from(String::new()).is_err());
+	}
 
 	#[test]
 	fn parse_node_path_variants() {
