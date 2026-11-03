@@ -42,11 +42,11 @@ These land with the next breaking release.
   hang's media priorities now sit above that default rather than below it.
   Mixed versions only differ in how an unset priority ranks against a set one,
   so upgrade publishers and players in either order.
-- **moq-transport drafts 14 through 17 are dropped.** Rust and JavaScript
-  speak moq-transport drafts 18 and 22 only, and the `moql` SETUP
-  negotiates moq-lite only. A peer that offers nothing newer fails
-  to connect instead of falling back, so move such peers to draft 18, draft 22, or a
-  moq-lite version before upgrading what they connect to.
+- **moq-transport drafts 14 through 17, 19, and 21 are dropped.** Rust and
+  JavaScript speak moq-transport drafts 18, 20, and 22, and the `moql` SETUP
+  negotiates moq-lite only. Before upgrading, move peers that offer only
+  dropped drafts to draft 18, 20, or 22, or a moq-lite version, so they can
+  still connect.
 - **WebSocket needs a QMux subprotocol** (#6231). Relays answer a WebSocket
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
   to the legacy `webtransport` format, so upgrade such clients before relays.

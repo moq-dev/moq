@@ -1707,9 +1707,8 @@ mod tests {
 		));
 	}
 
-	/// The CONNECT request is logged here and by the `web-transport-iroh`
-	/// transport, so its `Debug` must keep credentials out:
-	/// `web-transport-proto` redacts them from 0.6.4.
+	/// The CONNECT request is logged here, so its `Debug` must keep credentials
+	/// out: `web-transport-proto` redacts them from 0.6.4.
 	#[test]
 	fn connect_debug_redacts_credentials() {
 		let url = url::Url::parse("https://user:hunter2@relay.example/anon?jwt=SECRET#SECRET").unwrap();

@@ -37,6 +37,5 @@ fixed the MKV block-header panic; its input is
 ## Required
 
 - [moq-mux on a fixed mp4-atom](/quest/m1/fuzz-findings/mp4-atom-bump.md) - waiting on a 0.17.x release containing kixelated/mp4-atom#264, then moq-mux bumps to it and commits the `sgpd` and `iref` regressions
-- [TS step scan stays ordered](/quest/m1/fuzz-findings/ts-step-scan.md) - the step detector's look-ahead never subtracts past its start
 - [mp4-atom iloc is bounded](/quest/m1/fuzz-findings/mp4-atom-iloc.md) - zero-size `iloc` extents cannot allocate megabytes from a few bytes
 - [A catalog update reuses its encoder](/quest/m1/fuzz-findings/catalog-encoder.md) - republishing a compressed catalog or HLS group stops allocating a fresh DEFLATE encoder (about 200 KB) each time

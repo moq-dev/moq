@@ -135,8 +135,7 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Default connection-wide receive window, used when [`Config::receive_window`] is unset.
 ///
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
-/// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
-/// credit as it reads, it bounds only the unread data. It has to be at least moq-net's
+/// all of its streams, which the backends otherwise leave unlimited. It has to be at least moq-net's
 /// `transport::MIN_RECEIVE_WINDOW`, one 1 MiB segment. 4 MiB sustains about 270 Mbps at a
 /// 100 ms RTT, room for any one viewer or publisher, and lets a session pause two group
 /// streams for slow readers (half the window, a stream window each).
@@ -185,8 +184,7 @@ pub struct Config {
 	/// Enable UDP generic segmentation offload (GSO).
 	///
 	/// GSO batches sends into one syscall for throughput, but some NICs and
-	/// middleboxes mangle segmented packets. Defaults to on. The iroh backend
-	/// cannot turn it off and rejects an explicit `false`.
+	/// middleboxes mangle segmented packets. Defaults to on.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-gso",
@@ -220,10 +218,7 @@ pub struct Config {
 	/// shorter than the negotiated idle timeout could never keep the connection up,
 	/// so it is capped at the derived interval.
 	///
-	/// The iroh backend applies this to its connection keep-alive. It also keeps
-	/// a 5s per-path heartbeat that its builder will not raise or clear, so any
-	/// interval above 5s still sends those path pings. Iroh derives the default from
-	/// the local idle timeout alone. `None` and zero both use the default.
+	/// `None` and zero both use the default.
 	#[usage(
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",
@@ -261,7 +256,7 @@ pub struct Config {
 	/// [`congestion_control`](Self::congestion_control)'s families.
 	///
 	/// Code-only, since a controller has no text form: no flag or setting reaches it.
-	/// The QUIC backend runs it, and the iroh and io_uring runtimes refuse it.
+	/// The QUIC backend runs it, and the io_uring runtime refuses it.
 	#[cfg(feature = "driver")]
 	#[serde(skip)]
 	#[usage(skip)]
@@ -271,8 +266,7 @@ pub struct Config {
 	/// in flight or in incomplete messages across every stream at once. Defaults to
 	/// 4 MiB, and must fit the largest unit a session assembles, one 1 MiB segment.
 	///
-	/// When incomplete messages fill it, the least urgent stream is cancelled. iroh
-	/// returns credit as it reads, so there it bounds only unread data.
+	/// When incomplete messages fill it, the least urgent stream is cancelled.
 	///
 	/// Raise it when a fat, long path is idling below the link rate: the window
 	/// has to cover the bandwidth-delay product or the peer stalls waiting for
@@ -326,8 +320,7 @@ pub struct Config {
 	/// Danger: append TLS session secrets to this private file, for debugging.
 	///
 	/// Anyone holding this file can decrypt captured traffic. The native QUIC backend
-	/// opens it at initialization; Iroh refuses this setting because its API only supports
-	/// process-wide environment-based logging.
+	/// opens it at initialization.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-keylog",
@@ -700,7 +693,7 @@ pub struct Resolved {
 	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
 	///
 	/// The windows are resolved here rather than by each backend, whose own defaults
-	/// differ (moq-quic's and iroh's connection window is unlimited), so every runtime
+	/// differ (moq-quic's connection window is unlimited), so every runtime
 	/// honors the same `[quic]` section.
 	pub receive_window: u64,
 	/// Per-stream receive window in bytes, defaulting to [`DEFAULT_STREAM_RECEIVE_WINDOW`].
@@ -719,10 +712,7 @@ impl Resolved {
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
 	/// carries.
-	#[cfg_attr(
-		not(any(feature = "quic", feature = "iroh")),
-		allow(dead_code, reason = "only the QUIC backends use it")
-	)]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the QUIC backend uses it"))]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
@@ -734,15 +724,6 @@ impl Resolved {
 	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
-	}
-
-	/// Whether the config asks to turn GSO off, which not every backend can honor.
-	///
-	/// Only the iroh backend consults this, to reject a GSO-off request it can't
-	/// satisfy; the other backends toggle GSO directly.
-	#[cfg_attr(not(feature = "iroh"), allow(dead_code, reason = "only the `iroh` feature uses it"))]
-	pub(crate) fn gso_disabled(&self) -> bool {
-		self.gso == Some(false)
 	}
 
 	/// Whether an application's own congestion controller is installed.
@@ -827,7 +808,6 @@ mod tests {
 		assert_eq!(quic.keep_alive, None);
 		assert!(!quic.mtu_discovery);
 		assert_eq!(quic.gso, None);
-		assert!(!quic.gso_disabled());
 		assert!(quic.keylog.is_none());
 	}
 
@@ -850,20 +830,6 @@ mod tests {
 		assert_eq!(interval(10, Some(Duration::from_secs(5))), Duration::from_secs(5));
 		assert_eq!(interval(10, Some(Duration::from_secs(20))), Duration::from_secs(3));
 		assert_eq!(interval(0, Some(Duration::from_secs(20))), Duration::from_secs(20));
-	}
-
-	#[test]
-	fn gso_disabled_only_on_explicit_false() {
-		let off = Config {
-			gso: Some(false),
-			..Default::default()
-		};
-		assert!(off.resolve().gso_disabled());
-		let on = Config {
-			gso: Some(true),
-			..Default::default()
-		};
-		assert!(!on.resolve().gso_disabled());
 	}
 
 	#[test]
