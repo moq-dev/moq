@@ -49,7 +49,7 @@ use std::task::{Poll, ready};
 use std::time::Duration;
 
 use super::track::{self, Position, TrackState};
-use super::{aborts, expiry, group};
+use super::{aborts, expiry, flate, group};
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
@@ -721,6 +721,10 @@ pub(super) struct Track {
 	// What the frames this track's groups are still receiving may allocate up front,
 	// shared with every track minted from the same origin handle.
 	frames: super::frame::Budget,
+
+	// One finished local group's encoder, kept until another group needs it or the
+	// account drops. Raw codec only: an Extra here would keep this account alive.
+	encoder: Mutex<Option<flate::Encoder>>,
 }
 
 /// The greatest location a track has written or its source reported, followed by the track
@@ -827,6 +831,7 @@ impl Track {
 			aborts: OnceLock::new(),
 			largest: Default::default(),
 			declared: AtomicBool::new(false),
+			encoder: Mutex::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -1031,6 +1036,15 @@ impl Track {
 
 impl Drop for Track {
 	fn drop(&mut self) {
+		if self
+			.encoder
+			.get_mut()
+			.unwrap_or_else(PoisonError::into_inner)
+			.take()
+			.is_some()
+		{
+			self.pool.sub(flate::ENCODER_HEAP);
+		}
 		if let Some(key) = self.sweep.get() {
 			self.pool.unregister(*key);
 		}
@@ -1306,6 +1320,34 @@ pub(super) struct Extra {
 }
 
 impl Extra {
+	/// Take this track's spare encoder with its charge, or bill a new one.
+	pub(super) fn take_encoder(&self) -> flate::Encoder {
+		if let Some(track) = &self.track {
+			let encoder = track.encoder.lock().unwrap_or_else(PoisonError::into_inner).take();
+			if let Some(mut encoder) = encoder {
+				// Moving existing heap is not a write and must not accrue eviction debt.
+				self.bytes.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
+				encoder.reset();
+				return encoder;
+			}
+		}
+		self.add(flate::ENCODER_HEAP);
+		flate::Encoder::new()
+	}
+
+	/// Park a finished encoder and its charge, dropping it if the track has a spare.
+	pub(super) fn park_encoder(&self, encoder: flate::Encoder) {
+		if let Some(track) = &self.track {
+			let mut spare = track.encoder.lock().unwrap_or_else(PoisonError::into_inner);
+			if spare.is_none() {
+				self.bytes.fetch_sub(flate::ENCODER_HEAP, Ordering::Relaxed);
+				*spare = Some(encoder);
+				return;
+			}
+		}
+		self.sub(flate::ENCODER_HEAP);
+	}
+
 	/// Bill `n` more bytes.
 	pub(super) fn add(&self, n: u64) {
 		if let Some(track) = &self.track {
@@ -1366,6 +1408,42 @@ mod test {
 	fn bounded(capacity: u64) -> Pool {
 		let config = Config::default().with_capacity(capacity).with_expiry(DEFAULT_EXPIRY);
 		Pool::new(config)
+	}
+
+	/// Reuse transfers existing heap, concurrent users allocate separately, and only
+	/// one finished encoder stays parked until the account's final owner drops.
+	#[test]
+	fn encoder_spare_transfers_its_charge_without_write_debt() {
+		let pool = Pool::unbounded();
+		let charge = charge(&pool);
+		let first = charge.extra();
+		let second = charge.extra();
+		let account = charge.track.as_ref().unwrap();
+		account.take_written();
+		let encoder = first.take_encoder();
+		let concurrent = second.take_encoder();
+		assert_eq!(pool.used(), ENTRY_OVERHEAD + 2 * flate::ENCODER_HEAP);
+		assert_eq!(account.take_written(), 2 * flate::ENCODER_HEAP);
+
+		first.park_encoder(encoder);
+		assert_eq!(first.size(), 0);
+		assert_eq!(pool.used(), ENTRY_OVERHEAD + 2 * flate::ENCODER_HEAP);
+		let encoder = first.take_encoder();
+		assert_eq!(first.size(), flate::ENCODER_HEAP);
+		assert_eq!(account.take_written(), 0, "reuse must not inflate write debt");
+		first.park_encoder(encoder);
+		second.park_encoder(concurrent);
+		assert_eq!(second.size(), 0);
+		assert_eq!(pool.used(), ENTRY_OVERHEAD + flate::ENCODER_HEAP, "only one spare");
+
+		// A group and its inflated copy may outlive the track. They still own its
+		// account, so the parked encoder stays billed until that last owner drops.
+		drop(charge);
+		assert_eq!(pool.used(), flate::ENCODER_HEAP);
+		drop(first);
+		assert_eq!(pool.used(), flate::ENCODER_HEAP);
+		drop(second);
+		assert_eq!(pool.used(), 0);
 	}
 
 	struct Flag(std::sync::atomic::AtomicBool);

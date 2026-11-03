@@ -390,18 +390,15 @@ impl Flate {
 	/// Compress a locally written frame, returning its stored slice.
 	fn deflate(&mut self, payload: &[u8]) -> Bytes {
 		let plain = &self.plain;
-		let encoder = self.encoder.get_or_insert_with(|| {
-			plain.bill.add(flate::ENCODER_HEAP);
-			flate::Encoder::new()
-		});
+		let encoder = self.encoder.get_or_insert_with(|| plain.bill.take_encoder());
 		encoder.frame(payload)
 	}
 
-	/// Drop the codec state once no frame follows at `fin`: the encoder, and the decoder if
-	/// its readers already inflated every frame.
+	/// Park the encoder once no frame follows at `fin`, and drop the decoder if its readers
+	/// already inflated every frame.
 	fn finish(&mut self, fin: Option<usize>) {
-		if self.encoder.take().is_some() {
-			self.plain.bill.sub(flate::ENCODER_HEAP);
+		if let Some(encoder) = self.encoder.take() {
+			self.plain.bill.park_encoder(encoder);
 		}
 		let Some(fin) = fin else {
 			return;
@@ -6193,6 +6190,47 @@ mod test {
 		);
 	}
 
+	/// Every group starts cold even when a finished encoder is reused. Open groups
+	/// keep independent windows, and aborting one does not consume another's spare.
+	#[test]
+	fn reused_encoders_start_independent_group_streams() {
+		let pool = cache::Pool::unbounded();
+		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let info = track::Info::default().with_compress(true);
+		let mut concurrent = Producer::new(0u64.into(), info.clone(), account.clone());
+		concurrent.write_frame(None, verbose(0)).unwrap();
+		for sequence in 1..5u64 {
+			let mut group = Producer::new(sequence.into(), info.clone(), account.clone());
+			let mut reference = flate::Encoder::new();
+			let frames = [verbose(0), Bytes::new(), verbose(sequence as usize)];
+			let slices: Vec<_> = frames.iter().map(|frame| reference.frame(frame)).collect();
+			for frame in &frames {
+				group.write_frame(None, frame.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			group.finish().unwrap();
+			let mut raw = group.consume().compressed();
+			let mut decoder = flate::Decoder::new();
+			for (frame, expected) in frames.iter().zip(&slices) {
+				let Poll::Ready(Ok(Some(object))) = raw.poll_read_object(&kio::Waiter::noop()) else {
+					panic!("a stored slice is ready");
+				};
+				let slice = object.frame.payload.contiguous(0);
+				assert_eq!(slice, *expected, "reuse must emit a cold stream");
+				assert_eq!(decoder.frame(&slice, frame.len()).unwrap(), *frame);
+			}
+		}
+		concurrent.write_frame(None, verbose(1)).unwrap();
+		let mut reader = concurrent.consume();
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
+		concurrent.abort(Error::Cancel).unwrap();
+		drop(reader);
+		assert_eq!(pool.used(), flate::ENCODER_HEAP, "the spare survives a sibling's abort");
+		drop(account);
+		assert_eq!(pool.used(), 0);
+	}
+
 	/// A compressed group stores DEFLATE slices, hands plain readers the frames as written
 	/// from one shared inflated copy, and hands egress the slices with their sizes.
 	#[test]
@@ -6223,7 +6261,7 @@ mod test {
 		}
 		reference.finish().unwrap();
 		assert!(
-			stored + (plain as u64) / 2 < uncompressed.used(),
+			stored - flate::ENCODER_HEAP + (plain as u64) / 2 < uncompressed.used(),
 			"slices are stored: {stored} against {}",
 			uncompressed.used()
 		);
@@ -6450,8 +6488,8 @@ mod test {
 		assert_eq!(metered(), stored);
 	}
 
-	/// The codec state counts toward the pool while it lives: the encoder until the group
-	/// finishes, and a reader's decoder until the last frame inflates.
+	/// The codec state counts toward the pool while it lives: the encoder moves to its
+	/// track when the group finishes, and a decoder drops when the last frame inflates.
 	#[test]
 	#[cfg(feature = "async")]
 	fn codec_state_is_billed_while_held() {
@@ -6472,7 +6510,11 @@ mod test {
 		assert_eq!(group.handle.cache_size(), held, "an open group keeps both");
 
 		group.finish().unwrap();
-		assert_eq!(group.handle.cache_size(), stored + inflated, "finishing drops both");
+		assert_eq!(
+			group.handle.cache_size(),
+			stored + inflated,
+			"finishing releases both from the group"
+		);
 		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
 
 		// A finished group's decoder goes with the last frame it inflates.
@@ -6682,13 +6724,17 @@ mod test {
 		group.abort(Error::Evicted).unwrap();
 		assert_eq!(
 			pool.used(),
-			Flate::RELEASE_HEAP,
-			"the job still owns the new guard allocation"
+			Flate::RELEASE_HEAP + flate::ENCODER_HEAP,
+			"the job owns its guard, and the account owns its spare"
 		);
 		assert!(matches!(job.get(0), Err(Error::Evicted)));
 		drop(job);
-		assert_eq!(pool.used(), Flate::RELEASE_HEAP, "clones share one intrinsic charge");
+		assert_eq!(
+			pool.used(),
+			Flate::RELEASE_HEAP + flate::ENCODER_HEAP,
+			"clones share one intrinsic charge"
+		);
 		drop(retained);
-		assert_eq!(pool.used(), 0, "the final guard releases its own charge");
+		assert_eq!(pool.used(), 0, "the final guard also releases its account's spare");
 	}
 }
