@@ -44,7 +44,10 @@ pub struct Stream {
 /// Dropping it leaves the stream to finish, unless the peer stopped it, in which case it is
 /// reset with the peer's code.
 #[derive(Debug)]
-pub struct Finished(Half);
+pub struct Finished {
+	half: Half,
+	park: kio::Park,
+}
 
 /// What [`Stream`] and [`Finished`] share.
 #[derive(Debug)]
@@ -123,7 +126,10 @@ impl Stream {
 	/// stopped the stream first.
 	pub fn finish(mut self) -> Finished {
 		self.half.finish();
-		Finished(self.half)
+		Finished {
+			half: self.half,
+			park: kio::Park::default(),
+		}
 	}
 
 	/// Close the send stream immediately
@@ -200,6 +206,11 @@ impl Stream {
 		self.half.stopped()
 	}
 
+	/// Wait for the stream to end, retaining the peer's stop code; see [`Finished::stopped`].
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		self.half.stream.poll_stopped(waiter)
+	}
+
 	/// The identity of this stream
 	pub fn id(&self) -> stream::Id {
 		self.half.stream.id
@@ -209,7 +220,7 @@ impl Stream {
 impl Finished {
 	/// Abandon the stream's data the peer has not acknowledged yet. See [`Stream::reset()`].
 	pub fn reset(mut self, error_code: VarInt) {
-		self.0.reset(None, error_code);
+		self.half.reset(None, error_code);
 	}
 
 	/// Abandon the stream's data past `offset`. See [`Stream::reset_at()`].
@@ -217,17 +228,17 @@ impl Finished {
 	/// # Panics
 	/// - when `offset` came from another stream
 	pub fn reset_at(mut self, offset: Offset, error_code: VarInt) {
-		self.0.reset(Some(offset), error_code);
+		self.half.reset(Some(offset), error_code);
 	}
 
 	/// Set the priority its data is retransmitted at. See [`Stream::set_priority()`].
 	pub fn set_priority(&mut self, priority: i64) {
-		self.0.set_priority(priority);
+		self.half.set_priority(priority);
 	}
 
 	/// The priority of the send stream
 	pub fn priority(&self) -> i64 {
-		self.0.priority()
+		self.half.priority()
 	}
 
 	/// Move the stream into a send group. See [`Stream::set_group()`].
@@ -235,7 +246,7 @@ impl Finished {
 	/// # Panics
 	/// - when `group` belongs to another connection
 	pub fn set_group(&mut self, group: Option<&Group>) {
-		self.0.set_group(group);
+		self.half.set_group(group);
 	}
 
 	/// Completes when the peer stops the stream or acknowledges all of its data
@@ -250,12 +261,26 @@ impl Finished {
 	/// data. As such, relying on `stopped` to know when the peer has read a stream to completion
 	/// may introduce more latency than using an application-level response of some sort.
 	pub fn stopped(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
-		self.0.stopped()
+		self.half.stopped()
+	}
+
+	/// Wait for the stream to end, retaining the peer's stop code; see [`Finished::stopped`].
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		self.half.stream.poll_stopped(waiter)
 	}
 
 	/// The identity of this stream
 	pub fn id(&self) -> stream::Id {
-		self.0.stream.id
+		self.half.stream.id
+	}
+}
+
+impl Future for Finished {
+	type Output = Result<Option<VarInt>, Error>;
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		let this = self.get_mut();
+		this.half.stream.poll_stopped(this.park.hold(cx))
 	}
 }
 

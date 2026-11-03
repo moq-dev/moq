@@ -362,7 +362,7 @@ impl<T> Inner<T> {
 
 impl<T: Serialize> Inner<T> {
 	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
-		let timestamp = self.track.on_track(payload.at)?;
+		let timestamp = self.track.rescale(payload.at)?;
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
 
@@ -436,11 +436,11 @@ impl Track {
 	/// An update checks this before encoding. Found by `write_frame` instead, the mismatch would
 	/// come after a snapshot published its group, leaving an empty newest group in place of the
 	/// last value, and the dropped frame would reset the encoder, rolling a group for nothing.
-	fn on_track(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
-		Ok(moq_net::group::on_track(timestamp, self.inner.info().timescale)?)
+	fn rescale(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
+		Ok(self.inner.info().rescale(timestamp)?)
 	}
 
-	/// Write one encoded frame at a timestamp already [on the track](Self::on_track), rolling a
+	/// Write one encoded frame at a timestamp already [rescaled](Self::rescale) to the track, rolling a
 	/// group when it's a snapshot.
 	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
 		// Check before touching a group. `write_snapshot` closes the previous group and publishes a
