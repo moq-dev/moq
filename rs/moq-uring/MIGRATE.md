@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### QUIC waits have caller-owned poll forms
+### QUIC waits have caller-owned poll forms ([#7707](https://github.com/moq-dev/moq/pull/7707))
 
 The QUIC driver connection's stream opens, accepts, datagram receive and close waits,
 the endpoint's accept, and both send handles' close waits now expose `poll_*` methods

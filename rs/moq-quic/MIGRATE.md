@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Receive operations wake transmission themselves
+### Receive operations wake transmission themselves ([#7707](https://github.com/moq-dev/moq/pull/7707))
 
 `ShouldTransmit` is removed. `recv::Stream::lease` returns `Result<Lease, Error>` and
 `poll_lease` returns `Poll<Result<Lease, Error>>`; remove the transmit hint from tuple
