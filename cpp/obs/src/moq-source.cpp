@@ -119,6 +119,12 @@ struct AudioLayout {
 	uint32_t sample_rate = 0;
 };
 
+// Own the ranked snapshot while setup asynchronously tries each rendition once.
+struct AudioSelection {
+	std::vector<std::pair<std::string, moq::Audio>> candidates;
+	size_t next = 0;
+};
+
 // One subscribed track: what it is, the consumer once subscribed, and the pending
 // call that subscribes or reads its next frame. Dropping it cancels that call.
 struct Track {
@@ -140,6 +146,7 @@ struct Track {
 	// Video reads encoded frames to decode here; audio reads PCM moq-audio decoded.
 	std::shared_ptr<moq::MediaTrackConsumer> consumer;
 	std::shared_ptr<moq::AudioConsumer> audio_consumer;
+	std::shared_ptr<AudioSelection> audio_selection;
 	std::optional<moq::Continuation> call;
 };
 
@@ -229,6 +236,8 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 static void moq_source_clear_audio_locked(struct moq_source *ctx);
 static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog);
+static void moq_source_try_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				 const std::shared_ptr<AudioSelection> &selection);
 static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
 static Decoded moq_source_receive_frame(VideoDecoder &decoder);
 
@@ -874,30 +883,14 @@ static void moq_source_on_audio_subscribed(struct moq_source *ctx, const std::sh
 	if (!result) {
 		LOG_ERROR("Failed to subscribe to Audio track: %s", result.error().to_string().c_str());
 		moq_source_discard_candidate(conn, track);
+		if (std::holds_alternative<moq::Error::kUnsupportedConfig>(result.error().get_variant()))
+			moq_source_try_audio(ctx, conn, track->audio_selection);
 		return;
 	}
+	track->audio_selection.reset();
 	track->audio_consumer = *result;
 	LOG_INFO("Subscribed to Audio track successfully");
 	moq_source_read_audio(ctx, conn, track);
-}
-
-// Whether moq-audio decodes the rendition: Opus, PCM, or mono or stereo AAC-LC (the one AAC
-// profile and the layouts it has). moq-ffi reports a refusal only once the subscribe fails,
-// as an audio error with no kind, so check here to let an unsupported rendition fall through.
-// A configuration moq-audio still refuses, such as a malformed OpusHead, discards the
-// candidate when it subscribes.
-static bool moq_source_audio_decodes(const moq::Audio &config)
-{
-	const auto &codec = config.codec;
-	if (codec == "opus" || codec == "pcm")
-		return true;
-	// hang reads the AAC profile as a decimal, so `mp4a.40.02` is AAC-LC too.
-	const std::string aac = "mp4a.40.";
-	if (codec.rfind(aac, 0) != 0)
-		return false;
-	const auto profile = codec.find_first_not_of('0', aac.size());
-	return profile != std::string::npos && codec.compare(profile, std::string::npos, "2") == 0 &&
-	       (config.channel_count == 1 || config.channel_count == 2);
 }
 
 // The channels moq-audio should remix a rendition to, and where OBS puts them. A count
@@ -1038,22 +1031,32 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		return;
 	}
 
-	for (const auto *rendition : candidates) {
+	auto selection = std::make_shared<AudioSelection>();
+	selection->candidates.reserve(candidates.size());
+	for (const auto *rendition : candidates)
+		selection->candidates.emplace_back(rendition->first, rendition->second);
+	moq_source_try_audio(ctx, conn, selection);
+}
+
+static void moq_source_try_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				 const std::shared_ptr<AudioSelection> &selection)
+{
+	while (selection->next < selection->candidates.size()) {
+		const auto *rendition = &selection->candidates[selection->next++];
 		const auto &id = rendition->first;
 		const auto &config = rendition->second;
 		if (moq_source_same_audio(conn->audio.get(), id, config) && conn->audio->instance == conn->instance) {
 			conn->pending_audio.reset();
 			return;
 		}
-		if (moq_source_same_audio(conn->pending_audio.get(), id, config))
+		if (moq_source_same_audio(conn->pending_audio.get(), id, config)) {
+			// Keep the in-flight setup, but fall through against the newest catalog if it refuses.
+			if (!conn->pending_audio->audio_consumer)
+				conn->pending_audio->audio_selection = selection;
 			return;
-
-		// A codec moq-audio can't decode, or a layout OBS can't place, falls through to the next rendition.
-		if (!moq_source_audio_decodes(config)) {
-			LOG_ERROR("Unsupported audio codec '%s' with %u channels in rendition %s", config.codec.c_str(),
-				  config.channel_count, id.c_str());
-			continue;
 		}
+
+		// OBS's speaker layout is independent of the decoder's capabilities.
 		auto layout = moq_source_audio_layout(config.channel_count);
 		if (!layout) {
 			LOG_ERROR("Unsupported audio channel count %u in rendition %s: OBS has no layout for it",
@@ -1072,6 +1075,7 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		track->instance = conn->instance;
 		track->audio_config = config;
 		track->audio_layout = *layout;
+		track->audio_selection = selection;
 		conn->pending_audio = track;
 
 		moq::AudioDecoderOutput output{};
