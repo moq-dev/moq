@@ -21,6 +21,7 @@ from moq_ffi import (
     MoqCongestionControl,
     MoqConnectionStats,
     MoqDatagram,
+    MoqDelay,
     MoqFrame,
     MoqGrant,
     MoqOrder,
@@ -202,27 +203,52 @@ class Range:
 
 
 @dataclass(frozen=True)
+class Delay:
+    """How far behind the live edge a subscriber or decoder plays, mirroring moq-net's ``track::Delay``.
+
+    ``min`` is the target latency: the playout or jitter-buffer delay held behind the
+    live edge, and where a cold join starts. ``None`` leaves it unstated, which a decoder
+    plays as zero while the subscription keeps it unstated, so it never pulls the
+    aggregate across subscribers to zero. A ``min`` past ``max`` starts at ``max``.
+    ``max`` is how far a non-latest group may fall behind before it is skipped; zero
+    skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
+    alone to bound it, and it caps every range.
+
+    A bare ``Delay()`` is moq-net's default, zero for both.
+    """
+
+    min: timedelta | None = timedelta(0)
+    max: timedelta | None = timedelta(0)
+
+    @classmethod
+    def _from_ffi(cls, delay: MoqDelay) -> Delay:
+        return cls(min=delay.min, max=delay.max)
+
+    def _ffi(self) -> MoqDelay:
+        return MoqDelay(min=self.min, max=self.max)
+
+
+@dataclass(frozen=True)
 class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
-    ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once, ``None`` sets no subscriber limit and leaves the publisher's max
-    age alone to bound it, and it caps every range. ``ranges`` are the spans of the track
-    to deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which
-    pending group the publisher sends first, ``None`` for newest first.
+    ``delay`` is where a cold join starts and how far a non-latest group may fall behind
+    before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
+    everything ``delay.max`` still allows. ``order`` is which pending group the publisher
+    sends first, ``None`` for newest first.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
 
     priority: int = 0
-    max_delay: timedelta | None = timedelta(0)
+    delay: Delay = Delay()
     ranges: Sequence[Range] | None = None
     order: MoqOrder | None = None
 
     @classmethod
     def default(cls) -> Subscription:
-        """moq-net's defaults, whose zero ``max_delay`` skips a superseded group at once.
+        """moq-net's defaults, whose zero ``delay`` starts at the newest group and skips a superseded one at once.
 
         A ``None`` subscription means the same; ``dataclasses.replace`` this one to change
         a field.
@@ -230,7 +256,7 @@ class Subscription:
         defaults = moq_subscription_defaults()
         return cls(
             priority=defaults.priority,
-            max_delay=defaults.max_delay,
+            delay=Delay._from_ffi(defaults.delay),
             # The FFI defaults never restrict ranges, so there is no record to convert.
             ranges=None,
             order=defaults.order,
@@ -239,7 +265,7 @@ class Subscription:
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
-            max_delay=self.max_delay,
+            delay=self.delay._ffi(),
             ranges=None if self.ranges is None else [r._ffi() for r in self.ranges],
             order=self.order,
         )

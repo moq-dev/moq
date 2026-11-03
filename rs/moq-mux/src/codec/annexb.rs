@@ -269,6 +269,32 @@ impl InBandCodec {
 		Ok(())
 	}
 
+	/// Replace each `retained` parameter-set type, in VPS, SPS, PPS order, with the sets a complete
+	/// Annex-B init defines. A type the init omits keeps its retained sets.
+	///
+	/// Each init replaces the last one's sets rather than accumulating onto them, as a keyframe's
+	/// inline sets do in [`reconcile_keyframe_params`].
+	pub(crate) fn adopt_init(self, data: &[u8], retained: &mut [&mut ParameterSets]) -> Result<()> {
+		let types = self.parameter_sets();
+		debug_assert_eq!(types.len(), retained.len());
+		let mut sets = vec![ParameterSets::new(); types.len()];
+		for nal in complete_nals(data)? {
+			if nal.is_empty() {
+				continue;
+			}
+			let nal_type = self.nal_type(&nal);
+			if let Some(index) = types.iter().position(|&(ty, _)| ty == nal_type) {
+				self.insert_parameter_set(&mut sets[index], &nal)?;
+			}
+		}
+		for (retained, set) in retained.iter_mut().zip(sets) {
+			if !set.is_empty() {
+				**retained = set;
+			}
+		}
+		Ok(())
+	}
+
 	fn delimiter(self) -> u8 {
 		match self {
 			Self::H264 => 9,
@@ -404,6 +430,15 @@ pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut Pa
 	} else if seen != retained {
 		retained.clone_from(seen);
 	}
+}
+
+/// Every NAL in a complete Annex-B buffer, including the final one that no start code terminates.
+pub(crate) fn complete_nals(data: &[u8]) -> Result<Vec<Bytes>> {
+	let mut buf = Bytes::copy_from_slice(data);
+	let mut iter = NalIterator::new(&mut buf);
+	let mut nals = iter.by_ref().collect::<Result<Vec<_>>>()?;
+	nals.extend(iter.flush()?);
+	Ok(nals)
 }
 
 /// Iterates complete Annex B NAL units, leaving an unterminated final unit for `flush`.

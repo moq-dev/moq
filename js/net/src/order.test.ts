@@ -81,8 +81,8 @@ function writeGroup(track: TrackProducer): GroupProducer {
 
 // Receiving a group means its stream header was written, which the publisher does only after
 // ranking the stream.
-async function receive(subscriber: TrackSubscriber, count: number): Promise<number[]> {
-	const sequences: number[] = [];
+async function receive(subscriber: TrackSubscriber, count: number): Promise<bigint[]> {
+	const sequences: bigint[] = [];
 	for (let i = 0; i < count; i++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended early");
@@ -129,12 +129,12 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 	const subscriber = remote.track("video").subscribe({
 		delay: { max: MAX_DELAY },
 		order,
-		ranges: [{ start: { absolute: 0 } }],
+		ranges: [{ start: { absolute: 0n } }],
 	});
 	await receive(subscriber, groups.length);
 
 	if (update !== undefined) {
-		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: { absolute: 0 } }] });
+		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: { absolute: 0n } }] });
 		await aggregate(video, (upstream) => upstream === update);
 	}
 
@@ -271,7 +271,7 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 });
 
 // One track fanned out to an ascending and a descending subscriber, the shape a relay serves
-// from one upstream request (a JS app does not proxy, so the track is local here). The
+// from one upstream request (the track is local here). The
 // aggregate a wire would request upstream turns descending once the descending subscriber
 // joins, so it is never held behind the other's backlog, and each session still serves its
 // own subscriber in its own order.

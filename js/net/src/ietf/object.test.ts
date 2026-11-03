@@ -72,7 +72,7 @@ test("a data stream's header goes out in one write, stream type included", async
 		// Every optional field present, with values past a one-byte varint.
 		const group = new Group({
 			trackAlias: 1_000_000n,
-			groupId: 70_000,
+			groupId: 70_000n,
 			subGroupId: 300,
 			publisherPriority: 200,
 			flags: {

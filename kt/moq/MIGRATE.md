@@ -4,14 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of defaulting to null, for both the typed and the `String` overloads. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale = 1_000uL)`; one without is refused.
+
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.maxDelay` is `delay: Delay`: pass `delay = Delay(min = Duration.ZERO, max = maxDelay)`, where a null `max` sets no subscriber limit, or `copy` `Subscription.default()`.
+`dev.moq.media.Delay` moves to `dev.moq.Delay`, and its `min` is nullable: null leaves the target latency unstated, which a decoder plays as zero.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `List<String>` instead of `List<String>?`. Remove null checks and pass `captures = emptyList()` when constructing an announcement for a filter without wildcards. Rebuild with the matching generated bindings and native library.
 
 ### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: media.Delay?` and `estimate: Boolean = true`.
-`video.DecoderOutput.maxDelay` is `delay: media.Delay?`.
+`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: Delay?` and `estimate: Boolean = true`.
+`video.DecoderOutput.maxDelay` is `delay: Delay?`.
 `Delay(min, max)`: `max` (null for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
 A fixed audio playout delay `d` is `delay = Delay(min = d, max = ...)` with `estimate = false`.
 
@@ -43,7 +52,6 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 The records carry durations as `java.time.Duration` fields instead of `*Us` microsecond integers, so the duration extension properties are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 Convert with `toKotlinDuration()` and `toJavaDuration()` where you want `kotlin.time.Duration`.
 `AudioEncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs = 0u` for the codec's own frame.
-`Subscription.maxDelay` has no default: start from `Subscription.default()`, or pass `java.time.Duration.ZERO`, for the old default. Null sets no subscriber limit.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state
@@ -133,6 +141,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
 Replace `request.accept(broadcast)` with `request.prepare()`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.serve(producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 
