@@ -1,7 +1,9 @@
-publishing smoke-js-web-4864-26827.hang (fake camera, vite) to https://fb.mvfst.net:9448/moq-relay
+publishing smoke-js-web-4728-22826.hang (fake camera, vite) to https://fb.mvfst.net:9448/moq-relay
 [page] negotiated protocol: moqt-16
 [page] subscribe_namespace written: requestId=0
-[page] publish ok: broadcast=smoke-js-web-4864-26827.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4864-26827.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4728-22826.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4728-22826.hang track=video
 [page] adapter: closing stream requestId=3
-[page] publish done: broadcast=smoke-js-web-4864-26827.hang track=video
+[page] publish done: broadcast=smoke-js-web-4728-22826.hang track=video
+[page] adapter: closing stream requestId=1
+[page] publish done: broadcast=smoke-js-web-4728-22826.hang track=catalog.json

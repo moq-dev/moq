@@ -1,13 +1,12 @@
-[2m2026-11-02T18:01:14.940018Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m3744558705859925 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-02T18:01:14.945737Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-02T18:01:14.945754Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-02T18:01:14.951200Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://relay.moqtail.dev
-[2m2026-11-02T18:01:14.951213Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-02T18:01:15.174816Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-02T18:01:15.174839Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://relay.moqtail.dev
-[2m2026-11-02T18:01:15.213356Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m41 [3mbroadcast[0m[2m=[0msmoke-rust-4864-13818.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-02T18:01:16.848745Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m43 [3mbroadcast[0m[2m=[0msmoke-rust-4864-13818.hang [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-02T18:01:17.931345Z[0m [33m WARN[0m [2mweb_transport_moq::session[0m[2m:[0m failed to read capsule [3me[0m[2m=[0mUnexpectedEnd
-[2m2026-11-02T18:01:17.931418Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
-/home/runner/work/moq/moq/test/smoke/smoke.sh: line 708: 10551 Killed                  ffmpeg_h264
-     10552 Done                    | rust_moq "$URL" --broadcast "$broadcast" import avc3
+[2m2026-11-03T04:19:38.615868Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m669794623543548 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-03T04:19:38.625919Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-03T04:19:38.625942Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-03T04:19:38.637654Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://relay.moqtail.dev
+[2m2026-11-03T04:19:38.639170Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-03T04:19:38.798444Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
+[2m2026-11-03T04:19:38.798485Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://relay.moqtail.dev
+[2m2026-11-03T04:19:38.835313Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m95 [3mbroadcast[0m[2m=[0msmoke-rust-4728-2988.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-03T04:19:40.499877Z[0m [32m INFO[0m [2mmoq_net::ietf::publisher[0m[2m:[0m subscribe started [3mid[0m[2m=[0m97 [3mbroadcast[0m[2m=[0msmoke-rust-4728-2988.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-03T04:19:42.572177Z[0m [33m WARN[0m [2mweb_transport_moq::session[0m[2m:[0m failed to read capsule [3me[0m[2m=[0mUnexpectedEnd
+/home/runner/work/moq/moq/test/smoke/smoke.sh: line 708: 10453 Killed                  ffmpeg_h264
+     10454 Done                    | rust_moq "$URL" --broadcast "$broadcast" import avc3

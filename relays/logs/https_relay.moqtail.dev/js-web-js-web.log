@@ -1,18 +1,18 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=moqtail/ch02 active=true
-[page] announced: broadcast=moqtail/ch05 active=true
 [page] announced: broadcast=moqtail/ch07_all active=true
-[page] announced: broadcast=moqtail/ch01 active=true
+[page] announced: broadcast=moqtail/ch06 active=true
+[page] announced: broadcast=moqtail/ch03 active=true
+[page] announced: broadcast=moqtail/ch00_all active=true
+[page] announced: broadcast=moqtail/ch00 active=true
 [page] announced: broadcast=moqtail/testsrc active=true
 [page] announced: broadcast=moqtail/ch07 active=true
-[page] announced: broadcast=moqtail/ch00 active=true
-[page] announced: broadcast=moqtail/ch03 active=true
-[page] announced: broadcast=moqtail/ch06 active=true
+[page] announced: broadcast=moqtail/ch01 active=true
 [page] announced: broadcast=moqtail/ch04 active=true
-[page] announced: broadcast=moqtail/ch00_all active=true
-[page] announced: broadcast=smoke-js-web-4864-9419.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4864-9419.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4864-9419.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4864-9419.hang track=catalog.json
-decoded 0 frames from smoke-js-web-4864-9419.hang (vite)
+[page] announced: broadcast=moqtail/ch05 active=true
+[page] announced: broadcast=moqtail/ch02 active=true
+[page] announced: broadcast=smoke-js-web-4728-20766.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4728-20766.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4728-20766.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4728-20766.hang track=catalog.json
+decoded 0 frames from smoke-js-web-4728-20766.hang (vite)
