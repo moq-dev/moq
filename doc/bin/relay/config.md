@@ -17,7 +17,7 @@ Precedence is CLI, then env, then file, then defaults.
 ```toml
 [listen]
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
-version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
+version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all but moq-lite-07-wip.
 timeout = "10s"                      # Handshake deadline. "0" waits forever.
 implementation = "edge/1"            # SETUP name for the relay. Omit for moq-relay/<v> moq-net-rs/<v>, "" to send none.
 
@@ -122,9 +122,9 @@ idle_timeout = "10s"                 # Drop a connection after this long with no
 # keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout. iroh keeps a separate 5s path heartbeat.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
-receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
-stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
-send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
+receive_window = 4194304             # Whole-connection window, in bytes. Default (4 MiB).
+stream_receive_window = 1048576      # Per-stream window, in bytes. Default (1 MiB).
+send_window = 4194304                # Unacknowledged outgoing data, in bytes. Default (4 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
@@ -152,17 +152,23 @@ the idle timeout. A value no shorter than the negotiated idle timeout could
 never keep the connection up, so it is capped at the derived interval. iroh
 cannot see the peer's timeout, so it derives from the local `idle_timeout`.
 
-Raise the receive windows when a fat, long path idles below the link rate. The
-128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
-how much unread data and incomplete messages one peer can make the relay
-buffer. It has to fit the largest message, just over 64 MiB, so a smaller
-value, here or in `[limits.peer.quic]`, is refused at startup. When incomplete
-messages fill the window, the relay cancels the least urgent stream: the
-lowest subscription priority, then the group its subscription would deliver
-last. Over iroh the window bounds only
-unread data, and over WebSocket or TCP nothing bounds incomplete messages.
-`stream_receive_window` only paces one stream: its credit returns as bytes are
-read, whether or not their message is complete.
+Raise the receive windows when a fat, long path idles below the link rate: a
+connection carries at most its window per round trip. The 4 MiB
+`receive_window` default carries about 270 Mbps at a 100 ms RTT, plenty for one
+viewer or publisher, and bounds how much unread data and incomplete messages
+one peer can make the relay buffer. It has to fit the largest unit a session
+assembles, one 1 MiB segment, so a smaller value, here or in
+`[limits.peer.quic]`, is refused at startup. When incomplete messages fill the
+window, the relay cancels the least urgent stream: the lowest subscription
+priority, then the group its subscription would deliver last. A group still
+waiting for its track's TRACK\_INFO goes first, so that control message always
+gets through. WebSocket and TCP sessions cancel the same way; the relay accepts
+them at these windows too and widens peers to `[limits.peer.quic]`, and links
+it dials take these settings.
+Over iroh the window bounds only unread data. `stream_receive_window` only paces
+one stream: its credit returns as bytes are read, whether or not their message
+is complete, so the 1 MiB default caps one group stream at about 67 Mbps at a
+100 ms RTT.
 
 ## \[limits.client] and \[limits.peer]
 
@@ -180,17 +186,18 @@ announces = 100000
 
 [limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
-receive_window = 671088640           # Connection-wide receive window (640 MiB).
-send_window = 671088640              # Unacknowledged outgoing data (640 MiB).
+receive_window = 16777216            # Connection-wide receive window (16 MiB).
+send_window = 16777216               # Unacknowledged outgoing data (16 MiB).
 ```
 
 `[limits.peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
 any other `[quic]` key is refused. They replace the `[quic]` values for a
-peer's QUIC connection once its grant is known, before the SETUP reply. Links
-the relay dials get them from the handshake on. A link carrying a whole cluster is then
-not throttled by `[quic]` limits sized for one viewer, for example
-`--limits-peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
-their transport's own limits.
+peer's connection once its grant is known, before the SETUP reply, over QUIC,
+WebSocket, or TCP alike. Links the relay dials get them from the handshake on.
+A link carrying a whole cluster is then not throttled by `[quic]` limits sized
+for one viewer, for example `--limits-peer-quic-max-streams=200000`. Peers over
+iroh keep iroh's own limits. The 16 MiB windows carry about 450 Mbps at a 250 ms
+RTT and about 1 Gbps at 100 ms; raise both for a busier link.
 
 These are the defaults. Each subscription and FETCH holds a stream, as does each
 PUBLISH a peer's track listing gets, so `[quic]` or `[limits.peer.quic]`
@@ -363,7 +370,7 @@ tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
 extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
-extensions.solicit = false           # Decline MoQ Solicit.
+extensions.solicit = false           # Decline MoQ Solicit. All default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
@@ -397,8 +404,9 @@ flow control slows the upstream hop and the publisher. A slower reader is never
 waited on: one that trails the fastest by more than the rest of the 32 MB
 reaches a shed frame. A group nobody reads keeps arriving and shedding.
 A stopped stream keeps its receive credit, so the relay stops reading at most as
-many streams per connection as fit in half of `quic.receive_window`; past that,
-groups keep arriving and shedding as if unpaced.
+many streams per connection as fit in half of its receive window, a stream
+window each; past that, groups keep arriving and shedding as if unpaced. At the
+defaults that is two streams per client session and eight per peer link.
 
 ## \[stats]
 
@@ -415,11 +423,11 @@ linger = "5m"                        # Keep an empty group's track listed this l
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run announces under a fresh [epoch](/concept/moq-lite#publisher-epochs),
+Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
 so a restart is a new broadcast at the same path. Each group is a
 [track](/concept/stats#group-tracks) of that broadcast, and one returning after
-its linger restarts its counters under a new epoch without an announce. The
-node's totals count everything since its epoch began, so billing reads those;
+its linger restarts its counters under a new run id without an announce. The
+node's totals count everything since its run began, so billing reads those;
 a group's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.

@@ -31,8 +31,12 @@ use super::{Message, Version, cluster, error::request, peer, request_update};
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// No Max Age is the publisher's retention alone, whatever it turns out to be.
-		max_delay: None,
+		// No Max Age is the publisher's retention alone, whatever it turns out to be, and
+		// moq-transport has no field for a minimum.
+		delay: crate::track::Delay { min: None, max: None },
+		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
+		// answer: never from its cache, nor from an edge reported before.
+		feed: true,
 		..Default::default()
 	}
 }
@@ -1542,7 +1546,7 @@ impl Publisher {
 						let applied = track_serve.track.subscription();
 						msg.subscriber_priority = super::priority::to_wire(applied.priority);
 						msg.filter = track_serve.filter;
-						msg.max_age = applied.max_delay.and_then(|delay| delay.as_millis().try_into().ok());
+						msg.max_age = applied.delay.max.and_then(|delay| delay.as_millis().try_into().ok());
 						track_serve.close_groups();
 						self.pause_join(_join.as_ref());
 						drop(track_serve);
@@ -2054,7 +2058,7 @@ impl Publisher {
 		// which the track's refresh ratio judges.
 		let mut subscription = serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
 		if let Some(max_age) = msg.max_age {
-			subscription.max_delay = Some(Duration::from_millis(max_age));
+			subscription.delay.max = Some(Duration::from_millis(max_age));
 		}
 		// A range that resolves without the live edge has a fixed start, which is no join:
 		// bound the subscription before subscribing so the ratio never judges it. From the
@@ -2325,7 +2329,7 @@ impl Publisher {
 		}
 		if let Some(max_age) = update.max_age {
 			let mut subscription = serve.track.subscription();
-			subscription.max_delay = Some(Duration::from_millis(max_age));
+			subscription.delay.max = Some(Duration::from_millis(max_age));
 			serve.track.update(subscription).map_err(failed)?;
 		}
 		if let Some(value) = update.new_group {
@@ -4634,7 +4638,7 @@ impl TrackServe {
 		if let Some(next) = range.fill_tail(fill, edge) {
 			let options = group::Fetch {
 				priority: self.track.subscription().priority,
-				max_delay: self.track.subscription().max_delay,
+				max_delay: self.track.subscription().delay.max,
 				..Default::default()
 			};
 			// A stream still serving this group from the fill's edge keeps what it covers, so
@@ -6285,8 +6289,10 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber =
-			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
+		);
 		let serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
 			subscriber,
@@ -6335,7 +6341,7 @@ mod group_priority_test {
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_priority(3)
-				.with_max_delay(std::time::Duration::from_secs(3600)),
+				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
 		);
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
@@ -6391,7 +6397,7 @@ mod group_priority_test {
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_priority(3)
-				.with_max_delay(std::time::Duration::from_secs(3600)),
+				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
 		);
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
@@ -6432,8 +6438,10 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber =
-			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
+		);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		for millis in 0..FRAMES as u64 {
 			group
@@ -6526,8 +6534,10 @@ mod group_priority_test {
 						crate::track::Info::timed(),
 					);
 					// Nothing goes stale, so only the credit bounds what is held.
-					let subscriber =
-						track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+					let subscriber = track.subscribe(
+						track::Subscription::default()
+							.with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+					);
 					let serve = TrackServe::new(
 						crate::driver::Transport::new(session.clone()),
 						subscriber,
@@ -6572,7 +6582,9 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let subscriber = track.subscribe(
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+		);
 		let mut serve = TrackServe::new(
 			crate::driver::Transport::new(SinkSession::gated_open_uni(gate.consume())),
 			subscriber,
@@ -14593,7 +14605,7 @@ mod tests {
 
 		let subscription = serving_subscription(128);
 		assert_eq!(
-			subscription.max_delay, None,
+			subscription.delay.max, None,
 			"no Max Age is the publisher's retention alone"
 		);
 		let mut subscriber = producer.subscribe(subscription);
@@ -15600,10 +15612,13 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		// One epoch, so the second route re-prices the instance rather than restart it.
-		let epoch = crate::Epoch::mint();
+		// One instance, so the second route re-prices the instance rather than restart it.
+		let instance = crate::Instance::random();
 		let cam = origin
-			.announce("solo-cam", crate::origin::Route::default().with_epoch(epoch.clone()))
+			.announce(
+				"solo-cam",
+				crate::origin::Route::default().with_instance(instance.clone(), 0),
+			)
 			.unwrap();
 		settle().await;
 
@@ -15638,7 +15653,7 @@ mod tests {
 		let _standby = origin
 			.announce(
 				"solo-cam",
-				crate::origin::Route::default().with_epoch(epoch).with_cost(0),
+				crate::origin::Route::default().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -15701,12 +15716,14 @@ mod tests {
 			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
 		}
 		.produce();
-		// One epoch, so the warm route re-prices the instance rather than restart it.
-		let epoch = crate::Epoch::mint();
+		// One instance, so the warm route re-prices the instance rather than restart it.
+		let instance = crate::Instance::random();
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+				crate::origin::Route::default()
+					.with_instance(instance.clone(), 0)
+					.with_cost(4),
 			)
 			.unwrap();
 		settle().await;
@@ -15739,7 +15756,10 @@ mod tests {
 
 		// We start carrying it: a free route outranks the cold one.
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_instance(instance, 0).with_cost(0),
+			)
 			.unwrap();
 
 		// The request consumed id 1, so the update takes the next of our parity. The
@@ -15774,11 +15794,13 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let epoch = crate::Epoch::mint();
+		let instance = crate::Instance::random();
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+				crate::origin::Route::default()
+					.with_instance(instance.clone(), 0)
+					.with_cost(4),
 			)
 			.unwrap();
 		settle().await;
@@ -15828,7 +15850,10 @@ mod tests {
 		peer.push(&counted);
 		// Repricing sends the REQUEST_UPDATE whose OK is counted.
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_instance(instance, 0).with_cost(0),
+			)
 			.unwrap();
 
 		let res = kio::clock::timeout(Duration::from_secs(5), run)
@@ -15840,7 +15865,7 @@ mod tests {
 		assert!(log.closes().iter().any(|(c, _)| *c == code), "{:?}", log.closes());
 	}
 
-	/// A route from a different original publisher under the same epoch (a replica)
+	/// A route from a different original publisher under the same instance (a replica)
 	/// updates the advertisement in place, like any other change within an instance:
 	/// withdrawing it would make the namespace briefly vanish downstream just because
 	/// its replica moved.
@@ -15856,12 +15881,12 @@ mod tests {
 		.produce();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let publisher_b = crate::Hops::try_from(vec![crate::Hop::new(8).unwrap()]).unwrap();
-		let epoch = crate::Epoch::mint();
+		let instance = crate::Instance::random();
 		let _from_a = origin
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_epoch(epoch.clone())
+					.with_instance(instance.clone(), 0)
 					.with_hops(publisher_a)
 					.with_cost(4),
 			)
@@ -15899,7 +15924,7 @@ mod tests {
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_epoch(epoch)
+					.with_instance(instance, 0)
 					.with_hops(publisher_b)
 					.with_cost(0),
 			)
@@ -16445,7 +16470,7 @@ mod tests {
 		);
 	}
 
-	/// moq-transport has no restart: another source winning a namespace without an epoch
+	/// moq-transport has no restart: another source winning a namespace under another instance
 	/// withdraws it and advertises it afresh, so the peer resubscribes.
 	#[kio::test]
 	async fn a_restart_re_advertises_the_namespace() {
@@ -16510,11 +16535,13 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let epoch = crate::Epoch::mint();
+		let instance = crate::Instance::random();
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+				crate::origin::Route::default()
+					.with_instance(instance.clone(), 0)
+					.with_cost(4),
 			)
 			.unwrap();
 		settle().await;
@@ -16550,7 +16577,10 @@ mod tests {
 
 		peer.push(&refusal);
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_instance(instance, 0).with_cost(0),
+			)
 			.unwrap();
 
 		for _ in 0..100 {

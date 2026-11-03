@@ -8,7 +8,7 @@
  */
 
 import { Pattern } from "@moq/pattern";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { decodeRoles, encodeRoles, WireRoleSchema } from "./wire.ts";
 
 const PathSchema = z.string().check(

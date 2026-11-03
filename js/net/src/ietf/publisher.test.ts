@@ -3,7 +3,6 @@ import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clo
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import * as Epoch from "../epoch.ts";
 import {
 	error,
 	fromTransport,
@@ -15,6 +14,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import { type Hop, HopSchema } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, SessionBroadcast } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -1342,16 +1342,16 @@ test("republishing a path clears a refusal without unannouncing first", async ()
 });
 
 /**
- * A new epoch on the same broadcast handle is another publisher instance, so a refusal of
- * the old one does not strand it. Rust gets this from the END and START an epoch change
+ * A new instance on the same broadcast handle is another publisher instance, so a refusal of
+ * the old one does not strand it. Rust gets this from the END and START an instance change
  * delivers.
  */
-test("a new epoch at the same path clears a refusal", async () => {
+test("a new instance at the same path clears a refusal", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	const broadcast = origin.createBroadcast(Path.from("restarted"));
-	broadcast.announce({ epoch: Epoch.mint() });
+	broadcast.announce({ instance: Instance.random() });
 
 	void pub.runPublishNamespaces();
 
@@ -1361,7 +1361,7 @@ test("a new epoch at the same path clears a refusal", async () => {
 	await declinePublishNamespace(declined, 0n);
 	await sleep(Nano.fromMilli(Milli(SETTLE)));
 
-	broadcast.announce({ ...broadcast.route, epoch: Epoch.mint() });
+	broadcast.announce({ ...broadcast.route, instance: Instance.random() });
 
 	const retried = await nextStream(pair.client);
 	if (!retried) throw new Error("the new instance was never offered");
@@ -3440,7 +3440,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await RequestOk.decode(client.reader, fx.version);
 		expect(track.subscription.peek()?.priority).toBe(117);
 		// Only the priority changes; retention and the group range survive.
-		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
+		expect(track.subscription.peek()?.delay?.max).toBe(before?.delay?.max);
 		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
@@ -4436,19 +4436,19 @@ test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async
 		}),
 	);
 	try {
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(250));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(250));
 		const parameters = new Parameters();
 		parameters.maxAge = 900;
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(900));
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 4n }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(900));
 	} finally {
 		client.close();
 		track.finish();

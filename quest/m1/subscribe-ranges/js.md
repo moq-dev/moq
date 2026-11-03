@@ -13,7 +13,7 @@ Decided 2026-10-27 (maintainer): removing FETCH from lite-07 moved to
 [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md), and
 this quest no longer waits on
 [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md). The rest starts now:
-the ranges model, anchors, `maxDelay: null`, and the on-demand request
+the ranges model, anchors, `delay: { max: null }`, and the on-demand request
 surface. Rust's lite-07 SUBSCRIBE already carries ranges
 ([moq-dev/moq#6715](https://github.com/moq-dev/moq/pull/6715)).
 
@@ -26,9 +26,9 @@ that demand on the same track instead, as the Rust copy does.
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
 The publisher resolves no relative or time start, serving it from the oldest
 group its budget allows, and SUBSCRIBE_OK `Range Start` says so; resolve them.
-Also mirror Rust's optional `Subscription::max_delay`
+Also mirror Rust's optional `Delay::max`
 ([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)): a `null`
-`maxDelay` asks for the publisher's max age alone, dominates when subscriptions
+`delay.max` asks for the publisher's max age alone, dominates when subscriptions
 combine, and goes out as the largest delay the wire allows, where today an
 omitted one means the live edge only.
 

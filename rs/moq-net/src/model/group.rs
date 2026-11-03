@@ -1368,7 +1368,10 @@ impl Drop for GroupState {
 /// A track is all timed or all untimed, so a frame must match it: a timed frame on an
 /// untimed track, or an untimed one on a timed track, is [`Error::TimestampMismatch`],
 /// as is a timestamp the track's scale can't hold.
-pub(super) fn on_track(timestamp: Option<Timestamp>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
+///
+/// A writer that changes state before its frame reaches [`Producer::write_frame`], such as
+/// publishing a group for it, checks with this first so a refused timestamp changes nothing.
+pub fn on_track(timestamp: Option<Timestamp>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
 	match (timestamp, timescale) {
 		(Some(timestamp), Some(timescale)) => Ok(Some(
 			timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
@@ -2218,24 +2221,24 @@ impl Producer {
 	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
 	}
-	/// Poll until a reader holds the group and the writer is at most 16 MB past the end of
-	/// the last frame its fastest reader took, so a local writer runs no further ahead than
-	/// the live tail keeps behind that reader.
+	/// Poll until a reader holds the group and the next frame, described by `frame`, fits
+	/// within 16 MB past the end of the last frame its fastest reader took, so a local writer
+	/// runs no further ahead than the live tail keeps behind that reader.
 	///
 	/// Ready once the group is closed, so the next write surfaces why. A reader that took
-	/// every committed frame is waiting on the writer, so it never holds the writer back,
-	/// and one whose next frame was shed has fallen off the group and is not waited on.
-	/// Writing without waiting never fails: the group sheds its front instead, as it also
-	/// does for a frame larger than the room left, which trims the tail to fit.
-	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
-		ready!(self.poll_paced(waiter, 0));
+	/// every committed frame is waiting on the writer, so it never holds the writer back, even
+	/// for a frame larger than the window, and one whose next frame was shed has fallen off
+	/// the group and is not waited on. Writing without waiting never fails: the group sheds
+	/// its front instead.
+	pub fn poll_ready(&self, waiter: &kio::Waiter, frame: &frame::Info) -> Poll<()> {
+		ready!(self.poll_paced(waiter, frame.size));
 		// A closed group reports `Closed`, which is ready too.
 		self.handle.state.poll_wanted_changed(waiter, false).map(|_| ())
 	}
 
-	/// Wait until a reader holds the group and the writer has room; see [`Self::poll_ready`].
-	pub async fn ready(&self) {
-		kio::wait(|waiter| self.poll_ready(waiter)).await
+	/// Wait until a reader holds the group and `frame` fits; see [`Self::poll_ready`].
+	pub async fn ready(&self, frame: &frame::Info) {
+		kio::wait(|waiter| self.poll_ready(waiter, frame)).await
 	}
 
 	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
@@ -3625,7 +3628,7 @@ impl Consumer {
 	///
 	/// A publisher still writing the group polls this while it waits on its own transport,
 	/// which the group's reads cannot see: once the subscription's
-	/// [`max_delay`](crate::track::Subscription::max_delay) expires the group, it abandons
+	/// [`Delay::max`](crate::track::Delay::max) expires the group, it abandons
 	/// the stream, even with every frame already read off. It abandons it too once
 	/// [`Self::poll_finished`] fails. Stays `true` once set.
 	#[cfg(any(feature = "async", test))]
@@ -4730,8 +4733,10 @@ mod test {
 	fn draining_a_parked_group_does_not_lock_the_backlog() {
 		let broadcast = super::super::broadcast::Producer::new(Default::default());
 		let track = broadcast.create_track("parked", track::Info::timed()).unwrap();
-		let mut subscriber =
-			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+		let mut subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
+		);
 		let groups: Vec<_> = (0..3)
 			.map(|sequence| {
 				let mut group = track.create_group(Info { sequence }).unwrap();

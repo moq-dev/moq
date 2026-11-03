@@ -293,6 +293,7 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -810,7 +811,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
-		const epoch = announced?.active.peek()?.epoch;
+		const epoch = announced?.active.peek()?.instance;
 		const sibling = broadcast.video("video");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
 		await settle();
@@ -848,7 +849,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
 		expect(LaggingAudioEncoder.instances).toHaveLength(instances);
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.instance).toBe(epoch);
 		expect(siblingTrack.appendGroup().sequence).toBe(1);
 
 		const reconfiguring = configured();
@@ -868,7 +869,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.instance).toBe(epoch);
 		expect(siblingTrack.appendGroup().sequence).toBe(2);
 	} finally {
 		subscriber?.close();
@@ -998,7 +999,7 @@ test.each([undefined, false, true])(
 
 			await push(4);
 			expect(encoder.out.stats.peek().frames).toBe(onDemand === false ? 2 : 0);
-			late = net.track("audio").subscribe({ maxDelay: Milli(10_000) });
+			late = net.track("audio").subscribe({ delay: { max: Milli(10_000) } });
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
 			await push(3);
@@ -1116,7 +1117,7 @@ test("default audio replays the last second after three seconds without a subscr
 		expect(encoder.out.active.peek()).toBe(false);
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ maxDelay: Milli(1000) });
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
 		await settle();
 		expect(encoder.out.stats.peek().frames).toBe(50 - LaggingAudioEncoder.LAG);
 		for (let index = 150; index < 153; index++) {
@@ -1167,7 +1168,7 @@ test("replayed raw audio raises no catalog delay", async () => {
 		new Estimator().write(150 * 20_000, broadcast.order);
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ maxDelay: Milli(1000) });
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
 		await settle();
 		for (let index = 150; index < 153; index++) {
 			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });

@@ -545,6 +545,22 @@ where
 		self
 	}
 
+	/// Report `frames` frames the source produced but never handed to this track, such as ones an
+	/// encoder fell behind on, in its catalog's [`stats`](crate::catalog::Producer::stats).
+	pub fn report_skipped(&self, frames: u64) {
+		if let Some(sent) = &self.sent {
+			sent.skip(frames);
+		}
+	}
+
+	/// Report the encoder's latest target bitrate in its catalog's
+	/// [`stats`](crate::catalog::Producer::stats). The catalog's `bitrate` stays the maximum.
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		if let Some(sent) = &self.sent {
+			sent.target(bitrate);
+		}
+	}
+
 	/// Count a written frame. Only video keyframes count as keyframes: elsewhere the bit only
 	/// marks where a group starts.
 	fn count(&self, bytes: usize, keyframe: bool) {
@@ -1001,7 +1017,8 @@ mod tests {
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 	/// edge: history has to be asked for.
 	fn replay() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY)
+		moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
 	}
 
 	/// The media track's full retention window, so readers started after publishing
@@ -1384,7 +1401,10 @@ mod tests {
 		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
-		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_delay(discontinuity_max_age));
+		let consumer = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(discontinuity_max_age)),
+		);
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();

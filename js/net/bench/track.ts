@@ -57,7 +57,7 @@ async function measure(
 	const held = hold.count;
 	const window = Milli(held > 0 ? 3_600_000 : retained);
 	const producer = new Producer("bench").accept({ timescale: Timescale.MILLI, maxAge: window });
-	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ maxDelay: window }));
+	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ delay: { max: window } }));
 	let sequence = 0;
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.
 	const publish = (close: boolean) => {
@@ -116,7 +116,7 @@ async function measure(
 	// Ending the track releases the newest group too; idle cleanup reclaims the cache.
 	clock += CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8 + 1;
 	const idleStart = now();
-	const replay = producer.subscribe({ maxDelay: window });
+	const replay = producer.subscribe({ delay: { max: window } });
 	if (replay.tryRecvGroup()) throw new Error("idle cache entries were retained");
 	const idle = (now() - idleStart) * 1000;
 	replay.close();

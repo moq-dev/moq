@@ -50,7 +50,7 @@ else
 
     # These files hold the map and the recipes that call it, and match no
     # module, so a change to them would otherwise validate none of it.
-    if grep -qE '^(justfile|sh/(dispatch|changed)\.sh|sh/local\.(sh|ts))$' "$changed"; then
+    if grep -qE '^(justfile|sh/(dispatch|changed|kvm)\.sh|sh/local\.(sh|ts))$' "$changed"; then
         echo "$action: root orchestration changed; running everything." >&2
         all=1
     fi
@@ -100,14 +100,15 @@ module() {
 
 # maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other bindings
 # generate from it, built by the `cargo build-ffi` alias in .cargo/config.toml.
-# Each binding's check also compiles its doc samples. kt, swift, go, cpp, and
+# Each binding's check also compiles its doc samples. Python, Kotlin, and Swift
+# render through the rs/uniffi-bindgen generator fork. kt, swift, go, cpp, and
 # obs_compile each build moq-ffi's cdylib with the same features and profile
 # before reading target/debug/libmoq_ffi.so. Cargo runs one build at a time per
 # target directory and leaves a fresh output untouched, so the first of those
 # lanes builds it while the rest wait in Cargo, and none rewrites it while
 # another reads it. py builds its test features into a target directory of its
 # own, and carla runs its tools outside py's venv.
-module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)' \
+module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/py/|doc/lib/samples\.sh$)' \
     tools='uv' compiles=check
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
@@ -137,7 +138,7 @@ module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi
 # them fails.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3' lane=bun fix
-module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' \
+module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
 # and its own modules and test helpers; those still gate the full flake.
@@ -152,7 +153,7 @@ module carla '^demo/carla/(sim/|justfile$)' \
 # swift needs no tools: it skips off macOS by design, and platform.yml is its
 # real gate. Its formatter is absent where nixpkgs cannot build it (see
 # flake.nix).
-module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)' \
+module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/swift/|doc/lib/samples\.sh$)' \
     fix
 module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
     tools='cargo go uniffi-bindgen-go' compiles=check fix
@@ -161,7 +162,7 @@ module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
 module markdown '' \
     tools='bun' lane=bun fix
 module gh '' \
-    tools='actionlint zizmor bun python3 cargo clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='actionlint zizmor bun python3 cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
@@ -351,7 +352,7 @@ step() {
             # Without KVM, QEMU falls back to emulation and the VM tests time
             # out long after. Refuse rather than skip, so a local gate never
             # reads as passing without them.
-            if [[ "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 && ! -e /dev/kvm ]]; then
+            if [[ "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 ]] && ! bash sh/kvm.sh; then
                 echo "$action: flake's NixOS VM tests need KVM, but /dev/kvm is missing; run them on a KVM host, as CI does" >&2
                 return 1
             fi

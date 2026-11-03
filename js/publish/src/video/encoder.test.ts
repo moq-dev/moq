@@ -126,6 +126,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -170,6 +171,7 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: live,
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -227,6 +229,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -315,6 +318,7 @@ test("every published config fits a probe for its own codec", async () => {
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -670,6 +674,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -840,6 +845,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -1050,6 +1056,7 @@ async function recordKeyframes(
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -1175,7 +1182,7 @@ test.each([false, true])(
 			await recording.send(150);
 			expect(recording.keys).toEqual(onDemand ? [] : [0, 100]);
 
-			late = net.track("video").subscribe({ maxDelay: Milli(10_000) });
+			late = net.track("video").subscribe({ delay: { max: Milli(10_000) } });
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
 			await recording.send(200);
@@ -1311,7 +1318,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
-		const epoch = announced?.active.peek()?.epoch;
+		const epoch = announced?.active.peek()?.instance;
 		const sibling = broadcast.video("video/sd");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
 		await flush();
@@ -1337,7 +1344,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).toBe(false);
 		expect(encoder.out.active.peek()).toBe(false);
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.instance).toBe(epoch);
 		expect(siblingTrack.closed.peek()).toBeUndefined();
 		expect(siblingTrack.appendGroup().sequence).toBe(1);
 		const instances = FakeVideoEncoder.instances.length;
@@ -1381,7 +1388,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.instance).toBe(epoch);
 		expect(siblingTrack.appendGroup().sequence).toBe(2);
 	} finally {
 		subscriber?.close();
@@ -1512,6 +1519,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -1587,6 +1595,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		hls: () => undefined,
 		hlsHint: new Signal(undefined),
@@ -1648,6 +1657,7 @@ test("each slot keeps its own ceiling and maxima", async () => {
 		const slot = new Signal<Slot | undefined>(new Slot());
 		const rendition = () => ({
 			config: new Signal(undefined),
+			stats: new Signal(undefined),
 			track: new Signal<Moq.Track.Producer | undefined>(undefined),
 			slot,
 			hls: () => undefined,
