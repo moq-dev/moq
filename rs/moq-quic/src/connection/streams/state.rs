@@ -958,9 +958,12 @@ impl StreamsState {
 		let mut queued = false;
 		for dir in Dir::iter() {
 			let diff = self.max_remote[dir as usize] - self.sent_max_remote[dir as usize];
-			// To reduce traffic, only announce updates if at least 1/8 of the flow control window
-			// has been consumed.
-			if diff > self.max_concurrent_remote_count[dir as usize] / 8 {
+			// Batch updates while the peer still has advertised credit. Long-lived streams can
+			// hold most of the window, so waiting for a batch after it is spent would deadlock.
+			if diff > 0
+				&& (diff > self.max_concurrent_remote_count[dir as usize] / 8
+					|| self.next_remote[dir as usize] >= self.sent_max_remote[dir as usize])
+			{
 				pending.max_stream_id[dir as usize] = true;
 				queued = true;
 			}
@@ -1362,6 +1365,58 @@ mod tests {
 			(1024 * 1024u32).into(),
 			(1024 * 1024u32).into(),
 		)
+	}
+
+	/// Long-lived streams cannot hold the update batch hostage when one other stream turns over.
+	#[test]
+	fn held_streams_do_not_withhold_returned_credit() {
+		for dir in Dir::iter() {
+			let mut server = make(Side::Server);
+			let mut pending = Retransmits::default();
+			for index in 0..127 {
+				let id = StreamId::new(Side::Client, dir, index);
+				data(&mut server, id, 0, 1, false);
+				assert_eq!(Streams::new(&mut server, &ConnState::Established).accept(dir), Some(id));
+			}
+			for index in 127..131 {
+				let id = StreamId::new(Side::Client, dir, index);
+				data(&mut server, id, 0, 1, true);
+				assert_eq!(Streams::new(&mut server, &ConnState::Established).accept(dir), Some(id));
+				let mut stream = recv(&mut server, &mut pending, id);
+				let mut chunks = stream.read().unwrap();
+				assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
+				assert!(chunks.next(1).unwrap().is_none());
+				chunks.finalize();
+				if dir == Dir::Bi {
+					let mut stream = send::Stream {
+						id,
+						state: &mut server,
+						pending: &mut pending,
+						conn_state: &ConnState::Established,
+					};
+					stream.finish().unwrap();
+					stream.release();
+					server.received_ack_of(frame::StreamMeta {
+						id,
+						offsets: 0..0,
+						fin: true,
+					});
+				}
+				server.queue_max_stream_id(&mut pending);
+				assert!(
+					pending.max_stream_id[dir as usize],
+					"the peer has spent every advertised stream"
+				);
+				server.write_control_frames(
+					&mut Vec::new(),
+					&mut pending,
+					&mut ThinRetransmits::default(),
+					&mut FrameStats::default(),
+					1200,
+				);
+				assert_eq!(server.sent_max_remote[dir as usize], index + 2);
+			}
+		}
 	}
 
 	/// Notifications coalesce while a reader is parked, and freed streams leave no table storage.
