@@ -135,8 +135,8 @@ async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 #[kio::test]
 async fn a_fresh_reader_fills_nothing_below_its_start() {
 	for (version, want) in [
-		("moq-lite-04", 6..GROUPS),
 		// Starts at the live edge.
+		("moq-lite-04", GROUPS - 1..GROUPS),
 		("moq-lite-05", GROUPS - 1..GROUPS),
 		("moq-lite-06", 6..GROUPS),
 		("moq-lite-07-wip", 6..GROUPS),

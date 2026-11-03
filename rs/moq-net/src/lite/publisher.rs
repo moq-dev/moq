@@ -2256,7 +2256,10 @@ impl Request for SubscribeServe {
 						ietf,
 					};
 
-					let latest = latest.or_else(|| track.latest_sequence());
+					let latest = match shared.version {
+						Version::Lite01 | Version::Lite02 => latest,
+						_ => latest.or_else(|| track.latest_sequence()),
+					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
 					if let Some(update) = update {

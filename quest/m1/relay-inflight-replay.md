@@ -33,11 +33,14 @@ pipeline-requests epic, so this sits at the m1 top level.
 Public API: none. Wire: none.
 
 Implementation checkpoint: [moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737)
-removes the confirmation-time version guard and adds a controlled held-answer test.
+extends the confirmation-time lookup to lite03/04 and adds a controlled held-answer test.
 The test exposes cached groups 0, 3, and 7 with source start 0, and checks the
 encoded group streams. Lite03/04 join at 7; explicit starts and arrival floors
 remain covered, with lite05/06 controls. The range-anchor integration expectation
-now includes lite03/04 among the versions whose unfloored copy joins live.
+and budget integration expectations now include lite03/04 among the versions
+whose unfloored copy joins live. Lite01/02 retain their existing behavior.
+`just rs test -p moq-net --no-fail-fast` passes all 3,343 selected tests
+(13 skipped by the standard profile).
 
 ## Waiting
 
@@ -45,9 +48,8 @@ now includes lite03/04 among the versions whose unfloored copy joins live.
   The live-edge fix makes
   `moq-hls::integration server::a_cursor_records_a_publisher_without_fetch`
   time out with `moq-lite-03: no segment recorded`; the same test passes with
-  `origin/main`'s publisher implementation. The normal test first reports this
-  on lite01; a diagnostic run limited to lite03 confirms that restricting the
-  fix to lite03/04 would not avoid it. `Demand::wanted` includes queries, and
+  `origin/main`'s publisher implementation. A diagnostic run limited to lite03
+  confirmed this before the fix was restricted to lite03/04. `Demand::wanted` includes queries, and
   pre05 copies expose synthetic info before their upstream SUBSCRIBE answer,
   so neither signal establishes that a media subscription can retain the
   recorder's first segment. Options: (1) preserve the settled live-edge join
