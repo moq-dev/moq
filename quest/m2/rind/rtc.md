@@ -30,5 +30,4 @@ offered.
 
 ## Required
 
-- [rind runs on CPUs without the crypto extensions](/quest/m2/rind/older-cpus.md) - the rind release this switches to
 - [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - where str0m and dimpl live once vendored

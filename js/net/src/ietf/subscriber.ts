@@ -20,7 +20,8 @@ import {
 } from "../error.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, wireDelay } from "../internal.ts";
+import * as Instance from "../instance.ts";
+import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
@@ -295,7 +296,7 @@ export class Subscriber {
 	}
 
 	/**
-	 * The epochless route an advertisement carries; one without a path is anonymous and free.
+	 * The route an advertisement carries, before it is minted an instance; one without a path is anonymous and free.
 	 */
 	#route({ cluster }: AdvertParams): Route {
 		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
@@ -375,7 +376,9 @@ export class Subscriber {
 			this.#settleAnnounce(path, existing);
 			return id;
 		}
-		route = this.#priced(route);
+		// moq-transport carries no instance, so each namespace the peer advertises anew is a
+		// stream of its own, even one it advertised before on this session.
+		route = this.#priced({ ...route, instance: Instance.minted(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
@@ -407,7 +410,9 @@ export class Subscriber {
 	#settleAnnounce(path: Path.Valid, existing: Announced) {
 		const newest = existing.adverts.at(-1);
 		if (newest === undefined) return;
-		const route = this.#priced(newest.route);
+		// Every advertisement of a path the peer holds is the stream its first one named.
+		const { instance, epoch } = existing.route;
+		const route = this.#priced({ ...newest.route, instance, epoch });
 		if (routesEqual(existing.route, route)) return;
 		existing.route = route;
 		this.#consumes.announce(path, existing, route, false);
@@ -1033,7 +1038,7 @@ export class Subscriber {
 			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = producer.subscription.peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			const wantedMaxAge = this.#maxAge ? wireDelay(subscription) : undefined;
+			const wantedMaxAge = this.#maxAge && subscription ? maxDelayOf(subscription) : undefined;
 			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
@@ -1197,7 +1202,7 @@ export class Subscriber {
 			trackName: request.name,
 			// Read now, since a subscriber can join while the stream opened. Updates follow it.
 			subscriberPriority: toWire(request.priority),
-			maxAge: this.#maxAge ? wireDelay(request.subscription) : undefined,
+			maxAge: this.#maxAge ? maxDelayOf(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
 			// Joins at the current group, from its first object: the subscription delivers the
@@ -1255,6 +1260,7 @@ export class Subscriber {
 			ietf: version,
 		});
 		const producer = staged.producer;
+		hooks.receiveTrack(producer);
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
 		// The subscription starts after Largest, so the joining FETCH or the fill brings its

@@ -22,7 +22,7 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
-import { hiddenBelow, hooks, presented } from "../internal.ts";
+import { firstEligible, hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
@@ -33,7 +33,7 @@ import type { Groups, Info, Range, Position as TrackPosition, Subscriber as Trac
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
-import { untilGivenUp } from "../util/given_up.ts";
+import { GivenUp } from "../util/given_up.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -497,13 +497,17 @@ export class Publisher {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
 			const fixed = subscribeRange(msg, {}, version);
-			return source.track(msg.trackName).subscribe({
-				priority: fromWire(msg.subscriberPriority),
-				order: msg.groupOrder,
-				// An absent budget preserves everything retained by the producer.
-				maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
-				ranges: fixed.start ? serveRanges(fixed) : undefined,
-			});
+			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
+			return hooks.parked(
+				source.track(msg.trackName).subscribe({
+					priority: fromWire(msg.subscriberPriority),
+					order: msg.groupOrder,
+					// An absent budget preserves everything retained by the producer.
+					// moq-transport has no field for a minimum.
+					delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
+					ranges: fixed.start ? serveRanges(fixed) : undefined,
+				}),
+			);
 		};
 		let track = subscribe(broadcast);
 
@@ -707,7 +711,8 @@ export class Publisher {
 			track.update({
 				priority,
 				order,
-				maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
+				// moq-transport has no field for a minimum.
+				delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
 				ranges: serveRanges(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
@@ -721,7 +726,7 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			cache =
 				fill && fill.kind !== "empty"
-					? track.fork({ priority, order, maxDelay: Milli(Varint.MAX_U53) })
+					? track.fork({ priority, order, delay: { max: Milli(Varint.MAX_U53), min: null } })
 					: undefined;
 
 			const ranked = new Priority(track, info.priority);
@@ -834,8 +839,11 @@ export class Publisher {
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
-					if (params.maxAge !== undefined)
-						track.update({ ...track.subscription.peek(), maxDelay: Milli(params.maxAge) });
+					const maxAge = params.maxAge;
+					if (maxAge !== undefined) {
+						const current = track.subscription.peek();
+						track.update({ ...current, delay: { ...current?.delay, max: Milli(maxAge) } });
+					}
 					// A fill holds one cache view. At most this decoded update waits behind
 					// it; request parsing then backpressures any further fill requests.
 					if (params.fillParameters) await filling;
@@ -904,7 +912,7 @@ export class Publisher {
 							? track.fork({
 									priority: fromWire(msg.subscriberPriority),
 									order: msg.groupOrder,
-									maxDelay: Milli(Varint.MAX_U53),
+									delay: { max: Milli(Varint.MAX_U53), min: null },
 								})
 							: undefined;
 					try {
@@ -1093,6 +1101,9 @@ export class Publisher {
 		};
 		const changed = bounds.subscribe(narrowed);
 		narrowed();
+		// The subscription's budget, or an eviction of what is left to read, may give up on the
+		// group mid-write, which abandons the stream. A group already given up never starts the write.
+		const givenUp = new GivenUp(group);
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -1102,9 +1113,11 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
-				failure = stop;
-			});
+			const abandoned = givenUp
+				.write(() => opened.promise)
+				.then((stop) => {
+					failure = stop;
+				});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1151,17 +1164,18 @@ export class Publisher {
 			let left: StreamError | undefined;
 			const cancelled = unsubscribed.then(() => {
 				left = new StreamError(StreamCode.Cancel, { message: "unsubscribed while serving the group" });
-				return undefined;
 			});
-			// The subscription's budget, or an eviction of what is left to read, may give up on the
-			// group mid-write, which abandons the stream. A group already given up never starts the write.
+			// Either ends serving the group: made once, so each read and write races one promise for both.
+			const stopped = race([cancelled, excluded.promise]).then(() => false as const);
 			const write = async (op: () => Promise<unknown>) => {
-				const stop = await untilGivenUp(group, op);
+				const stop = await givenUp.write(op);
 				if (stop) throw stop;
 			};
 			// Writing the group stops for the pause too; the drain below answers it without a reset.
+			// One race covers the budget and both, rather than racing the budget's race again.
 			const send = async (op: () => Promise<unknown>) => {
-				await race([write(op), cancelled, excluded.promise]);
+				const stop = await givenUp.write(op, stopped);
+				if (stop) throw stop;
 				if (left) throw left;
 				if (rangeError) throw rangeError;
 			};
@@ -1184,12 +1198,7 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([
-						hooks.readGroupFrame(group, false, slice.skip),
-						stream.closed,
-						cancelled,
-						excluded.promise,
-					]);
+					const read = await race([hooks.readGroupFrame(group, false, slice.skip), stream.closed, stopped]);
 					if (left) throw left;
 					if (rangeError) throw rangeError;
 					if (!read) break;
@@ -1253,6 +1262,7 @@ export class Publisher {
 			hooks.releaseGroupReader(group, error(err));
 		} finally {
 			changed();
+			givenUp.close();
 			group.close();
 		}
 	}
@@ -1690,13 +1700,9 @@ export class Publisher {
 				for (const [covered, candidates] of advertised) {
 					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
 					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
-					if (
-						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
-						!this.#gate.allows(covered) ||
-						candidates.length === 0
-					)
-						continue;
-					updated.set(covered, candidates[0]);
+					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || !this.#gate.allows(covered)) continue;
+					const best = firstEligible(candidates);
+					if (best) updated.set(covered, best);
 				}
 				// Another broadcast at the path starts its backoff fresh, as a refusal does.
 				for (const [key, lapse] of lapses) {
@@ -2076,7 +2082,9 @@ export class Publisher {
 	 * @internal
 	 */
 	runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream): Promise<void> {
-		const request = new RequestStream(stream, this.#session, this.#quic);
+		// Nothing can follow a TRACK_STATUS, so a FIN only ends the requester's input; a reset or
+		// STOP_SENDING withdraws it.
+		const request = new RequestStream(stream, this.#session, this.#quic, { finCancels: false });
 		return request.serve(this.#runTrackStatusRequest(msg, request));
 	}
 
@@ -2362,7 +2370,9 @@ export class Publisher {
 
 		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
-		const cache = broadcast.track(named.trackName).subscribe({ priority, maxDelay: Milli(Varint.MAX_U53) });
+		const cache = broadcast
+			.track(named.trackName)
+			.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
 		let answer: FetchAnswer | undefined;
 		try {
 			const info = await untilAborted(cache.info(), signal);

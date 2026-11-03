@@ -9,13 +9,15 @@ about as much audio a minute as the Opus `bursty` rows, and the Opus
 `near-zero` row holding a 60 ms target with no underrun episodes. `test/audio-quality/budgets.json`
 carries every browser row's ceilings re-measured from them.
 
-## Plan
+## Waiting
 
-Waits on the nightlies: check the `audio-quality-run` artifacts of the
-scheduled Nightly runs on `main` (`gh run download <id> -n audio-quality-run`)
-once seven have run. Never dispatch the nightly by hand. The artifacts expire
-after 7 days, so download each run's as it lands rather than waiting for the
-seventh.
+- moq-dev/moq: seven scheduled Nightly runs on `main` from 2026-10-29 on, the
+  seventh due about 2026-11-04. Check with `gh run download <id> -n
+  audio-quality-run` on each; never dispatch the nightly by hand. The artifacts
+  expire after 7 days, so download each run's as it lands rather than waiting
+  for the seventh.
+
+## Plan
 
 Decided 2026-10-30 (maintainer): the count restarts at the 2026-10-29
 nightly, the first after

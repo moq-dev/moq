@@ -11,6 +11,11 @@ it locally. On macOS or Linux, install it with
 `curl -fsSL https://moq.sh | sh`, or use cargo, brew, apt, dnf, winget, or
 Docker; see [Install](/setup/install).
 
+Its cryptography comes from [rind](https://github.com/moq-dev/rind), which
+runs on any x86\_64 CPU and on any aarch64 CPU with NEON, including a Raspberry
+Pi 4, CM4, or Zero 2 W on a 64-bit OS. On a CPU missing a feature rind needs,
+`moq` exits at startup naming it.
+
 ## What it does
 
 | Verb | Endpoint | |
@@ -31,6 +36,7 @@ Docker; see [Install](/setup/install).
 | `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
+| `repair` | `mp4 <file>` | Finish an `export mp4` recording that was cut short. |
 | `devices` | | List capture sources and their ids. |
 
 ## Grammar
@@ -90,9 +96,9 @@ an error; run it again to publish anew. `import ts` and `import srt` republish
 instead when an MPEG-TS clock steps onto another timeline: the PCR and every
 stream stepping back, flagged or not, or more than 10 s forward without a
 `discontinuity_indicator`. The broadcast finishes there, and the rest of the
-input publishes as a new instance under a new
-[epoch](/concept/moq-lite#publisher-epochs), on the same SRT connection, which
-`export ts --stitch --follow` carries on into. The new instance keeps the mux
+input publishes as a new stream under a new
+[instance](/concept/moq-lite#publisher-instances), on the same SRT connection, which
+`export ts --stitch --follow` carries on into. The new stream keeps the mux
 rate the old one measured, so its catalog goes out with its first media rather
 than after a fresh two-second measurement. An unflagged step usually means
 redundant encoders behind a changeover switch: time-lock their clocks, or have
@@ -200,12 +206,17 @@ Other video waits for its first keyframe.
 `mp4 --output <file>` records to a new file the way OBS's hybrid MP4 does: it is
 fragmented MP4 while recording, so a crash leaves a playable file, and the
 broadcast's end or the first Ctrl-C (or SIGTERM) finishes it as a regular MP4 with
-its index at the end, without copying the media. A second signal exits at once
-and leaves it fragmented. Unlike `fmp4`, a rendition that joins mid-recording is
-kept, though only the finished file indexes it.
+its index at the end, without copying the media. Finishing writes everything
+received, the fragment still buffering included. A second signal exits at once
+and leaves it fragmented, minus that fragment. Unlike `fmp4`, a rendition that
+joins mid-recording is kept, though only the finished file indexes it.
+`moq repair mp4 <file>` finishes a recording that a crash or second signal left
+fragmented, in place and the same way: it indexes every fragment written in full,
+late renditions included, and cuts a partial one at the end.
 
 ```bash
 moq ... export mp4 --output recording.mp4
+moq repair mp4 recording.mp4
 ```
 
 MPEG-TS export pads to the source's constant mux rate when the catalog
@@ -249,7 +260,7 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-epoch. A refused broadcast request or a catalog with nothing this build can
+instance. A refused broadcast request or a catalog with nothing this build can
 play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
@@ -358,30 +369,36 @@ equivalents.
 
 ## Archive
 
+Recording through our publishers and relays needs opt-in `moq-lite-07-wip`
+on every hop for track discovery. Older moq-lite versions cannot list tracks,
+and our moq-transport publishers refuse the listing. The publisher and each
+relay must enable it too; see [Archives](/concept/archives#discover-and-record)
+for how, and for storage and serving limits.
+
 ```bash
 # Record every broadcast announced under `event`
-moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
+moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 
 # Replay one recorded broadcast under another name
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<epoch>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<instance>
 ```
 
 `export archive` records every broadcast announced at or under `--broadcast`
-with [moq-archive](https://docs.rs/moq-archive), each publisher instance under
-`<broadcast>/@<epoch>` in the store, until the connection ends. Like
+with [moq-archive](https://docs.rs/moq-archive), each stream under
+`<broadcast>/@<instance>` in the store, until the connection ends. Like
 `announced`, it leaves out a broadcast whose name starts with `.` unless
 `--broadcast` names it. A broadcast path segment that starts with `@` is
 stored as `%40`, so no recording lands inside another. Every track is stored as its own objects, cut about every 2 s
 of media (or wall clock for an [untimed](/concept/moq-lite#subscriptions)
 track) and at least every 4 s, splitting a long group between frames. A broadcast restarted under a new
-[epoch](/concept/moq-lite#publisher-epochs) records under its own key; a route
-without an epoch gets a fresh one each time it announces, so it never resumes
-or stitches into an older recording. Any recording that fails ends the export.
+[instance](/concept/moq-lite#publisher-instances) records under its own key; a route
+over an older wire gets a fresh instance each time it announces, so it never
+resumes or stitches into an older recording. Any recording that fails ends the export.
 `--retention 1h` keeps only the last hour, a DVR, deleting older objects
 `--retention-grace` (default 30 s) after they leave the window.
 
-`import archive` republishes one recorded broadcast, the `<broadcast>/@<epoch>`
-prefix `export archive` wrote, as an ordinary broadcast under a new epoch: every
+`import archive` republishes one recorded broadcast, the `<broadcast>/@<instance>`
+prefix `export archive` wrote, as an ordinary broadcast under a new instance: every
 track, the catalog included, with its original groups, frames, timescale, and
 priority. Each track is live from its newest stored group and serves older
 groups from the store on request, with no max age, so the whole recording stays
@@ -406,22 +423,30 @@ moq --connect https://relay.example.com/anon \
     -- export --broadcast event.hang archive file:///recordings
 ```
 
+These exporters read the local import through their shared origin, so recording
+here needs no network track discovery.
+
 ## Publisher runs
 
-Each run of `moq` announces a fresh
-[publisher epoch](/concept/moq-lite#publisher-epochs), kept across reconnects.
+Each run of `moq` announces under a fresh random
+[instance](/concept/moq-lite#publisher-instances), kept across reconnects.
 The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
 rtsp` one per RTSP session, and `import ts --program all` one per program.
+No importer continues its group sequences across a restart, so `moq` has no
+flag to set a stable instance and refuses one. A publisher that does continue
+them sets it on its route in a library, such as `Route::with_instance` in Rust
+or `announce({ instance, epoch })` in JavaScript; see
+[identity and recovery](/concept/identity).
 
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
-numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
-opt-in, and order by the host's clock there, so a host whose clock runs behind the old run's waits for it to close.
-Other versions carry no epoch, so a restart from another session is the newest
-route at an equal cost, or a better one.
+numbers to catch up. A relay ranks the route that entered it for exactly the
+path newest first at an equal cost, so the restart wins over the old run's
+lingering session. Instances cross a connection only on moq-lite 07, which is
+opt-in; over other versions the receiving session mints one per announcement.
 
-Each independent importer publishes its own epoch, even when two importers read
-one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
+Each independent importer publishes its own instance, even when two importers
+read one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
 same-path switching, subscriber-controlled selection on separate paths, and
 several routes to one publisher.
 
@@ -481,8 +506,8 @@ as a player that read the final catalog after the end, still gets the tail;
 import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
 completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
 ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
-broadcast at once. A reconnect publishes a newer
-[epoch](/concept/moq-lite#publisher-epochs) at the same path, which takes over
+broadcast at once. A reconnect publishes a new
+[instance](/concept/moq-lite#publisher-instances) at the same path, which takes over
 the path while the old broadcast finishes its linger. `import rtsp` redials
 after every session, so it closes each run at once and refuses `--linger`, as
 do `import archive`, `import capture`, and a WHEP pull (`import rtc --connect`).
@@ -515,14 +540,18 @@ continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends with the broadcast. A publisher that leaves still gets
-what the export buffered of it out on schedule first. `export ts --follow 10s`
-then waits that long for the same publisher instance to come back, and carries
-on with the same stream. A return that refuses its catalog keeps it waiting
-for the next announcement; if the follow runs out first, it exits 1 with that
+A stdout export ends when its catalog ends and its media has drained, so
+finishing only the media tracks leaves it waiting for catalog updates.
+`export ts --passthrough` instead ends with its track, once the packets it
+buffered are out, even while the catalog stays open; only a catalog that ends
+without naming the track ends it first. A publisher that leaves still gets what
+the export buffered of it out on schedule first. `export ts --follow 10s` then
+waits that long for the same publisher instance to come back, and carries on
+with the same stream. A return that refuses its catalog keeps it waiting for the
+next announcement; if the follow runs out first, it exits 1 with that
 refusal. One that goes before serving, such as one still routed through a dead
 session, is no return. A replacement (a restarted publisher, under a new
-[epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
+[instance](/concept/moq-lite#publisher-instances)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
@@ -534,10 +563,9 @@ congested link. The marked switch drops the old instance's buffered tail, so
 the replacement plays at `--delay` rather than behind it. An unimpaired switch
 usable within that window adds no gap. Congestion can starve the old instance
 sooner or leave the replacement acquiring past the window, causing a gap.
-Timestamps across epochs are not aligned. Without `--stitch` the export stays
-on the old publisher while it is up. Only lite-07 and moq-transport sessions
-carry epochs, so on the
-default version every return is a replacement. A failure other than the
+Timestamps across instances are not aligned. Without `--stitch` the export
+stays on the old publisher while it is up. Only lite-07 sessions carry
+instances, so on the default version every return is a replacement. A failure other than the
 publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
 can mark a break, so the other formats refuse `--linger`, the released spelling
 of `--follow`.
@@ -546,8 +574,9 @@ of `--follow`.
 
 `import --report` names a track in the catalog's `stats` section and reports
 what each rendition has written, about once a second while someone subscribes,
-with the connection's RTT, estimated send rate, and loss. It covers the stdin imports;
-capture, the gateways, `archive`, and `ts --program all` refuse it.
+with the connection's RTT, estimated send rate, and loss. It covers the stdin imports
+and `capture`, whose renditions also report the encoder's target bitrate and the
+video frames it fell behind on; the gateways, `archive`, and `ts --program all` refuse it.
 
 `import --echo-path <path>` solicits feedback from the same imports: it sets
 the catalog's `echo` path, resolved against the broadcast like a relative URL,

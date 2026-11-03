@@ -13,17 +13,51 @@ Landed in [moq-dev/moq#6949](https://github.com/moq-dev/moq/pull/6949):
 `groups`, a per-reader window (`js/net/src/window.ts`) with the Rust time-end
 walk, the union aggregate, lite-07 SUBSCRIBE carrying the list with times in
 the track's timescale (older wires the covering span, refusing other relative
-and time anchors per reader), `maxDelay: null`, the lite-07 publisher resolving
-relative and time anchors and naming each range's start in SUBSCRIBE_START,
-FINning a covered bounded subscription without SUBSCRIBE_END, and the
-subscriber keeping that copy and opening a fresh SUBSCRIBE on the same track
-once the demand moves past what it covered.
+and time anchors per reader), the lite-07 publisher resolving relative and
+time anchors and naming each range's start in SUBSCRIBE_START, FINning a
+covered bounded subscription without SUBSCRIBE_END, and the subscriber
+keeping that copy and opening a fresh SUBSCRIBE on the same track once the
+demand moves past what it covered. `delay: { max: null }` landed with
+[moq-dev/moq#7597](https://github.com/moq-dev/moq/pull/7597).
 
-Decided 2026-10-31 (maintainer): a range-bounded reader parks once its ranges
-are covered, in JavaScript as in Rust. A lite-07 copy outlives a covered FIN,
-so the cache stays warm for the same range and a widening update still
-delivers. A read that should end once its range is served belongs to the
-request surface and `fetchGroup` below, not to a subscription.
+Reader completion, decided 2026-11-02 (maintainer, on
+[moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545) and
+[moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)), replacing the
+2026-10-31 decision that a range-bounded reader parks:
+
+1. Park in both: keep the copy on a covered FIN, and leave a read that should
+   end to the request surface and `fetchGroup`.
+2. ✅ Complete in both: a bounded read ends once every group in its ranges is
+   handed out, dropped, skipped as stale, or given up, and only wire
+   publishers park.
+3. Leave it: JS copies keep releasing on a covered FIN.
+
+JavaScript matches Rust: a plain reader judges its own window, as the Rust
+`Cursor::is_exhausted` does, and a reader following route copies judges it on
+the serving copy, as the Rust `Reader::exhausted` does. Wire publishers and
+route copies read through the package-internal `hooks.parked`, the Rust
+`track::Subscriber::parked`. A lite-07 copy still outlives a covered FIN, so
+the cache answers the same range and a widening update still delivers.
+
+Decided 2026-11-03 (maintainer): main moved the cursor paths under
+[moq-dev/moq#6949](https://github.com/moq-dev/moq/pull/6949)
+([moq-dev/moq#7486](https://github.com/moq-dev/moq/pull/7486),
+[moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
+[moq-dev/moq#7597](https://github.com/moq-dev/moq/pull/7597),
+[moq-dev/moq#7609](https://github.com/moq-dev/moq/pull/7609)), so the PR
+re-ports its ranges onto them:
+
+1. ✅ Re-port in place, on the same PR.
+2. A fresh branch, closing and deleting this one.
+3. Park it.
+
+Mirror lite-07 bounded completion as the Rust copy implements it. The target
+is [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)' "Ends are signaled"
+design: a covered bounded subscription sends SUBSCRIBE_FINISH, keeps the
+Subscribe Stream open, and never FINs it. Until SUBSCRIBE_FINISH ships, the
+wire FINs a covered bounded subscription without SUBSCRIBE_END, and the JS
+subscriber reopens demand it no longer covers on the same track, as the Rust
+copy does.
 
 What remains:
 
@@ -50,7 +84,11 @@ What remains:
   resolved under a budget at least as loose as the reader's, and on a pre-06
   wire fill below the start only when the reader names a floor. `js/net`
   requests no fills today, so nothing over-fetches yet; this keeps it that way
-  once it does.
+  once it does. With fills, a bounded read also mirrors Rust's head fill
+  ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): it hands out
+  a cached group missing its first frames only once a fill answers from frame
+  0, and gives one whose fill is refused up as a miss. Until then a JS reader
+  counts a hole the feed no longer owes as given up, with no fill asked.
 
 Ranges stay whole groups ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)),
 so the group model keeps refusing a nonzero lite `frameStart` as a protocol

@@ -1,4 +1,3 @@
-import type * as Epoch from "../epoch.ts";
 import {
 	fromTransport,
 	ProtocolViolation,
@@ -7,11 +6,12 @@ import {
 	TimestampMismatch,
 	toStreamCode,
 } from "../error.ts";
+import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
-import { decodeEpoch, encodeEpoch } from "./epoch.ts";
+import { decodePin, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
 import {
@@ -19,6 +19,7 @@ import {
 	hasEndError,
 	hasFrameBounds,
 	hasGroupOrder,
+	hasMinDelay,
 	hasOrder,
 	hasRanges,
 	hasRefresh,
@@ -393,6 +394,21 @@ export function inclusiveGroupEnd(exclusive?: number): number | undefined {
 	return exclusive - 1;
 }
 
+/** Encode the `Subscriber Min Age`: milliseconds plus one, zero meaning not stated. Dropped
+ * on a wire without the field. */
+async function encodeMinDelay(w: Writer, version: Version, minDelay: number | undefined) {
+	if (!hasMinDelay(version)) return;
+	await w.u62(minDelay === undefined ? 0n : BigInt(minDelay) + 1n);
+}
+
+/** Decode the `Subscriber Min Age`, as not stated on a wire without the field. */
+async function decodeMinDelay(r: Reader, version: Version): Promise<number | undefined> {
+	if (!hasMinDelay(version)) return undefined;
+	const value = await r.u62();
+	if (value > BigInt(Number.MAX_SAFE_INTEGER) + 1n) throw new RangeError("min delay exceeds safe integer");
+	return value === 0n ? undefined : Number(value - 1n);
+}
+
 export class SubscribeUpdate {
 	/** A join requesting this group or later, judged against the local refresh ratio. */
 	wantedGroup?: number;
@@ -401,6 +417,11 @@ export class SubscribeUpdate {
 	order: Order;
 	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
 	maxDelay: number;
+	/**
+	 * Subscriber min delay (`Subscriber Min Age`) in milliseconds, or undefined when not stated.
+	 * Lite-07+; earlier wires decode it as not stated and drop it on encode.
+	 */
+	minDelay?: number;
 	startGroup?: number;
 	endGroup?: number;
 	/** See {@link Subscribe.startFrame}. */
@@ -415,6 +436,7 @@ export class SubscribeUpdate {
 		wantedGroup?: number;
 		order?: Order;
 		maxDelay?: number;
+		minDelay?: number;
 		startGroup?: number;
 		endGroup?: number;
 		startFrame?: number;
@@ -427,6 +449,7 @@ export class SubscribeUpdate {
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
 		this.maxDelay = props.maxDelay ?? 0;
+		this.minDelay = props.minDelay;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
@@ -444,6 +467,7 @@ export class SubscribeUpdate {
 				await w.u8(toWire(this.priority));
 				await encodeOrder(w, version, this.order);
 				await w.u53(this.maxDelay);
+				await encodeMinDelay(w, version, this.minDelay);
 				await encodeSpan(w, version, this, this.ranges);
 				if (hasRefresh(version))
 					await w.u62(this.wantedGroup === undefined ? 0n : BigInt(this.wantedGroup) + 1n);
@@ -460,6 +484,7 @@ export class SubscribeUpdate {
 				const priority = fromWire(await r.u8());
 				const order = await decodeOrder(r, version);
 				const maxDelay = await r.u53();
+				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
 				if (wanted > BigInt(Number.MAX_SAFE_INTEGER) + 1n)
@@ -469,6 +494,7 @@ export class SubscribeUpdate {
 					priority,
 					order,
 					maxDelay,
+					minDelay,
 					...span,
 				});
 			}
@@ -494,7 +520,7 @@ export class Subscribe {
 	id: bigint;
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. Lite-07+. */
-	epoch?: Epoch.Valid;
+	instance?: Instance.Valid;
 	track: string;
 	priority: number;
 	/**
@@ -504,6 +530,11 @@ export class Subscribe {
 	order: Order;
 	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
 	maxDelay: number;
+	/**
+	 * Subscriber min delay (`Subscriber Min Age`) in milliseconds, or undefined when not stated.
+	 * Lite-07+; earlier wires decode it as not stated and drop it on encode.
+	 */
+	minDelay?: number;
 
 	startGroup?: number;
 	endGroup?: number;
@@ -530,11 +561,12 @@ export class Subscribe {
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
-		epoch?: Epoch.Valid;
+		instance?: Instance.Valid;
 		track: string;
 		priority: number;
 		order?: Order;
 		maxDelay?: number;
+		minDelay?: number;
 		startGroup?: number;
 		endGroup?: number;
 		startFrame?: number;
@@ -543,11 +575,12 @@ export class Subscribe {
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
-		this.epoch = props.epoch;
+		this.instance = props.instance;
 		this.track = props.track;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
 		this.maxDelay = props.maxDelay ?? 0;
+		this.minDelay = props.minDelay;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
@@ -558,7 +591,7 @@ export class Subscribe {
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.id);
 		await w.string(Path.encode(this.broadcast));
-		await encodeEpoch(w, version, this.epoch);
+		await encodePin(w, version, this.instance);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
 
@@ -569,6 +602,7 @@ export class Subscribe {
 			default:
 				await encodeOrder(w, version, this.order);
 				await w.u53(this.maxDelay);
+				await encodeMinDelay(w, version, this.minDelay);
 				await encodeSpan(w, version, this, this.ranges);
 				break;
 		}
@@ -577,7 +611,7 @@ export class Subscribe {
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
 		const id = await r.u62();
 		const broadcast = Path.decode(await r.string());
-		const epoch = await decodeEpoch(r, version);
+		const instance = await decodePin(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
 
@@ -588,15 +622,17 @@ export class Subscribe {
 			default: {
 				const order = await decodeOrder(r, version);
 				const maxDelay = await r.u53();
+				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
-					epoch,
+					instance,
 					track,
 					priority,
 					order,
 					maxDelay,
+					minDelay,
 					...span,
 				});
 			}
