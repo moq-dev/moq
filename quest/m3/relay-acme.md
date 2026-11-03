@@ -2,9 +2,9 @@
 
 ## Goal
 
-moq-relay's default `acme` feature issues and renews certificates through
+moq-relay's `acme` feature returns: it issues and renews certificates through
 instant-acme on `rind-instant-acme`, with no rustls-acme, and its graph holds
-no aws-lc-rs. Existing config and the on-disk cache keep working.
+no aws-lc-rs.
 
 ## Plan
 
@@ -26,4 +26,4 @@ Public API: none; config unchanged. Wire: none.
 
 ## Required
 
-- [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - the adapter this uses, waiting on instant-acme 0.9
+- [rind-instant-acme is on crates.io](/quest/m3/rind-instant-acme.md) - the adapter this uses, waiting on instant-acme 0.9

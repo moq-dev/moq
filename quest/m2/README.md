@@ -39,7 +39,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Generated C bindings](/quest/m2/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written crate
 - [A C origin can discover eagerly, like a relay](/quest/m2/c-origin-relay.md) - the C API puts an origin in relay mode, so forwarding a client session's routes needs no local announce watcher
 - [A runtime-free QUIC driver](/quest/m2/quic-sansio-driver.md) - a caller's own loop moves UDP datagrams and polls moq sessions over moq-quic, for rust2's bindings
-- [MoQ on rind](/quest/m2/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
 - [QoS](/quest/m2/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
 - [HLS and DASH browser playback](/quest/m2/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly

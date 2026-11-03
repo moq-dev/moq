@@ -11,7 +11,7 @@ moq-tokio checks rind's CPU support at startup.
 ## Plan
 
 Decided with the maintainer on 2026-10-26; see the
-[epic](/quest/m2/rind/README.md).
+[epic](/quest/m1/rind/README.md).
 
 - moq-quic's direct calls move to rind's API: stateless reset HMAC-SHA256 and
   its HKDF-SHA256 key derivation, address-validation tokens (HKDF to

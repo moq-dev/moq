@@ -196,6 +196,7 @@ per-frame CPU growth since #5926.
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
 - [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - a resumed read gets every group or a drop on every wire version
 - [Stats name the route instance's epoch with a type](/quest/m1/stats-epoch-type.md) - `GroupFrame::epoch` gets a dedicated type and tests stop mislabelling the instance
+- [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 
 ## Related
 
