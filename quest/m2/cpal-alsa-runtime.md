@@ -27,6 +27,8 @@ is taken meanwhile.
 
 ## Plan
 
+Filed 2026-11-02 (maintainer-approved, /quest-unblock): [RustAudio/cpal#1421](https://github.com/RustAudio/cpal/issues/1421), recommending runtime loading first (most naturally in alsa-sys) and an optional ALSA host second. Related, not duplicates: RustAudio/cpal#1404 (FreeBSD-only `alsa` feature), cpal#929, and diwic/alsa-sys#10 (static linking).
+
 State as of 2026-10-05: cpal 0.18.2 (pinned here) and cpal master (0.19.0)
 both depend on `alsa` unconditionally on Linux and the BSDs. `alsa` 0.12.1
 depends on `alsa-sys` 0.6.1, whose build script links libasound through

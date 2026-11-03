@@ -11,6 +11,8 @@ CLI behavior and wire are unchanged.
 
 ## Plan
 
+Filed 2026-11-02 (maintainer-approved, /quest-unblock): [jdx/usage#1608](https://github.com/jdx/usage/issues/1608), building on the one-source-of-truth goal of jdx/usage#896, #1180 and #1202. If upstream declines, keep the drift test.
+
 Waits on two outside conditions, in order:
 
 1. The maintainer approves posting the proposal on jdx/usage. Decided
