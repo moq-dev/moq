@@ -486,10 +486,12 @@ def test_track_info_keeps_native_default_priority():
 
 
 def test_default_subscription_skips_superseded_groups_at_once():
-    """A bare record carries moq-net's zero max delay too; only an explicit None sets no limit."""
-    assert moq.Subscription.default()._ffi().max_delay == timedelta(0)
-    assert moq.Subscription()._ffi().max_delay == timedelta(0)
-    assert moq.Subscription(max_delay=None)._ffi().max_delay is None
+    """A bare record carries moq-net's zero delay too; only an explicit None leaves a bound unset."""
+    assert moq.Subscription.default() == moq.Subscription()
+    delay = moq.Subscription()._ffi().delay
+    assert (delay.min, delay.max) == (timedelta(0), timedelta(0))
+    delay = moq.Subscription(delay=moq.Delay(min=None, max=None))._ffi().delay
+    assert (delay.min, delay.max) == (None, None)
 
 
 def test_string_sequences_refuse_a_bare_string():
@@ -1009,7 +1011,7 @@ async def test_raw_multiple_frames():
 
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request(announcement.prefix)
-        subscription = moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0)
+        subscription = moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0)
         raw_consumer = await broadcast_consumer.subscribe_track("commands", subscription)
 
         messages = [
@@ -1035,7 +1037,7 @@ async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("direct")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0))
+    consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     track.write_frame(b"hello")
     track.write_frame(b"world")
@@ -1061,7 +1063,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
 
     consumer = track.consume(
         moq.Subscription(
-            max_delay=timedelta(seconds=10),
+            delay=moq.Delay(max=timedelta(seconds=10)),
             ranges=[moq.Range(start=moq.Anchor.RELATIVE(groups=2))],
             order=moq.Order.ASCENDING,
         )
@@ -1086,7 +1088,7 @@ async def test_time_anchor_starts_at_the_group_containing_it():
     start = moq.Anchor.TIME(timestamp=moq.Timestamp(1_500, 1_000))
     consumer = track.consume(
         moq.Subscription(
-            max_delay=timedelta(seconds=10),
+            delay=moq.Delay(max=timedelta(seconds=10)),
             ranges=[moq.Range(start=start)],
             order=moq.Order.ASCENDING,
         )
@@ -1139,7 +1141,7 @@ async def test_raw_group_sequence():
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track(
-            "seq", moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0)
+            "seq", moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0)
         )
 
         sent_sequences = []
@@ -1171,7 +1173,7 @@ async def test_default_iteration_is_sequence_order():
     broadcast = create_announced(origin, "track/ordering")
     raw = broadcast.publish_track("ordering")
 
-    subscription = moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0)
+    subscription = moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0)
     seq_consumer = raw.consume(subscription)
     arr_consumer = raw.consume(subscription)
 
@@ -1320,7 +1322,7 @@ async def test_read_frame_one_per_group():
     """read_frame() returns the first frame of each successive group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0))
+    consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     track.write_frame(b"ready")
     track.write_frame(b"running")
@@ -1364,7 +1366,7 @@ async def test_read_frame_skips_remaining_frames_in_group():
     """read_frame() only returns the first frame of a multi-frame group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("mixed")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0))
+    consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     group = track.append_group()
     group.write_frame(b"first")
@@ -1541,7 +1543,7 @@ async def test_audio_consumer_reports_its_playout_delay():
     def output(delay: timedelta | None) -> moq.audio.DecoderOutput:
         if delay is None:
             return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
-        fixed = moq.media.Delay(min=delay, max=timedelta(0))
+        fixed = moq.Delay(min=delay)
         return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=fixed, estimate=False)
 
     fixed = await moq.audio.Consumer.subscribe(broadcast_consumer, "mic", rendition, output(timedelta(milliseconds=80)))

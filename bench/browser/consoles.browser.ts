@@ -88,7 +88,15 @@ if (${JSON.stringify(failure)} === "pageerror") throw new Error("fixture pageerr
 			});
 			expect(Number.isFinite(loaded[0].time)).toBe(true);
 			expect(entries.some((entry) => "counted" in entry)).toBe(false);
-			if (failure !== "startup") expect(loaded[1].role).toBe("consumer");
+			if (failure !== "startup")
+				expect(loaded[1]).toMatchObject({
+					kind: "transport",
+					key: "transport 160B x200",
+					role: "consumer",
+					variant: "current",
+					round: 0,
+					pass: "timed",
+				});
 			if (failure === "pageerror")
 				expect(
 					entries.some(
@@ -102,6 +110,12 @@ if (${JSON.stringify(failure)} === "pageerror") throw new Error("fixture pageerr
 					true,
 				);
 				expect(loaded.length).toBe(12);
+				// Traced and counted samples run after every round, as round -1, with both roles on each pass.
+				const detailed = loaded.filter((entry) => entry.pass !== "timed");
+				expect(detailed.every((entry) => entry.round === -1)).toBe(true);
+				for (const pass of ["traced", "counted"])
+					for (const role of ["publisher", "consumer"])
+						expect(detailed.some((entry) => entry.pass === pass && entry.role === role)).toBe(true);
 				expect(entries.filter((entry) => entry.text === "page stopped").length).toBe(12);
 			}
 		} finally {

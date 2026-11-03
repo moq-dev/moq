@@ -1236,8 +1236,6 @@ pub struct Cluster {
 	/// Dial template every peer dial is built from; see [`Self::peer_client`].
 	connect: Option<moq_tokio::connect::Config>,
 	quic: Option<moq_tokio::quic::Config>,
-	#[cfg(feature = "iroh")]
-	iroh: Option<moq_tokio::iroh::Endpoint>,
 	/// The client static and API peers share, on the template's bind address, so
 	/// a fixed `[connect]` bind port stays the cluster's egress port. Built by
 	/// [`Self::start`] and joins [`Self::dialers`] once [`Started::run`] begins.
@@ -1392,8 +1390,6 @@ impl Cluster {
 			quic: None,
 			dial: None,
 			dialers: Dialers::new(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 			advertise: None,
 			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
@@ -1523,13 +1519,6 @@ impl Cluster {
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
 		self.connect = Some(connect);
 		self.quic = Some(quic);
-		self
-	}
-
-	/// Dial `iroh://` peers through this endpoint.
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: moq_tokio::iroh::Endpoint) -> Self {
-		self.iroh = Some(iroh);
 		self
 	}
 
@@ -2207,13 +2196,7 @@ impl Cluster {
 		}
 		let mut quic = self.quic.clone().unwrap_or_default();
 		self.peer_quic.dial(&mut quic);
-		let client = connect.init(quic)?;
-		#[cfg(feature = "iroh")]
-		let client = match &self.iroh {
-			Some(iroh) => client.with_iroh(iroh.clone()),
-			None => client,
-		};
-		Ok(client)
+		Ok(connect.init(quic)?)
 	}
 
 	/// Start a reconnecting LAN session from discovered details. Tests wire this
@@ -3868,10 +3851,9 @@ mod tests {
 			.iter()
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.collect();
-		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
 		let mut transport = driver::transport::Config::default();
 		transport.idle_timeout = Some(idle);
-		let mut server_config = driver::server::Config::new(Arc::new(crypto));
+		let mut server_config = driver::server::Config::new(Arc::new(tls));
 		server_config.transport = transport;
 		driver::endpoint::Endpoint::new(
 			driver::endpoint::Config::default().with_server(server_config),

@@ -494,6 +494,11 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		moq_net::transport::MIN_RECEIVE_WINDOW
 	);
 
+	anyhow::ensure!(
+		!quic.has_controller(),
+		"the io_uring runtime cannot run a custom congestion controller; drop quic.controller or use the tokio runtime"
+	);
+
 	let mut transport = moq_uring::quic::transport::Config::default();
 	#[cfg(feature = "qlog")]
 	if let Some(dir) = quic.qlog.as_deref() {
@@ -739,13 +744,7 @@ async fn serve_connection(
 	let sni = conn.server_name().map(str::to_owned);
 	// TLS validated this against the configured roots before the connection
 	// existed, so a chain here is an authenticated peer.
-	let identity = conn.peer_chain().map(|chain| {
-		let chain = chain
-			.into_iter()
-			.map(moq_tokio::rustls::pki_types::CertificateDer::from)
-			.collect();
-		moq_tokio::tls::PeerIdentity::from_chain(chain)
-	});
+	let identity = conn.peer_identity().map(moq_tokio::tls::PeerIdentity::from_chain);
 
 	// Browsers speak WebTransport; everyone else raw QUIC. The moq version
 	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`.

@@ -41,25 +41,16 @@ use tokio_util::sync::CancellationToken;
 #[global_allocator]
 static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jemalloc::tikv_jemallocator::Jemalloc;
 
-/// Everything needed to build MoQ clients/servers, encapsulating the optional
-/// iroh endpoint so the rest of the code is feature-agnostic.
+/// Everything needed to build MoQ clients/servers.
 #[derive(Clone)]
 struct Net {
 	/// The shared QUIC tuning, handed to whichever roles this process builds.
 	quic: moq_tokio::quic::Config,
-	#[cfg(feature = "iroh")]
-	iroh: Option<moq_tokio::iroh::Endpoint>,
 }
 
 impl Net {
 	fn client(&self, config: moq_tokio::connect::Config) -> anyhow::Result<moq_tokio::Client> {
-		let client = config.init(self.quic.clone())?;
-		#[cfg(feature = "iroh")]
-		let client = match self.iroh.clone() {
-			Some(iroh) => client.with_iroh(iroh),
-			None => client,
-		};
-		Ok(client)
+		Ok(config.init(self.quic.clone())?)
 	}
 
 	fn server(
@@ -71,10 +62,6 @@ impl Net {
 		server.listen = config;
 		server.activity = activity;
 		server.quic = self.quic.clone();
-		#[cfg(feature = "iroh")]
-		{
-			server.iroh = self.iroh.clone();
-		}
 		Ok(server.init()?)
 	}
 }
@@ -393,8 +380,6 @@ async fn run() -> anyhow::Result<()> {
 
 	let net = Net {
 		quic: cli.moq.quic.clone(),
-		#[cfg(feature = "iroh")]
-		iroh: cli.moq.iroh.clone().bind(&cli.moq.quic).await?,
 	};
 
 	#[cfg(feature = "jemalloc")]
@@ -482,11 +467,6 @@ async fn spawn_moq(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Attached> {
 	let cluster = cluster.with_connect(moq.client.clone(), moq.quic.clone());
-	#[cfg(feature = "iroh")]
-	let cluster = match net.iroh.clone() {
-		Some(iroh) => cluster.with_iroh(iroh),
-		None => cluster,
-	};
 	let origin = cluster.origin.clone();
 
 	// Built only to dial `--connect`: the cluster binds its own client from the
@@ -1572,8 +1552,6 @@ mod tests {
 		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		};
 		let mut tasks = JoinSet::new();
 		let directions = Directions {
@@ -1597,8 +1575,6 @@ mod tests {
 		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		};
 		let mut tasks = JoinSet::new();
 
@@ -1638,8 +1614,6 @@ mod tests {
 		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		};
 		let mut tasks = JoinSet::new();
 
@@ -1718,8 +1692,6 @@ mod tests {
 		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		};
 		let mut tasks = JoinSet::new();
 		let attached = spawn_moq(

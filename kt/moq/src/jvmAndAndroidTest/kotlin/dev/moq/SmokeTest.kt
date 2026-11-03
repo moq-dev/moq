@@ -309,8 +309,8 @@ class SmokeTest {
 
     @Test
     fun `a default subscription skips superseded groups at once`() {
-        assertEquals(java.time.Duration.ZERO, Subscription.default().maxDelay)
-        assertNull(Subscription(maxDelay = null).maxDelay)
+        assertEquals(java.time.Duration.ZERO, Subscription.default().delay.min)
+        assertEquals(java.time.Duration.ZERO, Subscription.default().delay.max)
     }
 
     @Test
@@ -327,7 +327,11 @@ class SmokeTest {
             val consumer =
                 track.consume(
                     Subscription(
-                        maxDelay = java.time.Duration.ofSeconds(10),
+                        delay =
+                            Delay(
+                                min = java.time.Duration.ZERO,
+                                max = java.time.Duration.ofSeconds(10),
+                            ),
                         ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
                         order = Order.ASCENDING,
                     )
