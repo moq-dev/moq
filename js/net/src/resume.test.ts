@@ -273,7 +273,7 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 	hooks.startTrack(tb.producer, { start: 5, requested: 3 });
 	const front = new Front();
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ groups: { start: { included: 3 } } });
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: { absolute: 3 } }] });
 	try {
 		expect(hooks.sourceStart(sub)).toBe(3);
 		const subscribed = tb.producer.subscription.changed();
@@ -282,6 +282,74 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 		expect(hooks.sourceStart(sub)).toBe(5);
 	} finally {
 		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+test("a routed reader serves its relative ranges as the serving copy resolves them", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	for (let sequence = 0; sequence < 5; sequence++) ta.write(sequence);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 2 }, end: { relative: 1 } }] });
+	try {
+		await settle();
+		// The copy holds the groups the anchors count back from, so the ranges end there.
+		expect(hooks.servingEnd(sub)).toBe(4);
+		expect(hooks.servingRuns(sub, 0, 10)).toEqual([{ start: 2, end: 4 }]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
+// Mirrors the Rust `Reader::exhausted`: the serving copy judges the window from its resume point,
+// and a group under it the local floor keeps out stays owed.
+test("a bounded read through routes ends once its window is read, across a route change", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	for (let sequence = 0; sequence < 3; sequence++) ta.write(sequence);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { absolute: 1 }, end: { absolute: 5 } }] });
+	const floored = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { absolute: 1 }, end: { absolute: 5 } }] })
+		.withRange({ start: { included: 3 } });
+	try {
+		expect((await sub.recvGroup())?.sequence).toBe(1);
+		expect((await sub.recvGroup())?.sequence).toBe(2);
+		const pending = sub.recvGroup();
+		expect(await Promise.race([pending, settle().then(() => "pending")])).toBe("pending");
+		for (let sequence = 0; sequence < 5; sequence++) tb.write(sequence);
+		front.serve(b.consume());
+		expect((await pending)?.sequence).toBe(3);
+		expect((await sub.recvGroup())?.sequence).toBe(4);
+		// The track goes on, but the window is read.
+		expect(await sub.recvGroup()).toBeUndefined();
+
+		expect((await floored.recvGroup())?.sequence).toBe(3);
+		expect((await floored.recvGroup())?.sequence).toBe(4);
+		// Groups 1 and 2 are in range under the floor, which may still drop.
+		const held = floored.recvGroup();
+		expect(await Promise.race([held, settle().then(() => "pending")])).toBe("pending");
+		floored.withRange({});
+		expect((await held)?.sequence).toBe(1);
+		expect((await floored.recvGroup())?.sequence).toBe(2);
+		expect(await floored.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		floored.close();
 		front.consumer.close();
 		a.close();
 		b.close();
@@ -350,7 +418,7 @@ test("a resumed fork has its own preferences and replay cursor", async () => {
 	front.serve(a.consume());
 	const parent = front.consumer.track("seq").subscribe({
 		priority: 2,
-		groups: { start: { included: 1 } },
+		ranges: [{ start: { absolute: 1 } }],
 	});
 	ta.write(0);
 	ta.write(1);
@@ -2101,7 +2169,7 @@ test("the largest honours the reader's bounds on the serving copy", async () => 
 		.track("seq")
 		.subscribe()
 		.withRange({ end: { excluded: 3 } });
-	const floored = front.consumer.track("seq").subscribe({ groups: { start: { included: 8 } } });
+	const floored = front.consumer.track("seq").subscribe({ ranges: [{ start: { absolute: 8 } }] });
 	for (let sequence = 0; sequence < 5; sequence++) ta.write(sequence);
 
 	const next = capped.largest();
@@ -2784,7 +2852,7 @@ test.each([
 			}
 			return sequences;
 		};
-		const asked = () => tb.producer.subscription.peek()?.groups?.start?.included;
+		const asked = () => tb.producer.subscription.peek()?.ranges?.[0]?.start?.absolute;
 		try {
 			sub.withRange({ start: { included: 4 } });
 			await clock.advance(Nano.zero);

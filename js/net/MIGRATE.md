@@ -11,6 +11,17 @@ Replace `maxDelay: d` with `delay: { max: d }`. `max` keeps `maxDelay`'s meaning
 `min` is the subscriber's target latency; `null` means not stated, which only a peer on moq-lite before 07 or moq-transport sends. moq-lite-07 SUBSCRIBE and SUBSCRIBE\_UPDATE carry it, and a track's aggregate takes the smallest stated one.
 `FetchGroupOptions.maxDelay` is unchanged.
 
+### `Subscription.groups` is `ranges` ([#6949](https://github.com/moq-dev/moq/pull/6949))
+
+`Track.Subscription` asks for `ranges: Track.Range[]` in place of `groups`, which is now refused at runtime. Each `Track.Range` starts and ends at a `Track.Anchor`: an `absolute` group, one `relative` to the latest, or the group containing a `time`.
+Replace `groups: { start: { included: a }, end: { excluded: b } }` with `ranges: [{ start: { absolute: a }, end: { absolute: b } }]`. An inclusive end `b` becomes `absolute: b + 1`, and an excluded start `a` becomes `absolute: a + 1`.
+A reader reads only its own ranges, whatever another subscriber widens the request to. `withRange` only narrows them; widen with `update({ ranges })`.
+
+### Bounded reads end ([#6949](https://github.com/moq-dev/moq/pull/6949))
+
+A `recvGroup` or `nextGroup` whose ranges all end now returns `undefined` once every group in them was handed out, dropped, skipped as stale, or will never arrive, as Rust's reads do since [#7545](https://github.com/moq-dev/moq/pull/7545). The track goes on: replacing the ranges with `update` reads on from the same subscriber. A `withRange` cap holding a group back keeps the read open, since the cap may rise.
+A loop that read a bounded range until a timeout now ends on its own; one that waited for more groups past the end of its ranges must widen them first.
+
 ### Ordered subscriptions wait for owed groups
 
 An ordered reader on a subscribed track now waits at a missing group while the feed may still deliver it, up to `delay.max` by media time or wall clock. Local tracks still skip gaps, and the zero default waits for nothing.
