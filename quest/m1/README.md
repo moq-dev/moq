@@ -200,7 +200,6 @@ per-frame CPU growth since #5926.
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The Python wrapper publish can be retried by hand](/quest/m1/release-py-dispatch.md) - `.github/workflows/release-py.yml` has a `workflow_dispatch` trigger, so a maintainer can retry a failed `moq-rs` publish from `release` without a new `moq-ffi-v*` tag or a path-matching push
-- [A returning route serves past the cap its old copy was given](/quest/m1/returning-route-cap.md) - when a resumed reader's route returns, the reused serving copy asks with the reader's current resolution, not the capped resolution it was left with when it was replaced
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
 - [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - a resumed read gets every group or a drop on every wire version
 - [moq-quic's idle connections keep no burst-sized state](/quest/m1/quic-readable-dedupe.md) - readable events are deduplicated and a quiet connection keeps no per-peak-stream bytes
