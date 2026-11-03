@@ -51,7 +51,7 @@ const lite: Protocol = {
 	],
 	async subscribe() {
 		const open: Open = (stream) => {
-			const producer = new Producer(0);
+			const producer = new Producer(0n);
 			const done = readFrames(new Reader(stream, undefined, LiteVersion.DRAFT_06), producer, {
 				scale: 1_000_000,
 			}).then(() => producer.finish());
@@ -96,7 +96,7 @@ const ietf: Protocol = {
 		await new SubscribeOk({ trackAlias: IETF_ALIAS }).encode(peer.writer, IETF_VERSION);
 
 		const ordered = track.ordered();
-		let groupId = 0;
+		let groupId = 0n;
 		const open: Open = (stream) => {
 			const header = new IetfGroup({
 				trackAlias: IETF_ALIAS,

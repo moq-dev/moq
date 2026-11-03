@@ -54,7 +54,7 @@ function write(group: Group.Producer, timestamp: number) {
 	});
 }
 
-function group(track: Track.Producer, sequence: number, timestamps: number[]): Group.Producer {
+function group(track: Track.Producer, sequence: bigint, timestamps: number[]): Group.Producer {
 	const group = track.createGroup(sequence);
 	for (const timestamp of timestamps) write(group, timestamp);
 	return group;
@@ -62,18 +62,18 @@ function group(track: Track.Producer, sequence: number, timestamps: number[]): G
 
 test("the start waits for an earlier group when the live edge arrives first", async () => {
 	const { track, results, flush } = setup();
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	expect(frames(results)).toEqual([]);
 
-	group(track, 4, [4_500_000]).finish();
+	group(track, 4n, [4_500_000]).finish();
 	await flush();
 	expect(frames(results)).toEqual(["4@4500000", "5@5000000"]);
 });
 
 test("a zero reach starts at a live edge that arrives first", async () => {
 	const { track, results, flush } = setup(0);
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	expect(frames(results)).toEqual(["5@5000000"]);
 });
@@ -85,10 +85,10 @@ test("the warmup reaches further back for the start", async () => {
 	] as const) {
 		const { track, results, flush } = setup(200, warmup);
 		// Newest first: group 4 covers the max delay alone, but not the warmup too.
-		group(track, 5, [5_000_000]).finish();
-		group(track, 4, [4_800_000]).finish();
+		group(track, 5n, [5_000_000]).finish();
+		group(track, 4n, [4_800_000]).finish();
 		await flush();
-		group(track, 3, [4_500_000]).finish();
+		group(track, 3n, [4_500_000]).finish();
 		await flush();
 		expect(frames(results)[0]).toEqual(start);
 		results.length = 0;
@@ -97,7 +97,7 @@ test("the warmup reaches further back for the start", async () => {
 
 test("a quiet track starts within one reach", async () => {
 	const { clock, track, results, flush } = setup(200, 300);
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	await clock.advance(Nano.fromMilli(Milli(BUDGET - 50)));
 	expect(frames(results)).toEqual([]);
@@ -108,42 +108,42 @@ test("a quiet track starts within one reach", async () => {
 
 test("the start needs no wait once a group covers the reach", async () => {
 	const { track, results, flush } = setup();
-	group(track, 5, [5_000_000, 5_000_000 + BUDGET * 1000]);
+	group(track, 5n, [5_000_000, 5_000_000 + BUDGET * 1000]);
 	await flush();
 	expect(frames(results)).toEqual(["5@5000000", "5@5500000"]);
 });
 
 test("the start keeps a group that began before the reach but covers it", async () => {
 	const { track, results, flush } = setup(200, 300);
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	// Group 4 begins 600ms before the newest content, past the 500ms reach, yet covers its 4.5s target.
-	group(track, 4, [4_400_000, 4_600_000, 4_900_000]).finish();
+	group(track, 4n, [4_400_000, 4_600_000, 4_900_000]).finish();
 	await flush();
 	expect(frames(results)[0]).toEqual("4@4400000");
 });
 
 test("the age skip still drops a group its successor covers", async () => {
 	const { track, results, flush } = setup();
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	// Group 6 starts a whole budget behind group 7's content, so group 5 cannot cover the reach.
-	group(track, 6, [5_000_000 + (BUDGET + 100) * 1000]);
-	group(track, 7, [5_000_000 + (2 * BUDGET + 200) * 1000]);
+	group(track, 6n, [5_000_000 + (BUDGET + 100) * 1000]);
+	group(track, 7n, [5_000_000 + (2 * BUDGET + 200) * 1000]);
 	await flush();
 	expect(frames(results)[0]).toEqual("6@5600000");
 });
 
 test("a large max delay alone starts at a live edge that arrives first", async () => {
 	const { track, results, flush } = setup(0, 0, 0, 10_000);
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	expect(frames(results)).toEqual(["5@5000000"]);
 });
 
 test("a min delay past the max delay reaches only the max delay", async () => {
 	const { clock, track, results, flush } = setup(200, 0, 2_000);
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	await clock.advance(Nano.fromMilli(Milli(150)));
 	expect(frames(results)).toEqual([]);
@@ -154,21 +154,21 @@ test("a min delay past the max delay reaches only the max delay", async () => {
 
 test("an unlimited max delay still reaches the min delay", async () => {
 	const { track, results, flush } = setup(BUDGET, 0, BUDGET, null);
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	expect(frames(results)).toEqual([]);
 
-	group(track, 4, [4_500_000]).finish();
+	group(track, 4n, [4_500_000]).finish();
 	await flush();
 	expect(frames(results)).toEqual(["4@4500000", "5@5000000"]);
 });
 
 test("the covering group is kept while its warmup arrives after the first read", async () => {
 	const { track, results, flush } = setup(200, 300);
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	// Group 4 covers the 4.5s target, and its first frame is read before the rest of it lands.
-	const covering = group(track, 4, [4_400_000]);
+	const covering = group(track, 4n, [4_400_000]);
 	await flush();
 	expect(frames(results)).toEqual(["4@4400000"]);
 
@@ -183,10 +183,10 @@ test("the covering group is kept while its warmup arrives after the first read",
 
 test("the covering group is kept while it arrives after the first read, without a warmup", async () => {
 	const { track, results, flush } = setup(200);
-	group(track, 5, [5_000_000]);
+	group(track, 5n, [5_000_000]);
 	await flush();
 	// Group 4 covers the 4.8s target, so its media before that point is older than the max delay.
-	const covering = group(track, 4, [4_400_000]);
+	const covering = group(track, 4n, [4_400_000]);
 	await flush();
 	expect(frames(results)).toEqual(["4@4400000"]);
 
@@ -202,12 +202,12 @@ test("the covering group is kept while it arrives after the first read, without 
 test("an age skip that ends the start still warms until the start's target", async () => {
 	const { track, results, flush } = setup(200, 300);
 	// Group 4 alone does not cover its 4.5s target, so the start waits.
-	group(track, 4, [5_000_000]);
+	group(track, 4n, [5_000_000]);
 	await flush();
 	// Groups 5 and 6 decode in one pass: group 6's 6.2s edge puts the 500ms reach's target at 5.7s,
 	// and the age skip drops group 4, whose successor starts past the reach, before the start sees it.
-	const covering = group(track, 5, []);
-	const newest = group(track, 6, []);
+	const covering = group(track, 5n, []);
+	const newest = group(track, 6n, []);
 	await flush();
 	write(covering, 5_600_000);
 	write(covering, 5_900_000);

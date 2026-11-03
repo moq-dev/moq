@@ -45,6 +45,9 @@ same frame/gap/end tags as decoded audio and video. Release every kind with
 `moq_consume_read_free`; frame payload pointers borrow that handle. A gap breaks
 continuity. An encoder end is not callback EOF: frames before its endpoint are the old
 encoder's drain, and the first at or past it starts fresh. Callback 0 ends the stream.
+These consumers include the rendition's catalog `warmup` in both the history fetched at
+join and the subscription budget. Feed that history to your decoder before presenting
+output; the requested max delay still controls steady-state skips.
 
 ## Connect
 
@@ -99,7 +102,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Tokens.** Set `moq_client_config.tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. To replace expiring tokens, close the session and connect again.
 - **Threading.** Call any function from any thread. Callbacks run on moq-c's runtime thread; the callback and its `user_data` must be safe to use there. Synchronize access to data shared with other threads, and dispatch UI work to your UI thread. Raw publish calls block until the codec takes the frame, which paces a publisher.
 - **Zeroed config is the default.** A zeroed `moq_client_config` means the default for every field, so new fields don't break callers. A field whose default isn't zero has a `has_*` flag: `backoff_timeout_us = 0` means "retry forever" only with `has_backoff_timeout = true`.
-- **Subscription defaults.** `moq_subscription_defaults()` returns moq-net's defaults, whose zero `max_delay_us` skips a superseded group at once; a NULL `moq_subscription` pointer means the same. Change its fields rather than zeroing one: a zeroed `moq_subscription` leaves `max_delay_present` false, which sets no subscriber limit.
+- **Subscription defaults.** A zeroed `moq_subscription`, a NULL pointer, and `moq_subscription_defaults()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. Set `delay.max_unlimited` for no subscriber limit, and `delay.min_unstated` to leave the target latency unstated.
 - **Compressed tracks.** `moq_track_info.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 - **fMP4 import.** `MOQ_CONTAINER_FORMAT_FMP4` splits each fragment into one frame per sample.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `moq_publish_media_cut`: after every frame, or at a segment cadence to align with video. Pass that cadence as `moq_audio_init.hint.group_duration_us`.

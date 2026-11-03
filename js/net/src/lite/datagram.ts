@@ -23,7 +23,7 @@ export class Datagram {
 	/** Subscribe ID this datagram is delivered on. */
 	subscribe: bigint;
 	/** Group sequence number (shared with the track's group namespace). */
-	sequence: number;
+	sequence: bigint;
 	/** Absolute presentation timestamp in the track's wire timescale, or undefined on a track that carries none. */
 	timestamp: number | undefined;
 	/** The frame payload, delimited by the datagram boundary. */
@@ -31,7 +31,7 @@ export class Datagram {
 	/** Plain payload length on a compressed lite-07 track. */
 	inflated?: number;
 
-	constructor(subscribe: bigint, sequence: number, timestamp: number | undefined, payload: Uint8Array) {
+	constructor(subscribe: bigint, sequence: bigint, timestamp: number | undefined, payload: Uint8Array) {
 		this.subscribe = subscribe;
 		this.sequence = sequence;
 		this.timestamp = timestamp;
@@ -92,7 +92,7 @@ export class Datagram {
 			if (type !== 0n) throw new Error(`unknown datagram type: ${type}`);
 		}
 		const subscribe = await r.u62();
-		const sequence = await r.u53();
+		const sequence = await r.u62();
 		const { timed, compressed } = framing(subscribe);
 		const timestamp = timed ? await r.u53() : undefined;
 		const inflated = hasCompression(version) && compressed ? await r.u53() : undefined;

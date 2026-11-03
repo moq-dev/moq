@@ -81,8 +81,8 @@ throttled one:
 nix develop --command just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
 ```
 
-It reports offered, received and lost datagrams, bottleneck queue drops, reordered
-arrivals and append-to-receive latency per viewer, and fails if the loopback
+It reports offered and lost datagrams, bottleneck queue drops, QUIC DATAGRAM frames
+that delivered no datagram, reordered arrivals and append-to-receive latency per viewer, and fails if the loopback
 viewer loses any. It runs nightly.
 
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
@@ -404,7 +404,7 @@ extra copy of every received stream chunk injected into `@moq/net`, the control
 that shows the suite can see a copy-heavy change), and `base` when a revision is
 given. Each variant resolves `@moq/*` from its own checkout. Variants alternate
 within each round, with the starting variant rotated, after one warmup round
-(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media,racing`).
+(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media,racing,stats`).
 
 - `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
   subscribes and reads them all. Connection setup and fixture generation stay
@@ -437,6 +437,19 @@ within each round, with the starting variant rotated, after one warmup round
   collection, a heap snapshot counts the flat strings still holding the run's URL
   marker, with their V8 object bytes and characters. A forced arm's winner is
   checked; an open race's is only reported.
+- `stats`: one page holds `Moq.Connection` handles open while they do nothing
+  else, to measure local send-rate sampling. Distinct reconnect loops (1, 4, 16)
+  cross reservations held on each (0, 1, 4); receive-only playback of a 30 fps
+  track, pooled connections inside the linger window after their last handle
+  closed, four identical pooled handles (one connection, the control) and qmux
+  complete the sweep. After a settle, a 2 s window (1.2 s for linger) reports
+  `getStats` calls and `setTimeout` calls per second, main-thread and process
+  CPU, and how many reservations hold a send-rate slice. `stats resume` releases
+  and re-takes a reservation ten times, 500 ms apart, timing its first slice.
+  Shipping Chromium has no `WebTransport.getStats()`, so this scenario runs in a
+  second browser with `--enable-blink-features=WebTransportStats`; its `absent`
+  shapes delete the method again, as shipping Chromium and Safari present it. The
+  `copy` control does not run here: nothing receives stream chunks in bulk.
 
 Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
 thread ticks; process CPU is each page's renderer (every thread, including
@@ -446,8 +459,10 @@ keep instrumentation out of timed samples: a traced pass retains a gzipped Chrom
 trace per workload and reports GC pauses and reclaimed JS heap; a counted pass
 wraps typed-array constructors, `set` and `slice` to report JS-visible bytes
 copied and allocated per payload byte during delivery, with connection setup
-subtracted; a probed pass reads each presented
-frame's painted id back to report frame delay percentiles. Native copies inside
+subtracted (for `stats`, V8's sampling heap profiler reports every byte the
+window allocated, collected or not); a probed pass reads each presented
+frame's painted id back to report frame delay percentiles. The `stats` call
+counters are one increment per call and run in every pass. Native copies inside
 WebTransport and WebCodecs are unavailable, and the report says so.
 
 Chromium runs headless with `--disable-gpu`, so decode and rendering are
@@ -472,14 +487,17 @@ order-independent digest must match, so skipped work cannot read as a speedup.
 CMAF output is decoded and checked byte for byte in a separate call after each
 phase's CPU and trace snapshots.
 Crashes, wrong bytes, missing frames, a window that presents nothing, a racing
-dial that fails or a forced racing arm won by the other transport, or an
-unavailable CPU clock fail the run; timing never does. The nightly runs
+dial that fails or a forced racing arm won by the other transport, a stats
+window whose reservations hold more or fewer send-rate slices than the transport
+can give (every one over WebTransport with `getStats()`, none over qmux or
+without it), a resume cycle that never gets its slice, or an unavailable CPU
+clock fail the run; timing never does. The nightly runs
 `--smoke`, whose racing sweep runs every mode and a rotated query at 4 URLs x 2
 reconnects x 64 characters, and keeps its run directory as the `bench-browser`
 artifact.
 
 The in-memory frame, retained-history, gap ledger, bandwidth allocation, cached-group
-replay, resume-history, and buffered-group paths also run directly in Chromium:
+replay, resume-history, buffered-group, and peer grant paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
@@ -489,6 +507,7 @@ nix develop --command bun bench/browser/micro.ts --bench bandwidth --out .tmp/ba
 nix develop --command bun bench/browser/micro.ts --bench replay --out .tmp/replay.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench resume-history --out .tmp/resume-history.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench buffered --out .tmp/buffered.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench pattern --out .tmp/pattern.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent, cross-origin isolated
@@ -509,6 +528,9 @@ change, a demand change and a ceiling change until the allocator republishes, an
 peek of every reservation, checking every grant against a reference division. Its
 Rust counterpart is `cargo bench -p moq-net --features fuzz --bench bandwidth`, whose
 `BANDWIDTH_COUNTS=<iterations>` mode prints allocations and wakes per operation.
+`pattern` runs `js/pattern/bench/algebra.ts` against every checkout's `@moq/pattern`:
+the same peer grant shapes as the Rust `pattern-algebra` sweep below, reduced and
+compared against a previous grant, up to a whole `AUTH_OK`.
 The drift sweep includes untimed controls and timed groups with decode-order
 B-frames, independently varying publisher and reader counts and retained history.
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
@@ -552,14 +574,16 @@ route hold, from Chromium's precise memory info; `serve_us` and
 `read_us` include no setup. Bun's collector scans its
 stack conservatively, so the fixture refuses to run there.
 
-The browser smoke lane preserves one measured round of all seven fixtures, and drift,
-ledger, bandwidth, replay and buffered also run in the nightly JS benchmark leg. Timing is
+The browser smoke lane preserves one measured round of all eight fixtures, and drift,
+ledger, bandwidth, replay, buffered and pattern also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
 
 Rust Criterion coverage includes `moq-pattern`'s
-`matching` (pattern count and path depth, last match and miss) and `moq-mux`'s
+`matching` (pattern count and path depth, last match and miss; and, in
+`pattern-algebra`, whole-union operations, including the worst known peer grant
+shapes swept over encoded size up to a whole `AUTH_OK`) and `moq-mux`'s
 `containers` (CMAF and Annex-B import/export). Container cases vary frame count
 and payload size; CMAF also varies track count. Separate frame and byte rates
 use the same fixtures, with byte rates counting the encoded stream size.
@@ -630,16 +654,27 @@ The table includes these measurements:
   time elapsed time. The Rust bench target jobs measure them with a short warmup
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
   trade precision for nightly runtime; the paired comparison below assesses a change.
-- JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
-  variants) and `size_bytes` columns, retaining every other column as a workload
-  dimension in each series name.
+- The CSV tables the JS benchmarks and the Rust benchmark tests print. A header
+  line names the columns; the time columns (`ns`, `us`, `ms`, and their
+  per-operation variants such as `ns_per_frame` or `plain_ns_per_read`),
+  `size_bytes` and `peak_bytes`, `mib_per_s`, and `*_packets` columns are
+  measurements, and every other column is a workload dimension in each series
+  name, so print outcomes only in measured columns. The Rust benchmark tests
+  (`just gh nightly rust-test`) run in release builds, one at a time, under
+  nextest's `bench` profile, which keeps each test's output in a JUnit report;
+  their series are named by package and test path, such as
+  `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`.
+- Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
+  bundles the [size report](../sh/size/README.md) measures, recorded even on a
+  night its growth check fails. Release build times stay out.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.
 Malformed, empty, nonfinite, or duplicate measurements fail validation. The
-nightly artifacts retain the reports, raw JS output, and each Criterion run's
-metadata and estimates for 45 days. Relay load, audio quality, and the Rust
-benchmark tests job's nextest output do not enter the table.
+nightly artifacts retain the reports, raw JS output, nextest JUnit reports, and
+each Criterion run's metadata and estimates for 45 days. Relay load, audio
+quality, and the binding runners (measured in rust2, above) do not enter the
+table.
 
 Render the table from the published history:
 
