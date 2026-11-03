@@ -6,15 +6,15 @@
 //! route on its continuity verdict, so the counter and the PES reassembly cannot disagree about
 //! which packets broke a chain. Each program times its own tables, PCR and PTS in [`Health`].
 //!
-//! Intervals run on the program clock the importer already keeps
-//! ([`Liveness`](super::import::Liveness)): the PCR summed step by step, which the 33-bit wrap,
-//! a signalled reset or one corrupt value cannot jump. The clock starts at the first PCR after
-//! the PMT, and a clock that stops freezes every interval with it. One that jumps forward
-//! without a flag, by less than the 1 s bound, stretches every interval by the jump: the PCR
-//! check counts the jump, and a table or PTS the stretch makes late counts too.
+//! Intervals advance by the larger of bounded PCR progression and elapsed arrival time.
+//! Arrival is sampled once per input chunk and at EOF, without a timer. A stalled or absent
+//! PCR therefore cannot hide missing tables or PTS, even when the whole input stops. An
+//! offline file still advances by its PCR; its arrival checks describe the ingestion pace,
+//! not the encoder's packet insertion schedule.
 
 use std::collections::{BTreeMap, HashMap};
 
+use kio::clock::Instant;
 use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::import::{Payload, discontinuity_indicator, payload, pcr};
@@ -209,13 +209,20 @@ impl Multiplex {
 	}
 }
 
-/// The TR 101 290 checks timed on one program's clock: table, PCR and PTS intervals.
+/// Table, PCR and PTS intervals on a program's running health clock.
 #[derive(Clone, Default)]
 pub(super) struct Health {
 	errors: Errors,
 	pcr_pid: Option<u16>,
 	/// The last PCR value on the PCR PID, forgotten across a signalled discontinuity.
 	pcr: Option<u64>,
+	clock: Clock,
+	/// Last advancing PCR, or when its PID was declared, on the running health clock.
+	progress: Option<i64>,
+	/// Missing PCR counts once until its value advances or a discontinuity resets it.
+	missing: bool,
+	/// Earliest arrival that can expire an interval. Resets may leave it conservatively early.
+	deadline: Option<Instant>,
 	pat: Timer,
 	/// The PMT PIDs the PAT names for the imported program.
 	pmt: HashMap<u16, Timer>,
@@ -224,18 +231,38 @@ pub(super) struct Health {
 }
 
 impl Health {
+	pub(super) fn now(&self) -> Option<u64> {
+		self.clock.now
+	}
+
+	pub(super) fn deadline(&self) -> Option<Instant> {
+		self.deadline
+	}
+
+	/// All packets in an input chunk share its arrival time, including unrouted packets.
+	pub(super) fn arrived(&mut self, at: Instant) {
+		if self.clock.arrival.is_some_and(|last| at <= last) {
+			return;
+		}
+		self.clock.arrived(at);
+		if self.deadline.is_none_or(|deadline| at >= deadline) {
+			self.tick();
+		}
+	}
+
 	pub(super) fn errors(&self) -> &Errors {
 		&self.errors
 	}
 
 	/// Time one packet the [`Multiplex`] graded as `continuation`. A corrupt packet or a
 	/// duplicate feeds no table or PCR check.
-	pub(super) fn packet(&mut self, pkt: &[u8; TsPacket::SIZE], continuation: Continuation, now: Option<u64>) {
+	pub(super) fn packet(&mut self, pkt: &[u8; TsPacket::SIZE], continuation: Continuation) {
 		if matches!(continuation, Continuation::Corrupt | Continuation::Duplicate) {
 			return;
 		}
 		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
 		let scrambled = pkt[3] & 0xc0 != 0;
+		let now = self.now();
 		if pid == Pid::PAT {
 			if scrambled {
 				self.errors.pat_error += 1;
@@ -253,57 +280,93 @@ impl Health {
 				timer.reset(now);
 			}
 		}
-		if self.pcr_pid == Some(pid) {
-			self.pcr(pid, pkt);
+		if self.pcr_pid == Some(pid) && self.pcr(pid, pkt) {
+			self.tick();
 		}
 	}
 
-	/// `PCR_repetition_error` and `PCR_discontinuity_indicator_error`, graded on consecutive
-	/// PCR values rather than on arrival, so they speak for the encoder's insertion and not for
-	/// the network in front of the importer.
+	/// Grade PCR value differences separately from the arrival-driven missing-PCR check.
 	///
 	/// On values alone a run of missing PCRs and an unsignalled jump are the same difference,
 	/// so one forward difference over 100 ms counts under both. A backward one counts only as
 	/// a discontinuity. The interval across a packet that sets `discontinuity_indicator` is
-	/// dropped from both (ISO/IEC 13818-1 2.4.3.4), and the wrap is modular.
-	fn pcr(&mut self, pid: u16, pkt: &[u8; TsPacket::SIZE]) {
+	/// dropped from both (ISO/IEC 13818-1 2.4.3.4), and the wrap is modular. A missing-PCR
+	/// outage already counted on arrival is not counted again when the PCR returns.
+	fn pcr(&mut self, pid: u16, pkt: &[u8; TsPacket::SIZE]) -> bool {
 		let value = pcr(pkt);
 		if discontinuity_indicator(pkt) {
 			self.pcr = value;
-			return;
+			self.clock.pcr(0, true);
+			self.progress = self.now().map(ticks);
+			self.missing = false;
+			return true;
 		}
 		let Some(value) = value else {
-			return;
+			return false;
 		};
 		let Some(last) = self.pcr.replace(value) else {
-			return;
+			self.clock.pcr(0, true);
+			self.progress = self.now().map(ticks);
+			self.missing = false;
+			return true;
 		};
 		let errors = self.errors.pid(pid);
 		match Delta::between(last, value, PCR_WRAP) {
 			Delta::Forward(step) if step > PCR_LIMIT => {
-				errors.pcr_repetition_error += 1;
+				errors.pcr_repetition_error += u64::from(!self.missing);
 				errors.pcr_discontinuity_indicator_error += 1;
 			}
 			Delta::Forward(_) => {}
 			Delta::Back(_) => errors.pcr_discontinuity_indicator_error += 1,
 		}
+		if value != last {
+			let step = match Delta::between(last, value, PCR_WRAP) {
+				Delta::Forward(step) if step <= super::mux_rate::MAX_INTERVAL => step,
+				_ => 0,
+			};
+			self.clock.pcr(step, self.missing || step == 0);
+			self.progress = self.clock.anchor.map(|(_, now)| ticks(now));
+			self.missing = false;
+			return true;
+		}
+		false
 	}
 
-	/// The program clock advanced to `now`: count every table and PTS overdue at it.
-	pub(super) fn tick(&mut self, now: u64) {
+	/// Count every table and PTS overdue, and a missing PCR once per outage.
+	fn tick(&mut self) {
+		let Some(now) = self.now() else { return };
+		let mut next = None;
+		let mut due = |last: i64, limit: u64| {
+			let at = last + ticks(limit) + 1;
+			next = Some(next.map_or(at, |next: i64| next.min(at)));
+		};
+		if let Some(pid) = self.pcr_pid {
+			let progress = self.progress.get_or_insert(ticks(now));
+			if ticks(now) - *progress > ticks(PCR_LIMIT) && !self.missing {
+				self.errors.pid(pid).pcr_repetition_error += 1;
+				self.missing = true;
+			}
+			if !self.missing {
+				due(*progress, PCR_LIMIT);
+			}
+		}
 		self.errors.pat_error += self.pat.expired(now, TABLE_LIMIT);
+		due(self.pat.last.unwrap(), TABLE_LIMIT);
 		for (pid, timer) in &mut self.pmt {
 			let late = timer.expired(now, TABLE_LIMIT);
 			if late > 0 {
 				self.errors.pids.entry(*pid).or_default().pmt_error += late;
 			}
+			due(timer.last.unwrap(), TABLE_LIMIT);
 		}
 		for (pid, timer) in &mut self.pts {
 			let late = timer.expired(now, PTS_LIMIT);
 			if late > 0 {
 				self.errors.pids.entry(*pid).or_default().pts_error += late;
 			}
+			due(timer.last.unwrap(), PTS_LIMIT);
 		}
+		self.deadline = next.and_then(|at| self.clock.at(at));
 	}
 
 	/// The PMT PIDs the latest PAT names for the imported program. A PID it no longer names is
@@ -320,6 +383,9 @@ impl Health {
 		if self.pcr_pid != pid {
 			self.pcr_pid = pid;
 			self.pcr = None;
+			self.progress = self.now().map(ticks);
+			self.missing = false;
+			self.tick();
 		}
 	}
 
@@ -362,6 +428,47 @@ impl Health {
 		}
 		if pts && let Some(timer) = self.pts.get(&pid) {
 			carry(timer, to.pts.entry(pid).or_default());
+		}
+		if self.pcr_pid == Some(pid) && to.pcr_pid == Some(pid) {
+			to.progress = self.progress.map(|last| last + ticks(then) - ticks(now));
+			to.missing = self.missing;
+		}
+		to.tick();
+	}
+}
+
+/// Extrapolate from the last advancing PCR on arrival time, without counting the same
+/// interval twice when PCR catches up. A clock reset reanchors without jumping the checks.
+#[derive(Clone, Default)]
+struct Clock {
+	now: Option<u64>,
+	anchor: Option<(Instant, u64)>,
+	arrival: Option<Instant>,
+}
+
+impl Clock {
+	fn at(&self, deadline: i64) -> Option<Instant> {
+		let (at, source) = self.anchor?;
+		let ticks = deadline.saturating_sub(ticks(source)).max(0) as u128;
+		let nanos = (ticks * 1_000_000_000).div_ceil(u128::from(PCR_HZ));
+		at.checked_add(std::time::Duration::from_nanos(u64::try_from(nanos).ok()?))
+	}
+
+	fn arrived(&mut self, at: Instant) {
+		self.arrival = Some(at);
+		let (then, ticks) = *self.anchor.get_or_insert((at, 0));
+		let elapsed = (at.duration_since(then).as_nanos() * u128::from(PCR_HZ) / 1_000_000_000) as u64;
+		self.now = Some(self.now.unwrap_or(0).max(ticks + elapsed));
+	}
+
+	fn pcr(&mut self, step: u64, reset: bool) {
+		if let Some(at) = self.arrival {
+			let source = self.anchor.map_or(0, |(_, ticks)| ticks) + step;
+			let now = self.now.unwrap_or(0).max(source);
+			self.now = Some(now);
+			// Ordinary jitter must not accumulate into extra PCR time. Only a counted
+			// outage or clock reset restarts the PCR timeline at the arrival floor.
+			self.anchor = Some((at, if reset { now } else { source }));
 		}
 	}
 }
@@ -839,13 +946,119 @@ mod test {
 		true
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn arrival_jitter_does_not_accumulate_on_the_health_clock() {
+		let mut health = super::Health::default();
+		let start = kio::clock::Instant::now();
+		health.arrived(start);
+		health.pcr_pid(Some(VIDEO));
+		let mut feed = Feed::default();
+		for i in 0..=30 {
+			let ms = i * 50 + if i % 2 == 0 { 0 } else { 30 };
+			health.arrived(start + std::time::Duration::from_millis(ms));
+			feed.pcr(i * 50 * MS, false);
+			health.packet(
+				(&*feed.last_packet()).try_into().unwrap(),
+				super::Continuation::Contiguous,
+			);
+		}
+		assert_eq!(health.now(), Some(1_500 * MS));
+		assert_eq!(health.errors.pids[&VIDEO].pcr_repetition_error, 0);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_pcr_does_not_freeze_timing_checks() {
+		for continuing in [false, true] {
+			for repeated in [false, true] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+				let mut import = Import::new(broadcast, catalog.reserve());
+				let mut feed = Feed::default();
+				feed.clean(0, 100);
+				import.decode(&std::mem::take(&mut feed.out)).unwrap();
+				for t in (100..=1_000).step_by(100) {
+					tokio::time::advance(std::time::Duration::from_millis(100)).await;
+					if continuing {
+						feed.pat();
+						feed.pmt(0, &[VIDEO, PEER]);
+						feed.pes(VIDEO, t * 90, false);
+						feed.pes(PEER, t * 90, false);
+					}
+					if repeated {
+						feed.pcr(90 * MS, false);
+					}
+					feed.null();
+					import.decode(&std::mem::take(&mut feed.out)).unwrap();
+				}
+				let stats = import.stats();
+				assert_eq!(stats.pcr_repetition_error, 1, "{continuing} {repeated}: {stats:?}");
+				assert_eq!(stats.pat_error, 2 * u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.pmt_error, 2 * u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.pts_error, 2 * u64::from(!continuing), "{stats:?}");
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_declared_pcr_that_never_arrives_is_missing() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = Import::new(broadcast, catalog.reserve());
+		let mut feed = Feed::default();
+		feed.run(0, 100, |t, _| t * MS, |_, part| part != Part::Pcr);
+		import.decode(&std::mem::take(&mut feed.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(100)).await;
+		feed.null();
+		import.decode(&std::mem::take(&mut feed.out)).unwrap();
+		assert_eq!(import.stats().pcr_repetition_error, 0, "exactly 100 ms is on time");
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		feed.null();
+		import.decode(&std::mem::take(&mut feed.out)).unwrap();
+		assert_eq!(import.stats().pcr_repetition_error, 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_stopped_input_counts_at_the_next_packet_or_eof_and_recovers() {
+		for eof in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut import = Import::new(broadcast, catalog.reserve());
+			let mut feed = Feed::default();
+			feed.clean(0, 100);
+			import.decode(&std::mem::take(&mut feed.out)).unwrap();
+			tokio::time::advance(std::time::Duration::from_secs(1)).await;
+			assert_eq!(import.stats().health(), [0; 9], "no timer or stats-driven mutation");
+			if eof {
+				import.finish().unwrap();
+			} else {
+				// A returning table must count the outage before resetting its interval.
+				feed.pat();
+				feed.pmt(0, &[VIDEO, PEER]);
+				feed.pes(VIDEO, 100 * 90, false);
+				feed.pes(PEER, 100 * 90, false);
+				feed.pcr(100 * MS, false);
+				import.decode(&std::mem::take(&mut feed.out)).unwrap();
+			}
+			let stats = import.stats();
+			assert_eq!(
+				(stats.pat_error, stats.pmt_error, stats.pts_error),
+				(2, 2, 2),
+				"{stats:?}"
+			);
+			assert_eq!(stats.pcr_repetition_error, 1, "{stats:?}");
+			tokio::time::advance(std::time::Duration::from_secs(1)).await;
+			import.finish().unwrap();
+			assert_eq!(import.stats().pcr_repetition_error, if eof { 1 } else { 2 });
+		}
+	}
+
 	/// `part` is missing for `len` ms after 1 s.
 	fn gap(part: Part, len: u64) -> impl Fn(u64, Part) -> bool {
 		move |t, p| p != part || !(t > 1_000 && t < 1_000 + len)
 	}
 
-	#[test]
-	fn a_clean_feed_counts_nothing() {
+	#[tokio::test(start_paused = true)]
+	async fn a_clean_feed_counts_nothing() {
 		let mut feed = Feed::default();
 		feed.clean(0, 3_000);
 		let stats = feed.stats();
@@ -859,8 +1072,8 @@ mod test {
 	/// The PCR is graded on its values: a gap over 100 ms counts under both checks, a shorter
 	/// one under neither, the wrap is no gap, and a step back is a discontinuity only. The clock
 	/// steps back alone: the media stepping with it would restart the import instead.
-	#[test]
-	fn pcr_gaps_are_graded_on_their_values() {
+	#[tokio::test(start_paused = true)]
+	async fn pcr_gaps_are_graded_on_their_values() {
 		let stats = |clock: &dyn Fn(u64, Part) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
 			let mut feed = Feed::default();
 			feed.run(0, 2_000, clock, keep);
@@ -907,8 +1120,8 @@ mod test {
 	}
 
 	/// The same 500 ms jump, signalled on the PCR PID, is a new time base and grades nothing.
-	#[test]
-	fn a_signalled_jump_is_not_graded() {
+	#[tokio::test(start_paused = true)]
+	async fn a_signalled_jump_is_not_graded() {
 		let mut feed = Feed::default();
 		feed.clean(0, 1_000);
 		feed.pcr(1_500 * MS, true);
@@ -919,8 +1132,8 @@ mod test {
 
 	/// A missing PAT counts once for each half second of program clock it is missing, and
 	/// a PAT exactly 0.5 s late is on time.
-	#[test]
-	fn a_late_pat_counts_once_per_half_second() {
+	#[tokio::test(start_paused = true)]
+	async fn a_late_pat_counts_once_per_half_second() {
 		for (len, count) in [(400, 0), (500, 0), (800, 1), (1_200, 2)] {
 			let mut feed = Feed::default();
 			feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pat, len));
@@ -931,8 +1144,8 @@ mod test {
 	}
 
 	/// PID 0 carries only PATs, in the clear.
-	#[test]
-	fn pid_zero_carries_only_clear_pats() {
+	#[tokio::test(start_paused = true)]
+	async fn pid_zero_carries_only_clear_pats() {
 		let mut feed = Feed::default();
 		feed.clean(0, 500);
 		feed.psi(0, &psi::section(0x02, 1, 0, 0, 0, &[0xe1, 0x01, 0xf0, 0x00]));
@@ -943,8 +1156,8 @@ mod test {
 		assert_eq!(stats.pat_error, 2, "{stats:?}");
 	}
 
-	#[test]
-	fn a_late_pmt_counts_on_its_own_check() {
+	#[tokio::test(start_paused = true)]
+	async fn a_late_pmt_counts_on_its_own_check() {
 		let mut feed = Feed::default();
 		feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pmt, 800));
 		let stats = feed.stats();
@@ -952,8 +1165,8 @@ mod test {
 	}
 
 	/// A 1 s gap in one stream's PTS counts once, on that stream.
-	#[test]
-	fn a_pts_gap_counts_on_its_own_pid() {
+	#[tokio::test(start_paused = true)]
+	async fn a_pts_gap_counts_on_its_own_pid() {
 		let mut feed = Feed::default();
 		feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pes(PEER), 1_000));
 		let stats = feed.stats();
@@ -963,8 +1176,8 @@ mod test {
 	}
 
 	/// A stream a PMT revision drops has no PTS cadence left to grade.
-	#[test]
-	fn a_stream_the_pmt_drops_has_no_pts_cadence() {
+	#[tokio::test(start_paused = true)]
+	async fn a_stream_the_pmt_drops_has_no_pts_cadence() {
 		let mut feed = Feed::default();
 		feed.clean(0, 1_000);
 		for t in (1_000..3_000).step_by(100) {
@@ -995,8 +1208,8 @@ mod test {
 		)
 	}
 
-	#[test]
-	fn continuity_errors_follow_iso_13818_1() {
+	#[tokio::test(start_paused = true)]
+	async fn continuity_errors_follow_iso_13818_1() {
 		assert_eq!(continuity(|_| {}), (0, 0, 0), "the control");
 		let lost = |feed: &mut Feed| {
 			feed.pes(PEER, 500 * 90, false);
@@ -1034,8 +1247,8 @@ mod test {
 
 	/// A packet flagged corrupt counts `Transport_error` and nothing else, even when its
 	/// counter jumps too.
-	#[test]
-	fn a_corrupt_packet_counts_only_a_transport_error() {
+	#[tokio::test(start_paused = true)]
+	async fn a_corrupt_packet_counts_only_a_transport_error() {
 		let tei = |feed: &mut Feed| {
 			feed.cc.insert(PEER, 9);
 			feed.pes(PEER, 500 * 90, false);
@@ -1067,8 +1280,8 @@ mod test {
 
 	/// One corrupt sync byte is an error without losing sync; two in a row lose it, and five
 	/// good ones acquire it again, so the next corrupt byte counts once more.
-	#[test]
-	fn sync_is_lost_after_two_corrupt_sync_bytes() {
+	#[tokio::test(start_paused = true)]
+	async fn sync_is_lost_after_two_corrupt_sync_bytes() {
 		let mut feed = Feed::default();
 		feed.clean(0, 2_000);
 		let nulls = feed.nulls();
@@ -1094,8 +1307,8 @@ mod test {
 
 	/// Bytes inserted into the stream move the packet grid: the old grid finds no sync byte
 	/// twice running, so sync is lost once, and acquired again on the new one.
-	#[test]
-	fn a_shifted_grid_loses_sync_once() {
+	#[tokio::test(start_paused = true)]
+	async fn a_shifted_grid_loses_sync_once() {
 		let mut feed = Feed::default();
 		feed.clean(0, 1_000);
 		feed.out.extend_from_slice(&[0x00; 10]);
@@ -1106,8 +1319,8 @@ mod test {
 	}
 
 	/// Every program's importer grades every packet of the multiplex, so a fault counts once.
-	#[test]
-	fn a_multiplex_counts_each_fault_once() {
+	#[tokio::test(start_paused = true)]
+	async fn a_multiplex_counts_each_fault_once() {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(
 			origin,

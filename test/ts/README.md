@@ -598,6 +598,25 @@ rebase.
 | `recovery-point-sei` | shape | each recovery point keeps its SEI |
 | `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
 
+## Input health
+
+Import's timing counters use bounded PCR progression and elapsed arrival time,
+so stalled PCR cannot freeze PAT, PMT or PTS checks. Arrival is sampled per
+input chunk; the next input or EOF grades a fully stopped feed without a timer.
+This diagnoses ingestion, including upstream delays, and does not certify the
+encoder's insertion schedule or PCR accuracy. An instantly read file needs a
+running PCR to establish its interval lengths.
+
+| Coverage | Automated evidence (`just rs test -p moq-mux`) |
+| --- | --- |
+| Single program, PCR absent or repeating while tables/PES continue or stop | [`health::test::a_stalled_pcr_does_not_freeze_timing_checks`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Fully stopped input, next packet or EOF; PCR return rearms the next outage | [`health::test::a_stopped_input_counts_at_the_next_packet_or_eof_and_recovers`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Shared PES PID, stalled owner or shared PCR PID; each input fault counted once | [`programs::test::a_stalled_owner_cannot_hide_a_shared_pids_outage`](../../rs/moq-mux/src/container/ts/programs.rs) |
+
+These paused-time tests run in the Rust PR gate. `ts_stalled` in the
+[`TS ingest benchmark`](../../rs/moq-mux/benches/ts_programs.rs) sweeps program
+fanout and input batching independently.
+
 ## Programs without video
 
 `just test ts --clockless audio-scte35`, `--clockless sections`, and

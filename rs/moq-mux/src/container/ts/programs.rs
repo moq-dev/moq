@@ -74,6 +74,9 @@ pub struct Programs {
 	clock: Clock,
 	/// The [`Clock`] reading past which the longest-waiting program is late, while one waits.
 	deadline: Option<u64>,
+	/// Earliest arrival that can expire a running program's health check. Kept early when
+	/// a routed packet moves its check later, avoiding a program scan on every input chunk.
+	health_deadline: Option<kio::clock::Instant>,
 	/// The packets on PIDs no program reads.
 	unclaimed: Unclaimed,
 }
@@ -319,6 +322,7 @@ impl Programs {
 			announced: false,
 			clock: Clock::default(),
 			deadline: None,
+			health_deadline: None,
 			unclaimed: Unclaimed::default(),
 		}
 	}
@@ -333,6 +337,16 @@ impl Programs {
 
 	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
 		demux.push(data);
+		let arrival = demux.arrival();
+		if self.health_deadline.is_none_or(|deadline| arrival >= deadline) {
+			self.health_deadline = None;
+			for program in &mut self.programs {
+				program.import.arrived(arrival);
+				if let Some(deadline) = program.import.timing().0.deadline() {
+					self.health_deadline = Some(self.health_deadline.map_or(deadline, |at| at.min(deadline)));
+				}
+			}
+		}
 		while let Some(packet) = demux.next() {
 			if let Some(pat) = &packet.pat {
 				self.follow(pat)?;
@@ -359,6 +373,9 @@ impl Programs {
 				let before = (self.pmt_pids[usize::from(packet.pid)] && import.pmt_pid() == Some(packet.pid))
 					.then(|| Before::of(import));
 				import.packet(&packet)?;
+				if let Some(deadline) = import.timing().0.deadline() {
+					self.health_deadline = Some(self.health_deadline.map_or(deadline, |at| at.min(deadline)));
+				}
 				self.clock.offer(index, import);
 				if import.claims_changed() {
 					changed.push((index, before));
@@ -741,6 +758,8 @@ impl Programs {
 	/// counts each PID in each way it reads it now or did, given its counts `before` the packet
 	/// that moved them, if that was a PMT.
 	fn reclaim(&mut self, index: usize, before: Option<&Before>) {
+		// A handover may bring an older interval into another program's health checks.
+		self.health_deadline = Some(kio::clock::Instant::ZERO);
 		let program = &mut self.programs[index];
 		let claims = program.import.claims();
 		for &pid in program.claims.iter().filter(|pid| claims.binary_search(pid).is_err()) {
@@ -1259,6 +1278,82 @@ mod test {
 		assert_eq!(outage(Leave::Stay), 2, "the 1.5 s since the PTS");
 		assert_eq!(outage(Leave::Retire), 2, "counted on by the program left");
 		assert_eq!(outage(Leave::Drop), 2, "counted on by the program still carrying it");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_missing_shared_pcr_counts_once_across_a_late_handover() {
+		let mut programs = Programs::new(
+			crate::source::produce_origin(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let mut mux = Mux::default();
+		let both = [(1, 0x100), (2, 0x200)];
+		mux.pat(&both[..1]).pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0);
+		mux.packet(0x1ff, Flags::pcr(27_000_000));
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		mux.pat(&both).pmt(0x200, 2, 0x1ff, &[(MP2, 0x61)], 0);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pcr_repetition_error, 1);
+		tokio::time::advance(std::time::Duration::from_millis(50)).await;
+		mux.pat(&both[1..]);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		for _ in 0..3 {
+			tokio::time::advance(std::time::Duration::from_millis(100)).await;
+			mux.packet(0x1fff, Flags::default());
+			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+			assert_eq!(programs.stats().pcr_repetition_error, 1, "the same outage still runs");
+		}
+		programs.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_owner_cannot_hide_a_shared_pids_outage() {
+		for shared_clock in [false, true] {
+			for continuing in [false, true] {
+				let mut programs = Programs::new(
+					crate::source::produce_origin(),
+					moq_net::Path::from_static("event.hang"),
+					catalog::Config::default(),
+				);
+				let mut mux = Mux::default();
+				let both = [(1, 0x100), (2, 0x200)];
+				let clocks = [0x1f1, if shared_clock { 0x1f1 } else { 0x1f2 }];
+				mux.pat(&both);
+				for ((number, pid), clock) in both.into_iter().zip(clocks) {
+					mux.pmt(pid, number, clock, &[(MP2, 0x61)], 0);
+					mux.packet(clock, Flags::pcr(27_000_000));
+				}
+				mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+				programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+				for i in 1..=10 {
+					tokio::time::advance(std::time::Duration::from_millis(100)).await;
+					if continuing {
+						mux.pat(&both);
+						for ((number, pid), clock) in both.into_iter().zip(clocks) {
+							mux.pmt(pid, number, clock, &[(MP2, 0x61)], 0);
+						}
+						mux.out
+							.extend(mp2_pes(0x61, i, 90_000 + u64::from(i) * 9_000, [0x61; 2]));
+					}
+					if !shared_clock {
+						mux.packet(clocks[1], Flags::pcr(27_000_000 + u64::from(i) * 100 * MS));
+					}
+					// No program reads this packet: it must still advance every health check.
+					mux.packet(0x1fff, Flags::default());
+					programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+				}
+				let stats = programs.stats();
+				assert_eq!(stats.pcr_repetition_error, 1, "{shared_clock} {continuing}: {stats:?}");
+				assert_eq!(stats.pat_error, u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.pmt_error, 2 * u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.pts_error, u64::from(!continuing), "{stats:?}");
+				assert_eq!(stats.streams[&0x61].pts_error, stats.pts_error);
+				programs.finish().unwrap();
+			}
+		}
 	}
 
 	/// A section stream refused for want of a PCR keeps its refusal in the totals once, though

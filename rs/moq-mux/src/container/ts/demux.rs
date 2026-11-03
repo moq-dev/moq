@@ -26,6 +26,8 @@ pub(super) struct Demux {
 	position: u64,
 	/// Packets framed so far, every PID and null stuffing included.
 	packets: u64,
+	/// One arrival timestamp for every packet supplied in a decode call.
+	arrival: Option<kio::clock::Instant>,
 	health: Multiplex,
 	pat: PatReader,
 	/// PAT sections dropped for a bad CRC.
@@ -42,6 +44,7 @@ pub(super) struct Demux {
 /// One packet, and what the shared layer read out of it.
 pub(super) struct Packet<'a> {
 	pub pkt: &'a [u8; TsPacket::SIZE],
+	pub arrival: kio::clock::Instant,
 	pub pid: u16,
 	/// The packet's offset in the input.
 	pub offset: u64,
@@ -68,7 +71,14 @@ impl Demux {
 
 	/// Append input; [`next`](Self::next) frames it.
 	pub fn push(&mut self, data: &[u8]) {
+		if !data.is_empty() {
+			self.arrival = Some(kio::clock::Instant::now());
+		}
 		self.scratch.extend_from_slice(data);
+	}
+
+	pub fn arrival(&self) -> kio::clock::Instant {
+		self.arrival.unwrap_or_else(kio::clock::Instant::now)
 	}
 
 	/// The next whole packet pushed, or `None` once only a partial packet remains, at which
@@ -113,6 +123,7 @@ impl Demux {
 
 		Some(Packet {
 			pkt,
+			arrival: self.arrival.expect("pushed input"),
 			pid,
 			offset,
 			count: self.packets,

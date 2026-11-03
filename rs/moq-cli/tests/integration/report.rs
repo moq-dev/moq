@@ -15,10 +15,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// Five seconds of HEVC and Opus at a constant 400 kb/s.
 const CLIP: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
 /// Bytes fed every [`PACE`], which keeps [`CLIP`] near real time.
-const CHUNK: usize = 188 * 40;
-const PACE: Duration = Duration::from_millis(150);
-/// Past the two seconds of PCR a live TS catalog waits for, so the broadcast is up by then.
-const HALF: usize = CLIP.len() / 2;
+const CHUNK: usize = 188 * 10;
+const PACE: Duration = Duration::from_micros(37_600);
 
 /// Feed `clip` to `write` at about real time, never catching up in a burst.
 async fn feed(clip: &[u8], mut write: impl AsyncFnMut(&[u8])) {
@@ -161,18 +159,15 @@ async fn import_reports_count_what_each_rendition_wrote() {
 	let mut stdin = import.stdin.take().expect("stdin");
 	let (mut sink, mut lines) = sink(&relay, "demo", "report");
 
-	// Half the clip, then a report before the rest: the import reports while it runs, and a
-	// stalled input keeps reporting until the sink has joined.
-	feed(&CLIP[..HALF], async |chunk| {
-		stdin.write_all(chunk).await.expect("write stdin")
-	})
-	.await;
-	let mut reports: Vec<hang::stats::Snapshot<ts::stats::Report>> =
-		vec![next(&mut lines).await.expect("a report mid-import")];
-	feed(&CLIP[HALF..], async |chunk| {
-		stdin.write_all(chunk).await.expect("write stdin")
-	})
-	.await;
+	// Keep supplying PCR while the sink joins: waiting for a report must not manufacture
+	// an input outage in the clean-feed control.
+	let (_, first) = tokio::join!(
+		feed(CLIP, async |chunk| {
+			stdin.write_all(chunk).await.expect("write stdin")
+		}),
+		next(&mut lines),
+	);
+	let mut reports: Vec<hang::stats::Snapshot<ts::stats::Report>> = vec![first.expect("a report mid-import")];
 	drop(stdin);
 	while let Some(report) = next(&mut lines).await {
 		reports.push(report);
@@ -188,7 +183,7 @@ async fn import_reports_count_what_each_rendition_wrote() {
 			&& first
 				.iter()
 				.all(|(name, rendition)| rendition.frames < written[name].frames),
-		"the first report counts half the clip: {first:?}"
+		"the first report counts part of the clip: {first:?}"
 	);
 	assert!(
 		reports.iter().any(|report| report.transport.rtt.is_some()),

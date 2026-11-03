@@ -370,7 +370,12 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// The TR 101 290 intervals this importer times, and its clock, for another to take over.
 	pub(super) fn timing(&self) -> (&Health, Option<u64>) {
-		(&self.health, self.liveness.now())
+		(&self.health, self.health.now())
+	}
+
+	/// Advance input health even when no packet routes to this program.
+	pub(super) fn arrived(&mut self, at: kio::clock::Instant) {
+		self.health.arrived(at);
 	}
 
 	/// Take over the TR 101 290 intervals `health` timed on `pid` at clock reading `now`, from a
@@ -381,7 +386,8 @@ impl<E: catalog::Catalog> Import<E> {
 			.ok()
 			.and_then(|pid| self.streams.get(&pid))
 			.is_some_and(Stream::cadenced);
-		health.hand_over(pid, &mut self.health, cadenced, now, self.liveness.now());
+		let then = self.health.now();
+		health.hand_over(pid, &mut self.health, cadenced, now, then);
 	}
 
 	/// A reservation on this program's timebase, so every stream shifts by its offset.
@@ -417,6 +423,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
 		demux.push(data);
+		self.arrived(demux.arrival());
 		// Route one whole packet at a time, so a PMT is parsed (and any PID it declares
 		// registered) before the packets that follow it in the same chunk route.
 		loop {
@@ -520,7 +527,8 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// Every packet is graded, but only the media PIDs and the clock route on the
 		// verdict: PSI and section PIDs keep their reassemblers' own.
-		self.health.packet(pkt, continuation, self.liveness.now());
+		self.health.arrived(packet.arrival);
+		self.health.packet(pkt, continuation);
 		let continuation = Pid::new(pid)
 			.ok()
 			.filter(|pid| self.streams.contains_key(pid) || self.pcr_pid == Some(*pid))
@@ -569,9 +577,6 @@ impl<E: catalog::Catalog> Import<E> {
 				self.place_pcr(pcr, offset)?;
 				self.liveness.pcr(pcr);
 				self.si.pcr(pcr, packet.count);
-				if let Some(now) = self.liveness.now() {
-					self.health.tick(now);
-				}
 				if self.supports_mpegts {
 					let ready = self.mux_rate.ready();
 					if self.mux_rate.pcr(pcr, packet.count) {
@@ -1263,7 +1268,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let is_video = stream.video();
 		let is_clock = matches!(stream, Stream::Clock);
 		if pes.pts.is_some() && stream.cadenced() {
-			self.health.pts(pid.as_u16(), self.liveness.now());
+			self.health.pts(pid.as_u16(), self.health.now());
 		}
 		// Resolve the wrap at PES start so every elementary stream and private section shares
 		// the program timeline, including streams discovered after a wrap.
@@ -1790,7 +1795,7 @@ impl<E: catalog::Catalog> Import<E> {
 			);
 		}
 		let first = self.identity.replace(identity).is_none();
-		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
+		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.health.now());
 		let moved = self.pmt.as_ref().is_none_or(|(pid, _)| *pid != entry.pmt_pid);
 		if moved {
 			if let Some((from, _)) = &self.pmt {
@@ -1862,6 +1867,9 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
+		if !self.finished {
+			self.arrived(kio::clock::Instant::now());
+		}
 		// A step still being judged never completed: what it held routes as read.
 		if !self.finished && self.steps.settle() {
 			self.decode(&[])?;

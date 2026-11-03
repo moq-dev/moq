@@ -78,7 +78,7 @@ pub struct Snapshot {
 	/// in sync.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub sync_byte_error: u64,
-	/// 1.3 `PAT_error_2`: each 0.5 s of program clock without a PAT section on PID 0, and each
+	/// 1.3 `PAT_error_2`: each 0.5 s of health clock without a PAT section on PID 0, and each
 	/// packet on PID 0 that is scrambled or starts a section other than a PAT.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub pat_error: u64,
@@ -89,7 +89,7 @@ pub struct Snapshot {
 	/// tells a loss of 15 from a duplicate, so the count is a floor.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub continuity_count_error: u64,
-	/// 1.5 `PMT_error_2`: each 0.5 s of program clock without a PMT section on a PMT PID the
+	/// 1.5 `PMT_error_2`: each 0.5 s of health clock without a PMT section on a PMT PID the
 	/// PAT names for the imported program, and each scrambled packet on one.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub pmt_error: u64,
@@ -97,10 +97,12 @@ pub struct Snapshot {
 	/// packet counts nothing else.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub transport_error: u64,
-	/// 2.3a `PCR_repetition_error`: consecutive PCR values on the PCR PID more than 100 ms
-	/// apart. Graded on the values, not on arrival: that speaks for the encoder's insertion,
-	/// which is what ingest can, while the network in front of the importer re-times arrival.
-	/// The interval across a `discontinuity_indicator` is not graded.
+	/// 2.3a `PCR_repetition_error`: consecutive PCR values more than 100 ms apart, or no
+	/// advancing PCR for over 100 ms of health clock, counted once until PCR returns.
+	/// The health clock advances by the larger of bounded PCR progression and arrival time,
+	/// sampled per input chunk and at EOF without a timer. Arrival includes upstream delays;
+	/// offline input needs ingestion time to expose a stalled PCR. A signalled discontinuity
+	/// resets the outage, and its PCR value difference is not graded.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub pcr_repetition_error: u64,
 	/// 2.3b `PCR_discontinuity_indicator_error`: consecutive PCR values outside 0 to 100 ms
@@ -109,7 +111,7 @@ pub struct Snapshot {
 	/// counts here and as a repetition error both.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub pcr_discontinuity_indicator_error: u64,
-	/// 2.5 `PTS_error`: each 700 ms of program clock without a PTS on an elementary stream
+	/// 2.5 `PTS_error`: each 700 ms of health clock without a PTS on an elementary stream
 	/// that has carried one. Verbatim streams are not graded: SCTE-35 and subtitles have no
 	/// cadence to hold.
 	#[serde(skip_serializing_if = "is_zero")]

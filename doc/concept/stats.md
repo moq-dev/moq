@@ -89,9 +89,13 @@ fixed limits:
 An import grades the stream as it arrived. An export builds every header
 itself and runs no checks, so its counters stay zero and only its rows'
 `units` and `quiet` move. Neither grades the wire a receiver sees downstream.
-The PCR checks are graded on PCR values, not arrival: they speak for the
-encoder's insertion, since the network re-times arrival, and a forward step
-over 100 ms counts as both. 1.6 `PID_error` is covered, more strictly, by each
+PCR value differences speak for the encoder's insertion: a forward step
+over 100 ms counts as both PCR errors. Import also counts a missing or frozen
+PCR once per outage, clearing it when PCR advances again. Its table and PTS
+checks keep advancing by the larger of bounded PCR progression and arrival
+time, sampled per input chunk. Arrival includes upstream delays; a file read
+instantly cannot establish how long its missing PCR lasted. A fully stopped
+input is graded at its next packet or EOF, without a timer. 1.6 `PID_error` is covered by each
 row's `units` and `quiet`: a dead video path behind a live mux still sends
 PCR-only packets on its PID, which a packet count reads as live.
 `PCR_accuracy_error` is not measured. No verdict is computed: a sparse stream
