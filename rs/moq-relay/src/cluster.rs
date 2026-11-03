@@ -1234,10 +1234,12 @@ fn dialer<'a>(cluster: &'a Cluster, token: &'a str) -> impl FnMut(DialTarget) ->
 /// origin. Loop prevention and route preference come from the hop list carried
 /// on each announced route (see [`moq_net::origin::Route`]).
 ///
-/// Construct with [`Cluster::new`], then attach a dial template and (optionally)
-/// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
-/// methods. Those builders do not rebuild the origin. A cluster without a
-/// dial template can serve local sessions but cannot dial remote peers.
+/// Construct with [`Cluster::new`]: its [`Options`] carry the limits, cache, and
+/// stats ([`Options::with_stats`]), and [`Cluster::stats`] is the resulting
+/// registry. Then attach a dial template with [`Cluster::with_connect`] and a LAN
+/// advertisement with [`Cluster::with_advertise`]; neither rebuilds the origin. A
+/// cluster without a dial template can serve local sessions but cannot dial
+/// remote peers.
 #[derive(Clone)]
 pub struct Cluster {
 	session_limits: moq_net::session::Limits,

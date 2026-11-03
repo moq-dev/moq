@@ -8,7 +8,8 @@ mod refresh;
 
 pub(crate) use caps::{Caps, Pacer};
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use axum::http;
 use moq_auth::{Bytes, Grant, Request, lease};
@@ -16,7 +17,7 @@ use moq_auth::{Pattern, Patterns};
 use moq_net::{Path, stats::Tier};
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, serde_as};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, oneshot};
 use url::Url;
 
 /// The longest a decider may take to verify a token presented in band. A
@@ -812,7 +813,7 @@ pub(crate) async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Out
 #[derive(Clone)]
 enum Decider {
 	/// The embedding process, through [`Admissions`].
-	Embedded(mpsc::UnboundedSender<Admission>),
+	Embedded(Arc<Submitter>),
 	Server(moq_auth::Client),
 	/// The public rules, as a token with an empty root.
 	Public(Arc<moq_auth::Claims>),
@@ -824,13 +825,11 @@ impl Decider {
 		match self {
 			Self::Embedded(admissions) => {
 				let (reply, answer) = oneshot::channel();
-				admissions
-					.send(Admission {
-						request,
-						connection,
-						reply,
-					})
-					.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
+				admissions.0.push(Admission {
+					request,
+					connection,
+					reply,
+				})?;
 				Ok(Box::pin(async move {
 					answer
 						.await
@@ -899,8 +898,17 @@ impl Auth {
 	/// returned [`Admissions`] and waits for its [`Admission`] to be granted or
 	/// refused. Dropping the `Admissions` fails every later session as unavailable.
 	pub fn embedded(node: impl Into<String>) -> (Self, Admissions) {
-		let (sender, receiver) = mpsc::unbounded_channel();
-		(Self::new(node, Decider::Embedded(sender)), Admissions(receiver))
+		let queue = Arc::new(Queue {
+			queued: Mutex::new(Queued {
+				pending: VecDeque::new(),
+				prune_at: PRUNE_MIN,
+				closed: false,
+				dropped: false,
+			}),
+			ready: Notify::new(),
+		});
+		let submitter = Arc::new(Submitter(queue.clone()));
+		(Self::new(node, Decider::Embedded(submitter)), Admissions(queue))
 	}
 
 	fn new(node: impl Into<String>, decider: Decider) -> Self {
@@ -1038,12 +1046,109 @@ fn still_valid(grant: &Grant) -> Result<(), lease::Reason> {
 /// slot before they reach the decider.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
-pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
+///
+/// An admission whose session stopped waiting is skipped, never handed out, and
+/// the queue prunes them as it grows, so a slow decider holds memory for the
+/// sessions still waiting rather than every one that gave up.
+pub struct Admissions(Arc<Queue>);
 
 impl Admissions {
 	/// The next session to decide, or `None` once every clone of the [`Auth`] is gone.
 	pub async fn next(&mut self) -> Option<Admission> {
-		self.0.recv().await
+		loop {
+			// A push before this waits stores a permit, so it is never missed.
+			let ready = self.0.ready.notified();
+			{
+				let mut queued = self.0.lock();
+				while let Some(admission) = queued.pending.pop_front() {
+					if !admission.reply.is_closed() {
+						return Some(admission);
+					}
+				}
+				if queued.closed {
+					return None;
+				}
+			}
+			ready.await;
+		}
+	}
+}
+
+impl Drop for Admissions {
+	fn drop(&mut self) {
+		// Fail every waiting session as unanswered, and every later one as unavailable.
+		let pending = {
+			let mut queued = self.0.lock();
+			queued.dropped = true;
+			std::mem::take(&mut queued.pending)
+		};
+		drop(pending);
+	}
+}
+
+/// The admissions an embedded [`Auth`] has submitted and its [`Admissions`] has
+/// yet to take.
+struct Queue {
+	queued: Mutex<Queued>,
+	/// Wakes [`Admissions::next`] for a new admission or the last [`Auth`] dropping.
+	ready: Notify,
+}
+
+struct Queued {
+	pending: VecDeque<Admission>,
+	/// The length at which a push first drops the admissions nobody waits on.
+	prune_at: usize,
+	/// Every clone of the [`Auth`] is gone, so no admission arrives again.
+	closed: bool,
+	/// The [`Admissions`] is gone, so no admission is answered again.
+	dropped: bool,
+}
+
+/// The fewest queued admissions that make a push prune the abandoned ones.
+///
+/// Each prune sets the next threshold to twice the admissions still waiting, so the
+/// queue holds at most twice the sessions waiting at the last prune, and pruning
+/// costs a constant amortized time per push.
+const PRUNE_MIN: usize = 64;
+
+impl Queue {
+	fn lock(&self) -> MutexGuard<'_, Queued> {
+		self.queued.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Queue `admission`, failing when nothing will answer it.
+	fn push(&self, admission: Admission) -> Result<(), Error> {
+		let abandoned = {
+			let mut queued = self.lock();
+			if queued.dropped {
+				return Err(Error::Unavailable("nobody is answering admissions".into()));
+			}
+			let mut abandoned = VecDeque::new();
+			if queued.pending.len() >= queued.prune_at {
+				let (waiting, gone): (VecDeque<_>, _) = std::mem::take(&mut queued.pending)
+					.into_iter()
+					.partition(|admission| !admission.reply.is_closed());
+				queued.pending = waiting;
+				queued.prune_at = (queued.pending.len() * 2).max(PRUNE_MIN);
+				abandoned = gone;
+			}
+			queued.pending.push_back(admission);
+			abandoned
+		};
+		drop(abandoned);
+		self.ready.notify_one();
+		Ok(())
+	}
+}
+
+/// The handle every clone of an embedded [`Auth`] shares: the last one dropping
+/// ends [`Admissions::next`].
+struct Submitter(Arc<Queue>);
+
+impl Drop for Submitter {
+	fn drop(&mut self) {
+		self.0.lock().closed = true;
+		self.0.ready.notify_one();
 	}
 }
 
@@ -1183,24 +1288,25 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn dropping_a_server_answer_cancels_the_http_exchange() {
+	async fn dropping_an_admission_cancels_the_http_exchange() {
 		use tokio::io::AsyncReadExt;
 
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 		let auth = Auth::new("test", Decider::Server(moq_auth::Client::new(url, None).unwrap()));
-		let mut answer = auth.submit(auth.request(moq_auth::Transport::Http, "/"), None).unwrap();
+		// Through `Auth::admit`, so detaching the answer anywhere on that path fails here.
+		let mut admission = Box::pin(auth.admit(auth.request(moq_auth::Transport::Http, "/")));
 		let (mut socket, _) = tokio::select! {
 			accepted = listener.accept() => accepted.unwrap(),
-			result = &mut answer => panic!("answered before the server accepted: {result:?}"),
+			result = &mut admission => panic!("admitted before the server accepted: {:?}", result.err()),
 		};
 		let mut buffer = [0; 1024];
 		let received = tokio::select! {
 			received = socket.read(&mut buffer) => received.unwrap(),
-			result = &mut answer => panic!("answered before the server replied: {result:?}"),
+			result = &mut admission => panic!("admitted before the server replied: {:?}", result.err()),
 		};
 		assert_ne!(received, 0, "the caller drove an HTTP request");
-		drop(answer);
+		drop(admission);
 		// A request awaiting its response cannot return its connection to the pool.
 		// Cancelling it closes that connection even while the auth server is stalled.
 		loop {
@@ -1211,6 +1317,78 @@ mod tests {
 				Err(err) => panic!("reading the cancelled request: {err}"),
 			}
 		}
+	}
+
+	fn submit_embedded(auth: &Auth, path: &str) -> Answer {
+		auth.submit(auth.request(moq_auth::Transport::Http, path), None)
+			.unwrap()
+	}
+
+	#[tokio::test]
+	async fn an_abandoned_embedded_admission_is_skipped() {
+		let (auth, mut admissions) = Auth::embedded("test");
+		drop(submit_embedded(&auth, "/gone"));
+		let waiting = submit_embedded(&auth, "/waiting");
+		let admission = admissions.next().await.unwrap();
+		assert_eq!(
+			admission.request.path, "/waiting",
+			"the decider never sees a session that gave up"
+		);
+		admission.refuse(Error::Refused(Default::default()));
+		assert!(matches!(waiting.await, Err(Error::Refused(_))));
+	}
+
+	#[tokio::test]
+	async fn abandoned_embedded_admissions_are_pruned_without_a_decider() {
+		let (auth, mut admissions) = Auth::embedded("test");
+		let waiting: Vec<_> = (0..PRUNE_MIN / 2)
+			.map(|i| submit_embedded(&auth, &format!("/waiting/{i}")))
+			.collect();
+		for i in 0..PRUNE_MIN * 20 {
+			drop(submit_embedded(&auth, &format!("/gone/{i}")));
+			let queued = admissions.0.lock().pending.len();
+			assert!(queued <= PRUNE_MIN.max(2 * waiting.len()), "{queued} admissions queued");
+		}
+		for i in 0..waiting.len() {
+			let admission = admissions.next().await.unwrap();
+			assert_eq!(
+				admission.request.path,
+				format!("/waiting/{i}"),
+				"waiting sessions keep their order"
+			);
+		}
+		drop(waiting);
+		assert!(
+			admissions
+				.0
+				.lock()
+				.pending
+				.iter()
+				.all(|admission| admission.reply.is_closed())
+		);
+	}
+
+	#[tokio::test]
+	async fn dropping_embedded_admissions_fails_waiting_and_later_sessions() {
+		let (auth, admissions) = Auth::embedded("test");
+		let waiting = submit_embedded(&auth, "/waiting");
+		drop(admissions);
+		assert!(matches!(waiting.await, Err(Error::Unavailable(_))));
+		let later = auth.submit(auth.request(moq_auth::Transport::Http, "/later"), None);
+		assert!(matches!(later.err(), Some(Error::Unavailable(_))));
+	}
+
+	#[tokio::test]
+	async fn embedded_admissions_end_once_every_auth_is_gone() {
+		let (auth, mut admissions) = Auth::embedded("test");
+		let clone = auth.clone();
+		let next = tokio::spawn(async move { admissions.next().await.is_none() });
+		tokio::task::yield_now().await;
+		drop(auth);
+		tokio::task::yield_now().await;
+		assert!(!next.is_finished(), "a clone can still submit");
+		drop(clone);
+		assert!(next.await.unwrap(), "no admission arrives once every clone is gone");
 	}
 
 	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
