@@ -1207,16 +1207,17 @@ export class Publisher {
 					if (slice.until !== undefined && read.sequence >= slice.until) break;
 
 					// A frame written in pieces streams its payload after the header.
-					const chunks = read.chunks?.size ? read.chunks : undefined;
-					const obj = chunks
+					const chunks = read.chunks;
+					const obj = chunks?.size
 						? new Frame({ streamed: chunks.size, timestamp: chunks.timestamp })
 						: new Frame({
-								payload: read.chunks ? new Uint8Array(0) : read.frame.payload,
+								payload: chunks ? new Uint8Array(0) : read.frame.payload,
 								timestamp: read.frame.timestamp,
 							});
 					const delta = first ? read.sequence : 0;
 					first = false;
 					await send(() => obj.encode(stream, header.flags, timescale, this.#session.version, delta));
+					// Even an empty one: it is an object only once committed, and may still be aborted.
 					if (chunks) await send(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
 				}
 
@@ -2773,10 +2774,10 @@ class FetchWriter {
 
 	/** Write `read` of group `sequence`, following the prior object of that group, if any. */
 	async object(sequence: bigint, read: ReadGroupFrame, stop: AbortSignal): Promise<void> {
-		const chunks = read.chunks?.size ? read.chunks : undefined;
+		const chunks = read.chunks;
 		const obj = new FetchFrame({
-			payload: read.chunks ? undefined : read.frame.payload,
-			streamed: chunks?.size,
+			payload: chunks ? undefined : read.frame.payload,
+			streamed: chunks?.size || undefined,
 			timestamp: read.frame.timestamp,
 		});
 		const position = {
@@ -2785,6 +2786,7 @@ class FetchWriter {
 			first: !this.#written,
 		};
 		await untilAborted(obj.encode(this.stream, position, this.#timescale, this.#version), stop);
+		// Even an empty payload: the object exists only once committed, and may still be aborted.
 		if (chunks)
 			await untilAborted(
 				sendPayload(chunks, (chunk) => this.stream.write(chunk), this.stream.closed),

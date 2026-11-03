@@ -829,6 +829,48 @@ test.each(["source", "request", "output"] as const)(
 	},
 );
 
+// An empty frame is an object only once committed: its header alone cannot complete the answer,
+// or a frame aborted after it would be served as if it existed.
+test.each(["finish", "abort"] as const)("a FETCH of an unfinished empty frame waits for its %s", async (outcome) => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		const group = fx.track.createGroup(0n);
+		const frame = group.createFrame({ size: 0, timestamp: new Timestamp(0, Timescale.MILLI) });
+		const request = requestStream(version);
+		let settled = false;
+		const task = fx.pub
+			.runFetch(new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, 1)) }), request.stream)
+			.finally(() => {
+				settled = true;
+			});
+		try {
+			expect(await request.answer.u53()).toBe(FetchOk.id);
+			await FetchOk.decode(request.answer, version);
+			const next = await fx.uni.read();
+			if (!next.value) throw new Error("missing fetch stream");
+			const reader = new Reader(next.value, undefined, version);
+			expect(await reader.u53()).toBe(FetchHeader.type);
+			await FetchHeader.decode(reader, version);
+			expect(await reader.decode((cursor) => decodeFetchObject(cursor, Timescale.MILLI))).toMatchObject({
+				kind: "object",
+				size: 0,
+			});
+			await flush();
+			expect(settled).toBe(false);
+
+			if (outcome === "finish") frame.finish();
+			else group.abort(new Error("source failed"));
+			await task;
+			if (outcome === "finish") expect(await reader.done()).toBe(true);
+			else expect(await reader.done().catch(error)).toBeInstanceOf(Error);
+		} finally {
+			request.stream.abort(new Error("test ended"));
+			group.abort(new Error("test ended"));
+			await task;
+		}
+	}
+});
+
 // A write parked on flow control never reads the group, so the group failing has to reach it
 // another way, or the answer holds its reader until the request ends.
 test("a FETCH parked on flow control stops when its group fails", async () => {

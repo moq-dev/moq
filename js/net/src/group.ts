@@ -1218,18 +1218,21 @@ export class Consumer {
 				throw this.#terminal;
 			}
 			const closed = this.#state.closed.peek();
+			const count = this.frameCount;
+			// The bound's headers are in hand: a failure after them reaches the payload reads,
+			// which drain what is buffered first, rather than refusing the answer.
+			if (until !== undefined && count >= until) {
+				this.#abandon();
+				return { end: until, complete: closed === null && count === until };
+			}
 			if (closed instanceof Error) {
 				if (await this.#resume(closed)) continue;
 				this.#abandon();
 				throw closed;
 			}
-			const count = this.frameCount;
-			if (closed !== undefined || (until !== undefined && count >= until)) {
+			if (closed !== undefined) {
 				this.#abandon();
-				return {
-					end: Math.min(count, until ?? count),
-					complete: closed !== undefined && (until === undefined || count <= until),
-				};
+				return { end: count, complete: true };
 			}
 			if (this.#expire()) continue;
 			if (this.#recover?.wants(undefined)) {

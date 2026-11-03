@@ -924,6 +924,24 @@ test.each([undefined, 2].flatMap((until) => [false, true].map((stalled) => ({ un
 	},
 );
 
+// The requested headers are already buffered: a copy failing afterwards reaches the payload
+// reads, which drain them first, rather than refusing an answer that can still be served.
+test("a bounded group end wait is met by buffered headers despite a failed copy", async () => {
+	const source = new Producer(0n);
+	source.writeFrame(textFrame("zero"));
+	const reader = source.consume();
+	const cause = new Error("route failed");
+	const end = hooks.groupEnd(reader, 2);
+	await yieldNow();
+	// Both land before the parked wait looks again.
+	source.writeFrame(textFrame("one"));
+	source.abort(cause);
+	expect(await end).toEqual({ end: 2, complete: false });
+	expect(await reader.readString()).toBe("zero");
+	expect(await reader.readString()).toBe("one");
+	await expect(reader.readFrame()).rejects.toBe(cause);
+});
+
 test.each(["eviction", "expiry"] as const)("a group end wait observes reader %s", async (failure) => {
 	const source = new Producer(0n);
 	source.writeFrame(textFrame("zero"));
