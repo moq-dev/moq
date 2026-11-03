@@ -1,6 +1,7 @@
 { nonce }:
 let
-  flake = builtins.getFlake (toString ../..);
+  # Other lanes rewrite ignored build output while this probe evaluates.
+  flake = builtins.getFlake "git+file://${toString ../..}";
   pkgs = import flake.inputs.nixpkgs { system = builtins.currentSystem; };
 in
 pkgs.runCommand "moq-userns-probe-${nonce}"
