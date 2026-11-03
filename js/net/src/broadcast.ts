@@ -220,7 +220,7 @@ function largest(state: BroadcastState, name: string): track.Position | undefine
 async function fetchGroup(
 	state: BroadcastState,
 	name: string,
-	sequence: number,
+	sequence: bigint,
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();

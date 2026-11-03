@@ -65,9 +65,14 @@ public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields: `.start`, `.update`, `.end`, or
 /// `.restart` (request the path again), each carrying an `Announce`.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
-/// Per-subscription delivery preferences: priority, latency budget, the ranges
-/// of the track to deliver, and group ordering.
+/// Per-subscription delivery preferences: priority, delay, the ranges of the track to
+/// deliver, and group ordering.
 public typealias Subscription = MoqFFI.MoqSubscription
+/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency and
+/// where a cold join starts, `nil` to leave it unstated (a decoder plays it as zero), and `max`,
+/// `nil` for no subscriber limit, is how far a non-latest group may fall behind before it is
+/// skipped. A `min` past `max` starts at `max`.
+public typealias Delay = MoqFFI.MoqDelay
 /// Options for fetching one complete group by sequence.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 /// Publisher-side track properties: priority, group ordering, max age,
@@ -133,8 +138,8 @@ extension Subscription {
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder
 
-    /// moq-net's defaults, whose `maxDelay` of 0 skips a superseded group at once. A `nil`
-    /// subscription means the same; copy this one to change a field. A `Subscription(...)`
-    /// must name `maxDelay`, where `nil` sets no subscriber limit.
+    /// moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded
+    /// one at once. A `nil` subscription means the same; copy this one to change a field. A
+    /// `Subscription(...)` must name `delay`.
     public static var `default`: Subscription { moqSubscriptionDefaults() }
 }

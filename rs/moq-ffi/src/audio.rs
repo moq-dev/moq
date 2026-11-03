@@ -170,11 +170,11 @@ pub struct MoqAudioDecoderOutput {
 	/// [`MoqAudioConsumer::delay`], and where a cold join starts; with
 	/// [`estimate`](Self::estimate) it floors the measured delay instead. A `min`
 	/// beyond the track's retention is refused. `max` is the congestion-control
-	/// knob [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay)
-	/// carries: a stalled group more than this far behind a newer one is skipped,
-	/// with no buffering added. `None` keeps the moq-mux default of zero for both.
+	/// knob of [`MoqSubscription::delay`](crate::consumer::MoqSubscription::delay):
+	/// a stalled group more than this far behind a newer one is skipped, with no
+	/// buffering added. `None` keeps the moq-mux default of zero for both.
 	#[uniffi(default = None)]
-	pub delay: Option<crate::media::MoqDelay>,
+	pub delay: Option<crate::consumer::MoqDelay>,
 	/// Measure the playout delay from arrival timing, never below `delay.min`.
 	/// `false` holds exactly `delay.min`.
 	#[uniffi(default = true)]

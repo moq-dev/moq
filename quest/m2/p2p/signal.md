@@ -25,7 +25,7 @@ roster `<id>` (also the perfect-negotiation tiebreak) is its public key, like an
 iroh endpoint id. Nothing proves the key yet: peers are trusted (see Trust).
 Which roster peer serves an announce is the application's explicit selection;
 moq maps nothing automatically. The route-layer node id stays declared and
-unverified ([routes](/quest/m1/cluster-routing/routes.md)); if a use case
+unverified ([routes](/quest/m1/cluster-routing/routes/README.md)); if a use case
 needs provable identity or signing, moq-lite-07's route identity becomes a
 public key, independent of P2P. P2P identity planning and peer grants were
 dropped until a real use case asks for them. Switching between a CDN and a

@@ -40,7 +40,9 @@ select_packages() {
     # A changed path under `rs/` is a seed only because every crate directory
     # there is named after its crate. Under-selecting checks nothing, so fall
     # back to all.
-    if jq -e '.packages[] | (.manifest_path | split("/")) as $p | select($p[-3] == "rs" and $p[-2] != .name)' <<<"$metadata" >/dev/null; then
+    local mismatched
+    mismatched=$(jq 'any(.packages[]; (.manifest_path | split("/")) as $p | $p[-3] == "rs" and $p[-2] != .name)' <<<"$metadata")
+    if [[ "$mismatched" == true ]]; then
         echo "rs: a crate directory no longer matches its crate name; selecting everything." >&2
         echo ALL
         return
@@ -109,7 +111,13 @@ select_packages() {
 	' <<<"$metadata" | sort -u | tr '\n' ' '
 }
 
-packages=$(select_packages)
+# A command substitution clears -e, so a failing jq inside selection would
+# otherwise print a partial selection. Restore it there; Bash 4.4's
+# `inherit_errexit` would too, but macOS ships Bash 3.2.
+packages=$(
+    set -e
+    select_packages
+)
 
 # Ids are `path+file://<dir>#<version>` for a directory named after its crate.
 names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
