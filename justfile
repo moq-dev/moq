@@ -76,6 +76,12 @@ bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
 bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16" $RUNTIME="tokio-workers" $BASE="" $TRANSPORT="quic":
     BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" BENCH_PROFILE_RUNTIME="$RUNTIME" BENCH_BASE="$BASE" BENCH_PROFILE_TRANSPORT="$TRANSPORT" bench/run.sh --profile
 
+# Count the chat fan-out's instructions per delivered group on one thread, through the model
+# alone and through a relay over the in-memory transport, for each revision in BASE and the
+# current tree. The counts don't move with host load: see the Fan-out section of bench/README.md.
+bench-fanout $BASE="" $SCENARIOS="model session" $SUBSCRIBERS="1 64 512":
+    BENCH_BASE="$BASE" BENCH_FANOUT_SCENARIOS="$SCENARIOS" BENCH_FANOUT_SUBSCRIBERS="$SUBSCRIBERS" bench/run.sh --fanout
+
 # Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
 # `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.
 [positional-arguments]

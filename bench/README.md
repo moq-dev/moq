@@ -355,6 +355,41 @@ measured under a one-minute load above about 9 read 5-20% low, so compare
 cells from quiet stretches within one run. Pinning does not remove interference
 from other host work.
 
+### Fan-out
+
+Relay instruction counts move with host load (see Instructions above), which
+hides steps of a few percent. `just bench-fanout` counts the chat fan-out
+without a relay process or sockets, so the counts are the code's alone:
+
+```bash
+nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
+nix develop --command just bench-fanout "" "model" "1 512"
+```
+
+Two scenarios run every subscriber count on one thread:
+
+- `model`: one finished group a cycle through the track model, which every
+  subscriber takes before parking again, as moq-net's `track_fanout_group`
+  bench does. It builds against every revision since
+  [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+- `session`: one publisher session into a relay origin and one viewer session
+  out of it per subscriber, over `transport::memory`, on one current-thread
+  runtime. It counts the publisher, relay, and viewer sessions together, but no
+  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
+  revision whose session API predates this harness reports it unsupported.
+
+Each `bench/fanout/<scenario>` crate builds against each base's and the current
+tree's own crates and lock, side by side, into `target/bench/fanout/`. Each
+count pins the harness to one CPU (`BENCH_FANOUT_CPU`, by default the last
+allowed one) and takes its user instructions from `perf stat` for a run of
+zero cycles and one of many; the difference over the groups delivered is
+`fanout-summary.json`. Repeated counts agree to within a few instructions per
+group. `BENCH_FANOUT_CALLGRIND=1`, with `valgrind` on `PATH`, also keeps
+callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
+`python3 bench/fanout.py functions ZERO FULL UNITS` ranks functions by
+instructions per group. `BENCH_FANOUT_VERSION` picks the session's protocol
+version (default `moq-lite-06`).
+
 ### Heap
 
 The heap mode builds the relay with `moq-relay/jemalloc` (the other modes keep

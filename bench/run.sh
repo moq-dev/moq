@@ -10,6 +10,8 @@ set -euo pipefail
 # `--profile` captures relay profiles: std mutex waits by stack (lock), CPU stacks
 # (cpu), or jemalloc heap snapshots and allocation churn (heap).
 # `--shard` sweeps the QUIC shard count against the connection count.
+# `--fanout` counts the chat fan-out's instructions per delivered group on one thread,
+# for each BENCH_BASE revision and the current tree, independent of host load.
 
 MODE=${1:-}
 ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
@@ -129,6 +131,32 @@ case $MODE in
         # Without frame pointers, perf's DWARF unwinder stops at the first relay frame,
         # and CPU stacks unwind by frame pointer alone.
         export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
+        ;;
+    --fanout)
+        # Several bases, each counted beside the current tree; see bench/fanout.py.
+        BASES=()
+        for value in ${BENCH_BASE:-}; do
+            BASES+=("$(git rev-parse --verify "$value^{commit}")")
+        done
+        BASE=${BASES[*]}
+        FANOUT_SCENARIOS=${BENCH_FANOUT_SCENARIOS:-model session}
+        FANOUT_SUBSCRIBERS=${BENCH_FANOUT_SUBSCRIBERS:-1 64 512}
+        for value in $FANOUT_SCENARIOS; do
+            if [[ ! $value =~ ^(model|session)$ ]]; then
+                printf 'unknown fan-out scenario %q; expected model or session\n' "$value" >&2
+                exit 1
+            fi
+        done
+        for value in $FANOUT_SUBSCRIBERS; do
+            if [[ ! $value =~ ^[1-9][0-9]{0,4}$ ]]; then
+                printf 'fan-out subscribers must be integers from 1 to 99999, got %q\n' "$value" >&2
+                exit 1
+            fi
+        done
+        if [[ -n ${BENCH_FANOUT_CALLGRIND:-} ]] && ! command -v valgrind >/dev/null; then
+            printf 'BENCH_FANOUT_CALLGRIND needs valgrind on PATH\n' >&2
+            exit 1
+        fi
         ;;
     --shard)
         BASE=
@@ -1002,6 +1030,82 @@ run_instructions() {
     python3 "$ROOT/bench/instructions.py" summarize "$RUN" "${labels[@]}"
 }
 
+# Count the chat fan-out per delivered group on one thread, for every base and the current
+# tree: each `bench/fanout/<scenario>` harness builds against that revision's own crates and
+# lock, so a count is the code's alone, whatever else the host runs. A scenario whose API a
+# revision predates is reported unsupported rather than failing the run.
+run_fanout() {
+    if [[ $(uname -s) != Linux ]] || ! command -v perf >/dev/null; then
+        printf 'fan-out counts need Linux perf\n' >&2
+        return 1
+    fi
+    local cpu=${BENCH_FANOUT_CPU:-${ALLOWED_CPUS##*,}}
+    local label sha index scenario dir key binary status
+    local -a labels=() revisions=() checkouts=() keys=() build_dirs=() extra=()
+    for sha in ${BASES[@]+"${BASES[@]}"}; do
+        label=base
+        if ((${#BASES[@]} > 1)); then label=base-${sha:0:12}; fi
+        revision_checkout "$sha" "$label"
+        labels+=("$label")
+        revisions+=("$sha")
+        checkouts+=("$REVISION_CHECKOUT")
+        keys+=("$sha")
+    done
+    labels+=(current)
+    revisions+=("$(git rev-parse HEAD)")
+    checkouts+=("$ROOT")
+    # The working tree changes under one target; Cargo's fingerprints track it.
+    keys+=(current)
+
+    # Fat LTO links on one thread, so the harnesses build side by side on every allowed CPU.
+    for ((index = 0; index < ${#labels[@]}; index++)); do
+        for scenario in $FANOUT_SCENARIOS; do
+            dir=$RUN/fanout/${labels[$index]}/$scenario
+            mkdir -p "$dir"
+            cp -R "$ROOT/bench/fanout/$scenario/." "$dir/"
+            # This revision's crates, resolved by its own lock.
+            sed -i "s|path = \"../../../rs/|path = \"${checkouts[$index]}/rs/|" "$dir/Cargo.toml"
+            cp "${checkouts[$index]}/Cargo.lock" "$dir/Cargo.lock"
+            # shellcheck disable=SC2016 # the inner shell expands its own arguments
+            setsid taskset -c "$ALLOWED_CPUS" bash -c 'cd "$1" && CARGO_TARGET_DIR=$2 cargo build --release' _ \
+                "$dir" "$TARGET/fanout/${keys[$index]}/$scenario" >"$dir/build.log" 2>&1 &
+            BUILD_PIDS+=($!)
+            build_dirs+=("$dir")
+        done
+    done
+    for ((index = 0; index < ${#build_dirs[@]}; index++)); do
+        status=0
+        wait "${BUILD_PIDS[$index]}" || status=$?
+        # Reaped, so cleanup must not signal a group that ID may now name.
+        unset "BUILD_PIDS[$index]"
+        if ((status == 0)); then
+            continue
+        fi
+        if [[ ${build_dirs[$index]} == "$RUN/fanout/current/"* ]]; then
+            printf 'the current tree'"'"'s fan-out harness failed to build:\n' >&2
+            tail -n 40 "${build_dirs[$index]}/build.log" >&2
+            return 1
+        fi
+        printf 'fan-out harness %s does not build; reported unsupported\n' "${build_dirs[$index]#"$RUN"/fanout/}"
+        touch "${build_dirs[$index]}/unsupported"
+    done
+
+    if [[ -n ${BENCH_FANOUT_VERSION:-} ]]; then extra+=(--version "$BENCH_FANOUT_VERSION"); fi
+    if [[ -n ${BENCH_FANOUT_CALLGRIND:-} ]]; then extra+=(--callgrind); fi
+    printf 'Counting user instructions on CPU %s\n' "$cpu"
+    for scenario in $FANOUT_SCENARIOS; do
+        for ((index = 0; index < ${#labels[@]}; index++)); do
+            dir=$RUN/fanout/${labels[$index]}/$scenario
+            binary=$TARGET/fanout/${keys[$index]}/$scenario/release/fanout-$scenario
+            if [[ -f $dir/unsupported ]]; then binary=-; fi
+            # shellcheck disable=SC2086 # one argument per subscriber count
+            python3 "$ROOT/bench/fanout.py" measure "$RUN" "${labels[$index]}" "${revisions[$index]}" \
+                "$scenario" "$binary" "$cpu" $FANOUT_SUBSCRIBERS ${extra[@]+"${extra[@]}"}
+        done
+    done
+    python3 "$ROOT/bench/fanout.py" summarize "$RUN"
+}
+
 # Each profiled run follows an unprofiled control on the same binary, so the
 # throughput and CPU difference shows the profiler's overhead.
 run_profile() {
@@ -1114,6 +1218,9 @@ elif [[ $MODE == --profile ]]; then
     exit 0
 elif [[ $MODE == --shard ]]; then
     run_shard_sweep
+    exit 0
+elif [[ $MODE == --fanout ]]; then
+    run_fanout
     exit 0
 elif [[ -n $BASE ]]; then
     BASE_COMMIT=$(git rev-parse --verify "$BASE^{commit}")
