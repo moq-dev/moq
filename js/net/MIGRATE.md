@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `follow` takes `FollowOptions` ([#7724](https://github.com/moq-dev/moq/pull/7724))
+
+Use `Origin.FollowOptions` for options passed to `Origin.Consumer.follow`, `Origin.Producer.follow`, or a borrowed `Origin.Reader` or `Origin.Table`. `request` still takes `Origin.RequestOptions`.
+Both keep the optional `instance` pin, so existing option objects remain assignable; only the declared options type changes. No fields or runtime behavior change.
+
 ### `Subscription.maxDelay` is `delay: Track.Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `Track.Subscription` carries a `delay: Track.Delay` (`{ min?: Milli | null; max?: Milli | null }`) in place of `maxDelay`, which is now refused at runtime.
