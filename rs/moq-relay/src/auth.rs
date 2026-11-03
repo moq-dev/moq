@@ -9,6 +9,7 @@ mod refresh;
 pub(crate) use caps::{Caps, Pacer};
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use axum::http;
@@ -825,12 +826,19 @@ impl Decider {
 		match self {
 			Self::Embedded(admissions) => {
 				let (reply, answer) = oneshot::channel();
+				let waiting = Arc::new(AtomicBool::new(true));
 				admissions.0.push(Admission {
 					request,
 					connection,
 					reply,
+					waiting: waiting.clone(),
 				})?;
+				let cancel = Cancel {
+					queue: admissions.0.clone(),
+					waiting,
+				};
 				Ok(Box::pin(async move {
+					let _cancel = cancel;
 					answer
 						.await
 						.map_err(|_| Error::Unavailable("the admission went unanswered".into()))?
@@ -902,6 +910,7 @@ impl Auth {
 			queued: Mutex::new(Queued {
 				pending: VecDeque::new(),
 				prune_at: PRUNE_MIN,
+				cancelled: 0,
 				closed: false,
 				dropped: false,
 			}),
@@ -1048,8 +1057,8 @@ fn still_valid(grant: &Grant) -> Result<(), lease::Reason> {
 /// serializes them.
 ///
 /// An admission whose session stopped waiting is skipped, never handed out, and
-/// the queue prunes them as it grows, so a slow decider holds memory for the
-/// sessions still waiting rather than every one that gave up.
+/// the queue prunes them as it grows or as more waiters give up, so a slow decider
+/// holds memory for the sessions still waiting rather than every one that gave up.
 pub struct Admissions(Arc<Queue>);
 
 impl Admissions {
@@ -1061,7 +1070,9 @@ impl Admissions {
 			{
 				let mut queued = self.0.lock();
 				while let Some(admission) = queued.pending.pop_front() {
-					if !admission.reply.is_closed() {
+					// A waiter that gave up already cleared the flag, and its own drop
+					// reclaimed the entry. Hand out only the ones still waiting.
+					if admission.waiting.swap(false, Ordering::AcqRel) {
 						return Some(admission);
 					}
 				}
@@ -1098,6 +1109,8 @@ struct Queued {
 	pending: VecDeque<Admission>,
 	/// The length at which a push first drops the admissions nobody waits on.
 	prune_at: usize,
+	/// Waiters that gave up since the last prune.
+	cancelled: usize,
 	/// Every clone of the [`Auth`] is gone, so no admission arrives again.
 	closed: bool,
 	/// The [`Admissions`] is gone, so no admission is answered again.
@@ -1127,9 +1140,10 @@ impl Queue {
 			if queued.pending.len() >= queued.prune_at {
 				let (waiting, gone): (VecDeque<_>, _) = std::mem::take(&mut queued.pending)
 					.into_iter()
-					.partition(|admission| !admission.reply.is_closed());
+					.partition(|admission| admission.waiting.load(Ordering::Acquire));
 				queued.pending = waiting;
 				queued.prune_at = (queued.pending.len() * 2).max(PRUNE_MIN);
+				queued.cancelled = 0;
 				abandoned = gone;
 			}
 			queued.pending.push_back(admission);
@@ -1138,6 +1152,50 @@ impl Queue {
 		drop(abandoned);
 		self.ready.notify_one();
 		Ok(())
+	}
+
+	/// Reclaim the admissions whose waiters gave up, without waiting for a push.
+	///
+	/// A burst raises the push threshold while every session still waits; if they
+	/// all time out afterwards, nothing would cross that threshold again. Scanning
+	/// once cancellations reach half the queue keeps each reclaim amortized.
+	fn cancel(&self) {
+		let abandoned = {
+			let mut queued = self.lock();
+			if queued.dropped || queued.pending.is_empty() {
+				return;
+			}
+			queued.cancelled += 1;
+			if queued.cancelled < queued.pending.len().div_ceil(2) {
+				return;
+			}
+			let (waiting, gone): (VecDeque<_>, _) = std::mem::take(&mut queued.pending)
+				.into_iter()
+				.partition(|admission| admission.waiting.load(Ordering::Acquire));
+			queued.pending = waiting;
+			queued.prune_at = (queued.pending.len() * 2).max(PRUNE_MIN);
+			queued.cancelled = 0;
+			gone
+		};
+		drop(abandoned);
+	}
+}
+
+/// Reclaims the queued admission of a waiter that stopped waiting.
+///
+/// The guard rides in the answer future, so dropping it, even before that future
+/// is first polled, marks the admission abandoned without needing a later push.
+struct Cancel {
+	queue: Arc<Queue>,
+	waiting: Arc<AtomicBool>,
+}
+
+impl Drop for Cancel {
+	fn drop(&mut self) {
+		// A handed-out admission is no longer the queue's to reclaim.
+		if self.waiting.swap(false, Ordering::AcqRel) {
+			self.queue.cancel();
+		}
 	}
 }
 
@@ -1160,6 +1218,8 @@ pub struct Admission {
 	pub request: Request,
 	connection: Option<lease::Consumer>,
 	reply: oneshot::Sender<Result<lease::Consumer, Error>>,
+	/// Whether its waiter still wants it: cleared when handed out or abandoned.
+	waiting: Arc<AtomicBool>,
 }
 
 #[cfg(test)]
@@ -1365,6 +1425,22 @@ mod tests {
 				.pending
 				.iter()
 				.all(|admission| admission.reply.is_closed())
+		);
+	}
+
+	#[tokio::test]
+	async fn a_cancelled_burst_is_reclaimed_without_a_later_push() {
+		let (auth, admissions) = Auth::embedded("test");
+		let burst: Vec<_> = (0..PRUNE_MIN * 16)
+			.map(|i| submit_embedded(&auth, &format!("/burst/{i}")))
+			.collect();
+		// The burst raised the push threshold well above what a small follow-up
+		// would cross. Nothing is pushed after the sessions give up.
+		assert!(admissions.0.lock().prune_at > PRUNE_MIN);
+		drop(burst);
+		assert!(
+			admissions.0.lock().pending.is_empty(),
+			"a burst whose sessions all gave up is reclaimed"
 		);
 	}
 
