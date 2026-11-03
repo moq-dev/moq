@@ -237,10 +237,17 @@ public enum Media {
             TrackProducer(try MoqMediaTrackProducer.audio(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         /// Import complete video frames on a named or requested track.
-        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil))
-            throws -> TrackProducer
-        {
-            TrackProducer(try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
+        ///
+        /// Pass `lower`, the next lower rendition of the same source, to publish this track one
+        /// priority below it, so a bandwidth allocator funds that one first.
+        public static func video(
+            broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil),
+            lower: TrackProducer? = nil
+        ) throws -> TrackProducer {
+            var initData = initData
+            if let lower { initData.lower = lower.ffi }
+            return TrackProducer(
+                try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         init(_ ffi: MoqMediaTrackProducer) {
             self.ffi = ffi
@@ -262,6 +269,14 @@ public enum Media {
         /// Mark a timeline break, preserving the advertised jitter and delay.
         public func discontinuity() throws {
             try ffi.discontinuity()
+        }
+
+        /// Advertise whether this video rendition is being produced, as its catalog `enabled`.
+        ///
+        /// Disable it when its sender stops for lack of bandwidth and mark a ``discontinuity()``;
+        /// enable it again just before the keyframe that resumes it. An audio track refuses.
+        public func setEnabled(_ enabled: Bool) throws {
+            try ffi.setEnabled(enabled: enabled)
         }
 
         /// Draw a group boundary here.
@@ -332,10 +347,15 @@ public enum Media {
         let ffi: MoqMediaTrackStreamProducer
 
         /// Import a video byte stream, inferring frame boundaries.
-        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil))
-            throws -> TrackStreamProducer
-        {
-            TrackStreamProducer(
+        ///
+        /// `lower` is as for ``TrackProducer/video(broadcast:initData:target:lower:)``.
+        public static func video(
+            broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil),
+            lower: TrackProducer? = nil
+        ) throws -> TrackStreamProducer {
+            var initData = initData
+            if let lower { initData.lower = lower.ffi }
+            return TrackStreamProducer(
                 try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         init(_ ffi: MoqMediaTrackStreamProducer) {
