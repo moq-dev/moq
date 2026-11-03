@@ -28,19 +28,26 @@ Facts from the last 100 runs of the workflow (58 runs, all
   Nix`). Unrelated to the limit; note it in the PR as a follow-up rather
   than fixing it here.
 
+It still recurs after this plan: runs
+[41362378749](https://github.com/moq-dev/moq/actions/runs/41362378749)
+("Review #7586") and
+[41404718134](https://github.com/moq-dev/moq/actions/runs/41404718134)
+("Review #7599") both failed with `agent run timed out after 1h` at
+`effort: high`.
+
 The action takes `timeout` ("e.g. 10m, 1h30m. Default: 1h") and `effort`
 (`low` to `max`, or a position in [0, 1]) inputs; today neither is set in
-`with:` (`pullfrog.yml:31-32`), so the repo's Pullfrog settings give
-`high`, likely from the repo's Pullfrog settings. The file's header allows
+`with:` (`pullfrog.yml:34-35`, at be39188000), so the `high` comes from
+the repo's Pullfrog settings. The file's header allows
 edits only where indicated; `with:` is the place. Recommended: set
 `effort: medium` first, since it bounds cost as well as time, and raise
 `timeout` only if medium-effort reviews of the largest recent
 PRs still approach an hour. Keep the job's own `timeout-minutes` (default
 360) above whatever `timeout` is set.
 
-[moq-dev/moq#7317](https://github.com/moq-dev/moq/pull/7317) (pins the
-action) and [moq-dev/moq#7424](https://github.com/moq-dev/moq/pull/7424)
-(registers Pullfrog in alerts, gates its secrets to main) also edit this
-file; whichever lands later merges the others.
+[moq-dev/moq#7317](https://github.com/moq-dev/moq/pull/7317) (merged, pins
+the action) and [moq-dev/moq#7424](https://github.com/moq-dev/moq/pull/7424)
+(merged, gates its secrets to main through the `pullfrog` environment)
+already reshaped this file; edit on top of them.
 
 Public API: none. Wire: none.

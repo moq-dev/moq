@@ -16,11 +16,12 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 Milestone: ✅ m1 (moved from m2). Not chosen: m2. There is no m1
 pipeline-requests epic, so this sits at the m1 top level.
 
-- `cursor_floor` (`rs/moq-net/src/lite/publisher.rs:125`) floors a pre-06
-  SUBSCRIBE at `latest`, the newest group when it arrived, and at 0 when the
-  copy has none yet. [moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328) (merged) re-reads the newest group of an unresolved track
-  once it resolves, but only for lite-05+ (`SubscribeServe`, `:1993`). JS no
-  longer replays for any version.
+- `cursor_floor` (`rs/moq-net/src/lite/publisher.rs:127` at be39188000)
+  floors a pre-06 SUBSCRIBE at `latest`, the newest group when it arrived,
+  and at 0 when the copy has none yet. [moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328) (merged) re-reads the newest group of an unresolved track
+  once it resolves, but only for lite-05+ (`SubscribeServe`, the
+  `has_track_stream()` match at `:2259`). JS no longer replays for any
+  version.
 - Extend the re-read to lite-03/04, so a resolved copy floors them at its
   newest group, never at a lower first group it reports; match what JS
   does.

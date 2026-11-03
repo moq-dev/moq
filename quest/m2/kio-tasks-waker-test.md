@@ -15,9 +15,9 @@ online review suggested it.
 
 [moq-dev/moq#7340](https://github.com/moq-dev/moq/pull/7340) added `insert`, `remove`, `TaskKey`'s generation stamp, and
 `poll_each`. The existing
-`a_stale_wake_costs_at_most_one_spurious_poll` (`task.rs:754`) covers a
-*finished* occupant's waker through `push`, and
-`removed_tasks_free_their_slot_and_key` (`:560`) opens the removed task's
+`a_stale_wake_costs_at_most_one_spurious_poll` (`task.rs:944` as of
+be39188000) covers a *finished* occupant's waker through `push`, and
+`removed_tasks_free_their_slot_and_key` (`:662`) opens the removed task's
 gate only while its slot is empty. Neither fires a removed task's waker
 after the slot is reused, which is the path the lite subscriber's
 `Change::Close` takes. Write that case with the `gated` helper and the

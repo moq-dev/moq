@@ -27,6 +27,6 @@ the buffer is therefore readable only once it ends; that delay is bounded by
 the buffer and is the point of coalescing, so no flush per input call.
 
 Measure with [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234)'s `mkv-payloads` and `mkv-chunks` benches in
-`rs/moq-mux/benches`, and keep its retention tests passing.
+`rs/moq-mux/benches/containers.rs`, and keep its retention tests passing.
 
 Public API: none. Wire: none.

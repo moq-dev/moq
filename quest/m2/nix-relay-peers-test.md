@@ -19,7 +19,7 @@ recommended.
 `MOQ_CLUSTER_CONNECT` at `:380`, and verified it only by a manual `nix eval`.
 
 - Add an eval check beside `nix/runner/config-test.nix`, wired into
-  `flake.nix`'s `checks` (`:714`): `null` sets no `MOQ_CLUSTER_CONNECT`, one
+  `flake.nix`'s `checks` (`:729` as of be39188000): `null` sets no `MOQ_CLUSTER_CONNECT`, one
   and two URLs join with commas, `[ ]` fails the type check, and a leaf
   without peers trips the assertion at `:219`.
 - A VM test (root plus two leaves) only if it stays cheap in CI; otherwise

@@ -16,7 +16,7 @@ which finished the surround-Opus-through-CMAF quest,
 and [moq-dev/moq#7308](https://github.com/moq-dev/moq/pull/7308).
 
 - No description: on main the `None` arm in
-  `rs/moq-mux/src/container/fmp4/mod.rs` (around line 1100) builds
+  `rs/moq-mux/src/container/fmp4/mod.rs` (line 1105 as of be39188000) builds
   `opus::Config::new` and writes `channel_mapping: None` (family 0) for any
   channel count, which RFC 7845 allows only for 1 or 2 channels. Use
   `opus::Mapping::vorbis` (`rs/moq-mux/src/codec/opus/mapping.rs`) for 3

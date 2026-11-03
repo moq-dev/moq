@@ -22,9 +22,9 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
   (`rs/moq-ffi/src/error.rs:235`; video at `:243`). A configuration moq-audio
   refuses under a supported codec string, such as an AAC description that
   declares SBR, still discards the candidate without trying the next.
-- Add the typed variant, raised from `subscribe` (`rs/moq-ffi/src/audio.rs:656`,
-  `video.rs:1296`) wherever moq-audio or moq-video refuses the config before
-  decoding starts. Mirror it in moq-c and the wrappers.
+- Add the typed variant, raised from `subscribe` (`rs/moq-ffi/src/audio.rs:645`,
+  `video.rs:1293` at be39188000) wherever moq-audio or moq-video refuses the
+  config before decoding starts. Mirror it in moq-c and the wrappers.
 - In OBS, fall through on the typed error and delete the mirrored gate and
   its tests.
 - Not in scope: falling through after a later async failure (subscribe

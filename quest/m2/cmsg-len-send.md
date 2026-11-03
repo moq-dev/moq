@@ -28,6 +28,7 @@ reasoning about which set is bigger. Drop `encode_src_ip` on Apple if it
 is still unused. Verify with cross-target `cargo check`
 (macOS, FreeBSD, Linux) or the `platform.yml` workflow, and watch the next
 macOS Nightly's `ipv4_source_address_override` (and `fast-apple-datapath`).
-The Windows receive path is [its own quest](/quest/m2/cmsg-windows-truncation.md).
+The Windows receive path's truncation was fixed separately in
+[moq-dev/moq#7543](https://github.com/moq-dev/moq/pull/7543).
 
 Public API: none. Wire: none.

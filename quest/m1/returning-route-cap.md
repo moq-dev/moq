@@ -24,10 +24,9 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   the copy's own resolution ends at its earlier cap and would pin a range
   ending relative to the latest group.
 - The bug: returning to a route reuses its newest copy
-  (`rs/moq-net/src/model/resume.rs:1147`), clears `until`, and calls
-  `copy.update(&self.mirrored)`. `Copy::wire` (`resume.rs:500`)
-  then takes
-  the `Sub::Ready(sub) if reader.ranges == self.from` arm and re-reads
+  (`rs/moq-net/src/model/resume.rs:1192` at be39188000), clears `until`, and
+  calls `copy.update(&self.mirrored)`. `Copy::wire` (`resume.rs:511`) then
+  takes the `Sub::Ready(sub) if reader.ranges == self.from` arm and re-reads
   `sub.resolved_ranges()`, which is the capped wire it was last sent. So the
   reused copy stays at its old cap and delivers nothing past it. Re-resolve
   the reused copy against the reader's window instead

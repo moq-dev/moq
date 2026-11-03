@@ -13,10 +13,9 @@ frame, and moq-ffi plus the bindings expose `Fill::time()`.
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
-[moq-dev/moq#7310](https://github.com/moq-dev/moq/pull/7310), which adds
-`track::Fill::time()` and the lookup (open; it owns and deletes
-[archive time ranges](/quest/m2/archive-time-ranges.md)). Start after it
-lands.
+[moq-dev/moq#7310](https://github.com/moq-dev/moq/pull/7310) (merged),
+which added `track::Fill::time()` and the lookup and finished the archive
+time ranges quest.
 
 - What a lookup's storage or decode failure does:
   - Silent cache fallback, as [moq-dev/moq#7310](https://github.com/moq-dev/moq/pull/7310) documents with a warning.
@@ -34,7 +33,7 @@ Also, from [moq-dev/moq#7310](https://github.com/moq-dev/moq/pull/7310)'s follow
   later misses those groups, so index them (or re-check) when the handler
   registers.
 - Mirror `Fill::time()` and the new refusal in `rs/moq-ffi`
-  (`MoqFill`, `rs/moq-ffi/src/producer.rs:466`) and the binding wrappers,
+  (`MoqFill`, `rs/moq-ffi/src/producer.rs:458` at be39188000) and the binding wrappers,
   so a binding-side history handler can answer lookups.
 - A time end walks the history one fill round trip per group. Measure a
   long range against the in-memory store; if DVR seeks need it, look the
@@ -49,5 +48,5 @@ Public API: `track::Fill` gains a lookup refusal; moq-ffi `MoqFill` gains
 
 ## Related
 
-- [Archive time ranges](/quest/m2/archive-time-ranges.md) - [moq-dev/moq#7310](https://github.com/moq-dev/moq/pull/7310) lands it first and adds `Fill::time()`
+- [Archive lookup withdrawal](/quest/m2/archive-lookup-withdrawal.md) - the other [moq-dev/moq#7310](https://github.com/moq-dev/moq/pull/7310) follow-up, a public withdrawal signal on `Fill`
 - [DVR rewind](/quest/m2/archive-dvr.md) - the consumer of time seeks

@@ -1,8 +1,8 @@
-# [S] Server::accept and Request::ok are kio machines
+# [S] Server::accept and Handshake::ok are kio machines
 
 ## Goal
 
-moq-net's `Server::accept` and `server::Request::ok` are `#[kio::machine]`
+moq-net's `Server::accept` and `server::Handshake::ok` are `#[kio::machine]`
 `poll_*` methods with one-line async wrappers, like the other straight-line
 bodies converted in [moq-dev/moq#7284](https://github.com/moq-dev/moq/pull/7284). Behavior, errors, and their public async
 signatures stay the same.
@@ -16,7 +16,8 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 Milestone: ✅ m1. Not chosen: m2.
 
 - Both are straight-line in spirit (`rs/moq-net/src/server.rs:283` and
-  `:768`), but they wait on the session handshake, which has no poll form, so
+  `:769` at be39188000; [moq-dev/moq#7284](https://github.com/moq-dev/moq/pull/7284) called the second
+  `Request::ok`), but they wait on the session handshake, which has no poll form, so
   [moq-dev/moq#7284](https://github.com/moq-dev/moq/pull/7284) left them as `async fn`.
   [Generated async wrappers](/quest/m1/poll-first/async-feature.md) converts
   the handshake by hand; once it has, convert these two through

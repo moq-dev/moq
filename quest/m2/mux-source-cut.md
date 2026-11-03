@@ -21,7 +21,7 @@ in `rs/moq-hls/src/server/mod.rs`) and cuts through the crate-private
 never sees the takeover, because `moq_mux::Source` exposes no way to follow
 its own path: `Source::follow(None, ..)` returns
 `follow::Instances::fixed` for the source's own path
-(`rs/moq-mux/src/source.rs:389`).
+(`rs/moq-mux/src/source.rs:390` as of be39188000).
 
 - Give `Source` a public way to follow its own path's announcements (a
   `follow_self`, or `follow` returning live instances for the own path when

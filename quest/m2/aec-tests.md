@@ -16,7 +16,8 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 recommended. [moq-dev/moq#7369](https://github.com/moq-dev/moq/pull/7369) (merged) exposes `aec::Processor`,
 `aec::Stream`, and `aec::Stats` for caller-supplied PCM.
 
-Add the tests beside [moq-dev/moq#7369](https://github.com/moq-dev/moq/pull/7369)'s unit tests in `rs/moq-audio/src/aec/`. Fix any
+Add the tests beside [moq-dev/moq#7369](https://github.com/moq-dev/moq/pull/7369)'s unit tests (`mod tests`,
+`rs/moq-audio/src/aec/processor.rs:358` at be39188000). Fix any
 bug they find in the same PR; if a rate is outside what Sonora accepts,
 assert the refusal rather than widening support.
 

@@ -14,10 +14,17 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 recommended. [moq-dev/moq#7247](https://github.com/moq-dev/moq/pull/7247) (merged) sizes controls from the
 rendered preview and combines that with an `invisible` capture rule.
 
-- In `js/publish/src/element.ts` / `preview.ts`, set the empty previews to
-  `hidden` (or `display: none`) while they have nothing to show, then drop
-  [moq-dev/moq#7247](https://github.com/moq-dev/moq/pull/7247)'s capture gate from the size observer.
-- Test in `js/publish/src/element.test.ts`: idle and hidden-camera states
-  report an empty size; a live capture reports its rendered size.
+- In `js/publish/src/element.ts`'s preview effect (`:279` as of
+  be39188000), set the empty previews to `display: none` while they have
+  nothing to show. A `<video>` already is with no visible source (`:314`),
+  but the `<canvas>` branch (`:285`) never hides, so an idle canvas keeps
+  its 300x150 placeholder and a hidden camera's canvas keeps its size. Check
+  the `<video>` idle state too, then drop
+  [moq-dev/moq#7247](https://github.com/moq-dev/moq/pull/7247)'s capture gate from the size observer
+  in `js/publish/src/ui/element.ts` (`:115`).
+- Test in `test/interop/clients/js/publish-ui.browser.ts`, beside
+  [moq-dev/moq#7247](https://github.com/moq-dev/moq/pull/7247)'s publish-controls cases, since sizing
+  needs real layout: idle and hidden-camera states report an empty size; a
+  live capture reports its rendered size.
 
 Public API: none. Wire: none.

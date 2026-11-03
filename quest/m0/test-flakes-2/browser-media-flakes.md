@@ -12,20 +12,26 @@ tests without the host's libraries on `LD_LIBRARY_PATH`.
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7402](https://github.com/moq-dev/moq/pull/7402) and [moq-dev/moq#7255](https://github.com/moq-dev/moq/pull/7255). Milestone: ✅ m0 (user, "all recommended" for quests 1-8).
 
 - **Buffering tests**: `the paused play button stays clickable during
-  {audio,video} stalling` (`test/interop/clients/js/harness.browser.ts:29`)
-  hit their 30 s timeout on main. They passed in scheduled Interop
+  {audio,video} stalling` (`test/interop/clients/js/harness.browser.ts:30`,
+  at be39188000) hit their 30 s timeout on main. They passed in scheduled
+  Interop
   [40896908858](https://github.com/moq-dev/moq/actions/runs/40896908858)
   (2026-10-29, under 1 s each) and failed in
   [41075505055](https://github.com/moq-dev/moq/actions/runs/41075505055)
-  (2026-10-30), and #7402 saw them time out locally on `origin/main`. Find
+  (2026-10-30), and #7402 saw them time out locally on `origin/main`. They
+  still time out in
+  [41317901057](https://github.com/moq-dev/moq/actions/runs/41317901057)
+  (2026-11-01, "waiting for locator('.buffering') to be hidden"). Find
   which wait never resolves (the `.buffering` spinner, the Pause click, or
   `.center-play`) and whether a change between those runs caused it; the
   fixture is `test/interop/clients/js/buffering/`. If it is a regression in
   `@moq/watch`, fix the element, not the test.
 - **Firefox audio tone**: `audio tone: after resume` and
-  `audio tone: coded-size growth` (`test/interop/clients/js/media.ts:566`,
-  `:902`) flake under host load with either media fixture: #7255 measured
-  main's fixture at 2/3 for `rename,pause`. Run the Firefox lane
+  `audio tone: coded-size growth` (the `audio tone` check in `measure`,
+  `test/interop/clients/js/media.ts:604`, reached from the `after resume`
+  and `coded-size growth` steps at `:1171` and `:1100`) flake under host
+  load with either media fixture: #7255 measured main's fixture at 2/3 for
+  `rename,pause`. Run the Firefox lane
   (`just test media --media-engines firefox`) under load to find what the
   tone check samples too early.
 - **Dev shell**: in the Nix dev shell, Firefox needs libavcodec and

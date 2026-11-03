@@ -19,7 +19,12 @@ mismatch is left: with that inclusive SUBSCRIBE_END, Rust still ends the
 track through the FIN (`ServeEnd::Finished` in
 `rs/moq-net/src/lite/subscriber.rs`) once the tail settles, while JS only
 releases it. Match what a current lite-05 publisher's SUBSCRIBE_END
-produces, a clean end, so JS changes and Rust keeps its behavior. Extend [moq-dev/moq#7295](https://github.com/moq-dev/moq/pull/7295)'s
+produces, a clean end, so JS changes and Rust keeps its behavior. Rust's
+`a_subscribe_end_below_a_received_group`
+(`rs/moq-net/src/lite/subscriber.rs:3885` at be39188000) already asserts
+Rust's clean end; its JS twin (`js/net/src/lite/tail.test.ts:392`)
+checks only that `reader.closed` is `null`, which a release also gives, so
+make it assert the finish. Extend [moq-dev/moq#7295](https://github.com/moq-dev/moq/pull/7295)'s
 `bare-fin` interop exchange (`test/interop/bare-fin.ts`, `just test
 bare-fin`) with the inclusive encoding rather than the real-QUIC matrix,
 for the reason [moq-dev/moq#7295](https://github.com/moq-dev/moq/pull/7295) gives.

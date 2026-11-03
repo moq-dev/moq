@@ -19,9 +19,10 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
   watch through `crate::ffi::detached`, a spawned task. A call cancelled
   before the binding frees it leaves that task running; it advances the
   shared watcher and its result is dropped, so the change is lost.
-- `MoqFill::wanted_changed` (`rs/moq-ffi/src/producer.rs:519`) fixed the same
-  race by driving the watch in place through `crate::ffi::Task::run` ("a
-  cancelled call left unfreed must not advance the watcher"). Use the same
+- `MoqFill::wanted_changed` (`rs/moq-ffi/src/producer.rs:511`, at
+  be39188000) fixed the same race by driving the watch in place through
+  `crate::ffi::Task::run` ("a cancelled call left unfreed must not advance
+  the watcher"). Use the same
   shape for `MoqTrackDemand`, and check the other `detached` watchers in
   moq-ffi and moq-c's demand callbacks for the same pattern.
 - Test: start a wait, cancel it, change demand, and assert the next call

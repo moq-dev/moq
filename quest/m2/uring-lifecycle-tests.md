@@ -18,8 +18,9 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /que
 finished the io_uring handle lifecycle quest.
 
 - Newly spawned queue: [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309) makes `Worker::drop` also drop tasks spawned
-  since its last turn (`rs/moq-uring/src/worker.rs`, `spawn` at :629 and
-  :721) and gives `Driver` a `Drop` that fails the connection.
+  since its last turn (`rs/moq-uring/src/worker.rs`, `spawn` at :697 and
+  :789 at be39188000) and gives `Driver` a `Drop` that fails the connection
+  (`rs/moq-uring/src/quic/driver/connection.rs:827`).
   Spawn a driver, drop the worker before its next turn, and check a handle
   fails with the worker-gone error instead of pending.
 - Reset at the cap: [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309)'s `recv_closed_sees_a_reset_at_the_cap` and

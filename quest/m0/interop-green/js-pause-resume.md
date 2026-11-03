@@ -1,4 +1,4 @@
-# [M] The browser js -> js moq-transport cell passes
+# [S] The browser js -> js moq-transport cell stays fixed
 
 ## Goal
 
@@ -30,19 +30,36 @@ The cell fails on `main` in scheduled Interop
   `catalog.json` SUBSCRIBE gets SUBSCRIBE_OK and then
   `publish done: status=0x0 reason=internal error`, so playback never starts.
 
-Every other `js -> X` and `X -> js` cell passes, so start at the browser
-publisher's side of a relay-forwarded subscription on moq-transport (the
-`js/net` IETF publisher): find which path ends a subscription with an
-internal error, from the relay log and the browser console in the cell's
-output. Reproduce with `just test interop --versions ietf --publishers js
---subscribers js`. Check first whether
-[moq-dev/moq#7383](https://github.com/moq-dev/moq/pull/7383) (draft-22
-resume keeps DYNAMIC_GROUPS, Rust subscriber) or #7236 (removes the
-inbound SUBSCRIBE_TRACKS handling) changes the result; if one fixes it,
-this quest only confirms that and adds the missing regression test.
+It has since gone green: the next scheduled run,
+[41317901057](https://github.com/moq-dev/moq/actions/runs/41317901057)
+(2026-11-01, `c95a9b1201`), passes browser `js -> js` on drafts 18, 20, and
+22, where
+[41209722015](https://github.com/moq-dev/moq/actions/runs/41209722015)
+(2026-10-31, `38566f5a84`) failed it on 20 (`35s of 30s`) and 22 (`5s of
+30s`). That run's own failure is the browser media tests in
+[browser media flakes](/quest/m0/test-flakes-2/browser-media-flakes.md),
+not this cell. Both PRs this quest suspected landed in between:
+[moq-dev/moq#7383](https://github.com/moq-dev/moq/pull/7383) (merged,
+draft-22 resume keeps DYNAMIC_GROUPS) and
+[moq-dev/moq#7236](https://github.com/moq-dev/moq/pull/7236) (merged,
+refuses inbound IETF track listings), along with `js/net`'s
+[moq-dev/moq#7355](https://github.com/moq-dev/moq/pull/7355) (merged, ends
+IETF requests once through `RequestStream`).
 
-Add a scripted-peer or unit test for the cause in `js/net`, so the
-regression shows without the browser matrix.
+What is left:
+
+- Confirm the cell stays green in the next scheduled Interop on `main`, or
+  locally with `just test interop --versions ietf --publishers js
+  --subscribers js` repeated. If it fails again, the original plan applies:
+  start at the `js/net` IETF publisher's side of a relay-forwarded
+  subscription and find which path ends it with an internal error, from the
+  relay log and the browser console in the cell's output.
+- Name the fix: bisect `38566f5a84..c95a9b1201` over `js/net`,
+  `rs/moq-net/src/ietf`, and `rs/moq-relay` with the command above.
+- Add a scripted-peer or unit test for that cause in `js/net` (or
+  `rs/moq-net` if the fix was there), so the regression shows without the
+  browser matrix, unless the fixing PR already added one that covers the
+  pause and resume.
 
 Public API: none expected. Wire: none expected; a fix that changes what
 the publisher sends is reported in the PR.

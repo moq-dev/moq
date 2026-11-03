@@ -17,15 +17,20 @@ recommended.
 
 [moq-dev/moq#7332](https://github.com/moq-dev/moq/pull/7332)'s review found that pipelined FETCHes could take every bidi stream
 before TRACK opened; on native QUIC, TRACK's `poll_open_request` fails at
-once (`rs/moq-net/src/coding/stream.rs:49-55`), but the in-memory
-transports always open: `rs/moq-net/src/lite/test_transport.rs:532` and
-`rs/moq-net/tests/integration/support/mock.rs:531` both map `poll_open_bi`
-to `Some`.
+once (`rs/moq-net/src/coding/stream.rs:52-61` at be39188000), but the
+in-memory transports never refuse. `transport::memory` already counts bidi
+credit (`Config::max_concurrent_bi_streams`, default unlimited, returned as
+the peer drops both halves), yet its `poll_open_request`
+(`rs/moq-net/src/transport/memory.rs:360-366`) parks on it like
+`poll_open_bi`. The integration mock wrapping it
+(`rs/moq-net/tests/integration/support/mock.rs:576`) and the lite test
+sessions (`rs/moq-net/src/lite/test_transport.rs:535`, `:776`, `:1237`)
+map `poll_open_bi` to `Some`.
 
-- Give both a configurable bidi credit (default unlimited so existing tests
-  are unchanged; `with_open_bi_gate` already parks `poll_open_bi`) and make
-  `poll_open_request` return `Ok(None)` when it is exhausted, releasing
-  credit as streams close.
+- Make `memory`'s `poll_open_request` return `Ok(None)` when its bidi credit
+  is exhausted, and have the mock delegate to it instead of its own
+  `poll_open_bi`. Where a lite test session gates bidi opens
+  (`with_open_bi_gate` parks `poll_open_bi`), refuse the request instead.
 - Regression: with credit for one stream and fetches queued before TRACK,
   the track still opens (the order [moq-dev/moq#7332](https://github.com/moq-dev/moq/pull/7332) fixed).
 

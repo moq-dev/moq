@@ -21,7 +21,7 @@ Milestone: ✅ m1. Not chosen: m2.
   a stalled owner's clock hides shared-PID timing errors
   ([review](https://github.com/moq-dev/moq/pull/7294#pullrequestreview-5709848438)),
   and a lone program with a stalled PCR already loses the same outage on main.
-- Each program's `Health` (`rs/moq-mux/src/container/ts/health.rs:175`) times
+- Each program's `Health` (`rs/moq-mux/src/container/ts/health.rs:214` at be39188000) times
   its tables, PCR, and PTS on its own PCR clock, passed in as `now` from the
   importer's `Liveness`. When the PCR stops, `now` stops, and no interval
   check fires. Fall back to a clock that keeps running, such as the multiplex

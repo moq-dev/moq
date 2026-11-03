@@ -18,11 +18,11 @@ Milestone: ✅ m1. Not chosen: m2.
 [moq-dev/moq#7412](https://github.com/moq-dev/moq/pull/7412)'s knockout measurement kept these rules because each guards behavior
 admission does not provide, but none has a test of its own:
 
-- `stale` (`judge`, `queue` at `jitter.rs:982`, `:1024`): drops a frame that
-  arrived before its deadline but was read after it. Test that such a frame
-  never goes out past its deadline.
-- `unheard_lag` (`jitter.rs:952`, `:1290`) and the horizon shift
-  (`jitter.rs:967`, `:1040`): both keep a new generation behind a track sent
+- `stale` (`judge`, `queue` at `jitter.rs:992`, `:1025`, at be39188000):
+  drops a frame that arrived before its deadline but was read after it.
+  Test that such a frame never goes out past its deadline.
+- `unheard_lag` (`jitter.rs:955`, `:1291`) and the horizon shift
+  (`jitter.rs:970`, `:1041`): both keep a new generation behind a track sent
   later than the anchor, and in the tests each covers for the other
   (removing both fails `a_track_crossing_after_the_new_clock_keeps_its_lead`
   and one more). Find an input where only one applies for each, such as a

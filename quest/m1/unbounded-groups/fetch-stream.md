@@ -16,9 +16,9 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411).
 
 - moq-transport FETCH egress: the user: "absolutely don't buffer."
-  `readFetched` (`js/net/src/ietf/publisher.ts:2753`, called at `:2401` and
-  `:2514`) collects each requested group slice before writing it. Stream it
-  the way [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)'s subgroup egress (`#serveGroup`) does, with `nextFrame`-style
+  `readFetched` (`js/net/src/ietf/publisher.ts:2760` at be39188000, called at
+  `:2408` and `:2521`) collects each requested group slice before writing it. Stream it
+  the way [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)'s subgroup egress (the `serveGroup` closure, `:811`) does, with `nextFrame`-style
   reads and chunked writes for a payload past one segment.
 - lite FETCH whose readers all leave mid-frame: the user: "fix that I
   think." Today it keeps reading the frame's payload before it notices. Watch

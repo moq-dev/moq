@@ -7,7 +7,8 @@ buffered group, while keeping the reader's bounds (range, budget, delivered
 set). `moq_json::snapshot::Consumer::latest()` moves onto it, so on a
 received track with a nonzero or unlimited `max_delay` it returns the newest
 buffered snapshot at once instead of waiting for an owed lower group. The
-`poll_latest` caveat goes.
+`poll_latest` caveat goes. `@moq/net`'s `Ordered` and `@moq/json`'s
+`latest()` do the same.
 
 ## Plan
 
@@ -29,10 +30,13 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
   gives up. Every in-repo snapshot reader uses the zero default and is
   unaffected; a reader with a budget is not.
 - The new read is that threading: skip owed holes but not the reader's range
-  or budget, and never hand out a group twice. Mirror it in `@moq/net`'s
-  `Ordered` and `@moq/json` only once JS waits on owed groups, which
-  [moq-dev/moq#7426](https://github.com/moq-dev/moq/pull/7426) plans as
-  `quest/m1/js-ordered-owed.md`.
+  or budget, and never hand out a group twice. The caveat sits at
+  `rs/moq-json/src/snapshot/consumer.rs:84` at be39188000.
+- [moq-dev/moq#7609](https://github.com/moq-dev/moq/pull/7609) (merged) made
+  JS ordered reads wait on owed groups too, so `@moq/json`'s `latest()`
+  (`js/json/src/snapshot/consumer.ts:59`, draining `Ordered.tryNextGroup`)
+  now parks the same way. Mirror the new read in `@moq/net`'s `Ordered`
+  (`js/net/src/track.ts:3111`) and move `latest()` onto it.
 
-Public API: adds an `Ordered` read (Rust); `snapshot::Consumer::latest()`
-stops waiting at owed holes. Wire: none.
+Public API: adds an `Ordered` read (Rust and JS); `snapshot::Consumer::latest()`
+and `@moq/json`'s `latest()` stop waiting at owed holes. Wire: none.

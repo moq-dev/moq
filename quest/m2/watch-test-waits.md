@@ -20,16 +20,17 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   - Drop.
 
 Waits: many test files define their own `settle`/`flush` as N
-`setTimeout(0)` or microtask turns (`js/watch/src/broadcast.test.ts:58`,
-`video/decoder.test.ts:15`, `video/source.test.ts:9`, `audio/emitter.test.ts:50`,
-`media.test.ts`, `sync.test.ts`, `audio/config.test.ts`, ...). Add one shared
+`yieldNow()` or microtask turns (`js/watch/src/broadcast.test.ts:58`,
+`video/decoder.test.ts:17`, `video/source.test.ts:13`, `audio/emitter.test.ts:50`,
+`media.test.ts`, `sync.test.ts`, `audio/config.test.ts`, ...; lines at
+be39188000). Add one shared
 test helper that waits on a `Getter` until a predicate holds, with a
 bounded timeout that fails loudly, like `waitFor` in
-`js/net/src/integration.test.ts:1702` and `js/net/src/auth.test.ts:41`, and
+`js/net/src/integration.test.ts:1701` and `js/net/src/auth.test.ts:41`, and
 move the tests onto it. Keep a plain yield only where the test asserts that
 nothing changed, and say so there.
 
-Scope error: `#requestBroadcast` (`js/watch/src/broadcast.ts:252`) calls
+Scope error: `#requestBroadcast` (`js/watch/src/broadcast.ts:257`) calls
 `origin.follow(path)`/`origin.request(path)`, which throw for a path outside
 the origin's scope; `#runBroadcast` catches the same throw into `out.error`,
 and [moq-dev/moq#7312](https://github.com/moq-dev/moq/pull/7312) (merged) catches it again in its contribution branch. Catch it once

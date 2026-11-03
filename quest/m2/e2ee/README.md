@@ -64,9 +64,10 @@ Noted 2026-10-31 from [moq-dev/moq#7307](https://github.com/moq-dev/moq/pull/730
   track cannot reset its nonce counters) leaves its resume rule implicit.
   State explicitly in that section how a reopened or resumed track continues
   from those claims.
-- moq-net's `Lister` has no async `used`/`unused` forms yet, so neither the
-  e2ee wrapper nor the trait mirror has them. Add them to the wrapper once
-  moq-net does.
+- moq-net's `Lister` has only `poll_wanted`/`poll_unwanted`
+  (`rs/moq-net/src/model/listing.rs:601` on be39188000), no async forms, so
+  neither the e2ee wrapper nor the trait mirror has them. Add them to the
+  wrapper once moq-net does.
 
 Before `@moq/e2ee` is first published, add its entrypoints to the API
 Extractor declaration checks, which analyze only published packages since

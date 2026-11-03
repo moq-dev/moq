@@ -13,13 +13,14 @@ in for "nothing served".
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
 [moq-dev/moq#7366](https://github.com/moq-dev/moq/pull/7366): m2, as
-recommended. Start after [moq-dev/moq#7366](https://github.com/moq-dev/moq/pull/7366) (open) lands; it adds
+recommended. [moq-dev/moq#7366](https://github.com/moq-dev/moq/pull/7366) (merged) added
 `rs/moq-relay/tests/integration/tenant_matrix.rs`.
 
 Its `http_routes_keep_tenants_apart` accepts any status for
 `/announced/tenant-a?jwt=b` (checking the body only when it is 200) and
 treats a `/fetch` still waiting after 2 s as "served nothing", since the
-handler waits up to a hard-coded 30 s (`rs/moq-relay/src/web.rs:1096`).
+handler waits up to a hard-coded 30 s (`rs/moq-relay/src/web.rs:1130` at
+be39188000).
 
 - Pin the expected status of each request (what the auth contract says B
   gets for a path outside its root) and assert it.
@@ -29,7 +30,3 @@ handler waits up to a hard-coded 30 s (`rs/moq-relay/src/web.rs:1096`).
   needs no new knob if possible.
 
 Public API: none, unless the fetch wait becomes a config field. Wire: none.
-
-## Related
-
-- [Tenant matrix](/quest/m2/tenant-matrix.md) - [moq-dev/moq#7366](https://github.com/moq-dev/moq/pull/7366) lands the test this tightens

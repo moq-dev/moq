@@ -22,7 +22,7 @@ relay's own resets while the reader withholds stream credit.
 
 - Put it in `rs/moq-relay/tests/integration/` with a relay, a publisher
   bursting a few groups, and a subscriber with a small `max_streams` (see
-  `peer_limits.rs:39`) and a max delay larger than the burst, that stalls
+  `peer_limits.rs:39`) and a `delay.max` larger than the burst, that stalls
   before reading. Assert every stream it receives completes with no
   `StreamError::Old` and that a group past the budget is reset `Old`.
 - Drive the stall with the simulated clock, not wall-clock sleeps.

@@ -14,8 +14,9 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 [moq-dev/moq#7350](https://github.com/moq-dev/moq/pull/7350): m2, as
 recommended.
 
-`is_cancel` (`rs/moq-net/src/lite/publisher.rs:1518`, "TODO better
-classify WebTransport errors") matches all `Transport(_)` and `IdleTimeout`.
+`is_cancel` (`rs/moq-net/src/lite/publisher.rs:1559` as of be39188000,
+"TODO better classify WebTransport errors") matches all `Transport(_)` and
+`IdleTimeout`.
 [moq-dev/moq#7350](https://github.com/moq-dev/moq/pull/7350) left it alone and wrote its own three-variant match for probe ends in
 `lite/publisher.rs` and `lite/subscriber.rs`.
 

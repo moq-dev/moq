@@ -19,12 +19,12 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   - ✅ Switch to `DecodeStart::Latest`. Reason: the source is a live player,
     so replaying the cache only adds latency.
 
-- `cpp/obs/src/moq-source.cpp:980`: set `output.start` to
+- `cpp/obs/src/moq-source.cpp:1068` (as of be39188000): set `output.start` to
   `moq::DecodeStart::kLatest` on the `moq::AudioDecoderOutput`. Video reads
   raw frames through `MediaTrackConsumer` and its own decoder, so it is
   unaffected.
 - Delete the `AudioDecoderOutput` and `VideoDecoderOutput` aliases in
-  `go/wrapper/types.go:15,76`: no wrapper API accepts them
+  `go/wrapper/types.go:15,81`: no wrapper API accepts them
   (`audio.DecoderOutput`/`video.DecoderOutput` are the real inputs). Their
   migration note is gathered by the
   [migration audit](/quest/m2/release/migrate-audit.md).

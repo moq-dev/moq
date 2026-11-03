@@ -13,12 +13,13 @@ draft-18 interop `tail` and `finish` cells pass with a Rust publisher.
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
 [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306): m2, as
-recommended. Start after [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) (open) lands; it owns
-[the join after finish](/quest/m2/ietf-join-after-finish.md).
+recommended. [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) (merged) kept the join after finish.
 
 [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) keeps the subscription's request open after PUBLISH_DONE but does not
-hold the head: when the producer drops, the cache demotes the latest group,
-and the late FETCH gets a loud refusal (accepted by that quest's Plan).
+hold the head: the retained `Joined::Group` holds only a `track::Consumer`
+(`rs/moq-net/src/ietf/publisher.rs:885`, `Retain` at `:927` as of
+be39188000), so when the producer drops, the cache demotes the latest group,
+and the late FETCH gets a loud refusal (accepted by its quest's Plan).
 
 - Hold the head group from the retained subscription (a cache pin or a
   held `group::Consumer`) until the join is answered or the request closes,
@@ -32,5 +33,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A quick finish keeps its pre-draft-22 join](/quest/m2/ietf-join-after-finish.md) - [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) lands the retained join
 - [IETF finish](/quest/m2/ietf-finish.md) - owns the interop cells

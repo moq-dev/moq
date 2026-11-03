@@ -21,12 +21,14 @@ epic, so this sits at the m1 top level.
   `moq-ffi-v*` tag (`release-py.yml:15`). When the `moq-ffi-v0.4.20` chain
   failed, the only retries were a new tag or a matching push.
 - Follow `release-kt-lib.yml`, which allows `workflow_dispatch` and publishes
-  only when `github.ref == 'refs/heads/release'` (`release-kt-lib.yml:193`).
+  only when `github.ref == 'refs/heads/release'` (`release-kt-lib.yml:148`
+  at be39188000, as [moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431) left it).
   Keep `release-py.yml`'s existing gates (already on PyPI, moq-ffi published).
   Those FFI steps (`ffi-gate`, `ffi-pypi`, `release-py.yml:98-112`) run only
   on `push`, and `build.outputs.publish` (`:52`) needs them for every event
   but `workflow_run`, so run them on `workflow_dispatch` too, or a dispatch
-  never publishes. Check both states: `moq-ffi` already on PyPI publishes,
+  never publishes. The `build` job's own `if` (`:43`) admits only `push` and
+  `workflow_run`, so it needs the dispatch too. Check both states: `moq-ffi` already on PyPI publishes,
   and an unpublished `moq-ffi` does not.
 - A dispatch with `--ref release` runs `release`'s copy of the workflow, so
   the trigger helps only once it is on `release` too. Backporting it is a

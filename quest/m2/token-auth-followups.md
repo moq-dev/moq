@@ -12,13 +12,14 @@ and its cause either fixed or recorded in this quest's PR with numbers.
 
 ## Plan
 
-Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211),
+Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211) (open),
 which finishes [request tokens](/quest/m1/ietf-token-auth.md).
 
 - Renewal: after [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211) a paused PUBLISH accepts a token, but a forwarding
   one refuses it ("AUTHORIZATION TOKEN on a locally initiated PUBLISH",
-  in `apply_subscription_update`, `rs/moq-net/src/ietf/publisher.rs:2130`
-  on main), so a forwarding PUBLISH can't be renewed in place. It fails
+  in [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211)'s `apply_subscription_update`, which is at
+  `rs/moq-net/src/ietf/publisher.rs:2266` on main at be39188000), so a
+  forwarding PUBLISH can't be renewed in place. It fails
   closed, so this is a gap, not a hole. Recommended: accept the renewal
   while forwarding, held to the same checks [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211) applies to a paused
   PUBLISH's token. Refusing it while

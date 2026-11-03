@@ -29,6 +29,12 @@ is related.
   moq-sign for it, or the type moves to a small shared crate if the
   dependency direction is wrong; say which in the PR). Keep the shared
   vectors in `drafts/moq-sign-00.json` as the single source of test vectors.
+- Both copies are still on `main` at be39188000:
+  `rs/moq-auth/src/mesh/mod.rs:52` (the specification) and `:65`
+  (`EndpointId`), beside `rs/moq-sign/src/key.rs:18`.
+- [moq-crypto replaces moq-sign](/quest/m1/moq-crypto.md) renames
+  `moq-sign`/`@moq/sign` to `moq-crypto`/`@moq/crypto`. If it lands first,
+  merge `EndpointId` into its public key type and use its JS codec instead.
 - Note, not in scope: persist a browser JS `SecretKey` (a nonextractable
   `CryptoKey`) in IndexedDB only once a browser mesh node needs a stable
   endpoint ID.
@@ -39,3 +45,4 @@ Public API: breaking for moq-auth (`mesh::EndpointId` becomes
 ## Related
 
 - [Mesh](/quest/m2/mesh/README.md) - the epic both types serve
+- [moq-crypto replaces moq-sign](/quest/m1/moq-crypto.md) - renames the crate this quest merges into

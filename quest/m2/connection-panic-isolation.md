@@ -9,8 +9,7 @@ to the peer when its last handle drops. Two background tasks
 [moq-dev/moq#7360](https://github.com/moq-dev/moq/pull/7360) left out are
 supervised by its rule: a panic in a listener's certificate reload watcher
 (`tls::Reload`) fails `Listener::accept` like a dead endpoint, and a panic
-in a qmux session reader/writer or WebSocket pump ends that session with an
-error and is counted.
+in a qmux session's driver ends that session with an error and is counted.
 
 ## Plan
 
@@ -23,7 +22,7 @@ which finished the task-supervision quest.
 server every accessor runs isolated, while a client's `Connecting` or
 stream call that touches the poisoned lock panics in the application's task;
 each caller would have to isolate it. And `ConnectionRef::drop`
-(`rs/moq-tokio/src/quic/driver/connection.rs:802`) skips the implicit close
+(`rs/moq-tokio/src/quic/driver/connection.rs:808` at be39188000) skips the implicit close
 when the lock is poisoned, so the peer waits for its idle timeout.
 
 Record the panic as the connection's terminal error once, where the
@@ -39,12 +38,15 @@ For the drop: send the close from the terminal-error path (the driver's
 isolation) rather than from the last handle, so a poisoned lock doesn't
 matter.
 
-`tls::Reload` is in `rs/moq-tokio/src/tls.rs:3315`; the qmux tasks are
-the plain `tokio::spawn`s at `rs/qmux/src/session.rs:489-490` and
-`rs/qmux/src/transport.rs:188` and `:985`. qmux can't reach
-`moq_tokio::panic`, so either qmux gets a small isolate of its own or its
-caller in moq-tokio observes the handles. Add a regression per class that
-injects a panic, as [moq-dev/moq#7360](https://github.com/moq-dev/moq/pull/7360)'s `driver_panic_fails_connecting` does.
+`tls::Reload` is in `rs/moq-tokio/src/tls.rs:3323` (at be39188000), and
+`Reload::spawn` runs its watcher with a plain `runtime::spawn`.
+[moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494) (merged) folded qmux's reader, writer, and
+WebSocket pump tasks into one caller-spawned `qmux::Driver` per session, so
+qmux spawns nothing and the only task left is the one moq-tokio's
+`spawn_qmux` (`rs/moq-tokio/src/lib.rs:114`) starts with a plain
+`runtime::spawn`. Wrap both spawns in `crate::panic::isolate`; qmux needs
+no isolate of its own. Add a regression per class that injects a panic, as
+[moq-dev/moq#7360](https://github.com/moq-dev/moq/pull/7360)'s `driver_panic_fails_connecting` does.
 
 Public API: none expected (behavior only); a new `Error` variant for a
 panicked driver if one is needed. Wire: none.

@@ -25,10 +25,11 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
 - Reproduce over real WebTransport first. The receiver alone cannot rescue a
   stream the transport has already errored, so expect the fix to be on the
   closing side (not closing the session until the peer has taken its
-  streams), which overlaps
-  [A lite-01..06 graceful close delivers the final group](/quest/m1/lite-legacy-close-drain.md).
-  If that quest's fix covers this case, fold the remaining test work into it
-  instead and delete this quest.
+  streams), which
+  [moq-dev/moq#7296](https://github.com/moq-dev/moq/pull/7296) (merged) did
+  for lite-05/06: `close()` now waits up to one second for the subscriber's
+  FIN, sent after it read the tail (`js/net/src/lite/connection.ts:255` at
+  be39188000). lite-01..04 keep the transport-ACK drain (its decision 1).
 - Testability: the budget's 32-check counter is module-global, so a test
   cannot choose which accept yields. Make the budget per session or
   injectable (`@internal`) and add the mid-drain yield test.
@@ -37,4 +38,4 @@ Public API: none (`acceptBudget` is `@internal`). Wire: none.
 
 ## Related
 
-- [A lite-01..06 graceful close delivers the final group](/quest/m1/lite-legacy-close-drain.md) - the publisher side of the same WebTransport close loss
+- [@moq/net's close-drain tests survive load](/quest/m0/test-flakes-2/js-close-drain.md) - the same close-drain tests, flaking under load

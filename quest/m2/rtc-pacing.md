@@ -44,7 +44,7 @@ WHEP enforcement needs it and nobody owned it.
   inbound RTP that never forms a frame, so a hostile publisher can send junk
   RTP past its cap. Meter it with the same bucket here if that proves to
   matter, without counting BWE padding probes (metering raw SRTP bytes would
-  trip an honest Chrome while probing). [moq-dev/moq#7373](https://github.com/moq-dev/moq/pull/7373) was tested against str0m on
+  trip an honest Chrome while probing). #7373 was tested against str0m on
   both ends only; check once with a real Chrome or Firefox publisher that
   it honors `b=TIAS` and REMB beside transport-cc, stays under the meter
   through keyframes and BWE probing at 90% of the cap, and lifts its

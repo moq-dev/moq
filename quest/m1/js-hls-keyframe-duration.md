@@ -16,11 +16,13 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 
 Milestone: ✅ m1 (moved from m2). Not chosen: m2.
 
-- The declaration is fixed at track creation: JS in [moq-dev/moq#7367](https://github.com/moq-dev/moq/pull/7367)'s `keyframeInterval`
-  handling, Rust in `rs/moq-video/src/encode/producer.rs:1073`
-  (`with_hls_hint(initial.gop.duration(initial.framerate))`), while the live
-  GOP follows later config. A raised interval therefore pushes segments past
-  the declared duration.
+- The declaration is fixed at track creation: JS in the `hlsHint` that
+  [moq-dev/moq#7367](https://github.com/moq-dev/moq/pull/7367) (merged) added, read only when a track is created
+  (`js/publish/src/video/encoder.ts:356`), Rust in `publish_capture`
+  (`rs/moq-video/src/encode/producer.rs:430`, `with_hls_hint(gop)` from the
+  probe's GOP; lines at be39188000), while the live GOP follows later config
+  (`encoder.ts:534`). A raised interval therefore pushes segments past the
+  declared duration.
 - Recommended: keep a keyframe at least every declared duration for the
   track's life, by capping the live interval at it. This matches
   [time-addressing consumers](/quest/m1/time-addressing/consumers.md), whose
@@ -33,7 +35,3 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
   and Bun today. Assert the catalog's `hls` field from `@moq/publish` too.
 
 Public API: none (behavior: a raised keyframe interval is capped). Wire: none.
-
-## Required
-
-- [JS HLS field](/quest/m2/js-hls.md) - [moq-dev/moq#7367](https://github.com/moq-dev/moq/pull/7367) publishes the browser's HLS declaration

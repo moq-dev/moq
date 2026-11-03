@@ -33,10 +33,10 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   declared `Inflated Size`.
 - Rust: the guard is `rs/moq-net/src/model/group/content.rs:117` (`size` and
   `inflated` against `MAX_CACHE_BYTES`). The inflated copy inflates each
-  frame whole (`GroupState::inflate`, `rs/moq-net/src/model/group.rs:621`).
+  frame whole (`Inflate::inflate`, `rs/moq-net/src/model/group.rs:632` at be39188000).
   Inflate into `frame::SEGMENT` segments instead, bounded the same way.
 - This also resolves [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)'s Rust follow-up: `GroupProducer::write_frame` and
-  `write_frames` (`group.rs:1680`, `:1759`) check only the plain payload
+  `write_frames` (`group.rs:1719`, `:1798`) check only the plain payload
   against 32 MB, so an incompressible frame near the cap encodes to a slice
   every receiver refuses. With no compressed cap, there is nothing to
   mismatch; [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) removes

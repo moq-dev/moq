@@ -66,7 +66,8 @@ m1 quest on 2026-10-22.
   module option `services.moq-relay.cluster.rootUrl` takes a non-empty
   list instead of a string. Migrate `rootUrl = "https://root:4443";` to
   `rootUrl = [ "https://root:4443" ];`; an empty list fails evaluation.
-  Write it into `rs/moq-relay/MIGRATE.md`'s transition section.
+  Write it into `rs/moq-relay/MIGRATE.md`'s transition section (its
+  `## Unreleased` section until the cut names the version).
 
 ## Required
 

@@ -12,8 +12,8 @@ unsupported codec and the UI shows the notice.
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
 [moq-dev/moq#7359](https://github.com/moq-dev/moq/pull/7359): m2, as
-recommended. Start after [moq-dev/moq#7359](https://github.com/moq-dev/moq/pull/7359) (open) lands; it adds the shared support
-probe and the indicator.
+recommended. [moq-dev/moq#7359](https://github.com/moq-dev/moq/pull/7359) (merged) added the shared support probe
+(`js/watch/src/support-probe.ts`) and the indicator.
 
 - `js/watch/src/ui/components/center-play.ts:16` reads only
   `watch.video.source.out.error`. Apply "no video, so audio": with no video
@@ -24,7 +24,3 @@ probe and the indicator.
   button hides for audio-only.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Watch support probe](/quest/m2/watch-support-probe.md) - the shared probe
