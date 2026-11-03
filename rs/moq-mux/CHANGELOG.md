@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.20](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.19...moq-mux-v0.10.20) - 2026-11-03
+
+### Other
+
+- backport main's benchmark cases to release for the pre-cut pairing
+
 ## [0.10.19](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.18...moq-mux-v0.10.19) - 2026-10-30
 
 ### Fixed

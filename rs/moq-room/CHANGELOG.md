@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.20](https://github.com/moq-dev/moq/compare/moq-room-v0.2.19...moq-room-v0.2.20) - 2026-11-03
+
+### Other
+
+- updated the following local packages: kio, moq-net, moq-auth, moq-json
+
 ## [0.2.19](https://github.com/moq-dev/moq/compare/moq-room-v0.2.18...moq-room-v0.2.19) - 2026-10-30
 
 ### Other
