@@ -162,9 +162,8 @@ we should have a signal instead". Settled the same day:
 - The subscriber FINs the stream once it wants nothing more, and the publisher
   FINs in reply.
 - Datagrams take no ranges, since they become their own track kind
-  (maintainer, 2026-11-01). The datagram-tracks plan
-  ([moq-dev/moq#7575](https://github.com/moq-dev/moq/pull/7575)) touches this
-  quest too, and should take this design and the rename as given.
+  ([Datagram tracks](/quest/m1/datagram-tracks/README.md), maintainer
+  2026-11-01), so datagram fills need no handling here.
 
 The draft's exception for a start past the publisher's largest position should
 also say that a relay knows that position only from its upstream's answer,

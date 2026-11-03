@@ -1188,7 +1188,7 @@ test.each([false, true])(
 			await recording.send(200);
 
 			const ordered = late.ordered();
-			const groups: number[] = [];
+			const groups: bigint[] = [];
 			const firsts: number[] = [];
 			for (let i = 0; i < (onDemand ? 1 : 2); i++) {
 				const group = await ordered.nextGroup();
@@ -1201,12 +1201,12 @@ test.each([false, true])(
 			if (onDemand) {
 				// The subscriber's arrival started the encoder, so its first frame opened the only group.
 				expect(recording.keys).toEqual([200]);
-				expect(groups).toEqual([0]);
+				expect(groups).toEqual([0n]);
 				expect(firsts).toEqual([200]);
 			} else {
 				// Both groups were cached before it arrived, and its join forced no fresh keyframe.
 				expect(recording.keys).toEqual([0, 100]);
-				expect(groups).toEqual([0, 1]);
+				expect(groups).toEqual([0n, 1n]);
 				expect(firsts).toEqual([0, 100]);
 			}
 		} finally {
@@ -1312,7 +1312,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 	let siblingSubscriber: Moq.Track.Subscriber | undefined;
 	let catalogSubscriber: Moq.Track.Subscriber | undefined;
 	let recovered: Moq.Track.Subscriber | undefined;
-	let announced: Moq.Origin.Requesting | undefined;
+	let announced: Moq.Origin.Following | undefined;
 	try {
 		await encoder.out.catalog.changed();
 		const net = broadcast.net.peek();
@@ -1329,7 +1329,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		await flush();
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
-		expect(siblingTrack.appendGroup().sequence).toBe(0);
+		expect(siblingTrack.appendGroup().sequence).toBe(0n);
 		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
 		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).not.toBe(false);
@@ -1346,7 +1346,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
 		expect(siblingTrack.closed.peek()).toBeUndefined();
-		expect(siblingTrack.appendGroup().sequence).toBe(1);
+		expect(siblingTrack.appendGroup().sequence).toBe(1n);
 		const instances = FakeVideoEncoder.instances.length;
 		broadcast.audio("audio/new");
 		estimate.set(20_000_000);
@@ -1389,7 +1389,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
-		expect(siblingTrack.appendGroup().sequence).toBe(2);
+		expect(siblingTrack.appendGroup().sequence).toBe(2n);
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();
