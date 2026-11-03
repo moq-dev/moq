@@ -7,8 +7,9 @@
  *
  * A {@link Credential} is what the application distributes out of band. Each publisher instance
  * calls {@link Credential.produce} to mint a {@link Generation.Producer} and wraps its `@moq/net`
- * broadcast in a {@link Broadcast.Producer}. Subscribers follow the path, take each instance's
- * epoch from the broadcast it resolved, bind a {@link Generation.Consumer} with
+ * broadcast in a {@link Broadcast.Producer}, announcing the generation's epoch as its route's
+ * instance. Subscribers follow the path, read each instance's epoch with {@link Epoch.of} from
+ * the broadcast it resolved, bind a {@link Generation.Consumer} with
  * {@link Credential.consume}, and wrap the broadcast in a {@link Broadcast.Consumer}. Both sides name tracks by their semantic names; only the
  * derived physical names reach `@moq/net`.
  *
@@ -17,7 +18,7 @@
  * const generation = credential.produce();
  * const publication = origin.createBroadcast(await credential.path("meeting.hang"));
  * const video = await new Broadcast.Producer(publication.broadcast, generation).createTrack("video", { timescale });
- * publication.announce({ epoch: generation.epoch });
+ * publication.announce({ instance: Epoch.instance(generation.epoch) });
  *
  * const group = video.appendGroup();
  * await group.writeFrame(timestamp, frame);
@@ -37,6 +38,8 @@ export { Credential } from "./credential.ts";
 /** Decrypted datagrams and the events a protected datagram read yields. */
 export * as Datagram from "./datagram.ts";
 export type { Name } from "./derive.ts";
+/** Generation epochs: the UUIDv7 text a publisher instance announces as its route's instance. */
+export * as Epoch from "./epoch.ts";
 export { type Code, Failure } from "./failure.ts";
 /** Producing generations mint an epoch; consuming generations bind a discovered one. Types only: a {@link Credential} makes them. */
 export type * as Generation from "./generation.ts";

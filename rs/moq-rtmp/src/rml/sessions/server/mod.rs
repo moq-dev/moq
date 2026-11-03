@@ -20,7 +20,7 @@ use crate::rml::messages::{PeerBandwidthLimitType, RtmpMessage, UserControlEvent
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::collections::{HashMap, HashSet};
 
 const FOURCC_CAN_DECODE: u32 = 0x01;
@@ -708,7 +708,7 @@ impl ServerSession {
 			_ => Vec::new(),
 		};
 
-		// A connection carries one publisher epoch or one playback, never a replacement.
+		// A connection carries one publisher instance or one playback, never a replacement.
 		stream.current_state = StreamState::Completed;
 		self.current_state = SessionState::Completed;
 		self.request = None;
@@ -1419,14 +1419,14 @@ fn create_status_object(level: &str, code: &str, description: &str) -> HashMap<S
 mod clock_tests {
 	use super::*;
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn session_epoch_uses_the_timer_clock() {
 		let session = ServerSession::new(ServerSessionConfig::new()).unwrap().0;
-		moq_clock::sleep(std::time::Duration::from_millis(12_345)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(12_345)).await;
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
-		moq_clock::sim::step_wall(moq_clock::Wall::UNIX_EPOCH);
+		kio::clock::sim::step_wall(kio::clock::Wall::UNIX_EPOCH);
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
-		moq_clock::sleep(std::time::Duration::from_millis(1 << 32)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1 << 32)).await;
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
 	}
 }

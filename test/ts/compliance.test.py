@@ -69,7 +69,9 @@ def h262(indication: int, rate: int, vbv: int, vbv_delay: int) -> bytes:
     head = b"\x00\x00\x01\xb3\x2d\x02\x40\x23"
     head += ((value & 0x3FFFF) << 14 | 1 << 13 | (vbv & 0x3FF) << 3).to_bytes(4, "big")
     ext = b"\x00\x00\x01\xb5"
-    ext += (1 << 44 | indication << 36 | 1 << 35 | 1 << 33 | (value >> 18) << 17 | 1 << 16 | (vbv >> 10) << 8).to_bytes(6, "big")
+    ext += (1 << 44 | indication << 36 | 1 << 35 | 1 << 33 | (value >> 18) << 17 | 1 << 16 | (vbv >> 10) << 8).to_bytes(
+        6, "big"
+    )
     picture = b"\x00\x00\x01\x00" + (1 << 19 | vbv_delay << 3).to_bytes(4, "big")
     return head + ext + picture
 

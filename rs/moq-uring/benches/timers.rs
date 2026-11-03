@@ -25,7 +25,7 @@ fn benchmark(c: &mut criterion::Criterion) {
 	for armed in [1, 64, 1024, 16384] {
 		// The rest of the table, spread across a minute so the re-armed timer
 		// lands among them.
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let _others: Vec<_> = (0..armed)
 			.map(|i| {
 				let mut timer = handle.timer();

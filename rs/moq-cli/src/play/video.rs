@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_mux::container::{Frame, Read};
 use moq_video::decode::Read as Decoded;
 use moq_video::decode::{Lane, Next, Selector};
@@ -413,7 +413,7 @@ impl<O: Output> Video<O> {
 				let frames = match step {
 					Step::Wait(Some(at)) => {
 						tokio::select! {
-							_ = moq_clock::sleep_until(at) => {},
+							_ = kio::clock::sleep_until(at) => {},
 							_ = self.changed.notified() => {},
 						}
 						continue;
@@ -616,7 +616,7 @@ impl<O: Output> Video<O> {
 					match at {
 						Some(at) => tokio::select! {
 							_ = woken => {},
-							_ = moq_clock::sleep_until(at) => {},
+							_ = kio::clock::sleep_until(at) => {},
 						},
 						None => woken.await,
 					}
@@ -700,7 +700,7 @@ mod tests {
 	impl Decoder for Buffered {
 		async fn decode(&mut self, frame: Frame) -> anyhow::Result<Vec<moq_video::Frame>> {
 			if !self.cost.is_zero() {
-				moq_clock::sleep(self.cost).await;
+				kio::clock::sleep(self.cost).await;
 			}
 			self.decoded.lock().unwrap().push((frame.timestamp, Instant::now()));
 			let size = self.size as usize;
@@ -761,7 +761,9 @@ mod tests {
 			.unwrap();
 		let subscriber = track
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data);
@@ -786,7 +788,10 @@ mod tests {
 		let subscribe = async |budget| {
 			let subscriber = track
 				.consume()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(budget))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(budget)),
+				)
 				.await
 				.unwrap();
 			moq_mux::container::Consumer::new(
@@ -944,7 +949,9 @@ mod tests {
 			.unwrap();
 		let subscriber = track
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(
@@ -1001,7 +1008,9 @@ mod tests {
 			.unwrap();
 		let subscriber = published
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
@@ -1057,7 +1066,9 @@ mod tests {
 			.unwrap();
 		let subscriber = track
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(
@@ -1099,7 +1110,9 @@ mod tests {
 			.unwrap();
 		let subscriber = source
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
@@ -1143,7 +1156,9 @@ mod tests {
 			.unwrap();
 		let subscriber = source
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
@@ -1205,7 +1220,10 @@ mod tests {
 		// The network keeps every group; only the player's age budget evicts.
 		let subscriber = source
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+			)
 			.await
 			.unwrap();
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
@@ -1253,7 +1271,9 @@ mod tests {
 			.unwrap();
 		let subscriber = source
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
@@ -1322,7 +1342,9 @@ mod tests {
 			.unwrap();
 		let subscriber = track
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
@@ -1371,7 +1393,9 @@ mod tests {
 	async fn join(track: &moq_net::track::Producer, budget: Duration, lookback: u64) -> Track {
 		let mut subscriber = track
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(budget))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(budget)),
+			)
 			.await
 			.unwrap();
 		let largest = subscriber.largest().await.unwrap();
@@ -1641,7 +1665,10 @@ mod tests {
 				.unwrap();
 			let subscriber = track
 				.consume()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(delay)),
+				)
 				.await
 				.unwrap();
 			let mut producer = moq_mux::container::Producer::new(track, format());

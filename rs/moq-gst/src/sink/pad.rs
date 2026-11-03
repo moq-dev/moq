@@ -1508,7 +1508,7 @@ mod tests {
 		let vp8 = gst::Caps::builder("video/x-vp8").build();
 		pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera")));
 		let drained = async { while records.recv_group().await.unwrap().is_some() {} };
-		let ended = moq_clock::timeout(Duration::from_secs(1), drained).await;
+		let ended = kio::clock::timeout(Duration::from_secs(1), drained).await;
 		assert!(ended.is_ok(), "the old track's records end");
 	}
 
@@ -1621,7 +1621,10 @@ mod tests {
 		let mut track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		for index in 0..17 {
@@ -2012,7 +2015,10 @@ mod tests {
 			.consume()
 			.track("audiolevels")
 			.expect("the opaque track is published")
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1))),
+			)
 			.await
 			.expect("subscribe to the opaque track")
 			.ordered();
@@ -2075,7 +2081,7 @@ mod tests {
 			subscriber,
 			moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Data),
 		);
-		let frame = moq_clock::timeout(std::time::Duration::from_secs(1), media.read())
+		let frame = kio::clock::timeout(std::time::Duration::from_secs(1), media.read())
 			.await
 			.expect("LOC media read timed out")
 			.unwrap();

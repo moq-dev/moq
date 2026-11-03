@@ -69,13 +69,16 @@ never does.
   flight without slowing the fast one; no flight fetches a frame twice; a
   track with no handler refreshes.
 - Benchmarks: a case swept over readers and how far apart they join.
+- Fills that write a whole batch of groups at once evict their own earlier
+  groups before the reader takes them (the follow-up from
+  [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)). Moved here
+  from [fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)
+  on 2026-11-02 (maintainer): the failure crosses groups, while pacing holds
+  back one group copy, so a flight's fill paces the batch by its riders
+  instead.
 
 Public API: none. Wire: none, beyond the existing frame-offset fills.
 
 ## Required
 
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - flights pace on their fastest rider the same way the live edge does
-
-## Related
-
-- [Refill evicted groups](/quest/m2/evicted-refill.md) - refills whole groups evicted before a reader took them

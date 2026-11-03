@@ -2,8 +2,9 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Error as NetError, Path, StreamCode, Track } from "@moq/net";
+import { Instance, Error as NetError, Path, StreamCode, Track } from "@moq/net";
 import {
+	Derived,
 	Effect,
 	type Getter,
 	type GetterType,
@@ -18,11 +19,11 @@ import { toHang } from "./msf";
 
 type ReferencedRendition = {
 	broadcast?: Path.Relative;
-	epoch?: Catalog.ReferenceEpoch;
+	instance?: Catalog.ReferenceInstance;
 };
 
 // Whether a rendition's reference names something this consumer can play.
-type Usable = (rel: Path.Relative | undefined, epoch: Moq.Epoch.Valid | undefined) => boolean;
+type Usable = (rel: Path.Relative | undefined, instance: Moq.Instance.Valid | undefined) => boolean;
 
 // Either the catalog's own broadcast, or a sibling to consume by path.
 type RelativeTarget = { local: true } | { local: false; path: Moq.Path.Valid };
@@ -32,20 +33,25 @@ function filterRenditions<T extends ReferencedRendition>(
 	usable: Usable,
 ): Record<string, T> {
 	return Object.fromEntries(
-		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.epoch)),
+		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.instance)),
 	);
 }
 
-// Whether `active` is proven to be another instance than `epoch` names. An epochless route cannot
-// prove its instance, so only a known mismatch counts.
-function provesOther(active: Moq.Broadcast.Consumer | undefined, epoch: Moq.Epoch.Valid | undefined): boolean {
-	return epoch !== undefined && active?.epoch !== undefined && active.epoch !== epoch;
+// Whether `active` is proven to be another stream than `instance` names. A route over a wire
+// that carries no instance has one its session minted, which proves nothing, so only a known
+// mismatch counts.
+function provesOther(active: Moq.Broadcast.Consumer | undefined, instance: Moq.Instance.Valid | undefined): boolean {
+	if (instance === undefined || active?.instance === undefined) return false;
+	return !Instance.isMinted(active.instance) && active.instance !== instance;
 }
 
 // Whether an announced route covers `path`, until closed. Hidden routes count: a service claim
 // under a `.`-named prefix is kept out of listings, but it still covers the renditions it would
 // produce, and this is never shown to anyone.
-function watchCovered(origin: Moq.Origin.Table, path: Moq.Path.Valid): { covered: Getter<boolean>; close: () => void } {
+function watchCovered(
+	origin: Moq.Origin.Reader,
+	path: Moq.Path.Valid,
+): { covered: Getter<boolean>; close: () => void } {
 	const announced = origin.announced(Path.Pattern.literal(path), { hidden: true, covering: true });
 	const covered = new Signal(false);
 	const active = new Set<Moq.Path.Valid>();
@@ -100,9 +106,9 @@ export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
  * another component whose output is wired in) does the writing.
  */
 export type BroadcastInput = {
-	// The origin to consume from. Independent of any connection: whichever sessions feed
+	// The read-side origin to borrow. Independent of any connection: whichever sessions feed
 	// the origin resolve the broadcast, and the handle spans their reconnects.
-	origin: Getter<Moq.Origin.Table | undefined>;
+	origin: Getter<Moq.Origin.Reader | undefined>;
 
 	// Whether to start downloading the broadcast. Defaults to true.
 	enabled: Getter<boolean>;
@@ -163,13 +169,13 @@ export class Broadcast {
 	// its relay about the broadcasts a catalog actually references.
 	readonly #watches = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; covered: Getter<boolean>; close: () => void; users: number }
+		{ origin: Moq.Origin.Reader; covered: Getter<boolean>; close: () => void; users: number }
 	>();
 
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; follow: boolean; request: Moq.Origin.Requesting; users: number }
+		{ origin: Moq.Origin.Reader; follow: boolean; request: Moq.Origin.Requesting; users: number }
 	>();
 
 	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
@@ -179,6 +185,10 @@ export class Broadcast {
 	// delivers it lands inside the same flush, where a value-compare coalesces the write away and
 	// strands the filtered copy on the previous contents.
 	readonly #raw = new Signal<Catalog.Root | undefined>(undefined);
+
+	// Set only on a contribution: its broadcast resolves through the parent catalog's references,
+	// so the two never resolve one path independently.
+	readonly #resolve = new Signal<((effect: Effect) => Moq.Broadcast.Consumer | undefined) | undefined>(undefined);
 
 	#signals: Effect;
 
@@ -202,16 +212,16 @@ export class Broadcast {
 	}
 
 	// Publish the catalog minus every rendition this consumer cannot use: one naming a
-	// broadcast that isn't announced to us, or one whose broadcast proves another epoch than it
+	// broadcast that isn't announced to us, or one whose broadcast proves another instance than it
 	// names. Selecting one of those would render nothing, since `relativeBroadcast` resolves it to
 	// no broadcast at all. Reruns as announcements arrive, so a rendition appears once its
-	// broadcast does. Only a rendition naming an epoch resolves its broadcast here, sharing the
+	// broadcast does. Only a rendition naming an instance resolves its broadcast here, sharing the
 	// request playback uses.
 	#runFiltered(effect: Effect): void {
 		const raw = effect.get(this.#raw);
-		const usable: Usable = (rel, epoch) =>
+		const usable: Usable = (rel, instance) =>
 			this.#relativeTarget(effect, rel) !== undefined &&
-			(epoch === undefined || !provesOther(this.#relativeActive(effect, rel), epoch));
+			(instance === undefined || !provesOther(this.#relativeActive(effect, rel), instance));
 		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
 	}
 
@@ -221,7 +231,7 @@ export class Broadcast {
 	// gets selected: its service claims a covering prefix, and nothing announces the exact path
 	// until this subscribes. Watches exactly `path`, shared by every caller asking about it.
 	// The blind cases (announcement gate off, no discovery) never reach here; see `#relativeTarget`.
-	#isPathAnnounced(effect: Effect, origin: Moq.Origin.Table, path: Moq.Path.Valid): boolean {
+	#isPathAnnounced(effect: Effect, origin: Moq.Origin.Reader, path: Moq.Path.Valid): boolean {
 		let entry = this.#watches.get(path);
 		if (!entry || entry.origin !== origin) {
 			entry?.close();
@@ -246,7 +256,7 @@ export class Broadcast {
 	// Share one origin request across callers reading the same referenced broadcast.
 	#requestBroadcast(
 		effect: Effect,
-		origin: Moq.Origin.Table,
+		origin: Moq.Origin.Reader,
 		path: Moq.Path.Valid,
 	): Moq.Broadcast.Consumer | undefined {
 		const follow = effect.get(this.in.follow);
@@ -275,6 +285,20 @@ export class Broadcast {
 	#runBroadcast(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
+
+		const resolve = effect.get(this.#resolve);
+		if (resolve) {
+			// Like the origin request below, a path outside the origin's scope throws.
+			let active: Moq.Broadcast.Consumer | undefined;
+			try {
+				active = resolve(effect);
+			} catch (err) {
+				effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
+				return;
+			}
+			effect.set(this.#out.active, active, undefined);
+			return;
+		}
 
 		const origin = effect.get(this.in.origin);
 		if (!origin) return;
@@ -461,20 +485,26 @@ export class Broadcast {
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
 	 *
-	 * `epoch` is the rendition's `epoch` field, the publisher instance the reference names.
-	 * Returns `undefined` while the followed broadcast is proven to be another instance, rather
-	 * than reading it. A route without an epoch cannot prove one, so there it is best effort.
+	 * `instance` is the rendition's `instance` field, the stream the reference names. Returns
+	 * `undefined` while the followed broadcast is proven to be another stream, rather than
+	 * reading it. A route over a wire that carries no instance cannot prove one, so there it is
+	 * best effort.
 	 *
 	 * @internal
 	 */
 	relativeBroadcast(
 		effect: Effect,
 		rel: Path.Relative | undefined,
-		epoch?: Moq.Epoch.Valid,
+		instance?: Moq.Instance.Valid,
 	): Moq.Broadcast.Consumer | undefined {
 		const active = this.#relativeActive(effect, rel);
-		if (!active || !provesOther(active, epoch)) return active;
-		console.warn("ignoring rendition: its broadcast serves another epoch", active.path, active.epoch, epoch);
+		if (!active || !provesOther(active, instance)) return active;
+		console.warn(
+			"ignoring rendition: its broadcast serves another instance",
+			active.path,
+			active.instance,
+			instance,
+		);
 		return undefined;
 	}
 
@@ -489,6 +519,53 @@ export class Broadcast {
 		if (!origin) return undefined;
 
 		return this.#requestBroadcast(effect, origin, target.path);
+	}
+
+	/**
+	 * Select a whole contribution, opening its catalog only while the caller owns this effect.
+	 *
+	 * Listing a contribution in the catalog opens nothing; this is the demand. The child tracks
+	 * the catalog entry and resolves through this broadcast's `relativeBroadcast`, sharing
+	 * its request: while following announcements it follows the contribution's restarts, and
+	 * otherwise it requests the first instance once. With an `instance` it is offline while its
+	 * broadcast resolves another stream. An absent entry leaves the child disabled, and an
+	 * unavailable contribution reads as offline. Its rendition IDs stay local to the child, so
+	 * they never shadow this catalog's IDs.
+	 *
+	 * ```ts
+	 * effects.run((effect) => {
+	 *   const child = broadcast.contribution(effect, "alice");
+	 *   const source = new Video.Source({ broadcast: child, supported: Video.Decoder.supported });
+	 *   effect.cleanup(() => source.close());
+	 *   // Feed source into a decoder as with any broadcast.
+	 * });
+	 * ```
+	 */
+	contribution(effect: Effect, id: string): Broadcast {
+		// Each computed notifies only on a real change, so an update that leaves the child's path
+		// alone (such as a new `instance`) never restarts its catalog.
+		const entry = effect.computed((run) => {
+			const contributions = run.get(this.out.catalog)?.contributions;
+			return contributions && Object.hasOwn(contributions, id) ? contributions[id] : undefined;
+		});
+		const name = effect.computed((run) => {
+			// An empty reference is present: it names the catalog's own broadcast.
+			const selected = run.get(entry);
+			return selected && Path.tryResolve(run.get(this.in.name), selected.broadcast);
+		});
+		const enabled = effect.computed((run) => run.get(entry) !== undefined);
+		const child = new Broadcast({
+			origin: this.in.origin,
+			name: new Derived([name], (name) => name ?? Path.empty()),
+			enabled: new Derived([enabled], (enabled) => enabled === true),
+			follow: this.in.follow,
+		});
+		child.#resolve.set((run) => {
+			const selected = run.get(entry);
+			return selected && this.relativeBroadcast(run, selected.broadcast, selected.instance);
+		});
+		effect.cleanup(() => child.close());
+		return child;
 	}
 
 	/** Stop and release everything this holds. */

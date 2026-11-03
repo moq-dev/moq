@@ -28,9 +28,10 @@ subset drops. What a peer actually observes against this implementation:
 - **Pull.** Subscribers ask. Single-track `PUBLISH` offers are declined, unless they answer our `SUBSCRIBE_TRACKS` (below); announce a namespace and serve the resulting subscriptions. Announcements go out unsolicited. A client asks only for the prefixes its readers watch, and a server or relay link for every prefix it may discover. We never hold two overlapping requests at a peer that did not declare solicit: a broader one replaces the narrower ones once they are closed. The solicit `SETUP` option makes us wait to be asked. Without it, a peer also gets each match as a `NAMESPACE` on its `SUBSCRIBE_NAMESPACE` stream, so it hears the namespace twice. We never send `PUBLISH`.
 - **We list no tracks by `PUBLISH`.** Rust and JavaScript refuse each `SUBSCRIBE_TRACKS` with `NOT_SUPPORTED`, and the session stays up. Our own peers list tracks over moq-lite instead.
 - **A Rust TRACKS listing sends `SUBSCRIBE_TRACKS` upstream, only on demand.** Listing a broadcast from a moq-transport peer sends `SUBSCRIBE_TRACKS` with `FORWARD=0` while someone lists it, never on connect, announce, or subscribe, so a peer that refuses, resets, or ignores it affects only that listing. Each listed track's paused `PUBLISH` is its upstream copy, which a reader resumes rather than subscribing again. Only a `PUBLISH_DONE` with `TRACK_ENDED` removes a listed track, and it lists as finished; any other end fails the listing, and readers list again. Our own moq-transport publishers refuse it, so a Rust listing of one fails.
-- **History is served one group at a time.** Our moq-transport publishers answer a `FETCH` only within one group, a draft-18 joining `FETCH` for the subscription's current group head, and a draft 20+ fill for the largest group's head. Whole-group fetches wait for an open group to finish. Both implementations accept and ignore `FILL_TIMEOUT`, including zero. A JavaScript subscription joins at the current group: on draft 18 it fetches the group's head with a Relative Joining `FETCH`, and from draft 20 asks for it with a fill. Datagrams are never fetchable. Subscribers still request ranges upstream, one per run of missing groups; a third-party publisher can answer those ranges and mark their gaps. A Rust reader that only fetches learns the track from `TRACK_STATUS`, so a finished track stays fetchable; a reader whose publisher refuses `TRACK_STATUS` as `NOT_SUPPORTED` still subscribes.
+- **History is served one group at a time.** Our moq-transport publishers answer a `FETCH` only within one group, a draft-18 joining `FETCH` for the subscription's current group head, and a draft 20+ fill for the largest group's head. Whole-group fetches wait for an open group to finish. Both implementations accept and ignore `FILL_TIMEOUT`, including zero. A JavaScript subscription joins at the current group: on draft 18 it fetches the group's head with a Relative Joining `FETCH`, and from draft 20 asks for it with a fill. Datagrams are never fetchable. Subscribers still request ranges upstream, one per run of missing groups; a third-party publisher can answer those ranges and mark their gaps. A Rust reader that only fetches learns the track from `TRACK_STATUS`, so a finished track stays fetchable; a refused `TRACK_STATUS` fails that reader's request, whatever the code, rather than falling back to a `SUBSCRIBE`.
+- **A requester's FIN.** On draft 18 a requester finishing its stream cancels its request, except after `TRACK_STATUS`: nothing can follow it, so the FIN only ends the requester's input and the request is still answered. From draft 20 a FIN never cancels; a reset or `STOP_SENDING` does.
 - **Compression.** Rust peers exchange compressed tracks when both offer the [Flate extension](/draft/moq-flate). Other peers receive one shared inflated copy. A publisher that seals the compression declaration makes that fallback unavailable: an incompatible peer is refused, preserving the sealed metadata. JavaScript does not offer the IETF extension.
-- **Timing.** A track whose `SUBSCRIBE_OK` declares no `TIMESCALE` is untimed. A Rust reader that never subscribed takes the units from `TRACK_STATUS`.
+- **Timing.** A track whose `SUBSCRIBE_OK` or `PUBLISH` declares no `TIMESCALE` is untimed. A `SUBSCRIBE` or `FETCH` with `INCLUDE_PROPERTIES=0` gets no `TIMESCALE` in its `SUBSCRIBE_OK` or `FETCH_OK`, so its objects go out unstamped. A Rust reader that never subscribed takes the units from `TRACK_STATUS`, and still asks for the properties whenever it subscribes to or fetches a timed track.
 - **Strict SETUP and parameters.** Repeated unknown `SETUP` options, GREASE included, are accepted if well-formed; a repeated known option is rejected. A `GROUP_ORDER` other than Ascending (1) or Descending (2) closes the session. An unknown message parameter, or one defined only for another message, closes the session. Other malformed control input closes the session with the draft's code too, such as a server `SETUP` carrying `PATH` or `AUTHORITY`, a namespace field ending in `/` (it would map to a path with an empty segment), a request cut short by FIN, or a second `GOAWAY` on one stream; a first `GOAWAY` on a request stream is legal.
 - **One `SETUP` credential**, forwarded to the [auth server](/bin/relay/auth#the-contract) unverified. A second `SETUP` token closes the session. We advertise no token cache, so an alias reference in `SETUP` closes it with `PROTOCOL_VIOLATION`, one on a request with `UNKNOWN_AUTH_TOKEN_ALIAS`, and a registration on a request with `AUTH_TOKEN_CACHE_OVERFLOW`. Where the Rust side authorizes the peer or verifies tokens, a token on a `SUBSCRIBE` or `PUBLISH_NAMESPACE` is verified like an in-band session token and authorizes that one request alone, even where that authorization already covers it; it never widens the session. It is refused with `NOT_SUPPORTED` when nothing verifies it, when it is empty, or when its Token Type is anything but 0 (out of band). A side that does neither, JavaScript included, ignores the token. Rust refuses a request carrying more than one distinct token with `NOT_SUPPORTED`, since it verifies one; JavaScript, which verifies none, ignores them all. A token-authorized `SUBSCRIBE` still stays within the grant the peer gave us. A token-authorized `PUBLISH_NAMESPACE` needs a grant covering everything beneath the namespace, and the tracks we subscribe under it rely on that announce instead of our limit, ending with it. An update renews the token, and a refused renewal ends only that request. Rust and JavaScript send the token a route names (`Route::auth`) on its `PUBLISH_NAMESPACE`, and swapping it renews the request with `REQUEST_UPDATE`; the inline `NAMESPACE` that answers a solicited `SUBSCRIBE_NAMESPACE` carries no token. A token added to a reconnecting connection's auth handle rides every session it makes, so the announcement keeps it across a reconnect; one added to a single session's handle ends with that session. A token on any other request is decoded and grants nothing, and a request repeating one is refused with `MALFORMED_AUTH_TOKEN`. The negotiated [MoQ Auth extension](/concept/moq-lite#authorization) accepts additional session tokens in band.
 - **Pause delivery.** `FORWARD=0` on a `SUBSCRIBE` or its update drops the subscription, closing its data streams and holding nothing upstream, while the request and its slot stay. `FORWARD=1` subscribes again as a new `SUBSCRIBE` with the same filter would, so nothing carries across the pause: its `REQUEST_OK` names the live edge it joined at. A paused update may change only priority and max age.
@@ -46,15 +47,16 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
 [auth](/draft/moq-auth) to tell each peer what it may publish and subscribe to,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
-before a `SUBSCRIBE_NAMESPACE` is synced,
-[epoch](/draft/moq-epoch) to carry [publisher epochs](/concept/moq-lite#publisher-epochs)
-without changing a path, and
+before a `SUBSCRIBE_NAMESPACE` is synced, and
 [probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
 only while an owned `recv_bandwidth()` consumer is held. Read estimates through
 its `peek()` or `changed()` methods; session statistics do not request PROBE.
-Both libraries offer solicit, auth, and epoch unless a side's
+Both libraries offer solicit and auth unless a side's
 `extensions` setting declines one, which connects it as a peer that does not
 speak that extension. The pooled JavaScript `Connection` has no such setting yet.
+moq-transport carries no [publisher instance](/concept/moq-lite#publisher-instances),
+so the receiving session mints one per announcement; the
+[epoch draft](/draft/moq-epoch) remains an unimplemented proposal.
 [ietf](/draft/moq-ietf) goes the other way: it extends moq-lite-07 to carry this
 object state between relays. moq-lite-07 is still a work in progress
 (`moq-lite-07-wip`), negotiated only when both sides enable it, so a peer that
@@ -75,8 +77,9 @@ choices. They follow the product model.
   `SUBSCRIBE` goes to one route, not to every publisher whose namespace matches.
   [Draft 16 §8.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html#section-8.5)
   requires the relay to send that `SUBSCRIBE` to all matching publishers. See
-  [publisher epochs](/concept/moq-lite#publisher-epochs) for how that one route
-  is chosen.
+  [choosing a route](/concept/identity#choosing-a-route) for how that one
+  route is chosen. moq-transport carries no stream instance, so a relay mints
+  one for each namespace it receives.
 
 - **Plain readers leave object and track properties out.**
   [Draft 18 §2.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-18.html#section-2.5)
@@ -113,7 +116,7 @@ choices. They follow the product model.
   `DUPLICATE_SUBSCRIPTION`.
 
 - **Subscriber max age is negotiated.** The [Timestamp extension](/draft/moq-timestamp)
-  carries a subscriber's `max_delay` in `SUBSCRIBE` and `REQUEST_UPDATE` only
+  carries a subscriber's `delay.max` in `SUBSCRIBE` and `REQUEST_UPDATE` only
   when the peer advertises support. Superseded groups expire against media time
   and the hop's clock; the newest group, including a quiet catalog, survives any
   budget. Relays forward their most tolerant subscriber's budget. Without the

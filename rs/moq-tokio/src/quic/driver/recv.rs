@@ -223,40 +223,46 @@ impl Stream {
 	/// Yields `Some` with the reset error code when the stream is reset by the peer. Yields `None`
 	/// when the stream was [`finish()`](crate::quic::driver::send::Stream::finish)ed by the peer
 	/// and all data has been received, after which it is no longer meaningful for the stream to
-	/// be reset.
+	/// be reset. Fails with [`Error::Evicted`] once the stream was evicted to free a stuck receive
+	/// window, until it is stopped.
 	///
 	/// This operation is cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		poll_fn(|cx| {
-			let mut conn = self.conn.state.lock();
+		poll_fn(|cx| self.poll_received_reset(cx)).await
+	}
 
-			if let Some(code) = self.reset {
-				return Poll::Ready(Ok(Some(code)));
-			}
+	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
+	/// left as it was.
+	pub(crate) fn poll_received_reset(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+		let mut conn = self.conn.state.lock();
 
-			match conn.inner.recv_stream(self.id).received_reset() {
-				Err(_) => Poll::Ready(Ok(None)),
-				Ok(Some(error_code)) => {
-					// Stream state has just now been freed, so the connection may need to issue new
-					// stream ID flow control credit, and later reads fail with the cached code.
-					self.reset = Some(error_code);
-					conn.wake();
-					Poll::Ready(Ok(Some(error_code)))
-				}
-				Ok(None) => {
-					if let Some(e) = &conn.error {
-						return Poll::Ready(Err(e.clone().into()));
-					}
-					// Resets always notify readers, since a reset is an immediate read error. We
-					// could introduce a dedicated channel to reduce the risk of spurious wakeups,
-					// but that increased complexity is probably not justified, as an application
-					// that is expecting a reset is not likely to receive large amounts of data.
-					conn.blocked_readers.insert(self.id, cx.waker().clone());
-					Poll::Pending
-				}
+		if let Some(code) = self.reset {
+			return Poll::Ready(Ok(Some(code)));
+		}
+
+		match conn.inner.recv_stream(self.id).received_reset() {
+			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
+			Err(moq_quic::recv::Error::Evicted) => Poll::Ready(Err(Error::Evicted)),
+			Err(_) => Poll::Ready(Ok(None)),
+			Ok(Some(error_code)) => {
+				// Stream state has just now been freed, so the connection may need to issue new
+				// stream ID flow control credit, and later reads fail with the cached code.
+				self.reset = Some(error_code);
+				conn.wake();
+				Poll::Ready(Ok(Some(error_code)))
 			}
-		})
-		.await
+			Ok(None) => {
+				if let Some(e) = &conn.error {
+					return Poll::Ready(Err(e.clone().into()));
+				}
+				// Resets always notify readers, since a reset is an immediate read error. We
+				// could introduce a dedicated channel to reduce the risk of spurious wakeups,
+				// but that increased complexity is probably not justified, as an application
+				// that is expecting a reset is not likely to receive large amounts of data.
+				conn.blocked_readers.insert(self.id, cx.waker().clone());
+				Poll::Pending
+			}
+		}
 	}
 
 	/// Handle common logic related to reading out of a receive stream
@@ -434,11 +440,11 @@ impl Buf for Lease<'_> {
 
 impl Drop for Lease<'_> {
 	fn drop(&mut self) {
-		if let Some(lease) = self.inner.take() {
-			let mut conn = self.stream.conn.state.lock();
-			if conn.inner.recv_stream(self.stream.id).restore(lease).should_transmit() {
-				conn.wake();
-			}
+		if let Some(lease) = self.inner.take()
+			&& let Some(mut conn) = self.stream.conn.state.lock_for_drop()
+			&& conn.inner.recv_stream(self.stream.id).restore(lease).should_transmit()
+		{
+			conn.wake();
 		}
 	}
 }
@@ -469,7 +475,9 @@ impl tokio::io::AsyncRead for Stream {
 
 impl Drop for Stream {
 	fn drop(&mut self) {
-		let mut conn = self.conn.state.lock();
+		let Some(mut conn) = self.conn.state.lock_for_drop() else {
+			return;
+		};
 
 		// clean up any previously registered wakers
 		conn.blocked_readers.remove(&self.id);

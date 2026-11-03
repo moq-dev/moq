@@ -161,6 +161,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) async fn connect(
 	url: Url,
 	protocols: &[&str],
+	session: &qmux::Config,
 	failover_delay: std::time::Duration,
 	resolution_delay: std::time::Duration,
 ) -> Result<qmux::Session> {
@@ -169,7 +170,7 @@ pub(crate) async fn connect(
 
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via TCP");
 	let candidates = crate::resolve::Candidates::resolve(host, port, resolution_delay);
-	connect_addrs(candidates, protocols, failover_delay).await
+	connect_addrs(candidates, protocols, session, failover_delay).await
 }
 
 /// Dial a `tls://host:port` URL: qmux over TLS over TCP, negotiating one of
@@ -181,6 +182,7 @@ pub(crate) async fn connect_tls(
 	url: Url,
 	protocols: &[&str],
 	tls: &crate::tls::Connect,
+	session: &qmux::Config,
 	failover_delay: std::time::Duration,
 	resolution_delay: std::time::Duration,
 ) -> crate::Result<qmux::Session> {
@@ -195,7 +197,7 @@ pub(crate) async fn connect_tls(
 	let client = qmux::tls::Client::new(std::sync::Arc::new(tls.build()?))
 		.with_protocols(protocols.iter().map(|&alpn| (alpn, &[WIRE_VERSION][..])))
 		.require_protocol()
-		.with_session_config(crate::qmux_config());
+		.with_session_config(session.clone());
 
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via TLS over TCP");
 	let candidates = crate::resolve::Candidates::resolve(host, port, resolution_delay);
@@ -206,6 +208,7 @@ pub(crate) async fn connect_tls(
 			client
 				.connect(addr, &name)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Connect(crate::error::message(err)))
 		}
 	})
@@ -217,20 +220,107 @@ pub(crate) async fn connect_tls(
 async fn connect_addrs(
 	candidates: crate::resolve::Candidates,
 	protocols: &[&str],
+	session: &qmux::Config,
 	failover_delay: std::time::Duration,
 ) -> Result<qmux::Session> {
 	crate::failover::race(candidates, failover_delay, |addr| {
 		let protocols: Vec<String> = protocols.iter().map(|&p| p.to_owned()).collect();
+		let mut config = session.clone();
 		async move {
-			let mut config = crate::qmux_config();
 			config.version = WIRE_VERSION;
 			config.protocol = qmux::Protocol::Negotiate(protocols);
 			qmux::tcp::connect(addr, config)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Connect(crate::error::message(err)))
 		}
 	})
 	.await
+}
+
+/// Serves `tls://` on TCP connections another listener accepted, such as a web
+/// server that reads each ClientHello so HTTPS and `tls://` share its port.
+///
+/// From [`crate::Server::tls_acceptor`]: the listen TLS identity, offering the
+/// same `qmux-01.<protocol>` ALPNs as a [`Listener`] serving `tls://`.
+#[cfg(feature = "_certs")]
+#[derive(Clone)]
+pub struct TlsAcceptor {
+	config: std::sync::Arc<rustls::ServerConfig>,
+	qmux: qmux::tls::Server,
+	server: moq_net::Server,
+	timeout: Option<std::time::Duration>,
+}
+
+#[cfg(feature = "_certs")]
+impl TlsAcceptor {
+	pub(crate) fn new(
+		config: std::sync::Arc<rustls::ServerConfig>,
+		session: qmux::Config,
+		server: moq_net::Server,
+		timeout: Option<std::time::Duration>,
+	) -> Self {
+		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(session);
+		Self {
+			config,
+			qmux,
+			server,
+			timeout,
+		}
+	}
+
+	/// The config to finish the TLS handshake with: the listen identity and its moq ALPNs.
+	pub fn config(&self) -> std::sync::Arc<rustls::ServerConfig> {
+		self.config.clone()
+	}
+
+	/// Whether a ClientHello offering `alpns` asks for `tls://`: it names one of
+	/// [`config`](Self::config)'s ALPNs.
+	pub fn offered<'a>(&self, mut alpns: impl Iterator<Item = &'a [u8]>) -> bool {
+		alpns.any(|offered| self.config.alpn_protocols.iter().any(|alpn| alpn == offered))
+	}
+
+	/// Run the qmux handshake and read SETUP on a connection whose TLS handshake
+	/// finished with [`config`](Self::config).
+	///
+	/// The negotiated ALPN picks the qmux wire format. The request reports the
+	/// socket's addresses, the SNI, the negotiated ALPN, and a client certificate
+	/// the config's verifier accepted, as a [`Listener`] serving `tls://` does.
+	/// The listen timeout bounds the handshake from this call, and `active` keeps
+	/// the connection counted toward the drain.
+	pub async fn accept<T>(
+		&self,
+		stream: tokio_rustls::server::TlsStream<T>,
+		active: moq_net::server::Active,
+	) -> crate::Result<crate::server::Request>
+	where
+		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRef<tokio::net::TcpStream> + Send + Unpin + 'static,
+	{
+		crate::runtime::scope(async move {
+			let deadline = self.timeout.and_then(|timeout| kio::clock::now().checked_add(timeout));
+			let tcp: &tokio::net::TcpStream = stream.get_ref().0.as_ref();
+			let remote = tcp.peer_addr().ok();
+			let local = tcp.local_addr().ok();
+			let stats = qmux::tcp::adopt(tcp).map_err(Error::Io)?;
+			let alpn = stream
+				.get_ref()
+				.1
+				.alpn_protocol()
+				.and_then(|alpn| std::str::from_utf8(alpn).ok())
+				.map(str::to_owned);
+			let handshake = async {
+				self.qmux
+					.accept_established(stream, stats)
+					.await
+					.map(crate::spawn_qmux)
+					.map_err(|err| Error::Accept(crate::error::message(err)))
+			};
+			let session = crate::server::within(deadline, handshake).await?;
+			let incoming = crate::server::Incoming::tcp(&session, remote, local, deadline, active).with_alpn(alpn);
+			crate::server::accept_stream(&self.server, session, incoming).await
+		})
+		.await
+	}
 }
 
 /// Listens for incoming qmux connections on a TCP port, plaintext or TLS.
@@ -238,6 +328,8 @@ pub struct Listener {
 	listener: tokio::net::TcpListener,
 	protocols: Vec<String>,
 	health: crate::accept::Health,
+	/// The settings each accepted qmux session starts with.
+	session: qmux::Config,
 	/// Present when the listener serves TLS; it negotiates the ALPN itself.
 	tls: Option<qmux::tls::Server>,
 }
@@ -251,6 +343,7 @@ impl Listener {
 				listener,
 				protocols: Vec::new(),
 				health: crate::accept::Health::new("tcp"),
+				session: crate::qmux_default(),
 				tls: None,
 			})
 		})
@@ -260,7 +353,16 @@ impl Listener {
 	/// Serve TLS with `config`, whose ALPN list already names each
 	/// `qmux-01.<protocol>` pair to accept.
 	pub(crate) fn with_tls(mut self, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
-		self.tls = Some(qmux::tls::Server::new(config).with_session_config(crate::qmux_config()));
+		self.tls = Some(qmux::tls::Server::new(config).with_session_config(self.session.clone()));
+		self
+	}
+
+	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
+	/// section, rather than its defaults. A session admitted with
+	/// [`crate::server::Request::with_quic_limits`] then takes those.
+	pub fn with_quic(mut self, quic: &crate::quic::Resolved) -> Self {
+		self.session = crate::qmux_config(quic);
+		self.tls = self.tls.map(|tls| tls.with_session_config(self.session.clone()));
 		self
 	}
 
@@ -317,14 +419,14 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, net::SocketAddr)>> + use<> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");
-		let mut config = crate::qmux_config();
+		let mut config = self.session.clone();
 		config.version = WIRE_VERSION;
 		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		let tls = self.tls.clone();
 		async move {
 			let session = match tls {
-				Some(tls) => tls.accept(stream).await,
-				None => qmux::tcp::accept(stream, config).await,
+				Some(tls) => tls.accept(stream).await.map(crate::spawn_qmux),
+				None => qmux::tcp::accept(stream, config).await.map(crate::spawn_qmux),
 			}
 			.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, addr))
@@ -341,7 +443,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						moq_clock::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}
@@ -484,14 +586,14 @@ mod tests {
 			let session = request.ok().await.unwrap();
 			(server, identity, sni, session)
 		});
-		let dialed = moq_clock::timeout(Duration::from_secs(5), client.connect(url).established())
+		let dialed = kio::clock::timeout(Duration::from_secs(5), client.connect(url).established())
 			.await
 			.expect("dial timed out");
 		if dialed.is_err() {
 			accept.abort();
 			return None;
 		}
-		let (server, identity, sni, _session) = moq_clock::timeout(Duration::from_secs(5), accept)
+		let (server, identity, sni, _session) = kio::clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")
 			.expect("accept task panicked");
@@ -521,16 +623,16 @@ mod tests {
 				.with_reconnect(false)
 				.connect(url.clone())
 		};
-		let untrusted = moq_clock::timeout(Duration::from_secs(5), dial(false).established()).await;
+		let untrusted = kio::clock::timeout(Duration::from_secs(5), dial(false).established()).await;
 		assert!(
 			matches!(untrusted, Ok(Err(_))),
 			"an untrusted certificate must be refused"
 		);
-		let _session = moq_clock::timeout(Duration::from_secs(5), dial(true).established())
+		let _session = kio::clock::timeout(Duration::from_secs(5), dial(true).established())
 			.await
 			.expect("trusted dial timed out")
 			.expect("trusted dial failed");
-		let (_server, _accepted) = moq_clock::timeout(Duration::from_secs(5), accept)
+		let (_server, _accepted) = kio::clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")
 			.expect("accept task panicked");
@@ -551,9 +653,14 @@ mod tests {
 
 		let blackhole: net::SocketAddr = "192.0.2.1:9".parse().unwrap();
 		let candidates = crate::resolve::Candidates::fixed([blackhole, addr]);
-		let session = moq_clock::timeout(
+		let session = kio::clock::timeout(
 			Duration::from_secs(5),
-			connect_addrs(candidates, &["moq-test"], Duration::from_millis(50)),
+			connect_addrs(
+				candidates,
+				&["moq-test"],
+				&crate::qmux_default(),
+				Duration::from_millis(50),
+			),
 		)
 		.await
 		.expect("failover timed out")
@@ -576,7 +683,7 @@ mod tests {
 		let addr = listener.local_addr().expect("local addr");
 		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
 		let candidates = crate::resolve::Candidates::fixed([addr]);
-		let client = connect_addrs(candidates, &["moq-test"], Duration::ZERO)
+		let client = connect_addrs(candidates, &["moq-test"], &crate::qmux_default(), Duration::ZERO)
 			.await
 			.expect("connect failed");
 		let server = accept.await.expect("accept task panicked");
@@ -599,7 +706,7 @@ mod tests {
 	#[tokio::test]
 	async fn connect_addrs_rejects_empty() {
 		let candidates = crate::resolve::Candidates::fixed([]);
-		let res = connect_addrs(candidates, &["moq-test"], Duration::ZERO).await;
+		let res = connect_addrs(candidates, &["moq-test"], &crate::qmux_default(), Duration::ZERO).await;
 		assert!(matches!(res, Err(Error::NoAddresses)));
 	}
 }

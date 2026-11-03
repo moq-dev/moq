@@ -73,7 +73,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	tracing::info!("wrote hello + world");
 
 	// Sleep before sending our next message.
-	moq_clock::sleep(tokio::time::Duration::from_secs(10)).await;
+	kio::clock::sleep(tokio::time::Duration::from_secs(10)).await;
 
 	// There's also a helper method to create a group with a single frame.
 	track.write_frame(
@@ -83,7 +83,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	tracing::info!("wrote foobarbaz");
 
 	// Sleep before exiting and closing the broadcast.
-	moq_clock::sleep(tokio::time::Duration::from_secs(10)).await;
+	kio::clock::sleep(tokio::time::Duration::from_secs(10)).await;
 
 	// End the broadcast. Dropping the producer does the same; closing is explicit.
 	broadcast.close();

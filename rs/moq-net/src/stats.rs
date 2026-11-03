@@ -488,7 +488,7 @@ pub struct Traffic {
 	/// payload as stored or sent.
 	pub inflated: u64,
 	/// Content skipped because it fell behind a subscriber's
-	/// [`max_delay`](crate::track::Subscription::max_delay) budget. Disjoint from the top-level payload
+	/// [`Delay::max`](crate::track::Delay::max) budget. Disjoint from the top-level payload
 	/// counters: skipped content is never handed over. A steady rate here means
 	/// subscribers are consistently behind the live edge.
 	pub stale: Content,
@@ -1970,6 +1970,13 @@ impl Clone for Scope {
 }
 
 impl Scope {
+	/// Whether this scope was tagged, a cheap pre-check that never resolves: an untagged
+	/// scope's [`Meter`] counts nothing, but a tagged one's may count nothing either, when
+	/// the registry is disabled or excludes its path, so [`Meter::is_tracked`] decides.
+	pub(crate) fn is_tagged(&self) -> bool {
+		self.session.inner.is_some() && self.resolved.is_some()
+	}
+
 	/// The counters for the session's current tier. Skips the registry unless the
 	/// tier changed since the last call, so the per-group path stays cheap.
 	fn counters(&self) -> Option<Arc<TierCounters>> {

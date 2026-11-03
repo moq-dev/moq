@@ -238,7 +238,8 @@ async fn read_until(
 	consumer: &moq_net::broadcast::Consumer,
 	name: &str,
 ) -> (Vec<crate::container::Frame>, Result<bool, String>) {
-	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+	let subscription = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 	let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 	let mut reader = crate::container::Consumer::new(
 		track,
@@ -246,7 +247,7 @@ async fn read_until(
 	);
 	let mut frames = Vec::new();
 	loop {
-		match moq_clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
+		match kio::clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			Ok(Ok(Some(frame))) => frames.push(frame),
 			Ok(Ok(None)) => return (frames, Ok(true)),
 			Err(_) => return (frames, Ok(false)),

@@ -77,10 +77,10 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
-	const subscriber = track.subscribe({ maxDelay: budget(Milli.zero) });
+	const subscriber = track.subscribe({ delay: { max: budget(Milli.zero) } });
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
-		maxDelay: AUTO_MAX_DELAY,
+		delay: { max: AUTO_MAX_DELAY },
 	});
 
 	const result: Measured = { targets: [], delivered: 0 };
@@ -109,7 +109,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 
 			const current = target({ measured: consumer.spread.peek(), frame: CHUNK_MS as Milli });
 			result.targets.push(current);
-			subscriber.update({ maxDelay: budget(current) });
+			subscriber.update({ delay: { max: budget(current) } });
 		}
 	} finally {
 		track.finish();

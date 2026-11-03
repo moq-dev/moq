@@ -6,7 +6,6 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
-import { Version as IetfVersion } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -16,6 +15,7 @@ import { Front } from "../resume.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
+import { wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
@@ -163,7 +163,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		await settle();
 		const initial = written.length;
 
-		// Another broadcast at the path, without an epoch: another instance.
+		// Another broadcast at the path, without an instance: another instance.
 		const republished = publish(origin, Path.from("cam"));
 		await settle();
 		const bytes = Uint8Array.from(written.slice(initial).flatMap((chunk) => [...chunk]));
@@ -599,15 +599,15 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 	}
 });
 
-// An unchecked track goes out untimed, so lite-06 carries its send time, never the frame's own
-// timestamp, which may be a moq-transport arrival time.
-test("lite draft-06: an unchecked track's fetched frames carry their send time", async () => {
+// An unchecked track's frames go out with their own timestamps, which may be moq-transport
+// arrival times, rather than their send time.
+test("lite draft-06: an unchecked track's fetched frames carry their own timestamp", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true });
 
 	const group = track.createGroup(0);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
@@ -619,14 +619,10 @@ test("lite draft-06: an unchecked track's fetched frames carry their send time",
 
 	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 0, group: 0 });
 	try {
-		const before = Math.floor(Timestamp.now().value);
 		await publisher.runFetch(msg, server);
-		const after = Math.ceil(Timestamp.now().value);
 
-		// The first frame's zigzag delta is against 0, in the milliseconds TRACK_INFO declares.
-		const sent = Number((await client.reader.u62()) >> 1n);
-		expect(sent).toBeGreaterThanOrEqual(before);
-		expect(sent).toBeLessThanOrEqual(after);
+		// The first frame's zigzag delta is against 0, in the microseconds TRACK_INFO declares.
+		expect(await client.reader.u62()).toBe(36_000_000_000n << 1n);
 	} finally {
 		publisher.close();
 		client.close();
@@ -701,6 +697,8 @@ async function servedSubscription(
 		// Answer the subscription with a front's broadcast, as an application forwarding a
 		// routed one does, so the track reads through the front's serving route.
 		routed?: boolean;
+		// Leave the track unresolved until `accept`, as an on-demand track the SUBSCRIBE beats.
+		pending?: boolean;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -725,7 +723,10 @@ async function servedSubscription(
 	} else {
 		broadcast = publish(origin, Path.from("test"));
 	}
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: options.maxAge });
+	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge };
+	let track = options.pending ? undefined : broadcast.createTrack("video", info);
+	// Pulled before the SUBSCRIBE arrives: a broadcast nobody pulls refuses an unknown track.
+	const request = options.pending ? wireOf(broadcast).requested() : undefined;
 
 	const client = await Stream.open(pair.client, { version: version });
 
@@ -757,16 +758,29 @@ async function servedSubscription(
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
 
+	const resolved = () => {
+		if (!track) throw new Error("the track is still pending");
+		return track;
+	};
+
 	return {
 		client,
 		datagrams: pair.client.datagrams.readable,
-		track,
+		get track() {
+			return resolved();
+		},
 		serving,
 		parked: gate.parked,
 		release: gate.release,
+		// Resolve a pending track with the publisher's request for it.
+		async accept() {
+			const pulled = await request;
+			if (!pulled) throw new Error("the publisher never requested the track");
+			track = pulled.accept(info);
+		},
 		// Stamped by sequence, so a group served out of order still starts in order.
 		serve(sequence: number) {
-			const group = track.createGroup(sequence);
+			const group = resolved().createGroup(sequence);
 			for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(sequence)));
 			group.finish();
 		},
@@ -846,7 +860,8 @@ for (const kind of [2, 3]) {
 			test(`lite-07 refuses anchor ${kind} at ${end ? "end" : "start"} in ${update ? "UPDATE" : "SUBSCRIBE"}`, async () => {
 				const version = Version.DRAFT_07;
 				const anchor = end ? [0, kind, 0] : [kind, 0, 0];
-				const bytes = new Uint8Array([8, 128, 0, 0, 1, ...anchor, 0]);
+				// Priority, order, max delay, an unstated min delay, one range, then the wanted group.
+				const bytes = new Uint8Array([9, 128, 0, 0, 0, 1, ...anchor, 0]);
 				const decoded = await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version);
 				const sub = await servedSubscription({ version, ranges: update ? undefined : decoded.ranges });
 				try {
@@ -990,13 +1005,14 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			const reader = sub.datagrams.getReader();
 			const max = Math.min(1200, transport);
 			try {
-				// Each body has three one-byte varints before its payload.
-				sub.track.insertDatagram(0, Timestamp.fromMillis(0), new Uint8Array(max - 2));
-				sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array(max - 3));
+				// Lite-07's type adds one byte to the three one-byte group fields.
+				const header = version === Version.DRAFT_07 ? 4 : 3;
+				sub.track.insertDatagram(0, Timestamp.fromMillis(0), new Uint8Array(max - header + 1));
+				sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array(max - header));
 				const next = await reader.read();
 				if (next.done) throw new Error("datagrams ended early");
 				expect(next.value.byteLength).toBe(max);
-				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence).toBe(1);
+				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence).toBe(1);
 			} finally {
 				await reader.cancel();
 				await sub.close();
@@ -1021,7 +1037,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group 
 	const recv = async () => {
 		const next = await reader.read();
 		if (next.done) throw new Error("datagrams ended early");
-		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence;
+		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence;
 	};
 	// The publisher applies an update's datagram bounds before forwarding its group range, and
 	// each update here moves the range's end.
@@ -1334,6 +1350,26 @@ test("lite draft-05: an update dropping the floor re-pins to the latest group", 
 	}
 });
 
+// A SUBSCRIBE can beat its track resolving, as one a relay serves from a copy still fetching
+// upstream. Groups the track holds once it does are older than the join, so an absent Group
+// Start is still the latest group.
+test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_05])(
+	"lite %s: a subscribe that beats its track resolving joins at the latest group",
+	async (version) => {
+		const sub = await servedSubscription({ version, pending: true });
+		try {
+			await sub.accept();
+			sub.serve(0);
+			sub.serve(1);
+			sub.serve(2);
+			expect(await sub.servedHeader()).toBe(2);
+			expect(await sub.servedSequence()).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
 // On an empty track the re-pin has no latest group to name, so the first group the
 // track produces is served, even below the dropped floor.
 test("lite draft-05: an update dropping the floor on an empty track serves the next group", async () => {
@@ -1631,7 +1667,8 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
-			maxDelay: TEST_MAX_DELAY_MS,
+			// Lite-06 cannot state a minimum.
+			delay: { min: null, max: TEST_MAX_DELAY_MS },
 			order: "descending",
 			groups: { start: undefined, end: { excluded: 6 } },
 		});
@@ -2460,7 +2497,7 @@ test("a version without the latency field serves a non-dropping budget", async (
 		try {
 			// These drafts decode the absent field as zero. The publisher must not turn
 			// that into a live-edge request the peer never made.
-			expect(sub.track.subscription.peek()?.maxDelay).toBe(Milli(Number.MAX_SAFE_INTEGER));
+			expect(sub.track.subscription.peek()?.delay?.max).toBe(Milli(Number.MAX_SAFE_INTEGER));
 		} finally {
 			await sub.close();
 		}

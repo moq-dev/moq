@@ -51,10 +51,10 @@ a producer would need per-track memory of its last number.
   [moq-dev/moq#6780](https://github.com/moq-dev/moq/pull/6780); the cut
   removes its sequence half, leaving a re-created track to keep its PTS
   moving forward.
-- **What it waits on** (decided 2026-10-27, maintainer): only the
+- **What it waits on** (decided 2026-10-27, maintainer; Fetch as a range
+  finished in [moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): only the
   subscribe-ranges children that put sequence ranges into the model and the
-  wire, [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md),
-  [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md), and
+  wire, [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) and
   [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md),
   not the whole epic. [Drop set](/quest/m1/drop-set.md) lands first too: its
   runs keyed by group sequence convert mechanically to starts.
@@ -117,8 +117,6 @@ Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required
 
-- [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - the one-range reads this rework moves onto times
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the range ends and drops this rework moves onto times
 - [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - the lite cursor state lives in the model before the cut rekeys it
-- [Lite-05/06 timestamps pass through](/quest/m1/lite-timestamps-through.md) - lite-05/06 tracks stay timed, so their ingest keeps real starts
 - [Drop set](/quest/m1/drop-set.md) - its dropped and expired runs convert mechanically from sequences to starts

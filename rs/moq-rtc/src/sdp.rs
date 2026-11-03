@@ -36,6 +36,35 @@ pub fn render_answer(answer: &str0m::change::SdpAnswer) -> String {
 		.join("\r\n")
 }
 
+/// Add a `b=TIAS` line at `rate` to every audio and video section the answer accepts, so
+/// the publisher's encoder targets at most `rate` from its first frame.
+///
+/// TIAS (RFC 3890) is bits per second without transport overhead, and what Chrome and
+/// Firefox read first. It is the only line: str0m's parser takes at most one `b=` per
+/// section and fails the whole description on a second, so adding `b=AS` too would break
+/// every str0m publisher, this crate's own WHIP client included. str0m renders no
+/// bandwidth line in an answer, so it's spliced into the text after the section's `c=`
+/// line, where RFC 4566 orders `b=`.
+pub fn cap_answer(answer: &str, rate: moq_net::bandwidth::Rate) -> String {
+	let lines = format!("b=TIAS:{}\r\n", rate.as_bps());
+	let mut out = String::with_capacity(answer.len() + 64);
+	let mut capped = false;
+	for line in answer.split_inclusive("\r\n") {
+		if line.starts_with("m=") {
+			// m=<media> <port> ...; a rejected section has port 0.
+			let mut tokens = line.split_whitespace();
+			let media = tokens.next().unwrap_or_default();
+			capped = matches!(media, "m=audio" | "m=video") && tokens.next() != Some("0");
+		}
+		out.push_str(line);
+		if capped && line.starts_with("c=") {
+			out.push_str(&lines);
+			capped = false;
+		}
+	}
+	out
+}
+
 /// Give an `m=` line a placeholder format payload when it has none (see
 /// [`render_answer`]); every other line passes through untouched.
 fn ensure_media_format(line: &str) -> Cow<'_, str> {
@@ -70,7 +99,35 @@ pub fn parse_resource_id(path: &str) -> Result<uuid::Uuid> {
 
 #[cfg(test)]
 mod tests {
-	use super::ensure_media_format;
+	use super::{cap_answer, ensure_media_format};
+
+	#[test]
+	fn a_capped_answer_bounds_each_accepted_media_section() {
+		let answer = "v=0\r\n\
+			o=- 1 2 IN IP4 0.0.0.0\r\n\
+			s=-\r\n\
+			t=0 0\r\n\
+			m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+			c=IN IP4 0.0.0.0\r\n\
+			a=mid:0\r\n\
+			m=video 0 UDP/TLS/RTP/SAVPF 0\r\n\
+			c=IN IP4 0.0.0.0\r\n\
+			a=mid:1\r\n\
+			m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+			c=IN IP4 0.0.0.0\r\n\
+			a=mid:2\r\n\
+			m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+			c=IN IP4 0.0.0.0\r\n\
+			a=mid:3\r\n";
+		let capped = cap_answer(answer, moq_net::bandwidth::Rate::from_kbps(2_500));
+		let sections: Vec<&str> = capped.split("m=").collect();
+		let bounded = "c=IN IP4 0.0.0.0\r\nb=TIAS:2500000\r\na=mid";
+		assert!(!sections[0].contains("b="), "the session section stays unbounded");
+		assert!(sections[1].contains(bounded), "{}", sections[1]);
+		assert!(!sections[2].contains("b="), "a rejected section stays unbounded");
+		assert!(!sections[3].contains("b="), "the data channel stays unbounded");
+		assert!(sections[4].contains(bounded), "{}", sections[4]);
+	}
 
 	#[test]
 	fn rejected_mline_with_no_format_gets_placeholder() {

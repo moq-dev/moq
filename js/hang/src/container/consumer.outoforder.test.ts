@@ -55,9 +55,9 @@ async function drain(consumer: Consumer): Promise<[number, number | undefined][]
 // subscription's own max delay already bounds how far back one can be.
 test("out-of-order groups are delivered rather than dropped", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(5000) } }), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Milli,
+		delay: { max: 5000 as Milli },
 	});
 
 	// The live edge lands first, and delivery starts there rather than waiting.
@@ -84,9 +84,9 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 // instant silently truncates its tail, so removal must wait for the group to finish.
 test("a below-cursor group still downloading is not truncated", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(5000) } }), {
 		format: new LegacyFormat("data"),
-		maxDelay: 5000 as Milli,
+		delay: { max: 5000 as Milli },
 	});
 
 	// The live edge group arrives first and starts delivery (still open).
@@ -123,9 +123,9 @@ test("delayed older groups survive a floor established by two newer groups", asy
 	clock.jump(Nano.fromMilli(Milli(200)));
 	const installed = clock.install();
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(5000) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(5000) } }), {
 		format: new LegacyFormat("data"),
-		maxDelay: Milli(5000),
+		delay: { max: Milli(5000) },
 	});
 	try {
 		publish(track, 3, 30);

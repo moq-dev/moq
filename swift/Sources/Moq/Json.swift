@@ -19,20 +19,18 @@ extension Json {
     public struct Timed<Value> {
         /// The decoded value.
         public let value: Value
-        /// The frame's timestamp on the broadcast clock in microseconds, or `nil` when untimed.
-        /// Rounded down to a whole microsecond, so a tick on a track like 90 kHz may not survive
-        /// a read and republish exactly.
-        public let timestampUs: UInt64?
+        /// The frame's timestamp on the broadcast clock, or `nil` when untimed.
+        public let timestamp: Timestamp?
 
         /// Pair `value` with its frame timestamp.
-        public init(value: Value, timestampUs: UInt64?) {
+        public init(value: Value, timestamp: Timestamp?) {
             self.value = value
-            self.timestampUs = timestampUs
+            self.timestamp = timestamp
         }
 
         init?(_ ffi: MoqJsonValue?) throws where Value: Decodable {
             guard let ffi else { return nil }
-            self.init(value: try decodeJson(ffi.value), timestampUs: ffi.timestampUs)
+            self.init(value: try decodeJson(ffi.value), timestamp: ffi.timestamp)
         }
     }
 
@@ -63,8 +61,8 @@ extension Json {
 
         /// Publish a new value, encoded as a snapshot or merge-patch delta automatically. A no-op
         /// if unchanged from the previous update.
-        public func update(_ value: Value, timestampUs: UInt64? = nil) throws {
-            try ffi.update(value: encodeJson(value), timestampUs: timestampUs)
+        public func update(_ value: Value, timestamp: Timestamp? = nil) throws {
+            try ffi.update(value: encodeJson(value), timestamp: timestamp)
         }
 
         /// A watch-only handle to whether the track has subscribers.
@@ -131,8 +129,8 @@ extension Json {
         }
 
         /// Append one record to the log.
-        public func append(_ value: Value, timestampUs: UInt64? = nil) throws {
-            try ffi.append(value: encodeJson(value), timestampUs: timestampUs)
+        public func append(_ value: Value, timestamp: Timestamp? = nil) throws {
+            try ffi.append(value: encodeJson(value), timestamp: timestamp)
         }
 
         /// A watch-only handle to whether the track has subscribers.
@@ -202,13 +200,13 @@ extension Json {
         }
 
         /// Append one record to the back of the window.
-        public func push(_ value: Value, timestampUs: UInt64? = nil) throws {
-            try ffi.push(value: encodeJson(value), timestampUs: timestampUs)
+        public func push(_ value: Value, timestamp: Timestamp? = nil) throws {
+            try ffi.push(value: encodeJson(value), timestamp: timestamp)
         }
 
         /// Drop `count` records from the front of the window, clamped to what it holds.
-        public func pop(_ count: UInt64, timestampUs: UInt64? = nil) throws {
-            try ffi.pop(count: count, timestampUs: timestampUs)
+        public func pop(_ count: UInt64, timestamp: Timestamp? = nil) throws {
+            try ffi.pop(count: count, timestamp: timestamp)
         }
 
         /// Close the open group, so the next edit opens one restating the retained window. A no-op
@@ -259,11 +257,11 @@ extension Json {
             guard let timed = try await ffi.next() else { return nil }
             let event: WindowEvent<Value>
             switch timed.event {
-            case let .push(index, value): event = .push(index: index, value: try decodeJson(value))
-            case let .pop(start, end): event = .pop(start..<end)
-            case let .skip(start, end): event = .skip(start..<end)
+            case .push(let index, let value): event = .push(index: index, value: try decodeJson(value))
+            case .pop(let start, let end): event = .pop(start..<end)
+            case .skip(let start, let end): event = .skip(start..<end)
             }
-            return Timed(value: event, timestampUs: timed.timestampUs)
+            return Timed(value: event, timestamp: timed.timestamp)
         }
 
         /// Cancel all current and future reads.

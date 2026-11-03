@@ -118,7 +118,7 @@ final class QuicConfig {
   /// How long an idle QUIC connection survives before it is dropped.
   final Duration? idleTimeout;
 
-  /// QUIC keep-alive ping interval; zero disables it.
+  /// QUIC keep-alive ping interval; zero uses the default.
   final Duration? keepAlive;
 
   /// UDP generic segmentation offload; null leaves the choice to the backend.
@@ -230,15 +230,15 @@ final class Moq {
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next publisher instance serving it, such as a restarted publisher. Pass an
-  /// [epoch] (UUIDv7 text) to follow only that instance.
-  Following follow(String path, {String? epoch}) =>
-      session.consume().follow(path: path, epoch: epoch);
+  /// next instance serving it, such as a restarted publisher. Pass an
+  /// [instance] to follow only that stream.
+  Following follow(String path, {String? instance}) =>
+      session.consume().follow(path: path, instance: instance);
 
   /// Resolve one publisher instance of the broadcast at [path]. Pass an
-  /// [epoch] (UUIDv7 text) to refuse any other instance.
-  Future<BroadcastConsumer> request(String path, {String? epoch}) =>
-      session.consume().request(path: path, epoch: epoch);
+  /// [instance] to refuse any other stream.
+  Future<BroadcastConsumer> request(String path, {String? instance}) =>
+      session.consume().request(path: path, instance: instance);
 
   /// The session's bandwidth allocator.
   ///
@@ -266,9 +266,8 @@ final class Moq {
 
   /// Drain within one second, then stop the client.
   ///
-  /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
-  /// Lite versions, including the default lite-06, wait only for transport ACKs.
-  /// IETF also waits for transport ACKs.
+  /// `moq-lite-05` and newer wait for the peer to receive finished tails; older
+  /// Lite versions and IETF wait only for transport ACKs.
   Future<void> close() async {
     try {
       session.shutdown();
