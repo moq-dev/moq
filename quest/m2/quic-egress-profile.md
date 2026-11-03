@@ -40,14 +40,39 @@ Then, only where the profile shows a cost:
 - `sendmmsg` in `moq_sock::udp` behind the existing GSO path, submitting every
   train ready across connections in one call, falling back to per-train
   `sendmsg` on partial failure the way the GSO fallback does. A prototype on
-  the tokio driver gives the profile a starting point. At a 1280-byte payload
-  on one core, about 17 trains went per `sendmmsg`, server CPU fell 8 to 13%
-  for small-object sessions and 16 to 21% for audio-rate ones, and median
-  latency rose 0.3 ms. Its shape:
-  - `UdpSocketState::try_send_many` on Linux sends up to 64 transmits in one
-    call, each with its own segment size, ECN, and source-address cmsgs. It
-    returns how many the kernel took, and retries an `EIO` or `EINVAL` on the
-    first transmit alone through `try_send`, so GSO halting still applies.
+  the tokio driver gives the profile a starting point. It was measured before
+  being [ported onto main](https://github.com/zshenker/moq/commit/040df9948bd110a83463f35cd4bd86245db03373)
+  (opt-in through `Endpoint::batch_sends`), and comes with its
+  [raw samples](https://github.com/zshenker/moq/blob/eae2ca6941ce67b8e14ba6afdb76c1c2240c45a0/bench/driver-batch-sends/samples.jsonl),
+  so the profile should re-measure the port.
+  - Setup: server and client on one host over loopback, the server on one
+    tokio worker pinned to one physical core, and the client on 6 pinned workers
+    over 12 sockets. 1,280-byte payloads, MTU discovery off, GSO and GRO on,
+    BBR3. Only the server batches. Each point is one 15 s run after a 5 s
+    warmup, on a dual-socket Broadwell Xeon with Linux 6.12. On and off ran back
+    to back on the same binary, in alternating order across runs.
+  - Server CPU (`getrusage`, % of one core):
+    - small objects (1,024 to 4,096 B at 30/s, 1,000 sessions): 61.7% off
+      against 54.9% on, n=3 each, so 8 to 15% lower;
+    - audio-rate (100 to 200 B at 50/s, 1,000 sessions): 66.9% against 53.9%,
+      n=3 each, so 16 to 22% lower;
+    - 1 and 3 Mbit/s video: 10% and 8% lower, n=1 each.
+
+    The system share fell from 31 to 38% to 22 to 34%. A single run varies by
+    about ±3%.
+  - Calls: over 5 s of the small-object point, `strace` counted 7,214
+    `sendmmsg` against 135,497 `sendmsg`, about 17 trains per call. `strace`
+    slows the server, so only the ratio holds.
+  - Latency (per object, from the server's write to the client's read of the
+    last byte): p50 rose from 36 to 72 µs to 258 to 352 µs. On the small-object
+    and audio points, p99 rose from 104 to 705 µs to 606 to 770 µs.
+
+  Its shape:
+  - `UdpSocketState::try_send_many` on Linux sends up to 64 transmits, one
+    `mmsghdr` each, in one `sendmmsg`, each with its own GSO segment size,
+    ECN, and source-address cmsgs. It returns how many the kernel took, and
+    retries an `EIO` or `EINVAL` on the first transmit alone through
+    `try_send`, so GSO halting still applies.
   - The driver copies each train into a per-socket queue, bounded in bytes,
     and one task per socket yields once and then flushes the queue.
   - Handshake packets bypass the queue. `handle_unreachable` acts only during
@@ -59,8 +84,8 @@ Then, only where the profile shows a cost:
     CONNECTION_CLOSE frames and frees the port.
 
   Open: whether batching is opt-in in the driver's config or on by default,
-  given the latency cost, and whether moq-uring, which already submits every
-  train in one ring enter, needs any of it.
+  given the added p50 and p99 latency, and whether moq-uring, which already
+  submits every train in one ring enter, needs any of it.
 - A `BufFactory`-style seam on `SendBuffer` in `moq-quic` that takes buffers
   from a pool sized from the send window and returns them on ACK. Design it
   with [the I/O boundary redesign](/quest/m2/quic-io-boundary.md), which
