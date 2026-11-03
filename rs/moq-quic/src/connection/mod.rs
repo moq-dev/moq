@@ -18,8 +18,9 @@ use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-	Dir, Duration, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE, MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Rate, Side,
-	StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError, TransportErrorCode, VarInt, Version,
+	Dir, Duration, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE, MAX_STREAM_COUNT, MAX_TRANSMIT_SIZE,
+	MIN_INITIAL_SIZE, Rate, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
+	TransportErrorCode, VarInt, Version,
 	cid_queue::CidQueue,
 	coding::BufMutExt,
 	connection::spaces::LostPacket,
@@ -564,6 +565,9 @@ impl Connection {
 			}
 			None => max_datagrams,
 		};
+		// Rechecked per call since MTU discovery can grow the segments. A lone datagram above the
+		// limit is left to the socket: only an IPv6 path configured past it can carry one.
+		let max_datagrams = max_datagrams.min((MAX_TRANSMIT_SIZE / usize::from(self.path.current_mtu())).max(1));
 
 		let mut num_datagrams = 0;
 		// Position in `buf` of the first byte of the current UDP datagram. When coalescing QUIC
