@@ -18,7 +18,7 @@
 //!   crossing it, so they have no place on the `moq-stats` wire.
 //! - `/health` - a liveness mirror of the public probe, for internal checks
 //!   that don't want to hit the customer port.
-//! - `/nodes` - the cluster peers this relay dialed and holds a session with.
+//! - `/nodes` - configured outbound cluster peers, live transports, and connect history.
 //! - `/sessions` and `/sessions/revalidate` - list or nudge live sessions on
 //!   this node. A push only causes a re-check, so a caller on this trusted
 //!   plane gains nothing a scheduled cadence would not do.

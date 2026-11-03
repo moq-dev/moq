@@ -67,7 +67,13 @@ async fn wait_dialed(http: &reqwest::Client, internal: u16, dialed: usize) {
 			.await
 			.expect("read /nodes");
 		let nodes: serde_json::Value = serde_json::from_str(&body).expect("parse /nodes");
-		if nodes["nodes"].as_array().expect("a node list").len() == dialed {
+		if nodes["nodes"]
+			.as_array()
+			.expect("a node list")
+			.iter()
+			.filter(|node| !node["connections"].as_array().expect("connections").is_empty())
+			.count() == dialed
+		{
 			return;
 		}
 		assert!(kio::clock::now() < deadline, "the mesh never formed: {nodes}");
