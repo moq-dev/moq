@@ -28,7 +28,7 @@ Boundaries:
 
 Decided 2026-11-02 (maintainer, follow-up planning after the 2026-11-02 /quest-complete run): draft 20 joins the covered drafts, since it came back in
 [moq-dev/moq#7190](https://github.com/moq-dev/moq/pull/7190) and every published moq-dev client and relay already offers it (verified on
-[moq-dev/moq#6972](https://github.com/moq-dev/moq/pull/6972)). Where this Plan says drafts 18 and 22, read 18, 20, and 22.
+[moq-dev/moq#6972](https://github.com/moq-dev/moq/pull/6972)).
 
 
 Decided with the maintainer on 2026-10-21, from an inventory of the
