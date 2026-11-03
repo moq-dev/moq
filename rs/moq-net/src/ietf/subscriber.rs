@@ -2021,6 +2021,14 @@ impl Subscriber {
 					let _ = stream.writer.close().await;
 					return Ok(());
 				}
+				// A lapsed token cancels the request, resetting what we send and stopping what we
+				// read, so the publisher knows to announce again with a fresh one (moq-transport
+				// sections 6.4.2.3 and 9.14). It takes any OK still buffered with it.
+				if super::error::token_expired(&refusal.error) {
+					stream.reader.stop(super::error::EXPIRED_AUTH_TOKEN);
+					stream.writer.reset(super::error::EXPIRED_AUTH_TOKEN);
+					return Err(refusal.error);
+				}
 				self.cancel_announce(&mut stream).await?;
 				return Err(refusal.error);
 			}
@@ -11113,10 +11121,10 @@ mod tests {
 		}
 	}
 
-	/// A lapsed grant retracts its announce at once, even while the withdrawal waits on a peer
-	/// that never acknowledges the closed stream.
+	/// A lapsed grant retracts its announce at once, and its withdrawal, a reset, waits on
+	/// nothing from a peer that never acknowledges a closed stream.
 	#[kio::test]
-	async fn a_lapsed_announce_grant_retracts_before_the_peer_reads() {
+	async fn a_lapsed_announce_grant_retracts_without_waiting_on_the_peer() {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_fin();
 		let (mut subscriber, mut requests, _cred, consumer, session) =
@@ -11152,23 +11160,96 @@ mod tests {
 		assert!(routed, "the token must authorize the announce");
 
 		kio::clock::sim::advance(std::time::Duration::from_secs(120)).await;
-		let mut retracted = false;
-		for _ in 0..50 {
-			let _ = futures::poll!(acceptor.as_mut());
-			assert!(
-				futures::poll!(run.as_mut()).is_pending(),
-				"the withdrawal waits on the peer's acknowledgement"
-			);
-			if routed_now(&consumer, "room/alice").is_none() {
-				retracted = true;
-				break;
-			}
-			settle().await;
-		}
+		let res = kio::clock::timeout(std::time::Duration::from_secs(1), run.as_mut())
+			.await
+			.expect("a lapse waits on nothing from the peer");
+		assert!(matches!(res, Err(Error::Expired)), "{res:?}");
 		assert!(
-			retracted,
-			"a lapsed grant must retract the route without waiting on the peer"
+			routed_now(&consumer, "room/alice").is_none(),
+			"a lapsed grant must retract the route"
 		);
+		assert_eq!(session.log.resets(), vec![crate::ietf::error::EXPIRED_AUTH_TOKEN]);
+	}
+
+	/// How an announce's token grant ends after its OK.
+	#[derive(Clone, Copy, Debug)]
+	enum TokenEnd {
+		/// The grant's deadline passes.
+		Lapsed,
+		/// The acceptor revokes it as expired.
+		RevokedExpired,
+		/// The acceptor revokes it.
+		Revoked,
+	}
+
+	/// A token announce whose token expires after its OK is cancelled, with RESET_STREAM and
+	/// STOP_SENDING carrying EXPIRED_AUTH_TOKEN, so the publisher knows to announce again with
+	/// a fresh token (moq-transport sections 6.4.2.3 and 9.14). A revoked token still finishes
+	/// the stream.
+	#[kio::test]
+	async fn a_lapsed_announce_token_cancels_its_request_as_expired() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			for end in [TokenEnd::Lapsed, TokenEnd::RevokedExpired, TokenEnd::Revoked] {
+				let (mut subscriber, mut requests, _cred, consumer, session) =
+					auth_announce_harness(version, Vec::new());
+				let rt = subscriber.runtime.clone();
+				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+					.await
+					.unwrap();
+				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+					stream,
+					token_publish_namespace(),
+					cluster::Peer::default(),
+					None,
+				));
+				let accepted = async { requests.next().await.expect("a request") };
+				let request = match futures::future::select(std::pin::pin!(accepted), run.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request,
+					futures::future::Either::Right((res, _)) => panic!("{version} {end:?}: ended unverified: {res:?}"),
+				};
+				let enforced = request.accept(publish_grant_expiring(&rt, Some(60)));
+				for _ in 0..50 {
+					assert!(
+						futures::poll!(run.as_mut()).is_pending(),
+						"{version} {end:?}: ended early"
+					);
+					settle().await;
+				}
+				assert!(
+					routed_now(&consumer, "room/alice").is_some(),
+					"{version} {end:?}: never routed"
+				);
+				assert!(
+					!session.log.writes.lock().unwrap().is_empty(),
+					"{version} {end:?}: no OK"
+				);
+
+				match end {
+					TokenEnd::Lapsed => kio::clock::sleep(std::time::Duration::from_secs(61)).await,
+					TokenEnd::RevokedExpired => enforced.revoke(crate::SessionError::Expired, "expired"),
+					TokenEnd::Revoked => enforced.revoke(crate::SessionError::Unauthorized, "revoked"),
+				}
+				let _ = kio::clock::timeout(std::time::Duration::from_secs(1), run.as_mut())
+					.await
+					.unwrap_or_else(|_| panic!("{version} {end:?}: outlived its grant"));
+
+				assert!(
+					routed_now(&consumer, "room/alice").is_none(),
+					"{version} {end:?}: still routed"
+				);
+				let (resets, stops) = (session.log.resets(), session.log.stops());
+				match end {
+					TokenEnd::Lapsed | TokenEnd::RevokedExpired => {
+						assert_eq!(resets, vec![0x7], "{version} {end:?}");
+						assert_eq!(stops, vec![0x7], "{version} {end:?}");
+					}
+					TokenEnd::Revoked => {
+						assert!(resets.is_empty(), "{version} {end:?}: {resets:?}");
+						assert!(stops.is_empty(), "{version} {end:?}: {stops:?}");
+					}
+				}
+			}
+		}
 	}
 
 	/// An update repeating its token withdraws a token-authorized announce, retracting the route
