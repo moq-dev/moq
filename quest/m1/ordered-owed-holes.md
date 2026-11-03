@@ -10,6 +10,23 @@ buffered snapshot at once instead of waiting for an owed lower group. The
 `poll_latest` caveat goes. `@moq/net`'s `Ordered` and `@moq/json`'s
 `latest()` do the same.
 
+## Waiting
+
+- Maintainer: choose the new public Ordered read's shape and name before
+  implementation. Recommend Rust `poll_latest_group` with its async
+  `latest_group`, mirrored by JS `tryLatestGroup` and `latestGroup`: select
+  the highest eligible buffered sequence across all resume copies in one
+  read, pass lower owed holes permanently, and retain the same range,
+  delay budget, returned-group guard, and delivered watermark as ordinary
+  ordered reads. With nothing eligible, wait for a new candidate or end;
+  `next_group` / `nextGroup` keep waiting on owed holes. Alternative:
+  `poll_next_available_group` / `next_available_group` and
+  `tryNextAvailableGroup` / `nextAvailableGroup` yield the lowest eligible
+  group without waiting on holes, leaving snapshot consumers to drain
+  them to reach the newest. The direct newest read better expresses the
+  goal and avoids handing out every superseded group. Record the choice
+  here and remove this wait before implementing.
+
 ## Plan
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
@@ -40,3 +57,15 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
 
 Public API: adds an `Ordered` read (Rust and JS); `snapshot::Consumer::latest()`
 and `@moq/json`'s `latest()` stop waiting at owed holes. Wire: none.
+
+Reproduced 2026-11-03 on the base of
+[moq-dev/moq#7736](https://github.com/moq-dev/moq/pull/7736): after reading
+snapshot group 0, buffer group 2 while the received track still owes group
+1. JS snapshot `latest()` remains pending with `delay.max` of 1,000 ms or
+`null`; advancing a manual clock one hour does not release the unlimited
+read. Delivering group 1 releases it with state 1, despite group 2 already
+being buffered. A two-case scratch probe passed with all pending reads
+settled during cleanup. Rust's existing
+`next_group_waits_on_an_owed_group_within_the_budget` test also passed,
+confirming finite and unlimited owed-hole waits in the Ordered read that
+the Rust snapshot consumer drains. No production change is implemented.
