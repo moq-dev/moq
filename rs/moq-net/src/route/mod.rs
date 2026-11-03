@@ -617,6 +617,14 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 		if routes.is_empty() {
 			self.rx.remove(&id);
 		}
+		// The sender forgets what it sent for a route it ended, so a restart
+		// starts from an empty view: apply the next batch to that, keeping the
+		// last view only for what it certified.
+		if reach.is_none()
+			&& let Some(heard) = self.heard.get_mut(&(id, from))
+		{
+			heard.raw = View::default();
+		}
 		self.update([id]);
 	}
 
@@ -1264,7 +1272,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 				}
 			}
 		}
-		let old: Vec<(Path, Shown<A>)> = self
+		let old: BTreeMap<Path, Shown<A>> = self
 			.shown
 			.range((id, Path::empty())..)
 			.take_while(|((key, _), _)| *key == id)
@@ -1302,7 +1310,7 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 			}
 		}
 		for (claim, now) in shown {
-			if !old.iter().any(|(known, _)| *known == claim) {
+			if !old.contains_key(&claim) {
 				self.log(id, &claim, Kind::Start, &now.item);
 			}
 			self.shown.insert((id, claim), now);

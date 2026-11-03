@@ -1294,3 +1294,32 @@ fn a_link_flap_costs_routes_not_broadcasts() {
 fn next_hop(sim: &Sim, node: Node) -> Option<Node> {
 	sim.route(node, 7).and_then(|route| route.next)
 }
+
+/// A neighbor ends a route, then advertises it again on the same stream. Its
+/// new snapshot is complete, so a claim withdrawn in between must not survive
+/// from the view it sent before the end.
+#[test]
+fn a_restarted_route_sends_a_complete_snapshot() {
+	let (origin, relay, node) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.join(origin, relay, 1);
+	sim.join(relay, node, 1);
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live/x", 0, None);
+	assert!(sim.run());
+	assert_eq!(sim.shows(node, 7, "live/x"), Some(true));
+
+	sim.disconnect(origin, relay);
+	assert!(sim.run());
+	assert!(!sim.holds(node, 7), "the relay let go");
+	// The relay forgets the origin, so its next snapshot starts empty.
+	sim.collect(relay, 7);
+	sim.unannounce(origin, "live/x");
+	sim.connect(origin, relay);
+	assert!(sim.run());
+	assert!(sim.route(node, 7).is_some());
+	assert_eq!(sim.shows(node, 7, "live/x"), None);
+	assert_eq!(revivals(&sim.events), 0);
+	sim.check().unwrap();
+}
