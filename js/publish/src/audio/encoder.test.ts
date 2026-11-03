@@ -1387,3 +1387,103 @@ test("audio retained across a disable and re-enable is served before the break",
 		installed.close();
 	}
 });
+
+// Two disables before anyone listens leave two breaks in the backlog: each flushes the audio before it.
+test("every disable retained before demand gets its own break", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const enabled = new Signal(true);
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("twice.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, enabled, capture: fakeCapture(feed) as never });
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const push = async (start: number, count: number) => {
+			for (let index = 0; index < count; index++) {
+				await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Nano.fromMilli(Milli(20)));
+			}
+		};
+		await push(0, 4);
+		enabled.set(false);
+		await settle();
+		enabled.set(true);
+		await settle();
+		await push(200_000, 3);
+		enabled.set(false);
+		await settle();
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
+		await settle(20);
+		expect(encoder.out.stats.peek().frames).toBe(7);
+		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Micro(80_000), Micro(260_000)]);
+	} finally {
+		discontinuity.mockRestore();
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
+// History that expired while disabled leaves a break with nothing in flight, which must not stall
+// the audio resumed after it.
+test("a break after expired history keeps the resumed audio flowing", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const enabled = new Signal(true);
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("expired.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, enabled, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const push = async (start: number, count: number) => {
+			for (let index = 0; index < count; index++) {
+				await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Nano.fromMilli(Milli(20)));
+			}
+		};
+		await push(0, 4);
+		enabled.set(false);
+		await settle();
+		await clock.advance(Nano.fromMilli(Milli(1100)));
+		enabled.set(true);
+		await settle();
+		await push(2_000_000, 3);
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
+		await settle(20);
+		// The codec holds two of the three resumed frames.
+		expect(encoder.out.stats.peek().frames).toBe(1);
+		await push(2_060_000, 2);
+		expect(encoder.out.stats.peek().frames).toBe(3);
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});

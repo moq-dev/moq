@@ -837,7 +837,8 @@ export class Encoder {
 							// A disable broke the timeline here; the rest follows once the marker is down.
 							if (backlog.takeCut()) {
 								cutAfterFlush();
-								break;
+								// A cut with nothing in flight lands at once, so the rest can follow.
+								if (flushing) break;
 							}
 							const frame = backlog.shift();
 							if (!frame) break;
@@ -846,7 +847,7 @@ export class Encoder {
 						}
 						deadline.set(backlog.deadline);
 						// The audio retained before a disable is all encoded, so the break follows it.
-						if (paused && breakPending) {
+						if (paused && breakPending && backlog.empty) {
 							breakPending = false;
 							cutAfterFlush();
 						}
