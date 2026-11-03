@@ -42,7 +42,8 @@ import {
 	type TrackRequestOptions,
 } from "./internal.ts";
 import { CACHE_EXPIRY, grace, Ledger } from "./ledger.ts";
-import { Timescale, Timestamp } from "./time.ts";
+import { rescale } from "./rescale.ts";
+import { Timescale, type Timestamp } from "./time.ts";
 import { checkSequence, max, min } from "./util/sequence.ts";
 import {
 	type Holdings,
@@ -177,29 +178,9 @@ export interface Info {
 	 * @internal
 	 */
 	unchecked?: boolean;
-	/**
-	 * `timestamp` at this track's {@link Info.timescale}, rounded as the wire rounds it. A track is
-	 * all timed or all untimed, so a frame must match it: a timestamp on an untimed track, none on
-	 * a timed one, or one the scale can't hold throws {@link TimestampMismatch}. A writer that
-	 * changes state before its frame reaches the track, such as signing or encrypting it,
-	 * rescales first so a refused timestamp changes nothing. Mirrors the Rust `track::Info::rescale`.
-	 */
-	rescale(timestamp: Timestamp | undefined): Timestamp | undefined;
 }
 
-// The one implementation of `Info.rescale`, shared by every resolved `Info`.
-const INFO_METHODS: Pick<Info, "rescale"> = { rescale };
-
-function rescale(this: Info, timestamp: Timestamp | undefined): Timestamp | undefined {
-	const timescale = this.timescale ?? undefined;
-	if ((timescale !== undefined) !== (timestamp !== undefined)) throw new TimestampMismatch();
-	if (timestamp === undefined || timescale === undefined) return undefined;
-	try {
-		return new Timestamp(Math.round(timestamp.as(timescale)), timescale);
-	} catch (cause) {
-		throw new TimestampMismatch({ cause });
-	}
-}
+export { rescale };
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
 //
@@ -230,8 +211,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 	if (info.compress !== undefined && typeof info.compress !== "boolean")
 		throw new TypeError("compress must be a boolean");
 	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
-	// The method lives on the prototype, so the fields stay plain data to compare and copy.
-	return Object.assign(Object.create(INFO_METHODS) as Pick<Info, "rescale">, {
+	return {
 		compress: info.compress ?? false,
 		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
@@ -239,7 +219,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
 		...(info.ietf === undefined ? {} : { ietf: info.ietf }),
 		...(info.unchecked ? { unchecked: true } : {}),
-	});
+	};
 }
 
 function refreshRatio(value: number): number {
@@ -1122,7 +1102,7 @@ export class Producer {
 			}
 			for (const sink of this.#sinks) {
 				for (const datagram of sink.datagrams.peek()) {
-					resolved.rescale(datagram.timestamp);
+					rescale(resolved, datagram.timestamp);
 				}
 			}
 		} catch (err) {
@@ -1575,7 +1555,8 @@ export class Producer {
 
 	// Refuse a datagram whose timedness disagrees with this track's.
 	#checkDatagram(timestamp: Timestamp | undefined): void {
-		this.#state.info.peek()?.rescale(timestamp);
+		const info = this.#state.info.peek();
+		if (info) rescale(info, timestamp);
 	}
 
 	// Refuse a write once the track is closed, or at or past its declared end.

@@ -3,7 +3,7 @@
  *
  * @module
  */
-import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
+import { type Group as NetGroup, Track as NetTrack, type Time } from "@moq/net";
 import { Pump } from "../pump.ts";
 import type { Event } from "./datagram.ts";
 import { checkGroup } from "./derive.ts";
@@ -90,7 +90,7 @@ export class Producer {
 	): Promise<void> {
 		this.#writable();
 		this.#reserve(sequence);
-		const at = this.#writer.track.rescale(timestamp);
+		const at = NetTrack.rescale(this.#writer.track, timestamp);
 		const iv = this.#datagramKey.admitSeal(sequence, 0, plaintext.byteLength, MAX_DATAGRAM_PAYLOAD);
 		this.#next = sequence + 1n;
 		const owned = plaintext.slice();

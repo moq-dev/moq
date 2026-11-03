@@ -25,9 +25,10 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
+import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
-import * as track from "../track.ts";
+import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
@@ -104,11 +105,11 @@ interface Stamp {
 	 * equals. Lite-05/06 cannot encode an untimed track, so an untimed one carries its send time
 	 * instead.
 	 */
-	timed?: track.Info;
+	timed?: Pick<track.Info, "timescale">;
 }
 
 /** How `version` stamps a track with `info`, or undefined when it carries no timestamps. */
-function stamping(version: Version, info: track.Info): Stamp | undefined {
+function stamping(version: Version, info: Pick<track.Info, "timescale">): Stamp | undefined {
 	const timescale = info.timescale ?? undefined;
 	const wire = wireTimescale(version, timescale);
 	if (wire === undefined) return undefined;
@@ -117,7 +118,7 @@ function stamping(version: Version, info: track.Info): Stamp | undefined {
 
 /** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out untimed. */
 function wireTime(timestamp: Timestamp | undefined, stamp: Stamp): number {
-	const own = stamp.timed?.rescale(timestamp);
+	const own = stamp.timed && rescale(stamp.timed, timestamp);
 	return own ? own.value : Math.round(Timestamp.now().as(stamp.timescale));
 }
 
@@ -1167,7 +1168,7 @@ export class Publisher {
 					return;
 				}
 				await this.#runFetchGroup(group, stream.writer, {
-					stamp: stamping(this.version, track.infoDefaults({ timescale: info.timescale })),
+					stamp: stamping(this.version, info),
 					compress: info.compress,
 					start: msg.startFrame,
 					end: msg.endFrame,

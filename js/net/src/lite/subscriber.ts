@@ -30,7 +30,7 @@ import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import * as Time from "../time.ts";
-import * as track from "../track.ts";
+import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
@@ -1477,7 +1477,7 @@ export class Subscriber {
 
 	// Map the wire TRACK_INFO onto the model track.Info a producer/consumer holds.
 	#toModelInfo(info: TrackInfo): track.Info {
-		return track.infoDefaults({
+		return {
 			timescale: info.timescale,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
@@ -1487,7 +1487,7 @@ export class Subscriber {
 			compress: info.compress,
 			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
 			...(hasMediaTime(this.version) ? {} : { unchecked: true }),
-		});
+		};
 	}
 
 	// Resolve a track's immutable model info via a TRACK stream (lite-05+), for the

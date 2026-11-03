@@ -14,8 +14,8 @@ export interface Keys {
 export interface Writer {
 	pump: Pump;
 	key: TrackKey;
-	// The net track's committed info, whose `rescale` checks every timestamp before encryption.
-	track: NetTrack.Info;
+	// The net track's committed info, which every timestamp is rescaled to before encryption.
+	track: Pick<NetTrack.Info, "timescale">;
 	// Set by release or abort: no new writes, including on existing groups.
 	closed: boolean;
 	aborted?: Error;

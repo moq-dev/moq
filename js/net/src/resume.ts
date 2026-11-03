@@ -106,8 +106,8 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
-// Every `track.Info` field but `unchecked` and the `rescale` method, so one added later fails to
-// compile until it is listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
+// Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
+// listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
 // lite versions still match. `ietf` is compared, like Rust's moq-transport `properties`.
 const INFO_FIELDS = Object.keys({
 	compress: true,
@@ -116,7 +116,7 @@ const INFO_FIELDS = Object.keys({
 	priority: true,
 	refresh: true,
 	ietf: true,
-} satisfies Record<Exclude<keyof track.Info, "unchecked" | "rescale">, true>) as (keyof track.Info)[];
+} satisfies Record<Exclude<keyof track.Info, "unchecked">, true>) as (keyof track.Info)[];
 
 /** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {

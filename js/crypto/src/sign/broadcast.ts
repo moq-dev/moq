@@ -6,7 +6,7 @@
  *
  * @module
  */
-import { Instance, type Broadcast as NetBroadcast, Track as NetTrack, type Path } from "@moq/net";
+import { Instance, type Broadcast as NetBroadcast, type Track as NetTrack, type Path } from "@moq/net";
 import { Failure } from "./failure.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
 import { Scope } from "./scope.ts";
@@ -47,13 +47,7 @@ export class Producer {
 			sequences = { next: 0n };
 			this.#sequences.set(name, sequences);
 		}
-		return Track.Producer.make(
-			inner,
-			this.#key,
-			new Scope(this.#path, this.instance, name),
-			sequences,
-			NetTrack.infoDefaults(info),
-		);
+		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.instance, name), sequences, info);
 	}
 
 	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */

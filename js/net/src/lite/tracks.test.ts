@@ -13,7 +13,6 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import { infoDefaults } from "../track.ts";
 import type { Limits } from "../util/limits.ts";
 import { wireOf } from "../wire.ts";
 import { Publisher } from "./publisher.ts";
@@ -479,13 +478,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 	expect(await tracks.next()).toEqual({
 		kind: "added",
 		name: "a",
-		info: infoDefaults({
-			timescale: Timescale.MILLI,
-			maxAge: Milli(3000),
-			priority: 9,
-			refresh: 4,
-			compress: true,
-		}),
+		info: { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4, compress: true },
 	});
 	broadcast.createTrack("b");
 	expect(await next(tracks)).toBe("+b");

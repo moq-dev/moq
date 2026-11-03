@@ -617,7 +617,7 @@ export const hooks: {
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
 	/**
-	 * Bind a group to its track's info, so a frame whose timestamp the track's `rescale` refuses
+	 * Bind a group to its track's info, so a frame whose timestamp doesn't `rescale` to the track
 	 * is refused. Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
 	bindGroupTimed: (group: GroupProducer, track: Info) => void;

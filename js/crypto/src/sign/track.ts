@@ -38,7 +38,7 @@ export class Producer {
 		key: SecretKey,
 		scope: Scope,
 		sequences: Sequences,
-		info: NetTrack.Info,
+		info: Pick<NetTrack.Info, "timescale">,
 	) {
 		this.#inner = inner;
 		this.name = inner.name;
@@ -52,7 +52,7 @@ export class Producer {
 		key: SecretKey,
 		scope: Scope,
 		sequences: Sequences,
-		info: NetTrack.Info,
+		info: Pick<NetTrack.Info, "timescale">,
 	): Producer {
 		return new Producer(inner, key, scope, sequences, info);
 	}

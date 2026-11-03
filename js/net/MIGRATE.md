@@ -4,11 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Track.Info` has `rescale` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
 
-A resolved `Track.Info` has `rescale(timestamp)`, which returns the timestamp at the track's timescale, rounded as the wire rounds it, and throws `TimestampMismatch` for a timestamp the track refuses. It mirrors the Rust `track::Info::rescale`.
-Build an `Info` with `Track.infoDefaults(fields)` rather than an object literal, which lacks the method.
-A timestamp that leaves the safe range at the track's timescale is now refused at the write with `TimestampMismatch`, rather than with a `RangeError` when it is encoded.
+A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.
+Catch `TimestampMismatch` where you caught that `RangeError`.
 
 ### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
 

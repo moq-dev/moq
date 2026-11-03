@@ -1,7 +1,7 @@
 // Signed tracks over a real moq-lite session: the subscriber delivers only what verifies.
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { type Broadcast, Connection, Error as NetError, Track as NetTrack, Origin, Path, Time } from "@moq/net";
+import { type Broadcast, Connection, Error as NetError, Origin, Path, Time } from "@moq/net";
 // The in-memory WebTransport pair @moq/net tests with; not part of its published surface.
 import { createMockTransportPair } from "../../../net/src/mock.ts";
 import * as Signed from "./broadcast.ts";
@@ -56,7 +56,7 @@ async function publish(key: SecretKey, path: Path.Valid) {
 		track(name: string) {
 			const raw = publication.broadcast.createTrack(name);
 			const scope = new Scope(path, signed.instance, name);
-			return { signed: Track.Producer.make(raw, key, scope, { next: 0n }, NetTrack.infoDefaults()), raw };
+			return { signed: Track.Producer.make(raw, key, scope, { next: 0n }, {}), raw };
 		},
 		async consume(expected: PublicKey): Promise<Signed.Consumer> {
 			return new Signed.Consumer(await active(net.subscriber, path), expected, path);

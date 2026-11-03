@@ -638,7 +638,6 @@ export namespace Track {
 		maxAge?: Milli;
 		priority: number;
 		refresh?: number;
-		rescale(timestamp: Time.Timestamp | undefined): Time.Timestamp | undefined;
 		timescale?: Time.Timescale | null;
 	}
 	export type Order = "ascending" | "descending";
@@ -725,6 +724,7 @@ export namespace Track {
 		ranges?: Track.Range[];
 	}
 	export function infoDefaults(info?: Partial<Track.Info>): Track.Info;
+	export function rescale(info: Pick<Track.Info, "timescale">, timestamp: Time.Timestamp | undefined): Time.Timestamp | undefined;
 }
 
 export namespace Varint {

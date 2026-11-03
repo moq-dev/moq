@@ -15,7 +15,7 @@
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks } from "./internal.ts";
-import * as track from "./track.ts";
+import type * as track from "./track.ts";
 
 /**
  * What a {@link Tracks} listing reports, in order.
@@ -445,9 +445,9 @@ export class Lister {
 		return this.#listing.closed;
 	}
 
-	/** List a track; unset `info` fields take their defaults. Throws if this answer already lists it. */
-	add(name: string, info: Partial<track.Info>): void {
-		this.#listing.answerAdd(name, track.infoDefaults(info));
+	/** List a track. Throws if this answer already lists it. */
+	add(name: string, info: track.Info): void {
+		this.#listing.answerAdd(name, info);
 	}
 
 	/** Stop listing a track that left unfinished, reported as `removed`. Throws if this answer does not list it. */

@@ -9,7 +9,7 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { infoDefaults, Subscription, Producer as TrackProducer } from "./track.ts";
+import { infoDefaults, rescale, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 
 const enc = new TextEncoder();
@@ -505,17 +505,17 @@ test("refresh must be a u32 ratio", () => {
 });
 
 test("rescale matches the track's timeline, rounded as the wire rounds it", () => {
-	const timed = infoDefaults({ timescale: Timescale.MILLI });
-	const rescaled = timed.rescale(Timestamp.fromMicros(2_400));
+	const timed = { timescale: Timescale.MILLI };
+	const rescaled = rescale(timed, Timestamp.fromMicros(2_400));
 	expect(rescaled?.value).toBe(2);
 	expect(rescaled?.scale).toBe(Timescale.MILLI);
-	expect(() => timed.rescale(undefined)).toThrow(TimestampMismatch);
-	const nano = infoDefaults({ timescale: Timescale.NANO });
-	expect(() => nano.rescale(new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MILLI))).toThrow(TimestampMismatch);
+	expect(() => rescale(timed, undefined)).toThrow(TimestampMismatch);
+	const huge = new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MILLI);
+	expect(() => rescale({ timescale: Timescale.NANO }, huge)).toThrow(TimestampMismatch);
 
-	const untimed = infoDefaults();
-	expect(untimed.rescale(undefined)).toBeUndefined();
-	expect(() => untimed.rescale(Timestamp.fromMillis(1))).toThrow(TimestampMismatch);
+	expect(rescale({}, undefined)).toBeUndefined();
+	expect(rescale({ timescale: null }, undefined)).toBeUndefined();
+	expect(() => rescale({}, Timestamp.fromMillis(1))).toThrow(TimestampMismatch);
 });
 
 test("appendDatagram shares the group sequence counter", () => {

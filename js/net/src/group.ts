@@ -9,6 +9,7 @@ import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError, TimestampMis
 import { Compression, encodable, stored } from "./flate/group.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
+import { rescale } from "./rescale.ts";
 import type { Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
 import { MAX_FRAME_BYTES, SEGMENT_BYTES } from "./util/limits.ts";
@@ -212,7 +213,7 @@ class GroupState {
 	cacheBytes = 0;
 	compressed?: boolean;
 	flate?: Compression;
-	// The owning track's info, whose `rescale` every frame must pass: a timed track's frames
+	// The owning track's info, which every frame's timestamp must `rescale` to: a timed track's frames
 	// carry a timestamp its scale holds, an untimed track's carry none. Undefined for a group
 	// no track has claimed yet, which takes either.
 	track?: TrackInfo;
@@ -255,9 +256,9 @@ class Landed implements Frame {
 	}
 }
 
-// Refuse a frame whose timestamp the track's `rescale` refuses.
+// Refuse a frame whose timestamp the track's timeline refuses.
 function checkTimed(track: TrackInfo | undefined, frame: Frame) {
-	track?.rescale(frame.timestamp);
+	if (track) rescale(track, frame.timestamp);
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
