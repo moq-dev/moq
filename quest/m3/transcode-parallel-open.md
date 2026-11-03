@@ -10,8 +10,8 @@ rather than the sum of them.
 
 ## Plan
 
-Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375),
-which finishes [transcode rungs](/quest/m2/transcode-rungs.md). Milestone m3: [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375)'s probe memo
+Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375) (merged),
+which finished the transcode rungs quest and lists this as a follow-up. Milestone m3: [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375)'s probe memo
 already makes each shape probe once, so this only matters for a source that
 keeps changing to new sizes.
 
@@ -27,7 +27,3 @@ resolves last; test that order. Extend [moq-dev/moq#7375](https://github.com/moq
 to show the difference.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Transcode rungs](/quest/m2/transcode-rungs.md) - its PR, [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375), adds the probe memo and ladder bench this builds on
