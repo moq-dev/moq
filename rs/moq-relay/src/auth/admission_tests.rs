@@ -9,7 +9,7 @@ fn patterns(texts: &[&str]) -> Patterns {
 
 #[tokio::test]
 async fn gateway_admission_scopes_origins_and_revoke_stops_work() {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
 	let mut grant = Grant::new(patterns(&["media/**"]), patterns(&["watch/**"]));
 	grant.root = Some("canonical".into());
@@ -42,7 +42,7 @@ async fn gateway_admission_scopes_origins_and_revoke_stops_work() {
 
 #[tokio::test]
 async fn a_gateway_role_without_scope_is_forbidden() {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
 	tokio::spawn(async move {
 		let admission = admissions.next().await.unwrap();
@@ -61,7 +61,7 @@ async fn a_gateway_role_without_scope_is_forbidden() {
 
 #[tokio::test]
 async fn completed_gateway_work_closes_its_lease() {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
 	let decider = tokio::spawn(async move {
 		let admission = admissions.next().await.unwrap();
@@ -80,7 +80,7 @@ async fn completed_gateway_work_closes_its_lease() {
 
 #[tokio::test]
 async fn a_narrowed_gateway_grant_stops_work() {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 	let (auth, mut admissions) = auth::Auth::embedded("edge");
 	let decider = tokio::spawn(async move {
 		let admission = admissions.next().await.unwrap();
@@ -103,7 +103,7 @@ async fn a_narrowed_gateway_grant_stops_work() {
 async fn a_moved_gateway_tier_retags_its_stats() {
 	use moq_net::stats;
 
-	let mut cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let mut cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 	cluster.stats = stats::Registry::new(stats::Config::new());
 	let registry = cluster.stats.clone();
 	let active = |tier: &'static str| {
@@ -150,7 +150,7 @@ async fn a_moved_gateway_tier_retags_its_stats() {
 
 #[tokio::test(start_paused = true)]
 async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 	let (producer, publisher) =
 		moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
 	let registry = producer.registry().clone();
@@ -184,7 +184,7 @@ async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
 #[tokio::test]
 async fn embedded_expired_refusals_keep_verified_root_and_tier() {
 	tokio::time::pause();
-	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 	let config = crate::stats::Config {
 		enabled: true,
 		..Default::default()

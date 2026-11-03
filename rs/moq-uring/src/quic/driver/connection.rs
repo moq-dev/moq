@@ -23,6 +23,13 @@ pub(crate) type Shared = Rc<Inner>;
 /// One GSO train is at most 64 segments; stay a hair under the kernel cap.
 const TRAIN_SEGMENTS: usize = 63;
 
+/// The GSO trains a connection stages per worker turn before it yields to
+/// the next, so one connection's backlog shares the socket with the others
+/// and with the completions the next reap brings back. More than one, so a
+/// reply's lone train is followed by an empty flush rather than a yield and a
+/// turn of its own; four cut a bulk sender's enters by a quarter against one.
+const TRAINS_PER_TURN: usize = 4;
+
 /// Everything the handles and the driver share, single-threaded.
 ///
 /// The connection and the bookkeeping live in separate `RefCell`s so a stream
@@ -388,6 +395,12 @@ impl Connection {
 	pub(crate) fn streams_evicted(&self) -> u64 {
 		self.shared.conn.borrow().stats().credit.evicted
 	}
+
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let conn = self.shared.conn.borrow();
+		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
+	}
 }
 
 impl Clone for Connection {
@@ -439,6 +452,8 @@ pub(crate) fn launch(
 		key,
 		deadline: owner.timer(),
 		close_staged: false,
+		turn: 0,
+		trains: 0,
 	};
 	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
 	(shared, future)
@@ -791,6 +806,10 @@ struct Driver {
 	/// flush that came back empty: moq-quic paces the close like any other packet,
 	/// so it can sit behind a pacing timer after the application asked for it.
 	close_staged: bool,
+	/// The worker turn `trains` counts in.
+	turn: u64,
+	/// Trains staged this turn.
+	trains: usize,
 }
 
 /// The worker dropped its tasks, this driver among them: nothing will ever
@@ -921,18 +940,27 @@ impl Driver {
 		}
 	}
 
-	/// Stage one GSO train, then yield so another connection sharing the
-	/// socket gets a chance at the transmit pool.
+	/// Stage up to [`TRAINS_PER_TURN`] GSO trains this turn, then yield the
+	/// rest to the next turn, so other connections sharing the socket get a
+	/// chance at the transmit pool and the ring is reaped in between.
 	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		match self.flush_one(waiter) {
-			Poll::Ready(Ok(())) => {}
-			Poll::Ready(Err(err)) => return Poll::Ready(err),
-			// Backpressure, or nothing left to stage.
-			Poll::Pending => return Poll::Pending,
+		let turn = self.shared.owner.turn();
+		if self.turn != turn {
+			self.turn = turn;
+			self.trains = 0;
 		}
-		// Requeue behind the other ready tasks. If moq-quic is drained, the next
-		// poll costs one empty acquire and then parks normally.
-		waiter.waker().wake_by_ref();
+		while self.trains < TRAINS_PER_TURN {
+			match std::task::ready!(self.flush_one(waiter)) {
+				Ok(()) => self.trains += 1,
+				Err(err) => return Poll::Ready(err),
+			}
+			// The budget is spent: requeue behind the next reap, once per turn.
+			// If moq-quic is drained by then, that poll costs one empty acquire
+			// and then parks normally.
+			if self.trains == TRAINS_PER_TURN {
+				self.shared.owner.yield_turn(waiter.waker());
+			}
+		}
 		Poll::Pending
 	}
 

@@ -1,6 +1,6 @@
 /** Exchange signed groups with Rust: verify the ones Rust signed, and sign through the JS wrappers. */
 import assert from "node:assert/strict";
-import { Broadcast, Epoch, type Track as NetTrack, Path, Time } from "../../js/net/src/index.ts";
+import { Broadcast, Instance, type Track as NetTrack, Path, Time } from "../../js/net/src/index.ts";
 import * as Signed from "../../js/sign/src/broadcast.ts";
 import { Failure } from "../../js/sign/src/failure.ts";
 import { SecretKey } from "../../js/sign/src/key.ts";
@@ -13,7 +13,7 @@ type Frame = { body: string; timestamp?: number | null };
 type Group = { track: string; group: number; timescale?: number | null; frames: Frame[] };
 /** A group for JS to sign: payloads, and timestamps in microseconds on a timed track. */
 type Write = { track: string; timescale?: number | null; frames: { payload: string; micros?: number | null }[] };
-type Input = { seed: string; path: string; epoch: string; rust: Group[]; js: Write[] };
+type Input = { seed: string; path: string; instance: string; rust: Group[]; js: Write[] };
 
 function unhex(text: string): Uint8Array<ArrayBuffer> {
 	return Uint8Array.from(text.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
@@ -26,14 +26,14 @@ function hex(bytes: Uint8Array): string {
 const input = JSON.parse(process.argv[2] ?? "") as Input;
 const key = await SecretKey.fromSeed(unhex(input.seed));
 const path = Path.from(input.path);
-const epoch = Epoch.parse(input.epoch);
+const instance = Instance.parse(input.instance);
 
 // Each Rust group through a verifying JS track consumer: its payloads, or the failure code.
 const verified: (string[] | string)[] = [];
 for (const { track, group, timescale, frames } of input.rust) {
 	const scale = timescale == null ? undefined : Time.Timescale(timescale);
 	const net = new Broadcast.Producer().createTrack(track, { timescale: scale });
-	const consumer = Track.Consumer.make(net.subscribe(), key.public, new Scope(path, epoch, track));
+	const consumer = Track.Consumer.make(net.subscribe(), key.public, new Scope(path, instance, track));
 	const writer = net.createGroup(group);
 	for (const { body, timestamp } of frames) {
 		const at = scale === undefined || timestamp == null ? undefined : new Time.Timestamp(timestamp, scale);
@@ -82,4 +82,4 @@ for (const { track, timescale, frames } of input.js) {
 	js.push({ track, group: raw.sequence, timescale, frames: bodies });
 }
 
-process.stdout.write(JSON.stringify({ public: key.public.toString(), verified, epoch: signed.epoch, js }));
+process.stdout.write(JSON.stringify({ public: key.public.toString(), verified, instance: signed.instance, js }));

@@ -19,8 +19,10 @@ and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns cata
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
 Publish JSON tracks with `MoqTrackInfo(compress: true)`; a `package:moq/json.dart` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
-`package:moq/json.dart` consumers return `Value` (`value`, `timestampUs`) from `next()`; a snapshot consumer
-yields each state in order, and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
+`package:moq/json.dart` consumers return `Value` (`value`, `timestamp`) from `next()`; a snapshot consumer
+yields each state in order, and `latest()` skips to the newest.
+Media times are exact `Timestamp` records, `value` units at `scale` units per second, so a 90 kHz tick survives a
+read and republish. `Duration.toTimestamp()` converts exactly; `Timestamp.toDuration()` rounds down to a whole microsecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
 `MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
@@ -64,6 +66,7 @@ moq
         AnnounceEventRestart(:final announce) ||
         AnnounceEventTakeover(:final announce):
       print(announce.prefix);
+      // Captures are a list of wildcard matches, empty without wildcards.
       print(announce.captures);
     default:
   }
@@ -95,8 +98,8 @@ final encoder = video.Producer(
     track: 'camera',
   ),
 );
-encoder.write(frame: video.Frame(timestampUs: pts, data: rgba));
-camera.announce(route: AnnounceRoute(epoch: mintEpoch()));
+encoder.write(frame: video.Frame(timestamp: pts, data: rgba));
+camera.announce(route: AnnounceRoute());
 encoder.finish();
 ```
 
@@ -127,9 +130,9 @@ final publication = moq.createBroadcast('live/camera');
 final mine = publication.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
-group.writeFrame(frame: Frame(payload: bytes, timestampUs: null));
+group.writeFrame(frame: Frame(payload: bytes, timestamp: null));
 group.finish();
-publication.announce(route: AnnounceRoute(epoch: mintEpoch())); // a fresh epoch per run
+publication.announce(route: AnnounceRoute()); // the broadcast mints its own instance
 track.finish();
 mine.close();
 
@@ -149,7 +152,7 @@ shows which module holds each.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: a `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: media.DecodeStart.latest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `dispose()` each frame from a `video.Consumer` promptly rather than waiting for the garbage collector, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
-- **Closing.** `await moq.close()` drains for up to one second and reports its result. `session.shutdown()` requests the drain synchronously; `await session.closed()` waits for its result. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Awaiting cancellation of an announcement, grant, or request subscription releases its pending native read. Announcements and grants also release their consumer; server listeners leave their shared server usable. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+- **Closing.** `await moq.close()` drains for up to one second and reports its result. `session.shutdown()` requests the drain synchronously; `await session.closed()` waits for its result. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Awaiting cancellation of an announcement, grant, or request subscription releases its pending native read. Announcements and grants also release their consumer; server listeners leave their shared server usable. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` takes it offline; disposing its `Publication` does not. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
 - **Stats.** `session.stats()` reports `rtt`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ConnectOptions(versions: ...)`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), listen to `moq.grants().updates()` for the `Grant` the relay sent back and each change, `null` until it answers and while a client session reconnects.

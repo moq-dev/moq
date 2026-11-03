@@ -110,6 +110,20 @@ pub enum Error {
 	/// The datagram exceeds [`max_datagram_size`](moq_net::transport::poll::Session::max_datagram_size).
 	#[error("datagram too large")]
 	DatagramTooLarge,
+
+	/// Incomplete messages filled the receive window and this stream ranked lowest, so its
+	/// buffered bytes were discarded to free it.
+	#[error("evicted")]
+	Evicted,
+
+	/// The receive window is below the given floor, moq-net's
+	/// [`MIN_RECEIVE_WINDOW`](moq_net::transport::MIN_RECEIVE_WINDOW).
+	#[error("receive_window must be at least {0} bytes to fit the largest message")]
+	ReceiveWindowTooSmall(u64),
+
+	/// A lease wanted more than the receive window can ever hold.
+	#[error("lease exceeds the receive window")]
+	LeaseTooLarge,
 }
 
 impl Error {
@@ -168,6 +182,7 @@ impl moq_net::transport::Error for Error {
 		match self {
 			Self::IdleTimeout => CloseKind::IdleTimeout,
 			Self::Closed => CloseKind::Closed,
+			Self::Evicted => CloseKind::Evicted,
 			_ => CloseKind::Transport,
 		}
 	}

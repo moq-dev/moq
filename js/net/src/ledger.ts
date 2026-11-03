@@ -15,7 +15,7 @@ const BTree = (btree.default as unknown as { default?: typeof btree.default }).d
  */
 export const GRACE = Milli(1000);
 
-/** The grace for a subscription with `maxDelay`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
+/** The grace for a subscription with `delay.max`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
 export function grace(maxDelay: Milli): Milli {
 	return maxDelay > 0 ? maxDelay : GRACE;
 }

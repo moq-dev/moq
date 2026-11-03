@@ -32,14 +32,15 @@ use crate::udp;
 /// Streams of each kind a peer may have open at once.
 const MAX_STREAMS: u64 = 1024;
 /// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
-const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
+/// The same default as moq-tokio's `[quic] stream_receive_window`.
+const STREAM_WINDOW: u32 = 1024 * 1024;
 /// Per-connection flow control credit, which also bounds incomplete messages, so it has to fit
-/// the largest one: `MIN_RECEIVE_WINDOW` is the 64 MiB announcement cap plus framing. 128 MiB
-/// also holds two maximum-size frames at once.
-const CONNECTION_WINDOW: u32 = 128 * 1024 * 1024;
+/// the largest unit, `MIN_RECEIVE_WINDOW`: one 1 MiB segment. The same default as moq-tokio's
+/// `[quic] receive_window`.
+const CONNECTION_WINDOW: u32 = 4 * 1024 * 1024;
 const _: () = assert!(CONNECTION_WINDOW as u64 >= moq_net::transport::MIN_RECEIVE_WINDOW);
 /// Unacknowledged outgoing data to buffer, whatever the peer allows.
-const SEND_WINDOW: u32 = 16 * 1024 * 1024;
+const SEND_WINDOW: u32 = 4 * 1024 * 1024;
 /// Datagram bytes to buffer in each direction, about 64 full-size datagrams.
 const DATAGRAM_WINDOW: usize = 96 * 1024;
 

@@ -2,13 +2,13 @@ use std::{
 	io,
 	pin::Pin,
 	sync::Arc,
-	task::{Context, Poll},
+	task::{Context, Poll, ready},
 };
 
 use bytes::{BufMut, Bytes};
 
 use crate::quic::driver::recv;
-use crate::quic::web::{CloseReason, ReadError, SessionError};
+use crate::quic::web::{CloseReason, ReadError};
 
 /// A stream that can be used to receive bytes. See [`crate::quic::driver::recv::Stream`].
 ///
@@ -42,6 +42,21 @@ impl RecvStream {
 		match &mut self.inner {
 			Some(inner) => inner.poll_lease(cx, want).map_err(|e| map_error(close, e)),
 			None => Poll::Ready(Err(ReadError::ClosedStream)),
+		}
+	}
+
+	/// Poll until the peer resets the stream, the receiver evicts it, or the session closes,
+	/// without reading it; pending for good once every byte arrived. See
+	/// [`recv::Stream::received_reset`].
+	pub fn poll_reset(&mut self, cx: &mut Context<'_>) -> Poll<ReadError> {
+		let close = &self.close;
+		let Some(inner) = &mut self.inner else {
+			return Poll::Ready(ReadError::ClosedStream);
+		};
+		match ready!(inner.poll_received_reset(cx)) {
+			Ok(None) => Poll::Pending,
+			Ok(Some(code)) => Poll::Ready(map_error(close, recv::Error::Reset(code))),
+			Err(err) => Poll::Ready(map_error(close, err)),
 		}
 	}
 
@@ -88,21 +103,19 @@ impl RecvStream {
 	/// Block until the stream has been reset and return the error code. See
 	/// [`recv::Stream::received_reset`].
 	///
-	/// Returns the stream's reset code or its session error.
-	pub async fn received_reset(&mut self) -> Result<Option<u32>, SessionError> {
+	/// Returns the stream's reset code, or fails with its session error or
+	/// [`ReadError::Evicted`] once the receiver evicted it to free a stuck window.
+	pub async fn received_reset(&mut self) -> Result<Option<u32>, ReadError> {
 		let Some(inner) = &mut self.inner else {
 			return Ok(None);
 		};
 		match inner.received_reset().await {
 			Ok(None) => Ok(None),
 			Ok(Some(code)) => match self.close.session_gone(code) {
-				Some(err) => Err(err),
+				Some(err) => Err(ReadError::SessionError(err)),
 				None => Ok(self.close.decode_stream_code(code)),
 			},
-			Err(err) => match map_error(&self.close, err) {
-				ReadError::SessionError(err) => Err(err),
-				err => unreachable!("only the connection fails a reset wait: {err}"),
-			},
+			Err(err) => Err(map_error(&self.close, err)),
 		}
 	}
 

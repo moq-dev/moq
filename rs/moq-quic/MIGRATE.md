@@ -17,6 +17,11 @@ A rustls config without TLS 1.3 or the AES-128-GCM-SHA256 suite now fails each c
 `ConnectError` no longer implements `Eq`.
 rustls is a required dependency; the `ring` and `aws-lc-rs` features pick only the provider.
 
+### An evicted stream fails `received_reset` ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`recv::Stream::received_reset` returns `Err(Error::Evicted)` for a stream evicted to free a stuck receive window, until the application stops it, rather than `Err(Error::Closed)`.
+Treat it as a failed read and stop the stream: a reader that watches for a reset instead of reading would otherwise leave its leased bytes holding further eviction off.
+
 ### Early data is removed
 
 Wait for `Event::Connected` before opening streams or sending application data.
