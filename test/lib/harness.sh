@@ -104,13 +104,15 @@ harness_begin() {
 
 # ── artifacts ───────────────────────────────────────────────────────────────
 
-# Copy a build artifact into this run before another build or collection can
-# remove it. Dereference symlinks: ownership must not depend on the build cache.
+# Keep a build artifact in this run before another build or collection can
+# unlink it. Dereference symlinks: ownership must not depend on the build cache.
 # DEST is relative to HARNESS_RUN; callers use that path for every later load.
 harness_stage() {
     local dest="$HARNESS_RUN/$1" source="$2"
     mkdir -p "$(dirname "$dest")" || return $?
-    cp -L "$source" "$dest"
+    # Nested compat cells retain their own names without copying the same large
+    # binary every time. A copy also supports run directories on another disk.
+    ln -L "$source" "$dest" 2>/dev/null || cp -L "$source" "$dest"
 }
 
 # ── endpoints ───────────────────────────────────────────────────────────────

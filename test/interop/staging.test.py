@@ -212,6 +212,40 @@ done
 """
         )
 
+    def test_nested_run_owns_links_after_parent_teardown(self):
+        binary = shlex.quote(str(self.profile / "moq"))
+        self.run_script(
+            f"""
+source {shlex.quote(str(ROOT / "test/lib/harness.sh"))}
+harness_begin parent
+harness_stage bin/moq {binary}
+parent="$HARNESS_RUN"
+# Model the parent's lifetime ending before a child launches its next client.
+HARNESS_RUN="$parent/child"
+mkdir -p "$HARNESS_RUN"
+harness_stage bin/moq "$parent/bin/moq"
+[[ "$HARNESS_RUN/bin/moq" -ef "$parent/bin/moq" ]]
+mv "$HARNESS_RUN" "$parent-saved-child"
+rm -rf "$parent" "$FIXTURE_TARGET"
+HARNESS_RUN="$parent-saved-child"
+"$HARNESS_RUN/bin/moq"
+"""
+        )
+        self.assertEqual(list((self.root / "runs").iterdir()), [])
+
+    def test_copy_when_hard_links_are_unavailable(self):
+        executable(self.tools / "ln", "exit 1\n")
+        self.run_script(
+            f"""
+source {shlex.quote(str(ROOT / "test/lib/harness.sh"))}
+harness_begin copy
+harness_stage bin/moq "$FIXTURE_TARGET/debug/moq"
+[[ ! "$HARNESS_RUN/bin/moq" -ef "$FIXTURE_TARGET/debug/moq" ]]
+rm -rf "$FIXTURE_TARGET"
+"$HARNESS_RUN/bin/moq"
+"""
+        )
+
     def test_missing_artifact_fails_and_keeps_evidence(self):
         self.run_script(
             f"""
