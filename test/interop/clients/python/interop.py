@@ -9,7 +9,7 @@ subscribe: connect, wait for a catalog with video and audio, and exit 0 once a
            has been decoded to --audio-out.<codec> for tone.py to judge (exit 1 on
            timeout / no data).
 
---finish verifies a finite tail, natural media/catalog EOF, announcement END, and
+--finish verifies a finite tail, natural media/catalog EOF, the announcement going absent, and
 same-session health; --frames sets its exact size. --finish-ack selects publisher
 finish mode and names the FIFO releasing teardown after the real linger.
 --version offers only that version. --grant waits for the grant the relay sends over
@@ -184,10 +184,10 @@ async def _catalog_with_media(consumer: moq.BroadcastConsumer) -> moq.media.Cata
 
 
 async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> None:
-    # Watch the exact path before resolving it, retaining END while media drains.
+    # Watch the exact path before resolving it, retaining its absence while media drains.
     async with client.announced(broadcast) as announcements:
-        async with client.follow(broadcast) as announced:
-            consumer = await announced
+        async with client.follow(broadcast) as following:
+            consumer = await following
             async with await moq.media.CatalogConsumer.subscribe(consumer) as catalogs:
                 async for catalog in catalogs:
                     if catalog.video:
@@ -218,16 +218,14 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
 
         started = False
         async for event in announcements:
-            if isinstance(event, moq.AnnounceEventRestart) and event.announce.prefix == broadcast:
-                raise RuntimeError("broadcast restarted during finish")
-            if isinstance(event, moq.AnnounceEventStart) and event.announce.prefix == broadcast:
+            if isinstance(event, moq.AnnounceEventPresent) and event.announce.prefix == broadcast:
                 started = True
-            if isinstance(event, moq.AnnounceEventEnd) and event.announce.prefix == broadcast:
+            if isinstance(event, moq.AnnounceEventAbsent) and event.announce.prefix == broadcast:
                 if not started:
                     raise RuntimeError("broadcast ended without announcement")
                 break
         else:
-            raise RuntimeError("announcement stream ended before broadcast END")
+            raise RuntimeError("announcement stream ended before the broadcast went absent")
 
     async with client.follow(f"{broadcast}.health") as announced_health:
         health = await announced_health

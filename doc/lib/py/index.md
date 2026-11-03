@@ -47,10 +47,10 @@ async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         # The filter is relative to the literal prefix; prefixes stay origin-relative.
         async for event in client.announced("live/", filter="*/camera"):
-            # A restart is a new publisher run at the same path: request it again. A
-            # takeover continues what an earlier route served, like a start.
-            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart, moq.AnnounceEventTakeover)):
-                continue  # AnnounceEventUpdate or AnnounceEventEnd
+            # A path stays present across publisher restarts: hold client.follow(path) to
+            # be handed each new run.
+            if not isinstance(event, moq.AnnounceEventPresent):
+                continue  # AnnounceEventAbsent
             announcement = event.announce
             print(announcement.captures)  # list of wildcard matches, empty without wildcards
             broadcast = await client.request(announcement.prefix)

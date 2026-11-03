@@ -187,7 +187,8 @@ type AnnounceOptions struct {
 	Hidden bool
 }
 
-// Announced streams routes under a literal prefix matching an optional pattern filter.
+// Announced lists the paths under a literal prefix matching an optional pattern filter, as each
+// becomes present or absent. To see another publisher instance take a path over, use Follow.
 func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	inner, err := o.inner.Announced(ffi.MoqAnnounceConfig{
 		Prefix: options.Prefix,
@@ -226,12 +227,12 @@ func (o *OriginConsumer) Request(ctx context.Context, path string, instance *str
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// AnnounceConsumer is a stream of announce events.
+// AnnounceConsumer is a listing of paths, each present or absent.
 type AnnounceConsumer struct {
 	inner *ffi.MoqAnnounceConsumer
 }
 
-// Next returns the next announce event, or (nil, nil) when the stream ends.
+// Next returns the next path becoming present or absent, or (nil, nil) when the stream ends.
 func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 	res, err := bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
 	if err != nil || res == nil {
@@ -240,12 +241,12 @@ func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 	return *res, nil
 }
 
-// All ranges over announce events until the stream ends or the loop breaks.
+// All ranges over the listing's events until the stream ends or the loop breaks.
 func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[AnnounceEvent, error] {
 	return bridge.Seq(ctx, a.Next)
 }
 
-// Cancel stops the announcement stream.
+// Cancel stops the listing.
 func (a *AnnounceConsumer) Cancel() {
 	a.inner.Cancel()
 }

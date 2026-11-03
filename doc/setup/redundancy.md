@@ -57,10 +57,10 @@ again as a new broadcast. This is not a fixed primary/standby priority unless
 the routes' costs make it one, and a restarted publisher takes a fresh
 instance, so it may rank either way.
 
-The switch is announced as a `Restart`. Players that follow announcements
-request the path again and begin the replacement broadcast. Existing
+The path stays announced across the switch, and a follower hands out the
+replacement broadcast. Players that follow the path begin it. Existing
 subscriptions stay on the old instance while it remains available, unless the
-consumer chooses to follow the restart.
+consumer chooses to follow the switch.
 
 For MPEG-TS output, opt into following replacements:
 

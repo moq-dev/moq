@@ -63,8 +63,9 @@ let session = client.with_origin(origin.clone()).connect(url);
 let consumer = origin.consume();
 let mut announced = consumer.announced();
 while let Some(event) = announced.next().await {
-    // Skip updates and retractions.
-    let moq_net::announce::Event::Start(update) = event else { continue };
+    // Skip retractions. A path stays present across publisher restarts: hold
+    // `consumer.follow(path, None)` to be handed each new run.
+    let moq_net::announce::Event::Present(update) = event else { continue };
     let broadcast = consumer.request(&update.prefix, update.route.instance).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?

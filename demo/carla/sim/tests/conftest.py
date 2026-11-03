@@ -17,19 +17,11 @@ class AnnounceEvent:
         self.announce = announce
 
 
-class AnnounceEventStart(AnnounceEvent):
+class AnnounceEventPresent(AnnounceEvent):
     pass
 
 
-class AnnounceEventUpdate(AnnounceEvent):
-    pass
-
-
-class AnnounceEventEnd(AnnounceEvent):
-    pass
-
-
-class AnnounceEventRestart(AnnounceEvent):
+class AnnounceEventAbsent(AnnounceEvent):
     pass
 
 
@@ -60,10 +52,8 @@ class SnapshotConsumer:
 
 moq = ModuleType("moq")
 moq.Error = MoqError
-moq.AnnounceEventStart = AnnounceEventStart
-moq.AnnounceEventUpdate = AnnounceEventUpdate
-moq.AnnounceEventEnd = AnnounceEventEnd
-moq.AnnounceEventRestart = AnnounceEventRestart
+moq.AnnounceEventPresent = AnnounceEventPresent
+moq.AnnounceEventAbsent = AnnounceEventAbsent
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 

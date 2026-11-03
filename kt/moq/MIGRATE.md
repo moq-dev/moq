@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing
+
+`announced(config).updates()` emits `AnnounceEventPresent` when a path becomes present and `AnnounceEventAbsent` when it goes, each carrying an `Announce` as `announce`.
+`AnnounceEventStart` is `AnnounceEventPresent` and `AnnounceEventEnd` is `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path)` instead; each `available()` returns the next instance's broadcast.
+
+```kotlin
+val following = moq.follow("live/camera")
+while (true) play(following.available())
+```
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `List<String>` instead of `List<String>?`. Remove null checks and pass `captures = emptyList()` when constructing an announcement for a filter without wildcards. Rebuild with the matching generated bindings and native library.

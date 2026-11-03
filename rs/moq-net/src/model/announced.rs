@@ -14,15 +14,6 @@ pub enum AnnounceEvent {
 	Absent(Announce),
 }
 
-impl AnnounceEvent {
-	/// The announcement this event reports.
-	pub fn announce(&self) -> &Announce {
-		match self {
-			Self::Present(announce) | Self::Absent(announce) => announce,
-		}
-	}
-}
-
 /// The paths announced in a scope, each reported as it becomes present or absent.
 ///
 /// A path that another instance takes over stays present, and a route's metadata

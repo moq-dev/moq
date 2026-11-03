@@ -119,14 +119,20 @@ content into it: subscriptions already open stay on the old stream until its
 last route goes, then end with an error. New requests resolve the winner on a
 fresh broadcast. Choose between two kinds of reader.
 
-**Follow announcements** when the reader should outlive any one stream, as a
-player does. Start on each broadcast, drop all decoder and buffer state on a
-restart, and wait on an end. Rust uses `consumer.follow(path, None)` (or
-`moq_mux::follow::Instances`), JavaScript `origin.follow(path)`, and the
-moq-ffi bindings `follow(path)` with `available()`. `@moq/watch`, `moq play`,
-and `moqsrc` follow this way, and `moq export ts --stitch` can splice a
-replacement as a marked program switch. A request failing is never the signal
-to restart; the announcement is. Nor is a track's error kind: a track withdrawn
+**Follow the path** when the reader should outlive any one stream, as a
+player does. A follower hands out a new broadcast each time another instance
+takes the path; an epoch change or another route of the same instance hands
+out nothing. Start on each broadcast, drop all decoder and buffer state when the
+next one arrives, and wait while the path is offline. Rust uses
+`consumer.follow(path, None)`, whose `available()` returns `None` once the path
+goes offline; JavaScript `origin.follow(path)`, whose `active` is undefined
+between instances; and the moq-ffi bindings `follow(path)` with `available()`.
+An announcement listing (`announced()`) only reports a path becoming present or
+absent: an instance change keeps it present, so a reader that needs one holds a
+follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, and
+`moq export ts --stitch` can splice a replacement as a marked program switch. A
+request failing is never the signal to restart; the follower handing out a new
+broadcast is. Nor is a track's error kind: a track withdrawn
 unfinished ends `Unroutable` over moq-lite but `Internal` over moq-transport,
 whose wire has no code for it.
 
@@ -187,19 +193,19 @@ A lazy job's lifecycle, as a viewer of `transcode/alice` sees it through a relay
 2. **Takeover.** Publishing the answer through the claim proves it was job A,
    so job A's route takes over the claim: what the viewer already resolved
    through the claim beneath `transcode/alice` keeps playing, now as instance
-   A. A Rust follower sees a takeover rather than a restart (JavaScript still
-   reports a start or restart). A different worker, or a job restarted under
-   the same claim, never inherits it. Only moq-lite 07 carries the takeover
+   A. A Rust follower is handed nothing new (a JavaScript follower still moves
+   to a new broadcast). A different worker, or a job restarted under the same
+   claim, never inherits it. Only moq-lite 07 carries the takeover
    across relays. Older wires, and paths where a relay cannot vouch for it,
    send an ordinary announcement instead, so the first subscription through
-   the claim is reset there: a follower sees a restart and requests again, and
-   a holder's track ends with an error, and it requests again. Either way the
+   the claim is reset there: a follower is handed the new broadcast, and a
+   holder's track ends with an error, and it requests again. Either way the
    second request reaches job A.
 3. **Steady state.** Requests resolve instance A by its exact route. Routes
    carrying instance A through other relays fail over without a seam.
 4. **Job restart.** The worker closes job A's publication. The path falls back
    to the claim, the next request asks the worker again, and job B publishes
-   under a fresh instance. Followers see each change as a restart; relays drop
+   under a fresh instance. Followers are handed each new broadcast; relays drop
    job A's cached groups, so a viewer returning within the cache window never
    gets them. Other paths under the claim, such as `transcode/bob`, are
    untouched.

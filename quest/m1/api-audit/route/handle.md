@@ -40,7 +40,8 @@ read-only facts on a received announcement, and `Hop`, `Hops` and
 `HopLimit` leave the public API.
 
 Non-goals: the instance model ([Instance and epoch](https://github.com/moq-dev/moq/pull/7489)),
-announce events ([Listing and follow](/quest/m1/api-audit/route/events.md)),
+announce events (a path listing plus `follow` since
+[moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678)),
 the read side, which instance owns, and the route layer's wire metric
 ([Routes and announces](/quest/m1/cluster-routing/routes.md)).
 

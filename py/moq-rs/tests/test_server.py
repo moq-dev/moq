@@ -10,15 +10,10 @@ import pytest
 
 
 async def routes(announced: moq.AnnounceConsumer):
-    """Yield each newly announced route, skipping updates and ends."""
+    """Yield each route that makes its path present, skipping absences."""
     async for event in announced:
-        if isinstance(event, moq.AnnounceEventStart):
+        if isinstance(event, moq.AnnounceEventPresent):
             yield event.announce
-
-
-async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
-    """The next announce event."""
-    return await asyncio.wait_for(anext(announced), timeout=5.0)
 
 
 def opus_head() -> bytes:
@@ -448,50 +443,6 @@ async def test_broadcast_route_over_wire():
             except asyncio.CancelledError:
                 pass
             broadcast.close()
-
-
-async def test_route_update_observes_restart():
-    """A route metadata update arrives as an AnnounceEventUpdate.
-
-    The publisher re-prices its announced route; the subscriber observes the new
-    cost in place (no retraction), and unannouncing retracts it.
-    """
-    origin = moq.OriginProducer()
-    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
-        publication = origin.create_broadcast("routed")
-        publication.announce(moq.AnnounceRoute(cost=1))
-
-        serve_task = asyncio.create_task(server.serve())
-        try:
-            async with moq.Client(
-                f"https://{server.local_addr}",
-                tls=moq.ClientTls(insecure=True),
-                bind="127.0.0.1:0",
-            ) as client:
-                announced = client.announced()
-                first = await next_route(announced)
-                assert isinstance(first, moq.AnnounceEventStart)
-                assert first.announce.prefix == "routed"
-                first_cost = first.announce.route.cost
-
-                # The publisher raises its cost: an in-place update.
-                publication.announce(moq.AnnounceRoute(cost=5))
-                updated = await next_route(announced)
-                assert isinstance(updated, moq.AnnounceEventUpdate)
-                assert updated.announce.prefix == "routed"
-                assert updated.announce.route.cost == first_cost + 4
-
-                # Unannouncing retracts the route.
-                publication.unannounce()
-                ended = await next_route(announced)
-                assert isinstance(ended, moq.AnnounceEventEnd)
-                assert ended.announce.prefix == "routed"
-        finally:
-            serve_task.cancel()
-            try:
-                await serve_task
-            except asyncio.CancelledError:
-                pass
 
 
 async def test_client_context_keeps_the_body_error():

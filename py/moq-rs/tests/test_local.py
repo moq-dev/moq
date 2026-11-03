@@ -28,9 +28,9 @@ def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProd
 
 
 async def routes(announced: moq.AnnounceConsumer):
-    """Yield each newly announced route, skipping updates and ends."""
+    """Yield each route that makes its path present, skipping absences."""
     async for event in announced:
-        if isinstance(event, moq.AnnounceEventStart):
+        if isinstance(event, moq.AnnounceEventPresent):
             yield event.announce
 
 
@@ -403,32 +403,34 @@ async def test_announced_broadcast():
         break
 
 
-async def test_announced_instance_restarts():
+async def test_following_restarts_on_a_new_instance():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
+    following = consumer.follow("instance")
     publication = origin.create_broadcast("instance")
 
     # The broadcast mints its own instance and keeps it across re-announcing.
     publication.announce()
-    start = await next_route(announced)
-    assert isinstance(start, moq.AnnounceEventStart)
-    minted = start.announce.route.instance
+    present = await next_route(announced)
+    assert isinstance(present, moq.AnnounceEventPresent)
+    minted = present.announce.route.instance
     assert minted
+    await asyncio.wait_for(following.available(), timeout=5.0)
 
+    # Another instance is another stream: followers restart onto it, while the path
+    # stays present, so neither the re-price nor the restart is listed.
     publication.announce(moq.AnnounceRoute(cost=1))
-    update = await next_route(announced)
-    assert isinstance(update, moq.AnnounceEventUpdate)
-    assert update.announce.route.instance == minted
-
-    # Another instance is another stream: consumers restart onto it.
     publication.announce(moq.AnnounceRoute(instance="cam", epoch=1))
-    restart = await next_route(announced)
-    assert isinstance(restart, moq.AnnounceEventRestart)
-    assert restart.announce.route.instance == "cam"
+    await asyncio.wait_for(following.available(), timeout=5.0)
+    publication.unannounce()
+    absent = await next_route(announced)
+    assert isinstance(absent, moq.AnnounceEventAbsent)
+    assert absent.announce.route.instance == "cam"
 
     with pytest.raises(moq.Error.InvalidInstance):
         publication.announce(moq.AnnounceRoute(instance=""))
+    following.cancel()
     publication.broadcast.close()
 
 
@@ -437,7 +439,7 @@ async def test_finish_serves_until_closed():
     consumer = origin.consume()
     announced = consumer.announced()
     broadcast = create_announced(origin, "finish")
-    assert isinstance(await next_route(announced), moq.AnnounceEventStart)
+    assert isinstance(await next_route(announced), moq.AnnounceEventPresent)
 
     track = broadcast.publish_track("status")
     track.write_frame(b"tail")
@@ -451,7 +453,7 @@ async def test_finish_serves_until_closed():
     assert frame is not None and frame.payload == b"tail"
 
     broadcast.close()
-    assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
+    assert isinstance(await next_route(announced), moq.AnnounceEventAbsent)
 
 
 def test_publish_lifecycle():
@@ -1632,19 +1634,19 @@ async def test_broadcast_is_reachable_only_while_announced():
     publication.announce()
     announced = consumer.announced()
     first = await next_route(announced)
-    assert isinstance(first, moq.AnnounceEventStart)
+    assert isinstance(first, moq.AnnounceEventPresent)
     assert first.announce.prefix == "live"
 
     publication.unannounce()
     retracted = await next_route(announced)
-    assert isinstance(retracted, moq.AnnounceEventEnd)
+    assert isinstance(retracted, moq.AnnounceEventAbsent)
     assert retracted.announce.prefix == "live"
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request("live"), timeout=5.0)
 
     publication.announce()
     back = await next_route(announced)
-    assert isinstance(back, moq.AnnounceEventStart)
+    assert isinstance(back, moq.AnnounceEventPresent)
     await asyncio.wait_for(consumer.request("live"), timeout=5.0)
     announced.cancel()
     track.finish()
@@ -1710,7 +1712,7 @@ async def test_announced_pattern_captures():
     audio = create_announced(origin, "room/alice/audio")
     chat = create_announced(origin, "room/alice/chat")
     match = await next_route(announced)
-    assert isinstance(match, moq.AnnounceEventStart)
+    assert isinstance(match, moq.AnnounceEventPresent)
     assert match.announce.prefix == "room/alice/chat"
     assert match.announce.captures == ["alice"]
 

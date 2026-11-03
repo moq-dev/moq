@@ -10,6 +10,7 @@ player speaks:
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import math
 from dataclasses import dataclass
@@ -298,58 +299,74 @@ async def watch_drivers(
 ) -> None:
     """Discover driver broadcasts at `{prefix}/{driverId}` and fan their commands in.
 
-    Runs until cancelled. Each run of a driver, its path plus the route instance it
-    announced under, gets its own task, so one slow or stuck driver cannot hold
-    up the others. A broadcast that ends, or restarts under another instance, ends
-    its task, and with it the lease of that run; a restart starts a new task.
+    Runs until cancelled. Each driver path the listing reports present gets its own
+    task, so one slow or stuck driver cannot hold up the others. That task follows
+    the path across the driver's runs, one publisher instance each; a run that
+    another takes over, or whose path goes absent, ends, and with it its lease.
     """
-    drivers: dict[str, tuple[str, asyncio.Task[None]]] = {}
-
-    def forget(driver_id: str, task: asyncio.Task[None]) -> None:
-        # Only this run's entry: a restart has already put its successor there.
-        current = drivers.get(driver_id)
-        if current is not None and current[1] is task:
-            del drivers[driver_id]
+    drivers: dict[str, asyncio.Task[None]] = {}
 
     try:
         async with client.announced(prefix, filter="*") as announced:
             async for event in announced:
-                # Every variant carries `announce`; uniffi's stubs type only the enum.
-                announce = event.announce  # pyright: ignore[reportAttributeAccessIssue]
-                path = announce.prefix
+                # Both variants carry `announce`; uniffi's stubs type only the enum.
+                path = event.announce.prefix  # pyright: ignore[reportAttributeAccessIssue]
                 driver_id = path.removeprefix(prefix + "/")
                 # The filter admits one segment below the prefix; anything else
                 # is a route that only overlaps it, not a driver's broadcast.
                 if driver_id == path or not driver_id or "/" in driver_id:
                     continue
-                instance = announce.route.instance
-                current = drivers.get(driver_id)
-                if isinstance(event, moq.AnnounceEventEnd):
-                    if current is not None:
-                        del drivers[driver_id]
-                        current[1].cancel()
+                if isinstance(event, moq.AnnounceEventAbsent):
+                    task = drivers.pop(driver_id, None)
+                    if task is not None:
+                        task.cancel()
                     continue
-                if current is not None:
-                    # Same run: the route only changed hops or cost.
-                    if current[0] == instance and not isinstance(event, moq.AnnounceEventRestart):
-                        continue
-                    current[1].cancel()
-                task = asyncio.create_task(
-                    _pump_driver(driver_id, instance, client, path, commands),
+                drivers[driver_id] = asyncio.create_task(
+                    _follow_driver(driver_id, client, path, commands),
                     name=f"driver:{driver_id}",
                 )
-                drivers[driver_id] = (instance, task)
-                task.add_done_callback(lambda task, driver_id=driver_id: forget(driver_id, task))
     finally:
-        for _, task in drivers.values():
+        for task in drivers.values():
             task.cancel()
+
+
+# Names each driver run for the lease. The bindings hand out a run's broadcast
+# without its route instance, and a process-wide count keeps a run's late
+# `driver_left` from releasing a later run of the same driver.
+_runs = itertools.count(1)
+
+
+async def _follow_driver(
+    driver_id: str,
+    client: moq.Client,
+    path: str,
+    commands: asyncio.Queue[Command],
+) -> None:
+    """Pump each run of one driver in turn, ending a run once another takes over."""
+    run: asyncio.Task[None] | None = None
+    try:
+        async with client.follow(path) as following:
+            while True:
+                broadcast = await following.available()
+                if run is not None:
+                    run.cancel()
+                instance = str(next(_runs))
+                run = asyncio.create_task(
+                    _pump_driver(driver_id, instance, broadcast, commands),
+                    name=f"driver:{driver_id}:{instance}",
+                )
+    # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
+    except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
+        log.info("driver %s follow ended: %s", driver_id, err)
+    finally:
+        if run is not None:
+            run.cancel()
 
 
 async def _pump_driver(
     driver_id: str,
     instance: str,
-    client: moq.Client,
-    path: str,
+    broadcast: moq.BroadcastConsumer,
     commands: asyncio.Queue[Command],
 ) -> None:
     """Feed one driver run's `control` track into the command queue.
@@ -357,11 +374,8 @@ async def _pump_driver(
     Always emits `driver_left` on the way out, however it leaves, so the gate
     releases a lease even when the track ends abnormally.
     """
-    log.info("driver %s connected (instance %s)", driver_id, instance)
+    log.info("driver %s connected (run %s)", driver_id, instance)
     try:
-        # Pinned to this run, so a newer one that took over before its own
-        # announcement cancels this task is never read under this run's lease.
-        broadcast = await client.request(path, instance=instance)
         control = moq.json.SnapshotConsumer(await broadcast.subscribe_track("control"))
         async for message in control:
             command = parse_command(driver_id, message.value, instance)
@@ -371,7 +385,7 @@ async def _pump_driver(
     except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
         log.info("driver %s track ended: %s", driver_id, err)
     finally:
-        log.info("driver %s disconnected (instance %s)", driver_id, instance)
+        log.info("driver %s disconnected (run %s)", driver_id, instance)
         await commands.put(Command(kind="driver_left", driver_id=driver_id, instance=instance))
 
 

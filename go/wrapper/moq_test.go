@@ -1539,7 +1539,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := nextRoute(t, ctx, announced)
-	if retracted, ok := event.(moq.AnnounceEventEnd); !ok || retracted.Announce.Prefix != "live" {
+	if retracted, ok := event.(moq.AnnounceEventAbsent); !ok || retracted.Announce.Prefix != "live" {
 		t.Fatalf("unannounce: event=%+v", event)
 	}
 	if _, err := consumer.Request(ctx, "live", nil); err == nil {
@@ -1662,18 +1662,24 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
-// A broadcast mints its own instance and keeps it across re-announcing; another
-// instance is another stream and restarts announce consumers.
-func TestAnnouncedInstanceRestarts(t *testing.T) {
+// A broadcast mints its own instance and keeps it across re-announcing. Another
+// instance keeps the path present in the listing and reaches only followers.
+func TestInstanceChangeReachesFollowers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	announced, err := origin.Consume().Announced(moq.AnnounceOptions{})
+	consumer := origin.Consume()
+	announced, err := consumer.Announced(moq.AnnounceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer announced.Cancel()
+	following, err := consumer.Follow("instance", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer following.Cancel()
 
 	publication, err := origin.CreateBroadcast("instance")
 	if err != nil {
@@ -1684,24 +1690,30 @@ func TestAnnouncedInstanceRestarts(t *testing.T) {
 	}
 	minted := nextAnnounced(t, ctx, announced).Route.Instance
 	if minted == "" {
-		t.Fatal("start instance is empty, want a minted one")
+		t.Fatal("present instance is empty, want a minted one")
+	}
+	if _, err := following.Available(ctx); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := publication.Announce(moq.AnnounceRoute{Cost: 1}); err != nil {
 		t.Fatal(err)
 	}
-	update, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventUpdate)
-	if !ok || update.Announce.Route.Instance != minted {
-		t.Fatalf("update = %+v, want instance %s", update, minted)
-	}
-
 	stable := "cam"
 	if err := publication.Announce(moq.AnnounceRoute{Instance: &stable, Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)
-	if !ok || restart.Announce.Route.Instance != stable {
-		t.Fatalf("restart = %+v, want instance %s", restart, stable)
+	if _, err := following.Available(ctx); err != nil {
+		t.Fatalf("follow after the instance change: %v", err)
+	}
+
+	// The listing's next event is the absence, so neither re-announce reached it.
+	if err := publication.Unannounce(); err != nil {
+		t.Fatal(err)
+	}
+	event := nextRoute(t, ctx, announced)
+	if absent, ok := event.(moq.AnnounceEventAbsent); !ok || absent.Announce.Route.Instance != stable {
+		t.Fatalf("event = %+v, want absent with instance %s", event, stable)
 	}
 
 	empty := ""
@@ -1724,12 +1736,12 @@ func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsume
 	return event
 }
 
-// nextAnnounced returns the next newly announced route.
+// nextAnnounced returns the route of the next path to become present.
 func nextAnnounced(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.Announce {
 	t.Helper()
 
 	event := nextRoute(t, ctx, announced)
-	announcedEvent, ok := event.(moq.AnnounceEventStart)
+	announcedEvent, ok := event.(moq.AnnounceEventPresent)
 	if !ok {
 		t.Fatalf("expected an announcement, got %+v", event)
 	}

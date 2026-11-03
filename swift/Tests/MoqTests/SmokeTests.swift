@@ -206,13 +206,13 @@ final class SmokeTests: XCTestCase {
 
         try publication.announce()
         let announced = try consumer.announced(prefix: "")
-        guard case .start(let first) = try await nextRoute(announced) else {
+        guard case .present(let first) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
 
         try publication.unannounce()
-        guard case .end(let retracted) = try await nextRoute(announced) else {
+        guard case .absent(let retracted) = try await nextRoute(announced) else {
             return XCTFail("expected a retraction")
         }
         XCTAssertEqual(retracted.prefix, "live")
@@ -222,7 +222,7 @@ final class SmokeTests: XCTestCase {
         } catch {}
 
         try publication.announce()
-        guard case .start = try await nextRoute(announced) else {
+        guard case .present = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
         _ = try await consumer.request(path: "live")
@@ -275,35 +275,43 @@ final class SmokeTests: XCTestCase {
         let chat = try origin.createBroadcast(path: "room/alice/chat")
         try chat.announce()
 
-        guard case .start(let update) = try await nextRoute(announced) else {
+        guard case .present(let update) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(update.prefix, "room/alice/chat")
         XCTAssertEqual(update.captures, ["alice"])
     }
 
-    func testAnnouncedInstanceRestarts() async throws {
+    func testNewInstanceRestartsFollowersButStaysListed() async throws {
         let origin = OriginProducer()
-        let announced = try origin.consume().announced(prefix: "")
+        let consumer = origin.consume()
+        let announced = try consumer.announced(prefix: "")
+        let following = try consumer.follow(path: "instance")
         let publication = try origin.createBroadcast(path: "instance")
 
         try publication.announce(route: AnnounceRoute())
-        guard case .start(let start) = try await nextRoute(announced) else {
+        guard case .present(let present) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertFalse(start.route.instance.isEmpty)
+        XCTAssertFalse(present.route.instance.isEmpty)
+        _ = try await following.available()
 
         try publication.announce(route: AnnounceRoute(instance: "camera", epoch: 1))
-        guard case .restart(let restart) = try await nextRoute(announced) else {
-            return XCTFail("expected a restart")
+        _ = try await following.available()
+
+        // The takeover was not listed, so the next event is the path going absent.
+        try publication.unannounce()
+        guard case .absent(let absent) = try await nextRoute(announced) else {
+            return XCTFail("expected the path to go absent")
         }
-        XCTAssertEqual(restart.route.instance, "camera")
+        XCTAssertEqual(absent.route.instance, "camera")
 
         XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(instance: ""))) { error in
             guard case MoqError.InvalidInstance = error else {
                 return XCTFail("expected InvalidInstance, got \(error)")
             }
         }
+        following.cancel()
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {

@@ -26,9 +26,10 @@ internal constructor(
     fun createBroadcast(path: String): Publication = session.publish().createBroadcast(path)
 
     /**
-     * Discover routes matching [config]; prefixes stay relative to the origin. Collect
-     * `announced(config).updates()` for a [Flow] of [AnnounceEvent] that cancels the handle when
-     * collection ends.
+     * List the paths matching [config] as each becomes present or absent; prefixes stay relative to
+     * the origin. Collect `announced(config).updates()` for a [Flow] of [AnnounceEvent] that
+     * cancels the handle when collection ends. A new publisher instance keeps its path present, so
+     * use [follow] to see it.
      */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)

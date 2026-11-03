@@ -29,10 +29,8 @@ import moq
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            # A restart is a new publisher run at the same path: request it again. A
-            # takeover continues what an earlier route served, like a start.
-            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart, moq.AnnounceEventTakeover)):
-                continue  # AnnounceEventUpdate or AnnounceEventEnd
+            if not isinstance(event, moq.AnnounceEventPresent):
+                continue  # AnnounceEventAbsent
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
@@ -262,7 +260,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare()`, fill its `.broadcast`, then `.publish() → Publication` to serve it as a new stream under a fresh instance, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.instance` names the stream; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent` or `AnnounceEventAbsent`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
   - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then each stream that takes over; an `instance` follows only that stream)
   - `.request(path, instance=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one stream, or raises once synced without a route; an `instance` refuses any other stream)
 

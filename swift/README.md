@@ -35,14 +35,9 @@ let session = try await client.connect(to: "https://relay.example.com")
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
 for try await event in announced {
-    // `.update` reprices a route and `.end` retracts it. A `.restart` is a new
-    // publisher run at the same path: request it again. A `.takeover` continues what an
-    // earlier route served, like a `.start`.
-    let announcement: Announce
-    switch event {
-    case .start(let started), .restart(let started), .takeover(let started, _): announcement = started
-    default: continue
-    }
+    // The listing reports each path once while it stays present, even as its publisher
+    // restarts; `session.consume.follow(path:)` hands out each new run.
+    guard case .present(let announcement) = event else { continue }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
     print("captures \(announcement.captures)")

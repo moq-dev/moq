@@ -54,13 +54,9 @@ let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
-    // A restart is a new publisher run at the same path: request it again. A takeover
-    // continues what an earlier route served, like a start.
-    let announcement: Announce
-    switch event {
-    case .start(let started), .restart(let started), .takeover(let started, _): announcement = started
-    default: continue // .update or .end
-    }
+    // A path stays present across publisher restarts: hold follow(path:) to be handed each
+    // new run.
+    guard case .present(let announcement) = event else { continue }
     // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
     print(announcement.captures)
     let broadcast = try await session.consume.request(path: announcement.prefix)

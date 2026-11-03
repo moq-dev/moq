@@ -51,16 +51,18 @@ for event, err := range announced.All(ctx) {
 		log.Fatal(err)
 	}
 	switch event := event.(type) {
-	case moq.AnnounceEventStart:
+	case moq.AnnounceEventPresent:
 		// Prefix stays origin-relative; Captures reports wildcard matches.
-		fmt.Println("got broadcast", event.Announce.Prefix)
-	case moq.AnnounceEventRestart: // a new publisher run at the same path
-		fmt.Println("restarted broadcast", event.Announce.Prefix)
-	case moq.AnnounceEventTakeover: // continues what an earlier route served
-		fmt.Println("took over broadcast", event.Announce.Prefix)
+		fmt.Println("broadcast online", event.Announce.Prefix)
+	case moq.AnnounceEventAbsent:
+		fmt.Println("broadcast offline", event.Announce.Prefix)
 	}
 }
 ```
+
+The listing reports only whether each path is present. A restarted publisher or another
+instance taking the path over keeps it present: to read the broadcast across them, hold
+`client.Follow(path, nil)` and read each new instance from `Available`.
 
 ## Common APIs
 

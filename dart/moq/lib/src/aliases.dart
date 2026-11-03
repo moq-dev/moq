@@ -70,27 +70,18 @@ typedef AnnounceRoute = MoqAnnounceRoute;
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
-/// What an [AnnounceConsumer] yields: [AnnounceEventStart],
-/// [AnnounceEventUpdate], [AnnounceEventEnd], [AnnounceEventRestart], or
-/// [AnnounceEventTakeover].
+/// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or
+/// [AnnounceEventAbsent].
+///
+/// Another publisher instance taking a path over keeps it present: hold a
+/// [Following] to see the broadcast change.
 typedef AnnounceEvent = MoqAnnounceEvent;
 
-/// A route now covers the prefix; the stream had none there.
-typedef AnnounceEventStart = StartMoqAnnounceEvent;
+/// A route now covers the path, which was absent.
+typedef AnnounceEventPresent = PresentMoqAnnounceEvent;
 
-/// The route covering the prefix changed hops or cost.
-typedef AnnounceEventUpdate = UpdateMoqAnnounceEvent;
-
-/// No route covers the prefix any more; carries its last route.
-typedef AnnounceEventEnd = EndMoqAnnounceEvent;
-
-/// Another publisher instance now serves the prefix: drop what was resolved
-/// under it and request afresh.
-typedef AnnounceEventRestart = RestartMoqAnnounceEvent;
-
-/// A route now covers the prefix and continues what the route at `predecessor`
-/// served beneath it: keep what was resolved through that one.
-typedef AnnounceEventTakeover = TakeoverMoqAnnounceEvent;
+/// No route covers the path any more; carries its last route.
+typedef AnnounceEventAbsent = AbsentMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;

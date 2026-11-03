@@ -33,7 +33,7 @@ func ExampleClient_Announced() {
 			}
 			log.Fatal(err)
 		}
-		if event, ok := event.(moq.AnnounceEventStart); ok {
+		if event, ok := event.(moq.AnnounceEventPresent); ok {
 			fmt.Println("broadcast:", event.Announce.Prefix)
 		}
 	}

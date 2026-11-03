@@ -364,7 +364,7 @@ static void on_finish_announce(void *ud, int32_t event) {
     if (read < 0) c->finish.failed = 1;
     else if (info.prefix_len == strlen(c->finish.path) &&
              memcmp(info.prefix, c->finish.path, info.prefix_len) == 0 &&
-             info.kind == MOQ_ANNOUNCE_KIND_END) c->finish.announce_end = 1;
+             info.kind == MOQ_ANNOUNCE_KIND_ABSENT) c->finish.announce_end = 1;
     pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&c->mu);
     moq_origin_announced_free((uint32_t)event);

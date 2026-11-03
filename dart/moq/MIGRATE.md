@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing
+
+`announced(...).updates()` yields `AnnounceEventPresent` when a path becomes present and `AnnounceEventAbsent` when it goes, each carrying an `Announce`.
+`AnnounceEventStart` is `AnnounceEventPresent` and `AnnounceEventEnd` is `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path)` instead; each `available()` returns the next instance's broadcast.
+
+```dart
+final following = moq.follow('live/camera');
+while (true) {
+  play(await following.available());
+}
+```
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `List<String>` instead of `List<String>?`. Remove null checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild with the matching native library.

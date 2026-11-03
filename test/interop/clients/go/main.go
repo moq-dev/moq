@@ -12,7 +12,7 @@
 //	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang --tone 440,660
 //	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20 --audio-out /tmp/audio --audio-ms 600
 //
-// --finish verifies a finite tail, natural media/catalog EOF, announcement END, and
+// --finish verifies a finite tail, natural media/catalog EOF, the announcement going absent, and
 // same-session health; --frames sets its exact size. --finish-ack selects publisher
 // finish mode and names the FIFO releasing teardown after the real linger.
 // --version offers only that version. --grant waits for the grant the relay sends
@@ -383,29 +383,26 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 			break
 		}
 	}
-	started := false
+	present := false
 	for {
 		event, err := announcements.Next(ctx)
 		if err != nil {
 			return err
 		}
 		if event == nil {
-			return errors.New("announcement stream ended before broadcast END")
+			return errors.New("announcement stream ended before the broadcast went absent")
 		}
-		if start, ok := event.(moq.AnnounceEventStart); ok && start.Announce.Prefix == broadcast {
-			started = true
+		if added, ok := event.(moq.AnnounceEventPresent); ok && added.Announce.Prefix == broadcast {
+			present = true
 		}
-		if restart, ok := event.(moq.AnnounceEventRestart); ok && restart.Announce.Prefix == broadcast {
-			return errors.New("broadcast restarted during finish")
-		}
-		if end, ok := event.(moq.AnnounceEventEnd); ok && end.Announce.Prefix == broadcast {
-			if !started {
-				return errors.New("broadcast ended without announcement")
+		if removed, ok := event.(moq.AnnounceEventAbsent); ok && removed.Announce.Prefix == broadcast {
+			if !present {
+				return errors.New("broadcast went absent without being present")
 			}
 			break
 		}
 	}
-	healthAnnounced, err := client.Follow(broadcast + ".health", nil)
+	healthAnnounced, err := client.Follow(broadcast+".health", nil)
 	if err != nil {
 		return err
 	}

@@ -62,8 +62,9 @@ public typealias Route = MoqFFI.MoqRoute
 /// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.
 /// Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
-/// What an `AnnounceConsumer` yields: `.start`, `.update`, `.end`, or
-/// `.restart` (request the path again), each carrying an `Announce`.
+/// What an `AnnounceConsumer` yields: `.present` or `.absent`, each carrying an
+/// `Announce`. Another publisher instance taking a path over keeps it present:
+/// hold a `Following` to see the broadcast change.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, latency budget, the ranges
 /// of the track to deliver, and group ordering.

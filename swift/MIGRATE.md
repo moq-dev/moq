@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing
+
+`AnnounceConsumer` yields `.present` when a path becomes present and `.absent` when it goes, each carrying an `Announce`.
+`.start` is `.present` and `.end` is `.absent`.
+`.update`, `.restart`, and `.takeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path:)` instead; each `available()` returns the next instance's broadcast.
+
+```swift
+let following = try session.consume.follow(path: "live/camera")
+while true {
+    play(try await following.available())
+}
+```
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `[String]` instead of `[String]?`. Remove optional checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Rebuild with the matching MoqFFI package and native library.

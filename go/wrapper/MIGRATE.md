@@ -4,6 +4,28 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing
+
+`AnnounceConsumer` yields only `AnnounceEventPresent`, when a route now covers a path that was absent, and `AnnounceEventAbsent`, when none does any more.
+Rename `AnnounceEventStart` to `AnnounceEventPresent` and `AnnounceEventEnd` to `AnnounceEventAbsent`.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` with its `Predecessor` are gone: a route changing cost or hops, a restarted publisher, and a takeover all keep the path present and report nothing.
+Instead of requesting the path again on a restart, hold `Follow` and read each new publisher instance from `Available`, dropping what was read from the previous one.
+
+```go
+following, err := client.Follow(path, nil)
+if err != nil {
+	return err
+}
+defer following.Cancel()
+for {
+	broadcast, err := following.Available(ctx)
+	if err != nil {
+		return err
+	}
+	play(broadcast)
+}
+```
+
 ### `media.VideoInit` is a struct
 
 `media.VideoInit` is its own struct rather than an alias of the generated record, so its new `Lower` field takes a `*media.TrackProducer`. A composite literal with `Format`, `Data`, `Label`, and `Hint` compiles unchanged; build one that way where you converted a generated `MoqVideoInit`.

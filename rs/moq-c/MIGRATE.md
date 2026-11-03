@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.
+Another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
+Recompile callers against the regenerated `moq.h`.
+
 ### JSON window edits take an optional timestamp
 
 `moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final

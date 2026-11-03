@@ -49,12 +49,11 @@ this quest removes the predecessor machinery and grows to [XL].
   `rs/moq-net/src/model/origin.rs` and `front.rs` (the `seen` stamps in
   `OriginConsumerState` and `PendingFront::via`); relay forwarding in
   `rs/moq-relay`; and `rs/moq-net/tests/integration/announce_takeover.rs`.
-  Remove the `Takeover` event from Rust (unless
-  [Listing and follow](/quest/m1/api-audit/route/events.md) has already
-  removed the event kinds), `TAKEOVER` and the predecessor fields from
-  `MoqAnnounceEvent` in `rs/moq-ffi/src/origin.rs` and from
-  `moq_announce_event` in `rs/moq-c/src/api.rs`, and their wrapper and
-  binding-doc mentions. In `js/net`, drop the ANNOUNCE_TAKEOVER decoding in
+  Remove `RouteEvent::Takeover` from the relay-level `routes()` stream
+  (`rs/moq-net/src/model/origin.rs`, and its folds in `follow.rs`,
+  `announced.rs` and the session publishers); the app listing, `MoqAnnounceEvent`
+  and `moq_announce_event` dropped it already in
+  [moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678). In `js/net`, drop the ANNOUNCE_TAKEOVER decoding in
   `lite/announce.ts` and `lite/subscriber.ts`. Remove the takeover sections
   from `drafts/draft-lcurley-moq-lite.md`, `doc/concept/identity.md` and
   `doc/concept/moq-lite.md`.
@@ -148,7 +147,6 @@ beyond [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)'s fields.
 
 ## Related
 
-- [Listing and follow](/quest/m1/api-audit/route/events.md) - continuity shows up inside `follow`, not as an event
 - [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - why a restarted job must never be stitched to its predecessor
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - replacements never substitute content into held handles
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout carries the instance

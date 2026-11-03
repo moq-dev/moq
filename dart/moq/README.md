@@ -10,16 +10,14 @@ final announced = connection.announced(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
 );
 await for (final event in announced.updates()) {
-  // A restart is a new publisher run at the same path: request it again. A takeover
-  // continues what an earlier route served, like a start.
+  // The listing reports each path once while it stays present, even as its
+  // publisher restarts; `connection.follow(path)` hands out each new run.
   switch (event) {
-    case AnnounceEventStart(:final announce) ||
-        AnnounceEventRestart(:final announce) ||
-        AnnounceEventTakeover(:final announce):
+    case AnnounceEventPresent(:final announce):
       // Prefix stays origin-relative; captures reports wildcard matches.
       print(announce.prefix);
       print(announce.captures);
-    default:
+    case AnnounceEventAbsent():
   }
 }
 ```

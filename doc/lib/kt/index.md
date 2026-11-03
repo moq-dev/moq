@@ -53,13 +53,11 @@ import dev.moq.media.*
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = listOf("ca.pem")))).use { moq ->
     moq.announced(AnnounceConfig(prefix = "live/", filter = "*/camera")).updates().collect { event ->
-        // A restart is a new publisher run at the same path: request it again. A takeover
-        // continues what an earlier route served, like a start.
+        // A path stays present across publisher restarts: hold moq.follow(path) to be handed
+        // each new run.
         val announce = when (event) {
-            is AnnounceEventStart -> event.announce
-            is AnnounceEventRestart -> event.announce
-            is AnnounceEventTakeover -> event.announce
-            else -> return@collect // Update or End
+            is AnnounceEventPresent -> event.announce
+            is AnnounceEventAbsent -> return@collect
         }
         // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
         println(announce.captures)

@@ -221,10 +221,12 @@ final class Moq {
   Publication createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
-  /// Discover routes matching [options]; prefixes stay relative to the origin.
+  /// List the paths matching [options] as each becomes present or absent;
+  /// prefixes stay relative to the origin.
   ///
   /// Listen to `announced(...).updates()` for a [Stream] of [AnnounceEvent]
-  /// that releases the cursor when the subscription ends.
+  /// that releases the cursor when the subscription ends. A new publisher
+  /// instance keeps its path present, so use [follow] to see it.
   AnnounceConsumer announced({
     AnnounceOptions options = const AnnounceOptions(),
   }) => session.consume().announced(config: options._ffi);

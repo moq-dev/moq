@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`Announce.Event` is `{ kind: "present" | "absent" } & Announce`. Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `start`, `update`, `restart` and `end` are gone.
+Map `"start"` to `"present"` and `"end"` to `"absent"`, and drop `"update"` branches. Where you requested the path again on `"restart"`, hold `origin.follow(path)`: its `active` moves to each new instance's broadcast.
+
 ### `Subscription.maxDelay` is `delay: Track.Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `Track.Subscription` carries a `delay: Track.Delay` (`{ min?: Milli | null; max?: Milli | null }`) in place of `maxDelay`, which is now refused at runtime.

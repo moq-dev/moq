@@ -46,21 +46,13 @@ type (
 	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
 	// empty when the filter has no wildcards.
 	Announce = ffi.MoqAnnounce
-	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, AnnounceEventEnd, AnnounceEventRestart, or AnnounceEventTakeover.
+	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventPresent or AnnounceEventAbsent.
+	// Another publisher instance taking a path over keeps it present; see it with [OriginConsumer.Follow].
 	AnnounceEvent = ffi.MoqAnnounceEvent
-	// AnnounceEventStart reports a route now covering a prefix that had none.
-	AnnounceEventStart = ffi.MoqAnnounceEventStart
-	// AnnounceEventUpdate reports the route covering a prefix changing hops or cost.
-	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
-	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
-	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
-	// AnnounceEventRestart reports another publisher instance now serving a prefix:
-	// drop what was resolved under it and request afresh.
-	AnnounceEventRestart = ffi.MoqAnnounceEventRestart
-	// AnnounceEventTakeover reports a route now covering a prefix that continues what the
-	// route at Predecessor served beneath it: keep what was resolved through that one.
-	AnnounceEventTakeover = ffi.MoqAnnounceEventTakeover
+	// AnnounceEventPresent reports a route now covering a path that was absent.
+	AnnounceEventPresent = ffi.MoqAnnounceEventPresent
+	// AnnounceEventAbsent reports that no route covers a path any more, carrying its last route.
+	AnnounceEventAbsent = ffi.MoqAnnounceEventAbsent
 	// Range is a span of a track to deliver: from Start up to End, or onward when End is nil.
 	// A relative start is the first frame of its group, a relative end includes its whole
 	// group, and an absolute end is exclusive.

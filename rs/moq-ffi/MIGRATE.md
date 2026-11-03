@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`MoqAnnounceEvent` is `Present { announce }` or `Absent { announce }`. `Start`, `Update`, `End`, `Restart` and `Takeover` (with its `predecessor`) are gone: another instance taking a path over keeps it present, and a route's cost changing is not reported.
+Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Where you requested the path again on `Restart`, hold `MoqOriginConsumer::follow(path)` and await `available()` for each new instance.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `MoqAnnounce.captures` is `Vec<String>` instead of `Option<Vec<String>>`. Remove optional checks and pass an empty list when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild the matching native library together.

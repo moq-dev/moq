@@ -59,16 +59,14 @@ moq
     )
     .updates()
     .listen((event) {
-  // A restart is a new publisher run at the same path: request it again. A takeover
-  // continues what an earlier route served, like a start.
+  // A path stays present across publisher restarts: hold moq.follow(path) to be handed
+  // each new run.
   switch (event) {
-    case AnnounceEventStart(:final announce) ||
-        AnnounceEventRestart(:final announce) ||
-        AnnounceEventTakeover(:final announce):
+    case AnnounceEventPresent(:final announce):
       print(announce.prefix);
       // Captures are a list of wildcard matches, empty without wildcards.
       print(announce.captures);
-    default:
+    case AnnounceEventAbsent():
   }
 });
 // Wait for a publisher at one path; call available() again for the next one.

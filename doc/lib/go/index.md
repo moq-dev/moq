@@ -66,17 +66,13 @@ for event, err := range announced.All(ctx) {
         if moq.IsShutdown(err) { break }
         log.Fatal(err)
     }
-    var ann moq.Announce
-    switch event := event.(type) {
-    case moq.AnnounceEventStart:
-        ann = event.Announce
-    case moq.AnnounceEventRestart: // a new publisher run at the same path: request it again
-        ann = event.Announce
-    case moq.AnnounceEventTakeover: // continues what an earlier route served, like a start
-        ann = event.Announce
-    default:
-        continue // AnnounceEventUpdate or AnnounceEventEnd
+    // A path stays present across publisher restarts: hold client.Follow(path, nil) to be
+    // handed each new run.
+    present, ok := event.(moq.AnnounceEventPresent)
+    if !ok {
+        continue // AnnounceEventAbsent
     }
+    ann := present.Announce
     // Prefix stays origin-relative; Captures is a list, empty without wildcards.
     fmt.Printf("captures: %v\n", ann.Captures)
     broadcast, err := client.Request(ctx, ann.Prefix, nil)

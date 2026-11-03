@@ -14,9 +14,9 @@ async def run(url: str, prefix: str, insecure: bool) -> None:
     async with moq.Client(url, tls=moq.ClientTls(insecure=insecure)) as client:
         print(f"watching route announcements under {prefix!r} at {url}")
         async for event in client.announced(prefix):
-            if isinstance(event, moq.AnnounceEventStart):
+            if isinstance(event, moq.AnnounceEventPresent):
                 print(f"  + {event.announce.prefix}")
-            elif isinstance(event, moq.AnnounceEventEnd):
+            elif isinstance(event, moq.AnnounceEventAbsent):
                 print(f"  - {event.announce.prefix}")
 
 

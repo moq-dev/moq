@@ -146,8 +146,10 @@ public final class OriginConsumer: Sendable {
         self.ffi = ffi
     }
 
-    /// Stream routes under a literal prefix matching an optional pattern filter.
-    /// Paths with a segment starting with `.` below the prefix are left out unless `hidden`.
+    /// List the paths under a literal prefix matching an optional pattern filter, as each
+    /// becomes present or absent. A new publisher instance keeps its path present, so use
+    /// `follow` to see it. Paths with a segment starting with `.` below the prefix are left
+    /// out unless `hidden`.
     public func announced(prefix: String = "", filter: String? = nil, hidden: Bool = false) throws -> AnnounceConsumer {
         AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter, hidden: hidden)))
     }
@@ -168,7 +170,7 @@ public final class OriginConsumer: Sendable {
     }
 }
 
-/// A stream of announce events. Iterate directly:
+/// A listing of paths as each becomes present or absent. Iterate directly:
 /// `for try await event in announced { ... }`.
 /// The sequence ends when the origin closes; cancelling the consuming task
 /// cancels the subscription.
@@ -218,7 +220,7 @@ public final class Following: Sendable {
         BroadcastConsumer(try await ffi.available())
     }
 
-    /// Cancel the pending `available()` call.
+    /// Cancel all current and future `available()` calls.
     public func cancel() {
         ffi.cancel()
     }

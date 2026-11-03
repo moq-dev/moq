@@ -33,27 +33,18 @@ each broadcast's exact path, so subscribers can enumerate broadcasts from routes
 """
 
 AnnounceEvent = MoqAnnounceEvent
-"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventStart`,
-:data:`AnnounceEventUpdate`, :data:`AnnounceEventEnd`, :data:`AnnounceEventRestart`,
-or :data:`AnnounceEventTakeover`, each carrying an :data:`Announce` as ``announce``.
+"""What :class:`AnnounceConsumer` yields: :data:`AnnounceEventPresent` or
+:data:`AnnounceEventAbsent`, each carrying an :data:`Announce` as ``announce``.
+
+Another publisher instance taking a path over keeps it present; hold
+:meth:`OriginConsumer.follow` to see the broadcast change.
 """
 
-AnnounceEventStart = MoqAnnounceEvent.START
-"""A route now covers the prefix; the stream had none there."""
+AnnounceEventPresent = MoqAnnounceEvent.PRESENT
+"""A route now covers the path, which was absent."""
 
-AnnounceEventUpdate = MoqAnnounceEvent.UPDATE
-"""The route covering the prefix changed hops or cost."""
-
-AnnounceEventEnd = MoqAnnounceEvent.END
-"""No route covers the prefix any more; carries its last route."""
-
-AnnounceEventRestart = MoqAnnounceEvent.RESTART
-"""Another publisher instance now serves the prefix: drop what was resolved under
-it and request afresh."""
-
-AnnounceEventTakeover = MoqAnnounceEvent.TAKEOVER
-"""A route now covers the prefix and continues what the route at ``predecessor``
-served beneath it: keep what was resolved through that one."""
+AnnounceEventAbsent = MoqAnnounceEvent.ABSENT
+"""No route covers the path any more; carries its last route."""
 
 
 class AnnounceConsumer(_Stream[MoqAnnounceEvent]):
