@@ -1080,8 +1080,10 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// The caller creates the track on the broadcast, as it does for a media track; this writes its
 	/// catalog entry and removes the entry when the returned handle drops. The catalog key is
-	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with
-	/// [`compress`](moq_net::track::Info::compress) set: JSON is small and repetitive.
+	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with a
+	/// [`timescale`](moq_net::track::Info::timescale), since every write is stamped on the
+	/// broadcast clock, and with [`compress`](moq_net::track::Info::compress) set: JSON is small and
+	/// repetitive.
 	///
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
@@ -1093,8 +1095,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
-	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
-	/// references another broadcast.
+	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, if the entry
+	/// references another broadcast, or with [`moq_net::Error::TimestampMismatch`] if `track` has no
+	/// timescale.
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,

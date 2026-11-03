@@ -2555,6 +2555,35 @@ mod tests {
 		);
 	}
 
+	/// A bounded feed goes live at its answer alone only when its resolved ranges stop short
+	/// of Largest. One that serves Largest waits for it, so a finite read judges an old
+	/// cached group against that edge rather than against itself.
+	#[kio::test]
+	async fn a_bounded_feed_goes_live_ahead_only_without_largest() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let largest = Some(Position::group(10));
+		active.ranges = vec![lite::Range::span(Some(0), 0, Some(10), None)];
+		active.served = Some(0);
+		active.starts = vec![Some(0)];
+		assert_eq!(active.never_serves(largest), None, "group 10 is in 0..11");
+
+		active.ranges = vec![lite::Range::span(Some(0), 0, Some(3), None)];
+		assert_eq!(active.never_serves(largest), largest, "0..4 never reaches group 10");
+
+		active.ranges.push(lite::Range::span(Some(10), 0, Some(12), None));
+		active.starts = vec![Some(0), Some(10)];
+		assert_eq!(active.never_serves(largest), None, "a later range serves it");
+		active.starts[1] = None;
+		assert_eq!(active.never_serves(largest), largest, "that range served nothing");
+
+		active.ranges[1].end = None;
+		assert_eq!(active.never_serves(largest), None, "an open feed reaches it");
+		assert_eq!(active.never_serves(None), None, "nothing to go live at");
+	}
+
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
 	/// A fetch held for group 1 keeps waiting through the grace and is served when it lands.
 	#[kio::test]
@@ -7578,6 +7607,19 @@ impl SubStream {
 		Some(start..end)
 	}
 
+	/// `largest`, when this bounded subscription's ranges, as SUBSCRIBE_START resolved them,
+	/// stop short of it, so the feed never delivers it. The range and arrival ledger then wait
+	/// for the groups it owes instead of an edge outside the requested history. A feed that
+	/// serves Largest waits for it, so an old cache is judged against that edge.
+	fn never_serves(&self, largest: Option<Position>) -> Option<Position> {
+		largest.filter(|largest| {
+			bounded(&self.ranges)
+				&& self
+					.covered()
+					.is_none_or(|spans| !spans.iter().any(|span| span.contains(&largest.group)))
+		})
+	}
+
 	/// The groups the publisher owed once it FINs a covered bounded lite-07 subscription
 	/// without SUBSCRIBE_END: each range from its absolute start, or else from where
 	/// SUBSCRIBE_START resolved delivery, up to its end. Groups below SUBSCRIBE_START were
@@ -7847,7 +7889,7 @@ impl Announced {
 				// `NotFound`. Accepted before the push, so the requester holds the source
 				// before its serve machine can see it unheld.
 				let dynamic = source.requests();
-				request.accept(&source);
+				request.serve(&source);
 				let _ = subscriber.sources.try_push(MintedSource {
 					path,
 					instance: entry.route.instance.clone(),
@@ -9585,9 +9627,16 @@ impl ServeLoop {
 										}
 										// No range starting anywhere leaves nothing owed.
 										let served = start.starts.iter().flatten().min().copied();
+										active.served = served;
+										active.starts = start.starts.clone();
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
-											self.serving.set_live(start.largest, served);
+											// A bounded feed that never delivers Largest goes live at the
+											// answer alone; one that does waits for it to show.
+											match active.never_serves(start.largest) {
+												Some(largest) => self.serving.set_live_ahead(largest, served),
+												None => self.serving.set_live(start.largest, served),
+											}
 											if let Some(largest) = start.largest {
 												self.serving.report_largest(largest);
 											}
@@ -9608,8 +9657,6 @@ impl ServeLoop {
 												_ => self.serving.start_at(served),
 											};
 										}
-										active.served = served;
-										active.starts = start.starts.clone();
 										// The groups the SUBSCRIBE asked for below it are not
 										// waited for, whatever the demand asks later. One that
 										// still arrives is delivered, so they are not dropped.

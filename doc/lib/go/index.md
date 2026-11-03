@@ -19,10 +19,10 @@ and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast we
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps are exact
 `moq.Timestamp` records (`Value` at `Scale` units per second), so a 90 kHz tick survives a read and republish;
 `TimestampFromDuration` converts exactly; `TimestampToDuration` rounds down to a whole nanosecond.
-A missing data timestamp stays untimed; the library never substitutes zero or now.
+A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
 `TrackInfo.Compress` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
-The JSON producers' `Update` / `Append` take a final `*moq.Timestamp` argument (`nil` for untimed).
+The JSON producers' `Update`, `Append`, `Push`, and `Pop` take a final `moq.Timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
 skips to the newest state where `Next` yields each one. A read timestamp is at the track's timescale.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.

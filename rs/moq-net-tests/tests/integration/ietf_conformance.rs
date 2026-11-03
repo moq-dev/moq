@@ -32,7 +32,7 @@ async fn routing(version: &str, cluster: bool) {
 	kio::clock::sim::spawn(async move {
 		let request = serving.requested_broadcast().await.unwrap();
 		assert_eq!(request.path().as_str(), NAMESPACE);
-		moq_net::fuzz::accept(request, answer);
+		request.serve(answer);
 	});
 
 	let mut options = MockConnectOptions::new(version);

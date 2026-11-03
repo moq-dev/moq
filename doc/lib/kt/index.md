@@ -17,7 +17,8 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 / `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
 `CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
 Publish JSON tracks with `TrackInfo(compress = true)`; a `dev.moq.json` consumer reads one with no option of its own.
-A missing data timestamp stays untimed; the library never substitutes zero or now.
+A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
+`SnapshotProducer.update`, `StreamProducer.append`, and `WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `dev.moq.json` consumers' `values()` emits `Value` (`value`, `timestamp`) and `valuesAs<T>()` emits `Timed<T>`;
 a snapshot consumer yields each state in order, and `latest()` skips to the newest.
 A `Timestamp(value, scale)` is exact and reads back at the track's timescale, so a 90 kHz tick republishes unchanged.
