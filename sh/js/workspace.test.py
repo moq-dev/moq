@@ -53,12 +53,13 @@ class SelectionTest(unittest.TestCase):
     def test_dispatcher_passes_only_js_impact_paths(self):
         sh = self.root / "sh"
         shutil.copy(selector.ROOT / "sh/dispatch.sh", sh / "dispatch.sh")
+        shutil.copy(selector.ROOT / "sh/quest.sh", sh / "quest.sh")
         changed = sh / "changed.sh"
         changed.write_text("#!/bin/sh\nprintf '%s\\n' js/auth/src/token.ts demo/pub/worker.ts quest/unrelated.md\n")
         changed.chmod(0o755)
         tools = self.root / "tools"
         tools.mkdir()
-        for command in ("bun", "quest", "nixfmt", "taplo"):
+        for command in ("bun", "nix", "nixfmt", "taplo"):
             stub = tools / command
             stub.write_text("#!/bin/sh\nexit 0\n")
             stub.chmod(0o755)
