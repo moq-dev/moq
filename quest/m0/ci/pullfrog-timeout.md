@@ -8,7 +8,12 @@ with its effective effort and duration recorded as evidence.
 ## Plan
 
 Decided 2026-10-31 (user, /quest-plan): use the recommended effort-first
-budget. The workflow now requests `effort: medium` and explicitly retains
+budget. Reconfirmed 2026-11-03 (user, /quest-spawn implementation brief):
+apply that configuration, publish the attempt, keep unavailable medium-effort
+runtime proof as explicit Waiting, and do not raise timeouts without the
+required evidence or dispatch online validation.
+
+The workflow now requests `effort: medium` and explicitly retains
 `timeout: 1h` in the action's allowed `with:` block. Do not raise the limit
 without medium-effort evidence from the largest recent PRs. GitHub's
 unchanged default job limit is 360 minutes.
@@ -59,11 +64,13 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- Pullfrog: effective medium effort is unavailable on the current OSS proxy
-  route because the pinned action forces high effort. Recommended: resolve
-  that upstream constraint before considering a larger timeout; changing
-  provider or funding policy needs a maintainer decision. Confirm in the
-  action source and effective-effort log, without dispatching a validation run.
+- Maintainer: choose how to make the effort input effective on the current
+  OSS proxy route, where the pinned action forces high effort. Recommended:
+  request upstream support for the input; alternative: choose a different
+  provider or funding route. No upstream request has been filed by this
+  attempt. Keep this PR draft pending that decision, then confirm the chosen
+  path in action source and effective-effort logs without dispatching a
+  validation run. Do not increase the timeout without the required evidence.
 - moq-dev/moq: an existing review of a large recent PR must demonstrate the
   effective effort requested by this workflow and finish inside one hour.
   Record its URL and `Run agent` duration before closing this quest. No such
