@@ -55,8 +55,8 @@ Decided with the maintainer on 2026-10-20:
   the next breaking release. Their rung disable needs the target and native
   probing, not padding.
 - Padding is browser-only (WebTransport in `js/net`). moq-quic with BBR3 is
-  the only native backend with a probing hook; other native backends (iroh
-  on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
+  the only native backend with a probing hook; moq-quic under CUBIC
+  has no sender, keep `Report`, and never
   disable a rung. lite-07 reserves its stream
   type before the cut (Padding Stream 0x2), and
   the sender stays here.
