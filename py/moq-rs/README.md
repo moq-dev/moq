@@ -229,7 +229,8 @@ on the broadcast clock, read with `media.CatalogProducer.now()`, so their track 
 A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
-Omitting time leaves data untimed; choose the track's `timescale` to match. Publish JSON tracks with
+A raw frame may omit its timestamp on an untimed track, but every JSON write takes one on the
+broadcast clock. Publish JSON tracks with
 `TrackInfo(compress=True)`: the track compresses each group on the wire, and consumers read it the
 same either way. Opaque bytes go on a plain `TrackProducer`.
 

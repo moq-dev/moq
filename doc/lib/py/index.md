@@ -24,7 +24,7 @@ so a raw byte stream needs no other importer.
 `ContainerFormat.FMP4` splits each fragment into one frame per sample.
 Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz tick survives a read and republish.
 `Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
-A missing data timestamp stays untimed; the library never substitutes zero or now.
+A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
 and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
