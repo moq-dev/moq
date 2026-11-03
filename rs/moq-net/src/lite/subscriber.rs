@@ -1,6 +1,6 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
-use crate::{frame, group, origin, track};
+use crate::{datagram, frame, group, origin, track};
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap},
 	sync::{Arc, atomic},
@@ -71,6 +71,9 @@ pub(super) struct Subscriber {
 	// local and is never written into a hop chain.
 	session_origin: crate::Hop,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
+	/// The datagram tracks subscribed upstream, by Subscribe ID, once their datagrams can be
+	/// read.
+	datagrams: Lock<HashMap<u64, DatagramEntry>>,
 	/// Why this session ended, once it has. A track still waiting on TRACK_INFO has no
 	/// copy in [`Self::subscribes`], so dropping its request reads this instead of
 	/// becoming [`Error::Dropped`].
@@ -131,6 +134,13 @@ impl Minted {
 			minted.remove(path);
 		}
 	}
+}
+
+/// A datagram track subscribed upstream, whose datagrams the session routes to it.
+struct DatagramEntry {
+	producer: datagram::Producer,
+	/// The units of every datagram Timestamp on the wire, or `None` when they carry none.
+	timescale: Option<Timescale>,
 }
 
 struct TrackEntry {
@@ -390,6 +400,7 @@ impl Subscriber {
 			self_origin,
 			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			subscribes: Default::default(),
+			datagrams: Default::default(),
 			ended: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
@@ -828,75 +839,35 @@ impl Subscriber {
 		self.subscribes.lock().remove(&id);
 	}
 
-	/// Decode one datagram body and hand it to the matching subscription's producer.
+	/// Decode one datagram body and hand it to the datagram track it was sent for.
+	///
+	/// Only a datagram track's subscription takes datagrams: a stream track's drops a
+	/// lite-05/06 group datagram, as does an unknown subscription or one not yet answered.
 	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		if payload.len() > lite::Datagram::MAX_SIZE {
 			return Ok(());
 		}
-		// Write through the map rather than cloning the entry out: a `TrackEntry` clone
-		// is a handful of atomic bumps on every datagram, and a producer held past its
-		// removal would keep the track (its cached groups, its stats subscription) alive.
-		// The group path already writes to a producer under this lock.
-		// Its framing is unknown until the peer's SETUP says whether the `ietf` extension is
-		// negotiated, and a best-effort datagram is not worth waiting for.
-		let Some(ietf) = self.peer_setup.ietf() else {
-			return Ok(());
-		};
-		let mut subscribes = self.subscribes.lock();
-		// An unknown subscription's datagram is dropped below, however it parses.
-		let Some(dg) = lite::Datagram::decode(payload, self.version, ietf, |id| {
-			subscribes
-				.get(&id)
-				.and_then(|entry| entry.copy.as_ref())
-				.map(|copy| copy.framing)
-				.unwrap_or_default()
+		let mut datagrams = self.datagrams.lock();
+		let Some(dg) = lite::Datagram::decode(payload, self.version, |id| {
+			datagrams.get(&id).is_some_and(|entry| entry.timescale.is_some())
 		})?
 		else {
 			return Ok(());
 		};
-		// Unknown or already-closed subscription, or one whose TRACK_INFO has not landed
-		// yet, which a datagram cannot wait for: drop the datagram.
-		let Some(TrackEntry {
-			copy: Some(Accepted { producer, framing }),
-			tail,
-			..
-		}) = subscribes.get_mut(&dg.subscribe)
-		else {
+		let Some(entry) = datagrams.get_mut(&dg.subscribe) else {
 			return Ok(());
 		};
-
 		let timestamp = dg
 			.timestamp
-			.zip(framing.timescale)
+			.zip(entry.timescale)
 			.map(|(value, scale)| Timestamp::new(value, scale))
 			.transpose()
 			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-
-		// A datagram is never owed a stream, so it never holds the subscription's end open.
-		if let Ok(mut tail) = tail.write() {
-			tail.account(dg.sequence..dg.sequence.saturating_add(1), self.runtime.now());
-		}
-		// A datagram says where the live feed is as well as a group does. Inserted first, so
-		// the copy goes live with it already showing.
-		let live = producer.is_live();
-		let datagram = crate::model::datagram::Stored {
-			datagram: crate::Datagram {
-				sequence: dg.sequence,
-				timestamp,
-				payload: dg.payload,
-			},
-			wire: dg.ietf.flatten().map(Arc::new),
-			deflated: None,
-		};
-		match dg.inflated {
-			Some(size) => producer.insert_deflated_datagram(datagram, size)?,
-			None => producer.insert_wire_datagram(datagram)?,
-		}
-		// A datagram-only feed may never answer with SUBSCRIBE_START, which waits for a group.
-		if !live {
-			producer.set_live(Some(Position::group(dg.sequence)), None);
-		}
-		Ok(())
+		entry.producer.insert(crate::Datagram {
+			sequence: dg.sequence,
+			timestamp,
+			payload: dg.payload,
+		})
 	}
 
 	fn log_path<'a>(&'a self, path: &'a Path) -> crate::path::Rooted<'a> {
@@ -910,7 +881,7 @@ impl Subscriber {
 // Owns the active subscriptions for exactly as long as the driver. A dropped
 // driver is how a cancelled session unwinds, so cleanup cannot depend on any
 // poll returning Ready.
-struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>);
+struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>, Lock<HashMap<u64, DatagramEntry>>);
 
 impl SubscriptionCleanup {
 	/// End every active subscription with the session's error. Group machines own
@@ -921,6 +892,9 @@ impl SubscriptionCleanup {
 	/// [`track::Producer::abort`] ends its readers cleanly instead. Before lite-05 the FIN
 	/// is that end, declared here at the live edge since nothing more can arrive.
 	fn abort(&self, err: &Error) {
+		for (_, entry) in self.1.lock().drain() {
+			entry.producer.abort(err.clone());
+		}
 		for (_, mut entry) in self.0.lock().drain() {
 			// A track still waiting on TRACK_INFO has no copy yet: its request rejects with
 			// the session's end instead.
@@ -977,7 +951,7 @@ impl SubscriberDriver {
 			discovery: crate::discovery::Discovery::new(&subscriber.origin, lazy, subscriber.runtime.clone()),
 			announces: kio::Tasks::new(),
 			prefixes: HashMap::new(),
-			cleanup: SubscriptionCleanup(subscriber.subscribes.clone()),
+			cleanup: SubscriptionCleanup(subscriber.subscribes.clone(), subscriber.datagrams.clone()),
 			uni: UniAccept::new(subscriber.clone(), early),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
 			datagrams: Some(DatagramRecv::new(subscriber.clone())),
@@ -2155,6 +2129,9 @@ struct SourceServe {
 	// A dedicated close-watch handle, since each pending operation needs its own.
 	closed: Transport,
 	tracks: kio::Tasks<TrackServeRun>,
+	/// Answers the datagram tracks consumers ask the source for.
+	datagram_requests: crate::broadcast::DatagramRequests,
+	datagrams: kio::Tasks<DatagramServe>,
 	// The source ended: no more track requests will arrive.
 	ended: bool,
 	/// Answers listings of the source with the peer's TRACKS.
@@ -2293,10 +2270,12 @@ impl SourceServe {
 			path: minted.path,
 			instance: minted.instance,
 			source: minted.source,
+			datagram_requests: minted.dynamic.datagrams(),
 			dynamic: minted.dynamic,
 			route: minted.route,
 			closed,
 			tracks: kio::Tasks::new(),
+			datagrams: kio::Tasks::new(),
 			ended: false,
 		}
 	}
@@ -2365,6 +2344,7 @@ impl kio::Task for SourceServe {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = self.tracks.poll(waiter);
+		let _ = self.datagrams.poll(waiter);
 
 		loop {
 			if self.closed.poll_closed(waiter).is_ready() {
@@ -2374,7 +2354,19 @@ impl kio::Task for SourceServe {
 			self.poll_listing(waiter);
 			if self.ended {
 				// Done once the tracks in flight are.
+				ready!(self.datagrams.poll(waiter));
 				return self.tracks.poll(waiter);
+			}
+			if let Poll::Ready(Ok(request)) = self.datagram_requests.poll_requested(waiter) {
+				let serve = DatagramServe::new(
+					self.subscriber.clone(),
+					self.path.clone(),
+					self.instance.clone(),
+					self.dynamic.validity().clone(),
+					request,
+				);
+				self.datagrams.push(serve);
+				continue;
 			}
 			match self.dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
@@ -2415,7 +2407,334 @@ impl kio::Task for SourceServe {
 
 		// Newly requested tracks start now rather than on the next wake.
 		let _ = self.tracks.poll(waiter);
+		let _ = self.datagrams.poll(waiter);
 		Poll::Pending
+	}
+}
+
+/// Serves one datagram track a consumer asked a source for: subscribes to it upstream, and
+/// keeps the subscriber priority current until nobody reads it or it ends. The session
+/// routes its datagrams by Subscribe ID (see [`Subscriber::route_datagram`]).
+///
+/// Lite-07 asks on a Datagrams Stream. Lite-05/06 carry a name's stream track and datagram
+/// track on one SUBSCRIBE, so this subscribes to the name and keeps only its group
+/// datagrams: its group streams are dropped, as for any subscription the session does not
+/// read groups for. Older versions carry no datagrams.
+struct DatagramServe {
+	subscriber: Subscriber,
+	path: Path,
+	instance: Option<crate::Instance>,
+	validity: crate::model::broadcast::RequestValidity,
+	// A dedicated close-watch handle.
+	closed: Transport,
+	id: u64,
+	state: DatagramState,
+}
+
+enum DatagramState {
+	/// Opening the request stream: TRACK on lite-05/06, DATAGRAMS on lite-07.
+	Open { request: datagram::Request },
+	/// Lite-07: waiting for DATAGRAMS_INFO.
+	Info {
+		request: datagram::Request,
+		stream: Stream<Transport, Version>,
+	},
+	/// Lite-05/06: waiting for TRACK_INFO.
+	TrackInfo {
+		request: datagram::Request,
+		stream: Stream<Transport, Version>,
+	},
+	/// Lite-05/06: opening the SUBSCRIBE.
+	Subscribe {
+		producer: datagram::Producer,
+		priority: i8,
+	},
+	/// Subscribed: forwarding priority changes until the track ends or nobody reads it.
+	Live {
+		producer: datagram::Producer,
+		stream: Stream<Transport, Version>,
+		priority: i8,
+	},
+	/// Our side finished: waiting for the publisher to read it.
+	Finish {
+		writer: crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
+	},
+	Done,
+}
+
+impl DatagramServe {
+	fn new(
+		subscriber: Subscriber,
+		path: Path,
+		instance: Option<crate::Instance>,
+		validity: crate::model::broadcast::RequestValidity,
+		request: datagram::Request,
+	) -> Self {
+		let id = subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
+		Self {
+			closed: subscriber.session.clone(),
+			subscriber,
+			path,
+			instance,
+			validity,
+			id,
+			state: DatagramState::Open { request },
+		}
+	}
+
+	/// Route the track's datagrams to `producer` from now on.
+	fn register(&self, producer: &datagram::Producer, timescale: Option<Timescale>) {
+		self.subscriber.datagrams.lock().insert(
+			self.id,
+			DatagramEntry {
+				producer: producer.clone(),
+				timescale,
+			},
+		);
+	}
+
+	fn name(&self) -> &str {
+		match &self.state {
+			DatagramState::Open { request }
+			| DatagramState::Info { request, .. }
+			| DatagramState::TrackInfo { request, .. } => request.name(),
+			DatagramState::Subscribe { producer, .. } | DatagramState::Live { producer, .. } => producer.name(),
+			DatagramState::Finish { .. } | DatagramState::Done => "",
+		}
+	}
+
+	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let version = self.subscriber.version;
+		loop {
+			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
+				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+			}
+			match &mut self.state {
+				DatagramState::Open { request } => {
+					self.validity.check(waiter)?;
+					// Nobody waits for it any more.
+					if request.priority().is_none() {
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					if !version.has_datagrams() || !version.has_track_stream() || self.closed.max_datagram_size() == 0 {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+					let mut stream = ready!(Stream::poll_open_request(&self.subscriber.session, version, waiter))?
+						.with_stats(self.subscriber.origin.stats());
+					let DatagramState::Open { request } = std::mem::replace(&mut self.state, DatagramState::Done) else {
+						unreachable!()
+					};
+					let track = request.name().to_string().into();
+					match version.has_datagram_tracks() {
+						true => {
+							stream.writer.buffer(&lite::ControlType::Datagrams)?;
+							stream.writer.buffer(&lite::Datagrams {
+								id: self.id,
+								broadcast: self.path.clone(),
+								instance: self.instance.clone(),
+								track,
+								priority: request.priority().unwrap_or_default(),
+							})?;
+							self.state = DatagramState::Info { request, stream };
+						}
+						false => {
+							stream.writer.buffer(&lite::ControlType::Track)?;
+							stream.writer.buffer(&lite::Track {
+								broadcast: self.path.clone(),
+								instance: self.instance.clone(),
+								track,
+							})?;
+							self.state = DatagramState::TrackInfo { request, stream };
+						}
+					}
+				}
+				DatagramState::Info { stream, .. } => {
+					self.validity.check_unanswered(waiter)?;
+					ready!(stream.writer.poll_flush(waiter))?;
+					let info = ready!(stream.reader.poll_decode::<lite::DatagramsInfo>(waiter))?;
+					let DatagramState::Info { request, stream } = std::mem::replace(&mut self.state, DatagramState::Done)
+					else {
+						unreachable!()
+					};
+					let priority = request.priority().unwrap_or_default();
+					let producer = request.accept(info.into());
+					self.register(&producer, info.timescale);
+					self.state = DatagramState::Live {
+						producer,
+						stream,
+						priority,
+					};
+				}
+				DatagramState::TrackInfo { stream, .. } => {
+					self.validity.check_unanswered(waiter)?;
+					ready!(stream.writer.poll_flush(waiter))?;
+					let info = ready!(stream.reader.poll_decode::<lite::TrackInfo>(waiter))?;
+					let DatagramState::TrackInfo { request, mut stream } =
+						std::mem::replace(&mut self.state, DatagramState::Done)
+					else {
+						unreachable!()
+					};
+					// The answer is all this stream was for.
+					let _ = stream.writer.finish();
+					let priority = request.priority().unwrap_or_default();
+					let producer = request.accept(
+						datagram::Info::default()
+							.with_priority(info.priority)
+							.with_timescale(info.timescale),
+					);
+					self.register(&producer, info.timescale);
+					self.state = DatagramState::Subscribe { producer, priority };
+				}
+				DatagramState::Subscribe { producer, priority } => {
+					// Live from the latest group on.
+					let msg = lite::Subscribe {
+						id: self.id,
+						broadcast: self.path.clone(),
+						instance: self.instance.clone(),
+						track: producer.name().to_string().into(),
+						priority: *priority,
+						max_delay: Duration::ZERO,
+						min_delay: None,
+						ranges: vec![LIVE],
+						order: track::Order::Descending,
+					};
+					let mut stream = ready!(Stream::poll_open_request(&self.subscriber.session, version, waiter))?
+						.with_stats(self.subscriber.origin.stats());
+					stream.writer.buffer(&lite::ControlType::Subscribe)?;
+					stream.writer.buffer(&msg)?;
+					let DatagramState::Subscribe { producer, priority } =
+						std::mem::replace(&mut self.state, DatagramState::Done)
+					else {
+						unreachable!()
+					};
+					self.state = DatagramState::Live {
+						producer,
+						stream,
+						priority,
+					};
+				}
+				DatagramState::Live {
+					producer,
+					stream,
+					priority,
+				} => {
+					let ended = match version.has_datagram_tracks() {
+						// Nothing follows DATAGRAMS_INFO but the publisher's end.
+						true => match ready_or(stream.reader.poll_decode_maybe::<lite::DatagramsInfo>(waiter)) {
+							Some(Ok(None)) => Some(Ok(())),
+							Some(Ok(Some(_))) => return Poll::Ready(Err(Error::ProtocolViolation)),
+							Some(Err(err)) => Some(Err(err)),
+							None => None,
+						},
+						// Whatever bounds the group streams it drops says nothing about the datagrams
+						// until the end.
+						false => match ready_or(stream.reader.poll_decode_maybe::<lite::SubscribeResponse>(waiter)) {
+							Some(Ok(None | Some(lite::SubscribeResponse::End(_)))) => Some(Ok(())),
+							Some(Ok(Some(_))) => continue,
+							Some(Err(err)) => Some(Err(err)),
+							None => None,
+						},
+					};
+					if let Some(end) = ended {
+						self.subscriber.datagrams.lock().remove(&self.id);
+						let DatagramState::Live {
+							producer, mut stream, ..
+						} = std::mem::replace(&mut self.state, DatagramState::Done)
+						else {
+							unreachable!()
+						};
+						end.inspect_err(|err| producer.clone().abort(err.clone()))?;
+						producer.finish();
+						if stream.writer.finish().is_ok() && version.waits_for_subscriber_fin() {
+							self.state = DatagramState::Finish { writer: stream.writer };
+							continue;
+						}
+						return Poll::Ready(Ok(()));
+					}
+					match producer.poll_priority(waiter, Some(*priority)) {
+						Poll::Ready(Some(next)) => {
+							*priority = next;
+							match version.has_datagram_tracks() {
+								true => stream.writer.buffer(&lite::DatagramsUpdate { priority: next })?,
+								false => stream.writer.buffer(&lite::SubscribeUpdate {
+									wanted_group: None,
+									priority: next,
+									max_delay: Duration::ZERO,
+									min_delay: None,
+									ranges: vec![LIVE],
+									order: track::Order::Descending,
+								})?,
+							}
+							continue;
+						}
+						// Nobody reads it: cancel, unless a reader arrived meanwhile.
+						Poll::Ready(None) if producer.close_unused() => return Poll::Ready(Err(Error::Cancel)),
+						_ => {}
+					}
+					ready!(stream.writer.poll_flush(waiter))?;
+					return Poll::Pending;
+				}
+				DatagramState::Finish { writer } => {
+					let _ = ready!(writer.poll_close(waiter));
+					return Poll::Ready(Ok(()));
+				}
+				DatagramState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+
+	/// End the track and the request with `err`, unless it already ended.
+	fn abort(&mut self, err: Error) {
+		self.subscriber.datagrams.lock().remove(&self.id);
+		match std::mem::replace(&mut self.state, DatagramState::Done) {
+			DatagramState::Open { request } => request.reject(err),
+			DatagramState::Info { request, stream } | DatagramState::TrackInfo { request, stream } => {
+				stream.writer.abort(&err);
+				request.reject(err);
+			}
+			DatagramState::Subscribe { producer, .. } => producer.abort(err),
+			DatagramState::Live { producer, stream, .. } => {
+				stream.writer.abort(&err);
+				producer.abort(err);
+			}
+			DatagramState::Finish { .. } | DatagramState::Done => {}
+		}
+	}
+}
+
+/// A lite-05/06 datagram track's subscription, from the latest group on.
+const LIVE: lite::Range = lite::Range {
+	start: Some(lite::Anchor::Relative(0)),
+	end: None,
+};
+
+/// A ready poll's value, or `None` while pending.
+fn ready_or<T>(poll: Poll<T>) -> Option<T> {
+	match poll {
+		Poll::Ready(value) => Some(value),
+		Poll::Pending => None,
+	}
+}
+
+impl kio::Task for DatagramServe {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let err = match ready!(self.poll_serve(waiter)) {
+			Ok(()) => return Poll::Ready(()),
+			Err(err) => err,
+		};
+		tracing::debug!(id = self.id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name(), %err, "datagrams ended");
+		self.abort(err);
+		Poll::Ready(())
+	}
+}
+
+impl Drop for DatagramServe {
+	fn drop(&mut self) {
+		// Dropped with its source when the session dies.
+		let err = self.subscriber.end_reason();
+		self.abort(err);
 	}
 }
 

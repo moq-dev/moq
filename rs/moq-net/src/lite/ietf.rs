@@ -27,12 +27,6 @@ const FIRST_OBJECT: u64 = 0x2;
 const EXTENSIONS: u64 = 0x4;
 const END_OF_GROUP: u64 = 0x8;
 
-// Datagram State bits, after RELAYED.
-const OBJECT_ID: u64 = 0x2;
-const PRIORITY: u64 = 0x4;
-const DATAGRAM_END: u64 = 0x8;
-const STATUS: u64 = 0x10;
-
 /// Immutable Properties, whose keys TRACK_PROPERTIES derives its sealed list from.
 const IMMUTABLE: u64 = 0x0b;
 
@@ -366,73 +360,6 @@ impl<'a> Message<'a> for TrackProperties {
 		}
 		Ok(Self(Some(Arc::new(properties))))
 	}
-}
-
-/// Encode a datagram's relay state after its Group Sequence, or a plain one's as 0.
-pub(crate) fn encode_datagram(
-	w: &mut Encoder<'_>,
-	wire: Option<&crate::model::datagram::Wire>,
-) -> Result<(), EncodeError> {
-	let Some(wire) = wire else {
-		return w.varint(0);
-	};
-	let mut state = RELAYED;
-	for (set, bit) in [
-		(wire.object_id.is_some(), OBJECT_ID),
-		(wire.priority.is_some(), PRIORITY),
-		(wire.end_of_group, DATAGRAM_END),
-		(wire.status.is_some(), STATUS),
-	] {
-		if set {
-			state |= bit;
-		}
-	}
-	w.varint(state)?;
-	if let Some(id) = wire.object_id {
-		w.varint(id)?;
-	}
-	if let Some(priority) = wire.priority {
-		w.u8(priority);
-	}
-	if let Some(status) = wire.status {
-		w.varint(status)?;
-	}
-	w.bytes(encode_properties(&wire.properties))
-}
-
-/// Decode a datagram's relay state on a track `framing` describes.
-pub(crate) fn decode_datagram(
-	r: &mut Decoder<'_>,
-	framing: super::Framing,
-) -> Result<Option<crate::model::datagram::Wire>, DecodeError> {
-	let state = r.varint()?;
-	if state == 0 {
-		return Ok(None);
-	}
-	if state & RELAYED == 0 || state & !(RELAYED | OBJECT_ID | PRIORITY | DATAGRAM_END | STATUS) != 0 {
-		return Err(DecodeError::InvalidValue);
-	}
-	// A track published over moq-lite has no moq-transport state.
-	framing.ietf.ok_or(DecodeError::InvalidValue)?;
-	let object_id = (state & OBJECT_ID != 0).then(|| r.varint()).transpose()?;
-	let priority = (state & PRIORITY != 0).then(|| r.u8()).transpose()?;
-	let status = (state & STATUS != 0).then(|| r.varint()).transpose()?;
-	// A status object has no frame to hold its time.
-	let framed = status.is_none_or(|status| status == 0);
-	let block = r.bytes()?;
-	let properties = decode_properties(block, framing, framed)?.properties;
-	let wire = crate::model::datagram::Wire {
-		object_id,
-		priority,
-		end_of_group: state & DATAGRAM_END != 0,
-		status,
-		properties,
-	};
-	// A relay holds and forwards it, so it must be one its publisher's draft could send.
-	if !wire.defined() {
-		return Err(DecodeError::InvalidValue);
-	}
-	Ok(Some(wire))
 }
 
 #[cfg(test)]
@@ -775,138 +702,6 @@ mod tests {
 		}
 	}
 
-	fn datagram(wire: &crate::model::datagram::Wire) -> Vec<u8> {
-		let mut buf = Vec::new();
-		encode_datagram(&mut Encoder::new(&mut buf, V.into()), Some(wire)).unwrap();
-		buf
-	}
-
-	/// A relay holds and forwards a datagram's Status, so one moq-transport does not define
-	/// would close the session it reached: it is refused where it arrives.
-	#[test]
-	fn datagram_statuses_are_ones_moq_transport_defines() {
-		for (status, ok) in [(0, true), (1, false), (2, false), (3, true), (4, true), (5, false)] {
-			let wire = crate::model::datagram::Wire {
-				object_id: Some(3),
-				priority: Some(9),
-				end_of_group: false,
-				status: Some(status),
-				properties: Properties::default(),
-			};
-			let decoded = decode_datagram(
-				&mut Decoder::new(&datagram(&wire), V.into()),
-				from(Draft::Draft18, None),
-			);
-			assert_eq!(decoded.is_ok(), ok, "{status}");
-		}
-	}
-
-	/// No moq-transport draft defines a status datagram that also ends the group, so one
-	/// is refused where it arrives, by the check moq-transport ingress applies.
-	#[test]
-	fn a_status_datagram_cannot_end_the_group() {
-		let wire = crate::model::datagram::Wire {
-			object_id: Some(3),
-			priority: Some(9),
-			end_of_group: true,
-			status: Some(3),
-			properties: Properties::default(),
-		};
-		assert!(
-			decode_datagram(
-				&mut Decoder::new(&datagram(&wire), V.into()),
-				from(Draft::Draft22, None)
-			)
-			.is_err()
-		);
-	}
-
-	#[test]
-	fn datagram_state_round_trips() {
-		for (end_of_group, status) in [(false, Some(3)), (true, None)] {
-			let wire = crate::model::datagram::Wire {
-				object_id: Some(3),
-				priority: Some(9),
-				end_of_group,
-				status,
-				properties: Properties::default(),
-			};
-			let decoded = decode_datagram(
-				&mut Decoder::new(&datagram(&wire), V.into()),
-				from(Draft::Draft22, None),
-			)
-			.unwrap();
-			assert_eq!(decoded, Some(wire));
-		}
-
-		let mut plain = Vec::new();
-		encode_datagram(&mut Encoder::new(&mut plain, V.into()), None).unwrap();
-		assert_eq!(plain, [0]);
-		// A plain datagram crosses whether or not its track came from moq-transport.
-		for framing in [from(Draft::Draft22, None), Default::default()] {
-			assert_eq!(
-				decode_datagram(&mut Decoder::new(&plain, V.into()), framing).unwrap(),
-				None
-			);
-		}
-	}
-
-	/// A track published over moq-lite has no moq-transport state, so a datagram on one
-	/// with any is refused.
-	#[test]
-	fn datagram_state_needs_a_moq_transport_track() {
-		let id = crate::model::datagram::Wire {
-			object_id: Some(3),
-			priority: None,
-			end_of_group: false,
-			status: None,
-			properties: Properties::default(),
-		};
-		let properties = crate::model::datagram::Wire {
-			object_id: None,
-			properties: Properties {
-				block: crate::ietf::object::block(
-					&[Property {
-						id: 0x20,
-						value: Value::Int(1),
-					}],
-					Draft::Draft22,
-				)
-				.unwrap(),
-				..Default::default()
-			},
-			..id.clone()
-		};
-		for wire in [id, properties] {
-			let buf = datagram(&wire);
-			assert!(decode_datagram(&mut Decoder::new(&buf, V.into()), from(Draft::Draft22, None)).is_ok());
-			assert!(
-				decode_datagram(&mut Decoder::new(&buf, V.into()), Default::default()).is_err(),
-				"{wire:?}"
-			);
-		}
-	}
-
-	/// A retained datagram holds its properties as the bytes they arrived as, not a decoded
-	/// list many times their size.
-	#[test]
-	fn datagram_properties_are_held_at_their_wire_size() {
-		const COUNT: usize = 500;
-		let mut block = vec![0x20, 1];
-		for _ in 1..COUNT {
-			block.extend([0, 1]);
-		}
-		let mut buf = Vec::new();
-		let w = &mut Encoder::new(&mut buf, V.into());
-		w.varint(RELAYED).unwrap();
-		w.bytes(&block).unwrap();
-		let wire = decode_datagram(&mut Decoder::new(&buf, V.into()), from(Draft::Draft18, None))
-			.unwrap()
-			.unwrap();
-		assert_eq!(wire.properties.heap(), block.len() as u64);
-		assert!(wire.properties.heap() < (COUNT * size_of::<Property>()) as u64 / 10);
-	}
-
 	/// Drafts 18 and 22 serialize a block alike, so only the track's draft says whether 0x06
 	/// is SUBGROUP_DELIVERY_TIMEOUT: a draft-18 one is dropped on its way to draft-22.
 	#[test]
@@ -926,26 +721,6 @@ mod tests {
 		let framing = from(Draft::Draft22, None);
 		assert!(decode_end(&[0x20, 1], framing).is_err());
 		assert!(decode_end(&[], framing).is_ok());
-	}
-
-	/// A datagram must be one its track's draft defines: a non-zero Status carries no
-	/// properties.
-	#[test]
-	fn a_datagram_block_needs_a_draft_that_sends_its_shape() {
-		for (status, carried) in [(0, true), (1, false), (3, false), (4, false)] {
-			for version in [Draft::Draft18, Draft::Draft22] {
-				// Object 3 at priority 9, which every draft can send beside a status.
-				let mut buf = Vec::new();
-				let w = &mut Encoder::new(&mut buf, V.into());
-				w.varint(RELAYED | OBJECT_ID | PRIORITY | STATUS).unwrap();
-				w.varint(3).unwrap();
-				w.u8(9);
-				w.varint(status).unwrap();
-				w.bytes(&[0x20, 1]).unwrap();
-				let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), from(version, None));
-				assert_eq!(decoded.is_ok(), carried, "{status}: {version}");
-			}
-		}
 	}
 }
 

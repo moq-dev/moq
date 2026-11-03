@@ -3526,6 +3526,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 	// discovering its path for as long as it lives, so the route outlives whatever
 	// reader found it, such as a listing that has since closed.
 	let mut discovered: Option<Interest> = None;
+	// The source the broadcast's datagram lookups go to, as last handed over: datagram
+	// tracks are live only, so a lookup joins the serving source's own track rather than a
+	// copy the front would splice.
+	let mut datagram_source: Option<u64> = None;
+	broadcast.serve_datagrams_from(None);
 
 	// Read the table for the machine: the best route and whether
 	// the serving source is on its way out. Also what the watch wakes for.
@@ -3968,6 +3973,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			{
 				io.staged = None;
 			}
+		}
+
+		if front.serving() != datagram_source {
+			datagram_source = front.serving();
+			broadcast.serve_datagrams_from(datagram_source.and_then(|id| sources.get(&id)).cloned());
 		}
 
 		let step = kio::wait(|waiter| {

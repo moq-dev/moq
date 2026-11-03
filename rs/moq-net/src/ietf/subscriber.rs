@@ -516,7 +516,7 @@ impl<'a> RangeWriter<'a> {
 
 	/// Finish the current group and open group `sequence`, returning the first Object ID it
 	/// starts at. The sequences between them do not exist. A group cached since it was asked
-	/// is read past, as is a datagram, which no request ever gets.
+	/// is read past, as is a datagram, which a stream track never holds.
 	fn open(&mut self, sequence: u64, datagram: bool) -> Result<u64, Error> {
 		if sequence < self.next || sequence > self.fetch.last {
 			tracing::warn!(
@@ -536,8 +536,8 @@ impl<'a> RangeWriter<'a> {
 		};
 		let producer = match datagram {
 			true => {
-				tracing::debug!(sequence, "a datagram group is not fetchable");
-				fill.reject_groups(sequence..sequence + 1, Error::NotFetchable);
+				tracing::debug!(sequence, "dropping a datagram group from a fetch");
+				fill.drop_groups(sequence..sequence + 1);
 				None
 			}
 			false => match fill.accept(sequence, None) {
@@ -4831,76 +4831,21 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Deliver an OBJECT_DATAGRAM with private relay metadata on its subscription.
+	/// Drop an OBJECT_DATAGRAM: a subscription is a stream track's, which takes no datagrams.
 	///
-	/// A malformed datagram is a protocol error. An unbound alias is dropped, as the
-	/// draft permits instead of buffering; public readers receive only Normal payloads.
+	/// A malformed datagram is still a protocol error.
 	pub fn recv_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let (datagram, _) = ietf::ObjectDatagram::decode_slice(&payload, self.version)?;
-		let (alias, sequence) = (datagram.track_alias, datagram.group_id);
-
-		let (payload, status) = match datagram.body {
-			ietf::DatagramBody::Payload(payload) => (payload, None),
-			ietf::DatagramBody::Status(status) if super::object::status_defined(status) => {
-				(bytes::Bytes::new(), Some(status))
-			}
-			ietf::DatagramBody::Status(_) => return Err(Error::Session(SessionError::ProtocolViolation)),
-		};
-
-		let mut state = self.state.lock();
-		let request_id = match state.aliases.read().map.get(&alias) {
-			Some(Alias::Active(request_id)) => *request_id,
-			_ => {
-				tracing::debug!(alias, sequence, "dropping a datagram for an unbound alias");
-				return Ok(());
-			}
-		};
-		let Some(track) = state.subscribes.get_mut(&request_id) else {
-			return Ok(());
-		};
-
-		// Like a subgroup object: a track that declared no timescale is untimed. One on a
-		// timed track without a Timestamp is refused by the model.
-		let properties = bytes::Bytes::from(datagram.properties.unwrap_or_default());
-		// A status object has no frame to hold its time, so its block keeps it.
-		let (timestamp, properties, inflated) = match status.is_some_and(|status| status != 0) {
-			true => (
-				None,
-				super::object::unframed(&properties, self.version, track.timescale)?,
-				None,
-			),
-			false => {
-				let decoded = super::object::read(&properties, self.version, track.timescale)?;
-				super::object::check_frame(&decoded.properties, track.timescale)?;
-				(decoded.timestamp, decoded.properties, decoded.inflated)
-			}
-		};
-		let Some(producer) = track.producer.as_mut() else {
-			return Ok(());
-		};
-		let inflated = match status.is_some_and(|s| s != 0) {
-			true => None,
-			false => super::object::inflated(inflated, producer.info().compress)?,
-		};
-		let stored = crate::model::datagram::Stored {
-			datagram: crate::Datagram {
-				sequence,
-				timestamp,
-				payload,
-			},
-			wire: Some(std::sync::Arc::new(crate::model::datagram::Wire {
-				object_id: datagram.object_id,
-				priority: datagram.publisher_priority,
-				end_of_group: datagram.end_of_group,
-				status,
-				properties,
-			})),
-			deflated: None,
-		};
-		match inflated {
-			Some(size) => producer.insert_deflated_datagram(stored, size)?,
-			None => producer.insert_wire_datagram(stored)?,
+		if let ietf::DatagramBody::Status(status) = datagram.body
+			&& !super::object::status_defined(status)
+		{
+			return Err(Error::Session(SessionError::ProtocolViolation));
 		}
+		tracing::debug!(
+			alias = datagram.track_alias,
+			group = datagram.group_id,
+			"dropping a datagram on a stream track's subscription"
+		);
 		Ok(())
 	}
 }

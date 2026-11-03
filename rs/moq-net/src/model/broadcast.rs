@@ -7,9 +7,9 @@
 //! a publisher ends its content by finishing its tracks, and goes offline by closing.
 //!
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
-use crate::{cache, stats, track};
+use crate::{cache, datagram, stats, track};
 use std::{
-	collections::HashSet,
+	collections::{HashSet, VecDeque},
 	sync::{
 		Arc,
 		atomic::{AtomicUsize, Ordering},
@@ -125,6 +125,16 @@ struct BroadcastState {
 	// The tracks cached since each [`Demand`] handle last looked, by handle, so a
 	// handle watches each track once rather than rescanning the table.
 	demands: slab::Slab<Vec<track::TrackWeak>>,
+
+	// Datagram tracks, a namespace apart from stream tracks: published, requested, or
+	// served. Weak, so a closed entry is reclaimed like a track's.
+	datagrams: WeakCache<Arc<str>, datagram::Weak>,
+	// Datagram tracks consumers asked for, waiting for a [`DatagramRequests`] to take them.
+	datagram_requests: VecDeque<datagram::Request>,
+	// Live [`DatagramRequests`] handles; a datagram track is requested only while one lives.
+	datagram_handlers: usize,
+	// Set on an origin's front: datagram lookups go to the source it serves from, if any.
+	datagram_source: Option<Option<Consumer>>,
 }
 
 impl BroadcastState {
@@ -167,6 +177,10 @@ impl BroadcastState {
 		for request in self.requests.drain_queued() {
 			request.reject(err.clone());
 		}
+		for request in self.datagram_requests.drain(..) {
+			request.reject(err.clone());
+		}
+		self.datagram_source = None;
 		for track in self.tracks.iter() {
 			track.reject(err.clone());
 		}
@@ -384,6 +398,38 @@ impl Producer {
 		Ok(track.listed(unlist))
 	}
 
+	/// Produce a new datagram track and insert it into the broadcast.
+	///
+	/// Datagram tracks are a namespace apart from stream tracks, so this never conflicts with
+	/// [`Self::create_track`]. Fails with [`Error::Duplicate`] while a live datagram track
+	/// holds the name.
+	pub fn create_datagrams(&self, name: impl Into<Arc<str>>, info: datagram::Info) -> Result<datagram::Producer, Error> {
+		let name = name.into();
+		let mut state = self.state.lock();
+		if let Some(live) = state.datagrams.get(name.as_ref()) {
+			// A consumer asked for it before it existed, and no handler took the request yet:
+			// creating the track serves those consumers.
+			let queued = state
+				.datagram_requests
+				.iter()
+				.position(|request| live.same_channel(&request.weak()));
+			let Some(queued) = queued else {
+				return Err(Error::Duplicate);
+			};
+			let request = state.datagram_requests.remove(queued).expect("found above");
+			return Ok(request.with_stats(self.stats.clone()).accept(info));
+		}
+		let producer = datagram::Producer::new(name.clone(), Some(info)).with_stats(self.stats.clone());
+		state.datagrams.insert(name, producer.weak());
+		Ok(producer)
+	}
+
+	/// Answer datagram lookups from `source`, the broadcast an origin's front serves from,
+	/// or refuse them with [`Error::Unroutable`] while it has none.
+	pub(super) fn serve_datagrams_from(&self, source: Option<Consumer>) {
+		self.state.lock().datagram_source = Some(source);
+	}
+
 	/// Reserve a track by name without finalizing its [`track::Info`].
 	///
 	/// Returns a [`track::Request`] already discoverable by consumers; call
@@ -567,7 +613,7 @@ impl Alive {
 				return true;
 			}
 			// A queued track is a reader on its way that let go of its handle.
-			if !state.requests.is_empty() {
+			if !state.requests.is_empty() || !state.datagram_requests.is_empty() {
 				return false;
 			}
 			// Held under the lock a consumer's first mint takes, so none appears until the
@@ -826,6 +872,12 @@ impl Requests {
 		&self.alive.validity
 	}
 
+	/// A handler for the datagram tracks consumers ask for. Until one exists, asking for a
+	/// datagram track nothing publishes fails with [`Error::NotFound`].
+	pub fn datagrams(&self) -> DatagramRequests {
+		DatagramRequests::new(self.alive.clone(), self.state.clone(), self.stats.clone())
+	}
+
 	/// Answer the broadcast's track listings, for a handler that knows the tracks it
 	/// would serve, such as a relay listing its upstream's. See [`Lister`].
 	///
@@ -844,6 +896,62 @@ impl Requests {
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+}
+
+/// Handles on-demand datagram tracks for a broadcast, like [`Requests`] does stream tracks.
+///
+/// Created by [`Requests::datagrams`]. When the last handle drops, the requests it never
+/// took are rejected with [`Error::Dropped`].
+pub struct DatagramRequests {
+	// Keeps the broadcast alive while a handler exists, as `Requests` does.
+	alive: Arc<Alive>,
+	state: kio::Shared<BroadcastState>,
+	stats: stats::Scope,
+}
+
+impl DatagramRequests {
+	fn new(alive: Arc<Alive>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
+		state.lock().datagram_handlers += 1;
+		Self { alive, state, stats }
+	}
+
+	/// The next datagram track a consumer asks for, to accept or reject.
+	///
+	/// Returns [`Error::Closed`] once the broadcast has ended.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_requested(&mut self, waiter: &kio::Waiter) -> Poll<Result<datagram::Request, Error>> {
+		if self.alive.validity.check(waiter).is_err() {
+			self.alive.close();
+		}
+		let mut state = ready!(self.state.poll(waiter, |state| {
+			match !state.datagram_requests.is_empty() || state.closing {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		}));
+		match state.datagram_requests.pop_front() {
+			Some(request) => Poll::Ready(Ok(request.with_stats(self.stats.clone()))),
+			None => Poll::Ready(Err(Error::Closed)),
+		}
+	}
+}
+
+impl Clone for DatagramRequests {
+	fn clone(&self) -> Self {
+		Self::new(self.alive.clone(), self.state.clone(), self.stats.clone())
+	}
+}
+
+impl Drop for DatagramRequests {
+	fn drop(&mut self) {
+		let mut state = self.state.lock();
+		state.datagram_handlers -= 1;
+		if state.datagram_handlers == 0 {
+			for request in state.datagram_requests.drain(..) {
+				request.reject(Error::Dropped);
+			}
+		}
 	}
 }
 
@@ -967,6 +1075,40 @@ impl Consumer {
 			track::Consumer::lookup(name.into(), self.info.clone(), self.clone(), current)
 				.with_stats(self.stats.clone()),
 		)
+	}
+
+	/// Consume the datagram track `name`, live from now.
+	///
+	/// Joins the track a producer publishes, or asks a [`DatagramRequests`] handler for it,
+	/// whose answer the consumer reads. Fails with [`Error::Unroutable`] once the broadcast
+	/// has ended, and [`Error::NotFound`] when nothing publishes the track and no handler
+	/// would serve a request for it.
+	pub fn datagrams(&self, name: &str) -> Result<datagram::Consumer, Error> {
+		let mut state = self.state.lock();
+		if state.closing {
+			return Err(Error::Unroutable);
+		}
+		if let Some(source) = &state.datagram_source {
+			let source = source.clone().ok_or(Error::Unroutable)?;
+			drop(state);
+			return Ok(source.datagrams(name)?.with_stats(self.stats.clone()));
+		}
+		if let Some(live) = state.datagrams.get(name)
+			&& let Some(consumer) = live.try_consume(self.stats.clone())
+		{
+			return Ok(consumer);
+		}
+		if state.datagram_handlers == 0 {
+			return Err(Error::NotFound);
+		}
+		let request = datagram::Request::new(name.into());
+		let consumer = request
+			.weak()
+			.try_consume(self.stats.clone())
+			.expect("a fresh request is open");
+		state.datagrams.insert(name.into(), request.weak());
+		state.datagram_requests.push_back(request);
+		Ok(consumer)
 	}
 
 	/// Join the demand of the track serving `name`, requesting it from a [`Requests`]

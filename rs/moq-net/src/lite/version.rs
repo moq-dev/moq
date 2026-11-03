@@ -79,11 +79,21 @@ impl Version {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
-	/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
-	/// Group datagrams route one frame over an existing subscription; lite-07 adds a
-	/// leading type and padding. Older than lite-05 never sends or accepts datagrams.
+	/// Whether the session may carry unreliable QUIC datagrams (lite-05 §6.4): single-frame
+	/// groups on lite-05/06, a datagram track's datagrams on lite-07, which adds a leading
+	/// type and padding. Older than lite-05 never sends or accepts datagrams.
 	pub fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
+	}
+
+	/// Whether a subscriber subscribes to a datagram track through its own Datagrams Stream
+	/// (0x9), whose datagrams carry the datagram track's own sequence. Added in lite-07;
+	/// earlier versions carry single-frame groups as datagrams on a SUBSCRIBE subscription.
+	pub(crate) fn has_datagram_tracks(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
 	}
 
 	/// Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin

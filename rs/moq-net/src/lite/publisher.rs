@@ -3,7 +3,7 @@ use crate::transport::poll::Session as _;
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
 
-use crate::{SessionError, announce, frame, group, origin, track};
+use crate::{SessionError, announce, datagram, frame, group, origin, track};
 use rangemap::{RangeMap, RangeSet};
 use std::{
 	borrow::Cow,
@@ -303,6 +303,7 @@ enum ControlState {
 	Fetch(RequestServe<FetchServe>),
 	TrackInfo(RequestServe<TrackInfoServe>),
 	Tracks(RequestServe<TracksServe>),
+	Datagrams(RequestServe<DatagramServe>),
 	Probe(ProbeServe),
 	Auth(AuthServe),
 	/// Decoding the peer's GOAWAY, surfaced through [`crate::Session::draining`].
@@ -344,6 +345,7 @@ impl Control {
 						lite::ControlType::Fetch | lite::ControlType::Track => version.has_track_stream(),
 						lite::ControlType::Auth => version.has_auth(),
 						lite::ControlType::Tracks => version.has_tracks(),
+						lite::ControlType::Datagrams => version.has_datagram_tracks(),
 						_ => true,
 					});
 
@@ -370,6 +372,9 @@ impl Control {
 						lite::ControlType::Tracks => {
 							ControlState::Tracks(RequestServe::new(self.shared.clone(), stream))
 						}
+						lite::ControlType::Datagrams => {
+							ControlState::Datagrams(RequestServe::new(self.shared.clone(), stream))
+						}
 						lite::ControlType::Probe => {
 							ControlState::Probe(ProbeServe::new(self.shared.clone(), self.runtime.clone(), stream))
 						}
@@ -383,6 +388,7 @@ impl Control {
 				ControlState::Fetch(serve) => return serve.poll(waiter),
 				ControlState::TrackInfo(serve) => return serve.poll(waiter),
 				ControlState::Tracks(serve) => return serve.poll(waiter),
+				ControlState::Datagrams(serve) => return serve.poll(waiter),
 				ControlState::Probe(serve) => return serve.poll(waiter),
 				ControlState::Auth(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
@@ -1935,8 +1941,10 @@ impl<R: Request> Drop for RequestServe<R> {
 ///
 /// The open stream is interest in the track: the query that answered it stays until the
 /// requester closes its side, so demand holds while the requester moves on to SUBSCRIBE.
-struct TrackInfoServe {
-	querying: track::Resolving,
+enum TrackInfoServe {
+	Track(track::Resolving),
+	/// Lite-05/06: a name no stream track has, answered for its datagram track.
+	Datagrams(datagram::Consumer),
 }
 
 impl Request for TrackInfoServe {
@@ -1962,9 +1970,16 @@ impl Request for TrackInfoServe {
 		msg.instance.as_ref()
 	}
 
-	fn start(_: &Shared, _: Self::Message, track: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
-		let querying = broadcast.track(track)?.info().into_inner();
-		Ok(Self { querying })
+	fn start(
+		shared: &Shared,
+		_: Self::Message,
+		track: &str,
+		broadcast: crate::broadcast::Consumer,
+	) -> Result<Self, Error> {
+		match broadcast.track(track) {
+			Ok(track) => Ok(Self::Track(track.info().into_inner())),
+			Err(err) => Ok(Self::Datagrams(legacy_datagrams(shared, &broadcast, track, err)?)),
+		}
 	}
 
 	fn update(&mut self, update: NoUpdate) {
@@ -1978,7 +1993,22 @@ impl Request for TrackInfoServe {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-		let info = ready!(self.querying.poll_ok(waiter))?;
+		let querying = match self {
+			Self::Track(querying) => querying,
+			Self::Datagrams(consumer) => {
+				let info = ready!(consumer.poll_info(waiter))?;
+				writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
+				writer.buffer(&lite::TrackInfo {
+					refresh: None,
+					priority: info.priority,
+					max_age: None,
+					timescale: info.timescale,
+					compress: false,
+				})?;
+				return Poll::Ready(Ok(ControlFlow::Break(())));
+			}
+		};
+		let info = ready!(querying.poll_ok(waiter))?;
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 
 		// Ahead of the track's groups, which a subscriber holds unread until it lands.
@@ -2088,9 +2118,18 @@ enum SubscribeServe {
 		latest: Option<u64>,
 		update: Option<lite::SubscribeUpdate>,
 	},
-	/// Streaming groups and datagrams. Boxed: by far the largest state, and the enum
-	/// is moved on every transition.
+	/// Streaming groups. Boxed: by far the largest state, and the enum is moved on every
+	/// transition.
 	Run(Box<TrackRun>),
+	/// Lite-05/06: a name no stream track has, served from its datagram track as group
+	/// datagrams keyed by its sequence.
+	Datagrams {
+		consumer: datagram::Consumer,
+		id: u64,
+		priority: i8,
+		/// Set once the track's info is known.
+		send: Option<DatagramSend>,
+	},
 	/// The track finished: draining the in-flight group streams before the FIN.
 	Drain {
 		children: kio::Tasks<GroupServe>,
@@ -2133,7 +2172,19 @@ impl Request for SubscribeServe {
 		track: &str,
 		broadcast: crate::broadcast::Consumer,
 	) -> Result<Self, Error> {
-		let track = broadcast.track(track)?;
+		let track = match broadcast.track(track) {
+			Ok(track) => track,
+			Err(err) => {
+				let mut consumer = legacy_datagrams(shared, &broadcast, track, err)?;
+				consumer.set_priority(msg.priority);
+				return Ok(Self::Datagrams {
+					consumer,
+					id: msg.id,
+					priority: msg.priority,
+					send: None,
+				});
+			}
+		};
 		let latest = track.latest_sequence();
 		if Bounds::has_time(&msg.ranges) {
 			let querying = track.info().into_inner();
@@ -2153,6 +2204,18 @@ impl Request for SubscribeServe {
 		match self {
 			Self::Query { update: pending, .. } | Self::Confirm { update: pending, .. } => *pending = Some(update),
 			Self::Run(run) => run.update(update),
+			Self::Datagrams {
+				consumer,
+				priority,
+				send,
+				..
+			} => {
+				*priority = update.priority;
+				consumer.set_priority(update.priority);
+				if let Some(send) = send {
+					send.steer(update.priority);
+				}
+			}
 			// The track is over: nothing left to steer.
 			Self::Drain { .. } => {}
 		}
@@ -2293,7 +2356,193 @@ impl Request for SubscribeServe {
 					ready!(children.poll(waiter));
 					return Poll::Ready(Ok(ControlFlow::Break(())));
 				}
+				Self::Datagrams {
+					consumer,
+					id,
+					priority,
+					send,
+				} => {
+					if send.is_none() {
+						let info = ready!(consumer.poll_info(waiter))?;
+						*send = Some(DatagramSend::new(shared, *id, info, *priority));
+					}
+					let send = send.as_ref().expect("set above");
+					return match ready!(consumer.poll_recv(waiter))? {
+						Some(datagram) => {
+							send.send(datagram);
+							Poll::Ready(Ok(ControlFlow::Continue(())))
+						}
+						None => Poll::Ready(Ok(ControlFlow::Break(()))),
+					};
+				}
 			}
+		}
+	}
+}
+
+/// Lite-05/06 carry a name's stream track and datagram track on one subscription: a name
+/// no stream track has is served from its datagram track. `err` is the stream track's
+/// refusal, returned as is otherwise.
+fn legacy_datagrams(
+	shared: &Shared,
+	broadcast: &crate::broadcast::Consumer,
+	track: &str,
+	err: Error,
+) -> Result<datagram::Consumer, Error> {
+	if !matches!(err, Error::NotFound) || !shared.version.has_datagrams() || shared.version.has_datagram_tracks() {
+		return Err(err);
+	}
+	broadcast.datagrams(track).map_err(|_| err)
+}
+
+/// Sends a datagram track's datagrams to one subscription, best-effort.
+struct DatagramSend {
+	session: Transport,
+	id: u64,
+	version: Version,
+	/// How datagrams are stamped, or `None` when they carry no timestamp.
+	stamp: Option<Stamp>,
+	/// The clock an untimed track's Lite05/06 send times are read from.
+	runtime: crate::time::Deadlines,
+	/// The publisher's priority for the track, which breaks subscriber priority ties.
+	publisher: i8,
+	/// The subscription's send group, or `None` on a transport without groups.
+	group: Option<GroupOf<Transport>>,
+}
+
+impl DatagramSend {
+	fn new(shared: &Shared, id: u64, info: datagram::Info, priority: i8) -> Self {
+		let session = shared.session.clone();
+		let group = session.send_group(crate::priority::group(priority, info.priority));
+		Self {
+			session,
+			id,
+			version: shared.version,
+			stamp: Stamp::new(shared.version, info.timescale),
+			runtime: shared.runtime.clone(),
+			publisher: info.priority,
+			group,
+		}
+	}
+
+	/// Move the subscription to the subscriber's new `priority`.
+	fn steer(&mut self, priority: i8) {
+		if let Some(group) = &mut self.group {
+			group.set_priority(crate::priority::group(priority, self.publisher));
+		}
+	}
+
+	/// Send one datagram over a QUIC datagram, newest first within the subscription. It is
+	/// dropped, as a datagram may be anywhere, if its body doesn't fit the transport's
+	/// datagram size or the transport has no room for it now.
+	fn send(&self, datagram: crate::Datagram) {
+		let Ok(timestamp) = self
+			.stamp
+			.map(|stamp| stamp.wire(datagram.timestamp, &self.runtime))
+			.transpose()
+		else {
+			return;
+		};
+		let sequence = datagram.sequence;
+		let body = lite::Datagram {
+			subscribe: self.id,
+			sequence,
+			timestamp,
+			payload: datagram.payload,
+		};
+		// The stamp is set wherever the version needs a timestamp, so this never hits a
+		// version guard.
+		let Ok(body) = body.encode_bytes(self.version) else {
+			return;
+		};
+		let max = self.session.max_datagram_size().min(lite::Datagram::MAX_SIZE);
+		if body.len() > max {
+			tracing::debug!(sequence, size = body.len(), max, "dropping oversized datagram");
+			return;
+		}
+		let options = SendOptions {
+			group: self.group.as_ref(),
+			priority: crate::priority::in_group(sequence, 0, Order::Descending),
+		};
+		let _ = self.session.send_datagram(body, options);
+	}
+}
+
+/// Answers a Datagrams stream (lite-07): DATAGRAMS_INFO, then the datagram track's
+/// datagrams from now until it ends.
+struct DatagramServe {
+	consumer: datagram::Consumer,
+	id: u64,
+	priority: i8,
+	/// Set once DATAGRAMS_INFO is buffered.
+	send: Option<DatagramSend>,
+}
+
+impl Request for DatagramServe {
+	const KIND: &'static str = "datagrams";
+	const GRACEFUL: bool = true;
+	const SUBSCRIPTION: bool = true;
+	const DATA: bool = true;
+	const HOLDS: bool = false;
+	type Message = lite::Datagrams<'static>;
+	type Update = lite::DatagramsUpdate;
+
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self::Message, DecodeError> {
+		lite::Datagrams::decode(r, version).map(lite::Datagrams::into_owned)
+	}
+
+	fn target(msg: &Self::Message) -> (&crate::Path, &str) {
+		(&msg.broadcast, &msg.track)
+	}
+
+	fn take_track(msg: &mut Self::Message) -> Cow<'static, str> {
+		std::mem::take(&mut msg.track)
+	}
+
+	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
+		msg.instance.as_ref()
+	}
+
+	fn start(_: &Shared, msg: Self::Message, track: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
+		let mut consumer = broadcast.datagrams(track)?;
+		consumer.set_priority(msg.priority);
+		Ok(Self {
+			consumer,
+			id: msg.id,
+			priority: msg.priority,
+			send: None,
+		})
+	}
+
+	fn update(&mut self, update: lite::DatagramsUpdate) {
+		self.priority = update.priority;
+		self.consumer.set_priority(update.priority);
+		if let Some(send) = &mut self.send {
+			send.steer(update.priority);
+		}
+	}
+
+	fn poll(
+		&mut self,
+		shared: &Shared,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<ControlFlow<()>, Error>> {
+		if self.send.is_none() {
+			let info = ready!(self.consumer.poll_info(waiter))?;
+			// Ahead of the datagrams, which a subscriber drops until it lands.
+			writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
+			writer.buffer(&lite::DatagramsInfo::from(info))?;
+			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority));
+		}
+		ready!(writer.poll_flush(waiter))?;
+		let send = self.send.as_ref().expect("set above");
+		match ready!(self.consumer.poll_recv(waiter))? {
+			Some(datagram) => {
+				send.send(datagram);
+				Poll::Ready(Ok(ControlFlow::Continue(())))
+			}
+			None => Poll::Ready(Ok(ControlFlow::Break(()))),
 		}
 	}
 }
@@ -3560,7 +3809,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	Ok(())
 }
 
-/// How a lite hop stamps a track's frames and datagrams.
+/// How a lite hop stamps a track's frames and a datagram track's datagrams.
 #[derive(Clone, Copy, Debug)]
 struct Stamp {
 	/// The wire timescale TRACK_INFO declared (see [`Version::wire_timescale`]).
@@ -3606,12 +3855,11 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 	Ok(())
 }
 
-/// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
-/// best-effort datagram to forward, the track declaring its exclusive final sequence, or
-/// the track finishing (the live edge having reached that boundary).
+/// What [`recv_next`] pulled from the one subscriber: the next group to serve, the track
+/// declaring its exclusive final sequence, or the track finishing (the live edge having
+/// reached that boundary).
 enum Recv {
 	Group(group::Consumer),
-	Datagram(crate::model::datagram::Stored),
 	Boundary(lite::SubscribeEnd),
 	Finished,
 }
@@ -3622,10 +3870,7 @@ fn final_sequence(end: track::Position) -> u64 {
 	end.final_sequence().unwrap_or(u64::MAX)
 }
 
-/// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order) or
-/// datagram from one `&mut` borrow, so groups and datagrams share the same subscription. Groups
-/// are polled first so a datagram burst can't starve them; datagrams are polled only when the
-/// transport carries them.
+/// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order).
 ///
 /// Groups are served in arrival order (`poll_recv_group`), not sequence order: on a relay, a
 /// burst can be ingested micro-reordered by the upstream leg, and a sequence cursor would then
@@ -3636,7 +3881,7 @@ fn final_sequence(end: track::Position) -> u64 {
 /// [`Recv::Finished`] either.
 ///
 /// When `emit_boundary` is set, a declared-but-not-yet-reached final sequence surfaces as
-/// [`Recv::Boundary`] in an idle moment (after groups and datagrams), so the caller can send
+/// [`Recv::Boundary`] in an idle moment (after groups), so the caller can send
 /// SUBSCRIBE_END as soon as the ending is known rather than waiting for the live edge to reach
 /// it. The caller clears `emit_boundary` after the first boundary so it fires once.
 ///
@@ -3645,7 +3890,6 @@ fn final_sequence(end: track::Position) -> u64 {
 fn poll_recv_next(
 	track: &mut track::Subscriber,
 	groups: bool,
-	datagrams: bool,
 	emit_boundary: bool,
 	end_error: bool,
 	waiter: &kio::Waiter,
@@ -3662,14 +3906,6 @@ fn poll_recv_next(
 			Poll::Ready(Err(_)) if end_error && track.ended_with_error() => groups_finished = true,
 			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 			Poll::Pending => {}
-		}
-		if datagrams {
-			match track.poll_recv_stored_datagram(waiter)? {
-				Poll::Ready(Some(datagram)) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
-				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
-				Poll::Ready(None) => {}
-				Poll::Pending => {}
-			}
 		}
 		// No live data ready: report the boundary (if declared) before signalling Finished, so a
 		// future boundary reaches the subscriber while the trailing groups are still in flight.
@@ -3701,8 +3937,8 @@ fn poll_recv_next(
 
 /// The async form of [`poll_recv_next`], for callers with nothing else to poll.
 #[cfg(test)]
-async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary: bool) -> Result<Recv, Error> {
-	kio::wait(|waiter| poll_recv_next(track, true, datagrams, emit_boundary, true, waiter)).await
+async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result<Recv, Error> {
+	kio::wait(|waiter| poll_recv_next(track, true, emit_boundary, true, waiter)).await
 }
 
 /// Bound `group` to what this subscription asked for, or `None` when it cannot be served
@@ -3788,7 +4024,7 @@ impl FramesBench {
 		Self(Bounds::new(&ranges, None).expect("group anchors").frames)
 	}
 
-	/// The frames served of `group`, as a served group or datagram looks them up.
+	/// The frames served of `group`, as a served group looks them up.
 	pub(crate) fn serve(&self, group: u64) -> (u64, Option<u64>) {
 		(self.0.start(group), self.0.end(group))
 	}
@@ -3918,7 +4154,7 @@ struct Subscription {
 	/// Last steer observed by this clone, so a change only fires once.
 	steer_seen: Steer,
 	version: Version,
-	/// How frames and datagrams are stamped, or `None` when they carry no timestamp.
+	/// How frames are stamped, or `None` when they carry no timestamp.
 	stamp: Option<Stamp>,
 	/// The clock an untimed track's Lite05/06 send times are read from.
 	runtime: crate::time::Deadlines,
@@ -3935,7 +4171,7 @@ struct GroupContext {
 	/// Last steer observed by this clone, so a change only fires once.
 	steer_seen: Steer,
 	version: Version,
-	/// How frames and datagrams are stamped, or `None` when they carry no timestamp.
+	/// How frames are stamped, or `None` when they carry no timestamp.
 	stamp: Option<Stamp>,
 	/// The clock an untimed track's Lite05/06 send times are read from.
 	runtime: crate::time::Deadlines,
@@ -3980,77 +4216,6 @@ impl Subscription {
 		}
 	}
 
-	/// Send one datagram best-effort over a QUIC datagram (lite-05 §6.4).
-	///
-	/// It goes in the subscription's send group, ranked like a stream carrying its group, so
-	/// it merges into the subscription's group order and wins a tie with that group's stream.
-	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
-	/// transport's datagram limit or the send fails (congestion / no capacity right now).
-	/// Returns whether it was handed to the transport.
-	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) -> bool {
-		// Only the `ietf` extension can say a datagram is a status rather than a payload.
-		let status = datagram
-			.wire
-			.as_ref()
-			.is_some_and(|wire| wire.status.is_some_and(|status| status != 0));
-		if status && !self.ietf {
-			return false;
-		}
-		let Ok(timestamp) = self
-			.stamp
-			.filter(|_| !status)
-			.map(|stamp| stamp.wire(datagram.timestamp, &self.runtime))
-			.transpose()
-		else {
-			return false;
-		};
-		let ietf = match (self.ietf, &datagram.wire) {
-			(false, _) => None,
-			(true, None) => Some(None),
-			// A sealed Timestamp keeps its units, which the receiver reads as the track's.
-			(true, Some(wire))
-				if wire
-					.properties
-					.sealed_time
-					.is_some_and(|sealed| self.stamp.map(|stamp| stamp.timescale) != Some(sealed.scale())) =>
-			{
-				return false;
-			}
-			(true, Some(wire)) => Some(Some(wire.as_ref().clone())),
-		};
-		let sequence = datagram.sequence;
-		// A lite-07 peer takes a compressed track's datagram as stored, others inflated.
-		let (payload, inflated) = datagram.sent(self.version.has_compression());
-		let body = lite::Datagram {
-			subscribe: self.id,
-			sequence,
-			timestamp,
-			inflated,
-			payload: payload.clone(),
-			ietf,
-		};
-		// has_datagrams is checked before this runs, and the stamp is set wherever the
-		// version needs a timestamp, so encoding never hits a version guard.
-		let Ok(body) = body.encode_bytes(self.version) else {
-			return false;
-		};
-
-		let max = self.session.max_datagram_size().min(lite::Datagram::MAX_SIZE);
-		if body.len() > max {
-			tracing::debug!(sequence, size = body.len(), max, "dropping oversized datagram");
-			return false;
-		}
-
-		// The run loop may not have served a group since the last SUBSCRIBE_UPDATE.
-		let priority = crate::priority::in_group(sequence, 0, self.steer_current().order);
-		let options = SendOptions {
-			group: self.group.as_ref(),
-			priority,
-		};
-		let _ = self.session.send_datagram(body, options);
-		true
-	}
-
 	/// Read the latest SUBSCRIBE_UPDATE steer, marking it seen.
 	fn steer_current(&mut self) -> Steer {
 		self.steer_seen = *self.steer.read();
@@ -4085,8 +4250,8 @@ impl Subscription {
 	}
 }
 
-/// A subscription's run loop: one subscriber cursor serving groups, datagrams,
-/// and SUBSCRIBE_UPDATE messages, with a machine per group it serves, one at a time
+/// A subscription's run loop: one subscriber cursor serving groups and SUBSCRIBE_UPDATE
+/// messages, with a machine per group it serves, one at a time
 /// waiting for stream credit.
 struct TrackRun {
 	ctx: Subscription,
@@ -4120,15 +4285,10 @@ struct TrackRun {
 	bounded: bool,
 	// Lite05+ names every sequence below the end that this subscription never
 	// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
-	// for a group that will not come. The sequences served, sent as a datagram, or
-	// dropped. A gap that never arrived stays until the end sweep names it: this side
+	// for a group that will not come. The sequences served or dropped. A gap that never arrived stays until the end sweep names it: this side
 	// cannot tell when the subscriber stopped waiting for it.
 	// `None` on other versions.
 	served: Option<RangeSet<u64>>,
-	// Serve datagrams off this same subscriber, but only on lite-05+ over a
-	// datagram-capable transport (qmux/WebSocket/TCP/UDS report size 0). No group
-	// fallback: otherwise off.
-	datagrams: bool,
 	/// The one group waiting for stream credit. The rest of the backlog waits in the cache,
 	/// which bills, ages, and evicts it, and the cursor's budget skips whatever went stale
 	/// meanwhile: a machine per parked group would hold state for as long as the peer
@@ -4156,7 +4316,6 @@ impl TrackRun {
 		let track = track.with_range((Bound::Included(floor), cap)).parked();
 
 		let emit_range = ctx.version.has_track_stream();
-		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
 		// Lite03 and Lite04 declare no end, so neither side could settle on a drop.
 		let served = emit_range.then(RangeSet::new);
 		let bounded = bounds.ends(ctx.version);
@@ -4177,7 +4336,6 @@ impl TrackRun {
 			skipped: RangeMap::new(),
 			end_sent: false,
 			served,
-			datagrams,
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -4318,7 +4476,7 @@ impl TrackRun {
 		writer.poll_flush(waiter)
 	}
 
-	/// Serve one ready group or datagram (`Continue`), or `Break` once the live edge
+	/// Serve one ready group (`Continue`), or `Break` once the live edge
 	/// reaches the track's boundary or a bounded lite-07 subscription is covered. Returning per item lets the caller watch the
 	/// requester while work stays ready.
 	fn poll_step(
@@ -4378,7 +4536,7 @@ impl TrackRun {
 	}
 
 	/// The track side of [`Self::poll_step`]: forward drops, resolve the start, and take the
-	/// next group, datagram, or boundary. Every wait here parks on the track subscriber.
+	/// next group or boundary. Every wait here parks on the track subscriber.
 	fn poll_track(
 		&mut self,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
@@ -4388,8 +4546,7 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// The first group waits for the source to resolve where its feed starts; datagrams
-		// keep flowing meanwhile.
+		// The first group waits for the source to resolve where its feed starts.
 		if let Some(group) = self.first.take() {
 			match self.track.poll_start(waiter) {
 				Poll::Ready(source) => {
@@ -4398,12 +4555,6 @@ impl TrackRun {
 				}
 				Poll::Pending => {
 					self.first = Some(group);
-					if self.datagrams
-						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_stored_datagram(waiter)?
-					{
-						self.serve_datagram(datagram);
-						return Poll::Ready(Ok(ControlFlow::Continue(())));
-					}
 					return Poll::Pending;
 				}
 			}
@@ -4432,25 +4583,15 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// One cursor drives the whole subscription: poll the cap-aware arrival-order
-		// group and, when enabled, the next best-effort datagram. Groups are polled
-		// first so a datagram burst can't starve them; datagrams flow whenever no
-		// group is ready (including while groups are parked above the cap).
+		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
 		let emit_boundary = self.emit_range && !self.end_sent;
 		let groups = self.opening.is_none();
 		let end_error = self.ctx.version.has_end_error();
-		if let Poll::Ready(res) = poll_recv_next(
-			&mut self.track,
-			groups,
-			self.datagrams,
-			emit_boundary,
-			end_error,
-			waiter,
-		) {
+		if let Poll::Ready(res) = poll_recv_next(&mut self.track, groups, emit_boundary, end_error, waiter) {
 			match res? {
 				Recv::Group(group) => {
 					// Never a second stream for a sequence this subscription already accounted
-					// for (served, sent as a datagram, or dropped): a group re-created after its
+					// for (served or dropped): a group re-created after its
 					// DROP stays dropped, since the subscriber may settle before it arrives.
 					if self
 						.served
@@ -4483,7 +4624,6 @@ impl TrackRun {
 						false => self.serve(group),
 					}
 				}
-				Recv::Datagram(datagram) => self.serve_datagram(datagram),
 				Recv::Boundary(end) => {
 					// The track declared its exclusive final sequence. Forward it now,
 					// even if trailing groups (below it) are still in flight, then
@@ -4522,9 +4662,7 @@ impl TrackRun {
 		match (self.start, &self.served) {
 			(Some(start), Some(served)) => self.track.covered(start, served),
 			// Before SUBSCRIBE_START the subscriber owes itself nothing (see
-			// `SubStream::owed`), so only a range given up whole is covered. Datagrams
-			// resolve no start, and a FIN would overtake them, so a range they served
-			// keeps the subscription open.
+			// `SubStream::owed`), so only a range given up whole is covered.
 			(None, _) => self.track.covered(self.floor, &self.skipped),
 			(Some(_), None) => false,
 		}
@@ -4549,48 +4687,6 @@ impl TrackRun {
 			Some(_) => self.drop_range(range, &err, writer)?,
 		}
 		Ok(true)
-	}
-
-	/// Send a datagram, recording its sequence once it went out.
-	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) {
-		// Untyped lite can name only object 0. Drop other payload objects before
-		// metering them; status objects keep their existing separate drop path.
-		if !self.ctx.ietf
-			&& let Some(wire) = &datagram.wire
-			&& wire.status.is_none_or(|status| status == 0)
-			&& wire.object_id.is_some_and(|id| id > 0)
-		{
-			tracing::debug!(
-				subscribe = self.ctx.id,
-				sequence = datagram.sequence,
-				object_id = wire.object_id,
-				"dropping nonzero datagram object on a lite hop without ietf"
-			);
-			return;
-		}
-		if let Some(wire) = &datagram.wire
-			&& crate::ietf::flate::egress_object(
-				&wire.properties,
-				self.track.info().ietf(),
-				self.ctx.version.has_compression(),
-			)
-			.is_err()
-		{
-			return;
-		}
-		let sequence = datagram.sequence;
-		// The model bounds whole groups, so the peer's frame bounds are applied here, against
-		// the Object ID a relayed moq-transport datagram keeps (a public one is frame 0).
-		let object = datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0);
-		if object < self.frames.start(sequence) || self.frames.end(sequence).is_some_and(|end| object > end) {
-			return;
-		}
-		// Metered in the form the wire carries.
-		let (payload, _) = datagram.sent(self.ctx.version.has_compression());
-		self.track.meter_datagram(payload.len() as u64);
-		if self.ctx.serve_datagram(datagram) {
-			self.mark_served(sequence);
-		}
 	}
 
 	/// Record `sequence` as served, for [`Self::drop_unserved`].

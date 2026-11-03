@@ -905,10 +905,6 @@ impl Misses {
 		for run in asks.iter() {
 			self.deferred.remove(run.clone());
 		}
-		// A buffered datagram arrived, and is served as one.
-		for datagram in &state.datagrams {
-			asks.remove(datagram.sequence..datagram.sequence.saturating_add(1));
-		}
 		// A gap the feed still waits for becomes a miss when it folds.
 		if let Some(at) = self.deferred.deadline() {
 			state.cache.watch_wall(at, waiter);

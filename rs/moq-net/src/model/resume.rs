@@ -14,8 +14,8 @@
 //! grace a passed group is waited for), and while a group still read is read from it or may
 //! continue from it (it holds that group, or may yet get it). Nothing under the bound is
 //! waited for past the reader's budget. The serving copy draining cleanly ends the track
-//! only once nothing it replaced may still deliver below that end. Datagrams are ephemeral,
-//! so no copy is kept for them: a reader that never asked for a group keeps none.
+//! only once nothing it replaced may still deliver below that end. A reader that never asked
+//! for a group keeps no copy.
 //!
 //! A new copy is asked from where the reader got to, so it never has the groups below the
 //! reader's local floor that the copies it replaced cached. Lowering that floor asks the
@@ -40,7 +40,7 @@
 //! former serving copy gave up and the reader had yet to report.
 
 use rangemap::{RangeMap, RangeSet};
-use std::collections::{BTreeSet, VecDeque};
+
 use std::ops::Bound;
 use std::sync::{Arc, PoisonError, Weak};
 use std::sync::{Mutex, MutexGuard};
@@ -369,7 +369,6 @@ impl Consumer {
 				newest: None,
 				resumed: None,
 				window,
-				datagrams: Datagrams::default(),
 				groups: (0, None),
 				groups_read: false,
 				out: Vec::new(),
@@ -489,15 +488,13 @@ struct Copy {
 	/// Each of those ranges resolved, by index, so clamping never widens one: as the
 	/// serving copy had them when this one was subscribed, until this one answers.
 	resolved: Vec<Option<Resolved>>,
-	/// Replaced by a newer route: its datagrams are the newer copy's to deliver.
+	/// Replaced by a newer route.
 	replaced: bool,
 	/// Bounded once the newer copy delivered its first group: nothing past this group is
 	/// taken from it. Unset while it may still feed a group the newer copy never has.
 	until: Option<Option<u64>>,
 	/// The group channel ran out.
 	done: Option<Result<()>>,
-	/// The datagram channel ran out.
-	datagrams_done: Option<Result<()>>,
 	/// When a newer group superseded every group under the bound: the newer copy's first
 	/// group, or the track's end. What the reader still lacks from it is waited for from
 	/// here, for no longer than the reader's budget.
@@ -594,8 +591,7 @@ impl Copy {
 
 	/// How a reader still needs this copy, once replaced.
 	fn retains(&mut self, reader: &Retain<'_>) -> Retains {
-		// Datagrams are ephemeral, so only groups keep a copy: a reader that only reads
-		// datagrams keeps none, whatever its budget.
+		// Only groups keep a copy: a reader that never read one keeps none, whatever its budget.
 		if !reader.groups_read {
 			return Retains::No;
 		}
@@ -824,16 +820,6 @@ impl Subscriber {
 		self.reader().take(candidate)
 	}
 
-	/// Poll for the next datagram in arrival order. `delivered` decides which replaced
-	/// copies still have a group to hand out, once groups were asked for.
-	pub(super) fn poll_recv_datagram(
-		&mut self,
-		delivered: &Delivered,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<super::datagram::Stored>>> {
-		self.reader().poll_recv_datagram(delivered, waiter)
-	}
-
 	/// Forget the gaps in `delivered` below each group past the reader's budget, judged on
 	/// the newest copy that answered; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
@@ -933,18 +919,14 @@ impl Subscriber {
 	}
 
 	/// The final sequence and the error the logical track ended with, once the serving copy
-	/// completed and drained the channel read, its datagrams for `datagrams`, to that end.
-	pub(super) fn end_error(&self, datagrams: bool) -> Option<(u64, Error)> {
+	/// completed and its groups drained to that end.
+	pub(super) fn end_error(&self) -> Option<(u64, Error)> {
 		let reader = self.reader();
 		let serving = reader
 			.copies
 			.last()
 			.filter(|copy| Some(copy.generation) == reader.generation)?;
-		let done = match datagrams {
-			true => &serving.datagrams_done,
-			false => &serving.done,
-		};
-		if !matches!(done, Some(Ok(())))
+		if !matches!(serving.done, Some(Ok(())))
 			|| !matches!(serving.track.poll_complete(&kio::Waiter::noop()), Poll::Ready(Ok(())))
 		{
 			return None;
@@ -1016,48 +998,6 @@ impl Candidate {
 	}
 }
 
-/// Exact identities within the reader's budget. The last delivery never ages until
-/// another supersedes it, as a group's budget starts at its immediate successor.
-/// A replacement copy replays at most its buffered datagrams, so no more than that many
-/// superseded identities are kept, whatever the budget: a publisher cannot grow it.
-#[derive(Default)]
-struct Datagrams {
-	latest: Option<(u64, u64)>,
-	seen: BTreeSet<(u64, u64)>,
-	superseded: VecDeque<(Instant, (u64, u64))>,
-	/// The highest identity ever handed out, which a declared end must stay past.
-	newest: Option<(u64, u64)>,
-}
-
-impl Datagrams {
-	fn expire(&mut self, at: Instant, budget: Duration) {
-		while let Some((since, id)) = self.superseded.front() {
-			if at.saturating_duration_since(*since) < budget {
-				break;
-			}
-			self.seen.remove(id);
-			self.superseded.pop_front();
-		}
-	}
-
-	fn insert(&mut self, id: (u64, u64), at: Instant) -> bool {
-		if self.latest == Some(id) || self.seen.contains(&id) {
-			return false;
-		}
-		self.newest = self.newest.max(Some(id));
-		if let Some(previous) = self.latest.replace(id) {
-			if self.superseded.len() == super::track::MAX_DATAGRAMS
-				&& let Some((_, oldest)) = self.superseded.pop_front()
-			{
-				self.seen.remove(&oldest);
-			}
-			self.seen.insert(previous);
-			self.superseded.push_back((at, previous));
-		}
-		true
-	}
-}
-
 /// A [`Subscriber`]'s state.
 struct Reader {
 	/// The first exclusive end any copy declared, refined by a matching mid-group end.
@@ -1085,8 +1025,6 @@ struct Reader {
 	resumed: Option<(Option<u64>, Vec<Option<Resolved>>)>,
 	/// The reader's ranges resolved; see [`Reader::window`].
 	window: Window,
-	/// Identities handed out within the reader's budget, by Group and Object ID, and the highest ever.
-	datagrams: Datagrams,
 	/// The local floor and exclusive cap; see [`track::Subscriber::with_range`].
 	groups: (u64, Option<u64>),
 	/// Whether groups were ever asked for; until then the reader keeps no replaced copy.
@@ -1251,7 +1189,6 @@ impl Reader {
 			copy.until = None;
 			copy.since = None;
 			copy.done = None;
-			copy.datagrams_done = None;
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// newest another route handed out, is not handed out.
 			copy.floor = copy.floor.max(self.newest);
@@ -1282,7 +1219,6 @@ impl Reader {
 			replaced: false,
 			until: None,
 			done: None,
-			datagrams_done: None,
 			since: None,
 			lease: Arc::new(()),
 			feeds: true,
@@ -1325,7 +1261,7 @@ impl Reader {
 				self.declared_error = copy.track.declared_error();
 			}
 		}
-		// A group, frame, or datagram at or past it, handed out or on any copy, claims
+		// A group or frame at or past it, handed out or on any copy, claims
 		// other content.
 		if let Some(declared) = self.declared {
 			let end = declared.final_sequence();
@@ -1338,10 +1274,6 @@ impl Reader {
 						.is_some_and(|group| group.frame_count() as u64 > declared.frame)
 			};
 			if seen(self.newest)
-				|| self
-					.datagrams
-					.newest
-					.is_some_and(|(group, frame)| Position { group, frame } >= declared)
 				|| self
 					.copies
 					.iter()
@@ -1729,84 +1661,6 @@ impl Reader {
 				.is_ready()
 	}
 
-	fn poll_recv_datagram(
-		&mut self,
-		delivered: &Delivered,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<super::datagram::Stored>>> {
-		loop {
-			if let Some(res) = self.poll_datagram_once(delivered, waiter) {
-				return res;
-			}
-		}
-	}
-
-	fn poll_datagram_once(
-		&mut self,
-		delivered: &Delivered,
-		waiter: &kio::Waiter,
-	) -> Option<Poll<Result<Option<super::datagram::Stored>>>> {
-		self.sync(waiter);
-		if self.refused {
-			return Some(Poll::Ready(Err(Error::ProtocolViolation)));
-		}
-		self.let_go(delivered, waiter);
-		let at = Instant::now();
-		self.datagrams.expire(at, self.mirrored.budget());
-		let groups = self.groups;
-		for index in (0..self.copies.len()).rev() {
-			loop {
-				let copy = &mut self.copies[index];
-				if copy.datagrams_done.is_some() || copy.replaced {
-					break;
-				}
-				let sub = match copy.poll_ready(groups, waiter) {
-					Poll::Pending => break,
-					Poll::Ready(Err(err)) => {
-						copy.datagrams_done = Some(Err(err));
-						break;
-					}
-					Poll::Ready(Ok(sub)) => sub,
-				};
-				if let Some(err) = sub.refused() {
-					return Some(Poll::Ready(Err(err)));
-				}
-				match sub.poll_recv_wire_datagram(waiter) {
-					Poll::Pending => break,
-					Poll::Ready(Ok(Some(datagram))) => {
-						// A relayed group can carry several datagrams, told apart by Object ID.
-						let id = (
-							datagram.sequence,
-							datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0),
-						);
-						if !self.datagrams.insert(id, at) {
-							continue;
-						}
-						if self.past_end(Position {
-							group: id.0,
-							frame: id.1,
-						}) {
-							return Some(Poll::Ready(Err(Error::ProtocolViolation)));
-						}
-						return Some(Poll::Ready(Ok(Some(datagram))));
-					}
-					Poll::Ready(Ok(None)) => {
-						copy.datagrams_done = Some(match copy.track.poll_complete(&kio::Waiter::noop()) {
-							Poll::Ready(end) => end,
-							Poll::Pending => Ok(()),
-						});
-						break;
-					}
-					Poll::Ready(Err(err)) => {
-						copy.datagrams_done = Some(Err(err));
-						break;
-					}
-				}
-			}
-		}
-		self.poll_end(waiter, |copy| copy.datagrams_done.clone())
-	}
-
 	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		loop {
 			self.sync(waiter);
@@ -1999,7 +1853,6 @@ impl Reader {
 			since: Some(track.now()),
 			track,
 			done: None,
-			datagrams_done: None,
 			lease: Arc::new(()),
 			feeds: true,
 		};
