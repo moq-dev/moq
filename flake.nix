@@ -694,6 +694,9 @@
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
             IN_MOQ_DEV_SHELL = "1";
 
+            # Local launchers need the exact build without evaluating the flake again.
+            MOQ_QUEST = "${quest-cli}/bin/quest";
+
             PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
             PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
             PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";

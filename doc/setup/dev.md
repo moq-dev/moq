@@ -55,6 +55,9 @@ Repository gates and quest checks resolve the quest build pinned by this
 checkout through `sh/quest.sh`. Use
 `bash sh/quest.sh review --base origin/main` for a local review with that build,
 or `bash sh/quest.sh gate COMMAND [ARGS...]` to admit a standalone build.
+Outside the dev shell, explicit host toolchains (`ALLOW_HOST_TOOLCHAIN=1`, or Windows without Nix)
+report the selected quest executable and version alongside the repository pin;
+their build identity is unverified.
 
 | What you changed or need to measure | Start here |
 | --- | --- |

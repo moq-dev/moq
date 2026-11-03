@@ -176,8 +176,7 @@ module moq_sh '^infra/moq-sh/' \
     tools='dash'
 # Quest documents form one graph, so any change validates the whole tree,
 # as does a bump of the flake-pinned validator.
-module quest '^(quest/|flake\.lock$|sh/quest\.sh$)' \
-    tools='nix'
+module quest '^(quest/|flake\.lock$|sh/quest\.sh$)'
 # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
 # nixpkgs, and the last moves on a flake.lock bump alone.
 module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)' \
