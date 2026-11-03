@@ -18,8 +18,9 @@ and record the numbers in the PR that closes this:
   that window stays cold for the next hosted job. Count how often a Nightly
   job pays that rebuild, including when `Cargo.lock` changed more than 8 times
   since the previous Nightly (see Plan).
-- Bucket size and request counts after a month on mbx 1.28.0 (from about
-  2026-11-26), against the 30-day expiry in `infra/mbx/lifecycle.json`.
+- Bucket size and request counts after a month with capped manifests
+  (mbx 1.28.0 and later, from about 2026-11-26), against the 30-day expiry
+  in `infra/mbx/lifecycle.json`.
   Shorten or lengthen it from that.
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
