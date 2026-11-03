@@ -172,7 +172,6 @@ per-frame CPU growth since #5926.
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - consumers hold a disabled rendition, and an unmute encodes at once with the mic still open
 - [Buffered audio survives a capture stop and a disable](/quest/m1/audio-across-stop.md) - audio retained by buffered capture is still served, or expires on its own `max_age`, after capture stops or the input is disabled
-- [One audio capture feeds the bus and an encoder](/quest/m1/audio-capture-fanout.md) - a capture Producer/Consumer replaces `bus::Capture` and `publish_capture`, so the studio's audio sources feed the mix and their own tracks from one device open
 - [moq-audio routes sources into several mixes](/quest/m1/audio-mix-router.md) - several mixes with routing, mix-minus, and per-source sync offsets, for the studio's audio mixes
 - [moq-mux presents a broadcast on the publisher's timestamps](/quest/m1/presentation-timeline.md) - `moq play`'s audio-anchored playout timing as a moq-mux API the studio's broadcast sources share
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
@@ -198,7 +197,6 @@ per-frame CPU growth since #5926.
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
 - [The JS resume model passes seed 12345](/quest/m1/js-resume-model-12345.md) - a reader updated to no ranges keeps reading instead of ending cleanly
 - [Prototype-safe rendition names in JS](/quest/m1/proto-safe-names.md) - `js/msf`'s `ext` and `js/publish`'s rendition maps keep `__proto__` and `constructor` names, like Rust
-- [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - a resumed read gets every group or a drop on every wire version
 - [Stats name the route instance's epoch with a type](/quest/m1/stats-epoch-type.md) - `GroupFrame::epoch` gets a dedicated type and tests stop mislabelling the instance
 
 ## Related
