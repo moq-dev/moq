@@ -7889,7 +7889,7 @@ impl Announced {
 				// `NotFound`. Accepted before the push, so the requester holds the source
 				// before its serve machine can see it unheld.
 				let dynamic = source.requests();
-				request.accept(&source);
+				request.serve(&source);
 				let _ = subscriber.sources.try_push(MintedSource {
 					path,
 					instance: entry.route.instance.clone(),
