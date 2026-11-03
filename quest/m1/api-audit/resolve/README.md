@@ -54,10 +54,6 @@ Public API: breaking task shape in moq-net; behavior changes in `@moq/net` and
 the bindings. The method and epoch renames broke every wrapper.
 Wire: none.
 
-## Required
-
-- [JS follow takes FollowOptions](/quest/m1/api-audit/resolve/follow-options.md) - `follow` and `request` get their own JS options types
-
 ## Related
 
 - [Origin fronts park](/quest/m2/origin-front-parks.md) - touches the same retry
