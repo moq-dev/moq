@@ -11,6 +11,22 @@ PR. Only a decision the fixer can't make reaches a person. The host
 `quest land` gate stops landing moq. Merged PRs per hour on a busy day match
 or beat both baselines below.
 
+## Waiting
+
+- Maintainer: verify the deployed `nixos` moq unit/generation runs
+  `quest land watch` with its fixer and retained state, no moq `serve` gate
+  remains, and the deployed installation token permits workflow-touching
+  fixes and re-enqueues. Current host access was unavailable at this
+  recheck. Recommend a read-only unit/journal check before any deployment
+  or permission change; installation metadata already grants workflows
+  write.
+- Maintainer: decide whether this day's throughput satisfies the approximate
+  host baseline of 4-6 PRs/hour, or keep performance verification open until
+  the never-empty-hour comparison below is complete. Recommend keeping it
+  open: 5.79 beats the old queue's overall 5.5, but the matching busy-hour
+  statistic is still missing. The host range's upper observed 6 is not a
+  new hard acceptance threshold.
+
 ## Plan
 
 Decided 2026-11-01 (maintainer, /quest-plan), reversing the 2026-10-26
@@ -83,24 +99,20 @@ Cutover recheck, 2026-11-03 (read-only):
   [published a fixed head and armed auto-merge](https://github.com/moq-dev/moq/pull/7222#issuecomment-6590060984),
   and [resolved a conflict and armed auto-merge](https://github.com/moq-dev/moq/pull/7501#issuecomment-6597514578)
   at 2026-11-03 07:01 UTC; the latter PR merged at 07:57:56 UTC.
-- **Host snapshot unavailable.** This session runs on `desktop`, whose
-  system and user managers have no `quest-land-moq.service`. SSH to `nixos`
-  timed out during banner exchange. Neither observation establishes the
-  current unit, deployed generation, state path or absence of a second
-  batching gate on `nixos`. No host configuration was deployed or changed.
 - **Fixer permissions.** A
   [historical workflow re-enqueue refusal](https://github.com/moq-dev/moq/pull/7431#issuecomment-6594966849)
   at 2026-11-03 03:49 UTC must not be mistaken for a current installation
   permission check. Organization installation metadata now lists moq-bot's
-  `workflows`, `contents` and `merge_queues` permissions as `write`. This
-  does not establish the scope of a token held by the deployed watcher.
+  `workflows`, `contents` and `merge_queues` permissions as `write`.
 - **Organization secrets verified absent.** Paginated
   `GET /orgs/moq-dev/actions/secrets?per_page=100` returned one page,
   `total_count=1`, and one name, neither `APP_CLIENT_ID` nor
   `APP_PRIVATE_KEY`; page 1 had no next link and an explicit page 2 was
   empty with the same total. The organization-copy removal condition is
-  satisfied at this observation; no secret values were read. This does not
-  date their removal or audit copies elsewhere.
+  satisfied at this observation; no secret values were read. Repository
+  copies are also absent (18 repository names, no next page); `bot` and
+  `publish` each list both names. Other CI credentials remain tracked by
+  [read-only CI](/quest/m0/ci/read-only-secrets.md).
 - **Open PRs.** `queue.yml` now also offers a dispatch that reports the
   skipped `Queue` context on an old PR head. A pre-workflow PR can still
   need that report; see its workflow comments. No PR was enqueued and no
@@ -116,7 +128,8 @@ UTC**, a full 24-hour window following the first successful merge-group build.
 | Final enqueue to merge, p90 | **84.2 min** | Queue: 162 min |
 
 Method: paginate REST search for `repo:moq-dev/moq is:pr is:merged base:main
-merged:2026-11-02..2026-11-03` (188 results, no incomplete results), then
+merged:2026-11-02..2026-11-03` (188 results at this recheck, no incomplete
+results), then
 paginate every result's `GET /repos/moq-dev/moq/issues/{number}/timeline`.
 Select merges in the half-open 24-hour window above, and subtract each
 PR's last `added_to_merge_queue` before its `merged` event. All 139 have an
@@ -124,30 +137,13 @@ enqueue event; use the median and nearest-rank p90. Examples at the window's
 ends are [moq-dev/moq#7457](https://github.com/moq-dev/moq/pull/7457) and
 [moq-dev/moq#7501](https://github.com/moq-dev/moq/pull/7501).
 
-This day beats the queue's overall throughput and its recorded latency,
-and lies inside the host's approximate throughput range. It does **not**
-establish matching the host's upper observed 6 PRs/hour. Final-enqueue
-latency excludes earlier failed attempts, fixer time before re-enqueue, and
-PRs that never merged, as in the queue baseline. No host latency baseline
-was recorded. The queue's 6.0 median in never-empty hours is a different
-statistic: complete busy-hour occupancy was not reconstructed, so the
-24-hour rate must not be compared to that median as if they were identical.
+Final-enqueue latency excludes earlier failed attempts, fixer time before
+re-enqueue, and PRs that never merged, as in the queue baseline. No host
+latency baseline was recorded.
+
+Performance verification remaining: reconstruct complete queue occupancy,
+including removed and unmerged PRs, and compare the median merges in
+never-empty hours with the queue baseline's 6.0. A 24-hour rate is not that
+statistic. Keep concurrency 1 while gathering this evidence.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- Maintainer: confirm the deployed `nixos` moq unit runs `quest land watch`
-  with its fixer and retained state, no moq `serve` gate remains, and its
-  installation-token scope permits workflow-touching fixes and re-enqueues.
-  Check the active unit/generation and recent journal on that host;
-  historical GitHub activity and source configuration cannot replace this
-  snapshot. Recommend verification before any further deployment or
-  permission change, since current installation metadata already grants
-  `workflows: write`.
-- moq-dev/moq: the completed day is 5.79 PRs/hour, below the host baseline's
-  upper observed 6. Keep the performance goal open until representative
-  post-cutover evidence establishes matching both baselines, including a
-  like-for-like never-empty-hour comparison. Recommend retaining the goal
-  and measuring the remaining gap rather than treating this day as proof
-  or changing concurrency without measured data.
