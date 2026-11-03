@@ -210,11 +210,6 @@ one cell. The tails check their own connections, so a fallback fails the lane.
 
 The in-tree control lanes also run with `--tail`:
 
-- Four untimed 900-byte datagrams cross the relay in both directions between Rust
-  and each native JS runtime. The subscriber acknowledges resolved metadata before
-  sending begins, then acknowledges each packet, so this checks framing and bytes
-  rather than best-effort burst capacity. The publisher stays open until the read is
-  acknowledged, keeping a reliable track end from overtaking the datagrams.
 - A JS wire requester gets the Rust publisher's exact largest location through
   TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
@@ -228,7 +223,7 @@ The in-tree control lanes also run with `--tail`:
 
 The standalone control endpoints use OS-assigned ports and production QMux,
 SETUP codecs, and request sessions. They verify their negotiated version directly.
-The datagram and query lanes through moq-relay use its usual version-log check.
+The query lanes through moq-relay use their usual version-log check.
 
 Some cases change shape on moq-transport:
 

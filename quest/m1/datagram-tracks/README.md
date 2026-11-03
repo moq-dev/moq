@@ -65,22 +65,36 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
   [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) requires this epic.
   lite-01..06 keep today's group datagrams.
 
-Not settled by the maintainer, so the first child decides it and records why:
-the datagram request's answer carries the track's timescale and
-compression, as TRACK_INFO does for a stream track.
+Decided by the Rust child ([moq-dev/moq#7752](https://github.com/moq-dev/moq/pull/7752)),
+not the maintainer, so open to revisiting:
 
-This README owns the work no child owns:
+- **The answer.** The lite-07 request (Datagrams Stream 0x9: DATAGRAMS, then
+  DATAGRAMS_UPDATE) is answered with DATAGRAMS_INFO, carrying the publisher
+  priority and the timescale, and no compression: a datagram track is never
+  compressed. Why: a subscriber needs the timescale to read a datagram (its
+  Timestamp is present only on a timed track), so the answer must carry it,
+  and a separate TRACK lookup would need a kind signal TRACK does not have. A
+  payload under 1200 bytes, compressed alone with a fresh window, saves little,
+  while compression would cost every datagram an Inflated Size and a decoder.
+- **Timestamp on a `Timescale` 0 track.** The datagram carries none, and its
+  Sequence stands in for its time. Why: it mirrors the
+  [model](/quest/m1/time-addressing/model.md)'s rule that a scale-less frame's
+  timestamp is its group's key, since a datagram's address is its sequence.
+  Until that model lands, Rust's datagram writes take `Option<Timestamp>` like
+  frame writes do (`None` on an untimed track), and the model quest converts
+  both.
+- **Old-version outbound.** An old-version SUBSCRIBE or TRACK for a name is
+  served from its datagram track only once the stream track's lookup fails
+  with NOT_FOUND, which through an origin resolves later, not at once. A
+  consequence: lite-05/06 datagrams between two old peers do not cross a new
+  relay, whose inbound stream-track subscription drops them. One side on
+  lite-07 carries them.
 
-- the Rust-JS interop test of a datagram track on lite-07, direct and
-  through a relay;
-- rewriting the Datagrams section of `doc/concept/moq-lite.md`.
-
-The draft's own Datagrams section changes with the
-[Rust child](/quest/m1/datagram-tracks/rust.md).
+This README owns the work no child owns: the Rust-JS interop test of a
+datagram track on lite-07, direct and through a relay.
 
 ## Required
 
-- [Rust datagram tracks](/quest/m1/datagram-tracks/rust.md) - Rust model types, the lite-07 datagram request and body, the draft, the relay, and moq-archive skipping datagram tracks
 - [JS datagram tracks](/quest/m1/datagram-tracks/js.md) - `@moq/net` datagram types and the lite-07 datagram request
 - [moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md) - Rust and JS map a datagram track to SUBSCRIBE and OBJECT_DATAGRAM with object ID 0, keeping the requested kind
 - [Bindings datagram tracks](/quest/m1/datagram-tracks/bindings.md) - moq-ffi, moq-c, and every wrapper expose the separate datagram types

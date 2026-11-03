@@ -13,8 +13,9 @@ UniFFI outputs, update `go/wrapper` (`publish.go`, `subscribe.go`,
 `records.go`) and `dart/moq`, and record the migration in each package's
 `MIGRATE.md`. Update `doc/lib/*` where they show datagrams.
 
+Until this lands, moq-ffi and moq-c back the old API with the new types
+([moq-dev/moq#7752](https://github.com/moq-dev/moq/pull/7752)): every raw track
+publishes a datagram track of the same name, and a reader opens it on its
+first `recv_datagram`. Remove that coupling here.
+
 Public API: breaking for every binding's datagrams. Wire: none.
-
-## Required
-
-- [Rust datagram tracks](/quest/m1/datagram-tracks/rust.md) - the Rust types the bindings mirror

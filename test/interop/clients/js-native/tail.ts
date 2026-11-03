@@ -29,7 +29,6 @@ const compress = mode === "compress";
 console.debug = console.error;
 console.info = console.error;
 const join = mode === "join" || mode === "status";
-const datagram = mode === "datagram";
 const status = mode === "status";
 const cached = mode === "cached";
 const late = mode === "late";
@@ -37,10 +36,10 @@ if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "late"].includes(mode)
+	![undefined, "drop", "join", "compress", "status", "cached", "late"].includes(mode)
 ) {
 	throw new Error(
-		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|late]]",
+		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|status|cached|late]]",
 	);
 }
 
@@ -117,15 +116,8 @@ try {
 		} else if (!status && !cached) {
 			const demand = track.demand();
 			while (demand.wanted.peek() === undefined) await demand.wanted.changed();
-			if (datagram) {
-				for (let sequence = 0; sequence < GROUPS; sequence++) {
-					assert.equal((await commands.next()).value, `datagram ${sequence}`, "missing datagram command");
-					track.appendDatagram(undefined, new Uint8Array(900).fill(sequence));
-				}
-			} else {
-				write(track);
-				track.close();
-			}
+			write(track);
+			track.close();
 		}
 		try {
 			const ack = await commands.next();
@@ -152,23 +144,7 @@ try {
 			if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
 			const seen: number[] = [];
 			try {
-				if (datagram) {
-					await track.info();
-					process.stdout.write("datagram ready\n");
-					for (let sequence = 0; sequence < GROUPS; sequence++) {
-						const frame = await track.recvDatagram();
-						assert(frame, "missing datagram");
-						assert.equal(frame.sequence, BigInt(sequence), "wrong datagram sequence");
-						assert.equal(frame.payload.byteLength, 900, "truncated datagram");
-						assert(
-							frame.payload.every((byte) => byte === sequence),
-							"corrupt datagram",
-						);
-						assert.equal(frame.timestamp, undefined, "unexpected IETF timestamp");
-						process.stdout.write(`datagram ${sequence}\n`);
-					}
-					console.error("datagram clean groups=0,1,2,3 bytes=3600");
-				} else if (late) {
+				if (late) {
 					for (let sequence = 0; sequence < LATE_GROUPS; sequence++) {
 						const group = await track.recvGroup();
 						assert(group, "missing group");
