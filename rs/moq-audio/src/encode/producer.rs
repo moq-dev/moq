@@ -1243,7 +1243,10 @@ mod tests {
 				let track = consumer
 					.track("audio")
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+					)
 					.await
 					.unwrap();
 				let mut reader = moq_mux::container::Consumer::new(
