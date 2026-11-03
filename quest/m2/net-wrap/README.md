@@ -41,6 +41,10 @@ and its trait-versus-bridge comparison:
   their `poll_*` forms. A wrapper adapts
   to moq-net, not the other way around: moq-e2ee's error converts into
   `moq_net::Error`.
+- **Datagrams follow the datagram types.** [Datagram tracks](/quest/m1/datagram-tracks/README.md) (m1) replaces
+  `append_datagram`, `insert_datagram`, and `recv_datagram` on stream tracks
+  with separate datagram producer and consumer types, so the traits mirror
+  those types instead.
 - **Terminal propagation crosses the wrapper.** Finish, typed aborts (such
   as e2ee's authentication error), and handle teardown reach the other side
   at every level, rather than collapsing into `Error::Dropped` or keeping a
