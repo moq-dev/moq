@@ -13,7 +13,7 @@ and its cause either fixed or recorded in this quest's PR with numbers.
 ## Plan
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211) (open),
-which finishes [request tokens](/quest/m1/ietf-token-auth.md).
+which finishes [request tokens](https://github.com/moq-dev/moq/pull/7211).
 
 - Renewal: after [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211) a paused PUBLISH accepts a token, but a forwarding
   one refuses it ("AUTHORIZATION TOKEN on a locally initiated PUBLISH",

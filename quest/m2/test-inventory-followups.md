@@ -26,7 +26,7 @@ for the `#[ignore]` check. Left over:
 - The failure output lists `benchmark_stream_import` twice. Deduplicate
   orphans by name and location.
 - JS bench scripts are left to
-  [JS bench inventory](/quest/m2/js-bench-inventory.md), which plans the
+  [JS bench inventory](https://github.com/moq-dev/moq/pull/7541), which plans the
   same checker change by its 2026-10-30 maintainer decision.
 
 Each fix gets a case in `sh/gh/test-inventory.test.py` that fails on the

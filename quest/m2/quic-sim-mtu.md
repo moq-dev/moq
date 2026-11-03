@@ -29,7 +29,7 @@ sim would have hidden it: `Pair::drive_client` and `drive_server`
 
 Not here: `tests::probe::competing_cubic`, which was failing on main, was
 fixed by [moq-dev/moq#7429](https://github.com/moq-dev/moq/pull/7429), and the 0-RTT ACK
-report is moot ([0-RTT leftovers](/quest/m1/quic-zero-rtt-leftovers.md)).
+report is moot ([0-RTT leftovers](https://github.com/moq-dev/moq/pull/7492)).
 
 Public API: none (test harness only). Wire: none.
 
