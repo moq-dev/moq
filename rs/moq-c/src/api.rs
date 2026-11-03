@@ -2489,6 +2489,26 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	})
 }
 
+/// Read the broadcast clock's current time into `dst`.
+///
+/// Every track in a broadcast shares this clock's epoch, so stamp media frames and JSON writes
+/// from it. Reading it fixes the clock: a container importer whose first frame arrives later
+/// shifts onto it rather than moving it.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must be a valid pointer to a [moq_timestamp].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_catalog_now(broadcast: u32, dst: *mut moq_timestamp) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*dst = State::lock().publish.catalog_now(broadcast)?.into();
+		Ok(())
+	})
+}
+
 /// Finish a broadcast's catalog, which ends its content.
 ///
 /// Finish every track first. The broadcast stays announced and keeps serving its finished
@@ -3574,9 +3594,10 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 /// Publish a new value to a JSON snapshot track. `value` is a UTF-8 JSON document. A no-op if
 /// unchanged from the previous update.
 ///
-/// `timestamp` is when the value was captured, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
-/// with `MOQ_ERROR_MOQ` and publishes nothing.
+/// `timestamp` is when the value was captured on the broadcast clock (see
+/// [moq_publish_catalog_now]), converted to the track's millisecond timescale. NULL fails with
+/// `MOQ_ERROR_INVALID_POINTER`, and a timestamp too large for milliseconds with `MOQ_ERROR_MOQ`;
+/// either publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3594,7 +3615,7 @@ pub unsafe extern "C" fn moq_publish_json_snapshot_update(
 		let json = ffi::parse_id(json)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
 		State::lock().publish.json_snapshot_update(json, value, timestamp)
 	})
 }
@@ -3634,9 +3655,10 @@ pub unsafe extern "C" fn moq_publish_json_stream(broadcast: u32, name: *const c_
 
 /// Append one record to a JSON stream track. `value` is a UTF-8 JSON document.
 ///
-/// `timestamp` is when the value was captured, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
-/// with `MOQ_ERROR_MOQ` and publishes nothing.
+/// `timestamp` is when the value was captured on the broadcast clock (see
+/// [moq_publish_catalog_now]), converted to the track's millisecond timescale. NULL fails with
+/// `MOQ_ERROR_INVALID_POINTER`, and a timestamp too large for milliseconds with `MOQ_ERROR_MOQ`;
+/// either appends nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3654,7 +3676,7 @@ pub unsafe extern "C" fn moq_publish_json_stream_append(
 		let stream = ffi::parse_id(stream)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
 		State::lock().publish.json_stream_append(stream, value, timestamp)
 	})
 }
@@ -3709,9 +3731,9 @@ pub unsafe extern "C" fn moq_publish_json_window(
 
 /// Append one record to the back of a JSON window. `value` is a UTF-8 JSON document.
 ///
-/// `timestamp` is when the edit occurred, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
-/// with `MOQ_ERROR_MOQ` and publishes nothing.
+/// `timestamp` is when the edit occurred on the broadcast clock (see [moq_publish_catalog_now]),
+/// converted to the track's millisecond timescale. NULL fails with `MOQ_ERROR_INVALID_POINTER`,
+/// and a timestamp too large for milliseconds with `MOQ_ERROR_MOQ`; either publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3729,16 +3751,16 @@ pub unsafe extern "C" fn moq_publish_json_window_push(
 		let window = ffi::parse_id(window)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
 		State::lock().publish.json_window_push(window, value, timestamp)
 	})
 }
 
 /// Drop `count` records from the front of a JSON window, clamped to what it holds.
 ///
-/// `timestamp` is when the edit occurred, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
-/// with `MOQ_ERROR_MOQ` and publishes nothing.
+/// `timestamp` is when the edit occurred on the broadcast clock (see [moq_publish_catalog_now]),
+/// converted to the track's millisecond timescale. NULL fails with `MOQ_ERROR_INVALID_POINTER`,
+/// and a timestamp too large for milliseconds with `MOQ_ERROR_MOQ`; either publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3748,7 +3770,7 @@ pub unsafe extern "C" fn moq_publish_json_window_push(
 pub unsafe extern "C" fn moq_publish_json_window_pop(window: u32, count: u64, timestamp: *const moq_timestamp) -> i32 {
 	ffi::enter(move || {
 		let window = ffi::parse_id(window)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
 		State::lock().publish.json_window_pop(window, count, timestamp)
 	})
 }

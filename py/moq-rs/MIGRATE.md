@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of an optional `timestamp=` keyword. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale=1_000)`; one without is refused.
+
 ### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `Subscription.max_delay` is `delay`, a `moq.Delay`: pass `delay=moq.Delay(max=...)` for the old `max_delay=...`, and `moq.Delay(max=None)` for no subscriber limit.
