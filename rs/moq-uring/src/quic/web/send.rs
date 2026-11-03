@@ -164,7 +164,7 @@ impl Stream {
 	}
 
 	/// Mark the stream as finished, such that no more data can be written. See
-	/// [`send::Stream::finish`]. Fails if it was already finished or reset.
+	/// [`send::Stream::finish`]. Does nothing if it was already finished or reset.
 	fn finish_mut(&mut self) {
 		if matches!(self.state, State::Open(_)) {
 			let State::Open(stream) = std::mem::replace(&mut self.state, State::Reset(Ok(None))) else {

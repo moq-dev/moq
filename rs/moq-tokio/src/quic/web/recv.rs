@@ -48,7 +48,7 @@ impl Stream {
 	}
 
 	/// Poll until the peer resets the stream, the receiver evicts it, or the session closes,
-	/// without reading it; pending for good once every byte arrived. See
+	/// without reading it; pending for good once every byte was read. See
 	/// [`recv::Stream::received_reset`].
 	pub fn poll_reset(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
 		let close = &self.close;
