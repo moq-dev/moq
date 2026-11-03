@@ -61,6 +61,7 @@ fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::Vi
 	hint.framerate = rendition.framerate;
 	hint.reorder = rendition.reorder;
 	hint.bitrate = rendition.bitrate;
+	hint.delay = rendition.delay;
 	hint.optimize_for_latency = rendition.optimize_for_latency;
 	// Authoritative for both the catalog entry and the wire, so dropping it would silently
 	// downgrade a caller's selection to the default.

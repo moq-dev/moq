@@ -71,7 +71,7 @@ impl<R: Send + 'static, I: Send + 'static> Worker<R, I> {
 		let handle = std::thread::Builder::new()
 			.name(thread_name.into())
 			.spawn(move || run(Ready(ready_tx), req_rx))
-			.map_err(|err| Error::Codec(anyhow::anyhow!("failed to spawn the {thread_name} thread: {err}")))?;
+			.map_err(|err| Error::CodecGone(format!("failed to spawn the {thread_name} thread: {err}")))?;
 
 		match ready_rx.await {
 			Ok(Ok(info)) => Ok(Self {
@@ -83,9 +83,7 @@ impl<R: Send + 'static, I: Send + 'static> Worker<R, I> {
 			Ok(Err(err)) => Err(err),
 			Err(_) => {
 				let _ = handle.join();
-				Err(Error::Codec(anyhow::anyhow!(
-					"{thread_name} thread exited before opening"
-				)))
+				Err(Error::CodecGone(format!("{thread_name} thread exited before opening")))
 			}
 		}
 	}
@@ -148,4 +146,15 @@ fn gone() -> Error {
 
 fn abandoned() -> Error {
 	Error::CodecGone("a cancelled call left the codec ahead of this stream".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn an_init_that_drops_its_reply_is_a_worker_failure() {
+		let result = Worker::<(), ()>::open("test-codec", |_, _| {}).await;
+		assert!(matches!(result, Err(Error::CodecGone(_))));
+	}
 }

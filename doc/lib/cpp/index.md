@@ -207,7 +207,7 @@ future completed, which is the executor thread.
 
 ## Disabled renditions
 
-A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq::Error::kUnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 
 ## Bandwidth estimates
 
@@ -219,7 +219,7 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 ## Subscription defaults
 
-`moq::subscription_defaults()` returns moq-net's defaults, whose zero `max_delay` skips a superseded group at once; passing `std::nullopt` for a subscription means the same. Change its fields rather than starting from `moq::Subscription{}`, whose unset `max_delay` sets no subscriber limit.
+Start every subscription from `moq::subscription_defaults()` and change its fields. It holds moq-net's defaults, a zero `delay` that starts at the newest group and skips a superseded one at once, and passing `std::nullopt` for a subscription means the same. A bare `moq::Subscription{}` does not: the generated records carry no duration defaults, so its unset `delay.max` sets no subscriber limit and its unset `delay.min` leaves the target latency unstated.
 
 ## Track demand
 

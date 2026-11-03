@@ -8,7 +8,7 @@ Existing plaintext commands remain the default; an explicit application credenti
 
 ## Plan
 
-Make `moq-e2ee` publishable with this CLI consumer; the crate currently sets
+Make `moq-crypto` publishable with this CLI consumer; the crate currently sets
 `publish = false` while it is workspace-only.
 
 - Hand the [trait-generic CLI paths](/quest/m2/net-wrap/cli.md) an encrypted broadcast for publication and playback. Keep codec, capture, playback, and synchronization logic outside the crypto layer.

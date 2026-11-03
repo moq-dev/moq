@@ -582,6 +582,12 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.stream.stop(self.version.encode_stream_code(&err.into()));
 	}
 
+	/// Send STOP_SENDING with `code`, for a condition no [`StreamError`] names, which the
+	/// caller has already looked up in the negotiated protocol's registry.
+	pub(crate) fn stop(&mut self, code: u32) {
+		self.stream.stop(code);
+	}
+
 	/// Cast the reader to a different version, used during version negotiation.
 	pub fn with_version<V2>(self, version: V2) -> Reader<S, V2> {
 		Reader {
