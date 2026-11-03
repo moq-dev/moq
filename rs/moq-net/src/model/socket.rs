@@ -12,7 +12,7 @@
 //! The peer learns of new streams from the broadcast's track listing, which needs
 //! moq-lite-07 on every hop. See `doc/concept/socket.md` for the convention.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 use std::task::{Poll, ready};
 
@@ -147,6 +147,9 @@ struct Listing {
 	bi: LinkedHashMap<Arc<str>, track::Info>,
 	/// This side's bi opens waiting for an answer, and whether the peer listed it.
 	opening: HashMap<Arc<str>, bool>,
+	/// The peer's answers to this side's bi opens that it still lists, so a name is not
+	/// opened again while the peer holds the answer to an earlier open of it.
+	answers: HashSet<Arc<str>>,
 	/// How the listing ended: `Ok` once the peer's broadcast ended, or why it failed.
 	end: Option<Result<(), Error>>,
 }
@@ -215,8 +218,11 @@ impl Listing {
 					if let Some(answered) = self.opening.get_mut(stream) {
 						*answered = true;
 					}
+					self.answers.insert(stream.into());
 				}
-				(true, Kind::Bi, None) => {}
+				(true, Kind::Bi, None) => {
+					self.answers.remove(stream);
+				}
 				// This side's uni streams live only in its own broadcast.
 				(true, Kind::Uni, _) => {}
 			}
@@ -250,6 +256,22 @@ impl Inner {
 	fn close(&self, reason: Closed) {
 		self.closed.lock().get_or_insert(reason);
 		self.local.close();
+	}
+
+	/// Whether this side's broadcast ended, registering `waiter` for when it does.
+	fn poll_local_closed(&self, waiter: &kio::Waiter) -> bool {
+		self.local.poll_closed(waiter).is_ready()
+	}
+
+	/// Create a track in this side's broadcast, refusing with [`Error::Closed`] once it
+	/// ended: a track in an ended broadcast reaches nobody. Checked after the create, so a
+	/// close racing it is either seen here or comes after the stream opened.
+	fn create_track(&self, name: String, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
+		let producer = self.local.create_track(name, info)?;
+		if self.poll_local_closed(&kio::Waiter::noop()) {
+			return Err(Error::Closed);
+		}
+		Ok(producer)
 	}
 }
 
@@ -293,32 +315,33 @@ impl Socket {
 	/// Open a uni stream named `name`: a track only this side writes.
 	///
 	/// Fails with [`Error::Duplicate`] when this side already opened a uni stream of
-	/// that name.
+	/// that name, and with [`Error::Closed`] once this side closed.
 	pub fn open_uni(&self, name: &str, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
 		self.inner
-			.local
 			.create_track(track_name(self.inner.role, Kind::Uni, name), info)
 	}
 
 	/// Open a bi stream named `name`, resolving once the peer accepts it.
 	///
 	/// `info` describes this side's track, and the peer's answer mirrors it. Fails with
-	/// [`Error::Duplicate`] when this side already opened a bi stream of that name.
+	/// [`Error::Duplicate`] when this side already opened a bi stream of that name, or
+	/// the peer still lists its answer to an earlier one, and with [`Error::Closed`]
+	/// once this side closed.
 	pub fn open_bi(&self, name: &str, info: impl Into<Option<track::Info>>) -> Result<kio::Pending<OpenBi>, Error> {
+		let inner = &self.inner;
 		let name: Arc<str> = name.into();
 		// Registered first, so a poll that reads the peer's answer before this returns keeps it.
 		{
-			let mut listing = self.inner.listing.lock();
-			if listing.opening.contains_key(&name) {
+			let mut listing = inner.listing.lock();
+			// Caught up first: the peer would skip a name it still answers, leaving this
+			// open unanswered. Parks nowhere, so no poller loses its wakeup.
+			listing.drain(&kio::Waiter::noop(), inner.role, &inner.remote);
+			if listing.opening.contains_key(&name) || listing.answers.contains(&name) {
 				return Err(Error::Duplicate);
 			}
 			listing.opening.insert(name.clone(), false);
 		}
-		let producer = match self
-			.inner
-			.local
-			.create_track(track_name(self.inner.role, Kind::Bi, &name), info)
-		{
+		let producer = match inner.create_track(track_name(inner.role, Kind::Bi, &name), info) {
 			Ok(producer) => producer,
 			Err(err) => {
 				self.inner.listing.lock().opening.remove(&name);
@@ -332,28 +355,34 @@ impl Socket {
 		}))
 	}
 
-	/// Poll for the next uni stream the peer opened; `None` once the peer's broadcast ended.
+	/// Poll for the next uni stream the peer opened; `None` once the peer's broadcast ended,
+	/// and [`Error::Closed`] once this side closed.
 	///
 	/// A stream is handed out only while the peer still lists it: one whose track the peer
 	/// dropped first, finished or not, is skipped.
 	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Option<Uni>, Error>> {
 		let inner = &self.inner;
-		let mut listing = inner.listing.lock();
-		listing.drain(waiter, inner.role, &inner.remote);
-		if let Some((name, ())) = listing.uni.pop_front() {
+		loop {
+			if inner.poll_local_closed(waiter) {
+				return Poll::Ready(Err(Error::Closed));
+			}
+			let mut listing = inner.listing.lock();
+			listing.drain(waiter, inner.role, &inner.remote);
+			let Some((name, ())) = listing.uni.pop_front() else {
+				return match listing.ended() {
+					Some(end) => Poll::Ready(end),
+					None => Poll::Pending,
+				};
+			};
 			drop(listing);
-			return Poll::Ready(
-				match inner.remote.track(&track_name(inner.role.peer(), Kind::Uni, &name)) {
-					Ok(consumer) => Ok(Some(Uni { name, consumer })),
-					// The peer's broadcast ended.
-					Err(Error::Unroutable) => Ok(None),
-					Err(err) => Err(err),
-				},
-			);
-		}
-		match listing.ended() {
-			Some(end) => Poll::Ready(end),
-			None => Poll::Pending,
+			return match inner.remote.track(&track_name(inner.role.peer(), Kind::Uni, &name)) {
+				Ok(consumer) => Poll::Ready(Ok(Some(Uni { name, consumer }))),
+				// The peer's broadcast ended.
+				Err(Error::Unroutable) => Poll::Ready(Ok(None)),
+				// The peer dropped the track since the listing read it.
+				Err(Error::NotFound) => continue,
+				Err(err) => Poll::Ready(Err(err)),
+			};
 		}
 	}
 
@@ -364,10 +393,14 @@ impl Socket {
 	}
 
 	/// Poll for the next bi stream the peer opened, answering it with a track that mirrors
-	/// the opener's info; `None` once the peer's broadcast ended.
+	/// the opener's info; `None` once the peer's broadcast ended, and [`Error::Closed`]
+	/// once this side closed. Skips streams as [`Self::poll_accept_uni`] does.
 	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<Option<Bi>, Error>> {
 		let inner = &self.inner;
 		loop {
+			if inner.poll_local_closed(waiter) {
+				return Poll::Ready(Err(Error::Closed));
+			}
 			let mut listing = inner.listing.lock();
 			listing.drain(waiter, inner.role, &inner.remote);
 			let Some((name, info)) = listing.bi.pop_front() else {
@@ -382,6 +415,8 @@ impl Socket {
 				Ok(consumer) => consumer,
 				// The peer's broadcast ended.
 				Err(Error::Unroutable) => return Poll::Ready(Ok(None)),
+				// The peer dropped the track since the listing read it.
+				Err(Error::NotFound) => continue,
 				Err(err) => return Poll::Ready(Err(err)),
 			};
 			// The opener's track info, minus how its copy reached this hop.
@@ -390,9 +425,10 @@ impl Socket {
 				unchecked: false,
 				..info
 			};
-			let producer = match inner.local.create_track(track, info) {
+			let producer = match inner.create_track(track, info) {
 				Ok(producer) => producer,
-				// The peer listed a stream again that this side already answered.
+				// The peer listed a stream again while this side still holds its answer to
+				// the earlier one; the opener refuses that open itself once it sees the answer.
 				Err(Error::Duplicate) => continue,
 				Err(err) => return Poll::Ready(Err(err)),
 			};
@@ -453,9 +489,15 @@ pub struct OpenBi {
 
 impl OpenBi {
 	/// Poll for the peer's answer. Fails with [`Error::Unroutable`] once the peer's
-	/// broadcast ends without one.
+	/// broadcast ends without one, and with [`Error::Closed`] once this side closed, even
+	/// if the answer came.
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bi, Error>> {
 		let inner = &self.inner;
+		// This side's track went with its broadcast, and a peer that keeps its own up
+		// without answering would otherwise hold this open forever.
+		if inner.poll_local_closed(waiter) {
+			return Poll::Ready(Err(Error::Closed));
+		}
 		let mut listing = inner.listing.lock();
 		listing.drain(waiter, inner.role, &inner.remote);
 		if listing.opening.get(&self.name) == Some(&true) {
@@ -564,6 +606,9 @@ struct Accepting {
 /// and a dialer's broadcast is requested only then: a listener that stops accepting
 /// holds nothing for the dialers waiting on it. While it accepts, a dialer dialing again
 /// with the same id ends the socket it replaces with [`Closed::Replaced`].
+///
+/// Run one listener per path. Two would both answer a dial under its instance, and the
+/// dialer would follow only one of them, leaving the other's socket unread.
 pub struct Listener {
 	origin: origin::Producer,
 	path: Path,
@@ -604,8 +649,11 @@ impl Listener {
 
 	/// Poll for the next dialer, requesting its broadcast and answering it.
 	///
-	/// A dialer that leaves before its broadcast resolves is skipped. Fails with
-	/// [`Error::Closed`] once the origin closes.
+	/// Dialers are taken one at a time, in order. A session resolves a request for a
+	/// broadcast its peer announced itself, without asking the peer, so a remote dialer
+	/// cannot hold up the ones behind it; only an [`origin::Requests`] handler on this
+	/// origin that holds a dial's request can. A dialer that leaves before its broadcast
+	/// resolves is skipped. Fails with [`Error::Closed`] once the origin closes.
 	pub fn poll_accept(&mut self, waiter: &kio::Waiter) -> Poll<Result<Socket, Error>> {
 		loop {
 			if let Some(accepting) = &mut self.accepting {

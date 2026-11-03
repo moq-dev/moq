@@ -5,8 +5,9 @@ description: Dial and accept point-to-point connections over moq-lite, with trac
 
 # Sockets
 
-A socket connects one dialer to one listener through any relay, the way a TCP
-connection does. A listener at a path accepts the sockets that dialers open to
+A socket connects one dialer to one listener through relays, the way a TCP
+connection does, provided every hop runs moq-lite 07, which is opt-in (see
+[Versions](#versions)). A listener at a path accepts the sockets that dialers open to
 it, and inside a socket either side opens and accepts tracks the way QUIC opens
 and accepts streams. Use it for per-client state that only the two ends need,
 such as a viewer's commands and the replies to them, while whatever every
@@ -29,7 +30,8 @@ socket is two broadcasts beneath it:
 | `L/.accept/<id>` | The listener | The listener's tracks |
 
 The id is one path segment that the dialer chooses, such as a random id or an
-endpoint ID. Both segments start with `.`, so sockets are
+endpoint ID. Run one listener per path: two would both answer a dial, and the
+dialer would follow only one of them. Both segments start with `.`, so sockets are
 [hidden](/concept/moq-lite#hidden-broadcasts) from anyone listing `L`. The
 listener discovers dialers with a one-segment watch of `L/.dial/*`, which a
 relay serves without scanning everything beneath `L`.
@@ -76,7 +78,9 @@ the application's name for the stream, which may hold `/`.
 - **Bi.** The opener publishes the track in its own broadcast. The peer accepts
   it by publishing the same name in its broadcast, with the opener's track
   info, and each side subscribes to the other's. The opener's stream resolves
-  once the answer is listed.
+  once the answer is listed. A peer still holding its answer to an earlier open
+  of a name can't answer the name again, so the opener refuses to reopen a name
+  while the peer lists its answer.
 
 The opener prefix keeps the two sides' names apart, the way the low bit of a
 QUIC stream ID does: the dialer's bi `chat` and the listener's bi `chat` are
@@ -97,7 +101,8 @@ than the tracks the opener keeps.
 A socket ends when either side's broadcast ends, which includes either side
 closing it or a session on the way dropping, or when a newer dial of its id
 replaces it. Each side then drops its socket, which retracts its broadcast and
-ends the socket for the peer.
+ends the socket for the peer. A side that closed opens and accepts nothing
+more, and its pending bi opens fail, even when the peer answers them later.
 
 ## Versions
 
