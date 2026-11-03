@@ -2519,23 +2519,8 @@ impl DatagramServe {
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 			}
-			// Nobody waits for it any more, unless a reader arrived meanwhile: then look again,
-			// which parks on that reader leaving. Live watches its priority instead.
-			let unused = match &self.state {
-				DatagramState::Open { request }
-				| DatagramState::Info { request, .. }
-				| DatagramState::TrackInfo { request, .. } => {
-					request.poll_unused(waiter).is_ready().then(|| request.close_unused())
-				}
-				DatagramState::Subscribe { producer, .. } => {
-					producer.poll_unused(waiter).is_ready().then(|| producer.close_unused())
-				}
-				_ => None,
-			};
-			match unused {
-				Some(true) => return Poll::Ready(Err(Error::Cancel)),
-				Some(false) => continue,
-				None => {}
+			if self.poll_unused(waiter).is_ready() {
+				return Poll::Ready(Err(Error::Cancel));
 			}
 			match &mut self.state {
 				DatagramState::Open { .. } => {
@@ -2721,6 +2706,30 @@ impl DatagramServe {
 		}
 	}
 
+	/// Ready once nobody waits for the track during setup, which then ended it. Atomic with a
+	/// joining reader: one that arrived meanwhile parks the poll on it leaving. Live watches
+	/// its priority instead.
+	fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let closed = match &self.state {
+				DatagramState::Open { request }
+				| DatagramState::Info { request, .. }
+				| DatagramState::TrackInfo { request, .. } => {
+					ready!(request.poll_unused(waiter));
+					request.close_unused()
+				}
+				DatagramState::Subscribe { producer, .. } => {
+					ready!(producer.poll_unused(waiter));
+					producer.close_unused()
+				}
+				_ => return Poll::Pending,
+			};
+			if closed {
+				return Poll::Ready(());
+			}
+		}
+	}
+
 	/// End the track and the request with `err`, unless it already ended.
 	fn abort(&mut self, err: Error) {
 		self.subscriber.datagrams.lock().remove(&self.id);
@@ -2758,6 +2767,11 @@ impl kio::Task for DatagramServe {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// Checked before the auth wait too, so an abandoned request never parks on a token.
+		if self.poll_unused(waiter).is_ready() {
+			self.abort(Error::Cancel);
+			return Poll::Ready(());
+		}
 		ready!(self.gate.poll_ready(waiter));
 		// Nothing is left to revoke once our side finished, nor on a closed session, whose
 		// end decides how the track ends.
