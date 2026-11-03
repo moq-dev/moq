@@ -199,7 +199,7 @@ func benchThroughput(b *testing.B, c benchCase) {
 						done <- err
 						return
 					}
-					want := time.Duration(n*frames+f) * time.Microsecond
+					want := moq.Timestamp{Value: uint64(n*frames + f), Scale: 1_000_000}
 					if frame == nil || !bytes.Equal(frame.Payload, payload) || frame.Timestamp == nil || *frame.Timestamp != want {
 						done <- fmt.Errorf("missing, reordered, or corrupt frame %d of round %d", f, n)
 						return
@@ -214,7 +214,7 @@ func benchThroughput(b *testing.B, c benchCase) {
 				return err
 			}
 			for f := range frames {
-				timestamp := time.Duration(n*frames+f) * time.Microsecond
+				timestamp := moq.Timestamp{Value: uint64(n*frames + f), Scale: 1_000_000}
 				if err := group.WriteFrame(moq.Frame{Payload: payload, Timestamp: &timestamp}); err != nil {
 					return err
 				}

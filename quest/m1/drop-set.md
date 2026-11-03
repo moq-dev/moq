@@ -14,10 +14,9 @@ narrower budget is served after a widening, as a cold relay would.
 
 ## Plan
 
-Decided 2026-10-27 (maintainer): this runs after
-[Range count cost](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
-`given_up` in `rs/moq-net/src/model/track/miss.rs` (made a `Required` entry
-2026-10-30, in [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)), and before
+Decided 2026-10-27 (maintainer): this runs after the range count cost work,
+which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
+since both edit `given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
 [Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
 because runs keyed by group sequence convert mechanically to starts.
 
@@ -303,10 +302,6 @@ Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149)
 a cancelled fetch below a track's end still holds the end open until the cache
 expiry scan removes it, so how fast a subscription ends depends on expiry
 timing. Settle it here, where cancelled and expired runs get a reason.
-
-## Required
-
-- [Range count cost](/quest/m1/subscribe-ranges/fill-linear.md) - the remaining range-count walks stop growing per poll; both edit `miss.rs`
 
 ## Related
 

@@ -5,8 +5,11 @@ use std::{
 
 use crate::Timestamp;
 
+mod runs;
 mod window;
-pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, later};
+pub(super) use runs::{Layered, Runs};
+pub(crate) use window::Accounted;
+pub(super) use window::{Containing, Held, Holdings, Resolved, Seen, Unheld, Window, later};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -20,6 +23,50 @@ pub struct Subscription {
 	/// Delivery priority, higher first, defaulting to 0. Higher values preempt lower ones
 	/// when bandwidth is constrained.
 	pub priority: i8,
+	/// How far behind the live edge this subscriber plays; see [`Delay`].
+	pub delay: Delay,
+	/// The spans of the track to deliver; see [`Range`].
+	///
+	/// The default is [`Range::oldest`]: everything [`Delay::max`] still considers
+	/// fresh. [`Range::live`] starts at the latest group instead, and an empty list asks
+	/// for nothing.
+	///
+	/// A request to the publisher, aggregated across every live subscriber as the union of
+	/// their ranges, and this subscriber's read filter: it reads only the groups its own
+	/// ranges cover, whatever another subscriber widens the union to.
+	/// [`crate::track::Subscriber::with_range`] narrows the reads further. See [Local cursor
+	/// vs wire preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
+	pub ranges: Vec<Range>,
+	/// Which pending group the publisher sends first; see [`Order`].
+	///
+	/// Aggregated across every live subscriber: any [`Order::Descending`] subscriber makes
+	/// the aggregate descending, so a relay fanning one upstream request out keeps its live
+	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
+	/// still serves it in its own order.
+	pub order: Order,
+	/// Whether this reader needs the source's live feed, not only its history: a wire
+	/// publisher owes its peer an answer naming the live edge, which only the upstream's own
+	/// answer gives. A session holding no upstream subscription for its copy subscribes again
+	/// for such a reader, whatever its ranges. Aggregated as any: one such reader is enough.
+	pub(crate) feed: bool,
+}
+
+/// How far behind the live edge a subscriber plays: where it starts, and how late it may fall.
+///
+/// Both default to zero, which starts at the newest group and skips a superseded one at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Delay {
+	/// The target latency, the playout or jitter-buffer delay held behind the live edge, or
+	/// `None` when the subscriber did not state one.
+	///
+	/// Only a peer whose wire cannot carry it leaves it unstated: moq-lite before 07 and
+	/// moq-transport. A media consumer reads an unstated minimum as zero. The aggregate
+	/// across subscribers is the smallest stated one, so an unstated minimum never pulls it
+	/// to zero, and a relay forwards it upstream as is. A publisher may use it, such as to
+	/// start a cold join that far back; nothing reads it there yet.
+	///
+	/// This is the `Subscriber Min Age` on the moq-lite-07 wire, in milliseconds.
+	pub min: Option<Duration>,
 	/// How long a superseded group stays worth delivering to this subscriber, or `None`
 	/// for as long as the publisher keeps it.
 	///
@@ -38,7 +85,7 @@ pub struct Subscription {
 	/// [`Info::max_age`](crate::track::Info::max_age), since waiting for a group longer
 	/// than it is kept around cannot produce it.
 	///
-	/// It caps every one of [`Self::ranges`]: a range names what may be delivered, and this
+	/// It caps every one of [`Subscription::ranges`]: a range names what may be delivered, and this
 	/// budget skips what inside it has gone stale.
 	///
 	/// # Where it is enforced
@@ -73,32 +120,41 @@ pub struct Subscription {
 	/// when something collects the track's cache pool: an origin's driver does, and a
 	/// standalone track needs [`Pool::poll`](crate::cache::Pool::poll) called, as its idle
 	/// expiry already does. Otherwise it is judged only when something else wakes the read.
-	pub max_delay: Option<Duration>,
-	/// The spans of the track to deliver; see [`Range`].
-	///
-	/// The default is [`Range::oldest`]: everything [`Self::max_delay`] still considers
-	/// fresh. [`Range::live`] starts at the latest group instead, and an empty list asks
-	/// for nothing.
-	///
-	/// A request to the publisher, aggregated across every live subscriber as the union of
-	/// their ranges, and this subscriber's read filter: it reads only the groups its own
-	/// ranges cover, whatever another subscriber widens the union to.
-	/// [`crate::track::Subscriber::with_range`] narrows the reads further. See [Local cursor
-	/// vs wire preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
-	pub ranges: Vec<Range>,
-	/// Which pending group the publisher sends first; see [`Order`].
-	///
-	/// Aggregated across every live subscriber: any [`Order::Descending`] subscriber makes
-	/// the aggregate descending, so a relay fanning one upstream request out keeps its live
-	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
-	/// still serves it in its own order.
-	pub order: Order,
+	pub max: Option<Duration>,
+}
+
+impl Default for Delay {
+	fn default() -> Self {
+		Self {
+			min: Some(Duration::ZERO),
+			max: Some(Duration::ZERO),
+		}
+	}
+}
+
+impl Delay {
+	/// Set [`Self::min`], returning `self` for chaining.
+	pub fn with_min(mut self, min: impl Into<Option<Duration>>) -> Self {
+		self.min = min.into();
+		self
+	}
+
+	/// Set [`Self::max`], returning `self` for chaining.
+	pub fn with_max(mut self, max: impl Into<Option<Duration>>) -> Self {
+		self.max = max.into();
+		self
+	}
+
+	/// [`Self::max`] as a budget: `None` waits as long as anything could.
+	pub(crate) fn budget(&self) -> Duration {
+		self.max.unwrap_or(Duration::MAX)
+	}
 }
 
 /// Which of a subscription's pending groups the publisher sends first.
 ///
 /// A transmission order only: it never decides *whether* a group is delivered, which is
-/// [`Subscription::max_delay`]'s job. An ascending subscriber that wants a backlog
+/// [`Delay::max`]'s job. An ascending subscriber that wants a backlog
 /// therefore needs a budget that covers it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Order {
@@ -137,8 +193,11 @@ pub enum Anchor {
 	/// The group containing this presentation time: the newest one starting at or before it.
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
-	/// or before it, a start reaches back to the oldest group, and while no group has
-	/// started at all it waits like `Relative(0)`. An end settles once a group starting
+	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
+	/// history looks the start up there (see [`Fill::time`](crate::track::Fill::time)),
+	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
+	/// reaches back to the oldest group. While no group has started at all it waits like
+	/// `Relative(0)`. An end settles once a group starting
 	/// after it is known and every sequence below that one is accounted for (started,
 	/// dropped, or never to start). Until then reads stop at the first held group that
 	/// may still start, so at the live edge at most that one group past the end is read
@@ -174,7 +233,7 @@ impl Range {
 	/// Everything from the oldest group still around onward, the default.
 	///
 	/// Unlike `Absolute(0)..` this names no floor: a wire whose publisher resolves the start
-	/// from [`Subscription::max_delay`] reaches as far back as it allows, and an older wire
+	/// from [`Delay::max`] reaches as far back as it allows, and an older wire
 	/// starts at the live edge, filling nothing below it.
 	pub fn oldest() -> Self {
 		Self {
@@ -287,9 +346,10 @@ impl Default for Subscription {
 	fn default() -> Self {
 		Self {
 			priority: 0,
-			max_delay: Some(Duration::ZERO),
+			delay: Delay::default(),
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
+			feed: false,
 		}
 	}
 }
@@ -301,16 +361,15 @@ impl Subscription {
 		self
 	}
 
-	/// Set how far a group may fall behind the live edge before it is skipped, `None` for
-	/// the publisher's max age alone, returning `self` for chaining.
-	pub fn with_max_delay(mut self, max_delay: impl Into<Option<Duration>>) -> Self {
-		self.max_delay = max_delay.into();
+	/// Set the [`Delay`], returning `self` for chaining.
+	pub fn with_delay(mut self, delay: Delay) -> Self {
+		self.delay = delay;
 		self
 	}
 
-	/// [`Self::max_delay`] as a budget: `None` waits as long as anything could.
+	/// [`Delay::max`] as a budget: `None` waits as long as anything could.
 	pub(crate) fn budget(&self) -> Duration {
-		self.max_delay.unwrap_or(Duration::MAX)
+		self.delay.budget()
 	}
 
 	/// Replace [`Self::ranges`], returning `self` for chaining.
@@ -462,15 +521,20 @@ impl Combined {
 			return;
 		};
 		combined.priority = combined.priority.max(sub.priority);
-		combined.max_delay = match (combined.max_delay, sub.max_delay) {
+		combined.delay.max = match (combined.delay.max, sub.delay.max) {
 			(Some(a), Some(b)) => Some(a.max(b)),
 			_ => None,
+		};
+		combined.delay.min = match (combined.delay.min, sub.delay.min) {
+			(Some(a), Some(b)) => Some(a.min(b)),
+			(a, b) => a.or(b),
 		};
 		combined.ranges.extend_from_slice(&sub.ranges);
 		// Sequence-first prioritization is enabled only when every subscriber wants it.
 		if let Order::Descending = sub.order {
 			combined.order = Order::Descending;
 		}
+		combined.feed |= sub.feed;
 	}
 
 	/// The aggregate, or `None` without a subscriber.

@@ -233,6 +233,28 @@ fn seed_from_env() -> u64 {
 	}
 }
 
+/// The run the calling thread is inside, if any.
+pub(crate) fn run_id() -> Option<u64> {
+	current().map(|runtime| runtime.id)
+}
+
+/// Run `id`, which the calling thread must be inside.
+fn expect_run(id: u64) -> Rc<Runtime> {
+	current()
+		.filter(|runtime| runtime.id == id)
+		.expect("a clock captured in a kio::clock::sim::run read outside it")
+}
+
+/// The simulated instant of run `id`.
+pub(crate) fn now_in(id: u64) -> Instant {
+	expect_run(id).now()
+}
+
+/// The simulated wall time of run `id`.
+pub(crate) fn wall_in(id: u64) -> Wall {
+	expect_run(id).time.borrow().clock.wall()
+}
+
 /// Whether the calling thread is inside [`run`].
 pub fn is_running() -> bool {
 	CURRENT.with(|current| current.borrow().is_some())

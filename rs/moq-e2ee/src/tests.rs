@@ -9,6 +9,7 @@ use bytes::Bytes;
 use rind::{aead, hmac};
 use serde_json::Value;
 
+use crate::Epoch;
 use crate::credential::{Config, Credential};
 use crate::datagram::Event;
 use crate::error::Error;
@@ -21,7 +22,6 @@ use crate::limits::{
 use crate::name::{Name, pad};
 use crate::protect::{nonce, protect};
 use crate::{group, track};
-use moq_net::Epoch;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -337,7 +337,8 @@ fn consume(generation: &Producer) -> Consumer {
 }
 
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60))
+	moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)))
 }
 
 fn net_track(name: &Name) -> moq_net::track::Producer {

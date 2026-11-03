@@ -29,4 +29,4 @@ Public API: moq-c gains each m1 binding feature. Wire: none.
 
 ## Required
 
-- [API gaps](/quest/m1/c/api-gaps.md) - one malformed-epoch error code, an audio enabled query, and a relay hops test
+- [API gaps](/quest/m1/c/api-gaps.md) - disabling pre-encoded simulcast rungs after the shared importer support lands
