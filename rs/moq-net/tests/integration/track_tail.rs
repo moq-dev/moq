@@ -29,7 +29,7 @@ const PAYLOAD: &[u8] = b"frame";
 /// How long a subscriber waits for a group it cannot account for, with no max delay set.
 const GRACE: Duration = Duration::from_secs(1);
 
-/// moq-lite drafts with and without SUBSCRIBE_END, and IETF drafts with a joining
+/// moq-lite drafts with and without SUBSCRIBE_FINISH, and IETF drafts with a joining
 /// FETCH (18) and with subscription fills (22).
 const VERSIONS: &[&str] = &[
 	"moq-lite-03",

@@ -32,6 +32,7 @@ import {
 	ALPN_06,
 	ALPN_07_WIP,
 	hasTrackStream,
+	keepsSubscribeOpen,
 	Version,
 	versionName,
 } from "./version.ts";
@@ -538,8 +539,10 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 	producer.finish();
 	producer.close();
-	// SUBSCRIBE_END, then the publisher's FIN.
-	await subscriber.reader.readAll();
+	// SUBSCRIBE_END, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
+	if (keepsSubscribeOpen(version)) {
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+	} else await subscriber.reader.readAll();
 
 	let closed = false;
 	void pair.server.closed.then(() => {
@@ -715,7 +718,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 		producer.finish();
 		producer.close();
-		await subscriber.reader.readAll();
+		// SUBSCRIBE_END; lite-07 keeps the stream open past it.
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 
 		// The withdrawal completes, but the subscription still waits for the subscriber's FIN.
 		fin.release();

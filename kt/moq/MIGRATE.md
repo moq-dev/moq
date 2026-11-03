@@ -25,6 +25,10 @@ while (true) {
 }
 ```
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of defaulting to null, for both the typed and the `String` overloads. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale = 1_000uL)`; one without is refused.
+
 ### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `Subscription.maxDelay` is `delay: Delay`: pass `delay = Delay(min = Duration.ZERO, max = maxDelay)`, where a null `max` sets no subscriber limit, or `copy` `Subscription.default()`.
@@ -158,6 +162,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
 Replace `request.accept(broadcast)` with `request.prepare()`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.serve(producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 

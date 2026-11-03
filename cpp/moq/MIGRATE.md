@@ -6,6 +6,10 @@
 
 `moq::Following::available()` resolves to a null `std::shared_ptr<moq::BroadcastConsumer>` once the path goes offline (or, for a follow pinned to an instance, once another instance takes it over), then the next broadcast when something serves the path again. The first call is never null. Check for null before using a later result, and treat it like the previous instance ending.
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`moq::JsonSnapshotProducer::update`, `moq::JsonStreamProducer::append`, and `moq::JsonWindowProducer::push` and `pop` take a required `moq::Timestamp` instead of an optional one. Stamp it from `moq::MediaCatalogProducer::now()`, the broadcast clock every track shares. Their constructors refuse a track created without a `timescale`. Regenerate bindings and rebuild with the matching native library.
+
 ### Subscriptions take a `moq::Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `moq::Subscription::max_delay` is `moq::Delay delay`: set `delay.max` to the old `max_delay`, or start from `moq::subscription_defaults()`.

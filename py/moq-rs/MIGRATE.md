@@ -16,6 +16,10 @@ Another publisher instance taking a path over keeps it present and is not listed
 Later calls return `None` when the path goes offline, or, when following an `instance`, when another instance takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
 Stop reading the previous broadcast on `None` and call `available()` again. A caller that only awaits the first broadcast can assert it is not `None`.
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of an optional `timestamp=` keyword. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale=1_000)`; one without is refused.
+
 ### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `Subscription.max_delay` is `delay`, a `moq.Delay`: pass `delay=moq.Delay(max=...)` for the old `max_delay=...`, and `moq.Delay(max=None)` for no subscriber limit.
@@ -146,6 +150,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
 Replace `request.accept(broadcast)` with `prepared = request.prepare()`, fill `prepared.broadcast`, then `prepared.publish()`, which announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.serve(producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 

@@ -118,6 +118,10 @@ class BroadcastRequest:
         """Start answering as a new stream under a fresh instance, hidden until published."""
         return BroadcastPrepared(self._inner.prepare())
 
+    def serve(self, broadcast: BroadcastConsumer) -> None:
+        """Serve held content under the prefix route's continuous sequence space, without an exact route."""
+        self._inner.serve(broadcast._inner)
+
     def reject(self, error_code: int) -> None:
         """Reject the request with an application error code."""
         self._inner.reject(error_code)

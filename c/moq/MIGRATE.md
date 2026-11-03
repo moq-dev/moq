@@ -14,6 +14,10 @@ Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling.
 
 `moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
 
+### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` on a NULL `timestamp` instead of stamping the broadcast clock. Stamp media and JSON from `moq_publish_catalog_now()`; in the generated API, JSON `update`, `append`, `push`, and `pop` take a required `moq_timestamp` from the media catalog producer's `now`, and the JSON producers refuse a track without a timescale.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
@@ -94,6 +98,7 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
 `moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
+To answer with a broadcast you already hold, `moq_broadcast_request_serve(request, consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to free.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
 ### `moq_track_info` gains `compress` (#5928)

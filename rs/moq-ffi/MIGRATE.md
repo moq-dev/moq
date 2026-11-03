@@ -12,6 +12,11 @@ Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Wher
 
 `MoqFollowing::available()` returns `Option<Arc<MoqBroadcastConsumer>>`: `None` once the path goes offline (or, for a follow pinned to an `instance`, once another instance takes it over), then the next broadcast when something serves the path again. The first call never returns `None`. Handle `None` as offline: drop what you read from the last broadcast and call `available()` again.
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`MoqJsonSnapshotProducer::update`, `MoqJsonStreamProducer::append`, and `MoqJsonWindowProducer::push` and `pop` take a required `MoqTimestamp` instead of an optional one that defaulted to null. Stamp it on the broadcast clock, read with `MoqMediaCatalogProducer::now`, so the data shares the media's epoch.
+Their constructors refuse a track created without a `timescale`: set one in `MoqTrackInfo`.
+
 ### Subscriptions take a `MoqDelay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `MoqSubscription.max_delay` is `delay: MoqDelay`, the record the decoder outputs take: set `delay.max` to the old `max_delay`.

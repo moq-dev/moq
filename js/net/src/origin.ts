@@ -364,13 +364,10 @@ class ServeState {
 	readonly root: Path.Valid;
 	/** The prefix the route claims; every served path is at or beneath it. */
 	readonly prefix: Path.Valid;
-	/** False when a session announced the route: it may serve that session's broadcast. */
-	readonly originated: boolean;
 
-	constructor(root: Path.Valid, prefix: Path.Valid, originated: boolean) {
+	constructor(root: Path.Valid, prefix: Path.Valid) {
 		this.root = root;
 		this.prefix = prefix;
-		this.originated = originated;
 	}
 
 	queue = new Signal(new Set<Request>());
@@ -1472,7 +1469,7 @@ export class Producer implements Table {
 		return this.#insertRoute(prefix, Route.default, true, true);
 	}
 
-	/** Insert an originated claim with route metadata that answers through `hooks.acceptRequest`, for tests and benches. @internal */
+	/** Insert an originated claim with route metadata that answers through `Request.serve`, for tests and benches. @internal */
 	requestsRoute(
 		prefix: Path.Valid,
 		route:
@@ -1514,7 +1511,7 @@ export class Producer implements Table {
 		// A handle that names no instance serves one of its own.
 		if (route.instance === undefined) route = { ...route, instance: Instance.random(), epoch: 0n };
 		publishPath(prefix);
-		const server = new ServeState(this.#scope.root, prefix, originated);
+		const server = new ServeState(this.#scope.root, prefix);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
 			identity: {},
@@ -2643,8 +2640,9 @@ export class Requests {
  * A pending request for a broadcast to be served on demand.
  *
  * Yielded by {@link Requests.requested}. {@link prepare} then {@link Prepared.publish}
- * resolves it with a new exact-path broadcast; {@link reject} resolves it with an error.
- * Advancing the iterator or closing it without either rejects the request.
+ * resolves it with a new exact-path broadcast; {@link serve} answers with a held broadcast;
+ * {@link reject} resolves it with an error.
+ * Advancing the iterator or closing it without answering rejects the request.
  *
  * @public
  */
@@ -2669,10 +2667,11 @@ export class Request {
 		};
 		publishPrepared = (request, publication) => {
 			if (!request.#server.has(request)) throw new Error("request is closed");
-			// The exact route usually settles the request on its own, resolving its waiters
-			// through the answer's fresh instance; answer it directly if it is still pending.
 			publication.announce();
-			if (request.#server.has(request)) request.#server.accept(request, publication.broadcast.consume());
+			// Its exact route owns availability: never cache a published job under the
+			// prefix, which would keep serving it after that exact route is withdrawn.
+			request.#server.forget(Path.join(request.#server.root, request.path), request);
+			request.#server.settled.update((n) => n + 1);
 			return publication;
 		};
 		rejectPrepared = (request, err) => request.#server.reject(request, err);
@@ -2681,7 +2680,6 @@ export class Request {
 			request.#withdrawn = true;
 			void err;
 		};
-		hooks.acceptRequest = (request, source) => request.#accept(source);
 	}
 
 	/** Start answering as a new stream under a fresh instance, hidden until published. */
@@ -2695,21 +2693,20 @@ export class Request {
 		return makePrepared(this, publication);
 	}
 
-	// Resolve a session-forwarded request with its peer's routed broadcast, through
-	// `hooks.acceptRequest`. The caller keeps producing into `source`; repeat requests for
-	// the path share it for as long as it stays live. Throws when handed a broadcast a
-	// session delivered to an originated claim, leaving the request open: it would go out
-	// labeled with this origin's hop.
-	#accept(source: broadcast.Producer | broadcast.Consumer): void {
+	/**
+	 * Serve a held broadcast under this prefix route without announcing an exact route.
+	 *
+	 * Takes ownership of a consumer; a producer stays the caller's. Every answer at this
+	 * path belongs to the prefix route's instance and must continue the same sequences and
+	 * bytes. Start a new prefix route for different content, or use {@link prepare} and
+	 * {@link Prepared.publish} for a job that can restart independently.
+	 */
+	serve(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
 			// the application still owns its producer and any other consumers.
 			if (this.#withdrawn && source instanceof broadcast.Consumer) source.close();
 			return;
-		}
-		if (this.#publisher) throw new Error("claim answers must be prepared and published");
-		if (this.#server.originated && !(source instanceof broadcast.Producer) && wireOf(source).fromSession) {
-			throw new Error("origin cannot serve a broadcast it did not produce");
 		}
 		this.#done = true;
 		const front = source instanceof broadcast.Producer ? source.consume() : source;

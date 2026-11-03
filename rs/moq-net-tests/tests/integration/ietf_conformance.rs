@@ -7,7 +7,7 @@ use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 use moq_net::{Hop, Version, broadcast, origin};
 use std::sync::Arc;
 
-// Moxygen c27ae6358df62a1195da479b2e07c50dd8174279, moqtest/Utils.cpp.
+// Moxygen's moqtest/Utils.cpp, pinned in nix/moxygen-sources.nix.
 const PREFIX: &str = "moq-test-00";
 const NAMESPACE: &str = "moq-test-00/0/0/0/1/2/2/1024/100/50/1/1/1/-1/-1/0";
 
@@ -32,7 +32,7 @@ async fn routing(version: &str, cluster: bool) {
 	kio::clock::sim::spawn(async move {
 		let request = serving.requested_broadcast().await.unwrap();
 		assert_eq!(request.path().as_str(), NAMESPACE);
-		moq_net::fuzz::accept(request, answer);
+		request.serve(answer);
 	});
 
 	let mut options = MockConnectOptions::new(version);

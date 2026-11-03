@@ -132,7 +132,7 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 				false => assert!(err.is_some(), "{label} {what}: ended cleanly"),
 			}
 		}
-		// Lite-07 ends the subscription after SUBSCRIBE_END rather than resetting it.
+		// Lite-07 ends the subscription after SUBSCRIBE_FINISH rather than resetting it.
 		let reset = session.server_transport.resets().contains(&(64 + 7));
 		assert_eq!(
 			reset,

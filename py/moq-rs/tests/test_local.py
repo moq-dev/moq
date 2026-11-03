@@ -556,7 +556,7 @@ async def test_json_snapshot_roundtrip():
     consumer = moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("status"))
 
     for viewers in range(1, 5):
-        producer.update({"viewers": viewers}, timestamp=moq.Timestamp(viewers, 1_000))
+        producer.update({"viewers": viewers}, moq.Timestamp(viewers, 1_000))
 
     # Iteration yields every state in order; latest() skips the buffered third.
     value = await asyncio.wait_for(anext(consumer), timeout=5.0)
@@ -572,13 +572,13 @@ async def test_json_snapshot_roundtrip():
 
 async def test_json_stream_roundtrip():
     broadcast = moq.BroadcastProducer()
-    producer = moq.json.StreamProducer(broadcast, broadcast.publish_track("events"))
+    producer = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", moq.TrackInfo(timescale=1_000)))
     consumer = moq.json.StreamConsumer(await broadcast.consume().subscribe_track("events"))
 
     for n in range(3):
-        producer.append({"n": n})
+        producer.append({"n": n}, moq.Timestamp(n, 1_000))
         record = await asyncio.wait_for(anext(consumer), timeout=5.0)
-        assert record == moq.json.Timed({"n": n}, None)
+        assert record == moq.json.Timed({"n": n}, moq.Timestamp(n, 1_000))
 
     producer.finish()
 
@@ -592,8 +592,8 @@ async def test_json_window_roundtrip():
     await asyncio.wait_for(until_wanted(demand), timeout=5.0)
 
     for n in range(3):
-        producer.push({"n": n}, timestamp=moq.Timestamp(n, 1_000))
-    producer.pop(2, timestamp=moq.Timestamp(3, 1_000))
+        producer.push({"n": n}, moq.Timestamp(n, 1_000))
+    producer.pop(2, moq.Timestamp(3, 1_000))
 
     for n in range(3):
         event = await asyncio.wait_for(anext(consumer), timeout=5.0)
@@ -603,19 +603,19 @@ async def test_json_window_roundtrip():
 
     producer.finish()
     with pytest.raises(moq.Error.Closed):
-        producer.push({"n": 3}, timestamp=moq.Timestamp(4, 1_000))
+        producer.push({"n": 3}, moq.Timestamp(4, 1_000))
     assert [event async for event in consumer] == []
 
 
 async def test_json_window_cut_restates_the_window():
     broadcast = moq.BroadcastProducer()
-    producer = moq.json.WindowProducer(broadcast.publish_track("log"))
+    producer = moq.json.WindowProducer(broadcast.publish_track("log", moq.TrackInfo(timescale=1_000)))
     raw = await broadcast.consume().subscribe_track("log")
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
 
     for n in range(3):
-        producer.push({"n": n})
-    producer.pop(1)
+        producer.push({"n": n}, moq.Timestamp(n, 1_000))
+    producer.pop(1, moq.Timestamp(3, 1_000))
     events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(4)]
     assert events == [
         moq.json.WindowPush(0, {"n": 0}),
@@ -625,7 +625,7 @@ async def test_json_window_cut_restates_the_window():
     ]
 
     producer.cut()
-    producer.push({"n": 3})
+    producer.push({"n": 3}, moq.Timestamp(4, 1_000))
     while True:
         group = await asyncio.wait_for(raw.recv_group(), timeout=5.0)
         assert group is not None
@@ -643,9 +643,10 @@ async def test_json_window_cut_restates_the_window():
 
 async def test_json_window_skips_records_outside_the_checkpoint():
     broadcast = moq.BroadcastProducer()
-    producer = moq.json.WindowProducer(broadcast.publish_track("log", moq.TrackInfo(refresh=1)), checkpoint_records=2)
+    track = broadcast.publish_track("log", moq.TrackInfo(refresh=1, timescale=1_000))
+    producer = moq.json.WindowProducer(track, checkpoint_records=2)
     for n in range(5):
-        producer.push({"n": n})
+        producer.push({"n": n}, moq.Timestamp(n, 1_000))
 
     # The join crosses the refresh ratio, so the producer restates the bounded checkpoint.
     joiner = await broadcast.consume().subscribe_track("log")
@@ -665,13 +666,14 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
     producer.finish()
     with pytest.raises(moq.Error.JsonTrack):
-        moq.json.WindowProducer(broadcast.publish_track("bad"), checkpoint_records=0)
+        moq.json.WindowProducer(broadcast.publish_track("bad", moq.TrackInfo(timescale=1_000)), checkpoint_records=0)
 
 
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
-    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", moq.TrackInfo(compress=True)))
-    stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events"))
+    timed = moq.TrackInfo(timescale=1_000, compress=True)
+    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", timed))
+    stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", timed))
     snapshot_demand = snapshot.demand()
     stream_demand = stream.demand()
     assert snapshot_demand.name == "status"
@@ -816,6 +818,27 @@ async def test_dynamic_broadcast_request():
     assert frame.timestamp == moq.Timestamp(20_000, 1_000_000)
     track.finish()
     served.broadcast.close()
+
+
+async def test_dynamic_serves_held_content_without_an_exact_route():
+    origin = moq.OriginProducer()
+    dynamic = origin.requests("live")
+    held = moq.BroadcastProducer()
+    track = held.publish_track("status", moq.TrackInfo(timescale=1_000_000))
+    source = held.consume()
+    requesting = asyncio.create_task(origin.consume().request("live/cam"))
+    request = await dynamic.requested_broadcast()
+    request.serve(source)
+    with pytest.raises(Exception):
+        request.serve(source)
+    broadcast = await requesting
+    reader = await broadcast.subscribe_track("status")
+    track.write_frame(b"held", moq.Timestamp(1, 1_000_000))
+    frame = await reader.read_frame()
+    assert frame is not None and frame.payload == b"held"
+    track.finish()
+    held.close()
+    dynamic.cancel()
 
 
 async def test_dynamic_broadcast_request_can_reject():
@@ -1778,17 +1801,17 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
         pass
     await assert_cancelled(track_dynamic.requested_fill())
 
-    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state"))
+    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state", moq.TrackInfo(timescale=1_000)))
     async with moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("state")) as snapshot_consumer:
         pass
     await assert_cancelled(anext(snapshot_consumer))
 
-    stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("log"))
+    stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("log", moq.TrackInfo(timescale=1_000)))
     async with moq.json.StreamConsumer(await broadcast.consume().subscribe_track("log")) as stream_consumer:
         pass
     await assert_cancelled(anext(stream_consumer))
 
-    window = moq.json.WindowProducer(broadcast.publish_track("window"))
+    window = moq.json.WindowProducer(broadcast.publish_track("window", moq.TrackInfo(timescale=1_000)))
     async with moq.json.WindowConsumer(await broadcast.consume().subscribe_track("window")) as window_consumer:
         pass
     await assert_cancelled(anext(window_consumer))
