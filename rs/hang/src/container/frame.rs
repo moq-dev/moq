@@ -1,4 +1,3 @@
-use super::MAX_AGE;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_more::Debug;
 
@@ -23,12 +22,12 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// [`with_timescale`](moq_net::track::Info::with_timescale) for a container that carries the
 /// source's own scale instead (CMAF and Matroska both do).
 ///
-/// Also declares a retention long enough for a segmented egress to serve a full playlist window,
-/// which is why every media track should start here rather than at `Info::default()`. It is a
-/// retention budget and a CEILING on what a subscriber may ask to wait for, so it never makes
-/// anyone play further behind live: a subscriber's own
-/// [`Delay::max`](moq_net::track::Delay::max) defaults to
-/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip the moment a newer group arrives).
+/// Keeps moq-net's authored [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE), long
+/// enough for a segmented egress to serve a full playlist window. It bounds how long a superseded
+/// group stays fresh and caps what a subscriber may ask to wait for, so it never makes anyone
+/// play further behind live: a subscriber's own [`Delay::max`](moq_net::track::Delay::max)
+/// defaults to [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip the moment a newer
+/// group arrives).
 ///
 /// `priority` is the publisher's tie-break priority, and should come from
 /// [`PRIORITY`](crate::catalog::PRIORITY) so every publisher orders its kinds the
@@ -40,7 +39,6 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 pub fn track_info(priority: i8) -> moq_net::track::Info {
 	moq_net::track::Info::default()
 		.with_timescale(TIMESCALE)
-		.with_max_age(MAX_AGE)
 		.with_priority(priority)
 }
 
@@ -152,15 +150,13 @@ mod test {
 	}
 
 	#[test]
-	fn media_tracks_declare_their_retention() {
+	fn media_tracks_keep_the_authored_max_age() {
 		// A media track is read as history (a segmented egress FETCHes segments a playlist
-		// advertised), so it declares a finite retention window.
-		assert_eq!(track_info(crate::catalog::PRIORITY.video).max_age, Some(MAX_AGE));
-
-		// Retimescaling for a container that carries the source's own scale keeps it, since that
-		// is the shape that would otherwise reach for `Info::default()` and lose the retention.
+		// advertised), so it keeps the finite authored max age through a retimescale.
+		let max_age = Some(moq_net::track::Info::DEFAULT_MAX_AGE);
+		assert_eq!(track_info(crate::catalog::PRIORITY.video).max_age, max_age);
 		let at = track_info(crate::catalog::PRIORITY.video).with_timescale(Timescale::MILLI);
 		assert_eq!(at.timescale, Some(Timescale::MILLI));
-		assert_eq!(at.max_age, Some(MAX_AGE));
+		assert_eq!(at.max_age, max_age);
 	}
 }

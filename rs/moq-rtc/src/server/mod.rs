@@ -142,13 +142,14 @@ pub struct Config {
 	/// the OS pick a port, which is fine for dev/loopback; production pins it.
 	pub udp_bind: SocketAddr,
 
-	/// How long relays keep a non-latest group of an ingested media track fetchable.
+	/// How long a superseded group of an ingested media track stays fresh, or `None` for no
+	/// publisher limit.
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
-	/// behind live, it caps how far back a FETCH can still reach. `None` keeps hang's own
-	/// default, which suits a segmented egress (HLS/DASH) reading the broadcast downstream:
-	/// it may only advertise segments that are still fetchable. Lower it when nothing reads
-	/// history and the memory matters.
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
+	/// behind live, it caps how far back a FETCH can still reach. Defaults to
+	/// [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE), which suits a segmented
+	/// egress (HLS/DASH) reading the broadcast downstream: it may only advertise segments
+	/// that are still fetchable. Lower it when nothing reads history.
 	///
 	/// Ingest only (`server publish` / WHIP): WHEP egress reads a broadcast someone else
 	/// declared, so it ignores this.
@@ -169,7 +170,7 @@ impl Default for Config {
 		Self {
 			ice_candidates: Vec::new(),
 			udp_bind: SocketAddr::from(([0, 0, 0, 0], 0)),
-			max_age: None,
+			max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			linger: moq_mux::Linger::DEFAULT,
 		}

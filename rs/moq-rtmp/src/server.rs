@@ -572,8 +572,8 @@ pub struct Publish<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// Retention declared on the media tracks this publish mints, or `None` for hang's
-	/// own default. Override with [`with_max_age`](Self::with_max_age).
+	/// Max age declared on the media tracks this publish mints, or `None` for no publisher
+	/// limit. Override with [`with_max_age`](Self::with_max_age).
 	max_age: Option<Duration>,
 	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
 	/// Override with [`with_bandwidth`](Self::with_bandwidth).
@@ -608,14 +608,14 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Set how long relays keep a non-latest group of this publish's media tracks
-	/// fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of this publish's media tracks stays fresh, or
+	/// `None` for no publisher limit. Defaults to
+	/// [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -1197,7 +1197,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_age: None,
+							max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
 							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 							linger: moq_mux::Linger::DEFAULT,
 						})));

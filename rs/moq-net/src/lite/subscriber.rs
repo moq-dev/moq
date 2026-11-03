@@ -8535,9 +8535,9 @@ impl TrackServeRun {
 				_working: serve.subscriber.session.work().start(),
 			}
 		} else {
-			// Older wires declare no publisher retention limit, and no timeline: their
-			// frames arrive untimed.
-			let info = track::Info::default().with_timescale(None);
+			// Older wires declare no publisher max age, and no timeline: their frames
+			// arrive untimed.
+			let info = track::Info::default().with_timescale(None).with_max_age(None);
 			TrackRunState::Serve(ServeLoop::new(&serve, request, info))
 		};
 		let gate = serve.gate();

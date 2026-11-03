@@ -118,7 +118,7 @@ impl Publisher {
 	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
 	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
 	///
-	/// `config` is the catalog the importer publishes into: retention
+	/// `config` is the catalog the importer publishes into: max age
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
 	/// (`with_bandwidth`).
 	pub fn new(

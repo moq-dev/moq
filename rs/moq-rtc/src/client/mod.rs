@@ -14,15 +14,15 @@ use std::time::Duration;
 use url::Url;
 
 /// Configuration shared by both `client publish` and `client subscribe`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
 	/// Public UDP socket addresses to advertise as ICE host candidates in
 	/// our outbound offer. Same semantics as [`crate::server::Config::ice_candidates`].
 	pub ice_candidates: Vec<SocketAddr>,
 
-	/// How long relays keep a non-latest group of an ingested media track fetchable.
-	/// Same semantics as [`crate::server::Config::max_age`].
+	/// How long a superseded group of an ingested media track stays fresh, or `None` for
+	/// no publisher limit. Same semantics as [`crate::server::Config::max_age`].
 	///
 	/// Ingest only ([`subscribe`](Client::subscribe) / WHEP): a WHIP
 	/// [`publish`](Client::publish) reads a broadcast someone else declared, so it
@@ -33,6 +33,16 @@ pub struct Config {
 	/// Ingest only ([`subscribe`](Client::subscribe) / WHEP); a WHIP
 	/// [`publish`](Client::publish) ignores this.
 	pub bandwidth: moq_net::bandwidth::Allocator,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			ice_candidates: Vec::new(),
+			max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
+			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+		}
+	}
 }
 
 /// Outbound WHIP/WHEP dialer.

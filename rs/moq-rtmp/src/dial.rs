@@ -70,8 +70,8 @@ pub struct Client<S = TcpStream> {
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping.
 	max_delay: Duration,
-	/// Retention declared on the media tracks [`pull`](Self::pull) publishes, or `None`
-	/// for hang's own default.
+	/// Max age declared on the media tracks [`pull`](Self::pull) publishes, or `None` for
+	/// no publisher limit.
 	max_age: Option<Duration>,
 	/// Connection allocator each track [`pull`](Self::pull) ingests claims its peak-hold bitrate on.
 	bandwidth: moq_net::bandwidth::Allocator,
@@ -174,7 +174,7 @@ impl<S: Stream> Client<S> {
 			work,
 			app: app.to_string(),
 			max_delay: crate::DEFAULT_MAX_DELAY,
-			max_age: None,
+			max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			linger: moq_mux::Linger::DEFAULT,
 			metadata: Default::default(),
@@ -191,14 +191,14 @@ impl<S: Stream> Client<S> {
 		self
 	}
 
-	/// Set how long relays keep a non-latest group of the media tracks
-	/// [`pull`](Self::pull) publishes fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of the media tracks [`pull`](Self::pull) publishes
+	/// stays fresh, or `None` for no publisher limit. Defaults to
+	/// [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
 	/// someone else declared, and takes [`with_max_delay`](Self::with_max_delay) instead.

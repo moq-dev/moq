@@ -389,10 +389,9 @@ pub struct Producer<E: CatalogExt = ()> {
 
 	/// How each media track's HLS segments are cut, unless disabled. See [`Config::with_hls`].
 	hls: Option<crate::hls::Config>,
-	/// Retention override for the media tracks minted under this catalog, or `None` to keep
-	/// hang's default. Fixed at construction, so every clone and every
-	/// [`Reserved`](super::Reserved) mints tracks under one policy. See
-	/// [`Config::with_max_age`].
+	/// The max age of the media tracks minted under this catalog, or `None` for no publisher
+	/// limit. Fixed at construction, so every clone and every [`Reserved`](super::Reserved)
+	/// mints tracks under one policy. See [`Config::with_max_age`].
 	max_age: Option<std::time::Duration>,
 	/// Connection allocator passthrough tracks claim their peak-hold bitrate on.
 	/// See [`Config::with_bandwidth`].
@@ -439,7 +438,7 @@ impl Default for Config<()> {
 	fn default() -> Self {
 		Self {
 			catalog: Catalog::default(),
-			max_age: None,
+			max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			clock: None,
 			hls: Some(crate::hls::Config::default()),
@@ -477,17 +476,18 @@ impl<E: CatalogExt> Config<E> {
 		self
 	}
 
-	/// Override how long the media tracks minted under this catalog keep a non-latest group
-	/// fetchable, replacing hang's default. `None` keeps it.
+	/// Set how long a superseded group of the media tracks minted under this catalog stays
+	/// fresh, or `None` for no publisher limit. Defaults to
+	/// [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE).
 	///
 	/// That default suits a segmented egress (HLS/DASH), which may only advertise segments a
-	/// FETCH can still reach. Lower it when nothing reads history and the memory matters;
-	/// raise it for a deeper seek window. It is a RETENTION budget, not a delivery one, so it
-	/// never makes a subscriber play further behind live -- it caps what one may ask to wait
-	/// for, and a subscriber's own budget still defaults to zero.
+	/// FETCH can still reach. Lower it when nothing reads history; raise it for a deeper seek
+	/// window. It is a freshness bound, not a delivery one, so it never makes a subscriber play
+	/// further behind live -- it caps what one may ask to wait for, and a subscriber's own
+	/// budget still defaults to zero.
 	///
 	/// Applies to the media tracks the catalog mints. The catalog and HLS record tracks keep
-	/// moq-net's default: both are read at the live edge, which is retained unconditionally.
+	/// moq-net's default: both are read at the live edge, which never goes stale.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<std::time::Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -579,18 +579,14 @@ impl<E: CatalogExt> Producer<E> {
 		})
 	}
 
-	/// Track properties for a media track under this catalog: hang's media defaults, plus any
-	/// [`Config::with_max_age`] override.
+	/// Track properties for a media track under this catalog: hang's media defaults, with the
+	/// [`Config::with_max_age`] policy.
 	///
 	/// `priority` should come from [`PRIORITY`](hang::catalog::PRIORITY) for the kind of media
 	/// the track carries. Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a
 	/// container that carries the source's own scale (CMAF and Matroska both do).
 	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
-		let info = hang::container::track_info(priority);
-		match self.max_age {
-			Some(max_age) => info.with_max_age(max_age),
-			None => info,
-		}
+		hang::container::track_info(priority).with_max_age(self.max_age)
 	}
 
 	/// Resolve a timestamp, synthesizing one from the broadcast's shared
@@ -1846,16 +1842,21 @@ mod test {
 	}
 
 	#[test]
-	fn media_tracks_inherit_the_catalogs_declared_retention() {
+	fn media_tracks_take_the_catalogs_max_age() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
-		// Unset, a catalog mints hang's media defaults, sized so a segmented egress can serve a
-		// full playlist window. Raw tracks impose no publisher age limit.
+		// Unset, a catalog mints the authored default, sized so a segmented egress can serve a
+		// full playlist window.
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(
 			catalog.track_info(hang::catalog::PRIORITY.video).max_age,
-			hang::container::track_info(hang::catalog::PRIORITY.video).max_age
+			Some(moq_net::track::Info::DEFAULT_MAX_AGE)
 		);
+
+		// `None` is an explicit unlimited, not a request for the default.
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default().with_max_age(None)).unwrap();
+		assert_eq!(catalog.track_info(hang::catalog::PRIORITY.video).max_age, None);
 
 		// An override reaches every media track this catalog mints, and does NOT disturb the
 		// timescale hang pins (or survive a retimescale for a source-scale container).

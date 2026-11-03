@@ -193,7 +193,7 @@ impl Reserved {
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
 	fn encode(self, registered: Registered) -> Producer {
-		let retention = self.track.track().info().max_age.unwrap_or(hang::container::MAX_AGE);
+		let retention = self.track.track().info().max_age.unwrap_or(moq_net::track::Info::DEFAULT_MAX_AGE);
 		let bitrate = registered.encoder.bitrate();
 		self.track.report_bitrate(bitrate);
 

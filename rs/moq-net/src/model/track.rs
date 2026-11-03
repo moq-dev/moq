@@ -126,13 +126,17 @@ pub struct Info {
 	/// by the wall clock alone, and a peer whose timestamps stop advancing cannot pin a
 	/// superseded group.
 	///
-	/// A retention bound rather than a delivery one, the inverse of an HTTP
+	/// A freshness bound on what may still be served, the inverse of an HTTP
 	/// `Cache-Control: max-age`. [`Delay::max`] is clamped to this, since a
-	/// group can't be waited for longer than it's kept around. Reported in TRACK_INFO so
-	/// relays re-serve with the same window. `None` (the default) sets no limit;
-	/// the origin cache ceiling and pool still apply. `Some(Duration::ZERO)` keeps the live edge.
-	/// Stale groups are skipped by readers; reclaiming their bytes is the cache pool's
-	/// [`expiry`](crate::cache::Pool::expiry) window.
+	/// group can't be waited for once it is stale. Reported in TRACK_INFO so
+	/// relays re-serve with the same bound.
+	///
+	/// An authored track defaults to [`Info::DEFAULT_MAX_AGE`]. `None` sets no publisher
+	/// limit, which an author requests explicitly with `with_max_age(None)` and which a
+	/// track received without one (an older moq-lite, or moq-transport without
+	/// MAX_CACHE_DURATION) keeps; the origin cache ceiling still applies.
+	/// `Some(Duration::ZERO)` serves only the live edge. Stale groups are skipped by readers;
+	/// reclaiming their bytes is the cache pool's [`expiry`](crate::cache::Pool::expiry) window.
 	///
 	/// This is the `Publisher Max Age` on the wire, the publisher-side half of the
 	/// budget [`Delay::max`] sets for a subscriber.
@@ -208,11 +212,13 @@ impl PartialEq for Info {
 
 impl Eq for Info {}
 
+/// An authored track's defaults: untimed, [`Info::DEFAULT_MAX_AGE`], priority 0, uncompressed,
+/// never asking for a refresh.
 impl Default for Info {
 	fn default() -> Self {
 		Self {
 			timescale: None,
-			max_age: None,
+			max_age: Some(Self::DEFAULT_MAX_AGE),
 			priority: DEFAULT_PRIORITY,
 			compress: false,
 			refresh: None,
@@ -223,6 +229,13 @@ impl Default for Info {
 }
 
 impl Info {
+	/// The [`max_age`](Self::max_age) an authored track gets unless its author sets one.
+	///
+	/// Long enough for a reader to fetch superseded groups for catch-up, a segmented egress
+	/// (HLS/DASH) to serve its playlist window, and a recorder to absorb reordering, without
+	/// delaying a live reader, whose own [`Delay::max`] defaults to zero.
+	pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30);
+
 	/// Set the per-frame timestamp scale, or `None` for an untimed track, returning `self`
 	/// for chaining.
 	///
@@ -233,7 +246,8 @@ impl Info {
 		self
 	}
 
-	/// Set how old a non-latest group may get before eviction, returning `self` for chaining.
+	/// Set how long a superseded group stays fresh, or `None` for no publisher limit,
+	/// returning `self` for chaining. See [`max_age`](Self::max_age).
 	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
