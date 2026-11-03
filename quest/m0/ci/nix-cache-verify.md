@@ -22,8 +22,9 @@ minute with nothing compiled, against 12-14 minutes of source builds in the
 2026-10-16 baseline.
 
 `cache.yml` now also builds and pushes the `moq-relay` and `moq` runtime
-closures to `nix-ci-moq-dev` on all three platforms (decided 2026-10-29).
-Smoke's nix channel reads them without write credentials. Verify the first
+closures to `nix-ci-moq-dev` on x86 Linux, Smoke's only current nix platform
+(runtime caching decided 2026-10-29). All three platforms still publish
+their dev shells first. Smoke reads the packages without write credentials. Verify the first
 post-merge Cache run uploads both and the next Smoke nix run substitutes
 them; a local build does not prove hosted publication.
 

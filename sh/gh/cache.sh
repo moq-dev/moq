@@ -11,11 +11,12 @@ trap 'rm -rf "$profile"' EXIT
 
 # Building the devShell derivation alone omits inputs that nix develop needs.
 nix develop --profile "$profile/devshell" --command true
+just infra nix push nix-ci-moq-dev "$profile/devshell"
 
-# Smoke's nix channel builds main HEAD, so it needs these runtime closures
-# even before the next release tag publishes them to the release bucket.
-for package in moq-relay moq; do
-    nix build ".#$package" --out-link "$profile/$package" --print-build-logs
-done
-
-just infra nix push nix-ci-moq-dev "$profile/devshell" "$profile/moq-relay" "$profile/moq"
+# Smoke's nix channel currently runs only on x86 Linux and builds main HEAD.
+# Publish its runtime closures without making the dev shell wait on Rust.
+system=$(nix eval --impure --raw --expr builtins.currentSystem)
+if [[ "$system" == x86_64-linux ]]; then
+    nix build .#moq-relay .#moq --out-link "$profile/runtime" --print-build-logs
+    just infra nix push nix-ci-moq-dev "$profile/runtime" "$profile/runtime-1"
+fi

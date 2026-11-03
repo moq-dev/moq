@@ -266,11 +266,12 @@ gh workflow run rpm-repo.yml --ref release -f tag=moq-relay-v1.2.3
 
 `nix.moq.dev` serves two buckets as one binary cache. `nix-moq-dev` holds
 released packages, pushed by `release-nix.yml` on a release tag, and never
-expires. `nix-ci-moq-dev` holds the dev shells and the `moq-relay` and `moq`
-packages `cache.yml` pushes after every merge to `main`, for x86 Linux, ARM
-Linux, and ARM macOS. It publishes the full build closure from
-`nix develop --profile` and the packages' runtime closures, uploading only
-missing paths. Smoke's nix channel reads these packages without write keys.
+expires. `nix-ci-moq-dev` holds the dev shells `cache.yml` pushes after every
+merge to `main`, for x86 Linux, ARM Linux, and ARM macOS. It publishes the
+full build closure from `nix develop --profile`, uploading only missing
+paths. On x86 Linux it then builds and pushes the `moq-relay` and `moq`
+runtime closures for Smoke's nix channel, which reads them without write
+keys. The other platforms have no Smoke nix lane.
 Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30 days
 after upload; the next warm re-uploads what it still needs. `flake.nix`
 sets `fallback = true` because that expiry can remove a path before one that

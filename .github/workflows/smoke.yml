@@ -41,8 +41,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is just a safety net against a hung relay/client. The nix channel
-    # gets longer: nix.moq.dev serves the toolchain but not moq's packages at
-    # HEAD, and compiling them has taken 43 minutes.
+    # gets longer for a cold build when Cache has not finished publishing
+    # HEAD's packages yet; compiling them has taken 43 minutes.
     timeout-minutes: ${{ matrix.channel == 'nix' && 75 || 45 }}
 
     # smoke.sh resolves the latest libmoq release via the GitHub API. Without a
