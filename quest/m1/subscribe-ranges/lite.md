@@ -2,10 +2,11 @@
 
 ## Goal
 
-A relay fills a lite-07 upstream by subscribing to the missing ranges, and
-recovers a dropped group with a one-group SUBSCRIBE. FETCH stays on lite-07 until
-[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md)
-removes it from both implementations.
+Lite-07 ranges carry implicit Range IDs, so a range a SUBSCRIBE_UPDATE adds
+learns where it started. A relay fills a lite-07 upstream by subscribing to the
+missing ranges, and recovers a dropped group with a one-group SUBSCRIBE. Lite-07
+FETCH stays, for one group or a slice within one group
+([Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md)).
 
 ## Plan
 
@@ -13,8 +14,9 @@ Decided 2026-10-25 (maintainer, on
 [moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)): FETCH removal
 moves out of this quest (to its own quest since 2026-10-27), since JS still requests and serves wire FETCH on lite-07
 (`track.Consumer.fetchGroup`), so a Rust-only removal would drop a current
-cross-language capability. This quest keeps FETCH on lite-07 and makes the
-range fill work without it.
+cross-language capability. Since 2026-11-03 FETCH stays on lite-07 for one
+group or a slice within one group, and this quest fills multi-group ranges
+through the subscription.
 
 Decided 2026-11-01 (maintainer, on
 [moq-dev/moq#7487](https://github.com/moq-dev/moq/pull/7487)): this quest
@@ -42,8 +44,51 @@ and FINs once it settles. That fixed back-to-back one-range reads
 copy's covered-FIN path (`SubStream::covered`, `ServeLoop::covered`) is gone.
 Datagrams take no ranges, since they become their own track kind (maintainer,
 2026-11-01; the datagram-tracks plan,
-[moq-dev/moq#7575](https://github.com/moq-dev/moq/pull/7575)). What remains is
-the range fill and the one-group recovery.
+[moq-dev/moq#7575](https://github.com/moq-dev/moq/pull/7575)). The same PR
+brought the JS lite-07 publisher and subscriber to the explicit end, so the two
+implementations share the wire; JS still names it SUBSCRIBE_END in code.
+
+Decided 2026-11-03 (maintainer, on
+[moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675)), answering the
+first attempt's open questions:
+
+1. **Land part 1:** ✅ land it now. Options: ✅ land now; keep a draft.
+2. **Fill budget:** ✅ the live demand's budget. Groups that budget drops
+   count as officially dropped, so the one-group SUBSCRIBE recovery (no max
+   delay) brings them back, and the live cap never loosens. Options: ✅ live
+   demand's budget; loosest budget; per-range wire budget.
+3. **Partial-group fills:** "we can keep FETCH then but for a single group (or
+   slice within a single group). SUBSCRIBE is for multiple groups and does not
+   support slicing within a group." A fill starting past frame 0, such as route
+   recovery's (`resume::Recover`), keeps its FETCH. See
+   [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md).
+4. **Datagram-only groups:** ✅ wait for datagram tracks
+   ([Datagram tracks](/quest/m1/datagram-tracks/README.md), planned in
+   [moq-dev/moq#7575](https://github.com/moq-dev/moq/pull/7575)); after them
+   ranges never carry datagrams. Options: ✅ wait for datagram tracks;
+   NOT_FETCHABLE drops now; keep FETCH for these.
+5. **Range IDs:** ✅ implicit range IDs now, using
+   [moq-dev/moq#7207](https://github.com/moq-dev/moq/pull/7207)'s encoding, so
+   a range added by SUBSCRIBE_UPDATE learns where it started. Options:
+   absolute-only fills; ✅ implicit range IDs now.
+
+Range IDs are this quest's next step. They did not fit #7675 as a checkpoint
+addition: the encoding changes SUBSCRIBE_UPDATE in the Rust and JS codecs,
+publishers, and subscribers together (#7207 was 1,420 lines across both and
+now conflicts with main), and it needs a start report #7207 never defined.
+What remains is Range IDs, then the range fill and the one-group recovery.
+
+### Range IDs
+
+[moq-dev/moq#7207](https://github.com/moq-dev/moq/pull/7207) is the reference:
+each Range implicitly takes the next Range ID on the stream, from 0, and
+SUBSCRIBE_UPDATE edits the live Ranges rather than restating them, with
+`Remove Count` Range IDs to retire and then the Ranges to add. A Range ID never
+assigned or already retired is a PROTOCOL_VIOLATION, and the live Ranges must
+stay non-empty and fit in one SUBSCRIBE. SUBSCRIBE_OK's Range Starts answer the
+Ranges live when it is sent, in Range ID order. A Range an update adds after
+SUBSCRIBE_OK still needs its start reported; see `## Waiting`. Rust and JS
+change together, with draft text and codec, publisher, and subscriber tests.
 
 ### Range fill through the subscription
 
@@ -101,7 +146,8 @@ whole) passed. These failed, and must pass on #7545's miss judging:
   backfill rule covers it: a relay leaves cached groups out of a bounded
   upstream range. On lite-07 the test counts SUBSCRIBE streams, not FETCH.
 
-Open questions the attempt raised, each with the attempt's recommendation:
+Open questions the attempt raised, now decided (2026-11-03, above), kept for
+their detail:
 
 - **Datagram sequences.** A range fill of a sequence served only as a datagram
   never completes: datagrams resolve no SUBSCRIBE_START, so a FIN or end
@@ -132,7 +178,7 @@ Open questions the attempt raised, each with the attempt's recommendation:
   was decided (2026-11-02), filling under the demand's budget composes with
   it: a group the live budget drops as OLD is officially dropped, so a
   one-group SUBSCRIBE with no max delay recovers it, and the live cap never
-  loosens. That is the 2026-11-03 handback's recommendation.
+  loosens. Decided that way on 2026-11-03.
 - **A range added after SUBSCRIBE_OK has no reported start.** SUBSCRIBE_OK's
   Range Starts are positional and sent once, yet the subscriber judges a
   bounded range complete from them, on a stream that stays open for later
@@ -141,8 +187,9 @@ Open questions the attempt raised, each with the attempt's recommendation:
   ([moq-dev/moq#7207](https://github.com/moq-dev/moq/pull/7207)), whose
   recommendation was to decide here whether ranges get implicit IDs so a later
   message can report a start. SUBSCRIBE_UPDATE keeps restating the whole list
-  either way: each range is a few bytes, and restating stays stateless. If IDs
-  are adopted, #7207 is the reference encoding.
+  either way: each range is a few bytes, and restating stays stateless. IDs
+  were adopted on 2026-11-03, with #7207's encoding, which edits rather than
+  restates.
 - `auth::lite_07_narrowing_resets_a_fetch_in_flight` read `Stream(Cancel)`
   instead of `Unauthorized`/`Unroutable` when the grant narrowed mid-group;
   the refusal must carry the grant's error.
@@ -163,9 +210,9 @@ marked DROP so we don't receive two copies of it". A group a reader still
 wants, once an existing subscription names it in SUBSCRIBE_DROP, is recovered
 by a new SUBSCRIBE covering only that group with no max delay, never on a
 guess, a timeout, or while the group may still arrive. This is lite-07's
-FETCH replacement for a dropped group, so that
-[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) can
-remove FETCH from Rust and JS together, as decided on 2026-10-25. Tests: a
+replacement for a FETCH of a dropped group wider than one group's slice, and
+with the fill budget decided 2026-11-03 it also recovers what the live
+budget drops. Tests: a
 group still in flight on the existing subscription sends no second SUBSCRIBE,
 and a dropped group is recovered exactly once.
 
@@ -177,6 +224,16 @@ recovers a dropped group with a one-group SUBSCRIBE. Run
 `just drafts check` and `just test interop --all`, and the `moq-net-tests`
 `restart::retired_fetch_lite07` and `moq-relay` suites.
 
+## Waiting
+
+- Maintainer: how a Range a SUBSCRIBE_UPDATE adds after SUBSCRIBE_OK learns its
+  start, which #7207 never defined. Options: (a) a new SUBSCRIBE_STARTED
+  message (type 0x3) carrying `Range ID` and `Range Start`, sent once that
+  Range's start resolves; (b) let SUBSCRIBE_OK repeat, each one answering the
+  Ranges added since the last. Recommended: (a), since SUBSCRIBE_OK also
+  carries the largest position and is the stream's first answer, and a per-Range
+  message keeps each start tied to its ID.
+
 ## Related
 
-- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - removes FETCH from lite-07 in both implementations once this and JS ranges land
+- [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, once this and JS ranges land
