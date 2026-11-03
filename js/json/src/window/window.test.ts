@@ -370,7 +370,7 @@ test("a lagging consumer is told what it missed", async () => {
 		producer.push({ value: { n } });
 		producer.pop(1);
 	}
-	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0 } });
+	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0n } });
 	const events = await live.finish();
 
 	const skipped = events.flatMap((e) => ("skip" in e ? span(e.skip) : []));
@@ -424,7 +424,7 @@ test("a fresh consumer adopts the current offset", async () => {
 	producer.pop(3);
 
 	const subscriber = track.subscribe();
-	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0 } });
+	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0n } });
 	const consumer = new Consumer<Rec>({ track: subscriber });
 	producer.finish();
 	const events: Event<Rec>[] = [];
@@ -591,7 +591,7 @@ test("events carry their frame's timestamp, and a header's restated records get 
 	producer.cut();
 	producer.push({ value: { n: 3 }, at: at(400) });
 	producer.finish();
-	late.withRange({ start: { included: 1 } });
+	late.withRange({ start: { included: 1n } });
 	const events: Timed<Event<Rec>>[] = [];
 	for await (const event of new Consumer<Rec>({ track: late })) events.push(event);
 	expect(events.map((event) => event.value)).toEqual([

@@ -161,7 +161,7 @@ impl Stream {
 		if let Some(code) = self.reset {
 			return Poll::Ready(Err(Error::Reset(code)));
 		}
-		let (result, _) = self
+		let result = self
 			.shared
 			.conn
 			.borrow_mut()
@@ -296,7 +296,7 @@ impl Stream {
 					Ok(mut chunks) => {
 						let status = read_fn(&mut chunks, waiter);
 						// Reading is what returns the peer's flow control credit.
-						let _ = chunks.finalize();
+						chunks.finalize();
 						status
 					}
 					Err(err) => ReadStatus::Failed(None, err),
@@ -410,7 +410,7 @@ impl Lease<'_> {
 	pub fn release(mut self) {
 		let lease = self.inner.take().expect("only taken to hand it back");
 		let stream = &*self.stream;
-		let _ = stream.shared.conn.borrow_mut().recv_stream(stream.id).release(lease);
+		stream.shared.conn.borrow_mut().recv_stream(stream.id).release(lease);
 	}
 }
 
@@ -437,7 +437,7 @@ impl Drop for Lease<'_> {
 	fn drop(&mut self) {
 		if let Some(lease) = self.inner.take() {
 			let stream = &*self.stream;
-			let _ = stream.shared.conn.borrow_mut().recv_stream(stream.id).restore(lease);
+			stream.shared.conn.borrow_mut().recv_stream(stream.id).restore(lease);
 		}
 	}
 }

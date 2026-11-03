@@ -14,18 +14,19 @@ for (const subscriptions of [1, 16, 128]) {
 			const priority = new Priority(subscriber);
 			const writers = Array.from({ length: streams }, (_, stream) => {
 				const writer = { setPriority: () => ranked++ } as unknown as Writer;
-				priority.add(writer, Math.floor(stream / 2), (stream % 2) * 100);
+				priority.add(writer, BigInt(Math.floor(stream / 2)), (stream % 2) * 100);
 				return writer;
 			});
 			return { priority, subscriber, writers };
 		});
 		const iterations = 100;
+		const last = BigInt(Math.floor((streams - 1) / 2));
 		const start = performance.now();
 		for (let iteration = 0; iteration < iterations; iteration++) {
 			for (const { priority, writers } of queues) {
 				const writer = writers[streams - 1];
 				priority.remove(writer);
-				priority.add(writer, Math.floor((streams - 1) / 2), 100);
+				priority.add(writer, last, 100);
 			}
 		}
 		const ns = ((performance.now() - start) * 1e6) / (iterations * subscriptions * 2);

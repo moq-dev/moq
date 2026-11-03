@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.
+Catch `TimestampMismatch` where you caught that `RangeError`.
+
+### A timestamp finer than the track's timescale is rounded down ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A timestamp that is fractional at the track's timescale, such as 1500µs on a millisecond track or a fractional `Timestamp.now()`, now goes out rounded down instead of to the nearest unit: 1500µs is 1 ms, not 2. Rust's `Timestamp::convert` and `track::Info::rescale` already round down, and `Track.rescale` does too.
+Write timestamps at the track's own scale where the exact value matters.
+
+### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
+
+Every group sequence is a `bigint`, so a group ID past 2^53 decodes, relays, and encodes again instead of being refused: `Group.Producer`/`Consumer.sequence`, `Track.Position.group`, `Track.Bound`, an `absolute` `Track.Anchor`, `Track.Datagram.sequence`, `Track.Demand.wanted`, the `group` of `Ordered.readFrame()`, and the `sequence` that `createGroup`, `insertDatagram`, and `fetchGroup` take and `appendDatagram` returns.
+Write literals with an `n` (`track.createGroup(5n)`, `{ absolute: 10n }`), convert with `BigInt(n)`, and compare with `===` against another bigint: `5n === 5` is `false`. `Math.min` and `Math.max` refuse a bigint, and `JSON.stringify` throws on one.
+Frame indices, a `relative` anchor's count, and timestamps stay `number`. A number where a sequence belongs throws a `TypeError`, and a negative one a `RangeError`.
+
 ### `Subscription.maxDelay` is `delay: Track.Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `Track.Subscription` carries a `delay: Track.Delay` (`{ min?: Milli | null; max?: Milli | null }`) in place of `maxDelay`, which is now refused at runtime.
@@ -25,11 +41,11 @@ A loop that read a bounded range until a timeout now ends on its own; one that w
 ### Ordered subscriptions wait for owed groups
 
 An ordered reader on a subscribed track now waits at a missing group while the feed may still deliver it, up to `delay.max` by media time or wall clock. Local tracks still skip gaps, and the zero default waits for nothing.
-With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. Publisher retention still bounds the budget.
+With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. The publisher's `Track.Info.maxAge` still bounds the budget.
 
 ### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
 
-A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
+A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` allows, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
 
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
@@ -41,11 +57,11 @@ A moq-transport namespace whose escaped path would exceed it is refused when dec
 `Path.from` throws on a component with a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling, and `Path.decode` refuses one off the wire. A moq-transport namespace field ending in `/`, which escapes to an empty segment, is refused too.
 Pass canonical components: `Path.from("room/cam")` or `Path.from(prefix, "cam")`, where an empty component is the root, rather than ``Path.from(`${prefix}/cam`)`` or `Path.from("room/")`.
 
-### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+### moq-transport drafts 14 through 17, 19, and 21 are removed ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753), [moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754))
 
-The `"moq-transport-14"` through `"moq-transport-17"` version names now throw a `TypeError`, and a peer offering only those versions fails the handshake.
+A peer offering only removed drafts fails the handshake.
 The moql SETUP (no ALPN, or `moql`) negotiates only moq-lite versions.
-Peers must speak moq-transport draft 18 or later, or moq-lite.
+Peers must speak moq-transport draft 18, 20, or 22, or moq-lite.
 
 ### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
@@ -129,7 +145,8 @@ Only `publish` announces it: `prepared.broadcast` has no announcement methods.
 `Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
 Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
 Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
-`Dynamic.update` is no longer part of the public API, and `Request` has no `accept` (#6496): only the built-in sessions answer with a broadcast they already hold.
+`Dynamic.update` is no longer part of the public API (#6496).
+`Request.serve(broadcast)` additively exposes the former private answer path: serve held content without announcing an exact route. The prefix route promises the same bytes and continuous sequences at each served path; start a new prefix route for different content, or prepare and publish an independent job.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
 ### `largest()` reports within a reader's `setGroups` bounds
@@ -247,10 +264,10 @@ A write whose timedness does not match its track throws `Error.TimestampMismatch
 
 ### Subscriber staleness is `maxDelay`
 
-`Track.Subscription`'s `maxAge` is `maxDelay`; `maxAge` stays the publisher's retention on `Track.Info`.
+`Track.Subscription`'s `maxAge` is `maxDelay`; `maxAge` stays the publisher's staleness bound on `Track.Info`.
 A `maxAge` key in subscription options throws a `TypeError`, even when `undefined` or beside `maxDelay`.
 
-### Publisher retention is optional (#4242)
+### `Track.Info.maxAge` is optional (#4242)
 
 `Track.Info.maxAge` is optional, absent meaning no publisher limit, and `DEFAULT_MAX_AGE_MS` is gone.
 Pass an explicit value such as `Milli(30_000)` where you used the constant.

@@ -99,15 +99,16 @@ export class Tally {
 
 	/** What was received of each rendition of the broadcast at `path`, keyed by rendition ID. */
 	report(path: Moq.Path.Valid): Record<string, Received> {
-		const report: Record<string, Received> = {};
+		// fromEntries defines each ID as its own key, so `__proto__` keeps its counters.
+		const report: [string, Received][] = [];
 		for (const [id, entry] of this.#broadcasts.get(path) ?? []) {
 			const received = { ...entry.received };
 			if (entry.stalling !== undefined) received.stalled = (received.stalled ?? 0) + elapsed(entry.stalling);
 			if (received.stalled !== undefined) received.stalled = Math.floor(received.stalled);
 			if (received.arrival) received.arrival = { ...received.arrival };
-			report[id] = received;
+			report.push([id, received]);
 		}
-		return report;
+		return Object.fromEntries(report);
 	}
 }
 

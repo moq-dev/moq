@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Breaking:** open one `capture::Producer` and pass its independent consumers
+  to the bus and encoder. Samples, timestamps, source gaps, and terminal failures
+  are shared; slow readers lose only their own expired buffers. See `MIGRATE.md`.
+
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-audio-v0.1.9...moq-audio-v0.1.10) - 2026-10-05
 
 ### Other

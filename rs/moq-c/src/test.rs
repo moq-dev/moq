@@ -20,11 +20,19 @@ fn read_timestamp(timestamp: *const moq_timestamp) -> Option<moq_timestamp> {
 	unsafe { timestamp.as_ref() }.copied()
 }
 
+/// The broadcast clock's current time, which every write on the broadcast is stamped from.
+fn catalog_now(broadcast: u32) -> moq_timestamp {
+	let mut now = moq_timestamp::default();
+	assert_eq!(unsafe { moq_publish_catalog_now(broadcast, &mut now) }, 0);
+	now
+}
+
 /// A ten-second max delay, the media consumers' usual budget here.
 const TEN_SECONDS: moq_delay = moq_delay {
 	min_us: 0,
 	max_us: 10_000_000,
 	max_unlimited: false,
+	min_unstated: false,
 };
 
 /// Convert a positive `i32` return value to `u32`, panicking on error.
@@ -131,7 +139,8 @@ impl Callback {
 	}
 
 	fn recv(&self) -> i32 {
-		self.rx.recv_timeout(TIMEOUT).expect("callback timed out")
+		// Delivery depends on the runtime and codec threads; nextest guards hangs.
+		self.rx.recv().expect("callback channel closed")
 	}
 
 	/// Wait for the terminal callback (code <= 0) the task delivers after close
@@ -236,7 +245,8 @@ impl Drop for Callback {
 
 /// FFI callback that forwards the status code through an `mpsc::Sender`.
 extern "C" fn channel_callback(user_data: *mut c_void, code: i32) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<i32>) };
+	// Terminal delivery lets the receiver free user_data and its channel while send still runs.
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<i32>) }.clone();
 	let _ = tx.send(code);
 }
 
@@ -295,7 +305,7 @@ impl Drop for States {
 }
 
 extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connection_state) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) };
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) }.clone();
 	let state = unsafe { &*state };
 	let mut protocol = moq_protocol_error {
 		scope: 0,
@@ -1766,8 +1776,10 @@ fn publish_track_invalid_broadcast() {
 
 	let subscription = moq_subscription {
 		priority: 1,
-		max_delay_us: 0,
-		max_delay_present: false,
+		delay: moq_delay {
+			max_unlimited: true,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1990,8 +2002,10 @@ fn raw_track_publish_consume() {
 	// finish draining if the second becomes visible while the callback runs.
 	let subscription = moq_subscription {
 		priority: 0,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -2224,8 +2238,10 @@ fn raw_track_subscription_options_and_update() {
 	];
 	let subscription = moq_subscription {
 		priority: 5,
-		max_delay_us: 25_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 25_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2254,15 +2270,20 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(read_timestamp(frame.timestamp), Some(micros(20_000)));
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-	let widened = [moq_range {
-		end: moq_anchor {
-			group: 3,
-			..ranges[0].end
+	// Widen the bounded range but keep the open one, so the read stays open for the cancel.
+	let widened = [
+		moq_range {
+			end: moq_anchor {
+				group: 3,
+				..ranges[0].end
+			},
+			..ranges[0]
 		},
-		..ranges[0]
-	}];
+		ranges[1],
+	];
 	let update = moq_subscription {
 		ranges: widened.as_ptr(),
+		ranges_len: widened.len(),
 		..subscription
 	};
 	assert_eq!(unsafe { moq_consume_track_update(consumer, &update) }, 0);
@@ -2335,8 +2356,10 @@ fn raw_track_time_anchor() {
 	}];
 	let subscription = moq_subscription {
 		priority: 5,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2433,8 +2456,10 @@ fn raw_track_update_refuses_time_on_untimed() {
 	}];
 	let update = moq_subscription {
 		priority: 3,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2490,8 +2515,10 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	};
 	let subscribe = |ranges: &[moq_range]| moq_subscription {
 		priority: 0,
-		max_delay_us: 60_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 60_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2592,14 +2619,17 @@ fn json_snapshot_publish_consume() {
 
 	let mut last = 0;
 	for expected in [r#"{"a":1}"#, r#"{"a":2}"#] {
+		// Nothing stamps a write for the caller, so a NULL timestamp publishes nothing.
 		assert_eq!(
 			unsafe {
-				moq_publish_json_snapshot_update(
-					producer,
-					expected.as_ptr() as *const c_char,
-					expected.len(),
-					std::ptr::null(),
-				)
+				moq_publish_json_snapshot_update(producer, r#"{"a":0}"#.as_ptr() as *const c_char, 7, std::ptr::null())
+			},
+			MOQ_ERROR_INVALID_POINTER
+		);
+		let now = catalog_now(broadcast);
+		assert_eq!(
+			unsafe {
+				moq_publish_json_snapshot_update(producer, expected.as_ptr() as *const c_char, expected.len(), &now)
 			},
 			0
 		);
@@ -2610,7 +2640,6 @@ fn json_snapshot_publish_consume() {
 			timestamp: std::ptr::null(),
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		// The producer stamps each value with the broadcast clock.
 		let at = read_timestamp(value.timestamp).expect("a stamped value is timed");
 		assert!(at.value >= last);
 		last = at.value;
@@ -2660,14 +2689,17 @@ fn json_stream_publish_consume() {
 
 	let mut last = 0;
 	for expected in [r#"{"n":0}"#, r#"{"n":1}"#, r#"{"n":2}"#] {
+		// Nothing stamps a write for the caller, so a NULL timestamp appends nothing.
 		assert_eq!(
 			unsafe {
-				moq_publish_json_stream_append(
-					producer,
-					expected.as_ptr() as *const c_char,
-					expected.len(),
-					std::ptr::null(),
-				)
+				moq_publish_json_stream_append(producer, r#"{"n":-1}"#.as_ptr() as *const c_char, 8, std::ptr::null())
+			},
+			MOQ_ERROR_INVALID_POINTER
+		);
+		let now = catalog_now(broadcast);
+		assert_eq!(
+			unsafe {
+				moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len(), &now)
 			},
 			0
 		);
@@ -2678,7 +2710,6 @@ fn json_stream_publish_consume() {
 			timestamp: std::ptr::null(),
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		// The producer stamps each value with the broadcast clock.
 		let at = read_timestamp(value.timestamp).expect("a stamped value is timed");
 		assert!(at.value >= last);
 		last = at.value;
@@ -2690,7 +2721,7 @@ fn json_stream_publish_consume() {
 		assert_eq!(moq_consume_json_value_free(value_id), 0);
 	}
 
-	// A caller's timestamp replaces the clock's, floored to the track's millisecond scale.
+	// A timestamp at another scale is floored to the track's milliseconds.
 	let expected = r#"{"n":3}"#;
 	let at = moq_timestamp {
 		value: (last + 1_000) * 90 + 45,
@@ -2755,10 +2786,12 @@ fn recv_window(cb: &Callback) -> WindowEvent {
 	(event.kind, event.start..event.end, json, timestamp)
 }
 
+/// Push record `n` at `n` milliseconds.
 fn window_push(handle: u32, n: u64) {
 	let value = format!(r#"{{"n":{n}}}"#);
+	let at = micros(n * 1_000);
 	assert_eq!(
-		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len(), std::ptr::null()) },
+		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len(), &at) },
 		0
 	);
 }
@@ -2775,8 +2808,8 @@ fn window_consume(consume: u32, name: &[u8], cb: &Callback) -> u32 {
 	})
 }
 
-/// A live reader sees each push and pop in order, stamped by the broadcast clock, and closing the
-/// broadcast ends a window still open.
+/// A live reader sees each push and pop in order at its timestamp, a NULL timestamp is refused, and
+/// closing the broadcast ends a window still open.
 #[test]
 fn json_window_publish_consume() {
 	use moq_json_window_kind::*;
@@ -2798,32 +2831,50 @@ fn json_window_publish_consume() {
 	let event_cb = Callback::new();
 	let consumer = window_consume(consume, name, &event_cb);
 
+	// Nothing stamps an edit for the caller, so a NULL timestamp publishes nothing.
+	let value = br#"{"n":-1}"#;
+	assert_eq!(
+		unsafe { moq_publish_json_window_push(producer, value.as_ptr().cast(), value.len(), std::ptr::null()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+	assert_eq!(
+		unsafe { moq_publish_json_window_pop(producer, 1, std::ptr::null()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
 	for n in 0..3 {
 		window_push(producer, n);
 	}
-	assert_eq!(unsafe { moq_publish_json_window_pop(producer, 2, std::ptr::null()) }, 0);
+	assert_eq!(unsafe { moq_publish_json_window_pop(producer, 2, &micros(3_000)) }, 0);
 
-	let mut last = moq_net::Timestamp::ZERO;
 	for n in 0..3 {
 		let (kind, range, json, timestamp) = recv_window(&event_cb);
 		assert_eq!(
-			(kind, range, json),
-			(MOQ_JSON_WINDOW_KIND_PUSH, n..n + 1, Some(serde_json::json!({ "n": n })))
+			(kind, range, json, timestamp),
+			(
+				MOQ_JSON_WINDOW_KIND_PUSH,
+				n..n + 1,
+				Some(serde_json::json!({ "n": n })),
+				Some(moq_net::Timestamp::from_millis(n).unwrap())
+			)
 		);
-		let timestamp = timestamp.expect("the producer stamps each edit with the broadcast clock");
-		assert!(timestamp >= last);
-		last = timestamp;
 	}
 	let (kind, range, json, timestamp) = recv_window(&event_cb);
-	assert_eq!((kind, range, json), (MOQ_JSON_WINDOW_KIND_POP, 0..2, None));
-	assert!(timestamp.expect("the pop is stamped too") >= last);
+	assert_eq!(
+		(kind, range, json, timestamp),
+		(
+			MOQ_JSON_WINDOW_KIND_POP,
+			0..2,
+			None,
+			Some(moq_net::Timestamp::from_millis(3).unwrap())
+		)
+	);
 
 	// Closing the broadcast ends the open window and releases its handle.
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert!(event_cb.recv_terminal() < 0, "an aborted window is not a clean end");
 	assert!(moq_consume_json_cancel(consumer) < 0, "the task removed itself");
 	assert!(
-		unsafe { moq_publish_json_window_pop(producer, 1, std::ptr::null()) } < 0,
+		unsafe { moq_publish_json_window_pop(producer, 1, &micros(4_000)) } < 0,
 		"the handle was released"
 	);
 	assert!(moq_publish_json_window_finish(producer) < 0, "the handle was released");
@@ -3247,8 +3298,10 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 0,
-		max_delay_us: 0,
-		max_delay_present: false,
+		delay: moq_delay {
+			max_unlimited: true,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -3766,6 +3819,39 @@ fn dynamic_serves_a_request_under_a_prefix() {
 }
 
 #[test]
+fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"source");
+	let held = consume_local(broadcast);
+	let cb = Callback::new();
+	let dynamic =
+		id(unsafe { moq_origin_requests(origin, b"live".as_ptr().cast(), 4, Some(channel_callback), cb.ptr) });
+	let result = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			origin,
+			b"live/cam".as_ptr().cast(),
+			8,
+			std::ptr::null(),
+			0,
+			Some(channel_callback),
+			result.ptr,
+		)
+	});
+	let request = id(cb.recv());
+	assert_eq!(moq_broadcast_request_serve(request, held), 0);
+	let served = id(result.recv());
+	assert!(moq_broadcast_request_serve(request, held) < 0, "request is consumed");
+	assert_eq!(moq_consume_close(held), 0, "source handle remains caller-owned");
+	result.recv_terminal();
+	assert_eq!(moq_consume_close(served), 0);
+	assert_eq!(moq_origin_requests_cancel(dynamic), 0);
+	cb.recv_terminal();
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";
@@ -3812,7 +3898,7 @@ impl Drop for ProtocolCallback {
 }
 
 extern "C" fn protocol_callback(user_data: *mut c_void, code: i32) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<(i32, Option<moq_protocol_error>)>) };
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<(i32, Option<moq_protocol_error>)>) }.clone();
 	let mut out = moq_protocol_error {
 		scope: 0,
 		code: 0,
@@ -4970,8 +5056,10 @@ struct Gate {
 
 extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
 	let gate = unsafe { &*(user_data as *const Gate) };
-	let _ = gate.tx.send(code);
+	// The receiver may free gate as soon as it receives the terminal code.
 	let hold = gate.hold.lock().unwrap().take();
+	let tx = gate.tx.clone();
+	let _ = tx.send(code);
 	if let Some(hold) = hold {
 		let _ = hold.recv();
 	}
@@ -6504,16 +6592,27 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.quic.resolve().keylog.is_none());
 }
 
-/// `moq_subscription_defaults` reads back as moq-net's defaults, while a zeroed struct
-/// sets no subscriber limit.
+/// `moq_subscription_defaults` and a zeroed struct both read back as moq-net's defaults, and
+/// the flags reach the unstated minimum and the unlimited max.
 #[test]
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = unsafe { crate::api::parse_subscription(&moq_subscription_defaults()) }.unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
 
-	let zeroed: moq_subscription = unsafe { std::mem::zeroed() };
-	let zeroed = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
-	assert_eq!(zeroed.delay.max, None);
+	let mut zeroed: moq_subscription = unsafe { std::mem::zeroed() };
+	assert_eq!(
+		unsafe { crate::api::parse_subscription(&zeroed) }.unwrap(),
+		moq_net::track::Subscription::default()
+	);
+
+	zeroed.delay = moq_delay {
+		min_us: 5,
+		max_us: 5,
+		max_unlimited: true,
+		min_unstated: true,
+	};
+	let flagged = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
+	assert_eq!(flagged.delay, moq_net::track::Delay { min: None, max: None });
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,
@@ -7521,6 +7620,59 @@ fn json_tracks_are_advertised_in_the_catalog() {
 	assert!(published_catalog(broadcast).json.tracks.is_empty());
 
 	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Media and data stamped from the broadcast clock share one epoch, so a JSON track gives the
+/// media no `delay`: a media frame trails no data write.
+#[test]
+fn a_shared_epoch_gives_media_no_delay() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"shared-epoch");
+	let before: Vec<String> = published_catalog(broadcast).audio.renditions.keys().cloned().collect();
+	let media = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&opus_head(),
+		None,
+	));
+	let name = (published_catalog(broadcast).audio.renditions.keys())
+		.find(|name| !before.contains(name))
+		.expect("rendition listed")
+		.clone();
+	let status = b"status";
+	let json = id(unsafe {
+		moq_publish_json_snapshot(
+			broadcast,
+			status.as_ptr() as *const c_char,
+			status.len(),
+			&moq_json_snapshot_config { deltas: true },
+		)
+	});
+
+	let now = catalog_now(broadcast);
+	let value = br#"{"live":true}"#;
+	assert_eq!(
+		unsafe { moq_publish_json_snapshot_update(json, value.as_ptr() as *const c_char, value.len(), &now) },
+		0
+	);
+	let start = moq_net::Timestamp::try_from(now).unwrap().as_micros() as u64;
+	write_opus(media, start, 50, 100);
+
+	let delay = audio_rendition(broadcast, &name).delay;
+	assert!(delay.unwrap_or_default().is_zero(), "{delay:?}");
+
+	assert_eq!(
+		unsafe { moq_publish_catalog_now(broadcast, std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+	assert_eq!(moq_publish_json_snapshot_finish(json), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(
+		unsafe { moq_publish_catalog_now(broadcast, &mut moq_timestamp::default()) } < 0,
+		"a closed broadcast has no clock"
+	);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
