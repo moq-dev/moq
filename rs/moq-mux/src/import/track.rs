@@ -8,6 +8,7 @@
 use crate::Result;
 use crate::catalog::VideoHint;
 use crate::catalog::hang::CatalogExt;
+use crate::container::Frame;
 
 use super::{AudioFormat, VideoFormat};
 pub use super::{AudioInit, VideoInit};
@@ -591,6 +592,55 @@ macro_rules! stream {
 /// H.264, an fMP4 reader, …); the importer infers them.
 pub struct TrackStream {
 	kind: TrackStreamKind,
+	gate: Gate,
+}
+
+/// Which of the access units a [`TrackStream`] splits it publishes.
+///
+/// The stream's caller cannot see frame boundaries, so the importer, not the caller, drops a
+/// disabled rendition's access units and finds the keyframe that resumes it.
+#[derive(Default)]
+struct Gate {
+	state: GateState,
+	/// Whether an access unit went out, so a disable has a timeline to break.
+	published: bool,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum GateState {
+	#[default]
+	Open,
+	/// Disabled: every access unit is dropped.
+	Closed,
+	/// Enabled again, but still disabled in the catalog until the next keyframe.
+	Resuming,
+}
+
+impl Gate {
+	/// The access units of `frames` to publish, and whether the first of them resumes the
+	/// rendition, so the catalog enables it again.
+	fn admit(&mut self, mut frames: Vec<Frame>) -> (Vec<Frame>, bool) {
+		let resumed = match self.state {
+			GateState::Open => false,
+			GateState::Closed => {
+				frames.clear();
+				false
+			}
+			GateState::Resuming => match frames.iter().position(|frame| frame.keyframe) {
+				Some(keyframe) => {
+					frames.drain(..keyframe);
+					self.state = GateState::Open;
+					true
+				}
+				None => {
+					frames.clear();
+					false
+				}
+			},
+		};
+		self.published |= !frames.is_empty();
+		(frames, resumed)
+	}
 }
 
 impl TrackStream {
@@ -626,7 +676,10 @@ impl TrackStream {
 			format => return Err(crate::Error::NotSelfDescribing(format.to_string())),
 		};
 
-		let mut stream = Self { kind };
+		let mut stream = Self {
+			kind,
+			gate: Gate::default(),
+		};
 		if !init.data.is_empty() {
 			stream.initialize(&init.data)?;
 		}
@@ -643,7 +696,10 @@ impl TrackStream {
 				ref mut import,
 			} => {
 				import.initialize(data)?;
-				let frames = split.decode(data, None)?;
+				let (frames, resumed) = self.gate.admit(split.decode(data, None)?);
+				if resumed {
+					import.set_enabled(true)?;
+				}
 				import.decode(frames)?;
 			}
 			TrackStreamKind::Hev1 {
@@ -651,7 +707,10 @@ impl TrackStream {
 				ref mut import,
 			} => {
 				import.initialize(data)?;
-				let frames = split.decode(data, None)?;
+				let (frames, resumed) = self.gate.admit(split.decode(data, None)?);
+				if resumed {
+					import.set_enabled(true)?;
+				}
 				import.decode(frames)?;
 			}
 			TrackStreamKind::Av01 {
@@ -666,6 +725,10 @@ impl TrackStream {
 				} else {
 					split.decode(data, None)?
 				};
+				let (frames, resumed) = self.gate.admit(frames);
+				if resumed {
+					import.set_enabled(true)?;
+				}
 				import.decode(frames)?;
 			}
 		}
@@ -676,7 +739,10 @@ impl TrackStream {
 	/// Decode a chunk of the byte stream.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		stream!(&mut self.kind, split, import => {
-			let frames = split.decode(data, None)?;
+			let (frames, resumed) = self.gate.admit(split.decode(data, None)?);
+			if resumed {
+				import.set_enabled(true)?;
+			}
 			import.decode(frames)
 		})
 	}
@@ -686,10 +752,44 @@ impl TrackStream {
 		// The splitter is taken out to flush, so its input storage ends with the input. The import
 		// stays, keeping the finished track and its rendition published.
 		stream!(&mut self.kind, split, import => {
-			let tail = std::mem::take(split).flush(None)?;
+			let (tail, resumed) = self.gate.admit(std::mem::take(split).flush(None)?);
+			if resumed {
+				import.set_enabled(true)?;
+			}
 			import.decode(tail)?;
 			import.finish()
 		})
+	}
+
+	/// Stop or resume publishing this rendition, advertised as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled).
+	///
+	/// Disable it when its sender cannot be funded (a
+	/// [`rate::Target::Disabled`](crate::rate::Target::Disabled)). Once anything was published,
+	/// that marks a [`discontinuity`](crate::container::Producer::discontinuity). Every access
+	/// unit decoded until it is enabled again is dropped, so the caller may keep writing the
+	/// stream. Enabled again, it drops access units until the next keyframe and advertises
+	/// itself enabled with that keyframe.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		match (enabled, self.gate.state) {
+			(false, GateState::Open) => {
+				let published = self.gate.published;
+				stream!(&mut self.kind, split, import => {
+					import.set_enabled(false)?;
+					if published {
+						// The partial access unit belongs before the break, and would otherwise
+						// complete with the first bytes after it.
+						split.reset();
+						import.discontinuity()?;
+					}
+				});
+				self.gate.state = GateState::Closed;
+			}
+			(false, GateState::Resuming) => self.gate.state = GateState::Closed,
+			(true, GateState::Closed) => self.gate.state = GateState::Resuming,
+			(false, GateState::Closed) | (true, GateState::Open | GateState::Resuming) => {}
+		}
+		Ok(())
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -1509,5 +1609,67 @@ mod tests {
 				"{format}: the frame ends with its picture"
 			);
 		}
+	}
+
+	/// A disabled [`TrackStream`] drops what it splits and marks the break, so a caller that
+	/// keeps writing sends nothing. Enabled again, it resumes, and advertises itself enabled,
+	/// only at the next keyframe.
+	#[tokio::test(start_paused = true)]
+	async fn track_stream_disables_and_resumes_at_a_keyframe() {
+		const H264_P: &[u8] = &[0x41, 0x9a, 0x21, 0x22];
+
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut import = TrackStream::video(
+			request,
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Avc3, Vec::new()),
+		)
+		.unwrap();
+		// Every group is written before anything reads, which the default
+		// REAL_TIME budget would collapse to the live edge.
+		let subscriber = consumer
+			.track("video")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+			)
+			.await
+			.unwrap();
+		let enabled = || catalog.snapshot().video.renditions["video"].enabled;
+
+		let keyframe = [h264_init(), annexb(&[H264_IDR])].concat();
+		let delta = annexb(&[H264_P]);
+		// One access unit per frame interval. The splitter holds the last NAL until the next
+		// start code, so an access unit goes out one write after its last NAL arrives.
+		async fn write(import: &mut TrackStream, bytes: &[u8]) {
+			import.decode(bytes).unwrap();
+			kio::clock::sleep(Duration::from_millis(33)).await;
+		}
+		for bytes in [&keyframe, &delta, &delta, &delta] {
+			write(&mut import, bytes).await;
+		}
+
+		import.set_enabled(false).unwrap();
+		assert!(!enabled());
+		for bytes in [&delta, &keyframe, &delta, &delta] {
+			write(&mut import, bytes).await;
+		}
+
+		import.set_enabled(true).unwrap();
+		for bytes in [&delta, &keyframe, &delta] {
+			write(&mut import, bytes).await;
+		}
+		assert!(!enabled(), "enabled before the keyframe that resumes it");
+		write(&mut import, &delta).await;
+		assert!(enabled());
+		import.finish().unwrap();
+
+		// The first group loses the access units still in the splitter at the disable, the
+		// marker breaks the timeline, and the resumed group opens on the keyframe: three
+		// access units and the end marker `finish` bounds the last one with.
+		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 4]);
 	}
 }
