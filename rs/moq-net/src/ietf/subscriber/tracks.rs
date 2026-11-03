@@ -764,7 +764,12 @@ impl Subscriber {
 		{
 			let credit = kio::Producer::<()>::default();
 			let hold: crate::auth::Hold = std::sync::Arc::new(credit.consume());
-			let verdict = self.auth.verify_request(token.0, Some(hold));
+			let verdict = self.auth.verify_request(
+				token.0,
+				Some(hold),
+				crate::auth::RequestKind::Publish,
+				&msg.track_namespace,
+			);
 			let session = self.session.clone();
 			let verified = kio::wait(|waiter| {
 				if session.poll_closed(waiter).is_ready()

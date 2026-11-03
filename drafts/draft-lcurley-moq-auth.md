@@ -111,8 +111,9 @@ An acceptor that verifies {{moqt}} AUTHORIZATION TOKEN request parameters treats
 Its grant MUST NOT join the session scope: a naming request uses that grant alone, and a request without the token gains nothing from it.
 The acceptor verifies the token when its first naming request opens and ends its grant when the last naming request ends; a later request verifies it again.
 Expiry or revocation ends every naming request.
-A REQUEST_UPDATE carrying a token introduces or replaces its request's token authority, including when the update pauses forwarding.
-The acceptor MUST verify the token before acknowledging the update.
+A request is admitted either by the session or by a token, and that never changes.
+A REQUEST_UPDATE carrying a token replaces the token authority of a request a token admitted, including when the update pauses forwarding; the acceptor MUST verify the token before acknowledging the update.
+On a request the session admitted, the acceptor MUST refuse an update carrying a token.
 A joining FETCH retains its subscription's authority.
 
 ## Patterns {#patterns}
@@ -250,7 +251,7 @@ This document requests three registrations in the "MOQT Message Types" registry 
 
 ## Since draft-lcurley-moq-auth-00 (in progress)
 
-- Request tokens share verification and lifetime per distinct token, isolated from session scope; updates can introduce or replace a token while pausing or resuming.
+- Request tokens share verification and lifetime per distinct token, isolated from session scope; updates replace a token-admitted request's token, even while pausing or resuming, and a token on a session-admitted request's update is refused.
 
 - AUTH_ERROR can carry GOING_AWAY, refusing an AUTH past the acceptor's GOAWAY without refusing the token.
 - AUTH_OK carries moq-lite Path Patterns instead of Track Namespace prefixes, and a grant is refused only when too large for one AUTH_OK.

@@ -910,6 +910,23 @@ enum Admit {
 	Token(Option<crate::auth::Hold>),
 }
 
+/// What admitted a PUBLISH_NAMESPACE: its own token's grant, if one did, and the announce
+/// slot it took, which a re-attach reuses.
+struct Admission {
+	grant: Option<crate::auth::RequestGrant>,
+	slot: Option<crate::auth::Hold>,
+}
+
+impl Admission {
+	/// How [`Subscriber::start_announce`] attaches it.
+	fn admit(&self) -> Admit {
+		match self.grant {
+			Some(_) => Admit::Token(self.slot.clone()),
+			None => Admit::Session(self.slot.clone()),
+		}
+	}
+}
+
 /// How a live advertisement ends, written once its route is released.
 #[derive(Debug)]
 enum Withdraw {
@@ -1867,7 +1884,8 @@ impl Subscriber {
 		};
 
 		// Our authorization of the peer (the limit) admits an announce without a token, and
-		// holds back one it does not cover until it does. An AUTHORIZATION TOKEN on the
+		// refuses one it does not cover: the peer learns at once rather than publishing into
+		// nothing, and re-announces once its limit widens. An AUTHORIZATION TOKEN on the
 		// announce goes to the application to verify for this announce alone (MoQ
 		// request-token), even where the limit covers it, and a verified one is exempt from the
 		// limit while it lasts.
@@ -1875,6 +1893,13 @@ impl Subscriber {
 			Some(token) if gate.token_decides() => Some(token.0.clone()),
 			_ => None,
 		};
+		if token.is_none() && !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
+			tracing::debug!(%path, "refusing publish_namespace outside the limit");
+			let reason = crate::auth::unauthorized_reason(&path);
+			self.write_error(&mut stream, &Error::Unauthorized, &reason).await?;
+			let _ = stream.writer.close().await;
+			return Ok(());
+		}
 		let existing = self.state.lock().broadcasts.get(&path).map(|entry| entry._slot.clone());
 		let slot: Option<crate::auth::Hold> = Some(match existing {
 			Some(slot) => slot,
@@ -1922,19 +1947,34 @@ impl Subscriber {
 				}
 			}
 		};
-		let binding = crate::auth::RequestBinding::new(
-			&self.runtime,
-			path.clone(),
-			crate::auth::RequestKind::PublishNamespace,
-			slot,
-			token_grant,
-		);
+		let token = token_grant.is_some();
 
-		// Everything the advertisement does once admitted runs under its grant: one that ends
-		// at any await, the first answer included, drops it right there. `attached` says the
-		// route is up, and `acked` that the OK went out, which decides how the peer is told.
+		// Everything the advertisement does once admitted runs under what admitted it: its
+		// token's grant, or the session's limit, which never holds an announce back. Either
+		// ending at any await, the first answer included, drops it right there, and a
+		// publisher whose limit widens again re-announces. `attached` says the route is up, and
+		// `acked` that the OK went out, which decides how the peer is told.
 		let mut attached = None;
 		let mut acked = false;
+		let auth = self.auth.clone();
+		let mut epoch = 0;
+		let mut limited = |waiter: &kio::Waiter| {
+			let mut excluded = false;
+			while let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter) {
+				excluded = !permit.within_limit(path.as_str());
+			}
+			match excluded {
+				true => Poll::Ready(crate::auth::Refusal {
+					error: Error::Unauthorized,
+					reason: crate::auth::unauthorized_reason(&path),
+				}),
+				false => Poll::Pending,
+			}
+		};
+		let mut ended = |waiter: &kio::Waiter| match &token_grant {
+			Some(grant) => grant.poll_ended(waiter),
+			None => limited(waiter),
+		};
 		let lived = crate::auth::until(
 			async {
 				match self.start_announce(path.clone(), advert, admit) {
@@ -1956,23 +1996,26 @@ impl Subscriber {
 					},
 					peer,
 					&mut attached,
-					&binding,
+					Admission {
+						grant: token_grant.clone(),
+						slot: slot.clone(),
+					},
 				)
 				.await
 			},
-			|waiter| binding.poll_ended(waiter),
+			&mut ended,
 		)
 		.await;
 
 		// The route goes before anything waits on the peer, so a peer that stops reading
 		// cannot keep it routed. A stream that detached mid-flight (a reflected update) has
 		// nothing left to release.
-		self.release_announce(&path, &mut attached, binding.named())?;
+		self.release_announce(&path, &mut attached, token)?;
 
 		let withdraw = match lived {
 			Ok(withdraw) => withdraw?,
 			Err(refusal) => {
-				tracing::info!(%path, err = %refusal.error, reason = %refusal.reason, "request token grant ended");
+				tracing::info!(%path, err = %refusal.error, reason = %refusal.reason, "announce no longer authorized");
 				if !acked {
 					self.write_error(&mut stream, &refusal.error, &refusal.reason).await?;
 					let _ = stream.writer.close().await;
@@ -2013,8 +2056,9 @@ impl Subscriber {
 		held: Held,
 		peer: cluster::Peer,
 		attached: &mut Option<u64>,
-		binding: &crate::auth::RequestBinding,
+		admission: Admission,
 	) -> Result<Withdraw, Error> {
+		let token_grant = &admission.grant;
 		let Held { cluster: mut held } = held;
 		// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
 		// request-token); its verify is raced against the stream in the loop's single wait
@@ -2140,18 +2184,10 @@ impl Subscriber {
 				}
 				Turn::Failed(err) => return Err(err),
 				Turn::Renewal(request_update::Verdict { verdict, grant: res }) => {
-					let named = binding.named();
-					let Err(refusal) = binding.admit(verdict, res) else {
-						if !named && attached.is_some() {
-							let mut state = self.state.lock();
-							let entry = state.broadcasts.get_mut(path).expect("attached namespace");
-							entry.tokens += 1;
-							let generation = self.reattach(path, entry)?;
-							drop(state);
-							if let Some(generation) = generation {
-								self.serve_route(path.clone(), generation);
-							}
-						}
+					// Only a token-authorized announce starts a renewal.
+					let rg = token_grant.as_ref().expect("a renewal without a request grant");
+					// On accept the old grant is dropped and the deadline re-armed (REQUEST_OK).
+					let Err(refusal) = rg.renew(verdict, res) else {
 						self.write_ok(stream).await?;
 						continue;
 					};
@@ -2233,7 +2269,7 @@ impl Subscriber {
 					None => {
 						if let Some(id) = attached.take() {
 							tracing::debug!(%path, "publish_namespace now loops back; detaching");
-							let _ = self.stop_announce(path.clone(), id, binding.named());
+							let _ = self.stop_announce(path.clone(), id, token_grant.is_some());
 						}
 						Ok(())
 					}
@@ -2244,12 +2280,7 @@ impl Subscriber {
 							// Re-attach: a clean path replaced the reflected one we detached from.
 							None => {
 								// The grant still holds the slot it was admitted with, so reuse it.
-								let admit = if binding.named() {
-									Admit::Token(binding.hold())
-								} else {
-									Admit::Session(binding.hold())
-								};
-								self.start_announce(path.clone(), advert, admit)
+								self.start_announce(path.clone(), advert, admission.admit())
 									.map(|id| *attached = Some(id))
 							}
 						}
@@ -2274,7 +2305,15 @@ impl Subscriber {
 				.authorization_token
 				.filter(|_| self.auth.token_decides(crate::auth::Direction::Subscribe))
 			{
-				renewal.verify(binding.verify(&self.auth, token.0));
+				let Some(grant) = &token_grant else {
+					// An announce is admitted by the session or by a token, and that never
+					// changes, so a token here is refused rather than taken unread.
+					return Ok(Withdraw::Cancel(crate::auth::Refusal {
+						error: Error::Unsupported,
+						reason: "AUTHORIZATION TOKEN on an announce admitted without one".to_string(),
+					}));
+				};
+				renewal.verify(grant.verify_renewal(&self.auth, token.0));
 				continue;
 			}
 
@@ -2495,8 +2534,10 @@ impl Subscriber {
 					Some(slot) => slot,
 					None => std::sync::Arc::new(self.acquire_announce()?),
 				};
-				// Outside the session's limit: held, not refused, so a wider limit can
-				// attach it while the peer still advertises it.
+				// Outside the session's limit: held, not refused, so a wider limit can attach
+				// it while the peer still advertises it. Only a NAMESPACE entry gets here
+				// outside it: nothing can refuse one, and the peer never repeats it. A
+				// PUBLISH_NAMESPACE the limit does not cover is refused before it attaches.
 				if !token && !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
 					tracing::debug!(route = %crate::path::Rooted(self.origin.root(), &path), "withholding announce outside the limit");
 					entry.insert(BroadcastState {
@@ -9776,13 +9817,6 @@ mod tests {
 		let path = crate::Path::from_static("room/host");
 		let mut attached = Some(0);
 		{
-			let binding = crate::auth::RequestBinding::new(
-				&subscriber.runtime,
-				path.clone(),
-				crate::auth::RequestKind::PublishNamespace,
-				None,
-				None,
-			);
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
@@ -9791,7 +9825,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				&binding,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 
 			for _ in 0..100 {
@@ -9832,13 +9869,6 @@ mod tests {
 		let path = crate::Path::from_static("room/host");
 		let mut attached = Some(0);
 		{
-			let binding = crate::auth::RequestBinding::new(
-				&subscriber.runtime,
-				path.clone(),
-				crate::auth::RequestKind::PublishNamespace,
-				None,
-				None,
-			);
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
@@ -9847,7 +9877,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				&binding,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 
 			// Both updates apply, then the loop parks on the exhausted script. The
@@ -9906,7 +9939,12 @@ mod tests {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: vec![0x00, 0xff],
 		};
-		let verdict = auth.verify_request(token, Some(hold.clone()));
+		let verdict = auth.verify_request(
+			token,
+			Some(hold.clone()),
+			crate::auth::RequestKind::PublishNamespace,
+			&path,
+		);
 		let _issued = requests.next().await.unwrap().accept(crate::auth::Grant::all());
 		let answered = verdict.grant().await;
 		let grant = crate::auth::RequestGrant::new(
@@ -9928,13 +9966,6 @@ mod tests {
 			.unwrap();
 		let mut attached = Some(0);
 		{
-			let binding = crate::auth::RequestBinding::new(
-				&subscriber.runtime,
-				path.clone(),
-				crate::auth::RequestKind::PublishNamespace,
-				grant.hold(),
-				Some(grant),
-			);
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
@@ -9943,7 +9974,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				&binding,
+				Admission {
+					grant: Some(grant.clone()),
+					slot: grant.hold(),
+				},
 			));
 			for _ in 0..20 {
 				assert!(
@@ -10007,13 +10041,6 @@ mod tests {
 		let path = crate::Path::from_static("room/host");
 		let mut attached = Some(0);
 		{
-			let binding = crate::auth::RequestBinding::new(
-				&subscriber.runtime,
-				path.clone(),
-				crate::auth::RequestKind::PublishNamespace,
-				None,
-				None,
-			);
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
@@ -10022,7 +10049,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				&binding,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 			for _ in 0..20 {
 				assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
@@ -10065,13 +10095,6 @@ mod tests {
 		let mut attached = Some(0);
 		let mut result = None;
 		{
-			let binding = crate::auth::RequestBinding::new(
-				&subscriber.runtime,
-				path.clone(),
-				crate::auth::RequestKind::PublishNamespace,
-				None,
-				None,
-			);
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
@@ -10080,7 +10103,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				&binding,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 			for _ in 0..20 {
 				if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
@@ -10125,13 +10151,6 @@ mod tests {
 		let path = crate::Path::from_static("room/host");
 		let mut attached = Some(0);
 		{
-			let binding = crate::auth::RequestBinding::new(
-				&subscriber.runtime,
-				path.clone(),
-				crate::auth::RequestKind::PublishNamespace,
-				None,
-				None,
-			);
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
@@ -10140,7 +10159,10 @@ mod tests {
 				},
 				peer,
 				&mut attached,
-				&binding,
+				Admission {
+					grant: None,
+					slot: None,
+				},
 			));
 			for _ in 0..20 {
 				assert!(
@@ -10199,13 +10221,6 @@ mod tests {
 
 		let path = crate::Path::from_static("room/host");
 		let mut attached = Some(0);
-		let binding = crate::auth::RequestBinding::new(
-			&subscriber.runtime,
-			path.clone(),
-			crate::auth::RequestKind::PublishNamespace,
-			None,
-			None,
-		);
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 			&mut stream,
 			&path,
@@ -10214,7 +10229,10 @@ mod tests {
 			},
 			peer,
 			&mut attached,
-			&binding,
+			Admission {
+				grant: None,
+				slot: None,
+			},
 		));
 		let mut result = None;
 		for _ in 0..20 {
@@ -11166,67 +11184,135 @@ mod tests {
 		}
 	}
 
-	/// Naming a first token attaches a withheld route and switches its lifetime to that token.
-	#[kio::test]
-	async fn a_first_announce_token_replaces_session_scope() {
-		for version in [Version::Draft18, Version::Draft22] {
-			for path in ["room/alice", "other/alice"] {
-				let (mut subscriber, mut requests, _cred, consumer, session) =
-					auth_announce_harness(version, publish_namespace_update_with_token(version).await);
-				let auth = subscriber.auth.clone();
-				let runtime = subscriber.runtime.clone();
-				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
-					.await
-					.unwrap();
-				let tokenless = ietf::PublishNamespace {
-					request_id: RequestId(1),
-					track_namespace: crate::Path::from_static(path),
-					params: Default::default(),
-					authorization_token: None,
-				};
-				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
-					stream,
-					tokenless,
-					cluster::Peer::default(),
-					None
-				));
-				for _ in 0..50 {
-					assert!(futures::poll!(run.as_mut()).is_pending());
-					settle().await;
-				}
-				let request = match requests.poll_next(&kio::Waiter::noop()) {
-					Poll::Ready(Some(request)) => request,
-					_ => panic!("first token never reached verifier"),
-				};
-				let issued = request.accept(publish_grant_expiring(&runtime, None));
-				for _ in 0..50 {
-					assert!(futures::poll!(run.as_mut()).is_pending());
-					settle().await;
-				}
-				assert!(routed_now(&consumer, path).is_some(), "first token admits the route");
-				assert!(
-					!auth.within_limit(crate::auth::Direction::Subscribe, "room/alice"),
-					"token did not widen session scope"
-				);
-				auth.handle().authorize(&crate::auth::Grant::default());
-				for _ in 0..50 {
-					assert!(futures::poll!(run.as_mut()).is_pending());
-					settle().await;
-				}
-				assert!(routed_now(&consumer, path).is_some(), "token replaces session scope");
-				issued.revoke(crate::SessionError::Unauthorized, "revoked");
-				let mut ended = false;
-				for _ in 0..50 {
-					if futures::poll!(run.as_mut()).is_ready() {
-						ended = true;
-						break;
-					}
-					settle().await;
-				}
-				assert!(ended, "guard observes the introduced token");
-				assert!(routed_now(&consumer, path).is_none());
-				assert!(session.log.closes().is_empty());
+	/// Poll `run` until it ends, failing if it never does.
+	async fn run_to_end<F: std::future::Future>(mut run: std::pin::Pin<&mut F>) -> F::Output {
+		for _ in 0..100 {
+			if let Poll::Ready(res) = futures::poll!(run.as_mut()) {
+				return res;
 			}
+			settle().await;
+		}
+		panic!("the announce never ended");
+	}
+
+	/// A PUBLISH_NAMESPACE for `path`, presenting no token.
+	fn tokenless_announce(path: &'static str) -> ietf::PublishNamespace {
+		ietf::PublishNamespace {
+			request_id: RequestId(1),
+			track_namespace: crate::Path::from_static(path),
+			params: Default::default(),
+			authorization_token: None,
+		}
+	}
+
+	/// A token an update names on an announce the session admitted is refused and never
+	/// reaches the acceptor: an announce is admitted by the session or by a token, and that
+	/// never changes. The refusal withdraws the announce.
+	#[kio::test]
+	async fn a_token_on_a_session_announce_update_is_refused() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let (mut subscriber, mut requests, _cred, consumer, session) =
+				auth_announce_harness(version, publish_namespace_update_with_token(version).await);
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				tokenless_announce("other/alice"),
+				cluster::Peer::default(),
+				None
+			));
+			run_to_end(run).await.unwrap();
+			assert_eq!(
+				replies(&session.log, ietf::RequestOk::ID),
+				1,
+				"{version}: never admitted"
+			);
+			assert_eq!(
+				occurrences(&session.log, b"AUTHORIZATION TOKEN on an announce admitted without one"),
+				1,
+				"{version}: the update was not refused"
+			);
+			assert!(
+				requests.poll_next(&kio::Waiter::noop()).is_pending(),
+				"{version}: the token reached the acceptor"
+			);
+			assert!(routed_now(&consumer, "other/alice").is_none(), "{version}");
+			assert!(session.log.closes().is_empty(), "{version}");
+		}
+	}
+
+	/// A tokenless PUBLISH_NAMESPACE the limit does not cover is refused UNAUTHORIZED rather
+	/// than acknowledged and held, so the publisher learns it at once.
+	#[kio::test]
+	async fn a_tokenless_announce_outside_the_limit_is_refused() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
+			let probe = subscriber.clone();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				tokenless_announce("room/alice"),
+				cluster::Peer::default(),
+				None
+			));
+			run_to_end(run).await.unwrap();
+			assert_eq!(replies(&session.log, ietf::RequestOk::ID), 0, "{version}: acknowledged");
+			assert_eq!(
+				replies(&session.log, ietf::RequestError::ID),
+				1,
+				"{version}: not refused"
+			);
+			assert_eq!(occurrences(&session.log, b"unauthorized: room/alice"), 1, "{version}");
+			assert!(routed_now(&consumer, "room/alice").is_none(), "{version}");
+			assert!(probe.state.lock().broadcasts.is_empty(), "{version}: held");
+			assert!(session.log.closes().is_empty(), "{version}");
+		}
+	}
+
+	/// A session-authorized announce ends once the limit stops covering it, rather than being
+	/// held for a wider limit to bring back: the publisher re-announces.
+	#[kio::test]
+	async fn a_narrowed_limit_ends_a_session_announce() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let (mut subscriber, _requests, _cred, consumer, session) = auth_announce_harness(version, Vec::new());
+			let auth = subscriber.auth.clone();
+			let probe = subscriber.clone();
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+				stream,
+				tokenless_announce("other/alice"),
+				cluster::Peer::default(),
+				None
+			));
+			for _ in 0..20 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				settle().await;
+			}
+			assert!(routed_now(&consumer, "other/alice").is_some(), "{version}: admitted");
+
+			auth.handle().authorize(&crate::auth::Grant::default());
+			let res = run_to_end(run).await;
+			assert!(matches!(res, Err(Error::Unauthorized)), "{version}: {res:?}");
+			assert!(
+				routed_now(&consumer, "other/alice").is_none(),
+				"{version}: still routed"
+			);
+
+			// Nothing was held for the limit to bring back.
+			auth.handle().authorize(&crate::auth::Grant {
+				publish: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			});
+			settle().await;
+			assert!(probe.state.lock().broadcasts.is_empty(), "{version}: held");
+			assert!(routed_now(&consumer, "other/alice").is_none(), "{version}: came back");
+			assert!(session.log.closes().is_empty(), "{version}");
 		}
 	}
 
