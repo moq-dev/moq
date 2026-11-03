@@ -780,3 +780,53 @@ fn a_message_recomputes_only_its_identity() {
 		);
 	}
 }
+
+/// A route whose metric plus the link cost reaches the infinite metric is
+/// unreachable, so it neither certifies regions nor keeps an identity held:
+/// only the reachable neighbor's region shows, and a held overflowing route
+/// is let go.
+#[test]
+fn an_overflowing_route_neither_certifies_nor_holds() {
+	let finite = |metric| {
+		Some(Reach::Finite(Advert {
+			seqno: 0,
+			metric,
+			down_only: false,
+		}))
+	};
+	let floors = |region: &str| BTreeMap::from([(p(region), 1)]);
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 1,
+	};
+	let (near, far) = (1, 2);
+	let far_link = Link {
+		cost: MAX - 1,
+		..Link::default()
+	};
+
+	let mut router: Router<Node, Item> = Router::new(1);
+	router.connect(near, Link::default()).unwrap();
+	router.connect(far, far_link.clone()).unwrap();
+	router.route(near, 7, finite(1));
+	router.batch(near, 7, vec![(p("live/a/x"), Some(item))], floors("live/a"), 0);
+	router.route(far, 7, finite(1));
+	router.batch(far, 7, vec![(p("live/b/y"), Some(item))], floors(""), 0);
+	assert_eq!(router.selected(7).and_then(|route| route.next), Some(near));
+	assert_eq!(router.shows(7, &p("live/a/x")), Some(true));
+	assert_eq!(
+		router.shows(7, &p("live/b/y")),
+		None,
+		"only the unreachable route certifies it"
+	);
+
+	let mut router: Router<Node, Item> = Router::new(1);
+	router.connect(far, far_link).unwrap();
+	router.route(far, 7, finite(1));
+	router.batch(far, 7, vec![(p("live/x"), Some(item))], floors(""), 0);
+	router.route(far, 7, Some(Reach::Held));
+	assert!(router.selected(7).is_none());
+	assert!(!router.grounded(7), "an unreachable held route recovers nothing");
+	assert_eq!(router.shows(7, &p("live/x")), None);
+}

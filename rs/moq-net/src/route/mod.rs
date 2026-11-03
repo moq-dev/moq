@@ -938,14 +938,15 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 	}
 
 	/// Whether this node holds a held route to `id` it could recover through.
-	/// One counts only if its last finite advertisement is feasible here, so
+	/// One counts only if its last finite advertisement is feasible and
+	/// reachable here, so
 	/// holds follow a strictly decreasing metric toward a starved node and
 	/// cannot hold each other up.
 	fn recoverable(&self, id: Id) -> bool {
 		self.rx.get(&id).is_some_and(|routes| {
 			routes
-				.values()
-				.any(|entry| entry.held && self.feasible(id, entry.advert))
+				.iter()
+				.any(|(&next, entry)| entry.held && self.reachable(id, next, entry))
 		})
 	}
 
@@ -956,16 +957,22 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 	}
 
 	/// The neighbors whose views can certify `id`: those whose last finite
-	/// advertisement is feasible here, held or not. Feasible edges strictly
+	/// advertisement is feasible and reachable here, held or not. Feasible edges strictly
 	/// decrease the metric toward the origin, so certification never circulates.
 	fn certifiers(&self, id: Id) -> Vec<N> {
 		self.rx.get(&id).map_or_else(Vec::new, |routes| {
 			routes
 				.iter()
-				.filter(|(_, entry)| self.feasible(id, entry.advert))
+				.filter(|&(&next, entry)| self.reachable(id, next, entry))
 				.map(|(&next, _)| next)
 				.collect()
 		})
+	}
+
+	/// Whether `entry`'s last finite advertisement from `next` is feasible here
+	/// and reachable across the link, as selection requires of a usable route.
+	fn reachable(&self, id: Id, next: N, entry: &Entry) -> bool {
+		self.feasible(id, entry.advert) && add(entry.advert.metric, self.neighbors[&next].link.cost).is_some()
 	}
 
 	/// The regions of `id` that this node's certifiers certify, those whose

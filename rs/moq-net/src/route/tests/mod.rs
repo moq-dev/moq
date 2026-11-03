@@ -636,6 +636,9 @@ impl Sim {
 				};
 				checked.insert((node, key));
 				let claims: BTreeSet<&Path> = self.history[&id].iter().map(|change| &change.claim).collect();
+				if let Some(claim) = view.items.keys().find(|claim| !claims.contains(claim)) {
+					return Err(format!("node {node} holds {key}'s {claim} with no origin history"));
+				}
 				for claim in claims {
 					let Some(rev) = view.as_of(claim) else {
 						if view.items.contains_key(claim) {

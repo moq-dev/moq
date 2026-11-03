@@ -1323,3 +1323,39 @@ fn a_restarted_route_sends_a_complete_snapshot() {
 	assert_eq!(revivals(&sim.events), 0);
 	sim.check().unwrap();
 }
+
+/// A claim covering both interests stays shown when a client moves to a
+/// disjoint interest: what it knows of that claim is current as of the old
+/// interest, which carried every change to it until the switch. A withdrawal
+/// still queued on the old stream is discarded with it and arrives on the
+/// new stream's snapshot instead: the claim ends once, never revives, and no
+/// END is false.
+#[test]
+fn a_covering_claim_survives_a_disjoint_interest_until_the_new_snapshot() {
+	let (origin, relay, client) = (0, 1, 2);
+	let mut sim = Sim::new(3);
+	sim.leaf(origin);
+	sim.leaf(client);
+	sim.join(origin, relay, 1);
+	sim.join(relay, client, 1);
+	sim.watch(client, "live/a");
+	sim.originate(origin, 7, 0);
+	sim.announce(origin, "live", 0, None);
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live"), Some(true));
+
+	sim.hold(relay, client);
+	sim.unannounce(origin, "live");
+	assert!(sim.run());
+	sim.watch(client, "live/b");
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live"), Some(true), "lags like any snapshot");
+
+	sim.release(relay, client);
+	assert!(sim.run());
+	assert_eq!(sim.shows(client, 7, "live"), None);
+	assert_eq!(life(&sim, client, "live"), [Kind::Start, Kind::End]);
+	assert_eq!(revivals(&sim.events), 0);
+	assert_eq!(false_ends(&sim.events), 0);
+	sim.check().unwrap();
+}
