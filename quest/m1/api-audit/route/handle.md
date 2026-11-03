@@ -42,7 +42,7 @@ read-only facts on a received announcement, and `Hop`, `Hops` and
 Non-goals: the instance model ([Instance and epoch](https://github.com/moq-dev/moq/pull/7489)),
 announce events ([Listing and follow](/quest/m1/api-audit/route/events.md)),
 the read side, which instance owns, and the route layer's wire metric
-([Routes and announces](/quest/m1/cluster-routing/routes.md)).
+([lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md)).
 
 ## Plan
 

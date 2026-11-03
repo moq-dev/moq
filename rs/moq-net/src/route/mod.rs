@@ -5,7 +5,7 @@
 //! asks, and only the identity's own node advances its seqno. Each origin
 //! versions its own claims with a revision, and a node merges every neighbor's
 //! certified view claim by claim, so no stale copy revives a withdrawal it
-//! already knows. See `quest/m1/cluster-routing/routes.md` for the contract.
+//! already knows. See `quest/m1/cluster-routing/routes/README.md` for the contract.
 //!
 //! The router does no I/O: the caller feeds it what each neighbor sent and
 //! drains [`Out`] messages and reader [`Event`]s. Neighbor keys `N` and claim
