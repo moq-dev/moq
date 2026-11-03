@@ -1,24 +1,29 @@
 /**
- * The payload of a token: a root, plus the publish/subscribe patterns granted beneath it.
+ * The payload of a token: a root, plus the publish/subscribe patterns granted beneath it
+ * and an optional bitrate cap on each.
  *
  * @module
  */
 
-import { Patterns } from "@moq/pattern";
-import * as z from "@zod/mini";
-import { Access, AccessSchema, normalizeAccess, patterns, ScopeAccessSchema } from "./access.ts";
+import { Pattern, Patterns } from "@moq/pattern";
+import * as z from "zod/mini";
 import * as Path from "./path.ts";
-import { decodeGrants } from "./wire.ts";
+import { decodeGrants, decodeRoles, PatternListSchema, WireRoleSchema } from "./wire.ts";
 
-export { PatternListSchema, patterns } from "./access.ts";
+export { PatternListSchema } from "./wire.ts";
+
+/** Parse a list of pattern texts into a reduced union. */
+export function patterns(texts: readonly string[] | undefined): Patterns {
+	return new Patterns((texts ?? []).map((text) => Pattern.parse(text)));
+}
 
 const ScopeFields = {
 	/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
 	root: z._default(z.string(), ""),
 	/** Patterns this key may grant to publishers, relative to `root`. */
-	publish: z.optional(ScopeAccessSchema),
+	publish: z.optional(PatternListSchema),
 	/** Patterns this key may grant to subscribers, relative to `root`. */
-	subscribe: z.optional(ScopeAccessSchema),
+	subscribe: z.optional(PatternListSchema),
 };
 
 /**
@@ -26,7 +31,8 @@ const ScopeFields = {
  *
  * `root` is optional on the wire to match the Rust `moq-auth` crate, which omits it
  * when the scope sits at the top level. A legacy `put`/`get` prefix scope reads as the
- * subtree patterns it meant. Any other field is refused.
+ * subtree patterns it meant. A scope bounds paths, never bitrate, so a capped role is
+ * refused. Any other field is refused.
  */
 export const ScopeSchema = z
 	.pipe(
@@ -35,14 +41,7 @@ export const ScopeSchema = z
 			put: z.optional(z.array(z.string())),
 			get: z.optional(z.array(z.string())),
 		}),
-		z.transform((wire, ctx) => {
-			const { publish, subscribe, ...grants } = decodeGrants(wire, ctx);
-			return {
-				...grants,
-				...(publish !== undefined && { publish: normalizeAccess(publish).path.toJSON() }),
-				...(subscribe !== undefined && { subscribe: normalizeAccess(subscribe).path.toJSON() }),
-			};
-		}),
+		z.transform(decodeGrants),
 	)
 	.check(
 		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
@@ -50,12 +49,15 @@ export const ScopeSchema = z
 		}),
 	);
 
+/** A value parsed by {@link ScopeSchema}. */
 export type Scope = z.output<typeof ScopeSchema>;
 
 const ClaimsFields = {
 	...ScopeFields,
-	publish: z.optional(AccessSchema),
-	subscribe: z.optional(AccessSchema),
+	/** Patterns the holder may publish, relative to `root`, optionally with a bitrate cap. */
+	publish: z.optional(WireRoleSchema),
+	/** Patterns the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
+	subscribe: z.optional(WireRoleSchema),
 	/** Expiration time, as a whole unix timestamp in seconds. */
 	exp: z.optional(z.int()),
 	/** Issued-at time, as a whole unix timestamp in seconds. */
@@ -83,8 +85,10 @@ const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
  * exactly what it says: `alice` is one broadcast, `alice/**` is a subtree, and `**` is
  * everything under the root. Legacy `moq-token` claims read too, each `put`/`get`
  * prefix `p` as the subtree `p/**`, and signing writes that form whenever it says the
- * same thing. The registered `iss`, `sub`, and `jti` claims are read and dropped; any
- * other field fails verification.
+ * same thing. A role may instead be `{"path": [...], "rate": bps}`, which parses into
+ * `publish_rate` or `subscribe_rate` beside the patterns; a capped role is never written
+ * as a prefix, since an older verifier would drop the cap. The registered `iss`, `sub`,
+ * and `jti` claims are read and dropped; any other field fails verification.
  */
 export const ClaimsSchema = z
 	.pipe(
@@ -94,20 +98,13 @@ export const ClaimsSchema = z
 			put: z.optional(PrefixListSchema),
 			get: z.optional(PrefixListSchema),
 		}),
-		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => {
-			const { publish, subscribe, ...grants } = decodeGrants(claims, ctx);
-			return {
-				...grants,
-				...(publish !== undefined && { publish: normalizeAccess(publish) }),
-				...(subscribe !== undefined && { subscribe: normalizeAccess(subscribe) }),
-			};
-		}),
+		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeRoles(decodeGrants(claims, ctx))),
 	)
 	.check(
 		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
 		// rejects such a token as useless. Checking `!== undefined` here would mint
 		// tokens that Rust then refuses to verify.
-		z.refine((data) => (data.publish?.path.size ?? 0) > 0 || (data.subscribe?.path.size ?? 0) > 0, {
+		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
 			message: "Either publish or subscribe must grant at least one pattern",
 		}),
 	);
@@ -125,10 +122,10 @@ export type Claims = z.output<typeof ClaimsSchema>;
  * it; the empty pattern grants exactly the path.
  */
 export interface Permissions {
-	/** Subscribe paths and an optional download cap, relative to the authorized path. */
-	subscribe: Access;
-	/** Publish paths and an optional upload cap, relative to the authorized path. */
-	publish: Access;
+	/** Patterns the holder may subscribe to, relative to the authorized path. */
+	subscribe: Patterns;
+	/** Patterns the holder may publish to, relative to the authorized path. */
+	publish: Patterns;
 }
 
 /**
@@ -139,7 +136,7 @@ export interface Permissions {
  *
  * - `path` extends the root (root `demo`, path `demo/room`), so the extra `room`
  *   narrows each pattern and drops the ones outside it.
- * - `path` is a parent of the root (root `demo`, path ``), so `demo` is prepended to
+ * - `path` is a parent of the root (root `demo`, empty path), so `demo` is prepended to
  *   each pattern to keep it anchored where the token points.
  *
  * Matching is segment-aware, so a root of `foo` does not cover `foobar`. Slashes at
@@ -148,8 +145,8 @@ export interface Permissions {
  * Throws when the two don't overlap, and when they do but every pattern falls outside
  * `path`.
  *
- * This is authorization only. Verify the signature first with {@link verify}, which is
- * where expiry is enforced.
+ * This is authorization only. Verify the signature first with {@link Key.verify} or
+ * {@link KeySet.verify}, which is where expiry is enforced.
  *
  * @public
  */
@@ -174,10 +171,10 @@ export function authorize(claims: Claims, path: string): Permissions {
 	}
 
 	const permissions: Permissions = {
-		subscribe: new Access({ path: scope(claims.subscribe?.path ?? new Patterns()), rate: claims.subscribe?.rate }),
-		publish: new Access({ path: scope(claims.publish?.path ?? new Patterns()), rate: claims.publish?.rate }),
+		subscribe: scope(patterns(claims.subscribe)),
+		publish: scope(patterns(claims.publish)),
 	};
-	if (permissions.subscribe.path.size === 0 && permissions.publish.path.size === 0) {
+	if (permissions.subscribe.size === 0 && permissions.publish.size === 0) {
 		throw new Error(`token grants no access to path "${target}"`);
 	}
 
@@ -197,11 +194,9 @@ export function authorize(claims: Claims, path: string): Permissions {
  * checks the same keys.
  */
 export function scopeAllows(scope: Scope, claims: Claims): boolean {
-	const covers = (granted: string[] | undefined, requested: Access | undefined) => {
+	const covers = (granted: string[] | undefined, requested: string[] | undefined) => {
 		try {
-			return patterns(granted)
-				.rooted(scope.root)
-				.covers((requested?.path ?? new Patterns()).rooted(claims.root));
+			return patterns(granted).rooted(scope.root).covers(patterns(requested).rooted(claims.root));
 		} catch {
 			// A root too deep to place the patterns beneath cannot be granted either way.
 			return false;

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"moq.dev/moq"
 	moqmedia "moq.dev/moq/media"
@@ -15,7 +14,7 @@ import (
 func ExampleClient_Announced() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com")
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -44,24 +43,26 @@ func ExampleClient_Announced() {
 func ExampleClient_CreateBroadcast() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com")
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer client.Close()
 
-	broadcast, err := client.CreateBroadcast("me/mic")
+	publication, err := client.CreateBroadcast("me/mic")
 	if err != nil {
 		log.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 
 	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		log.Fatal(err)
 	}
-	_ = broadcast.Announce(moq.Route{})
+	_ = publication.Announce(moq.AnnounceRoute{})
 
-	pts := 20 * time.Millisecond
+	// 20 ms in, counted on the Opus 48 kHz sample clock.
+	pts := moq.Timestamp{Value: 960, Scale: 48_000}
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {
 		log.Fatal(err)
 	}
@@ -76,11 +77,14 @@ func ExampleClient_CreateBroadcast() {
 func ExampleClient_Session_stats() {
 	ctx := context.Background()
 
-	client, err := moq.Dial(ctx, "https://relay.example.com",
-		moq.WithTLSRoots("/etc/ssl/custom-ca.pem"),
-		moq.WithTLSSystemRoots(true),
-		moq.WithTLSFingerprints("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-	)
+	systemRoots := true
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{
+		TLS: moq.ClientTLS{
+			Roots:        []string{"/etc/ssl/custom-ca.pem"},
+			SystemRoots:  &systemRoots,
+			Fingerprints: []string{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		},
+	})
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -6,6 +6,12 @@ runs:
   steps:
     # A checksum-verified prebuilt, so it costs seconds rather than a
     # `cargo install`. Keep the version in step with nixpkgs' just in flake.lock.
+    - name: Use the NixOS runner toolchain
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: just --version
+
     - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      if: runner.environment != 'self-hosted'
       with:
         tool: just@1.58.0

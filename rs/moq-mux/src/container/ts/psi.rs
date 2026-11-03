@@ -5,7 +5,8 @@
 //! used only when its CRC-32/MPEG-2 matches: a corrupt one is dropped whole, and the last
 //! good table stays in force until a repetition replaces it.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Context;
 use mpeg2ts::ts::Pid;
@@ -36,22 +37,22 @@ pub(super) fn encode_pat(pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<byte
 	finish_section(section)
 }
 
-/// Encode a PMT, rejecting descriptor or table lengths that MPEG-TS cannot represent.
-pub(super) fn encode_pmt(pmt: &mpeg2ts::ts::payload::Pmt) -> anyhow::Result<bytes::Bytes> {
+/// Encode a PMT at `version`, rejecting descriptor or table lengths that MPEG-TS cannot represent.
+pub(super) fn encode_pmt(pmt: &Pmt, version: mpeg2ts::ts::VersionNumber) -> anyhow::Result<bytes::Bytes> {
 	let mut section = vec![PMT_TABLE_ID, 0xb0, 0];
-	section.extend_from_slice(&pmt.program_num.to_be_bytes());
-	section.extend_from_slice(&[0xc1 | (pmt.version_number.as_u8() << 1), 0, 0]);
+	section.extend_from_slice(&pmt.program_number.to_be_bytes());
+	section.extend_from_slice(&[0xc1 | (version.as_u8() << 1), 0, 0]);
 	section.extend_from_slice(&(0xe000 | pmt.pcr_pid.map_or(0x1fff, |pid| pid.as_u16())).to_be_bytes());
 	encode_descriptors(&mut section, &pmt.program_info)?;
-	for stream in &pmt.es_info {
-		section.push(stream.stream_type as u8);
-		section.extend_from_slice(&(0xe000 | stream.elementary_pid.as_u16()).to_be_bytes());
+	for stream in &pmt.streams {
+		section.push(stream.stream_type);
+		section.extend_from_slice(&(0xe000 | stream.pid.as_u16()).to_be_bytes());
 		encode_descriptors(&mut section, &stream.descriptors)?;
 	}
 	finish_section(section)
 }
 
-fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[mpeg2ts::ts::Descriptor]) -> anyhow::Result<()> {
+fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[Descriptor]) -> anyhow::Result<()> {
 	let length = descriptors
 		.iter()
 		.map(|descriptor| 2 + descriptor.data.len())
@@ -135,17 +136,6 @@ pub(super) struct Association {
 pub(super) struct Pat {
 	pub transport_stream_id: u16,
 	pub programs: Vec<Association>,
-}
-
-impl Pat {
-	/// The program numbers listed, without the network PID's.
-	pub fn program_numbers(&self) -> Vec<u16> {
-		self.programs
-			.iter()
-			.map(|entry| entry.program_number)
-			.filter(|&number| number != 0)
-			.collect()
-	}
 }
 
 /// Collects PAT sections until every section of one version has arrived.
@@ -232,16 +222,25 @@ impl Pmt {
 
 		let mut rest = &body[4 + info_len..];
 		let mut streams = Vec::new();
+		// A PID the loop lists again takes the later entry, in the earlier one's place.
+		let mut index = HashMap::new();
 		while !rest.is_empty() {
 			if rest.len() < 5 {
 				return None;
 			}
 			let len = length([rest[3], rest[4]]);
-			streams.push(Es {
+			let es = Es {
 				stream_type: rest[0],
 				pid: pid([rest[1], rest[2]]),
 				descriptors: descriptors(rest.get(5..5 + len)?)?,
-			});
+			};
+			match index.entry(es.pid) {
+				Entry::Occupied(entry) => streams[*entry.get()] = es,
+				Entry::Vacant(entry) => {
+					entry.insert(streams.len());
+					streams.push(es);
+				}
+			}
 			rest = &rest[5 + len..];
 		}
 		Some(Self {
@@ -272,6 +271,8 @@ fn descriptors(mut data: &[u8]) -> Option<Vec<Descriptor>> {
 
 /// A complete PES header and the payload bytes that follow it.
 pub(super) struct PesStart<'a> {
+	/// The packet's header, from its start code through the optional fields and stuffing.
+	pub header: &'a [u8],
 	pub stream_id: u8,
 	/// Raw 90 kHz.
 	pub pts: Option<u64>,
@@ -294,14 +295,13 @@ impl<'a> PesStart<'a> {
 		if payload.len() < 6 {
 			return Ok(6);
 		}
-		if matches!(payload[3], 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff) {
+		if !has_optional_header(payload[3]) {
 			return Ok(6);
 		}
 		if payload.len() < 9 {
 			return Ok(9);
 		}
 		anyhow::ensure!(payload[6] & 0xc0 == 0x80, "unexpected PES header marker bits");
-		anyhow::ensure!(payload[6] & 0x30 == 0, "scrambled PES is not supported");
 		anyhow::ensure!(payload[7] & 0xc0 != 0x40, "PES DTS without a PTS");
 		let len = usize::from(payload[8]);
 		let packet_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
@@ -316,7 +316,8 @@ impl<'a> PesStart<'a> {
 	///
 	/// Optional fields this demux has no use for (ESCR, ES rate, trick mode, copy info, the
 	/// PES CRC, extensions, stuffing) are skipped by `PES_header_data_length`. Incomplete headers
-	/// must be assembled before parsing; malformed headers are refused.
+	/// must be assembled before parsing; malformed headers are refused. A scrambled one parses,
+	/// for its stream to refuse: [`Self::scrambled`].
 	pub fn parse(payload: &'a [u8]) -> anyhow::Result<Self> {
 		let header_len = Self::header_len(payload)?;
 		anyhow::ensure!(payload.len() >= header_len, "PES header truncated");
@@ -326,6 +327,7 @@ impl<'a> PesStart<'a> {
 		// Streams that carry no optional header (ISO/IEC 13818-1 table 2-21).
 		if header_len == 6 {
 			return Ok(Self {
+				header: &payload[..6],
 				stream_id,
 				pts: None,
 				dts: None,
@@ -354,6 +356,7 @@ impl<'a> PesStart<'a> {
 			),
 		};
 		Ok(Self {
+			header: &payload[..9 + header_len],
 			stream_id,
 			pts,
 			dts,
@@ -361,6 +364,92 @@ impl<'a> PesStart<'a> {
 			data: &payload[9 + header_len..],
 		})
 	}
+}
+
+impl PesStart<'_> {
+	/// Whether `PES_scrambling_control` says the payload is scrambled.
+	pub fn scrambled(&self) -> bool {
+		self.header.get(6).is_some_and(|flags| flags & 0x30 != 0)
+	}
+
+	/// Check the header as a whole-PES track carries it, on a stream of `stream_type`, and return
+	/// the clock field it carries that only the PTS and DTS of are moved onto the catalog clock:
+	/// ESCR, a `pack_header_field`, or a TREF (ISO 13818-1 2.4.3.7). Refuses an unbounded PES
+	/// that is not video, and a flagged optional field that runs past `PES_header_data_length`.
+	pub fn whole(&self, stream_type: u8) -> anyhow::Result<Option<&'static str>> {
+		let stream_id = self.stream_id;
+		let video = matches!(stream_id, 0xe0..=0xef) || (stream_id == 0xfd && is_video_stream_type(stream_type));
+		anyhow::ensure!(
+			self.header[4..6] != [0, 0] || video,
+			"PES_packet_length 0 on stream_id {stream_id:#04x}, which only a video stream may leave unbounded"
+		);
+		let Some(fields) = self.header.get(9..) else {
+			return Ok(None);
+		};
+		let flags = self.header[7];
+		// Each flagged field in order (Table 2-21): PTS, DTS, ESCR, ES_rate, DSM trick mode,
+		// additional_copy_info, previous_PES_CRC; stuffing fills the rest.
+		let mut at = [
+			(0x80, 5),
+			(0x40, 5),
+			(0x20, 6),
+			(0x10, 3),
+			(0x08, 1),
+			(0x04, 1),
+			(0x02, 2),
+		]
+		.iter()
+		.filter(|&&(flag, _)| flags & flag != 0)
+		.map(|&(_, len)| len)
+		.sum::<usize>();
+		let mut clock = (flags & 0x20 != 0).then_some("ESCR");
+		if flags & 0x01 != 0 {
+			let read = |at: usize| fields.get(at).copied().context("PES extension runs past its header");
+			let extension = read(at)?;
+			at += 1;
+			// PES_private_data, then pack_header_field behind its own length byte.
+			if extension & 0x80 != 0 {
+				at += 16;
+			}
+			if extension & 0x40 != 0 {
+				clock = clock.or(Some("pack_header_field"));
+				at += 1 + usize::from(read(at)?);
+			}
+			// program_packet_sequence_counter and P-STD_buffer.
+			at += 2 * usize::from(extension & 0x20 != 0) + 2 * usize::from(extension & 0x10 != 0);
+			if extension & 0x01 != 0 {
+				let len = usize::from(read(at)? & 0x7f);
+				// A set stream_id_extension_flag with a clear tref_extension_flag says a TREF
+				// follows.
+				if len > 0 && read(at + 1)? & 0x81 == 0x80 {
+					clock = clock.or(Some("TREF"));
+				}
+				at += 1 + len;
+			}
+		}
+		anyhow::ensure!(
+			at <= fields.len(),
+			"PES optional fields need {at} bytes where PES_header_data_length gives {}",
+			fields.len()
+		);
+		Ok(clock)
+	}
+}
+
+/// Whether a PES of `stream_id` carries the optional header: all but program_stream_map,
+/// padding, private_stream_2, the ECM and EMM streams, DSMCC, H.222.1 type E and the program
+/// stream directory (ISO 13818-1 table 2-21).
+pub(super) fn has_optional_header(stream_id: u8) -> bool {
+	!matches!(stream_id, 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff)
+}
+
+/// Whether a PMT `stream_type` carries video (ISO 13818-1 Table 2-34, and VC-1's 0xEA), whose
+/// PES alone may leave `PES_packet_length` unbounded.
+pub(super) fn is_video_stream_type(stream_type: u8) -> bool {
+	matches!(
+		stream_type,
+		0x01 | 0x02 | 0x10 | 0x1b | 0x1e..=0x26 | 0x28..=0x2b | 0x31..=0x35 | 0xea
+	)
 }
 
 /// A 33-bit PTS or DTS behind its 4-bit prefix and three marker bits.
@@ -397,34 +486,49 @@ mod test {
 
 	#[test]
 	fn pmt_encoding_rejects_unrepresentable_lengths() {
-		use mpeg2ts::ts::payload::Pmt;
-		use mpeg2ts::ts::{Descriptor, VersionNumber};
-		let mut pmt = Pmt {
-			program_num: 1,
-			pcr_pid: None,
-			version_number: VersionNumber::default(),
-			program_info: vec![Descriptor {
-				tag: 0x80,
-				data: vec![0; 256],
-			}],
-			es_info: Vec::new(),
+		let descriptor = |tag, len| Descriptor {
+			tag,
+			data: bytes::Bytes::from(vec![0; len]),
 		};
-		assert!(encode_pmt(&pmt).unwrap_err().to_string().contains("255 bytes"));
-		pmt.program_info = vec![
-			Descriptor {
-				tag: 0x80,
-				data: vec![0; 250]
-			};
-			4
-		];
-		let section = encode_pmt(&pmt).unwrap();
+		let mut pmt = Pmt {
+			program_number: 1,
+			pcr_pid: None,
+			program_info: vec![descriptor(0x80, 256)],
+			streams: Vec::new(),
+		};
+		let version = mpeg2ts::ts::VersionNumber::default();
+		assert!(encode_pmt(&pmt, version).unwrap_err().to_string().contains("255 bytes"));
+		pmt.program_info = vec![descriptor(0x80, 250); 4];
+		let section = encode_pmt(&pmt, version).unwrap();
 		assert!(crc_ok(&section));
 		assert_eq!(section.len(), 1024);
-		pmt.program_info.push(Descriptor {
-			tag: 0x81,
-			data: Vec::new(),
-		});
-		assert!(encode_pmt(&pmt).unwrap_err().to_string().contains("1021 bytes"));
+		pmt.program_info.push(descriptor(0x81, 0));
+		assert!(
+			encode_pmt(&pmt, version)
+				.unwrap_err()
+				.to_string()
+				.contains("1021 bytes")
+		);
+	}
+
+	/// The encoder writes the raw stream_type, so a byte no codec claims survives a round trip.
+	#[test]
+	fn pmt_encoding_round_trips_unnamed_stream_types() {
+		let pmt = Pmt {
+			program_number: 9,
+			pcr_pid: Some(Pid::new(0x100).unwrap()),
+			program_info: Vec::new(),
+			streams: vec![Es {
+				stream_type: 0x99,
+				pid: Pid::new(0x104).unwrap(),
+				descriptors: vec![Descriptor {
+					tag: 0x05,
+					data: bytes::Bytes::from_static(b"TEST"),
+				}],
+			}],
+		};
+		let section = encode_pmt(&pmt, mpeg2ts::ts::VersionNumber::default()).unwrap();
+		assert_eq!(Pmt::parse(&section), Some(pmt));
 	}
 
 	#[test]
@@ -448,7 +552,8 @@ mod test {
 		assert_eq!(pat.section(&first), None);
 		let whole = pat.section(&second).expect("both sections are in");
 		assert_eq!(whole.transport_stream_id, 7);
-		assert_eq!(whole.program_numbers(), [1, 2]);
+		let numbers: Vec<_> = whole.programs.iter().map(|entry| entry.program_number).collect();
+		assert_eq!(numbers, [1, 2]);
 		// A repetition of either section repeats the whole table.
 		assert_eq!(pat.section(&first), Some(whole));
 
@@ -481,6 +586,21 @@ mod test {
 		assert_eq!(pmt.streams[0].stream_type, 0x2d);
 		assert_eq!(pmt.streams[1].pid, Pid::new(0x100).unwrap());
 		assert_eq!(pmt.streams[1].descriptors[0].tag, 0x0a);
+	}
+
+	/// A PID listed again takes the later entry, in the place of the first.
+	#[test]
+	fn pmt_repeated_pid_keeps_the_last_entry() {
+		let body = [
+			0xe1, 0x00, 0xf0, 0x00, // PCR PID 0x100, no program_info
+			0x1b, 0xe1, 0x00, 0xf0, 0x00, // H.264 on 0x100
+			0x0f, 0xe1, 0x01, 0xf0, 0x00, // AAC on 0x101
+			0x06, 0xe1, 0x00, 0xf0, 0x03, 0x0a, 0x01, 0x00, // private data on 0x100, with a descriptor
+		];
+		let pmt = Pmt::parse(&section(0x02, 1, 0, 0, 0, &body)).unwrap();
+		let streams: Vec<_> = pmt.streams.iter().map(|es| (es.stream_type, es.pid.as_u16())).collect();
+		assert_eq!(streams, [(0x06, 0x100), (0x0f, 0x101)]);
+		assert_eq!(pmt.streams[0].descriptors[0].tag, 0x0a);
 	}
 
 	#[test]

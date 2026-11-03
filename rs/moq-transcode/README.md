@@ -29,9 +29,10 @@ uses the Direct3D11 video processor by default; set
 `Config::resize.output` to `Output::Cpu` to decode to CPU pixels and resize
 there.
 
-The default `openh264` and `nvidia` features mirror `moq-video`. A hardware-only
-Linux build can use `--no-default-features --features nvidia`; a software-only
-build can use `--no-default-features --features openh264`.
+The features mirror `moq-video`: `nvidia` is on by default and the `openh264`
+software fallback is opt-in, so a GPU-less host needs `--features openh264` to
+encode at all. A software-only build can use
+`--no-default-features --features openh264`.
 
 ## Library
 
@@ -43,7 +44,7 @@ broadcast.
 let mut config = moq_transcode::Config::default();
 // The derivative is announced at `<source>/transcode.hang`, so the source
 // renditions are referenced through its parent.
-config.source = Some(moq_net::path::RelativeOwned::from(".".to_string()));
+config.source = Some(moq_net::path::Relative::new("."));
 
 let output = origin.create_broadcast(format!("{path}/transcode.hang"))?;
 output.announce(Default::default())?;

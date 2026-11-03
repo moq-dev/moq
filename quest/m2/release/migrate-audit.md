@@ -1,45 +1,73 @@
-# [L] API-diff check on release PRs
+# [M] Migration audit of the breaking cut
 
 ## Goal
 
-Every PR into `release` runs a check that diffs each published package's
-public API against its last published version. A backport fails on any break; on
-the breaking cut PR the diff is reported for the auditor, who confirms every
-break, including those in surfaces the diff cannot see, has its `MIGRATE.md`
-entry before the cut merges.
+Before the breaking cut merges, every break it ships, including those in
+surfaces `just api-diff` cannot see, has its
+`MIGRATE.md` entry, and each entry states the net change from the last
+published version.
 
 ## Plan
 
-Decided 2026-10-16 (maintainer interview):
+Decided 2026-10-16 (maintainer interview); the diff tooling moved to its own
+m1 quest on 2026-10-22.
 
-- Commit `!` markers undercount: a 2026-10-16 sample estimated 12-15
-  unmarked breaks on top of 87 marked ones, a floor since signature-only
-  changes escape the heuristic. This check is the backstop; PRs into `main`
-  get no CI check.
-- Runs on PRs into `release` only: backports must keep the published API
-  (CONTRIBUTING), and the cut PR gets a full audit.
-- Backports fail on any detected break. The cut PR only reports: Rust
-  versions are bumped by release-plz after the cut lands, so the diff cannot
-  gate on a version bump there.
-- One `just` recipe, three backends: cargo-semver-checks for Rust crates,
-  emitted `.d.ts` API reports for `@moq/*` packages, and a `moq.h` plus
-  UniFFI interface diff for the bindings. Prefer maintained tools over
-  hand-rolled diffing. Wire it into the workflow that runs on PRs into
-  `release`, and add the audit step to CONTRIBUTING.md's Releases section.
-- Baseline is the last published artifact, not a git tag: `@moq/*` and
-  `moq-rs` publish without tags. Rust compares against crates.io
-  (cargo-semver-checks' default), JS against the npm tarball's declarations,
-  and the FFI interfaces against the published `moq-ffi` crate and the last
-  released C archive's `moq.h`.
-- Coverage: the report covers Rust crates, `@moq/*` declarations, and the
-  generated FFI interfaces. A break only in a hand-written binding wrapper
-  (`py/moq-rs`, `kt/moq`, `dart/moq`, `go/wrapper`, `swift`, `cpp/moq`,
-  `cpp/obs`) or a binary's flags, env vars, or config keys escapes it, so the
-  cut's audit also reads the diff of those paths by hand. Per-language wrapper
-  checks are out of scope until a missed break shows they are needed.
-- For this cut, fill every gap the report and the manual pass show in the
-  matching `MIGRATE.md`.
+- PRs into `main` no longer write `MIGRATE.md` entries (decided
+  2026-10-23). Gather the breaks from `!` PRs: every `!` subject in
+  `git log` since the `release` merge base, then each PR's Impact section
+  for its migration note, since squash commits drop the PR body. Write each
+  note into its package's guide. The API-diff report below catches breaks a
+  PR left unmarked; a behavior break with no `!` stays with PR review.
+- Correct Unreleased entries that a later PR overturned. Known: `js/net/MIGRATE.md`
+  still describes `request(path, { announced: true })`, which
+  [moq-dev/moq#7173](https://github.com/moq-dev/moq/pull/7173) replaced with
+  `follow(path)` (decided 2026-10-29). Also known, from
+  [moq-dev/moq#7036](https://github.com/moq-dev/moq/pull/7036)'s rename of
+  `used` to `wanted` (Decided 2026-10-30 (maintainer, /quest-plan of the 2026-10-30 /quest-complete follow-ups)): `rs/moq-json/MIGRATE.md`
+  should say `producer.demand().wanted().is_some()`, not
+  `producer.demand().is_used()`. In `js/net/MIGRATE.md`, the line saying
+  broadcast and group demand keep `used` and `unused()` is false, the line on
+  `unused()` rejecting on close is moot, and
+  "`producer.unused()` is `producer.demand().unused()`" should point at
+  `demand().wanted`.
+- Run the API-diff report on the cut PR and read the diff of the
+  hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
+  `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,
+  env vars, and config keys by hand. Add this manual pass to
+  CONTRIBUTING.md's Releases section, which already names the other sources.
+- Fill every gap the report and the manual pass show in the matching
+  `MIGRATE.md`. Known gaps: breaking releases cut after the
+  2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5
+  and possibly moq-audio and moq-video), because their breaks predate the
+  backfill's merge base. The [compression migration](https://github.com/moq-dev/moq/pull/7046)
+  deleted moq-flate before this cut: audit the migration from its published
+  API to ordinary tracks with `compress`, rather than promising a new
+  moq-flate transition release.
+- Each version-transition section, starting from the `## Unreleased`
+  entries already on `main`, says how to migrate from the published
+  version to the candidate (decided 2026-10-22, maintainer, from an external
+  API audit). Collapse entries a later change reversed or reshaped (an API
+  removed then reintroduced, a default changed twice) into the net change,
+  and drop the intermediate history.
+- Read the API-diff report's auto-trait changes too, not only renamed or
+  removed items (added 2026-10-27, from an external release-to-main audit
+  that found lost `Sync` on JSON consumers, fMP4/HLS importers, video decode
+  consumers, and relay state). Restore an accidental loss at its source;
+  otherwise the migration note says how to share the type instead.
+- Compile-check the code in every `MIGRATE.md` section the cut ships against
+  the candidate. Nothing else builds it.
 - Required by the cut, after m1's breaking work has landed.
+- Start from the candidates [moq-dev/moq#6477](https://github.com/moq-dev/moq/pull/6477)
+  listed as breaks matching no name in `MIGRATE.md` (about 15 Rust crates,
+  `@moq/hang`, `@moq/net`, `@moq/watch`, and moq-ffi): confirm each, and add
+  its migration note or record why none is needed.
+- Known break, a Nix option rather than a Rust API (added 2026-10-31, from
+  [moq-dev/moq#7343](https://github.com/moq-dev/moq/pull/7343)): the NixOS
+  module option `services.moq-relay.cluster.rootUrl` takes a non-empty
+  list instead of a string. Migrate `rootUrl = "https://root:4443";` to
+  `rootUrl = [ "https://root:4443" ];`; an empty list fails evaluation.
+  Write it into `rs/moq-relay/MIGRATE.md`'s transition section (its
+  `## Unreleased` section until the cut names the version).
 
 ## Required
 

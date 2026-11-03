@@ -32,8 +32,8 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	// From the first group with a replay window: a late reader is owed the whole track,
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(0))
-		.with_max_delay(std::time::Duration::from_secs(30));
+		.with_range(0..)
+		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 	let mut consumer = track.subscribe(subscription);
 
 	for _ in 0..GROUPS {
@@ -41,7 +41,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 		group.write_frame(Timestamp::ZERO, b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 	}
-	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
 	// Every group below the end is finished: the end has settled and the track is
 	// complete. Nothing has been read yet.
 	if abort {
@@ -77,19 +77,19 @@ fn assert_whole((got, err): (Vec<u64>, Option<Error>), what: &str) {
 }
 
 /// The groups a settled track holds outlive an abort: a late reader gets all of them.
-#[moq_net_sim::test]
+#[kio::test]
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_reader() {
 	assert_whole(round(true, false).await, "arrival order, aborted after the end settled");
 }
 
 /// The same in sequence order: the ordered cursor ends clean too, not with the abort.
-#[moq_net_sim::test]
+#[kio::test]
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_ordered_reader() {
 	assert_whole(round(true, true).await, "sequence order, aborted after the end settled");
 }
 
 /// Control: with no abort the same late reader gets every group, then the clean end.
-#[moq_net_sim::test]
+#[kio::test]
 async fn a_settled_track_delivers_every_group_to_a_late_reader() {
 	assert_whole(round(false, false).await, "arrival order, no abort");
 	assert_whole(round(false, true).await, "sequence order, no abort");

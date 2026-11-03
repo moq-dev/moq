@@ -27,7 +27,9 @@ pub(crate) fn from_transport(error: impl crate::transport::Error) -> Error {
 }
 
 /// Classify control bytes at a stream boundary, keeping a transport FIN/reset distinct.
-pub(super) fn control<S: crate::transport::poll::Session>(session: &mut S, err: Error) -> Error {
+#[cfg(feature = "async")]
+pub(super) fn control(session: &mut crate::driver::Transport, err: Error) -> Error {
+	use crate::transport::poll::Session as _;
 	let err = match err {
 		Error::Decode(crate::DecodeError::Short) => err,
 		err => crate::auth::protocol_error(err),

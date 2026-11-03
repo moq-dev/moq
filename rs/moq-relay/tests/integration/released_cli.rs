@@ -59,16 +59,6 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("cluster-tier", Some("MOQ_CLUSTER_TIER")),
 	("cluster-token", Some("MOQ_CLUSTER_TOKEN")),
 	("internal-listen", Some("MOQ_INTERNAL_LISTEN")),
-	#[cfg(feature = "iroh")]
-	("iroh-bind-v4", Some("MOQ_IROH_BIND_V4")),
-	#[cfg(feature = "iroh")]
-	("iroh-bind-v6", Some("MOQ_IROH_BIND_V6")),
-	#[cfg(feature = "iroh")]
-	("iroh-disable-relay", Some("MOQ_IROH_DISABLE_RELAY")),
-	#[cfg(feature = "iroh")]
-	("iroh-enabled", Some("MOQ_IROH_ENABLED")),
-	#[cfg(feature = "iroh")]
-	("iroh-secret", Some("MOQ_IROH_SECRET")),
 	("listen", Some("MOQ_SERVER_BIND")),
 	("log-level", Some("MOQ_LOG_LEVEL")),
 	("server-bind", Some("MOQ_SERVER_BIND")),
@@ -121,7 +111,7 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 ];
 
 /// Every flag name the parser accepts today, including aliases and hidden args.
-fn flags(cmd: &usage::argv::spec::CommandMeta<'_>) -> HashSet<String> {
+fn flags(cmd: &usage_rs::argv::spec::CommandMeta<'_>) -> HashSet<String> {
 	let mut out = HashSet::new();
 	for flag in cmd.flags {
 		for long in flag.flag.longs {
@@ -135,7 +125,7 @@ fn flags(cmd: &usage::argv::spec::CommandMeta<'_>) -> HashSet<String> {
 }
 
 /// Every environment variable the parser reads, mapped to the flag that reads it.
-fn envs(cmd: &usage::argv::spec::CommandMeta<'_>) -> HashMap<String, String> {
+fn envs(cmd: &usage_rs::argv::spec::CommandMeta<'_>) -> HashMap<String, String> {
 	let mut out = HashMap::new();
 	for flag in cmd.flags {
 		let name = flag.flag.longs.first().copied().unwrap_or(flag.flag.name);

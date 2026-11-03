@@ -163,3 +163,5 @@ impl RtmpMessage {
 		}
 	}
 }
+
+pub use message_payload::Amf0Message;

@@ -5,6 +5,7 @@
  *
  * @module
  */
+
 import { Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
@@ -37,6 +38,7 @@ function matchesFullscreen(el: HTMLElement): boolean {
 	return false;
 }
 
+/** The `<moq-watch-ui>` element: playback controls around the `<moq-watch>` it wraps. */
 export default class MoqWatchUi extends HTMLElement {
 	#signals?: Effect;
 	#root: ShadowRoot;
@@ -54,6 +56,7 @@ export default class MoqWatchUi extends HTMLElement {
 		this.#observer = new MutationObserver(() => this.#updateWatch());
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#updateWatch();
 		this.#observer.observe(this, { childList: true });
@@ -63,6 +66,7 @@ export default class MoqWatchUi extends HTMLElement {
 		signals.run(this.#render.bind(this));
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#observer.disconnect();
 		this.#signals?.close();
@@ -89,7 +93,7 @@ export default class MoqWatchUi extends HTMLElement {
 		// The slotted <moq-watch> (canvas/video) sits at the base of the stack.
 		player.appendChild(DOM.create("slot"));
 
-		// Center affordances: play prompt + buffering spinner + offline / refused / unsupported-codec / hidden notices.
+		// Center affordances: play prompt + buffering spinner + offline / refused / unsupported / hidden notices.
 		const center = DOM.create("div", { className: "center" });
 		center.append(
 			centerPlay(effect, watch),

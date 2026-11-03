@@ -29,27 +29,34 @@
 //! [unicycle](https://github.com/udoprog/unicycle) proved out against
 //! `FuturesUnordered`'s intrusive list): a wake is one `fetch_or`, lock-free,
 //! and inherently deduplicated since setting a set bit is a no-op. Each poll
-//! snapshots a word at a time with `swap(0)`, so a task woken mid-pass lands in
-//! the next pass instead of spinning this one. Because tasks are closures, not
-//! pinned futures, a slot's identity is stable and its [`Waker`] is minted once
-//! and reused across occupants: the per-task allocation `FuturesUnordered`
+//! snapshots the woken words with `swap(0)` before running anything, so a task
+//! woken mid-pass lands in the next pass instead of spinning this one. Because
+//! tasks are closures, not pinned futures, a slot's identity is stable and its
+//! [`Waker`] is minted once and reused across occupants: the per-task allocation `FuturesUnordered`
 //! pays per future (and futures-buffered removes with an unsafe arena) is a
 //! per-slot cost here, amortized to zero in a long-lived set. An owner that
 //! wakes its own tasks mid-poll (a driver advancing its clock) runs that poll in
 //! [`Waiter::batch`], so the set's wake of the owner is not a second poll. Safe Rust
 //! throughout.
+//!
+//! The bitset is indexed so a poll visits only woken words, not every word the
+//! set ever grew: a word's first bit also marks it in its chunk's summary, and a
+//! chunk's first marked word also marks bit `chunk % 64` of one word shared by
+//! the whole set. A poll with nothing woken is then one `swap`, however many
+//! slots a past burst left behind. Up to 64 chunks (65,536 slots) the top word
+//! is exact; past that a bit stands for every 64th chunk, one `swap` each.
 
 use std::{
-	cell::{Cell, RefCell},
-	// std's `Arc`: `Waker::from` needs it. The atomics are loom's under `--cfg loom`.
-	sync::{Arc, atomic::Ordering},
+	cell::RefCell,
+	num::NonZeroUsize,
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+	},
 	task::{Context, Poll, RawWakerVTable, Wake, Waker},
 };
 
-use crate::{
-	sync::{AtomicBool, AtomicU64, Mutex},
-	waiter::{Park, Waiter},
-};
+use crate::waiter::{Park, Waiter};
 
 /// Wake-bits per chunk word and words per chunk: one chunk covers 1024 slots.
 const WORD_BITS: usize = 64;
@@ -58,11 +65,19 @@ const CHUNK_SLOTS: usize = WORD_BITS * CHUNK_WORDS;
 
 /// One fixed block of the wake bitset. Chunks never move or grow, so a waker
 /// can hold its chunk directly and set its bit without any lock.
-struct Chunk([AtomicU64; CHUNK_WORDS]);
+struct Chunk {
+	words: [AtomicU64; CHUNK_WORDS],
+	/// Bit `w` is set once word `w` went nonzero and stays set until a poll
+	/// takes the word, so a poll swaps only the words that hold wakes.
+	summary: AtomicU64,
+}
 
 impl Chunk {
 	fn new() -> Arc<Self> {
-		Arc::new(Self(std::array::from_fn(|_| AtomicU64::new(0))))
+		Arc::new(Self {
+			words: std::array::from_fn(|_| AtomicU64::new(0)),
+			summary: AtomicU64::new(0),
+		})
 	}
 }
 
@@ -84,19 +99,32 @@ pub struct Tasks<T> {
 	free: Vec<usize>,
 	len: usize,
 	shared: Arc<Shared>,
-	/// The readiness snapshot each poll dispatches from, taken before any task
-	/// runs so a mid-pass wake lands in the next pass wherever its slot sits.
+	/// The readiness snapshot each poll dispatches from: the woken words as
+	/// `(word index, bits)` in ascending word order, taken before any task runs
+	/// so a mid-pass wake lands in the next pass wherever its slot sits.
 	/// Retained so steady-state polls don't allocate.
-	scratch: Vec<u64>,
+	scratch: Vec<(usize, u64)>,
 	/// The slot that leads the next readiness snapshot, rotated after every
 	/// nonempty pass so wake-all resources cannot favor low-numbered tasks.
 	next: usize,
+	/// Stamped on each occupant, so a [`TaskKey`] outliving its task names nothing.
+	generation: u64,
+}
+
+/// Names a task [`insert`](Tasks::insert)ed into a set, until it finishes or is
+/// [`remove`](Tasks::remove)d. A key to a task that is gone never names the
+/// task reusing its slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TaskKey {
+	index: usize,
+	generation: u64,
 }
 
 /// A slot's current task and its retained kio registrations.
 struct Occupant<T> {
 	task: T,
 	park: Park,
+	generation: u64,
 }
 
 /// Waker state shared with every slot; deliberately `T`-free so the wakers
@@ -107,6 +135,9 @@ struct Shared {
 	/// Set by the first wake since the last poll began, so a burst of wakes
 	/// costs one parent wake, not one each.
 	pending: AtomicBool,
+	/// The chunks with a marked summary: bit `c % 64` for chunk `c`. The top
+	/// level of the wake index, so a poll skips the chunks nothing woke.
+	ready: AtomicU64,
 }
 
 impl Shared {
@@ -134,20 +165,18 @@ impl Shared {
 	}
 }
 
-// Loom runs its threads on one OS thread, so the scope must be loom's to stay per thread.
-#[cfg(not(loom))]
 std::thread_local! {
-	static POLLING: Polling = const { Polling { current: Cell::new(None), held: RefCell::new(Vec::new()) } };
-}
-#[cfg(loom)]
-loom::thread_local! {
-	static POLLING: Polling = Polling { current: Cell::new(None), held: RefCell::new(Vec::new()) };
+	static POLLING: Polling = const { Polling { open: RefCell::new(Vec::new()), held: RefCell::new(Vec::new()) } };
 }
 
 /// A waker's identity: what [`Waker::will_wake`] compares.
 type Identity = (*const (), *const RawWakerVTable);
 
-/// The [`Waiter::batch`] running on this thread, and the wakes held for it.
+fn identity(waker: &Waker) -> Identity {
+	(waker.data(), waker.vtable())
+}
+
+/// The [`Waiter::batch`]es running on this thread, and the wakes held for them.
 ///
 /// A set woken from inside its owner's poll (by time that poll advanced, say)
 /// would wake a task that is already running, and the executor would poll it
@@ -155,32 +184,42 @@ type Identity = (*const (), *const RawWakerVTable);
 /// wake. So the wake is held until the batch returns, then delivered only if the
 /// set is still pending. A wake from another thread is never held: it cannot
 /// know where the owner's poll is.
+///
+/// Batches nest: a task polled inside its executor's batch may open its own. A
+/// wake is held by the innermost open batch it names, so a task's batch does not
+/// let its wakes of the executor's set through.
 pub(crate) struct Polling {
-	/// The innermost batch's waker; the outer ones wait on their stack frames.
-	current: Cell<Option<Identity>>,
-	/// Held wakes. Each batch owns the ones past the length it found on entry.
-	held: RefCell<Vec<Arc<Shared>>>,
+	/// The open batches' wakers, innermost last.
+	open: RefCell<Vec<Identity>>,
+	/// Held wakes, each with the batch holding it. A batch owns the entries past
+	/// the length it found on entry that name it; the others belong to a batch
+	/// around it.
+	held: RefCell<Vec<(Identity, Arc<Shared>)>>,
 }
 
 impl Polling {
 	/// Run `poll` as the task `waker` wakes, delivering the wakes it held when it returns.
 	pub(crate) fn run<R>(waker: &Waker, poll: impl FnOnce() -> R) -> R {
 		struct Scope {
-			outer: Option<Identity>,
+			identity: Identity,
 			start: usize,
 		}
 		impl Drop for Scope {
 			fn drop(&mut self) {
-				let held: Vec<_> = POLLING.with(|polling| {
-					polling.current.set(self.outer);
+				let mut mine = Vec::new();
+				POLLING.with(|polling| {
+					polling.open.borrow_mut().pop();
 					let mut held = polling.held.borrow_mut();
-					match held.len() > self.start {
-						true => held.drain(self.start..).collect(),
-						false => Vec::new(),
-					}
+					mine.extend(
+						held.extract_if(self.start.., |(identity, _)| *identity == self.identity)
+							.map(|(_, shared)| shared),
+					);
 				});
+				// Keep holding O(1), then coalesce the same set's wakes across passes.
+				mine.sort_unstable_by_key(Arc::as_ptr);
+				mine.dedup_by(|a, b| Arc::ptr_eq(a, b));
 				// Outside the borrow: a waker may poll inline and open a batch of its own.
-				for shared in held {
+				for shared in mine {
 					shared.release();
 				}
 			}
@@ -188,26 +227,31 @@ impl Polling {
 
 		// Delivered on unwind too, so a panicking poll loses no wakeup. Polled from a
 		// thread-local's destructor after the scope is gone, nothing is held at all.
+		let identity = identity(waker);
 		let _scope = POLLING
-			.try_with(|polling| Scope {
-				outer: polling.current.replace(Some((waker.data(), waker.vtable()))),
-				start: polling.held.borrow().len(),
+			.try_with(|polling| {
+				polling.open.borrow_mut().push(identity);
+				Scope {
+					identity,
+					start: polling.held.borrow().len(),
+				}
 			})
 			.ok();
 		poll()
 	}
 
-	/// Keep back a wake of `parent` when it is the innermost batch on this thread.
+	/// Keep back a wake of `parent` when a batch open on this thread runs as it.
 	///
 	/// A wake from a thread-local's destructor may run after the scope is gone; it
 	/// is delivered.
 	fn hold(parent: &Waker, shared: &Arc<Shared>) -> bool {
 		POLLING
 			.try_with(|polling| {
-				if polling.current.get() != Some((parent.data(), parent.vtable())) {
+				let identity = identity(parent);
+				if !polling.open.borrow().contains(&identity) {
 					return false;
 				}
-				polling.held.borrow_mut().push(shared.clone());
+				polling.held.borrow_mut().push((identity, shared.clone()));
 				true
 			})
 			.unwrap_or(false)
@@ -215,10 +259,12 @@ impl Polling {
 }
 
 /// The per-slot waker: sets the slot's wake bit and nudges the owner.
+///
+/// One lives per slot the set ever grew, so it keeps only the slot index and
+/// derives its bits from that.
 struct SlotWaker {
 	chunk: Arc<Chunk>,
-	word: usize,
-	bit: u64,
+	slot: usize,
 	shared: Arc<Shared>,
 }
 
@@ -230,9 +276,21 @@ impl Wake for SlotWaker {
 	fn wake_by_ref(self: &Arc<Self>) {
 		// An already-set bit means the slot is queued for the next pass and the
 		// owner was already nudged: a burst of wakes is one bit and one nudge.
-		if self.chunk.0[self.word].fetch_or(self.bit, Ordering::AcqRel) & self.bit == 0 {
-			self.shared.wake_parent();
+		let index = (self.slot % CHUNK_SLOTS) / WORD_BITS;
+		let bit = 1 << (self.slot % WORD_BITS);
+		let word = self.chunk.words[index].fetch_or(bit, Ordering::AcqRel);
+		if word & bit != 0 {
+			return;
 		}
+		// Only the wake that makes a level nonzero marks the level above. A poll
+		// clears each level before taking the one below it, so a later wake into a
+		// still-nonzero level is either taken by that poll or covered by the mark
+		// the level's first wake left (or is about to leave) for the next one.
+		if word == 0 && self.chunk.summary.fetch_or(1 << index, Ordering::AcqRel) == 0 {
+			let chunk = self.slot / CHUNK_SLOTS;
+			self.shared.ready.fetch_or(1 << (chunk % WORD_BITS), Ordering::AcqRel);
+		}
+		self.shared.wake_parent();
 	}
 }
 
@@ -248,9 +306,11 @@ impl<T> Tasks<T> {
 			shared: Arc::new(Shared {
 				parent: Mutex::new(None),
 				pending: AtomicBool::new(false),
+				ready: AtomicU64::new(0),
 			}),
 			scratch: Vec::new(),
 			next: 0,
+			generation: 0,
 		}
 	}
 
@@ -269,6 +329,12 @@ impl<T> Tasks<T> {
 	/// Wakes the owner, so a task pushed between polls (from another arm of the
 	/// owner's own poll, say) still gets started.
 	pub fn push(&mut self, task: T) {
+		self.insert(task);
+	}
+
+	/// Add a task like [`push`](Self::push), returning the key that
+	/// [`remove`](Self::remove)s it before it finishes.
+	pub fn insert(&mut self, task: T) -> TaskKey {
 		let index = match self.free.pop() {
 			Some(index) => index,
 			None => {
@@ -279,20 +345,40 @@ impl<T> Tasks<T> {
 				self.children.push(None);
 				self.wakers.push(Waker::from(Arc::new(SlotWaker {
 					chunk: self.chunks[index / CHUNK_SLOTS].clone(),
-					word: (index % CHUNK_SLOTS) / WORD_BITS,
-					bit: 1 << (index % WORD_BITS),
+					slot: index,
 					shared: self.shared.clone(),
 				})));
 				index
 			}
 		};
+		self.generation += 1;
 		self.children[index] = Some(Occupant {
 			task,
 			park: Park::default(),
+			generation: self.generation,
 		});
 		self.len += 1;
 		// Queue the first poll exactly the way any wake would.
 		self.wakers[index].wake_by_ref();
+		TaskKey {
+			index,
+			generation: self.generation,
+		}
+	}
+
+	/// Take a task out of the set before it finishes, cancelling it there.
+	///
+	/// `None` when the task already finished or was removed.
+	pub fn remove(&mut self, key: TaskKey) -> Option<T> {
+		let slot = self.children.get_mut(key.index)?;
+		if slot.as_ref()?.generation != key.generation {
+			return None;
+		}
+		let occupant = slot.take()?;
+		// A wake bit left set costs the slot's next occupant one spurious poll at most.
+		self.free.push(key.index);
+		self.len -= 1;
+		Some(occupant.task)
 	}
 }
 
@@ -342,7 +428,44 @@ impl<T: Task<Output = ()>> Tasks<T> {
 	/// such an arm with [`is_empty`](Self::is_empty).
 	/// `waiter` is registered for the next task wake or push; the tasks
 	/// themselves park on their own wakers.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
+		self.poll_each(waiter, |_, ()| {})
+	}
+
+	/// [`poll`](Self::poll) again while a pass woke a task, up to `budget` passes,
+	/// returning how many ran.
+	///
+	/// A wake chain no deeper than the budget completes in this one call: a task
+	/// woken by another (or pushed) during a pass runs in the next pass. Each pass
+	/// still snapshots before running anything, so a chain deeper than the budget,
+	/// or a task that wakes itself every poll, takes `budget` steps and leaves the
+	/// rest to the next call, waking the owner as [`poll`](Self::poll) does.
+	///
+	/// For an owner that runs its set until it is quiet before blocking, such as
+	/// an executor's turn. Run the call inside the owner's [`Waiter::batch`], or
+	/// the wakes that a later pass takes still wake the owner.
+	#[cfg_attr(feature = "sim", track_caller)]
+	pub fn poll_passes(&mut self, waiter: &Waiter, budget: NonZeroUsize) -> usize {
+		self.passes(waiter, budget, &mut |_, ()| {})
+	}
+}
+
+impl<T: Task> Tasks<T> {
+	/// [`poll`](Self::poll) a set whose tasks resolve to a value: `done` takes
+	/// each task that returned `Ready`, with its output, as it retires.
+	#[cfg_attr(feature = "sim", track_caller)]
+	pub fn poll_each(&mut self, waiter: &Waiter, mut done: impl FnMut(T, T::Output)) -> Poll<()> {
+		self.passes(waiter, NonZeroUsize::MIN, &mut done);
+		match self.len {
+			0 => crate::coop::ready(()),
+			_ => Poll::Pending,
+		}
+	}
+
+	/// Run passes until one wakes nothing or `budget` have run; returns how many ran.
+	#[cfg_attr(feature = "sim", track_caller)]
+	fn passes(&mut self, waiter: &Waiter, budget: NonZeroUsize, done: &mut impl FnMut(T, T::Output)) -> usize {
 		{
 			let mut parent = self.shared.parent.lock().unwrap();
 			let waker = waiter.waker();
@@ -350,22 +473,52 @@ impl<T: Task<Output = ()>> Tasks<T> {
 				*parent = Some(waker.clone());
 			}
 		}
-		// Re-arm before sweeping: a wake landing mid-pass must nudge the owner
-		// again, since its word will already have been snapshotted.
-		self.shared.pending.store(false, Ordering::Release);
+		let mut ran = 0;
+		loop {
+			// Re-arm before sweeping: a wake landing mid-pass must nudge the owner
+			// again, since its word will already have been snapshotted. The same
+			// flag tells the loop whether the pass woke anything.
+			self.shared.pending.store(false, Ordering::Release);
+			self.pass(done);
+			ran += 1;
+			if ran == budget.get() || !self.shared.pending.load(Ordering::Acquire) {
+				return ran;
+			}
+		}
+	}
 
-		// One snapshot per owner poll, taken in full before any task runs:
+	/// Run every task woken before the pass began.
+	#[cfg_attr(feature = "sim", track_caller)]
+	fn pass(&mut self, done: &mut impl FnMut(T, T::Output)) {
+		// One snapshot per pass, taken in full before any task runs:
 		// `swap(0)` takes the woken bits and clears them, so a task woken
 		// during the pass (by another task or a self-wake) lands in the next
 		// pass wherever its slot sits, never this one. Dispatching straight off
 		// the words instead would run a forward wake chain in a single pass,
-		// starving the caller's other arms.
+		// starving the caller's other arms. Each level is cleared before the
+		// level below it is read, the order the wakers' marks rely on.
 		let mut scratch = std::mem::take(&mut self.scratch);
 		scratch.clear();
-		for chunk in &self.chunks {
-			for word in &chunk.0 {
-				scratch.push(word.swap(0, Ordering::AcqRel));
+		let mut ready = self.shared.ready.swap(0, Ordering::AcqRel);
+		while ready != 0 {
+			let first = ready.trailing_zeros() as usize;
+			ready &= ready - 1;
+			for (chunk_index, chunk) in self.chunks.iter().enumerate().skip(first).step_by(WORD_BITS) {
+				let mut words = chunk.summary.swap(0, Ordering::AcqRel);
+				while words != 0 {
+					let word = words.trailing_zeros() as usize;
+					words &= words - 1;
+					let bits = chunk.words[word].swap(0, Ordering::AcqRel);
+					if bits != 0 {
+						scratch.push((chunk_index * CHUNK_WORDS + word, bits));
+					}
+				}
 			}
+		}
+		// Up to 64 chunks the bits visit them in order; past that, a bit's chunks
+		// interleave with the next bit's.
+		if self.chunks.len() > WORD_BITS {
+			scratch.sort_unstable_by_key(|&(word, _)| word);
 		}
 
 		let slots = self.children.len();
@@ -378,8 +531,12 @@ impl<T: Task<Output = ()>> Tasks<T> {
 			}
 			let first_word = from / WORD_BITS;
 			let last_word = (to - 1) / WORD_BITS;
-			for (word_index, word) in scratch.iter().enumerate().take(last_word + 1).skip(first_word) {
-				let mut bits = *word;
+			let start = scratch.partition_point(|&(word, _)| word < first_word);
+			for &(word_index, word) in &scratch[start..] {
+				if word_index > last_word {
+					break;
+				}
+				let mut bits = word;
 				if word_index == first_word {
 					bits &= u64::MAX << (from % WORD_BITS);
 				}
@@ -402,20 +559,20 @@ impl<T: Task<Output = ()>> Tasks<T> {
 					}
 					let cx = Context::from_waker(&self.wakers[index]);
 					let child_waiter = occupant.park.hold(&cx);
-					if occupant.task.poll(child_waiter).is_ready() {
-						self.children[index] = None;
+					// Each child is its own task, so a large sweep of finite children is not
+					// one spinning poll.
+					#[cfg(feature = "sim")]
+					let _scope = crate::coop::child();
+					if let Poll::Ready(output) = occupant.task.poll(child_waiter) {
+						let occupant = self.children[index].take().expect("polled slot is occupied");
 						self.free.push(index);
 						self.len -= 1;
+						done(occupant.task, output);
 					}
 				}
 			}
 		}
 		self.scratch = scratch;
-
-		match self.len {
-			0 => Poll::Ready(()),
-			_ => Poll::Pending,
-		}
 	}
 }
 
@@ -425,7 +582,7 @@ impl<T> Default for Tasks<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use std::sync::{Mutex, atomic::AtomicUsize};
@@ -497,6 +654,81 @@ mod tests {
 		open(&c_gate);
 		assert!(tasks.poll(&waiter).is_ready(), "an empty set is Ready");
 		assert!(tasks.is_empty());
+	}
+
+	/// A removed task is gone at once, and its key never names the task that
+	/// reuses its slot.
+	#[test]
+	fn removed_tasks_free_their_slot_and_key() {
+		let mut tasks = Tasks::new();
+		let (a_gate, a_polls) = (crate::Producer::new(false), Arc::new(AtomicUsize::new(0)));
+		let a = tasks.insert(gated(a_gate.consume(), a_polls.clone()));
+		let waiter = Waiter::noop();
+		assert!(tasks.poll(&waiter).is_pending());
+
+		assert!(tasks.remove(a).is_some());
+		assert!(tasks.is_empty());
+		// Its pending wake is dropped with it.
+		open(&a_gate);
+		assert!(tasks.poll(&waiter).is_ready());
+		assert_eq!(a_polls.load(Ordering::SeqCst), 1);
+
+		let b_gate = crate::Producer::new(false);
+		let b = tasks.insert(gated(b_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		assert_eq!(tasks.children.len(), 1, "b reuses a's slot");
+		assert!(tasks.remove(a).is_none(), "a stale key names nothing");
+		assert!(tasks.remove(b).is_some());
+		assert!(tasks.remove(b).is_none());
+	}
+
+	/// `poll_each` hands back each task that resolves, with its output.
+	#[test]
+	fn poll_each_hands_back_outputs() {
+		/// Resolves to ten times its id once the gate opens.
+		struct Tagged {
+			id: usize,
+			gate: crate::Consumer<bool>,
+		}
+		impl Task for Tagged {
+			type Output = usize;
+
+			fn poll(&mut self, waiter: &Waiter) -> Poll<usize> {
+				match self.gate.poll(waiter, |open| match **open {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}) {
+					Poll::Ready(_) => Poll::Ready(self.id * 10),
+					Poll::Pending => Poll::Pending,
+				}
+			}
+		}
+
+		let mut tasks = Tasks::new();
+		let gate = crate::Producer::new(false);
+		for id in 0..3 {
+			tasks.push(Tagged {
+				id,
+				gate: gate.consume(),
+			});
+		}
+
+		let waiter = Waiter::noop();
+		let mut done = Vec::new();
+		assert!(
+			tasks
+				.poll_each(&waiter, |task, out| done.push((task.id, out)))
+				.is_pending()
+		);
+		assert!(done.is_empty());
+
+		open(&gate);
+		assert!(
+			tasks
+				.poll_each(&waiter, |task, out| done.push((task.id, out)))
+				.is_ready()
+		);
+		done.sort();
+		assert_eq!(done, [(0, 0), (1, 10), (2, 20)]);
 	}
 
 	/// A boxed set mixes shapes: a plain closure and an adapted future.
@@ -617,6 +849,94 @@ mod tests {
 		drop(fillers);
 	}
 
+	/// A pass budget runs a forward wake chain up to the budget in one call and
+	/// no further: each pass still snapshots before running anything, so the
+	/// step past the budget lands in the next call and wakes the owner.
+	#[test]
+	fn a_pass_budget_bounds_a_wake_chain() {
+		type Gates = Vec<crate::Producer<bool>>;
+		type Set = Tasks<Box<dyn FnMut(&Waiter) -> Poll<()>>>;
+
+		/// A chain of parked tasks a word apart, each opening the next gate when its
+		/// own opens, with the first gate open.
+		fn chain(tasks: &mut Set, links: usize) -> (Gates, Vec<Arc<AtomicUsize>>) {
+			let gates: Gates = (0..=links).map(|_| crate::Producer::new(false)).collect();
+			let mut polls = Vec::new();
+			for link in 0..links {
+				let consumer = gates[link].consume();
+				let next = gates[link + 1].clone();
+				let count = Arc::new(AtomicUsize::new(0));
+				polls.push(count.clone());
+				tasks.push(Box::new(move |waiter: &Waiter| {
+					count.fetch_add(1, Ordering::SeqCst);
+					match consumer.poll(waiter, |open| match **open {
+						true => Poll::Ready(()),
+						false => Poll::Pending,
+					}) {
+						Poll::Ready(_) => {
+							open(&next);
+							Poll::Ready(())
+						}
+						Poll::Pending => Poll::Pending,
+					}
+				}));
+				// Fillers so each link sits in a later word than the one before.
+				for _ in 1..WORD_BITS {
+					tasks.push(Box::new(|_: &Waiter| Poll::Pending));
+				}
+			}
+			assert!(tasks.poll(&Waiter::noop()).is_pending(), "every link parks");
+			open(&gates[0]);
+			(gates, polls)
+		}
+
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waiter = Waiter::new(Waker::from(wakes.clone()));
+		let budget = NonZeroUsize::new(3).unwrap();
+
+		// Within the budget: the whole chain runs in one call, which then finds
+		// nothing left to run.
+		let mut tasks = Tasks::new();
+		let (_gates, polls) = chain(&mut tasks, 2);
+		assert_eq!(tasks.poll_passes(&waiter, budget), 2, "two links, then quiet");
+		let counts: Vec<_> = polls.iter().map(|count| count.load(Ordering::SeqCst)).collect();
+		assert_eq!(counts, [2, 2], "the woken link ran in the same call");
+
+		// Past it: the fourth link waits for the next call, and the owner is told.
+		let mut tasks = Tasks::new();
+		let (_gates, polls) = chain(&mut tasks, 4);
+		wakes.0.store(0, Ordering::SeqCst);
+		assert_eq!(tasks.poll_passes(&waiter, budget), 3, "the budget");
+		let counts: Vec<_> = polls.iter().map(|count| count.load(Ordering::SeqCst)).collect();
+		assert_eq!(counts, [2, 2, 2, 1], "three steps of the chain, no more");
+		assert!(wakes.0.load(Ordering::SeqCst) > 0, "the step left over woke the owner");
+		assert_eq!(tasks.poll_passes(&waiter, budget), 1, "the last step, then quiet");
+		assert_eq!(polls[3].load(Ordering::SeqCst), 2);
+	}
+
+	/// A task waking itself on every poll runs once per pass, so a budget bounds
+	/// it rather than letting it spin the call.
+	#[test]
+	fn a_self_waking_task_spends_the_budget_and_stops() {
+		let mut tasks = Tasks::new();
+		let polls = Arc::new(AtomicUsize::new(0));
+		let counted = polls.clone();
+		tasks.push(move |waiter: &Waiter| {
+			counted.fetch_add(1, Ordering::SeqCst);
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		});
+
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waiter = Waiter::new(Waker::from(wakes.clone()));
+		let references = Arc::strong_count(&tasks.shared);
+		let ran = waiter.batch(|| tasks.poll_passes(&waiter, NonZeroUsize::new(4).unwrap()));
+		assert_eq!(ran, 4);
+		assert_eq!(polls.load(Ordering::SeqCst), 4, "once per pass");
+		assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "one wake for the work left over");
+		assert_eq!(Arc::strong_count(&tasks.shared), references, "a batch retained a wake");
+	}
+
 	/// A retired occupant's leftover waker firing into a reused slot costs at
 	/// most one spurious poll of the new occupant, never a double poll: the
 	/// slot's single bit coalesces the stale wake with any real one.
@@ -685,6 +1005,54 @@ mod tests {
 		.join()
 		.unwrap();
 		assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "the teardown wake was lost");
+	}
+
+	/// A task running a batch of its own inside its owner's batch still has its
+	/// wakes of the owner's set held for the owner: a later pass that takes them
+	/// leaves the owner unwoken, and one the budget leaves over wakes it on return.
+	#[test]
+	fn a_nested_batch_holds_wakes_for_the_outer_batch() {
+		type Boxed = Box<dyn FnMut(&Waiter) -> Poll<()>>;
+
+		for (budget, b_ran, owner_wakes) in [(2, 1, 0), (1, 0, 1)] {
+			let mut tasks: Tasks<Boxed> = Tasks::new();
+			let a_gate = crate::Producer::new(false);
+			let a_consumer = a_gate.consume();
+			let b_gate = crate::Producer::new(false);
+			let b_opener = b_gate.clone();
+			// When its gate opens, A opens B's from inside a batch of its own, the
+			// way a session driver polls its children.
+			tasks.push(Box::new(move |waiter: &Waiter| {
+				waiter.batch(|| {
+					match a_consumer.poll(waiter, |open| match **open {
+						true => Poll::Ready(()),
+						false => Poll::Pending,
+					}) {
+						Poll::Ready(_) => {
+							open(&b_opener);
+							Poll::Ready(())
+						}
+						Poll::Pending => Poll::Pending,
+					}
+				})
+			}));
+			let b_polls = Arc::new(AtomicUsize::new(0));
+			tasks.push(Box::new(gated(b_gate.consume(), b_polls.clone())));
+
+			let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+			let waiter = Waiter::new(Waker::from(wakes.clone()));
+			assert!(tasks.poll(&waiter).is_pending(), "both park");
+			open(&a_gate);
+			wakes.0.store(0, Ordering::SeqCst);
+
+			let budget = NonZeroUsize::new(budget).unwrap();
+			let references = Arc::strong_count(&tasks.shared);
+			let ran = waiter.batch(|| tasks.poll_passes(&waiter, budget));
+			assert_eq!(Arc::strong_count(&tasks.shared), references, "a batch retained a wake");
+			assert_eq!(ran, budget.get());
+			assert_eq!(b_polls.load(Ordering::SeqCst), 1 + b_ran, "budget {budget}");
+			assert_eq!(wakes.0.load(Ordering::SeqCst), owner_wakes, "budget {budget}");
+		}
 	}
 
 	/// An owner whose poll wakes a task in its own set, then polls the set, took that
@@ -812,6 +1180,127 @@ mod tests {
 			assert!(tasks.poll(&waiter).is_pending());
 		}
 		assert_eq!(*order.lock().unwrap(), [0, 1, 2, 1, 2, 0, 2, 0, 1]);
+	}
+
+	/// Past 64 chunks a bit of the top index word stands for every 64th chunk:
+	/// each woken task still runs exactly once, in rotated slot order, and a
+	/// chunk sharing a woken chunk's bit is not polled for it.
+	#[test]
+	#[cfg_attr(miri, ignore = "65 chunks of tasks take too long to interpret")]
+	fn wakes_past_64_chunks_run_in_slot_order() {
+		fn task(id: usize, order: Arc<Mutex<Vec<usize>>>) -> impl FnMut(&Waiter) -> Poll<()> {
+			move |_| {
+				order.lock().unwrap().push(id);
+				Poll::Pending
+			}
+		}
+
+		let order = Arc::new(Mutex::new(Vec::new()));
+		let mut tasks = Tasks::new();
+		let slots = 66 * CHUNK_SLOTS;
+		for id in 0..slots {
+			tasks.push(task(id, order.clone()));
+		}
+		let waiter = Waiter::noop();
+		assert!(tasks.poll(&waiter).is_pending());
+		assert_eq!(order.lock().unwrap().len(), slots, "every new task ran once");
+		order.lock().unwrap().clear();
+
+		// Chunks 1 and 65 share a top bit, as do 0 and 64; chunk 2 has its own.
+		let woken = [
+			65 * CHUNK_SLOTS + 3,
+			CHUNK_SLOTS + 7,
+			2 * CHUNK_SLOTS,
+			64 * CHUNK_SLOTS,
+			5,
+		];
+		for &slot in &woken {
+			tasks.wakers[slot].wake_by_ref();
+		}
+		assert!(tasks.poll(&waiter).is_pending());
+		let mut sorted = woken;
+		sorted.sort();
+		assert_eq!(
+			*order.lock().unwrap(),
+			sorted,
+			"ascending slot order from the rotation point"
+		);
+		order.lock().unwrap().clear();
+
+		// The rotation point moved past the first slot run, which now runs last.
+		for &slot in &woken {
+			tasks.wakers[slot].wake_by_ref();
+		}
+		assert!(tasks.poll(&waiter).is_pending());
+		let mut rotated = sorted[1..].to_vec();
+		rotated.push(sorted[0]);
+		assert_eq!(*order.lock().unwrap(), rotated);
+
+		order.lock().unwrap().clear();
+		assert!(tasks.poll(&waiter).is_pending());
+		assert!(order.lock().unwrap().is_empty(), "nothing was woken");
+	}
+
+	/// Wakes from other threads racing the owner's polls are never lost: every
+	/// task woken after its last poll runs again.
+	#[test]
+	fn concurrent_wakes_are_never_lost() {
+		const TASKS: usize = 3 * CHUNK_SLOTS;
+		const THREADS: usize = 4;
+		const ROUNDS: usize = if cfg!(miri) { 16 } else { 2_000 };
+
+		// Each task records the highest wake count it has observed.
+		let counts: Arc<Vec<AtomicUsize>> = Arc::new((0..TASKS).map(|_| AtomicUsize::new(0)).collect());
+		let seen: Arc<Vec<AtomicUsize>> = Arc::new((0..TASKS).map(|_| AtomicUsize::new(0)).collect());
+		let mut tasks = Tasks::new();
+		for id in 0..TASKS {
+			let (counts, seen) = (counts.clone(), seen.clone());
+			tasks.push(move |_: &Waiter| {
+				seen[id].store(counts[id].load(Ordering::SeqCst), Ordering::SeqCst);
+				Poll::Pending
+			});
+		}
+
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waiter = Waiter::new(Waker::from(wakes.clone()));
+		assert!(tasks.poll(&waiter).is_pending());
+		let wakers: Arc<Vec<Waker>> = Arc::new(tasks.wakers.clone());
+
+		let threads: Vec<_> = (0..THREADS)
+			.map(|thread| {
+				let (counts, wakers) = (counts.clone(), wakers.clone());
+				std::thread::spawn(move || {
+					// Spread each thread's wakes over every word and chunk.
+					let mut slot = thread * 997;
+					for _ in 0..ROUNDS {
+						for _ in 0..8 {
+							slot = (slot + 4099) % TASKS;
+							counts[slot].fetch_add(1, Ordering::SeqCst);
+							wakers[slot].wake_by_ref();
+						}
+					}
+				})
+			})
+			.collect();
+		// Poll while the wakers run: a wake that marks a word or chunk the
+		// running poll already passed must stay indexed for a later one.
+		while !threads.iter().all(|thread| thread.is_finished()) {
+			assert!(tasks.poll(&waiter).is_pending());
+		}
+		for thread in threads {
+			thread.join().unwrap();
+		}
+		assert!(wakes.0.load(Ordering::SeqCst) > 0, "no wake reached the owner");
+
+		// Every wake is in; one more poll must run each task woken since its last.
+		assert!(tasks.poll(&waiter).is_pending());
+		for id in 0..TASKS {
+			assert_eq!(
+				seen[id].load(Ordering::SeqCst),
+				counts[id].load(Ordering::SeqCst),
+				"task {id} lost a wake"
+			);
+		}
 	}
 
 	/// Drive a set to completion as a future. Generic on purpose: the two tests

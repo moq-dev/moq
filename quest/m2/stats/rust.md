@@ -1,58 +1,69 @@
-# [M] The Rust CLI, players, encoders, and remuxes report stats and feedback
+# [M] The Rust player and gateways report stats and feedback
 
 ## Goal
 
-- `moq import --stats` and `moq publish --stats` announce a stats track in
-  the catalog and fill it with what they send.
-- `moq play` and `moq export`, given `--echo <name>`, publish an `.echo`
-  broadcast under each watched catalog's echo path and fill its feedback
-  track.
-- `moq export stats <broadcast>` prints a broadcast's stats snapshots, and
-  `moq export echo <prefix>` prints the feedback of every `.echo` broadcast
-  under a prefix, as JSON lines.
+- `moq play`, given `--echo <name>`, publishes an `.echo` broadcast under each
+  watched catalog's echo path and fills its feedback track with what it
+  received, decoded, and played.
+- The gateway imports (`hls`, `rtmp`, `srt`, `rtsp`, `rtc`) and `archive` take
+  `--report` and `--echo-path`, which set the catalog's `stats` and `echo`
+  sections as they do for the stdin imports and capture.
+- `import capture --report` counts the audio frames a microphone capture
+  dropped in `skipped`, as it already does for video.
 
 ## Plan
 
+- `import --report` and `--echo-path` already cover the stdin imports and
+  capture, and `export --echo` and the `export report` and `export echo` sinks
+  already read and print the reports (`rs/moq-mux/src/stats.rs`,
+  `rs/moq-cli/src/report.rs`). The catalog's `Sent` registry counts what every
+  track minted under it writes, and an encoder reports its skips and target
+  through `container::Producer::report_skipped` and `report_bitrate`. This quest
+  adds the counters still missing and reuses the rest; `--report` and
+  `--echo-path` refuse the gateways until it lands.
 - Counters come from the source, per track, as cumulative `stats()`
   snapshots: no callback, no per-frame lock.
-  - Publisher: the `moq-video` and `moq-audio` encode producers count frames,
-    bytes, keyframes, and drops. The `moq-mux` importers count the frames and
-    bytes they write per track. A remux never encodes, so without them the
-    CLI would have nothing to report for `moq import`.
   - Viewer: the decode and render paths count received, decoded, late,
-    stalled, underruns, and errors. The `moq-mux` exporters count the frames
-    and bytes they receive per track, so `moq export --echo` reports a row
-    for each rendition it remuxes. `underruns` in
-    `rs/moq-audio/src/playback` is already counted privately.
-- `moq-cli` folds the counters into `hang::stats::Snapshot` on the stats
-  interval and writes it through `moq_json::snapshot`, with the `.z` sibling.
-  `transport` comes from the connection's `ConnectionStats`.
-  Decided in the quest audit: this quest owns generic per-rendition reporting;
-  [TS health stats](/quest/m2/ts-health-stats.md) owns serializing and flattening
-  TS container counters under `mpegts` in publisher stats and export `.echo`.
-  That integration stays in m2 so this quest does not duplicate its work.
-- Feedback: after reading a catalog with an `echo` section, the player
-  resolves the echo path against the broadcast, appends `<name>.echo`, and
-  publishes there with the fixed feedback
-  track, keyed by the catalog's rendition IDs. Each catalog update
-  reconciles it: a removed `echo` section, a changed path, or no longer
-  watching unannounces the old broadcast. A name that is not a single path segment is refused at
-  parse time.
-- A viewer given `--echo` with `--catalog-format msf` refuses: the MSF
-  catalog does not carry an `echo` solicitation. Imports always emit the
-  MSF catalog beside hang, omitting `stats` and `echo` from MSF.
-- `moq export stats` and `moq export echo` are sinks that skip `.hang` media
-  discovery, so they route around `catalog_format`.
-- `doc/bin/cli.md` documents the flags and sinks.
-- The media test publishes with `--stats` and plays with `--echo` against a
-  publisher that solicits feedback. It asserts that the publisher's frame
-  count matches what was sent and that the viewer's newest arrival advances.
+    stalled, underruns, and errors. `underruns` in
+    `rs/moq-audio/src/playback` is already counted privately. The player reads
+    video through `moq_mux::container::Consumer` directly, so it bypasses the
+    `Source`'s `Received` registry today.
+  - Audio capture: `capture::Samples::gap` only flags that buffers were
+    dropped. Counting `skipped` needs the drop size, converted to codec frames.
+- The gateways build their catalogs in their own crates (`moq-rtmp`,
+  `moq-srt`, `moq-rtc`, `moq-archive`; `hls` and `rtsp` build theirs in
+  `rs/moq-cli`), so each needs a way to name the stats track and the echo path
+  before its first catalog, and a reporter to run beside each session's
+  catalog. The report writer lives in `rs/moq-cli/src/report.rs` and reads the
+  transport from a `moq_tokio` connection monitor, which the gateway crates do
+  not see.
+- Decided 2026-10-31 (maintainer): move the report writer into `moq-mux`, with
+  the transport passed in as data rather than read from a `moq_tokio` monitor,
+  and give each gateway builder `with_report` and `with_echo`. A library user
+  embedding a gateway gets reports too; the cost, accepted, is that `Stats`
+  becomes a library API. Rejected: handing each session's catalog back to the
+  CLI through a returned handle, which keeps the writer in `moq-cli` but leaves
+  library users without reports.
+- `moq play --echo` reconciles each watched catalog's `echo` section as
+  `export --echo` does, and refuses `--catalog-format msf` the same way: the
+  MSF catalog does not carry an `echo` solicitation. `play` attaches only the
+  consume direction today, so it also needs the publish direction.
+- The media test captures with `--report` and plays with `--echo` against a
+  publisher that solicits feedback. It asserts the encoder's frame count and
+  that the player's newest arrival advances.
 - Decided 2026-10-08: no E2EE refusal here. The CLI has no encrypted
-  broadcast yet, so [Encrypted native CLI](/quest/m2/e2ee/cli.md) refuses `--stats` and
+  broadcast yet, so [Encrypted native CLI](/quest/m2/e2ee/cli.md) refuses `--report` and
   `--echo` when it adds one: they would publish rendition IDs and per-track
   counters in plaintext beside it.
+- Decided 2026-10-22 (maintainer): the publisher's solicit option moved here
+  from [encoder feedback](/quest/m3/stats-encoder-feedback.md), which keeps
+  only the adaptation loop and reuses `--echo-path`.
+- `export --echo` counts no drops in `late`: `Received::report`
+  (`rs/moq-mux/src/stats.rs`) fills only frames, bytes, and arrival while the
+  TS release section holds the drops (from
+  [moq-dev/moq#6654](https://github.com/moq-dev/moq/pull/6654)).
 
 ## Related
 
-- [TS health stats](/quest/m2/ts-health-stats.md) - adds TS-specific counters after this generic reporting plumbing lands
 - [Encrypted native CLI](/quest/m2/e2ee/cli.md) - refuses stats and feedback on an encrypted broadcast
+- [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - the adaptation loop that reads what `--echo-path` solicits

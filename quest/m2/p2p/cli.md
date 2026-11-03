@@ -41,6 +41,5 @@ Docs: a "P2P" section in `doc/bin/cli.md` beside the LAN cluster one.
 
 ## Required
 
-- [Native data channel transport](/quest/m2/p2p/webrtc.md)
 - [Native pairs over ICE and QUIC](/quest/m2/p2p/native-quic.md) - the native-to-native path
 - [Signaling and policy](/quest/m2/p2p/signal.md) - the roster and offer schema this mirrors

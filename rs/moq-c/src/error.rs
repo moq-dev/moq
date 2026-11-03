@@ -4,48 +4,88 @@ use crate::ffi;
 
 // Keep these public constants as the single source for both Rust's return mapping and the
 // generated C header. -1, -11, -12, and -39 are retired and remain reserved.
+/// The MoQ protocol operation failed.
 pub const MOQ_ERROR_MOQ: i32 = -2;
+/// The URL could not be parsed.
 pub const MOQ_ERROR_URL: i32 = -3;
+/// The input is not valid UTF-8.
 pub const MOQ_ERROR_UTF8: i32 = -4;
+/// The connection could not be established.
 pub const MOQ_ERROR_CONNECT: i32 = -5;
+/// A required pointer is null or invalid.
 pub const MOQ_ERROR_INVALID_POINTER: i32 = -6;
+/// The resource handle is invalid.
 pub const MOQ_ERROR_INVALID_ID: i32 = -7;
+/// The requested resource was not found.
 pub const MOQ_ERROR_NOT_FOUND: i32 = -8;
+/// The media format is not recognized.
 pub const MOQ_ERROR_UNKNOWN_FORMAT: i32 = -9;
+/// Initialization failed.
 pub const MOQ_ERROR_INIT_FAILED: i32 = -10;
+/// The timestamp is outside the supported range.
 pub const MOQ_ERROR_TIMESTAMP_OVERFLOW: i32 = -13;
+/// The requested log level is invalid.
 pub const MOQ_ERROR_LEVEL: i32 = -14;
+/// The enum value or error code is invalid.
 pub const MOQ_ERROR_INVALID_CODE: i32 = -15;
+/// A Rust task panicked.
 pub const MOQ_ERROR_PANIC: i32 = -16;
+/// The origin is offline.
 pub const MOQ_ERROR_OFFLINE: i32 = -17;
+/// The media catalog or container could not be processed.
 pub const MOQ_ERROR_HANG: i32 = -18;
+/// The requested rendition index is out of range.
 pub const MOQ_ERROR_NO_INDEX: i32 = -19;
+/// A string contains an unexpected NUL byte.
 pub const MOQ_ERROR_NUL: i32 = -20;
+/// The session handle was not found.
 pub const MOQ_ERROR_SESSION_NOT_FOUND: i32 = -21;
+/// The origin handle was not found.
 pub const MOQ_ERROR_ORIGIN_NOT_FOUND: i32 = -22;
+/// The announcement handle was not found.
 pub const MOQ_ERROR_ANNOUNCEMENT_NOT_FOUND: i32 = -23;
+/// The broadcast handle was not found.
 pub const MOQ_ERROR_BROADCAST_NOT_FOUND: i32 = -24;
+/// The catalog handle was not found.
 pub const MOQ_ERROR_CATALOG_NOT_FOUND: i32 = -25;
+/// The media handle was not found.
 pub const MOQ_ERROR_MEDIA_NOT_FOUND: i32 = -26;
+/// The track handle was not found.
 pub const MOQ_ERROR_TRACK_NOT_FOUND: i32 = -27;
+/// The frame handle was not found.
 pub const MOQ_ERROR_FRAME_NOT_FOUND: i32 = -28;
+/// Media could not be imported or exported.
 pub const MOQ_ERROR_MUX: i32 = -29;
+/// An audio codec operation failed.
 pub const MOQ_ERROR_AUDIO: i32 = -30;
+/// The importer did not consume the complete input buffer.
 pub const MOQ_ERROR_BUFFER_NOT_CONSUMED: i32 = -31;
+/// The group handle was not found.
 pub const MOQ_ERROR_GROUP_NOT_FOUND: i32 = -32;
+/// The native transport helper failed.
 pub const MOQ_ERROR_NATIVE: i32 = -33;
+/// Authorization is required or invalid.
 pub const MOQ_ERROR_UNAUTHORIZED: i32 = -34;
+/// Authorization does not permit the requested operation.
 pub const MOQ_ERROR_FORBIDDEN: i32 = -35;
+/// A video codec operation failed.
 pub const MOQ_ERROR_VIDEO: i32 = -36;
+/// JSON could not be parsed or encoded.
 pub const MOQ_ERROR_JSON: i32 = -37;
+/// A JSON track could not be processed.
 pub const MOQ_ERROR_JSON_TRACK: i32 = -38;
+/// The configuration contains an invalid value.
 pub const MOQ_ERROR_INVALID_CONFIG: i32 = -40;
+/// A standalone consumer cannot resolve a rendition in another broadcast.
 pub const MOQ_ERROR_UNRESOLVABLE_BROADCAST: i32 = -41;
+/// The authorization token expired.
 pub const MOQ_ERROR_EXPIRED: i32 = -42;
+/// The catalog requires a newer moq-hang version than this build supports.
+pub const MOQ_ERROR_UNSUPPORTED_CATALOG: i32 = -43;
 
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_error_scope {
 	/// A session close code.
@@ -57,7 +97,7 @@ pub enum moq_error_scope {
 /// A recognized protocol kind. Pair with [`moq_error_scope`]: `CANCEL` is 0 on a session
 /// and 1 on a stream. `APP` and `UNKNOWN` keep the numeric code in [`moq_protocol_error`].
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_protocol_kind {
 	/// Cancel.
@@ -109,6 +149,20 @@ pub enum moq_protocol_kind {
 	MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS = 25,
 	/// The authorization token expired and can be refreshed.
 	MOQ_PROTOCOL_KIND_EXPIRED = 26,
+	/// A token registration exceeded the advertised cache size.
+	MOQ_PROTOCOL_KIND_AUTH_TOKEN_CACHE_OVERFLOW = 27,
+	/// The peer could not parse an authorization token.
+	MOQ_PROTOCOL_KIND_MALFORMED_AUTH_TOKEN = 28,
+	/// A token referred to an alias that was never registered.
+	MOQ_PROTOCOL_KIND_UNKNOWN_AUTH_TOKEN_ALIAS = 29,
+	/// The peer reused or sent an invalid request ID.
+	MOQ_PROTOCOL_KIND_INVALID_REQUEST_ID = 30,
+	/// The peer sent a path it may not send.
+	MOQ_PROTOCOL_KIND_INVALID_PATH = 31,
+	/// The peer sent an authority it may not send.
+	MOQ_PROTOCOL_KIND_INVALID_AUTHORITY = 32,
+	/// The peer exceeded its outstanding request update limit.
+	MOQ_PROTOCOL_KIND_TOO_MANY_REQUEST_UPDATES = 33,
 }
 
 /// A protocol failure a peer sent: scope, verbatim wire code, and recognized kind.
@@ -116,7 +170,6 @@ pub enum moq_protocol_kind {
 /// Filled by [`crate::moq_error_protocol`] after a call returned a negative code. Do not parse
 /// [`crate::moq_error`] for this; that string is diagnostics only.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub struct moq_protocol_error {
 	/// [`moq_error_scope`] discriminant.
@@ -384,6 +437,13 @@ fn session_kind(err: &moq_net::SessionError) -> moq_protocol_kind {
 		moq_net::SessionError::Timeout => MOQ_PROTOCOL_KIND_TIMEOUT,
 		moq_net::SessionError::Version => MOQ_PROTOCOL_KIND_VERSION,
 		moq_net::SessionError::TooManyRequests => MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS,
+		moq_net::SessionError::AuthTokenCacheOverflow => MOQ_PROTOCOL_KIND_AUTH_TOKEN_CACHE_OVERFLOW,
+		moq_net::SessionError::MalformedAuthToken => MOQ_PROTOCOL_KIND_MALFORMED_AUTH_TOKEN,
+		moq_net::SessionError::UnknownAuthTokenAlias => MOQ_PROTOCOL_KIND_UNKNOWN_AUTH_TOKEN_ALIAS,
+		moq_net::SessionError::InvalidRequestId => MOQ_PROTOCOL_KIND_INVALID_REQUEST_ID,
+		moq_net::SessionError::InvalidPath => MOQ_PROTOCOL_KIND_INVALID_PATH,
+		moq_net::SessionError::InvalidAuthority => MOQ_PROTOCOL_KIND_INVALID_AUTHORITY,
+		moq_net::SessionError::TooManyRequestUpdates => MOQ_PROTOCOL_KIND_TOO_MANY_REQUEST_UPDATES,
 		moq_net::SessionError::App(_) => MOQ_PROTOCOL_KIND_APP,
 		moq_net::SessionError::Unknown(_) => MOQ_PROTOCOL_KIND_UNKNOWN,
 		_ => MOQ_PROTOCOL_KIND_UNKNOWN,
@@ -438,6 +498,9 @@ impl ffi::ReturnCode for Error {
 			Error::InvalidCode => MOQ_ERROR_INVALID_CODE,
 			Error::Panic => MOQ_ERROR_PANIC,
 			Error::Offline => MOQ_ERROR_OFFLINE,
+			// A catalog needing a newer reader is an upgrade, not a broken publisher.
+			Error::Hang(hang::Error::UnsupportedVersion(_))
+			| Error::Mux(moq_mux::Error::Hang(hang::Error::UnsupportedVersion(_))) => MOQ_ERROR_UNSUPPORTED_CATALOG,
 			Error::Hang(_) => MOQ_ERROR_HANG,
 			Error::NoIndex => MOQ_ERROR_NO_INDEX,
 			Error::NulError(_) => MOQ_ERROR_NUL,
@@ -469,6 +532,50 @@ impl ffi::ReturnCode for Error {
 #[cfg(test)]
 mod tests {
 	#[test]
+	fn unsupported_catalog_has_its_own_code() {
+		use crate::ffi::ReturnCode;
+
+		let hang = hang::Error::UnsupportedVersion(5);
+		assert_eq!(
+			super::Error::Hang(hang.clone()).code(),
+			super::MOQ_ERROR_UNSUPPORTED_CATALOG
+		);
+		assert_eq!(
+			super::Error::Mux(moq_mux::Error::Hang(hang)).code(),
+			super::MOQ_ERROR_UNSUPPORTED_CATALOG
+		);
+	}
+
+	#[test]
+	fn named_session_codes_keep_a_known_kind() {
+		use super::moq_protocol_kind::*;
+		for (code, kind) in [
+			(0x0, MOQ_PROTOCOL_KIND_CANCEL),
+			(0x1, MOQ_PROTOCOL_KIND_INTERNAL),
+			(0x2, MOQ_PROTOCOL_KIND_UNAUTHORIZED),
+			(0x3, MOQ_PROTOCOL_KIND_PROTOCOL_VIOLATION),
+			(0x4, MOQ_PROTOCOL_KIND_INVALID_REQUEST_ID),
+			(0x6, MOQ_PROTOCOL_KIND_KEY_VALUE_FORMATTING),
+			(0x7, MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS),
+			(0x8, MOQ_PROTOCOL_KIND_INVALID_PATH),
+			(0x10, MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT),
+			(0x11, MOQ_PROTOCOL_KIND_TIMEOUT),
+			(0x13, MOQ_PROTOCOL_KIND_AUTH_TOKEN_CACHE_OVERFLOW),
+			(0x15, MOQ_PROTOCOL_KIND_VERSION),
+			(0x16, MOQ_PROTOCOL_KIND_MALFORMED_AUTH_TOKEN),
+			(0x17, MOQ_PROTOCOL_KIND_UNKNOWN_AUTH_TOKEN_ALIAS),
+			(0x18, MOQ_PROTOCOL_KIND_EXPIRED),
+			(0x19, MOQ_PROTOCOL_KIND_INVALID_AUTHORITY),
+			(0x1b, MOQ_PROTOCOL_KIND_TOO_MANY_REQUEST_UPDATES),
+		] {
+			let error = super::from_session(&moq_net::SessionError::from_code(code));
+			assert_eq!(error.scope, super::moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
+			assert_eq!(error.code, code);
+			assert_eq!(error.kind, kind as u32, "session code {code:#x}");
+		}
+	}
+
+	#[test]
 	fn session_limit_has_a_known_kind() {
 		let error = super::from_session(&moq_net::SessionError::TooManyRequests);
 		assert_eq!(error.scope, super::moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
@@ -476,6 +583,20 @@ mod tests {
 		assert_eq!(
 			error.kind,
 			super::moq_protocol_kind::MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS as u32
+		);
+	}
+
+	/// A relay that found its upstream malformed says so, apart from a relay bug's INTERNAL_ERROR.
+	#[test]
+	fn received_malformed_track_keeps_its_kind() {
+		let error = super::Error::Moq(moq_net::StreamError::MalformedTrack.into())
+			.protocol()
+			.expect("a stream code");
+		assert_eq!(error.scope, super::moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32);
+		assert_eq!(error.code, 0x12);
+		assert_eq!(
+			error.kind,
+			super::moq_protocol_kind::MOQ_PROTOCOL_KIND_MALFORMED_TRACK as u32
 		);
 	}
 }

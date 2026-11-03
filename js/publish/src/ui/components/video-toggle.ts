@@ -1,7 +1,7 @@
 import type { Effect } from "@moq/signals";
+import { controlButton } from "@moq/ui";
 import type MoqPublish from "../../element";
 import { camera, cameraOff, icon } from "../icons";
-import { controlButton } from "./button";
 
 /** Toggles whether video is published (publish.invisible). Red when off. */
 export function videoToggle(parent: Effect, publish: MoqPublish): HTMLElement {

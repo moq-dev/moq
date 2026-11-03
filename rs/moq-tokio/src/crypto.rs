@@ -15,7 +15,7 @@ pub fn provider() -> Provider {
 	return Arc::new(rustls::crypto::aws_lc_rs::default_provider());
 	#[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
 	return Arc::new(rustls::crypto::ring::default_provider());
-	#[allow(unreachable_code)]
+	#[allow(unreachable_code, reason = "unreachable when a crypto feature returns above")]
 	{
 		panic!("no CryptoProvider available; install_default() or enable either the aws-lc-rs or ring feature");
 	}

@@ -40,13 +40,14 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     }
 
     /// The publisher-side properties learned during subscription.
-    public func info() throws -> TrackInfo {
-        try ffi.info()
+    public func info() -> TrackInfo {
+        ffi.info()
     }
 
-    /// Change this subscriber's delivery preferences.
-    public func update(subscription: Subscription) {
-        ffi.update(subscription: subscription)
+    /// Change this subscriber's delivery preferences. Throws on a time anchor the track
+    /// can't serve.
+    public func update(subscription: Subscription) throws {
+        try ffi.update(subscription: subscription)
     }
 
     /// Cancel all current and future reads.
@@ -129,19 +130,15 @@ public final class TrackDemand: Sendable {
         ffi.name()
     }
 
-    /// Whether the track has at least one active consumer right now.
-    public var isUsed: Bool {
-        ffi.isUsed()
+    /// The group subscribers want next, or nil while nobody subscribes. A value past the
+    /// newest group asks for a new group now, typically a keyframe.
+    public var wanted: UInt64? {
+        ffi.wanted()
     }
 
-    /// Suspend until the track has at least one active consumer.
-    public func used() async throws {
-        try await ffi.used()
-    }
-
-    /// Suspend until the track has no active consumers.
-    public func unused() async throws {
-        try await ffi.unused()
+    /// Suspend until `wanted` changes and return it. The first call returns at once.
+    public func wantedChanged() async throws -> UInt64? {
+        try await ffi.wantedChanged()
     }
 }
 
@@ -165,8 +162,8 @@ public final class TrackProducer: Sendable {
     }
 
     /// Serve fetches for groups that are not currently cached.
-    public func dynamic() throws -> TrackDynamic {
-        TrackDynamic(try ffi.dynamic())
+    public func requests() throws -> TrackRequests {
+        TrackRequests(try ffi.requests())
     }
 
     /// Append a new group, returning a producer for its frames.
@@ -179,17 +176,28 @@ public final class TrackProducer: Sendable {
         GroupProducer(try ffi.createGroup(sequence: sequence))
     }
 
-    /// Write a single-frame group with a timestamp in microseconds.
-    public func writeFrame(_ payload: Data, timestampUs: UInt64? = nil) throws {
-        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
+    /// Write a single-frame group with a presentation timestamp, or untimed when nil.
+    public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }
 
     /// Send a best-effort datagram and return its sequence number.
     ///
-    /// `timestampUs` is the presentation timestamp in microseconds. Payloads are
+    /// `timestamp` is the presentation timestamp, or untimed when nil. Payloads are
     /// capped at 1200 bytes. There is no stream fallback.
-    public func appendDatagram(_ payload: Data, timestampUs: UInt64? = nil) throws -> UInt64 {
-        try ffi.appendDatagram(frame: Frame(payload: payload, timestampUs: timestampUs))
+    public func appendDatagram(_ payload: Data, timestamp: Timestamp? = nil) throws -> UInt64 {
+        try ffi.appendDatagram(frame: Frame(payload: payload, timestamp: timestamp))
+    }
+
+    /// Send a best-effort datagram at an explicit sequence number, for a caller that
+    /// allocates its own. `appendDatagram` continues after the largest one.
+    public func insertDatagram(_ payload: Data, sequence: UInt64, timestamp: Timestamp? = nil) throws {
+        try ffi.insertDatagram(sequence: sequence, frame: Frame(payload: payload, timestamp: timestamp))
+    }
+
+    /// The newest group or datagram written, at its newest frame, or `nil` before any.
+    public func largest() throws -> Position? {
+        try ffi.largest()
     }
 
     /// Abort the track with an application error code, failing active consumers.
@@ -227,9 +235,9 @@ public final class GroupProducer: Sendable {
         GroupConsumer(try ffi.consume())
     }
 
-    /// Write a frame with a timestamp in microseconds.
-    public func writeFrame(_ payload: Data, timestampUs: UInt64? = nil) throws {
-        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
+    /// Write a frame with a presentation timestamp, or untimed when nil.
+    public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }
 
     /// Mark the group complete. No more frames can be written.

@@ -11,7 +11,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use crate::args::MoqSide;
 
 /// Follow the broadcasts announced on a relay as they start and end.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Only follow paths under this prefix.
@@ -96,6 +96,9 @@ async fn follow(
 			// A new route or a new instance for a path already announced, which changes
 			// nothing shown.
 			Event::Update(_) | Event::Restart(_) => continue,
+			// A route continuing another: new to the list unless it replaced that one in place.
+			Event::Takeover { announce, predecessor } if predecessor != announce.prefix => (announce, true),
+			Event::Takeover { .. } => continue,
 		};
 
 		let path = announce.prefix.as_str();
@@ -171,12 +174,11 @@ impl View {
 mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
-	use crate::test_env::EnvGuard;
 	use std::time::Duration;
 	use tokio::io::{AsyncBufReadExt, BufReader, DuplexStream, Lines};
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
-	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_EPOCH", "MOQ_BROADCAST"];
+	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_BROADCAST"];
 
 	/// A running relay holding `demo/a`, `demo/b`, and `other/c` from one publisher.
 	struct Fixture {
@@ -185,7 +187,7 @@ mod tests {
 		/// Stops the relay, which ends every session on it.
 		shutdown: moq_relay::shutdown::Trigger,
 		/// The published broadcasts by path; dropping one retracts it.
-		broadcasts: Vec<(&'static str, moq_net::broadcast::Producer)>,
+		broadcasts: Vec<(&'static str, moq_net::origin::Publication)>,
 		_publisher: moq_tokio::Connection,
 	}
 
@@ -229,7 +231,7 @@ mod tests {
 
 			// Every broadcast is on the relay before anything follows it.
 			for (path, _) in &broadcasts {
-				tokio::time::timeout(TIMEOUT, relay.routed_broadcast(*path))
+				kio::clock::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
 					.await
 					.expect("relay routes the broadcast")
 					.expect("broadcast");
@@ -271,7 +273,7 @@ mod tests {
 
 	/// The next line printed.
 	async fn next(lines: &mut Lines<BufReader<DuplexStream>>) -> String {
-		tokio::time::timeout(TIMEOUT, lines.next_line())
+		kio::clock::timeout(TIMEOUT, lines.next_line())
 			.await
 			.expect("a line in time")
 			.expect("read")
@@ -296,15 +298,15 @@ mod tests {
 	fn net() -> crate::Net {
 		crate::Net {
 			quic: Default::default(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		}
 	}
 
 	/// What is already announced as `+` lines, then a `-` when a publisher leaves.
 	#[tokio::test]
 	async fn prints_the_replay_then_changes() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let mut fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["demo"]);
@@ -321,7 +323,9 @@ mod tests {
 	/// Each `--json` line is `{"path", "active"}`.
 	#[tokio::test]
 	async fn json_lines_parse() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let mut fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["other", "--json"]);
@@ -336,14 +340,16 @@ mod tests {
 	/// It fails once the relay goes away rather than waiting forever.
 	#[tokio::test]
 	async fn fails_when_the_session_ends() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let fixture = Fixture::new().await;
 
 		let (mut lines, task) = fixture.follow(&["other"]);
 		assert_eq!(next(&mut lines).await, "+ other/c");
 
 		fixture.shutdown.start();
-		let result = tokio::time::timeout(TIMEOUT, task)
+		let result = kio::clock::timeout(TIMEOUT, task)
 			.await
 			.expect("exits once the session ends")
 			.expect("task");
@@ -396,7 +402,9 @@ mod tests {
 	/// `announced` follows a prefix, so a `--broadcast` is refused rather than ignored.
 	#[test]
 	fn only_connect_is_accepted() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "--broadcast", "demo", "announced"])
 			.expect("parse");
 		let err = cli.dial_only("announced", &[]).unwrap_err().to_string();
@@ -406,7 +414,9 @@ mod tests {
 	/// The one-shot listing is gone, with no alias or flag left behind for it.
 	#[test]
 	fn ls_and_follow_are_unknown() {
-		let _env = EnvGuard::clear(ENV);
+		if !test_env::Env::without(ENV).isolate() {
+			return;
+		}
 		assert!(Invocation::try_parse_from(["moq", "--connect", "http://relay", "ls"]).is_err());
 		assert!(Invocation::try_parse_from(["moq", "--connect", "http://relay", "announced", "--follow"]).is_err());
 	}

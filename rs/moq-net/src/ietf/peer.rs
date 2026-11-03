@@ -20,12 +20,18 @@ pub(crate) struct Peer {
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
 
+	/// Whether the peer understands subscriber max age (MoQ Timestamp).
+	pub max_age: bool,
+
 	/// MoQ Auth: whether both sides negotiated the Auth request streams.
 	pub auth: bool,
 
 	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
-	/// NAMESPACE messages before the subscription is caught up, in both directions.
+	/// NAMESPACE messages before the subscription is synced, in both directions.
 	pub active_count: bool,
+
+	/// Whether this peer offered DEFLATE-compressed tracks.
+	pub flate: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -35,9 +41,41 @@ pub(crate) struct Peer {
 /// Solicit), so nothing can go out until it arrives. Cheap to clone; every handle
 /// shares the same slot.
 #[derive(Clone, Default)]
-pub(crate) struct PeerSetup(kio::Shared<Option<Peer>>);
+pub(crate) struct PeerSetup {
+	slot: kio::Shared<Option<Peer>>,
+	/// Where the peer's advertised implementation is published for the session handle.
+	implementation: crate::setup::PeerImplementation,
+	/// The session's auth link to tell once the peer's SETUP accepts the connection.
+	accept: Option<crate::auth::Link>,
+}
 
 impl PeerSetup {
+	/// A fixture whose peer already sent its SETUP.
+	#[cfg(test)]
+	pub(crate) fn declared(peer: Peer) -> Self {
+		let setup = Self::default();
+		setup.set(peer);
+		setup
+	}
+
+	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
+	pub fn accepting(mut self, link: crate::auth::Link) -> Self {
+		link.await_setup();
+		self.accept = Some(link);
+		self
+	}
+
+	/// Publish the peer's advertised implementation to `slot` once its SETUP is read.
+	pub fn with_implementation(mut self, slot: crate::setup::PeerImplementation) -> Self {
+		self.implementation = slot;
+		self
+	}
+
+	/// Record the implementation the peer's SETUP advertised.
+	pub fn set_implementation(&self, value: Option<String>) {
+		self.implementation.set(value);
+	}
+
 	/// Record what the peer declared. A SETUP carrying no options records the default
 	/// (no extension negotiated, no requirements), which is what unblocks a waiter.
 	///
@@ -46,27 +84,35 @@ impl PeerSetup {
 	/// overwrite the identity would advertise under one exclusion and serve under
 	/// another, which is how a routing loop gets back in.
 	pub fn set(&self, peer: Peer) {
-		let mut slot = self.0.lock();
-		if slot.is_none() {
-			*slot = Some(peer);
+		let mut slot = self.slot.lock();
+		if slot.is_some() {
+			return;
+		}
+		*slot = Some(peer);
+		drop(slot);
+		if let Some(link) = &self.accept {
+			link.accepted();
 		}
 	}
 
-	/// Await the peer's SETUP.
+	/// Poll for the peer's SETUP.
 	///
-	/// The peer MUST send exactly one, so this resolves once that stream is read. Waits
+	/// The peer MUST send exactly one, so this is ready once that stream is read. Pending
 	/// forever if it never does; the caller is a session task, cancelled when the driver
 	/// drops.
 	#[cfg(feature = "async")]
+	pub fn poll_get(&self, waiter: &kio::Waiter) -> std::task::Poll<Peer> {
+		let slot = std::task::ready!(self.slot.poll(waiter, |peer| match peer.is_some() {
+			true => std::task::Poll::Ready(()),
+			false => std::task::Poll::Pending,
+		}));
+		std::task::Poll::Ready((*slot).expect("polled for Some"))
+	}
+
+	/// Await the peer's SETUP; see [`Self::poll_get`].
+	#[cfg(feature = "async")]
 	pub async fn get(&self) -> Peer {
-		let slot = self
-			.0
-			.wait(|peer| match peer.is_some() {
-				true => std::task::Poll::Ready(()),
-				false => std::task::Poll::Pending,
-			})
-			.await;
-		(*slot).expect("waited for Some")
+		kio::wait(|waiter| self.poll_get(waiter)).await
 	}
 }
 
@@ -77,7 +123,7 @@ mod tests {
 	/// The announce loops read the peer's declaration once and hold it, while
 	/// subscription serving re-reads it. A second SETUP overwriting the identity would
 	/// split those two apart, so the first write is the one that counts.
-	#[moq_net_sim::test]
+	#[kio::test]
 	async fn first_write_wins() {
 		let first = Peer {
 			cluster: cluster::Peer {
@@ -86,8 +132,10 @@ mod tests {
 			},
 			solicit: None,
 			hidden: false,
+			max_age: false,
 			auth: false,
 			active_count: false,
+			flate: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -99,8 +147,10 @@ mod tests {
 			},
 			solicit: Some(true),
 			hidden: true,
+			max_age: false,
 			auth: true,
 			active_count: true,
+			flate: true,
 		});
 
 		assert_eq!(slot.get().await, first);

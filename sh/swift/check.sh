@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local smoke check for the Swift wrapper. Builds moq-ffi for the host
-# macOS target, lays out a local XCFramework, and runs `swift test`.
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
+# Local smoke check for the Swift wrapper. Checks formatting
+# (sh/swift/format.sh), then builds moq-ffi for the host macOS target, lays
+# out a local XCFramework, and runs `swift test`.
 #
-# Skipped on hosts without `swift` (Linux dev environments) or without
-# `cargo`. Intended for `just swift check`.
+# The build and tests are skipped on hosts without `swift` (Linux dev
+# environments) or without `cargo`. Intended for `just swift check`.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SWIFT_DIR="$(cd "$SCRIPT_DIR/../../swift" && pwd)"
 WORKSPACE_DIR="$(cd "$SWIFT_DIR/.." && pwd)"
+
+# Formatting needs only swift-format, so it runs before the skips below.
+bash "$SCRIPT_DIR/format.sh" --check
 
 if ! command -v swift >/dev/null 2>&1; then
     echo "swift check: no swift toolchain on PATH, skipping" >&2
@@ -41,8 +49,7 @@ fi
 
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
 # Debug by default. This is a compile-and-test gate, not a benchmark, and a
-# release build of moq-ffi shares no artifacts with the debug ones `just ci check`
-# and `just ci test` already produce, so it was a third full compile of the
+# release build of moq-ffi shares no artifacts with the debug ones `just ci` already produces, so it was a third full compile of the
 # dependency tree (~5 min of CI on its own, plus a whole target/release tree on
 # a runner that was already tight on disk). Set MOQ_FFI_PROFILE=release for an
 # optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
@@ -54,8 +61,11 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "swift check: building moq-ffi for $HOST_TARGET..."
-cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
-    --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+# The shared default build (.cargo/config.toml), whose `openh264` the tests rely on.
+# Cargo resolves the alias, and a relative CARGO_TARGET_DIR, from the working
+# directory, so the build and the metadata below both run in the workspace.
+cd "$WORKSPACE_DIR"
+cargo build-ffi ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"}
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -98,4 +108,4 @@ bash "$WORKSPACE_DIR/doc/lib/samples.sh" swift "$WORKSPACE_DIR/doc/lib/swift/ind
 # swift/Package.swift already declares a path-based MoqFFIBinary pointing
 # at the xcframework laid out above, so no manifest mutation is needed.
 cd "$SWIFT_DIR"
-env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} swift test
+env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} swift test "$@"

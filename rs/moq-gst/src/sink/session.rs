@@ -91,7 +91,10 @@ impl Status {
 }
 
 /// Convert only transport metrics actually supplied by the active backend into the public property.
-fn connection_stats_structure(stats: moq_net::session::Stats) -> gst::Structure {
+fn connection_stats_structure(
+	stats: moq_net::session::Stats,
+	recv_rate: Option<moq_net::bandwidth::Rate>,
+) -> gst::Structure {
 	let mut structure = gst::Structure::new_empty("moq-connection-stats");
 	if let Some(rtt) = stats.rtt {
 		structure.set("rtt-us", u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX));
@@ -103,7 +106,7 @@ fn connection_stats_structure(stats: moq_net::session::Stats) -> gst::Structure 
 		),
 		(
 			"estimated-recv-rate-bps",
-			stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps),
+			recv_rate.map(moq_net::bandwidth::Rate::as_bps),
 		),
 		("bytes-sent", stats.bytes_sent),
 		("bytes-received", stats.bytes_received),
@@ -134,34 +137,20 @@ pub struct ResolvedSettings {
 	pub url: url::Url,
 	/// Name to publish the broadcast under.
 	pub broadcast: String,
-	/// Disable TLS certificate verification (local/dev use).
-	pub tls_disable_verify: bool,
-	/// QUIC idle timeout override.
-	pub quic_idle_timeout: Option<std::time::Duration>,
-	/// QUIC keep-alive override, including zero to disable it.
-	pub quic_keep_alive: Option<std::time::Duration>,
+	/// The shared connection properties resolved before startup.
+	pub connect: moq_tokio::connect::Config,
+	/// The shared QUIC properties resolved before startup.
+	pub quic: moq_tokio::quic::Config,
 }
 
 /// Builds the connect configuration with the sink's TLS and backoff overrides.
 pub(super) fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
-	let mut config = moq_tokio::connect::Config::default();
-	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = Some(std::time::Duration::ZERO);
-	config
+	settings.connect.clone()
 }
 
 /// The QUIC transport overrides the sink exposes as properties.
 pub(super) fn quic_config(settings: &ResolvedSettings) -> moq_tokio::quic::Config {
-	let mut config = moq_tokio::quic::Config::default();
-	// The properties are optional and the config fields are not: an unset property
-	// leaves the library default rather than overriding it with one of its own.
-	if let Some(idle_timeout) = settings.quic_idle_timeout {
-		config.idle_timeout = Some(idle_timeout);
-	}
-	if let Some(keep_alive) = settings.quic_keep_alive {
-		config.keep_alive = Some(keep_alive);
-	}
-	config
+	settings.quic.clone()
 }
 
 /// Whether the publication is still open, and if not, how it ended.
@@ -263,6 +252,9 @@ pub(crate) struct Session {
 	/// The live recv-bitrate estimate, tracked across reconnects by the reconnect loop. Read directly
 	/// by the `estimated-recv-rate` getter.
 	recv_bandwidth: moq_net::bandwidth::Consumer,
+	/// Divides this publication's send estimate among tracks that opt into a ceiling. The reconnect
+	/// handle owns the registry, so reservations and their probe target survive reconnects.
+	bandwidth: moq_net::bandwidth::Allocator,
 	connection_stats: moq_tokio::connection::Monitor,
 	/// This publication's completion. The task moves it to `Failed` on a fatal transport error, so the
 	/// pad streaming threads stop feeding a dead session without consulting the element.
@@ -278,19 +270,21 @@ impl Session {
 	) -> Result<(
 		Self,
 		SessionRegistration,
-		moq_net::broadcast::Producer,
+		moq_net::origin::Publication,
 		moq_mux::catalog::Producer,
 	)> {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_tokio::origin::spawn();
-		// Each run is a new publisher instance: a restarted pipeline takes over from one whose route still
-		// lingers, rather than resuming viewers into the old run's group sequence. Reconnects keep it.
-		let epoch = moq_net::Epoch::mint();
-		gst::info!(CAT, "publishing {} under epoch {epoch}", settings.broadcast);
-		let mut broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default().with_epoch(epoch))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
+		// Each run is a new stream under a fresh instance, which the publication mints: a restarted
+		// pipeline never resumes viewers into the old run's group sequence. Reconnects keep it.
+		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default())?;
+		if let Some(instance) = broadcast.route().and_then(|route| route.instance) {
+			gst::info!(CAT, "publishing {} under instance {instance}", settings.broadcast);
+		}
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
 
 		let status = Arc::new(Status::default());
 		let completion = CompletionState::new();
@@ -310,6 +304,7 @@ impl Session {
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
+		let bandwidth = reconnect.allocator();
 		let connection_stats = reconnect.monitor();
 
 		// The task is spawned parked. An immediate auth rejection would otherwise race the element
@@ -332,6 +327,7 @@ impl Session {
 				status,
 				send_bandwidth,
 				recv_bandwidth,
+				bandwidth,
 				connection_stats,
 				completion,
 			},
@@ -356,9 +352,21 @@ impl Session {
 		self.recv_bandwidth.peek().map_or(0, moq_net::bandwidth::Rate::as_bps)
 	}
 
+	/// The allocator shared by tracks published in this session.
+	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+		self.bandwidth.clone()
+	}
+
+	#[cfg(test)]
+	pub(super) fn replace_bandwidth(&mut self, bandwidth: moq_net::bandwidth::Allocator) {
+		self.bandwidth = bandwidth;
+	}
+
 	/// Snapshot the current connection statistics, or None while disconnected.
 	pub fn connection_stats(&self) -> Option<gst::Structure> {
-		self.connection_stats.stats().map(connection_stats_structure)
+		self.connection_stats
+			.stats()
+			.map(|stats| connection_stats_structure(stats, self.recv_bandwidth.peek()))
 	}
 
 	/// Cumulative connects and disconnects recorded by the reconnect loop.
@@ -523,7 +531,7 @@ mod tests {
 		stats.rtt = Some(std::time::Duration::ZERO);
 		stats.bytes_sent = Some(0);
 		stats.packets_lost = Some(7);
-		let structure = connection_stats_structure(stats);
+		let structure = connection_stats_structure(stats, None);
 		assert_eq!(structure.get::<u64>("rtt-us"), Ok(0));
 		assert_eq!(structure.get::<u64>("bytes-sent"), Ok(0));
 		assert_eq!(structure.get::<u64>("packets-lost"), Ok(7));
@@ -542,14 +550,13 @@ mod tests {
 		assert_eq!(structure.get::<u64>("ended"), Ok(2));
 	}
 
-	fn started_with_broadcast() -> (Session, moq_net::broadcast::Producer) {
+	fn started_with_broadcast() -> (Session, moq_net::origin::Publication) {
 		gst::init().unwrap();
 		let settings = ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
-			tls_disable_verify: false,
-			quic_idle_timeout: None,
-			quic_keep_alive: None,
+			connect: crate::connection::Settings::default().resolve().unwrap().0,
+			quic: Default::default(),
 		};
 		let (session, registration, broadcast, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
 		registration.mark_registered();
@@ -562,19 +569,19 @@ mod tests {
 		(session, connection)
 	}
 
-	fn announced_epoch(broadcast: &moq_net::broadcast::Producer) -> moq_net::Epoch {
-		broadcast.route().expect("announced").epoch.expect("an epoch")
+	fn announced_instance(broadcast: &moq_net::origin::Publication) -> moq_net::Instance {
+		broadcast.route().expect("announced").instance.expect("an instance")
 	}
 
-	// Without an epoch, a restart whose old route lingers resumes viewers into the old run's groups.
+	// Under one instance, a restart whose old route lingers would resume viewers into the old run's groups.
 	#[test]
-	fn each_run_announces_a_newer_epoch() {
+	fn each_run_announces_a_new_instance() {
 		let (first, first_broadcast) = started_with_broadcast();
-		let first_epoch = announced_epoch(&first_broadcast);
+		let first_instance = announced_instance(&first_broadcast);
 		first.stop();
 
 		let (second, second_broadcast) = started_with_broadcast();
-		assert!(announced_epoch(&second_broadcast) > first_epoch);
+		assert_ne!(announced_instance(&second_broadcast), first_instance);
 		second.stop();
 	}
 

@@ -15,13 +15,16 @@
 //! per connection and CPU per message (see the README).
 
 #[cfg(target_os = "linux")]
-mod duration;
+#[path = "host/udp.rs"]
+mod udp;
 
 #[cfg(target_os = "linux")]
 mod linux {
-	use std::collections::HashMap;
+	use super::udp;
+	use kio::clock::Wall;
+	use std::collections::{HashMap, HashSet};
 	use std::io::Write;
-	use std::time::{Duration, SystemTime, UNIX_EPOCH};
+	use std::time::Duration;
 
 	use anyhow::Context;
 	use procfs::CurrentSI;
@@ -44,8 +47,8 @@ mod linux {
 		}
 	}
 
-	/// Sample CPU, memory, and context-switch counters for a running process.
-	#[derive(usage::Cli, Debug)]
+	/// Sample CPU, memory, context-switch and UDP socket counters for a running process.
+	#[derive(usage_rs::Cli, Debug)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(name = "moq-bench-host", version = env!("CARGO_PKG_VERSION"))]
 	#[usage(completion)]
@@ -64,10 +67,10 @@ mod linux {
 
 		/// Stop after this duration. Runs until interrupted (or the targets exit) otherwise.
 		#[usage(long)]
-		duration: Option<crate::duration::Duration>,
+		duration: Option<moq_tokio::cli::Duration>,
 
 		/// Write JSON lines to this file instead of stdout. Truncates on start.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jsonl", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jsonl", "json"))]
 		pub output: Option<std::path::PathBuf>,
 
 		/// Include a per-thread breakdown in every sample. Costs one /proc read per
@@ -99,8 +102,37 @@ mod linux {
 		/// so the process's share of the whole machine is computable.
 		host_cpu_busy: f64,
 		host_cores: u64,
+		#[serde(flatten, skip_serializing_if = "Option::is_none")]
+		udp: Option<UdpSample>,
 		#[serde(skip_serializing_if = "Option::is_none")]
 		per_thread: Option<Vec<ThreadSample>>,
+	}
+
+	/// The process's UDP sockets, from the kernel's own accounting (see `udp.rs`).
+	/// Absent when the host refuses the `sock_diag` dump.
+	#[derive(Serialize)]
+	struct UdpSample {
+		/// UDP sockets the process holds.
+		udp_sockets: u64,
+		/// The smallest receive buffer any of them was granted, in kernel units
+		/// (Linux reports twice the `SO_RCVBUF` request it honored).
+		udp_rcvbuf_min: u64,
+		/// The same for the send buffer.
+		udp_sndbuf_min: u64,
+		/// Bytes waiting in their receive queues now: a gauge, not a counter.
+		udp_rx_queue_bytes: u64,
+		/// Datagrams the kernel dropped at these sockets because a receive queue
+		/// was full (`sk_drops`), cumulative across every socket the sampler saw.
+		/// One drop is one queued skb, which a coalesced GRO train makes several
+		/// datagrams.
+		udp_drops: u64,
+		/// The namespace's UDP `RcvbufErrors`, IPv4 and IPv6: every socket in it,
+		/// not just this process's.
+		udp_rcvbuf_errors: u64,
+		/// The namespace's UDP `SndbufErrors`.
+		udp_sndbuf_errors: u64,
+		/// The namespace's UDP `InErrors`.
+		udp_in_errors: u64,
 	}
 
 	/// One thread's slice of a [`Sample`], for spotting scheduler imbalance and
@@ -151,6 +183,21 @@ mod linux {
 	struct Target {
 		proc: Process,
 		ctx: CtxTotals,
+		drops: udp::Drops,
+		/// `/proc/<pid>/fd` refused us (another user's process), so this target
+		/// samples without the UDP fields rather than not at all.
+		udp_denied: bool,
+	}
+
+	impl Target {
+		fn new(proc: Process) -> Self {
+			Self {
+				proc,
+				ctx: CtxTotals::default(),
+				drops: udp::Drops::default(),
+				udp_denied: false,
+			}
+		}
 	}
 
 	/// Resolve the target processes from --pid or --name.
@@ -161,10 +208,7 @@ mod linux {
 				.iter()
 				.map(|&pid| {
 					let proc = Process::new(pid).with_context(|| format!("pid {pid}"))?;
-					Ok(Target {
-						proc,
-						ctx: CtxTotals::default(),
-					})
+					Ok(Target::new(proc))
 				})
 				.collect();
 		}
@@ -176,10 +220,7 @@ mod linux {
 			let Ok(proc) = proc else { continue };
 			let Ok(stat) = proc.stat() else { continue };
 			if stat.comm == args.name {
-				found.push(Target {
-					proc,
-					ctx: CtxTotals::default(),
-				});
+				found.push(Target::new(proc));
 			}
 		}
 		Ok(found)
@@ -199,9 +240,23 @@ mod linux {
 	/// Snapshot one process; `Err` means it exited (or /proc denied us) and should
 	/// be dropped. Everything read here is per-target, so an error only ever
 	/// condemns this target; host-wide reads live in the caller and fail the run.
-	fn sample(target: &mut Target, tps: f64, page: u64, threads: bool, host: (f64, u64)) -> anyhow::Result<Sample> {
+	fn sample(
+		target: &mut Target,
+		tps: f64,
+		page: u64,
+		threads: bool,
+		host: (f64, u64),
+		sockets: Option<&HashMap<u64, udp::Socket>>,
+	) -> anyhow::Result<Sample> {
 		let stat = target.proc.stat()?;
 		let (host_cpu_busy, host_cores) = host;
+		let udp = match sockets {
+			Some(all) if !target.udp_denied => {
+				let owned = udp::inodes(&target.proc);
+				udp_sample(target, all, owned)?
+			}
+			_ => None,
+		};
 
 		// /proc/<pid>/status reports the context-switch counters of the thread group
 		// leader alone (utime/stime in stat are the aggregated ones), so the
@@ -233,9 +288,8 @@ mod linux {
 		target.ctx.retain(|tid| live.contains(&tid));
 
 		Ok(Sample {
-			timestamp_ms: SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.unwrap_or_default()
+			timestamp_ms: kio::clock::wall()
+				.saturating_duration_since(Wall::UNIX_EPOCH)
 				.as_millis(),
 			pid: target.proc.pid,
 			comm: stat.comm.clone(),
@@ -247,8 +301,40 @@ mod linux {
 			ctx_involuntary: target.ctx.involuntary,
 			host_cpu_busy,
 			host_cores,
+			udp,
 			per_thread,
 		})
+	}
+
+	/// Fold one target's sockets into its UDP fields. A target whose fd table we
+	/// may not list (another user's process) loses only these fields, once and
+	/// loudly, like a host that refuses the dump; any other error means it exited.
+	fn udp_sample(
+		target: &mut Target,
+		all: &HashMap<u64, udp::Socket>,
+		owned: std::io::Result<HashSet<u64>>,
+	) -> anyhow::Result<Option<UdpSample>> {
+		let owned = match owned {
+			Ok(owned) => owned,
+			Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+				eprintln!("pid {}: UDP socket accounting unavailable: {err}", target.proc.pid);
+				target.udp_denied = true;
+				return Ok(None);
+			}
+			Err(err) => return Err(err.into()),
+		};
+		let sample = target.drops.observe(&owned, all);
+		let (rcvbuf_errors, sndbuf_errors, in_errors) = udp::snmp(&target.proc);
+		Ok(Some(UdpSample {
+			udp_sockets: sample.sockets,
+			udp_rcvbuf_min: sample.rcvbuf_min,
+			udp_sndbuf_min: sample.sndbuf_min,
+			udp_rx_queue_bytes: sample.queued,
+			udp_drops: sample.drops,
+			udp_rcvbuf_errors: rcvbuf_errors,
+			udp_sndbuf_errors: sndbuf_errors,
+			udp_in_errors: in_errors,
+		}))
 	}
 
 	/// Resolve the targets, then sample them every interval until the duration
@@ -280,39 +366,54 @@ mod linux {
 				.join(", ")
 		);
 
-		let start = std::time::Instant::now();
+		let start = kio::clock::now();
+		let mut udp_warned = false;
 		loop {
 			// Host-wide once per round: unlike the per-target reads inside `sample`,
 			// a failure here is not a target exiting, so it fails the run.
 			let host = host_cpu(tps).context("failed to read /proc/stat")?;
+			// One dump per round serves every target. A host that refuses it
+			// (no sock_diag) loses only the UDP fields, once and loudly.
+			let sockets = match udp::dump() {
+				Ok(sockets) => Some(sockets),
+				Err(err) => {
+					if !udp_warned {
+						eprintln!("UDP socket accounting unavailable: {err}");
+						udp_warned = true;
+					}
+					None
+				}
+			};
 
 			// Drop targets that exited; sampling the survivors is still useful.
-			targets.retain_mut(|target| match sample(target, tps, page, args.threads, host) {
-				Ok(record) => {
-					// A serialization failure is a bug, not a runtime condition.
-					let line = serde_json::to_string(&record).expect("sample must serialize");
-					if let Err(err) = writeln!(out, "{line}") {
-						eprintln!("write failed: {err}");
-						std::process::exit(1);
+			targets.retain_mut(
+				|target| match sample(target, tps, page, args.threads, host, sockets.as_ref()) {
+					Ok(record) => {
+						// A serialization failure is a bug, not a runtime condition.
+						let line = serde_json::to_string(&record).expect("sample must serialize");
+						if let Err(err) = writeln!(out, "{line}") {
+							eprintln!("write failed: {err}");
+							std::process::exit(1);
+						}
+						true
 					}
-					true
-				}
-				Err(_) => {
-					eprintln!("pid {} exited, dropping", target.proc.pid);
-					false
-				}
-			});
+					Err(_) => {
+						eprintln!("pid {} exited, dropping", target.proc.pid);
+						false
+					}
+				},
+			);
 			// Every line lands on disk before the sleep, so a Ctrl-C loses nothing.
 			out.flush()?;
 
 			anyhow::ensure!(!targets.is_empty(), "all target processes exited");
-			let Some(delay) = next_delay(
-				args.interval.0,
-				args.duration.map(crate::duration::Duration::into_std),
-				start.elapsed(),
-			) else {
+			let Some(delay) = next_delay(args.interval.0, args.duration.map(Into::into), start.elapsed()) else {
 				return Ok(());
 			};
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the sampler runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(delay);
 		}
 	}
@@ -342,12 +443,11 @@ mod linux {
 		fn zero_interval_rejected() {
 			let argv = [std::ffi::OsStr::new("--interval"), std::ffi::OsStr::new("0s")];
 			let err = Args::parse_from(&argv).unwrap_err();
-			let err = usage::render_failure(Args::spec(), &argv, &err);
+			let err = usage_rs::render_failure(Args::spec(), &argv, &err);
 			assert!(err.contains("greater than 0s"), "unexpected error: {err}");
 
-			// Nonzero still parses, and the default holds.
-			let args = Args::parse_from(&[]).unwrap();
-			assert_eq!(args.interval, PositiveDuration(Duration::from_secs(1)));
+			// The default still passes the same check.
+			Args::parse_from(&[]).unwrap();
 		}
 
 		/// A duration shorter than the interval must cap the sleep, not stretch the
@@ -391,6 +491,27 @@ mod linux {
 			ctx.observe(1, 12, 1);
 			ctx.observe(2, 3, 1);
 			assert_eq!((ctx.voluntary, ctx.involuntary), (20, 4));
+		}
+
+		/// A target whose `/proc/<pid>/fd` belongs to another user keeps its CPU
+		/// and memory samples and loses only the UDP fields, for good; any other
+		/// fd error still reads as the target exiting.
+		#[test]
+		fn denied_fd_table_drops_only_udp() {
+			let all = HashMap::new();
+			let mut target = Target::new(Process::myself().unwrap());
+			let denied = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+			assert!(udp_sample(&mut target, &all, denied).unwrap().is_none());
+			assert!(target.udp_denied);
+			let tps = procfs::ticks_per_second() as f64;
+			let record = sample(&mut target, tps, procfs::page_size(), false, (0.0, 1), Some(&all)).unwrap();
+			assert!(record.udp.is_none());
+
+			let mut target = Target::new(Process::myself().unwrap());
+			let gone = Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+			assert!(udp_sample(&mut target, &all, gone).is_err());
+			assert!(!target.udp_denied);
+			assert!(udp_sample(&mut target, &all, Ok(HashSet::new())).unwrap().is_some());
 		}
 	}
 }

@@ -1,9 +1,10 @@
 //! The ETSI TR 101 290 checks an [`Import`](super::Import) grades its input against.
 //!
 //! Counters only, at the fixed limits of TR 101 290 V1.4.1: nothing here decides what is
-//! published, and nothing is configured. The importer feeds every packet through
-//! [`Health::packet`], and the media PIDs and the clock route on its continuity verdict, so
-//! the counter and the PES reassembly cannot disagree about which packets broke a chain.
+//! published, and nothing is configured. The parser grades every packet through
+//! [`Multiplex::packet`] once, however many programs read it, and the media PIDs and the clock
+//! route on its continuity verdict, so the counter and the PES reassembly cannot disagree about
+//! which packets broke a chain. Each program times its own tables, PCR and PTS in [`Health`].
 //!
 //! Intervals run on the program clock the importer already keeps
 //! ([`Liveness`](super::import::Liveness)): the PCR summed step by step, which the 33-bit wrap,
@@ -28,7 +29,7 @@ const TABLE_LIMIT: u64 = PCR_HZ / 2;
 /// left TS 101 154 in 2005.
 const PCR_LIMIT: u64 = PCR_HZ / 10;
 /// `PTS_error`: 700 ms.
-const PTS_LIMIT: u64 = PCR_HZ * 7 / 10;
+pub(super) const PTS_LIMIT: u64 = PCR_HZ * 7 / 10;
 /// ISO/IEC 13818-1 G.1: sync is lost after two consecutive corrupt sync bytes, and acquired
 /// after five consecutive correct ones.
 const SYNC_LOST: u8 = 2;
@@ -36,14 +37,26 @@ const SYNC_ACQUIRED: u8 = 5;
 const NULL_PID: u16 = 0x1fff;
 const SYNC_BYTE: u8 = 0x47;
 
-/// What one importer counted, kept per PID so importers reading the same multiplex can be
-/// merged without counting a packet twice.
+/// What one checker counted, kept per PID so programs reading the same PID can be merged
+/// without counting a packet twice.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Errors {
 	ts_sync_loss: u64,
 	sync_byte_error: u64,
 	pat_error: u64,
 	pids: BTreeMap<u16, PidErrors>,
+}
+
+/// The checks a program times on a PID by the way it reads it, which programs reading the PID
+/// the same way count alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum Checks {
+	/// The PTS cadence of an elementary stream it carries, and the PAT's interval on PID 0.
+	Stream,
+	/// The PCR checks on the PID it takes its clock from.
+	Clock,
+	/// The PMT interval on the PID it reads its PMT from.
+	Table,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -57,22 +70,53 @@ struct PidErrors {
 }
 
 impl Errors {
-	/// Fold in another importer's count of the same input. Every importer of a multiplex sees
-	/// every packet, so each check takes the larger count rather than the sum.
+	/// Fold in another checker's count of the same input. Programs sharing a PAT, PMT or PCR PID
+	/// time the same packets, so each check takes the larger count rather than the sum.
 	pub(super) fn max(&mut self, other: &Self) {
-		self.ts_sync_loss = self.ts_sync_loss.max(other.ts_sync_loss);
-		self.sync_byte_error = self.sync_byte_error.max(other.sync_byte_error);
-		self.pat_error = self.pat_error.max(other.pat_error);
+		self.combine(other, u64::max);
+	}
+
+	/// Set each count to `f` of it and `other`'s, check by check and PID by PID.
+	pub(super) fn combine(&mut self, other: &Self, f: impl Fn(u64, u64) -> u64) {
+		self.ts_sync_loss = f(self.ts_sync_loss, other.ts_sync_loss);
+		self.sync_byte_error = f(self.sync_byte_error, other.sync_byte_error);
+		self.pat_error = f(self.pat_error, other.pat_error);
 		for (pid, theirs) in &other.pids {
 			let ours = self.pids.entry(*pid).or_default();
-			ours.continuity_count_error = ours.continuity_count_error.max(theirs.continuity_count_error);
-			ours.transport_error = ours.transport_error.max(theirs.transport_error);
-			ours.pmt_error = ours.pmt_error.max(theirs.pmt_error);
-			ours.pcr_repetition_error = ours.pcr_repetition_error.max(theirs.pcr_repetition_error);
-			ours.pcr_discontinuity_indicator_error = ours
-				.pcr_discontinuity_indicator_error
-				.max(theirs.pcr_discontinuity_indicator_error);
-			ours.pts_error = ours.pts_error.max(theirs.pts_error);
+			ours.continuity_count_error = f(ours.continuity_count_error, theirs.continuity_count_error);
+			ours.transport_error = f(ours.transport_error, theirs.transport_error);
+			ours.pmt_error = f(ours.pmt_error, theirs.pmt_error);
+			ours.pcr_repetition_error = f(ours.pcr_repetition_error, theirs.pcr_repetition_error);
+			ours.pcr_discontinuity_indicator_error = f(
+				ours.pcr_discontinuity_indicator_error,
+				theirs.pcr_discontinuity_indicator_error,
+			);
+			ours.pts_error = f(ours.pts_error, theirs.pts_error);
+		}
+	}
+
+	/// The `checks` counted on `pid` alone.
+	pub(super) fn only(&self, pid: u16, checks: Checks) -> Self {
+		let all = self.pids.get(&pid).copied().unwrap_or_default();
+		let mut errors = PidErrors::default();
+		let mut pat_error = 0;
+		match checks {
+			Checks::Stream => {
+				errors.pts_error = all.pts_error;
+				if pid == Pid::PAT {
+					pat_error = self.pat_error;
+				}
+			}
+			Checks::Clock => {
+				errors.pcr_repetition_error = all.pcr_repetition_error;
+				errors.pcr_discontinuity_indicator_error = all.pcr_discontinuity_indicator_error;
+			}
+			Checks::Table => errors.pmt_error = all.pmt_error,
+		}
+		Self {
+			pat_error,
+			pids: BTreeMap::from([(pid, errors)]),
+			..Default::default()
 		}
 	}
 
@@ -102,13 +146,73 @@ impl Errors {
 	}
 }
 
-/// The TR 101 290 checks on one importer's input. See the [module](self).
+/// The TR 101 290 checks that read packets alone: sync and per-PID continuity. One per input,
+/// however many programs read it.
 #[derive(Default)]
-pub(super) struct Health {
+pub(super) struct Multiplex {
 	errors: Errors,
 	sync: Sync,
 	/// Per PID, every PID but the null PID.
 	continuity: HashMap<u16, Continuity>,
+}
+
+impl Multiplex {
+	pub(super) fn errors(&self) -> &Errors {
+		&self.errors
+	}
+
+	/// The framer found a packet at `at` in `buf`. Checks every sync byte position up to it.
+	pub(super) fn routed(&mut self, buf: &[u8], at: usize) {
+		self.sync.routed(buf, at, &mut self.errors);
+	}
+
+	/// The parser is about to drain `buf` up to `off`: check the sync byte positions in the
+	/// rest of it, which no packet will be routed from, and carry the grid over.
+	pub(super) fn drained(&mut self, buf: &[u8], off: usize) {
+		self.sync.drained(buf, off, &mut self.errors);
+	}
+
+	/// Grade one packet's continuity, and say what it means for the bytes already accumulated
+	/// for its PID.
+	///
+	/// A packet with `transport_error_indicator` set counts `Transport_error` and nothing else:
+	/// TR 101 290 derives no further error from it.
+	pub(super) fn packet(&mut self, pkt: &[u8; TsPacket::SIZE]) -> Continuation {
+		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
+		if pkt[1] & 0x80 != 0 {
+			self.errors.pid(pid).transport_error += 1;
+		}
+		// The null PID's counter is undefined (ISO/IEC 13818-1 2.4.3.3).
+		if pid == NULL_PID {
+			return Continuation::Contiguous;
+		}
+
+		let continuity = self.continuity.entry(pid).or_default();
+		let continuation = continuity.observe(pkt);
+		match continuation {
+			// ISO/IEC 13818-1 2.4.3.3 permits one duplicate; a third copy is an error.
+			Continuation::Duplicate if continuity.repeats > 1 => {
+				self.errors.pid(pid).continuity_count_error += 1;
+			}
+			Continuation::Broken if !discontinuity_indicator(pkt) => {
+				self.errors.pid(pid).continuity_count_error += 1;
+			}
+			_ => {}
+		}
+		continuation
+	}
+
+	/// `pid` changed route: forget the chain behind it, so the new route's first packet is not
+	/// judged against bytes it never accumulated.
+	pub(super) fn restart(&mut self, pid: u16) {
+		self.continuity.remove(&pid);
+	}
+}
+
+/// The TR 101 290 checks timed on one program's clock: table, PCR and PTS intervals.
+#[derive(Clone, Default)]
+pub(super) struct Health {
+	errors: Errors,
 	pcr_pid: Option<u16>,
 	/// The last PCR value on the PCR PID, forgotten across a signalled discontinuity.
 	pcr: Option<u64>,
@@ -124,49 +228,13 @@ impl Health {
 		&self.errors
 	}
 
-	/// The framer found a packet at `at` in `buf`. Checks every sync byte position up to it.
-	pub(super) fn routed(&mut self, buf: &[u8], at: usize) {
-		self.sync.routed(buf, at, &mut self.errors);
-	}
-
-	/// The importer is about to drain `buf` up to `off`: check the sync byte positions in the
-	/// rest of it, which no packet will be routed from, and carry the grid over.
-	pub(super) fn drained(&mut self, buf: &[u8], off: usize) {
-		self.sync.drained(buf, off, &mut self.errors);
-	}
-
-	/// Grade one packet, and say what it means for the bytes already accumulated for its PID.
-	///
-	/// A packet with `transport_error_indicator` set counts `Transport_error` and nothing else:
-	/// TR 101 290 derives no further error from it, so it feeds no continuity, table or PCR
-	/// check. A duplicate feeds none of them either, after its own continuity check.
-	pub(super) fn packet(&mut self, pkt: &[u8; TsPacket::SIZE], now: Option<u64>) -> Continuation {
+	/// Time one packet the [`Multiplex`] graded as `continuation`. A corrupt packet or a
+	/// duplicate feeds no table or PCR check.
+	pub(super) fn packet(&mut self, pkt: &[u8; TsPacket::SIZE], continuation: Continuation, now: Option<u64>) {
+		if matches!(continuation, Continuation::Corrupt | Continuation::Duplicate) {
+			return;
+		}
 		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
-		if pkt[1] & 0x80 != 0 {
-			self.errors.pid(pid).transport_error += 1;
-		}
-		// The null PID's counter is undefined (ISO/IEC 13818-1 2.4.3.3).
-		if pid == NULL_PID {
-			return Continuation::Contiguous;
-		}
-
-		let continuity = self.continuity.entry(pid).or_default();
-		let continuation = continuity.observe(pkt);
-		match continuation {
-			Continuation::Corrupt => return continuation,
-			// ISO/IEC 13818-1 2.4.3.3 permits one duplicate; a third copy is an error.
-			Continuation::Duplicate => {
-				if continuity.repeats > 1 {
-					self.errors.pid(pid).continuity_count_error += 1;
-				}
-				return continuation;
-			}
-			Continuation::Broken if !discontinuity_indicator(pkt) => {
-				self.errors.pid(pid).continuity_count_error += 1;
-			}
-			Continuation::Broken | Continuation::Contiguous => {}
-		}
-
 		let scrambled = pkt[3] & 0xc0 != 0;
 		if pid == Pid::PAT {
 			if scrambled {
@@ -188,7 +256,6 @@ impl Health {
 		if self.pcr_pid == Some(pid) {
 			self.pcr(pid, pkt);
 		}
-		continuation
 	}
 
 	/// `PCR_repetition_error` and `PCR_discontinuity_indicator_error`, graded on consecutive
@@ -211,14 +278,14 @@ impl Health {
 		let Some(last) = self.pcr.replace(value) else {
 			return;
 		};
-		let step = (value + PCR_WRAP - last) % PCR_WRAP;
-		let forward = step <= PCR_WRAP / 2;
 		let errors = self.errors.pid(pid);
-		if forward && step > PCR_LIMIT {
-			errors.pcr_repetition_error += 1;
-		}
-		if !forward || step > PCR_LIMIT {
-			errors.pcr_discontinuity_indicator_error += 1;
+		match Delta::between(last, value, PCR_WRAP) {
+			Delta::Forward(step) if step > PCR_LIMIT => {
+				errors.pcr_repetition_error += 1;
+				errors.pcr_discontinuity_indicator_error += 1;
+			}
+			Delta::Forward(_) => {}
+			Delta::Back(_) => errors.pcr_discontinuity_indicator_error += 1,
 		}
 	}
 
@@ -244,7 +311,7 @@ impl Health {
 	pub(super) fn pmt_pids(&mut self, pids: &[u16], now: Option<u64>) {
 		self.pmt.retain(|pid, _| pids.contains(pid));
 		for &pid in pids {
-			self.pmt.entry(pid).or_insert(Timer { last: now });
+			self.pmt.entry(pid).or_insert(Timer::at(now));
 		}
 	}
 
@@ -267,11 +334,57 @@ impl Health {
 		self.pts.retain(|pid, _| pids.contains(pid));
 	}
 
-	/// `pid` changed route: forget the chain behind it, so the new route's first packet is not
-	/// judged against bytes it never accumulated, and stop grading its PTS until it has one.
+	/// `pid` changed route: stop grading its PTS until it has one.
 	pub(super) fn restart(&mut self, pid: u16) {
-		self.continuity.remove(&pid);
 		self.pts.remove(&pid);
+	}
+
+	/// Carry what this checker has timed on `pid` over to `to`, which reads the same packets and
+	/// counts `pid` from here on, where `to` has not timed it yet: the PAT's interval on PID 0,
+	/// the PMT's on a PMT PID `to` reads, and the PTS cadence when `to` grades one there. So an
+	/// interval running across the handover counts once, from where it began, even from before
+	/// `to`'s clock started. `now` and `then` are this checker's clock and `to`'s; nothing
+	/// carries over before both run.
+	pub(super) fn hand_over(&self, pid: u16, to: &mut Self, pts: bool, now: Option<u64>, then: Option<u64>) {
+		let (Some(now), Some(then)) = (now, then) else {
+			return;
+		};
+		let carry = |timer: &Timer, theirs: &mut Timer| {
+			if theirs.last.is_none() {
+				theirs.last = timer.last.map(|last| last + ticks(then) - ticks(now));
+			}
+		};
+		if pid == Pid::PAT {
+			carry(&self.pat, &mut to.pat);
+		}
+		if let (Some(timer), Some(theirs)) = (self.pmt.get(&pid), to.pmt.get_mut(&pid)) {
+			carry(timer, theirs);
+		}
+		if pts && let Some(timer) = self.pts.get(&pid) {
+			carry(timer, to.pts.entry(pid).or_default());
+		}
+	}
+}
+
+/// The step between two readings of a clock that wraps: forward by up to half the range,
+/// otherwise back, so a wrap reads as the small forward step it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Delta {
+	/// Ahead by this many ticks.
+	Forward(u64),
+	/// Behind by this many ticks.
+	Back(u64),
+}
+
+impl Delta {
+	/// From `last` to `value`, both below `wrap`.
+	pub(super) fn between(last: u64, value: u64, wrap: u64) -> Self {
+		let step = (value % wrap + wrap - last % wrap) % wrap;
+		if step <= wrap / 2 {
+			Self::Forward(step)
+		} else {
+			Self::Back(wrap - step)
+		}
 	}
 }
 
@@ -288,31 +401,41 @@ fn section_start(pkt: &[u8; TsPacket::SIZE]) -> Option<u8> {
 }
 
 /// How long since a table or a PTS last occurred, on the program clock.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Timer {
-	/// `None` until the clock starts.
-	last: Option<u64>,
+	/// `None` until the clock starts. Signed, since one [handed over](Health::hand_over) from
+	/// an earlier clock may predate this one's start.
+	last: Option<i64>,
 }
 
 impl Timer {
+	fn at(now: Option<u64>) -> Self {
+		Self { last: now.map(ticks) }
+	}
+
 	fn reset(&mut self, now: Option<u64>) {
 		if now.is_some() {
-			self.last = now;
+			*self = Self::at(now);
 		}
 	}
 
 	/// How many times `limit` ran out since the last occurrence, restarting the wait at each,
 	/// so an outage counts once per limit it lasts rather than once in all.
 	fn expired(&mut self, now: u64, limit: u64) -> u64 {
-		let last = self.last.get_or_insert(now);
-		let late = now.saturating_sub(*last);
+		let last = self.last.get_or_insert(ticks(now));
+		let late = u64::try_from(ticks(now) - *last).unwrap_or(0);
 		if late <= limit {
 			return 0;
 		}
 		let count = (late - 1) / limit;
-		*last += count * limit;
+		*last += ticks(count * limit);
 		count
 	}
+}
+
+/// A program clock reading as a signed tick count, which 27 MHz keeps in range for millennia.
+fn ticks(now: u64) -> i64 {
+	i64::try_from(now).unwrap_or(i64::MAX)
 }
 
 /// `TS_sync_loss` and `Sync_byte_error`, on a grid of its own.
@@ -402,7 +525,7 @@ impl Sync {
 /// meaningless when spliced onto bytes that didn't follow them. Keeping one implementation
 /// keeps a subtle rule (which packets advance the counter, which retransmissions to ignore)
 /// from drifting into two, and `Continuity_count_error` reads the same verdict.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Continuity {
 	/// Last continuity_counter seen on a packet with payload, to spot gaps.
 	last_cc: Option<u8>,
@@ -651,7 +774,7 @@ mod test {
 		/// The feed from `from` to `to` ms on a clock reading `clock(t)` PCR ticks at `t` ms: the
 		/// PAT and PMT every 100 ms, a PCR every 10 ms, a PES on each video PID every 40 ms
 		/// stamped on the same clock, and a null packet closing each 10 ms. `keep` drops parts.
-		fn run(&mut self, from: u64, to: u64, clock: impl Fn(u64) -> u64, keep: impl Fn(u64, Part) -> bool) {
+		fn run(&mut self, from: u64, to: u64, clock: impl Fn(u64, Part) -> u64, keep: impl Fn(u64, Part) -> bool) {
 			for t in (from..to).step_by(10) {
 				if t % 100 == 0 {
 					if keep(t, Part::Pat) {
@@ -662,12 +785,12 @@ mod test {
 					}
 				}
 				if keep(t, Part::Pcr) {
-					self.pcr(clock(t) % PCR_WRAP, false);
+					self.pcr(clock(t, Part::Pcr) % PCR_WRAP, false);
 				}
 				if t % 40 == 0 {
 					for pid in [VIDEO, PEER] {
 						if keep(t, Part::Pes(pid)) {
-							self.pes(pid, clock(t) / 300, false);
+							self.pes(pid, clock(t, Part::Pes(pid)) / 300, false);
 						}
 					}
 				}
@@ -676,7 +799,7 @@ mod test {
 		}
 
 		fn clean(&mut self, from: u64, to: u64) {
-			self.run(from, to, |t| t * MS, |_, _| true);
+			self.run(from, to, |t, _| t * MS, |_, _| true);
 		}
 
 		/// Where each null packet starts.
@@ -734,15 +857,16 @@ mod test {
 	}
 
 	/// The PCR is graded on its values: a gap over 100 ms counts under both checks, a shorter
-	/// one under neither, the wrap is no gap, and a step back is a discontinuity only.
+	/// one under neither, the wrap is no gap, and a step back is a discontinuity only. The clock
+	/// steps back alone: the media stepping with it would restart the import instead.
 	#[test]
 	fn pcr_gaps_are_graded_on_their_values() {
-		let stats = |clock: &dyn Fn(u64) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
+		let stats = |clock: &dyn Fn(u64, Part) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
 			let mut feed = Feed::default();
 			feed.run(0, 2_000, clock, keep);
 			feed.stats()
 		};
-		let pcr = |clock: &dyn Fn(u64) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
+		let pcr = |clock: &dyn Fn(u64, Part) -> u64, keep: &dyn Fn(u64, Part) -> bool| {
 			let stats = stats(clock, keep);
 			let health = stats.health();
 			assert_eq!(
@@ -752,20 +876,27 @@ mod test {
 			);
 			(stats.pcr_repetition_error, stats.pcr_discontinuity_indicator_error)
 		};
-		let steady = |t| t * MS;
+		let steady = |t: u64, _: Part| t * MS;
 		assert_eq!(pcr(&steady, &gap(Part::Pcr, 150)), (1, 1), "a 150 ms gap");
 		assert_eq!(pcr(&steady, &gap(Part::Pcr, 80)), (0, 0), "an 80 ms gap");
 		assert_eq!(pcr(&steady, &gap(Part::Pcr, 100)), (0, 0), "a gap of exactly 100 ms");
-		assert_eq!(pcr(&|t| PCR_WRAP - 1_000 * MS + t * MS, &all), (0, 0), "the wrap");
+		assert_eq!(pcr(&|t, _| PCR_WRAP - 1_000 * MS + t * MS, &all), (0, 0), "the wrap");
 		assert_eq!(
-			pcr(&|t| if t < 1_000 { t * MS } else { (t - 500) * MS }, &all),
+			pcr(
+				&|t, part| if t < 1_000 || part != Part::Pcr {
+					t * MS
+				} else {
+					(t - 500) * MS
+				},
+				&all
+			),
 			(0, 1),
 			"an unsignalled step back"
 		);
 
 		// An unsignalled 500 ms jump also stretches the program clock by 510 ms, which makes
 		// the PAT and the PMT each just late. The 40 ms PES cadence absorbs it.
-		let jump = stats(&|t| if t < 1_000 { t * MS } else { (t + 500) * MS }, &all);
+		let jump = stats(&|t, _| if t < 1_000 { t * MS } else { (t + 500) * MS }, &all);
 		assert_eq!(
 			(jump.pcr_repetition_error, jump.pcr_discontinuity_indicator_error),
 			(1, 1),
@@ -781,7 +912,7 @@ mod test {
 		let mut feed = Feed::default();
 		feed.clean(0, 1_000);
 		feed.pcr(1_500 * MS, true);
-		feed.run(1_000, 2_000, |t| (t + 500) * MS, all);
+		feed.run(1_000, 2_000, |t, _| (t + 500) * MS, all);
 		let stats = feed.stats();
 		assert_eq!(stats.health(), [0; 9], "{stats:?}");
 	}
@@ -792,7 +923,7 @@ mod test {
 	fn a_late_pat_counts_once_per_half_second() {
 		for (len, count) in [(400, 0), (500, 0), (800, 1), (1_200, 2)] {
 			let mut feed = Feed::default();
-			feed.run(0, 3_000, |t| t * MS, gap(Part::Pat, len));
+			feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pat, len));
 			let stats = feed.stats();
 			assert_eq!(stats.pat_error, count, "PAT missing for {len} ms");
 			assert_eq!(stats.pmt_error, 0, "PAT missing for {len} ms");
@@ -815,7 +946,7 @@ mod test {
 	#[test]
 	fn a_late_pmt_counts_on_its_own_check() {
 		let mut feed = Feed::default();
-		feed.run(0, 3_000, |t| t * MS, gap(Part::Pmt, 800));
+		feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pmt, 800));
 		let stats = feed.stats();
 		assert_eq!((stats.pmt_error, stats.pat_error), (1, 0), "{stats:?}");
 	}
@@ -824,7 +955,7 @@ mod test {
 	#[test]
 	fn a_pts_gap_counts_on_its_own_pid() {
 		let mut feed = Feed::default();
-		feed.run(0, 3_000, |t| t * MS, gap(Part::Pes(PEER), 1_000));
+		feed.run(0, 3_000, |t, _| t * MS, gap(Part::Pes(PEER), 1_000));
 		let stats = feed.stats();
 		assert_eq!(stats.pts_error, 1, "{stats:?}");
 		assert_eq!(stats.streams[&PEER].pts_error, 1);
@@ -841,7 +972,7 @@ mod test {
 			feed.run(
 				t,
 				t + 100,
-				|t| t * MS,
+				|t, _| t * MS,
 				|_, part| part != Part::Pmt && part != Part::Pes(PEER),
 			);
 		}
@@ -978,7 +1109,11 @@ mod test {
 	#[test]
 	fn a_multiplex_counts_each_fault_once() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", crate::catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			crate::catalog::Config::default(),
+		);
 		let mut data = super::super::import::test::two_programs();
 		let mut corrupt = vec![0x47, 0x9f, 0xff, 0x10];
 		corrupt.resize(188, 0xff);

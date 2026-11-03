@@ -8,7 +8,7 @@ use unsafe_libopus::{
 };
 
 use super::Backend;
-use crate::encode::{Encoded, Settings};
+use crate::encode::{Config, Encoded};
 use crate::{Error, opus};
 
 pub(super) const NAME: &str = "libopus";
@@ -32,16 +32,16 @@ pub(super) struct Libopus {
 unsafe impl Send for Libopus {}
 
 impl Libopus {
-	/// Opens at the settings' rate and layout, which the front end has already
+	/// Opens at the config's rate and layout, which the front end has already
 	/// checked against what Opus codes.
-	pub(super) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
-		Ok(Box::new(Self::new(settings)?))
+	pub(super) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self::new(config)?))
 	}
 
-	fn new(settings: &Settings) -> Result<Self, Error> {
-		let sample_rate = settings.sample_rate;
-		let channels = settings.layout.channels();
-		let frame_size = opus::frame_size(sample_rate, settings.frame_duration)?;
+	fn new(config: &Config) -> Result<Self, Error> {
+		let sample_rate = config.sample_rate;
+		let channels = config.layout.channels();
+		let frame_size = opus::frame_size(sample_rate, config.frame_duration)?;
 
 		let mut err = 0i32;
 		// SAFETY: out-pointer `err` is valid; inner is checked for null below.
@@ -68,10 +68,10 @@ impl Libopus {
 			lookahead: 0,
 		};
 
-		if let Some(bitrate) = settings.bitrate {
+		if let Some(bitrate) = config.bitrate {
 			backend.set_rate(bitrate.as_bps())?;
 		}
-		backend.set_ctl(OPUS_SET_DTX_REQUEST, i32::from(settings.dtx), "OPUS_SET_DTX")?;
+		backend.set_ctl(OPUS_SET_DTX_REQUEST, i32::from(config.dtx), "OPUS_SET_DTX")?;
 
 		let bitrate = backend.get_ctl(OPUS_GET_BITRATE_REQUEST, "OPUS_GET_BITRATE")?;
 		backend.bitrate = u64::try_from(bitrate)
@@ -180,9 +180,9 @@ mod tests {
 
 	#[test]
 	fn runtime_bitrate_reaches_libopus() {
-		let mut backend = Libopus::new(&Settings {
+		let mut backend = Libopus::new(&Config {
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(64_000)),
-			..Settings::default()
+			..Config::default()
 		})
 		.unwrap();
 
@@ -196,9 +196,9 @@ mod tests {
 
 	#[test]
 	fn applies_dtx_control() {
-		let backend = Libopus::new(&Settings {
+		let backend = Libopus::new(&Config {
 			dtx: true,
-			..Settings::default()
+			..Config::default()
 		})
 		.unwrap();
 

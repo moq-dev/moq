@@ -7,6 +7,8 @@ struct MoQService {
 	// TODO: Define needed params to connect to a relay
 	std::string server;
 	std::string path;
+	// The dock's publish token, which the output presents through the client's tokens.
+	std::string token;
 
 	MoQService(obs_data_t *settings, obs_service_t *service);
 

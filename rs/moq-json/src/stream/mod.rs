@@ -4,12 +4,10 @@
 //! time, a stream is an ordered log of self-contained records. Every [`Producer::append`] writes one
 //! JSON object as one frame, and a [`Consumer`] yields every record in order.
 //!
-//! The whole log rides a **single group** that is never rolled: with
-//! [`Config::compression`] set to [`crate::Compression::Deflate`], that one
-//! group is one DEFLATE window, so every record
-//! compresses against all the earlier ones. There is deliberately no group rolling (and so no
-//! catch-up machinery): the only reason to roll would be moq-net's per-group frame cap, which
-//! isn't worth working around here. A caller that wants to bound the record rate throttles at
+//! The whole log rides a **single group** that is never rolled: on a
+//! [`compress`](moq_net::track::Info::compress)ed track, that one group is one DEFLATE window, so
+//! every record compresses against all the earlier ones. There is deliberately no group rolling (and so no
+//! catch-up machinery): a moq-net group has no size cap. A caller that wants to bound the record rate throttles at
 //! the source (e.g. the timeline's segment cadence); a consumer that finds a gap can fetch or
 //! extrapolate.
 //!
@@ -19,25 +17,17 @@
 //!
 //! # Budget
 //!
-//! That single group is what bounds the log. moq-net caps a group at
-//! [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES) (32 MiB) of payload and
-//! [`MAX_GROUP_FRAMES`](moq_net::group::MAX_GROUP_FRAMES) (8192) frames, and a consumer always
-//! starts at frame 0, so the cap is never met by dropping a prefix some readers missed. (With
-//! compression the retained suffix would be undecodable anyway, since its DEFLATE window depends
-//! on the dropped prefix.)
-//!
-//! Instead an append that might not fit is refused with [`moq_net::Error::GroupTooLarge`] before
-//! it is encoded, and the log stays intact and writable. With compression the check counts the
-//! record's raw size plus DEFLATE's worst-case overhead, since the compressed size is only known
-//! once the window has moved. The budget covers the whole log rather than a single record, so once
-//! it is spent every append is refused: the live stream is bounded history by design, a publisher
-//! with more to say opens a new track, and deep history is served from a recording.
+//! A log accepts appends for its track's life; only a record larger than one frame may be
+//! ([`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), 32 MiB) is refused, with
+//! [`moq_net::Error::FrameTooLarge`], before it is written. moq-net holds only the group's newest
+//! 32 MiB and sheds older records from its front, so a consumer that falls further behind, or
+//! joins after the front is shed, gets [`moq_net::Error::Evicted`].
 //!
 //! # Choosing a layer
 //!
 //! [`Producer`] and [`Consumer`] own a track. [`Encoder`] and [`Decoder`] are the same logic
-//! without it, for when something else is already in charge of the track; they carry the shared
-//! DEFLATE window and nothing else, since a log has no group boundaries to report.
+//! without it, for when something else is already in charge of the track. A log has no group
+//! boundaries to report, so they carry no state.
 
 pub mod consumer;
 mod decoder;
@@ -50,13 +40,15 @@ pub use encoder::{Config, Encoder, Pending};
 pub use producer::Producer;
 
 #[cfg(test)]
+use futures::FutureExt;
+
+#[cfg(test)]
 mod test {
 	use std::task::Poll;
 
 	use serde_json::{Value, json};
 
 	use super::*;
-	use crate::Compression;
 
 	/// Refused before the log's group opens, so the log carries on rather than ending.
 	#[test]
@@ -78,7 +70,28 @@ mod test {
 			.append(moq_net::Timed::from(&json!({ "n": 3 })).at(at))
 			.unwrap();
 		producer.finish().unwrap();
-		assert_eq!(drain(consume(track, false)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
+		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
+	}
+
+	/// A timestamp the track's millisecond scale can't hold is refused like a missing one, rather
+	/// than reaching the group as a hole that ends the log.
+	#[test]
+	fn a_timed_track_refuses_an_unconvertible_timestamp() {
+		let (mut producer, track) = producer_on(Config::default(), timed());
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		let huge = moq_net::Timestamp::from_scale((1 << 61) - 1, 1).unwrap();
+		producer
+			.append(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+			.unwrap();
+		assert!(matches!(
+			producer.append(moq_net::Timed::from(&json!({ "n": 2 })).at(huge)),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		producer
+			.append(moq_net::Timed::from(&json!({ "n": 3 })).at(at))
+			.unwrap();
+		producer.finish().unwrap();
+		assert_eq!(drain(consume(track)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
 	}
 
 	#[test]
@@ -123,35 +136,22 @@ mod test {
 	fn demand_follows_subscribers() {
 		let (producer, consumer) = producer(Config::default());
 		let demand = producer.demand();
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert_eq!(demand.wanted(), Some(0));
 
 		drop(consumer);
-		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_used(&waiter).is_pending());
+		assert_eq!(demand.wanted(), None);
 
 		let _consumer = producer.consume();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_unused(&waiter).is_pending());
+		assert_eq!(demand.wanted(), Some(0));
 	}
 
-	fn compressed() -> Config {
-		Config {
-			compression: Compression::Deflate,
-		}
+	/// A compressed track.
+	fn compressed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_compress(true)
 	}
 
-	fn consume(track: moq_net::track::Subscriber, compression: bool) -> Consumer<Value> {
-		Consumer::new(
-			track,
-			Config {
-				compression: if compression {
-					Compression::Deflate
-				} else {
-					Compression::None
-				},
-			},
-		)
+	fn consume(track: moq_net::track::Subscriber) -> Consumer<Value> {
+		Consumer::new(track, Config::default())
 	}
 
 	/// Drain every record currently available without blocking.
@@ -159,7 +159,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			out.push(value);
+			out.push(value.value);
 		}
 		out
 	}
@@ -172,14 +172,14 @@ mod test {
 		}
 		producer.finish().unwrap();
 
-		let records = drain(consume(track, false));
+		let records = drain(consume(track));
 		assert_eq!(records, (0..5).map(|n| json!({ "n": n })).collect::<Vec<_>>());
 	}
 
 	/// Each record keeps its own capture time, and the returned size is the encoded frame.
 	#[test]
 	fn a_stamped_append_writes_its_capture_time() {
-		let (mut producer, _track) = producer_on(compressed(), timed());
+		let (mut producer, _track) = producer_on(Config::default(), timed().with_compress(true));
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let record = json!({ "n": 1 });
@@ -197,72 +197,36 @@ mod test {
 	}
 
 	#[test]
-	fn compressed_roundtrip_in_order() {
-		let (mut producer, track) = producer(compressed());
-		for n in 0..20 {
-			producer.append(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
-		}
-		producer.finish().unwrap();
-
-		let records = drain(consume(track, true));
-		assert_eq!(records.len(), 20);
-		assert_eq!(records[7], json!({ "group": 7, "pts": 14_000 }));
-	}
-
-	#[test]
 	fn all_records_ride_one_group() {
-		let (mut producer, track) = producer(compressed());
+		let (mut producer, mut track) = producer_on(Config::default(), compressed());
 		for n in 0..50 {
 			producer.append(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
 		// Never rolled: a single group holds the whole log.
-		assert_eq!(track.latest(), Some(0));
-		assert_eq!(drain(consume(track, true)).len(), 50);
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
+		assert_eq!(drain(consume(track)).len(), 50);
 	}
 
 	#[test]
 	fn live_consumer_sees_each_record() {
-		let (mut producer, track) = producer(compressed());
-		let mut consumer = consume(track, true);
+		let (mut producer, track) = producer_on(Config::default(), compressed());
+		let mut consumer = consume(track);
 		let waiter = kio::Waiter::noop();
 
 		for n in 0..3 {
 			producer.append(&json!({ "n": n })).unwrap();
 			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "n": n })),
+				Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "n": n })),
 				other => panic!("expected record, got {other:?}"),
 			}
 		}
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 		producer.finish().unwrap();
-	}
-
-	#[test]
-	fn shared_window_shrinks_repetitive_records() {
-		let (mut producer, track) = producer(compressed());
-		for n in 0..8 {
-			producer.append(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
-		}
-		producer.finish().unwrap();
-
-		let waiter = kio::Waiter::noop();
-		let mut track = track.ordered();
-		let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) else {
-			panic!("expected a group");
-		};
-		let mut sizes = Vec::new();
-		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-			sizes.push(frame.payload.len());
-		}
-		assert_eq!(sizes.len(), 8);
-		let raw = serde_json::to_vec(&json!({ "group": 7, "pts": 14_000 })).unwrap().len();
-		assert!(
-			*sizes.last().unwrap() < raw / 2,
-			"windowed record {} should be far below its raw size {raw}",
-			sizes.last().unwrap()
-		);
 	}
 
 	/// A record the encoder rejects must not have published a group first: a live consumer would
@@ -286,7 +250,15 @@ mod test {
 				.is_err()
 		);
 
-		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
+		assert_eq!(
+			subscriber
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group),
+			None,
+			"a rejected record opened a group"
+		);
 
 		let waiter = kio::Waiter::noop();
 		assert!(
@@ -295,24 +267,34 @@ mod test {
 		);
 	}
 
-	/// A track whose timescale is extreme enough that converting a wall-clock timestamp into it
-	/// overflows, so `write_frame` rejects every frame. That stands in for any post-`append_group`
-	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
-	/// allocating 32 MB to provoke it.
+	/// A timed track whose first group already starts at ten seconds, so a group that a frame at
+	/// [`rewound`] opens is published by `append_group` and then refused by `write_frame` for
+	/// starting before it. That stands in for any post-`append_group` write failure (the reported
+	/// one is a frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut info = timed();
-		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
-
-		moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", Some(info))
-			.unwrap()
+			.create_track("test", timed())
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(
+				moq_net::Timestamp::from_millis(10_000).unwrap(),
+				bytes::Bytes::from_static(b"{}"),
+			)
+			.unwrap();
+		group.finish().unwrap();
+		track
 	}
 
-	/// `value` at a time [`rejecting_track`] can't hold: it matches the timed track, so the
-	/// append gets as far as the group before the conversion fails.
+	/// Before [`rejecting_track`]'s first group starts, so a group opened at it is refused.
+	fn rewound() -> moq_net::Timestamp {
+		moq_net::Timestamp::from_millis(1_000).unwrap()
+	}
+
+	/// `value` at [`rewound`], so the append gets as far as a published group before it fails.
 	fn late(value: &Value) -> moq_net::Timed<&Value> {
-		moq_net::Timed::from(value).at(moq_net::Timestamp::from_millis(10_000).unwrap())
+		moq_net::Timed::from(value).at(rewound())
 	}
 
 	/// A failed write must reach the consumer, not just the caller. A clean close drains a reader to
@@ -329,52 +311,55 @@ mod test {
 			Err(crate::Error::Net(_))
 		));
 
-		let waiter = kio::Waiter::noop();
 		assert!(
-			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Err(_))),
+			fails(&mut subscriber),
 			"a truncated log must surface an error rather than read as a completed one"
 		);
 	}
 
-	/// The track ends with the group, so nothing opens a second one and splits the log. The retry
-	/// reports the ended track rather than the [`Error::Desync`](crate::Error::Desync) the dropped
-	/// record left on the encoder, which says nothing about why the log stopped.
+	/// The track ends with the group, so nothing opens a second one and splits the log.
 	#[test]
 	fn a_failed_write_ends_the_track() {
 		let track = rejecting_track();
-		let mut producer = Producer::<Value>::new(track, compressed());
+		let mut producer = Producer::<Value>::new(track, Config::default());
 
 		assert!(matches!(
 			producer.append(late(&json!({ "n": 1 }))),
 			Err(crate::Error::Net(_))
 		));
 
-		// The retry reports the abort rather than the `Error::Desync` the dropped record left on the
-		// encoder, which says nothing about why the log stopped.
 		assert!(
 			matches!(producer.append(late(&json!({ "n": 2 }))), Err(crate::Error::Net(_))),
 			"a second append must fail on the ended track rather than open another group"
 		);
 
-		// A subscriber taken after the abort still exists; it surfaces the failure on its first read,
-		// which is how a late reader learns the log is truncated.
+		// A subscriber taken after the abort still exists; it surfaces the failure once past the
+		// groups it can still read, which is how a late reader learns the log is truncated.
+		assert!(fails(&mut producer.consume()));
+	}
+
+	/// Whether `subscriber` reaches a failure after reading past the groups it already has.
+	fn fails(subscriber: &mut moq_net::track::Subscriber) -> bool {
 		let waiter = kio::Waiter::noop();
-		assert!(matches!(
-			producer.consume().poll_recv_group(&waiter),
-			Poll::Ready(Err(_))
-		));
+		loop {
+			match subscriber.poll_recv_group(&waiter) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				Poll::Ready(Err(_)) => return true,
+				_ => return false,
+			}
+		}
 	}
 
 	/// A completed log is still readable, so finishing must not end the track the way an abort does.
 	/// The append that follows fails on the closed track without turning it into a failure.
 	#[test]
 	fn appending_after_finish_fails_without_aborting() {
-		let (mut producer, _track) = producer(compressed());
+		let (mut producer, _track) = producer_on(Config::default(), compressed());
 		producer.append(&json!({ "n": 0 })).unwrap();
 		producer.finish().unwrap();
 
 		assert!(producer.append(&json!({ "n": 1 })).is_err());
-		assert_eq!(drain(consume(producer.consume(), true)), vec![json!({ "n": 0 })]);
+		assert_eq!(drain(consume(producer.consume())), vec![json!({ "n": 0 })]);
 	}
 
 	/// A stream is one group. A publisher that opens a second lost whatever would have completed the
@@ -390,7 +375,8 @@ mod test {
 
 		// Ask for a replay window, so the first group is delivered rather than skipped by the
 		// subscriber's default max delay budget once a newer group exists.
-		let subscription = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let subscriber = track.subscribe(subscription);
 
 		// Both groups stay open, the way a publisher writing to two at once leaves them.
@@ -403,12 +389,12 @@ mod test {
 			.write_frame(moq_net::Timestamp::now(), br#"{"n":1}"#.as_slice())
 			.unwrap();
 
-		let mut consumer = consume(subscriber, false);
+		let mut consumer = consume(subscriber);
 		let waiter = kio::Waiter::noop();
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(value))) if value == json!({ "n": 0 })
+			Poll::Ready(Ok(Some(value))) if value.value == json!({ "n": 0 })
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),
@@ -425,66 +411,53 @@ mod test {
 		));
 	}
 
-	fn config(compression: bool) -> Config {
-		if compression { compressed() } else { Config::default() }
+	fn info(compress: bool) -> moq_net::track::Info {
+		moq_net::track::Info::default().with_compress(compress)
 	}
 
 	fn refused(result: crate::Result<usize>) -> bool {
-		matches!(result, Err(crate::Error::Net(moq_net::Error::GroupTooLarge)))
+		matches!(result, Err(crate::Error::Net(moq_net::Error::FrameTooLarge)))
 	}
 
-	/// A record past the group budget is refused before anything is written, so the log carries on:
-	/// the next record lands and decodes, which with compression proves the window never moved.
+	/// A frame limit small enough to pass cheaply, standing in for moq-net's 32 MiB cache.
+	const BUDGET: u64 = 32 * 1024;
+
+	/// A record larger than a frame is refused before anything is written, so the log carries on:
+	/// the next record lands and decodes.
 	#[test]
 	fn an_oversized_record_is_refused_and_the_log_continues() {
 		for compression in [false, true] {
-			let (mut producer, track) = producer(config(compression));
+			let (mut producer, track) = producer_on(Config::default(), info(compression));
+			producer.set_max_frame_bytes(BUDGET);
 			producer.append(&json!({ "n": 0 })).unwrap();
 
-			let oversized = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize));
+			let oversized = Value::String("x".repeat(BUDGET as usize));
 			assert!(refused(producer.append(&oversized)), "compression={compression}");
 
 			producer.append(&json!({ "n": 1 })).unwrap();
 			producer.finish().unwrap();
 
 			assert_eq!(
-				drain(consume(track, compression)),
+				drain(consume(track)),
 				vec![json!({ "n": 0 }), json!({ "n": 1 })],
 				"compression={compression}"
 			);
 		}
 	}
 
-	/// The budget covers the whole log, so once its frames are spent every append is refused, and
-	/// the log written so far still finishes cleanly and reads back whole.
+	/// A log has no budget: it carries more records than a group once could, and reads back whole.
 	#[test]
-	fn a_spent_budget_refuses_every_append() {
+	fn a_log_accepts_every_append() {
 		for compression in [false, true] {
-			let (mut producer, track) = producer(config(compression));
-			for n in 0..moq_net::group::MAX_GROUP_FRAMES {
+			let (mut producer, track) = producer_on(Config::default(), info(compression));
+			for n in 0..10_000 {
 				producer.append(&json!({ "n": n })).unwrap();
 			}
-
-			assert!(
-				refused(producer.append(&json!({ "n": -1 }))),
-				"compression={compression}"
-			);
-			assert!(
-				refused(producer.append(&json!({ "n": -2 }))),
-				"compression={compression}"
-			);
 			producer.finish().unwrap();
 
-			let records = drain(consume(track, compression));
-			assert_eq!(
-				records.len(),
-				moq_net::group::MAX_GROUP_FRAMES,
-				"compression={compression}"
-			);
-			assert_eq!(
-				records.last(),
-				Some(&json!({ "n": moq_net::group::MAX_GROUP_FRAMES - 1 }))
-			);
+			let records = drain(consume(track));
+			assert_eq!(records.len(), 10_000, "compression={compression}");
+			assert_eq!(records.last(), Some(&json!({ "n": 9_999 })));
 		}
 	}
 
@@ -492,14 +465,14 @@ mod test {
 	fn embedded_newlines_survive() {
 		// Each record is its own frame (one JSON object), and JSON escapes control characters, so a
 		// string value containing a newline round-trips cleanly.
-		let (mut producer, track) = producer(compressed());
+		let (mut producer, track) = producer_on(Config::default(), compressed());
 		let value = json!({ "s": "line1\nline2\ttab", "u": "a\u{000a}b" });
 		for _ in 0..4 {
 			producer.append(&value).unwrap();
 		}
 		producer.finish().unwrap();
 
-		let records = drain(consume(track, true));
+		let records = drain(consume(track));
 		assert_eq!(records, vec![value.clone(), value.clone(), value.clone(), value]);
 	}
 }

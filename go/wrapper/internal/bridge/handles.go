@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"fmt"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
@@ -21,8 +22,8 @@ var (
 	GroupConsumer func(any) *ffi.MoqGroupConsumer
 	// TrackDemand wraps a handle as a *moq.TrackDemand.
 	TrackDemand func(*ffi.MoqTrackDemand) any
-	// Bandwidth returns the handle behind a *moq.Bandwidth.
-	Bandwidth func(any) *ffi.MoqBandwidth
+	// Allocator returns the handle behind a *moq.Allocator.
+	Allocator func(any) *ffi.MoqAllocator
 	// Reservation wraps a native reservation as *moq.Reservation.
 	Reservation func(*ffi.MoqReservation) any
 	// CatalogProducer returns the handle behind a *media.CatalogProducer.
@@ -37,23 +38,22 @@ var BroadcastConsumer func(any) *ffi.MoqBroadcastConsumer
 // TrackRequest returns the handle behind a *moq.TrackRequest.
 var TrackRequest func(any) *ffi.MoqTrackRequest
 
-// Frame converts a moq.Frame to the generated record.
-var Frame func(any) (ffi.MoqFrame, error)
-
 // Subscription converts a *moq.Subscription to the generated record.
 var Subscription func(any) (*ffi.MoqSubscription, error)
 
-// Duration converts a duration into nonnegative microseconds.
-var Duration func(time.Duration, string) (uint64, error)
+// NonNegative refuses a negative duration, which the generated converter
+// would panic on rather than return an error.
+func NonNegative(value *time.Duration, name string) error {
+	if value != nil && *value < 0 {
+		return fmt.Errorf("negative %s: %v", name, *value)
+	}
+	return nil
+}
 
-// OptionalDuration converts a caller's time to microseconds, preserving absence.
-func OptionalDuration(value *time.Duration, name string) (*uint64, error) {
-	if value == nil {
-		return nil, nil
+// Rendition refuses an audio rendition's negative jitter, for the same reason.
+func Rendition(rendition ffi.MoqRendition) error {
+	if audio, ok := rendition.(ffi.MoqRenditionAudio); ok {
+		return NonNegative(audio.Config.Jitter, "jitter")
 	}
-	us, err := Duration(*value, name)
-	if err != nil {
-		return nil, err
-	}
-	return &us, nil
+	return nil
 }

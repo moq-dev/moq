@@ -5,48 +5,56 @@
 //! over a [`super::mock::MockSession`] pair and spawns both protocol drivers, giving tests
 //! two live sessions ready for pub/sub without any real QUIC or network I/O.
 
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 
 use std::sync::{
 	Arc,
 	atomic::{AtomicUsize, Ordering},
 };
+use std::task::Poll;
 
-use moq_net::{Client, Server, Session, Version, origin};
+use moq_net::{Client, Server, Session, Version, kio, origin};
 
 use super::mock::{MockSession, MockStats, create_mock_session_pair};
 
-/// The current instant: simulated under `moq_net_sim`, tokio's in the benches.
+/// The current ambient instant.
 pub fn now() -> moq_net::time::Instant {
-	match moq_net_sim::is_running() {
-		true => moq_net_sim::now(),
-		false => tokio::time::Instant::now().into_std(),
-	}
+	kio::clock::now()
 }
 
-/// Run a protocol driver in the background: on `moq_net_sim` in tests, on tokio in
+/// Run a protocol driver in the background: on `kio::clock`'s sim in tests, on tokio in
 /// the benches.
 pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
-	match moq_net_sim::is_running() {
-		true => drop(moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
+	match kio::clock::sim::is_running() {
+		true => drop(kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}))),
 		false => drop(tokio::spawn(moq_net::time::run(driver))),
 	}
 }
 
-struct Counted<D> {
+struct Controlled<D> {
 	driver: D,
-	polls: Arc<AtomicUsize>,
+	polls: Option<Arc<AtomicUsize>>,
+	gate: Option<kio::Consumer<bool>>,
 }
 
-impl<D: moq_net::time::Driver> moq_net::time::Driver for Counted<D> {
+impl<D: moq_net::time::Driver> moq_net::time::Driver for Controlled<D> {
 	fn poll(
 		&mut self,
 		now: moq_net::time::Instant,
 		waiter: &kio::Waiter,
 	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
-		self.polls.fetch_add(1, Ordering::Relaxed);
+		if let Some(gate) = &self.gate
+			&& gate
+				.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending })
+				.is_pending()
+		{
+			return Ok(None);
+		}
+		if let Some(polls) = &self.polls {
+			polls.fetch_add(1, Ordering::Relaxed);
+		}
 		self.driver.poll(now, waiter)
 	}
 }
@@ -84,8 +92,21 @@ pub struct MockConnectOptions {
 	pub cost: Option<u64>,
 	/// What both transports report as their connection statistics.
 	pub stats: MockStats,
+	/// The context the server records under.
+	pub server_stats: moq_net::stats::Session,
 	/// Count server driver polls into this counter when supplied.
 	pub server_polls: Option<Arc<AtomicUsize>>,
+	/// Hold an announcement stream over the client's whole subscribe origin for
+	/// the pair's lifetime, so the client asks the server about everything it may,
+	/// the way a reader listing everything would. Clear it to test discovery
+	/// following the readers.
+	pub client_discovers_all: bool,
+	/// Pause the receiving driver while its transport keeps delivering data.
+	pub server_gate: Option<kio::Consumer<bool>>,
+	/// What the client advertises as its implementation, when not the default.
+	pub client_implementation: Option<String>,
+	/// What the server advertises as its implementation, when not the default.
+	pub server_implementation: Option<String>,
 }
 
 impl MockConnectOptions {
@@ -104,7 +125,12 @@ impl MockConnectOptions {
 			server_extensions: Default::default(),
 			cost: None,
 			stats: MockStats::default(),
+			server_stats: Default::default(),
 			server_polls: None,
+			client_discovers_all: true,
+			server_gate: None,
+			client_implementation: None,
+			server_implementation: None,
 		}
 	}
 }
@@ -118,6 +144,8 @@ pub struct MockPair {
 	pub client_transport: MockSession,
 	/// The server's end of the mock transport, for steering delivery.
 	pub server_transport: MockSession,
+	/// See [`MockConnectOptions::client_discovers_all`].
+	pub client_discovery: Option<moq_net::announce::Consumer>,
 }
 
 /// Run the MoQ handshake over the mock transport, returning connected sessions.
@@ -145,14 +173,23 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	if let Some(cost) = opts.cost {
 		client = client.with_cost(cost);
 	}
+	if let Some(implementation) = opts.client_implementation {
+		client = client.with_implementation(implementation);
+	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}
+	let client_discovery = opts
+		.client_subscribe
+		.as_ref()
+		.filter(|_| opts.client_discovers_all)
+		.map(|subscribe| subscribe.consume().announced());
 	if let Some(subscribe) = opts.client_subscribe {
 		client = client.with_subscriber(subscribe);
 	}
 
 	let mut server = Server::new()
+		.with_stats(opts.server_stats)
 		.with_versions(opts.version.into())
 		.with_extensions(opts.server_extensions);
 	if let Some(publish) = &opts.server_publish {
@@ -164,9 +201,12 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	if let Some(limits) = opts.server_limits {
 		server = server.with_limits(limits);
 	}
+	if let Some(implementation) = opts.server_implementation {
+		server = server.with_implementation(implementation);
+	}
 
 	// Run both handshakes concurrently and spawn each side's driver
-	// the moment its handshake resolves: on draft-17+ the server's accept blocks
+	// the moment its handshake resolves: on moq-transport the server's accept blocks
 	// on the client's SETUP, which only reaches the wire once the client's
 	// machine is polled (and vice versa for the server's own SETUP).
 	let client_fut = async {
@@ -182,10 +222,11 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.accept(now(), server_transport)
 			.await
 			.expect("server handshake failed");
-		match opts.server_polls {
-			Some(polls) => spawn(Counted { driver, polls }),
-			None => spawn(driver),
-		}
+		spawn(Controlled {
+			driver,
+			polls: opts.server_polls,
+			gate: opts.server_gate,
+		});
 		session
 	};
 	let (client_session, server_session) = futures::join!(client_fut, server_fut);
@@ -195,6 +236,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		server: server_session,
 		client_transport: transports.0,
 		server_transport: transports.1,
+		client_discovery,
 	}
 }
 
@@ -210,8 +252,8 @@ pub async fn peer_with_latency(
 	b: &origin::Producer,
 	latency: std::time::Duration,
 ) -> MockPair {
-	let a = a.clone().peer();
-	let b = b.clone().peer();
+	let a = a.clone().with_link(moq_net::origin::Link::Peer);
+	let b = b.clone().with_link(moq_net::origin::Link::Peer);
 	let mut options = MockConnectOptions::new(version);
 	options.client_publish = Some(a.consume().with_hidden(true));
 	options.client_subscribe = Some(a);

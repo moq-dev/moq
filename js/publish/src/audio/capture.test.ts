@@ -1,7 +1,8 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { Nano, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
-import { Baseline } from "../jitter";
+import { Order } from "../order";
 
 // The capture pulls its processor in as a `?worklet` blob URL, which the bun test loader can't
 // resolve. Stub it so the module imports; the value is only ever passed to our fake addModule.
@@ -363,7 +364,7 @@ test("captures once a gesture resumes a context built before one", async () => {
 	// Blocked, so `<moq-publish>` doesn't hold its announce for audio that may never come.
 	expect(capture.blocked.peek()).toBe(true);
 
-	const before = performance.now() * 1000;
+	const before = Nano.toMicro(Nano(now()));
 	webaudio.gesture();
 	await settle();
 
@@ -558,12 +559,20 @@ test("a failed encoder stays failed until the capture source changes", async () 
 	const capture = new Capture({ enabled, source: source as never });
 	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition, baseline: new Baseline() } as never,
+		broadcast: {
+			audio: () => rendition,
+			order: new Order(),
+			in: { maxAge: new Signal(undefined), onDemand: new Signal(false) },
+		} as never,
 		capture,
 		enabled,
 	});
@@ -611,6 +620,7 @@ test("a failed encoder stays failed until the capture source changes", async () 
 	} finally {
 		encoder.close();
 		capture.close();
+		track.finish();
 		track.close();
 		await settle();
 		error.mockRestore();

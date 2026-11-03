@@ -1,3 +1,5 @@
+//! Accept incoming MoQ sessions.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,6 +28,10 @@ pub struct MoqServerConfig {
 	/// QUIC transport tuning.
 	#[uniffi(default)]
 	pub quic: MoqQuicConfig,
+	/// Your own `name/version` product tokens, space-separated, advertised in SETUP ahead of
+	/// moq-ffi's, as [`MoqClientConfig::implementation`](crate::session::MoqClientConfig::implementation) does.
+	#[uniffi(default = None)]
+	pub implementation: Option<String>,
 	/// The origin whose broadcasts are served to incoming sessions.
 	///
 	/// With neither `publish` nor `consume` set, each session's two sides share one fresh
@@ -141,8 +147,11 @@ async fn serve(
 			request = listener.accept() => request,
 		};
 		match request {
-			Some(request) => slot.send(request),
-			None => break,
+			Ok(request) => slot.send(request),
+			Err(err) => {
+				tracing::error!(%err, "server stopped accepting");
+				break;
+			}
 		}
 	}
 	// `Listener::close` releases the sockets before it returns; a drop only schedules that.
@@ -153,6 +162,7 @@ async fn serve(
 impl ServerState {
 	fn new(config: MoqServerConfig) -> Result<Self, MoqError> {
 		let mut listen = moq_tokio::listen::Config::default();
+		listen.implementation = Some(crate::session::implementation(config.implementation.as_deref())?);
 		if let Some(bind) = config.bind {
 			let parsed = bind.parse().map_err(|_| MoqError::Config {
 				reason: format!("invalid bind address: {bind}"),
@@ -164,8 +174,11 @@ impl ServerState {
 		listen.tls.key = config.tls.key.into_iter().map(PathBuf::from).collect();
 		listen.tls.generate = config.tls.generate;
 
-		let mut quic = moq_tokio::quic::Config::default();
-		quic.max_streams = config.quic.max_streams;
+		// moq-tokio only checks these when `listen` binds, which would report them as `Bind`.
+		let quic: moq_tokio::quic::Config = config.quic.into();
+		quic.validate().map_err(|err| MoqError::Config {
+			reason: err.to_string(),
+		})?;
 
 		Ok(Self {
 			config: listen,
@@ -335,8 +348,6 @@ struct RequestState {
 pub enum MoqTransport {
 	/// Raw QUIC, negotiating a MoQ ALPN directly.
 	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
 	/// A plaintext TCP connection using qmux framing.
@@ -353,7 +364,6 @@ impl TryFrom<moq_tokio::Transport> for MoqTransport {
 	fn try_from(value: moq_tokio::Transport) -> Result<Self, Self::Error> {
 		Ok(match value {
 			moq_tokio::Transport::Quic => Self::Quic,
-			moq_tokio::Transport::Iroh => Self::Iroh,
 			moq_tokio::Transport::WebSocket => Self::WebSocket,
 			moq_tokio::Transport::Tcp => Self::Tcp,
 			moq_tokio::Transport::Unix => Self::Unix,
@@ -371,7 +381,6 @@ mod transport_tests {
 	#[test]
 	fn converts_supported_transports() {
 		assert_eq!(MoqTransport::try_from(Transport::Quic).unwrap(), MoqTransport::Quic);
-		assert_eq!(MoqTransport::try_from(Transport::Iroh).unwrap(), MoqTransport::Iroh);
 		assert_eq!(
 			MoqTransport::try_from(Transport::WebSocket).unwrap(),
 			MoqTransport::WebSocket
@@ -397,6 +406,7 @@ pub struct MoqRequest {
 	url: Option<String>,
 	path: String,
 	query: Option<String>,
+	peer_implementation: Option<String>,
 }
 
 impl MoqRequest {
@@ -409,6 +419,7 @@ impl MoqRequest {
 		let url = request.url().map(|u| u.to_string());
 		let path = request.path().to_string();
 		let query = request.query().map(str::to_string);
+		let peer_implementation = request.peer_implementation().map(str::to_string);
 		Ok(Arc::new(Self {
 			task: Task::new(RequestState {
 				request: Some(request),
@@ -419,6 +430,7 @@ impl MoqRequest {
 			url,
 			path,
 			query,
+			peer_implementation,
 		}))
 	}
 }
@@ -461,6 +473,14 @@ impl MoqRequest {
 		self.query.clone()
 	}
 
+	/// The implementation the client advertised in its SETUP, such as
+	/// `moq-py/0.6.0 moq-ffi/0.4.12 moq-net-rs/0.3.10`, or null when it advertised none.
+	///
+	/// Peer-controlled: use it for logs and rollout counts, never to authorize.
+	pub fn peer_implementation(&self) -> Option<String> {
+		self.peer_implementation.clone()
+	}
+
 	/// The network transport carrying this session.
 	pub fn transport(&self) -> MoqTransport {
 		self.transport
@@ -477,24 +497,28 @@ impl MoqRequest {
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
 	) -> Result<Arc<MoqSession>, MoqError> {
+		// Foreign runtime threads can have a 512 KiB stack. Keep the transport
+		// handshake out of the nested Task::run futures polled on that stack.
 		self.task
-			.run(move |mut state| async move {
-				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
-				// Materialize both origin sides so the session can publish/subscribe and the
-				// FFI can hand back a publisher/consumer.
-				let (publish, subscribe) = crate::origin::resolve_pair(
-					publish.as_ref().or(state.publish.as_ref()),
-					consume.as_ref().or(state.consume.as_ref()),
-				);
-				let (session, driver) = request
-					.with_publisher(&publish.inner)
-					.with_subscriber(subscribe.inner.clone())
-					.ok()
-					.await
-					.map_err(|err| MoqError::Connect {
-						reason: format!("{err}"),
-					})?;
-				Ok(Arc::new(MoqSession::accepted(session, publish, subscribe, driver)))
+			.run(move |mut state| {
+				Box::pin(async move {
+					let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
+					// Materialize both origin sides so the session can publish/subscribe and the
+					// FFI can hand back a publisher/consumer.
+					let (publish, subscribe) = crate::origin::resolve_pair(
+						publish.as_ref().or(state.publish.as_ref()),
+						consume.as_ref().or(state.consume.as_ref()),
+					);
+					let session = request
+						.with_publisher(&publish.inner)
+						.with_subscriber(subscribe.inner.clone())
+						.ok()
+						.await
+						.map_err(|err| MoqError::Connect {
+							reason: format!("{err}"),
+						})?;
+					Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
+				})
 			})
 			.await
 	}
@@ -510,9 +534,8 @@ impl MoqRequest {
 			.run(move |mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
 				let reject = match code {
-					401 => moq_tokio::server::Reject::Unauthorized,
-					403 => moq_tokio::server::Reject::Forbidden,
-					code => moq_tokio::server::Reject::App(code),
+					401 | 403 => moq_net::SessionError::Unauthorized,
+					code => moq_net::SessionError::App(code),
 				};
 				request.reject(reject).await.map_err(|err| MoqError::Reject {
 					reason: format!("{err}"),
@@ -528,5 +551,63 @@ impl MoqRequest {
 	/// rejects the session.
 	pub fn cancel(&self) {
 		self.task.cancel();
+	}
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+	use super::*;
+
+	/// A server can complete a real handshake on an Apple-sized foreign thread.
+	#[test]
+	fn accept_on_a_foreign_thread() {
+		std::thread::Builder::new()
+			.name("foreign-session".into())
+			.stack_size(512 * 1024)
+			.spawn(|| {
+				let server = MoqServer::new(MoqServerConfig {
+					bind: Some("127.0.0.1:0".into()),
+					versions: vec!["moq-lite-07-wip".into()],
+					tls: MoqServerTls {
+						generate: vec!["localhost".into()],
+						..Default::default()
+					},
+					..Default::default()
+				})
+				.unwrap();
+				let addr = pollster::block_on(server.listen()).unwrap();
+				let client = crate::session::MoqClient::new(crate::session::MoqClientConfig {
+					bind: Some("127.0.0.1:0".into()),
+					versions: vec!["moq-lite-07-wip".into()],
+					tls: crate::session::MoqClientTls {
+						insecure: true,
+						..Default::default()
+					},
+					..Default::default()
+				})
+				.unwrap();
+				let connect =
+					crate::ffi::runtime().spawn(async move { client.connect(format!("https://{addr}")).await });
+				let request = pollster::block_on(server.accept()).unwrap().unwrap();
+				let peer = pollster::block_on(request.accept(None, None)).unwrap();
+				let session = pollster::block_on(connect).unwrap().unwrap();
+				let everything = crate::auth::MoqGrant {
+					publish: vec!["**".into()],
+					subscribe: vec!["**".into()],
+					expires: None,
+				};
+				for grants in [peer.grants(), session.grants()] {
+					let mut grant = grants.grant();
+					while grant.as_ref() != Some(&everything) {
+						grant = pollster::block_on(grants.changed()).unwrap();
+					}
+				}
+				peer.cancel(0);
+				session.cancel(0);
+				server.cancel();
+			})
+			.unwrap()
+			.join()
+			.unwrap();
 	}
 }

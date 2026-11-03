@@ -6,6 +6,7 @@ description: Capture, encode, and publish from the browser
 # @moq/publish
 
 [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/publish)
 
 The publisher: captures a camera, microphone, screen, or file, encodes with
 WebCodecs, writes the catalog, and publishes a hang broadcast.
@@ -28,13 +29,19 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
-| `muted`, `invisible` | Disable audio or video capture. |
+| `muted`, `invisible` | Stop publishing audio or video. The microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit; clear `source` or remove the element to release them. `source` covers both devices, so releasing one while keeping the other takes the library: toggle `Source.Microphone` or `Source.Camera` `enabled`. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
-| `announce` | When to advertise: once the `source` is live (default), `always`, or `never`. Nobody can see or subscribe to the broadcast until it is announced. |
+| `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
+| `stats` | Publish a [stats track](/concept/stats#media-reports) named in the catalog. Off by default. |
+| `echo-path` | Solicit viewer feedback under this path, relative to the broadcast as a rendition reference is: from `room/live`, `viewers` is `room/viewers`. Sets the catalog's `echo` section; absent solicits none. |
 
-Every attribute is also a reactive property. The
+Every attribute is also a reactive property, and property or UI changes reflect
+back into the attributes. An invalid value is refused rather than defaulted: the
+property setter throws, and invalid markup reports a browser `error` event and
+suspends the element until corrected or removed. The
 [README](https://www.npmjs.com/package/@moq/publish) lists types and defaults.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
@@ -44,12 +51,43 @@ Capture failures, such as `NotAllowedError` when permission is refused, land in
 `el.sources.audio`, and `<moq-publish-ui>` shows them. A refused capture waits
 for a permission, device, or settings change instead of prompting again.
 
+## Stats and feedback
+
+With `stats`, the catalog names a `stats.json` track that reports, about once a
+second while someone subscribes, what each rendition has sent under its catalog
+ID: frames, bytes, keyframes, frames skipped because the encoder was still
+busy, and the target bitrate. Its `transport` carries only the PROBE round-trip
+time, since browsers report no usable WebTransport statistics. The encoders'
+`out.stats` and the stats panel read the same counters, and a custom producer
+reports through its rendition's `stats` signal. The `Broadcast` takes the same
+options as `stats`, `probe`, and `echo` inputs.
+
+`echo-path` only asks for feedback: a `<moq-watch echo="alice">` that reads the
+catalog publishes `room/viewers/alice.echo`, and `moq export echo` or a dashboard
+reads it there. Issue tokens that let viewers publish under that path. A path
+that walks above the root from the broadcast name is left out of the catalog
+with a warning, since every viewer would refuse it.
+
 ## Encoding
+
+Video encodes while enabled, so its recent groups wait in the track's cache for
+a late subscription's `delay.max` or a fetch. Audio keeps raw PCM while nobody
+listens, then encodes that history ahead of live audio when a subscriber arrives.
+Both retain up to `maxAge`; raw audio without a declared retention keeps at most
+30 seconds (about 11.5 MB for 48 kHz stereo f32). Capture stays open.
+
+Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
+`onDemand: true` also gates video, which then loses its unsubscribed past.
+Bandwidth reservations still follow subscriptions; unwatched video uses its
+configured bitrate.
 
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
-`el.video.config`, and `el.video.cut()` asks for an extra keyframe. Size,
+`el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
+who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
+so `keyframeInterval` is only the longest a group runs. Through a moq-lite
+relay, only the join that opens the relay's upstream subscription counts. Size,
 bitrate, and framerate change in place, while a codec or audio format change
 keeps the rendition's catalog ID under a fresh `track` name that viewers
 follow through the catalog. For
@@ -91,7 +129,10 @@ signals.run((effect) => {
         timescale: Moq.Time.Timescale.MILLI,
         maxAge: Milli(86_400_000),
     });
-    effect.cleanup(() => track.close());
+    effect.cleanup(() => {
+        track.finish();
+        track.close();
+    });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
     meta.update({ value: current, at: Moq.Time.Timestamp.now() });
@@ -131,8 +172,8 @@ const broadcast = new Publish.Broadcast({
     rotation: capture.out.rotation,
 });
 
-// Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
-// encodes only while someone is subscribed.
+// Video encodes while enabled. Audio buffers raw PCM until someone subscribes.
+// Pass `onDemand: false` to the broadcast to encode both continuously.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);
@@ -149,9 +190,11 @@ browsers suspend Web Audio until then. Every input and output is a signal from
 `out.error` and disables only its rendition; siblings and the broadcast keep
 running. It does not retry on demand or bandwidth changes, and enable cycles
 that keep the same capture do not retry. A new capture source (such as the
-track a camera or microphone reopens on unmute), changed encoder settings, or
+track a camera or microphone reopens after a device swap), changed encoder settings, or
 a replacement encoder recovers it. Recovery keeps the catalog ID and uses a
-fresh `track` name.
+fresh `track` name. A new network broadcast (a rename or a `maxAge` change)
+also starts the encoder over, under the catalog ID, with its advertised
+maxima reset.
 
 ## Strict CSP
 

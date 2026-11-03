@@ -1,4 +1,4 @@
-use super::{IntersectionError, InvalidPattern, Pattern};
+use super::{IntersectionError, InvalidPattern, Pattern, index::Index};
 
 /// A union of patterns, reduced so no member is contained by another.
 ///
@@ -10,6 +10,11 @@ use super::{IntersectionError, InvalidPattern, Pattern};
 /// union contains the candidate. A candidate covered only jointly by several members
 /// (`a/**` against `a`, `a/*`, and `a/*/**`) is refused, which keeps the check linear
 /// and its answer easy to predict. A grant that means a subtree writes `a/**`.
+///
+/// Operations over a whole union (collecting, extending, [`covers`](Self::covers), and
+/// [`intersect`](Self::intersect)) index one side by segment first, so their cost
+/// follows the members a query could match rather than every pair: a peer's large
+/// grant costs about its own size, not its square.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Patterns(Vec<Pattern>);
 
@@ -19,7 +24,8 @@ impl Patterns {
 		Self::default()
 	}
 
-	/// Add a pattern, dropping members it contains.
+	/// Add a pattern, dropping members it contains. Linear in the members; add many at
+	/// once with [`Extend`] or [`FromIterator`].
 	///
 	/// Returns `false` when a member already contains it, leaving the union unchanged.
 	pub fn insert(&mut self, pattern: Pattern) -> bool {
@@ -46,7 +52,8 @@ impl Patterns {
 	/// Whether every member of `other` is [contained](Self::contains) here: `other`
 	/// grants nothing this union does not. The empty union is covered by anything.
 	pub fn covers(&self, other: &Self) -> bool {
-		other.0.iter().all(|pattern| self.contains(pattern))
+		let index = Index::new(&self.0);
+		other.0.iter().all(|pattern| index.contains(pattern))
 	}
 
 	/// Whether any member overlaps `pattern`.
@@ -56,19 +63,46 @@ impl Patterns {
 
 	/// The paths in both unions, as one union: every member of this one intersected
 	/// with every member of `other`. See [`Pattern::intersect`].
+	///
+	/// Fails when the union grows past [`Pattern::MAX_INTERSECTIONS`] members.
 	pub fn intersect(&self, other: &Self) -> Result<Self, IntersectionError> {
-		let mut out = Self::new();
+		// A member inside the other union is its own intersection, and every other result
+		// it takes part in lies within it, so only the members left over are paired.
+		let ours = Index::new(&self.0);
+		let theirs = Index::new(&other.0);
+		let mut out = Vec::new();
+		let mut rest = Index::default();
 		for member in &self.0 {
-			for candidate in &other.0 {
-				for pattern in member.intersect(candidate)? {
-					out.insert(pattern);
-					if out.len() > Pattern::MAX_INTERSECTIONS {
-						return Err(IntersectionError::TooManyPatterns);
-					}
+			match theirs.contains(member) {
+				true => out.push(member.clone()),
+				false => rest.insert(member),
+			}
+		}
+		for candidate in &other.0 {
+			if ours.contains(candidate) {
+				out.push(candidate.clone());
+				continue;
+			}
+			for member in rest.overlapping(candidate) {
+				out.extend(member.intersect(candidate)?);
+				// Fail once the union grows past the limit, so the pieces held stay within a
+				// few times it rather than the product of both unions' sizes. A later, broader
+				// piece could have absorbed them, so this can refuse a union that would fit.
+				if out.len() > 2 * Pattern::MAX_INTERSECTIONS {
+					out = Self::bounded(out)?.0;
 				}
 			}
 		}
-		Ok(out)
+		Self::bounded(out)
+	}
+
+	/// The reduced union of `patterns`, failing past [`Pattern::MAX_INTERSECTIONS`].
+	fn bounded(patterns: Vec<Pattern>) -> Result<Self, IntersectionError> {
+		let out: Self = patterns.into_iter().collect();
+		match out.len() > Pattern::MAX_INTERSECTIONS {
+			true => Err(IntersectionError::TooManyPatterns),
+			false => Ok(out),
+		}
 	}
 
 	/// Every member rebased at `root`, as one union. See [`Pattern::rebase`].
@@ -127,18 +161,44 @@ impl From<Pattern> for Patterns {
 }
 
 impl FromIterator<Pattern> for Patterns {
+	/// Reduce a union in one pass, broadest first.
+	///
+	/// In [`specificity`](Pattern::specificity) order a pattern can only be contained by
+	/// one before it, so each is kept unless the index of those kept already contains it,
+	/// and nothing kept is ever removed.
 	fn from_iter<I: IntoIterator<Item = Pattern>>(iter: I) -> Self {
-		let mut set = Self::new();
-		set.extend(iter);
-		set
+		let mut sorted: Vec<Pattern> = iter.into_iter().collect();
+		sorted.sort_unstable_by(|a, b| a.specificity().cmp(&b.specificity()).then_with(|| a.cmp(b)));
+		sorted.dedup();
+
+		let mut index = Index::default();
+		let keep: Vec<bool> = sorted
+			.iter()
+			.map(|pattern| {
+				let kept = !index.contains(pattern);
+				if kept {
+					index.insert(pattern);
+				}
+				kept
+			})
+			.collect();
+		drop(index);
+
+		let mut keep = keep.into_iter();
+		sorted.retain(|_| keep.next().expect("one verdict per pattern"));
+		// Release the room the discarded patterns took, for as long as the union lives.
+		sorted.shrink_to_fit();
+		// The wire order is canonical text, whatever order reduction visited.
+		sorted.sort_unstable();
+		Self(sorted)
 	}
 }
 
 impl Extend<Pattern> for Patterns {
+	/// Reduce the members and the new patterns together, in one pass.
 	fn extend<I: IntoIterator<Item = Pattern>>(&mut self, iter: I) {
-		for pattern in iter {
-			self.insert(pattern);
-		}
+		let members = std::mem::take(&mut self.0);
+		*self = members.into_iter().chain(iter).collect();
 	}
 }
 

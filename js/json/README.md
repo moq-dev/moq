@@ -42,7 +42,7 @@ for await (const { value, at } of consumer) {
 const current = await consumer.latest();
 ```
 
-Pass `{ deltaRatio: x }` with a positive `x` to `Snapshot.Producer` to emit merge-patch deltas. A new snapshot group rolls once the deltas *already written* to the group exceed `x` times the fresh snapshot size; the delta that crosses the budget still lands first, so a group overshoots by at most one delta. `deltaRatio` defaults to `8` when unset. Set it to `0` to disable deltas: every change becomes a fresh single-frame snapshot group. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
+Changes ride as merge-patch deltas by default; pass `{ deltas: false }` to make every change a fresh single-frame snapshot group. A group of deltas runs until a joiner wants a fresh one: give the track a `refresh` ratio (`track.accept({ refresh: 8 })`), and once the deltas outweigh that many snapshots a join asks for a new group, which the producer answers by restating the value at the newest timestamp written. Without a ratio a group rolls only at its frame or byte cap. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
 
 ### Stream: every record
 
@@ -64,4 +64,4 @@ for await (const { value, at } of consumer) {
 
 Producers take `{ value, at }`, where `at` is the capture time written as the frame timestamp, and consumers return the same shape. Nothing fills in now: a timed track needs `at` on every write, and an untimed track takes none and reads back without one.
 
-Both modes support optional group-scoped DEFLATE compression (`{ compression: "deflate" }` on both sides), interoperable with the Rust `moq-json` crate. `Config` is the codec options; `Producer.Config` / `Consumer.Config` add the track.
+Compression is the track's: create it with `compress: true` (`new Track.Producer(name).accept({ compress: true })`) and `@moq/net` compresses each group on the wire, while every reader sees plain JSON. JSON is small and repetitive, so set it on JSON tracks. `Config` is the codec options; `Producer.Config` / `Consumer.Config` add the track.

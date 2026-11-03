@@ -38,19 +38,22 @@ Decided with the maintainer, 2026-10-13:
 - Keep Babel. A detour longer than the lost route may wait for a sequence
   refresh from the origin; instant failover is not required. Measure failure
   detection, additional routing recovery, and total interruption separately.
-- Mint a fresh routing identity per process or tab restart, shared across
-  that live origin's authenticated sessions: the hash of a per-process key,
-  proven once per session ([identity proof](/quest/m1/cluster-routing/identity.md)).
-  Keep administrative identity separate; `cluster.id` is removed. Session
-  scoping alone cannot identify one publisher through both its CDN and P2P
-  connections. (Decided 2026-10-14.)
-- A connection's own proven identity stays bare everywhere. Identities a
-  connection forwards on behalf of others are filed under
-  `hash(subject, id)`, keyed by the grant's credential subject, when its
-  publish grant is scoped, and stay bare when it is unscoped. The key is
-  deterministic, so two uplinks of one subject share it across token refresh,
-  and a forger only damages routes inside its own scope. (Decided 2026-10-14;
-  subject decided 2026-10-15.)
+- An origin declares its own routing identity, fresh per process or tab
+  restart and shared across its live sessions. It is unverified. Decided 2026-11-02 (maintainer, /quest-unblock): no
+  key proof is planned; if a use case needs a provable identity, moq-lite-07's
+  route identity becomes a public key, independent of P2P. Receiver-stamped
+  per-session identities were dropped 2026-10-26 (maintainer): in a mesh,
+  two relays stamping their sessions from one origin forward its routes as
+  two identities a third relay cannot recognize as one. Keep administrative
+  identity separate; `cluster.id` is removed. Switching between paths
+  resumes only across a matching explicit epoch.
+- Every identity a connection sends, its own and those it forwards, is
+  qualified when its publish grant is scoped, and stays bare when it is
+  unscoped, so a forger only damages routes inside its own scope. (Decided
+  2026-10-14; own identities included 2026-10-26, since they are no longer
+  proven.) How a scoped peer's identities are keyed is open in
+  [Routes and announces](/quest/m1/cluster-routing/routes.md): the
+  issuer-qualified subject key was dropped 2026-11-02 (maintainer).
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
@@ -72,7 +75,7 @@ Decided with the maintainer, 2026-10-13:
   sent routes learned from other connections. Relays default on;
   applications choose per P2P connection (on for redundancy, off for
   conference offload). Browser tabs stay off until the
-  [Rust-to-TypeScript](/quest/m2/rs2ts/README.md) port. Applications
+  [Rust-to-TypeScript](/quest/m2/rs2ts-js.md) port. Applications
   explicitly select P2P connections; discovery does not dial everyone.
 - Each CDN broadcast enters a local network once by configuration: local
   peers outrank a backup uplink, and origin aggregation joins the rest.
@@ -81,29 +84,33 @@ Decided with the maintainer, 2026-10-13:
   m1 provides and tests the shared routing primitives without requiring an
   actual P2P integration.
 
-The implementation is gated on [handoff proofs](/quest/m1/cluster-routing/handoff.md):
-a complete neighbor snapshot does not prove its claims are current. The
-routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes.md)
+The handoff proof showed a complete neighbor snapshot does not prove its
+claims are current; receivers merge origin-versioned views by floor instead.
+The routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes.md)
 with deterministic counterexamples: path-only subscriptions that reselect
 origins at every hop loop and deadlock, so forwarded requests name their
 identity; feasibility makes transit priorities depend on arrival order;
 export keeps one selection with a down-only bit; and scoped forwarding is
-contained by subject-qualified identities.
+contained by qualified identities.
 
 The new routing model and finalized lite-07 belong to the breaking release.
 Existing mesh deployments remain supported; the full edge/core topology
 migration is independent. Basic outbound federation proves the common routing
 contract without requiring that deployment migration.
 
-Recent baseline: #5375's two-second retraction quarantine reduced stale
-revivals but left residual cases; #5391 bounded its queue under repeated
-same-clock churn. #5382 and #5393 separately reduced idle-session polling.
+Recent baseline: [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
+two-second retraction quarantine reduced stale revivals but left residual
+cases; [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391) bounded
+its queue under repeated same-clock churn.
+[moq-dev/moq#5382](https://github.com/moq-dev/moq/pull/5382) and
+[moq-dev/moq#5393](https://github.com/moq-dev/moq/pull/5393) separately
+reduced idle-session polling.
 The 300 ms update hold alone is no longer the baseline. Keep regression
 coverage for announcement churn, idle work, active continuity, and retained
 state separately; fewer control bytes does not prove cheaper runtime work.
 
 The earlier simulator estimates remain in [Routes and announces](/quest/m1/cluster-routing/routes.md).
-They do not prove the proposed handoff correct. Preserve public synthetic
+They do not prove the handoff correct; its fixtures do. Preserve public synthetic
 fixtures and controlled-time regressions, including residual stale revival,
 not only results from deployment tooling. Do not claim per-origin aggregation
 reduces origin count when every application publishes one broadcast.
@@ -119,8 +126,6 @@ setup after the capabilities land.
 
 ## Required
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - a routing identity is the hash of a per-process key that every session proves
-- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims survive rerouting without resurrection or false END
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 
@@ -131,4 +136,3 @@ setup after the capabilities land.
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m2
 - [Route wakes](/quest/m2/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m2/link-quality.md) - optional measured link cost, distinct from delivery-health failover
-- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - independent origins serving the same explicit epoch

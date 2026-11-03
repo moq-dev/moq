@@ -52,18 +52,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	commands.finish()?;
 
 	let waiter = kio::Waiter::noop();
-	let Poll::Ready(Ok(Some(latest))) = state_reader.poll_next(&waiter) else {
+	// `latest` skips the stale steering values; `next` would replay them in order.
+	let Poll::Ready(Ok(Some(latest))) = state_reader.poll_latest(&waiter) else {
 		return Err("finished control track did not yield its latest state".into());
 	};
-	assert_eq!(latest, Control { speed: 0, turn: 0 });
-	println!("Current control: {latest:?}");
-	assert!(matches!(state_reader.poll_next(&waiter), Poll::Ready(Ok(None))));
-	for expected in expected {
+	assert_eq!(latest.value, Control { speed: 0, turn: 0 });
+	assert_eq!(latest.at, Some(Timestamp::from_millis(2)?));
+	println!("Current control: {:?} at {:?}", latest.value, latest.at);
+	assert!(matches!(state_reader.poll_latest(&waiter), Poll::Ready(Ok(None))));
+	for (tick, expected) in expected.into_iter().enumerate() {
 		let Poll::Ready(Ok(Some(command))) = command_reader.poll_next(&waiter) else {
 			return Err("finished command track lost an ordered command".into());
 		};
-		assert_eq!(command, expected);
-		println!("Command: {command:?}");
+		assert_eq!(command.value, expected);
+		assert_eq!(command.at, Some(Timestamp::from_millis(tick as u64)?));
+		println!("Command: {:?} at {:?}", command.value, command.at);
 	}
 	assert!(matches!(command_reader.poll_next(&waiter), Poll::Ready(Ok(None))));
 	Ok(())

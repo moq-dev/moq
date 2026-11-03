@@ -3,6 +3,10 @@
 //! Maps the AV1CodecConfigurationRecord (av1C) flag bits into the
 //! catalog's AV1 codec struct, and provides an [`Import`] that publishes
 //! raw AV1 bitstreams (OBU-framed) to a moq broadcast.
+//!
+//! The sequence header has no sample aspect. AV1's per-frame
+//! [`render_size`](https://aomediacodec.github.io/av1-spec/#render-size-syntax)
+//! hint can change between frames, so it does not establish a display aspect for the whole rendition.
 
 mod import;
 mod split;
@@ -16,21 +20,27 @@ use hang::catalog::AV1;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The OBU or codec configuration has an incomplete or invalid header.
 	#[error("OBU is too short")]
 	ObuTooShort,
 
+	/// The OBU size exceeds the supported length.
 	#[error("OBU size too large")]
 	ObuSizeTooLarge,
 
+	/// The stream has not supplied its decoder configuration.
 	#[error("not initialized")]
 	NotInitialized,
 
+	/// A frame arrived before the sequence header.
 	#[error("expected sequence header before any frames")]
 	MissingSequenceHeader,
 
+	/// The frame has no timestamp.
 	#[error("missing timestamp")]
 	MissingTimestamp,
 
+	/// The OBU header could not be parsed.
 	#[error("OBU header parse: {0}")]
 	ObuHeaderParse(std::sync::Arc<std::io::Error>),
 }
@@ -41,6 +51,7 @@ impl From<std::io::Error> for Error {
 	}
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) for the `av01`
@@ -71,6 +82,8 @@ pub(crate) fn config_from_av1c(av1c: &[u8]) -> Result<hang::catalog::VideoConfig
 		chroma_sample_position: av1c[2] & 0x03,
 		..Default::default()
 	});
+	// configOBUs follow the four header bytes, usually with the sequence header.
+	config.color = color(&av1c[4..]);
 	config.description = Some(bytes::Bytes::copy_from_slice(av1c));
 	Ok(config)
 }

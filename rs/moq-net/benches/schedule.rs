@@ -14,6 +14,8 @@
 //!
 //! `fanout` sweeps subscriptions against groups in flight per subscription, timing one frame,
 //! so a scheduling cost that grows with the table rather than the touched path is a slope.
+//! `datagram` sweeps send groups and queued datagrams per group against one
+//! datagram sent and one evicted, for the same reason.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,7 +25,10 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 
 // Both schedulers compile straight from source, so neither widens its crate's API for this.
 #[path = "../src/priority.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod priority;
 
 // The queue names `crate::track::Order`, which is public.
@@ -34,11 +39,11 @@ mod track {
 // Keeps moq-quic's own formatting.
 #[rustfmt::skip]
 #[path = "../../moq-quic/src/connection/streams/schedule.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "the bench compiles the private module from source and uses only part of it")]
 mod schedule;
 
 use priority::{Priority, PriorityHandle, PriorityQueue};
-use schedule::{Schedule, Slot};
+use schedule::{Next, Schedule, Slot};
 
 /// The most a frame carries, one packet.
 const PACKET: usize = 1200;
@@ -47,7 +52,7 @@ const PACKET: usize = 1200;
 /// `cadence` ticks, numbered from `first` in steps of `step`.
 #[derive(Clone, Copy)]
 struct Track {
-	priority: u8,
+	priority: i8,
 	rate: usize,
 	cadence: u64,
 	first: u64,
@@ -55,7 +60,7 @@ struct Track {
 }
 
 impl Track {
-	const fn new(priority: u8, rate: usize, cadence: u64) -> Self {
+	const fn new(priority: i8, rate: usize, cadence: u64) -> Self {
 		Self {
 			priority,
 			rate,
@@ -188,7 +193,7 @@ struct Sim {
 	kind: Kind,
 	tracks: Vec<Track>,
 	capacity: usize,
-	schedule: Schedule<u64>,
+	schedule: Schedule<u64, ()>,
 	groups: Vec<usize>,
 	queue: PriorityQueue,
 	moved: Arc<Mutex<Vec<u64>>>,
@@ -207,7 +212,7 @@ impl Sim {
 		let groups = workload
 			.tracks
 			.iter()
-			.map(|track| schedule.open_group(track.priority.into(), None))
+			.map(|track| schedule.open_group(track.priority.into()))
 			.collect();
 		let mut sim = Self {
 			kind,
@@ -324,7 +329,7 @@ impl Sim {
 
 		let mut budget = self.capacity;
 		while budget > 0 {
-			let Some(id) = self.schedule.pop() else {
+			let Some(Next::Stream(id)) = self.schedule.pop() else {
 				break;
 			};
 			let stream = self.streams.get_mut(&id).unwrap();
@@ -347,7 +352,7 @@ impl Sim {
 	}
 
 	fn report(&self, workload: &str) {
-		let priorities: Vec<u8> = {
+		let priorities: Vec<i8> = {
 			let mut p: Vec<_> = self.tracks.iter().map(|t| t.priority).collect();
 			p.sort();
 			p.dedup();
@@ -420,11 +425,11 @@ fn bench_workloads(c: &mut Criterion) {
 }
 
 /// A saturated schedule: `subscriptions` groups at one priority, each with `streams` queued.
-fn saturated(subscriptions: usize, streams: usize) -> (Schedule<u64>, Vec<Slot>) {
+fn saturated(subscriptions: usize, streams: usize) -> (Schedule<u64, ()>, Vec<Slot>) {
 	let mut schedule = Schedule::new();
 	let mut slots = Vec::with_capacity(subscriptions * streams);
 	for _ in 0..subscriptions {
-		let group = schedule.open_group(0, None);
+		let group = schedule.open_group(0);
 		for seq in 0..streams {
 			let id = slots.len() as u64;
 			let mut slot = Slot::default();
@@ -449,7 +454,9 @@ fn bench_fanout(c: &mut Criterion) {
 				&(),
 				|b, ()| {
 					b.iter(|| {
-						let id = schedule.pop().unwrap();
+						let Some(Next::Stream(id)) = schedule.pop() else {
+							unreachable!("only streams are queued");
+						};
 						let slot = &mut slots[id as usize];
 						schedule.sent(id, slot, PACKET, Some((id % streams as u64) as i64), true);
 					});
@@ -485,5 +492,67 @@ fn bench_fanout(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_workloads, bench_fanout);
+/// A full datagram budget: `groups` send groups at one priority, with `datagrams` queued in
+/// each, one packet apiece.
+fn datagrams(groups: usize, datagrams: usize) -> (Schedule<u64, ()>, Vec<usize>) {
+	let mut schedule = Schedule::new();
+	let ids: Vec<_> = (0..groups).map(|_| schedule.open_group(0)).collect();
+	let budget = groups * datagrams * PACKET;
+	for seq in 0..datagrams {
+		for &group in &ids {
+			assert!(schedule.push_datagram(Some(group), seq as i64, (), PACKET, budget));
+		}
+	}
+	(schedule, ids)
+}
+
+fn bench_datagram(c: &mut Criterion) {
+	// A datagram into a full budget, which evicts the oldest of the lowest-priority group.
+	let mut group = c.benchmark_group("schedule_datagram_evict_groups");
+	for groups in [1, 16, 256, 4_096] {
+		for queued in [1, 16, 256] {
+			if groups * queued > 100_000 {
+				continue;
+			}
+			let (mut schedule, ids) = datagrams(groups, queued);
+			let budget = schedule.datagram_bytes();
+			let mut seq = queued as i64;
+			let mut next = 0;
+			group.bench_with_input(BenchmarkId::new(format!("groups_{groups}"), queued), &(), |b, ()| {
+				b.iter(|| {
+					// Round robin, so every group keeps its share of the budget.
+					schedule.push_datagram(Some(ids[next]), seq, (), PACKET, budget);
+					next = (next + 1) % ids.len();
+					seq += 1;
+				});
+			});
+		}
+	}
+	group.finish();
+
+	// A datagram sent and another queued in its place, through every round robin.
+	let mut group = c.benchmark_group("schedule_datagram_send");
+	for groups in [1, 16, 256, 4_096] {
+		for queued in [1, 16, 256] {
+			if groups * queued > 100_000 {
+				continue;
+			}
+			let (mut schedule, _) = datagrams(groups, queued);
+			let mut seq = queued as i64;
+			group.bench_with_input(BenchmarkId::new(format!("groups_{groups}"), queued), &(), |b, ()| {
+				b.iter(|| {
+					let Some(Next::Datagram(at)) = schedule.pop() else {
+						unreachable!("only datagrams are queued");
+					};
+					schedule.sent_datagram(at);
+					schedule.push_datagram(at, seq, (), PACKET, usize::MAX);
+					seq += 1;
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_workloads, bench_fanout, bench_datagram);
 criterion_main!(benches);

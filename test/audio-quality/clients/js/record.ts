@@ -127,14 +127,19 @@ try {
 	const trimmed = arrivals.filter(([at]) => at - start <= durationMs);
 	const round = (x: number, places: number) => Math.round(x * 10 ** places) / 10 ** places;
 	const trace: Trace = {
-		version: 2,
+		version: 3,
 		source,
 		description,
 		transport: info.transport,
 		rtt: rtt === null ? null : round(rtt, 1),
 		config: info.config as Trace["config"],
 		duration: durationMs,
-		arrivals: trimmed.map(([at, timestamp, group]) => [round(at - start, 2), round(timestamp, 3), group]),
+		arrivals: trimmed.map(([at, timestamp, group, duration]) => [
+			round(at - start, 2),
+			round(timestamp, 3),
+			group,
+			duration,
+		]),
 	};
 	// One arrival per line, so the file reads as a table.
 	const { arrivals: rows, ...header } = trace;

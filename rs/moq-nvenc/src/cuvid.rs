@@ -35,24 +35,32 @@ type UnmapVideoFrame64 = unsafe extern "C" fn(CUvideodecoder, c_ulonglong) -> CU
 /// ([`create_video_parser`](Self::create_video_parser)), feed it bitstream
 /// packets, and inside the parser callbacks create a decoder, decode pictures,
 /// and map/unmap the decoded frames. All calls require a current CUDA context.
-#[allow(missing_debug_implementations)]
 pub struct Api {
+	/// Creates a bitstream parser.
 	#[doc(alias = "cuvidCreateVideoParser")]
 	pub create_video_parser: CreateVideoParser,
+	/// Feeds a bitstream packet to a parser.
 	#[doc(alias = "cuvidParseVideoData")]
 	pub parse_video_data: ParseVideoData,
+	/// Destroys a parser.
 	#[doc(alias = "cuvidDestroyVideoParser")]
 	pub destroy_video_parser: DestroyVideoParser,
+	/// Queries what the decoder supports for a codec and format.
 	#[doc(alias = "cuvidGetDecoderCaps")]
 	pub get_decoder_caps: GetDecoderCaps,
+	/// Creates a decoder.
 	#[doc(alias = "cuvidCreateDecoder")]
 	pub create_decoder: CreateDecoder,
+	/// Destroys a decoder.
 	#[doc(alias = "cuvidDestroyDecoder")]
 	pub destroy_decoder: DestroyDecoder,
+	/// Submits one picture to a decoder.
 	#[doc(alias = "cuvidDecodePicture")]
 	pub decode_picture: DecodePicture,
+	/// Maps a decoded frame for reading.
 	#[doc(alias = "cuvidMapVideoFrame64")]
 	pub map_video_frame: MapVideoFrame64,
+	/// Unmaps a frame mapped by `map_video_frame`.
 	#[doc(alias = "cuvidUnmapVideoFrame64")]
 	pub unmap_video_frame: UnmapVideoFrame64,
 }

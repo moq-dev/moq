@@ -53,19 +53,18 @@ impl Import {
 		Ok(())
 	}
 
-	fn init(&mut self, vp9: hang::catalog::VP9, width: u16, height: u16) -> crate::Result<()> {
-		let mut config = hang::catalog::VideoConfig::new(vp9);
-		config.coded_width = Some(width as u32);
-		config.coded_height = Some(height as u32);
+	fn init(&mut self, vp9: hang::catalog::VP9, width: u32, height: u32) -> crate::Result<()> {
+		let mut config = hang::catalog::VideoConfig::new(vp9.clone());
+		config.color = super::color(&vp9);
+		config.coded_width = Some(width);
+		config.coded_height = Some(height);
 
 		self.apply_config(config)?;
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	///
-	/// A changed config just re-mirrors the rendition; there are no fixed tracks to reject a
-	/// reconfiguration.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}
@@ -97,11 +96,6 @@ impl Import {
 		self.track.track().demand()
 	}
 
-	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
-		self.track.flush(timestamp, now)
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
@@ -114,8 +108,6 @@ impl Import {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;
@@ -125,6 +117,13 @@ impl Import {
 	/// Mark a timeline break and restart measurement without lowering advertised values.
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
 		self.track.discontinuity()
+	}
+
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> crate::Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)
 	}
 
 	/// Close the current group and open the next one at `sequence`.

@@ -92,7 +92,7 @@ fn nal_types(annexb: &[u8]) -> Vec<u8> {
 }
 
 fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
-	let mut config = crate::encode::Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap());
+	let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
 	config.kind = crate::encode::Kind::Named("nvenc".into());
 	config.color = Some(color);
 	config.gop = crate::encode::Gop::Keyframe { interval: 30 };
@@ -117,7 +117,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 	// convert and scale fine, there is just no encoder to hand them to.
 	let size = Size::new(320, 192);
 	let sd = Size::new(160, 96);
-	let color = Color::Bt709Limited;
+	let color = Color::BT709;
 	let mut producer = Producer::new(size).expect("no Vulkan NVIDIA device: this opt-in test needs one");
 	let converter = Converter::new(0, color, NonZeroUsize::new(3).unwrap()).expect("CUDA converter");
 	assert_eq!(converter.color(), color);
@@ -314,7 +314,7 @@ struct Stage {
 
 impl Stage {
 	fn measure<T>(&mut self, f: impl FnOnce() -> T) -> T {
-		let (wall, cpu) = (std::time::Instant::now(), cpu_now());
+		let (wall, cpu) = (kio::clock::now(), cpu_now());
 		let out = f();
 		self.wall.push(wall.elapsed());
 		self.cpu.push(cpu_now() - cpu);
@@ -359,7 +359,7 @@ async fn vulkan_cuda_three_view_workload() {
 	const TICKS: u64 = 90;
 	let size = Size::new(1280, 720);
 	let sd = Size::new(640, 360);
-	let color = Color::Bt709Limited;
+	let color = Color::BT709;
 	let tick = Duration::from_nanos(1_000_000_000 / 30);
 
 	// One picture per tick phase, so the encoders see real motion instead of a
@@ -384,7 +384,7 @@ async fn vulkan_cuda_three_view_workload() {
 	let (mut encode_hd, mut encode_sd, mut complete) = (Stage::default(), Stage::default(), Stage::default());
 	let mut bytes = (0usize, 0usize);
 	let mut late = 0u64;
-	let mut started = std::time::Instant::now();
+	let mut started = kio::clock::now();
 
 	for tick_index in 0..WARMUP + TICKS {
 		// Discard the warmup: the first ticks pay for PTX JIT, NVENC's lazy
@@ -399,9 +399,9 @@ async fn vulkan_cuda_three_view_workload() {
 			complete = Stage::default();
 			bytes = (0, 0);
 			late = 0;
-			started = std::time::Instant::now();
+			started = kio::clock::now();
 		}
-		let deadline = std::time::Instant::now() + tick;
+		let deadline = kio::clock::now() + tick;
 		let timestamp = moq_net::Timestamp::from_micros(tick_index * 33_333).unwrap();
 
 		for (producer, slot, hd, small, signal) in &mut views {
@@ -430,7 +430,7 @@ async fn vulkan_cuda_three_view_workload() {
 				.expect("encode SD");
 			bytes.1 += packets.iter().map(|p| p.payload.len()).sum::<usize>();
 
-			let (wall, cpu) = (std::time::Instant::now(), cpu_now());
+			let (wall, cpu) = (kio::clock::now(), cpu_now());
 			let returned = completion.wait().await.expect("completion worker stopped");
 			complete.wall.push(wall.elapsed());
 			complete.cpu.push(cpu_now() - cpu);
@@ -443,8 +443,8 @@ async fn vulkan_cuda_three_view_workload() {
 			*slot = Some(returned);
 		}
 
-		match deadline.checked_duration_since(std::time::Instant::now()) {
-			Some(idle) => tokio::time::sleep(idle).await,
+		match deadline.checked_duration_since(kio::clock::now()) {
+			Some(idle) => kio::clock::sleep(idle).await,
 			None => late += 1,
 		}
 	}
@@ -506,8 +506,8 @@ fn auto_external_captures_are_distinguishable() {
 	let size = Size::new(320, 192);
 	for output in [size, Size::new(160, 96)] {
 		for capture in 1..6 {
-			let previous = expected(size, capture_shift(size, capture - 1), Color::Bt709Limited, output);
-			let current = expected(size, capture_shift(size, capture), Color::Bt709Limited, output);
+			let previous = expected(size, capture_shift(size, capture - 1), Color::BT709, output);
+			let current = expected(size, capture_shift(size, capture), Color::BT709, output);
 			for (plane, a, b) in [
 				("y", current.y(), previous.y()),
 				("u", current.u(), previous.u()),
@@ -532,7 +532,7 @@ fn auto_external_captures_are_distinguishable() {
 #[ignore = "requires a Linux NVIDIA GPU with Vulkan/CUDA external memory and NVENC"]
 async fn vulkan_cuda_auto_external_encode() {
 	let size = Size::new(320, 192);
-	let color = Color::Bt709Limited;
+	let color = Color::BT709;
 	let mut producer = Producer::new(size).expect("NVIDIA Vulkan device required by opted-in test");
 	let device = producer.contract(Format::Rgba8).device;
 	let decode = crate::decode::Config {
@@ -541,7 +541,7 @@ async fn vulkan_cuda_auto_external_encode() {
 	};
 	let mut renditions = Vec::new();
 	for output in [size, Size::new(160, 96)] {
-		let mut config = crate::encode::Config::new(output.width, output.height, crate::Rate::new(30, 1).unwrap());
+		let mut config = crate::encode::Config::new(output.width, output.height, crate::FrameRate::new(30, 1).unwrap());
 		config.input = Some(device);
 		config.color = Some(color);
 		config

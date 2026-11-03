@@ -25,7 +25,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Fixture {
 	producer: moq_e2ee::track::Producer,
 	consumer: moq_e2ee::track::Consumer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_pair: MockPair,
 }
 
@@ -38,15 +38,15 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	.unwrap();
 	let generation = cred.produce();
 	let path = cred.path("meeting.hang").unwrap();
-	let name = generation.name(track).unwrap();
 
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
 	let broadcast = publisher.create_broadcast(&path).unwrap();
-	let net = broadcast.create_track(name.as_str(), timed()).unwrap();
+	let protected = moq_e2ee::broadcast::Producer::new(broadcast.broadcast().clone(), generation.clone());
+	let producer = protected.create_track(track, timed()).unwrap();
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(generation.epoch().clone()))
+		.announce(moq_net::origin::Route::default().with_instance(generation.epoch().instance(), 0))
 		.unwrap();
 
 	let mut options = MockConnectOptions::new(version);
@@ -54,32 +54,31 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
 
-	// The subscriber knows the opaque path and takes the epoch from the announced route.
-	// A wire without epochs leaves it to the application's own channel.
+	// The subscriber knows the opaque path and takes the epoch from the announced route's
+	// instance. A wire without instances leaves it to the application's own channel.
 	let consumer = consumer_origin.consume();
-	let route = consumer.routed(&path).await.unwrap();
+	let remote = consumer.follow(&path, None).unwrap().available().await.unwrap();
 	if version.to_string().starts_with("moq-lite-07") {
 		assert_eq!(
-			route.epoch.as_ref(),
+			moq_e2ee::Epoch::of(&remote).as_ref(),
 			Some(generation.epoch()),
 			"lite-07 announces the epoch"
 		);
 	}
-	let epoch = route.epoch.unwrap_or_else(|| generation.epoch().clone());
-	let consuming = cred.consume(epoch);
-	let remote = consumer.request_broadcast(&path, None).await.unwrap();
-	let subscriber = remote
-		.track(name.as_str())
+	let epoch = moq_e2ee::Epoch::of(&remote).unwrap_or_else(|| generation.epoch().clone());
+	let consumer = moq_e2ee::broadcast::Consumer::new(remote, cred.consume(epoch))
+		.subscribe(
+			track,
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+		)
 		.unwrap()
-		.subscribe(Some(
-			moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)),
-		))
 		.await
 		.unwrap();
 
 	Fixture {
-		producer: generation.produce(net).unwrap(),
-		consumer: consuming.consume(subscriber).unwrap(),
+		producer,
+		consumer,
 		_broadcast: broadcast,
 		_pair: pair,
 	}
@@ -87,7 +86,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 
 #[tokio::test]
 async fn grouped_over_lite() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_protected("moq-lite-07-wip".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
@@ -104,8 +103,8 @@ async fn grouped_over_lite() {
 
 #[tokio::test]
 async fn grouped_over_ietf() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected("moq-transport-21".parse().unwrap(), "video").await;
+	kio::clock::timeout(TEST_TIMEOUT, async {
+		let mut fixture = connect_protected("moq-transport-22".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(1).unwrap(), b"ietf-frame")
@@ -119,16 +118,16 @@ async fn grouped_over_ietf() {
 	.expect("timed out");
 }
 
-async fn datagram_roundtrip(version: &str) {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+async fn datagram_roundtrip(version: &str, plaintext: &[u8]) {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_protected(version.parse().unwrap(), "audio").await;
 		fixture
 			.producer
-			.append_datagram(Timestamp::from_millis(9).unwrap(), b"opus")
+			.append_datagram(Timestamp::from_millis(9).unwrap(), plaintext)
 			.unwrap();
 		match fixture.consumer.recv_datagram().await.unwrap() {
 			Some(moq_e2ee::datagram::Event::Datagram(d)) => {
-				assert_eq!(&d.plaintext[..], b"opus");
+				assert_eq!(&d.plaintext[..], plaintext);
 				assert_eq!(d.sequence, 0);
 			}
 			other => panic!("{other:?}"),
@@ -140,10 +139,16 @@ async fn datagram_roundtrip(version: &str) {
 
 #[tokio::test]
 async fn datagrams_over_lite() {
-	datagram_roundtrip("moq-lite-05").await;
+	datagram_roundtrip("moq-lite-05", b"opus").await;
+}
+
+/// The largest plaintext still fits once lite-07 prefixes the datagram with its Type.
+#[tokio::test]
+async fn max_datagram_over_lite_07() {
+	datagram_roundtrip("moq-lite-07-wip", &[7; moq_e2ee::MAX_DATAGRAM_PLAINTEXT]).await;
 }
 
 #[tokio::test]
 async fn datagrams_over_ietf() {
-	datagram_roundtrip("moq-transport-21").await;
+	datagram_roundtrip("moq-transport-22", b"opus").await;
 }

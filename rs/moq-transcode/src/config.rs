@@ -1,6 +1,6 @@
 //! Transcoder configuration: the rung ladder and catalog wiring.
 
-use moq_net::path::RelativeOwned;
+use moq_net::path::Relative;
 
 use crate::Ladder;
 
@@ -28,7 +28,7 @@ pub struct Config {
 	/// and audio) through this path so players fetch them from the source
 	/// directly; the transcoder never proxies or subscribes them. `None` omits
 	/// them from the derivative catalog.
-	pub source: Option<RelativeOwned>,
+	pub source: Option<Relative>,
 
 	/// Which video encoder implementation encodes the rungs. The default
 	/// prefers hardware (NVENC on Linux, VideoToolbox on macOS, Media

@@ -5,7 +5,11 @@ import { race } from "@moq/signals";
 // whatever it holds when this rejects.
 export async function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	if (!signal) return promise;
-	signal.throwIfAborted();
+	if (signal.aborted) {
+		// Observed, since the caller drops it: a later rejection is not unhandled.
+		promise.catch(() => undefined);
+		throw signal.reason;
+	}
 
 	const { promise: aborted, reject } = Promise.withResolvers<never>();
 	const onAbort = () => reject(signal.reason);

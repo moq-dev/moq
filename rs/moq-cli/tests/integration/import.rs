@@ -10,7 +10,7 @@ use tokio::process::Child;
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a finished import stays up: long enough for a subscriber to request its media
 /// after reading the final catalog, short enough that the process exits within `TIMEOUT`.
-const MAX_AGE: &str = "5s";
+const LINGER: &str = "5s";
 const BBB: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 
 /// Await `step` while `moq` still holds stdin open, failing as soon as the process exits.
@@ -21,17 +21,22 @@ async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>
 	tokio::select! {
 		out = step => out,
 		status = child.wait() => panic!("moq exited with {} before {what}", status.expect("wait for moq")),
-		_ = tokio::time::sleep(TIMEOUT) => panic!("{what} timed out"),
+		_ = kio::clock::sleep(TIMEOUT) => panic!("{what} timed out"),
 	}
 }
 
 /// Start `moq import ts`, publishing `demo` from stdin to the relay at `url`.
 fn import(url: &str, fingerprint: &str) -> Child {
+	import_as(url, fingerprint, &[], "demo")
+}
+
+/// Start `moq <global> import ts`, publishing `name` from stdin to the relay at `url`.
+fn import_as(url: &str, fingerprint: &str, global: &[&str], name: &str) -> Child {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
-	for (name, _) in std::env::vars_os() {
-		if name.to_string_lossy().starts_with("MOQ_") {
-			command.env_remove(name);
+	for (var, _) in std::env::vars_os() {
+		if var.to_string_lossy().starts_with("MOQ_") {
+			command.env_remove(var);
 		}
 	}
 	command
@@ -41,12 +46,10 @@ fn import(url: &str, fingerprint: &str) -> Child {
 			"--connect-tls-fingerprint",
 			fingerprint,
 			"--broadcast",
-			"demo",
-			"import",
-			"--max-age",
-			MAX_AGE,
-			"ts",
+			name,
 		])
+		.args(global)
+		.args(["import", "--linger", LINGER, "ts"])
 		.stdin(Stdio::piped())
 		.kill_on_drop(true)
 		.spawn()
@@ -89,7 +92,7 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 		panic!("the first announce event is {event:?}, not a start");
 	};
 	assert_eq!(announce.prefix.as_str(), "demo");
-	let broadcast = running(&mut child, "the broadcast", consumer.request_broadcast("demo", None))
+	let broadcast = running(&mut child, "the broadcast", consumer.request("demo", None))
 		.await
 		.expect("announced broadcast resolves");
 	let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast)
@@ -104,14 +107,14 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 		.expect("a catalog");
 
 	drop(stdin);
-	let status = tokio::time::timeout(TIMEOUT, child.wait())
+	let status = kio::clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq never exited")
 		.expect("wait for moq");
 	assert!(status.success(), "moq exited with {status}");
 
 	loop {
-		match tokio::time::timeout(TIMEOUT, catalogs.next())
+		match kio::clock::timeout(TIMEOUT, catalogs.next())
 			.await
 			.expect("the catalog never ended")
 		{
@@ -130,7 +133,7 @@ const SHORT: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data
 
 /// A subscriber already waiting when a short import ends still receives its media: the
 /// import announces at the finish, once its catalog lists the tracks, and keeps them servable
-/// for their max-age after EOF.
+/// for the linger after EOF.
 #[tokio::test]
 async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	let _ = moq_tokio::crypto::install_default();
@@ -164,7 +167,7 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	running(&mut child, "the announce", announced.next())
 		.await
 		.expect("origin closed");
-	let broadcast = running(&mut child, "the broadcast", consumer.request_broadcast("demo", None))
+	let broadcast = running(&mut child, "the broadcast", consumer.request("demo", None))
 		.await
 		.expect("announced broadcast resolves");
 	let mut catalogs = running(
@@ -175,7 +178,7 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	.await
 	.expect("subscribe to the catalog");
 
-	let catalog = tokio::time::timeout(TIMEOUT, catalogs.next())
+	let catalog = kio::clock::timeout(TIMEOUT, catalogs.next())
 		.await
 		.expect("no catalog")
 		.expect("catalog read")
@@ -187,12 +190,12 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 		.next()
 		.expect("a video rendition")
 		.clone();
-	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track(&name).expect("track").subscribe(None))
+	let mut track = kio::clock::timeout(TIMEOUT, broadcast.track(&name).expect("track").subscribe(None))
 		.await
 		.expect("the video subscription timed out")
 		.expect("subscribe to the video");
 	let mut frames = 0;
-	while let Some(mut group) = tokio::time::timeout(TIMEOUT, track.recv_group())
+	while let Some(mut group) = kio::clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("the video never ended")
 		.expect("video group")
@@ -203,7 +206,7 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	}
 	assert!(frames > 0, "the subscriber received no video");
 
-	let status = tokio::time::timeout(TIMEOUT, child.wait())
+	let status = kio::clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq never exited")
 		.expect("wait for moq");

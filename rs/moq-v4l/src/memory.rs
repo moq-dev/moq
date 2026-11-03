@@ -1,7 +1,6 @@
 use std::fmt;
 
 /// Memory used for buffer exchange
-#[allow(clippy::unreadable_literal)]
 #[rustfmt::skip]
 #[repr(u32)]
 pub enum Memory {

@@ -24,8 +24,7 @@ fi
 
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
 # Debug by default. This is a compile-and-test gate, not a benchmark, and a
-# release build of moq-ffi shares no artifacts with the debug ones `just ci check`
-# and `just ci test` already produce, so it was a third full compile of the
+# release build of moq-ffi shares no artifacts with the debug ones `just ci` already produces, so it was a third full compile of the
 # dependency tree (~5 min of CI on its own, plus a whole target/release tree on
 # a runner that was already tight on disk). Set MOQ_FFI_PROFILE=release for an
 # optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
@@ -37,8 +36,11 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "kt generate: building moq-ffi for $HOST_TARGET..."
-cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
-    --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+# The shared default build (.cargo/config.toml), whose `openh264` the tests rely on.
+# Cargo resolves the alias, and a relative CARGO_TARGET_DIR, from the working
+# directory, so the build and the metadata below both run in the workspace.
+cd "$WORKSPACE_DIR"
+cargo build-ffi ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"}
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')

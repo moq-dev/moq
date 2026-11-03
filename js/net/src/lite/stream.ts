@@ -1,13 +1,3 @@
-import type { AnnounceRequest } from "./announce.ts";
-import type { Goaway } from "./goaway.ts";
-import type { Group } from "./group.ts";
-import type { SessionClient } from "./session.ts";
-import type { Subscribe } from "./subscribe.ts";
-import type { Track } from "./track.ts";
-
-export type StreamBi = SessionClient | AnnounceRequest | Subscribe | Track | Goaway;
-export type StreamUni = Group;
-
 export const StreamId = {
 	Session: 0,
 	Announce: 1,
@@ -17,6 +7,7 @@ export const StreamId = {
 	Goaway: 5,
 	Track: 6,
 	Auth: 7,
+	Tracks: 8,
 	ClientCompat: 0x20,
 	ServerCompat: 0x21,
 } as const;
@@ -30,6 +21,8 @@ export const StreamId = {
 export const DataType = {
 	Group: 0,
 	Setup: 1,
+	/** Arbitrary bytes discarded by lite-07+ receivers. */
+	Padding: 2,
 } as const;
 
 /** A unidirectional data-stream type. See {@link DataType}. */

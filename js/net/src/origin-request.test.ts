@@ -1,80 +1,89 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
-import * as Epoch from "./epoch";
+import { StreamCode, StreamError } from "./error";
 import { Route } from "./hop";
-import { Producer } from "./origin";
+import * as Instance from "./instance.ts";
+import { hooks } from "./internal.ts";
+import { type Following, Producer, type Publication, type Request, type Requesting } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-test("an announced request follows restart, end and a later start", async () => {
+test("a follower moves through restart, end and a later start", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const first = origin.createBroadcast(path);
-	first.announce();
-	const request = origin.request(path, { announced: true });
-	expect(request.active.peek()?.closed).toBe(first.closed);
-	const second = origin.createBroadcast(path);
-	second.announce();
+	const firstPublication = origin.createBroadcast(path);
+	const first = firstPublication.broadcast;
+	firstPublication.announce();
+	const request: Following = origin.follow(path);
+	expect(request.active.peek()?.instance).toBe(firstPublication.route?.instance);
+	const secondPublication = origin.createBroadcast(path);
+	const second = secondPublication.broadcast;
+	secondPublication.announce();
 	await settle();
-	expect(request.active.peek()?.closed).toBe(second.closed);
+	expect(request.active.peek()?.instance).toBe(secondPublication.route?.instance);
 	second.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
 	expect(request.closed.peek()).toBeUndefined();
-	const third = origin.createBroadcast(path);
-	third.announce();
+	const thirdPublication = origin.createBroadcast(path);
+	const third = thirdPublication.broadcast;
+	thirdPublication.announce();
 	await settle();
-	expect(request.active.peek()?.closed).toBe(third.closed);
+	expect(request.active.peek()?.instance).toBe(thirdPublication.route?.instance);
 	request.close();
 	third.close();
 	first.close();
 	origin.close();
 });
 
-test("an epoch-pinned announced request refuses another instance", async () => {
+test("an instance-pinned follower refuses another instance", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const epoch = Epoch.mint();
-	const first = origin.createBroadcast(path);
-	first.announce({ epoch });
-	const request = origin.request(path, { announced: true, epoch });
-	const second = origin.createBroadcast(path);
-	second.announce({ epoch: Epoch.mint() });
+	const instance = Instance.random();
+	const firstPublication = origin.createBroadcast(path);
+	const first = firstPublication.broadcast;
+	firstPublication.announce({ instance });
+	const request = origin.follow(path, { instance });
+	const secondPublication = origin.createBroadcast(path);
+	const second = secondPublication.broadcast;
+	secondPublication.announce({ instance: Instance.random() });
 	await settle();
-	expect(request.active.peek()?.closed).not.toBe(second.closed);
+	expect(request.active.peek()?.instance).not.toBe(secondPublication.route?.instance);
 	request.close();
 	first.close();
 	second.close();
 	origin.close();
 });
 
-test("an announced request changes its handle on an in-place epoch restart", async () => {
+test("a follower changes its handle on an in-place instance restart", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const broadcast = origin.createBroadcast(path);
-	const before = Epoch.mint();
-	broadcast.announce({ epoch: before });
-	const request = origin.request(path, { announced: true });
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	const before = Instance.random();
+	broadcastPublication.announce({ instance: before });
+	const request = origin.follow(path);
 	const old = request.active.peek();
-	const after = Epoch.mint();
-	broadcast.announce({ epoch: after });
+	const after = Instance.random();
+	broadcastPublication.announce({ instance: after });
 	await settle();
-	expect(request.active.peek()?.epoch).toBe(after);
+	expect(request.active.peek()?.instance).toBe(after);
 	expect(request.active.peek()).not.toBe(old);
 	request.close();
 	broadcast.close();
 	origin.close();
 });
 
-test("a closed announced request never acquires another publisher", async () => {
+test("a closed follower never acquires another publisher", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const request = origin.request(path, { announced: true });
+	const request = origin.follow(path);
 	request.close();
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
 	expect(request.closed.peek()).toBeNull();
@@ -82,24 +91,29 @@ test("a closed announced request never acquires another publisher", async () => 
 	origin.close();
 });
 
-test("announced requests refuse paths that cannot be watched or are outside scope", () => {
-	const origin = new Producer();
-	expect(() => origin.request(Path.from("camera*main"), { announced: true })).toThrow();
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("pool/job/cam"))]));
-	expect(() => scoped.request(Path.from("pool/job"), { announced: true })).toThrow();
-	origin.close();
-});
+test.each(["request", "follow"] as const)(
+	"%s refuses unwatchable paths and scope violations before registering",
+	(method) => {
+		const origin = new Producer();
+		expect(() => origin[method](Path.from("camera*main"))).toThrow();
+		const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("pool/job/cam"))]));
+		expect(() => scoped[method](Path.from("pool/job"))).toThrow();
+		expect(wireOf(origin).requests.peek()?.size).toBe(0);
+		origin.close();
+	},
+);
 
-test("unrelated routes never notify announced request followers", async () => {
+test("unrelated routes never notify followers", async () => {
 	const origin = new Producer();
-	const requests = Array.from({ length: 32 }, (_, i) => origin.request(Path.from(`room/${i}`), { announced: true }));
+	const requests = Array.from({ length: 32 }, (_, i) => origin.follow(Path.from(`room/${i}`)));
 	await settle();
 	let changes = 0;
 	const stops = requests.map((request) => request.active.subscribe(() => changes++));
-	const other = origin.createBroadcast(Path.from("unrelated"));
-	other.announce();
+	const otherPublication = origin.createBroadcast(Path.from("unrelated"));
+	const other = otherPublication.broadcast;
+	otherPublication.announce();
 	await settle();
-	other.announce({ cost: 5n });
+	otherPublication.announce({ cost: 5n });
 	await settle();
 	other.close();
 	await settle();
@@ -109,9 +123,9 @@ test("unrelated routes never notify announced request followers", async () => {
 	origin.close();
 });
 
-test("an origin closing settles pending announced requests", async () => {
+test("an origin closing settles pending followers", async () => {
 	const origin = new Producer();
-	const request = origin.request(Path.from("absent"), { announced: true });
+	const request = origin.follow(Path.from("absent"));
 	origin.close();
 	await settle();
 	expect(request.closed.peek()).toBeNull();
@@ -119,48 +133,64 @@ test("an origin closing settles pending announced requests", async () => {
 	request.close();
 });
 
-test("an announced request keeps its fallback blind answer", async () => {
+test("only a request can use a session without discovery", async () => {
 	const origin = new Producer();
 	const wire = wireOf(origin);
 	const detach = wire.attach(false);
 	const path = Path.from("blind");
-	const request = origin.request(path, { announced: true });
-	const broadcast = new BroadcastProducer();
-	const withdraw = wire.answer(path, broadcast.consume());
+	const followed = origin.follow(path);
+	const slot = wire.requests.peek()?.get(path);
+	if (!slot) throw new Error("request did not register");
+	expect(wire.blind(slot)).toBe(false);
+	const requested: Requesting = origin.request(path);
+	expect(wire.blind(slot)).toBe(true);
+	// The blind answer lands in the shared slot, but only the plain handle takes it.
+	const source = new BroadcastProducer();
+	const withdraw = wire.answer(path, source.consume());
 	await settle();
-	expect(request.active.peek()?.closed).toBe(broadcast.closed);
-	request.close();
+	expect(requested.active.peek()?.closed).toBe(source.closed);
+	expect(followed.active.peek()).toBeUndefined();
+	const joined = origin.follow(path);
+	await settle();
+	expect(joined.active.peek()).toBeUndefined();
+	joined.close();
+	requested.close();
+	await settle();
+	expect(wire.blind(slot)).toBe(false);
+	followed.close();
 	withdraw?.();
+	source.close();
 	detach();
-	broadcast.close();
 	origin.close();
 });
 
-test("announced requests follow the serving prefix, ignoring descendants and re-prices", async () => {
+test("followers track the serving prefix, ignoring descendants and re-prices", async () => {
 	const origin = new Producer();
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
-	const prefix = origin.dynamic(Path.from("pool"));
+	const prefix = origin.requestsRoute(Path.from("pool"));
 	const serving = (async () => {
-		for await (const request of prefix.requested()) request.accept(source.consume());
+		for await (const request of prefix.requested()) hooks.acceptRequest(request, source.consume());
 	})();
-	const request = origin.request(Path.from("pool/job"), { announced: true });
+	const request = origin.follow(Path.from("pool/job"));
 	await settle();
-	expect(request.active.peek()?.closed).toBe(source.closed);
-	const below = origin.createBroadcast(Path.from("pool/job/thumb"));
-	below.announce();
+	expect(request.active.peek()?.instance).toBe(prefix.route.instance);
+	const belowPublication = origin.createBroadcast(Path.from("pool/job/thumb"));
+	const below = belowPublication.broadcast;
+	belowPublication.announce();
 	await settle();
-	expect(request.active.peek()?.closed).toBe(source.closed);
-	const exact = origin.createBroadcast(Path.from("pool/job"));
-	exact.announce();
+	expect(request.active.peek()?.instance).toBe(prefix.route.instance);
+	const exactPublication = origin.createBroadcast(Path.from("pool/job"));
+	const exact = exactPublication.broadcast;
+	exactPublication.announce();
 	await settle();
-	expect(request.active.peek()?.closed).toBe(exact.closed);
-	prefix.update({ cost: 5n });
+	expect(request.active.peek()?.instance).toBe(exactPublication.route?.instance);
+	prefix.updateRoute({ cost: 5n });
 	await settle();
-	expect(request.active.peek()?.closed).toBe(exact.closed);
+	expect(request.active.peek()?.instance).toBe(exactPublication.route?.instance);
 	exact.close();
 	await settle();
-	expect(request.active.peek()?.closed).toBe(source.closed);
+	expect(request.active.peek()?.instance).toBe(prefix.route.instance);
 	prefix.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -173,14 +203,15 @@ test("announced requests follow the serving prefix, ignoring descendants and re-
 	await serving;
 });
 
-test("an announced request ignores a covering route whose scope excludes its path", async () => {
+test("a follower ignores a covering route whose scope excludes its path", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
-	const prefix = scoped.dynamic(Path.from("room/alice"));
-	const exact = origin.createBroadcast(Path.from("room/alice"));
-	exact.announce({ cost: 5n });
-	const request = origin.request(Path.from("room/alice"), { announced: true });
-	expect(request.active.peek()?.closed).toBe(exact.closed);
+	const prefix = scoped.requestsRoute(Path.from("room/alice"));
+	const exactPublication = origin.createBroadcast(Path.from("room/alice"));
+	const exact = exactPublication.broadcast;
+	exactPublication.announce({ cost: 5n });
+	const request = origin.follow(Path.from("room/alice"));
+	expect(request.active.peek()?.instance).toBe(exactPublication.route?.instance);
 	exact.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -189,29 +220,29 @@ test("an announced request ignores a covering route whose scope excludes its pat
 	origin.close();
 });
 
-test("an announced request follows an epochless route replaced by an identical one", async () => {
+test("a follower tracks a route replaced by an identical one", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const serve = (source: BroadcastProducer) => {
-		const route = origin.dynamic(path);
+		const route = origin.requestsRoute(path);
 		void (async () => {
-			for await (const request of route.requested()) request.accept(source.consume());
+			for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 		})();
 		return route;
 	};
 	const firstSource = new BroadcastProducer();
 	const first = serve(firstSource);
-	const request = origin.request(path, { announced: true });
+	const request = origin.follow(path);
 	await settle();
-	expect(request.active.peek()?.closed).toBe(firstSource.closed);
+	expect(request.active.peek()?.instance).toBe(first.route.instance);
 
-	// Same (default) route metadata and no epoch: only the entry's identity differs.
+	// Same (default) route metadata: only the instance each claim minted differs.
 	const secondSource = new BroadcastProducer();
 	const second = serve(secondSource);
 	await settle();
 	first.close();
 	await settle();
-	expect(request.active.peek()?.closed).toBe(secondSource.closed);
+	expect(request.active.peek()?.instance).toBe(second.route.instance);
 
 	request.close();
 	second.close();
@@ -220,15 +251,15 @@ test("an announced request follows an epochless route replaced by an identical o
 	origin.close();
 });
 
-test("an origin closing settles an announced request a served route resolved", async () => {
+test("an origin closing settles a follower a served route resolved", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const source = new BroadcastProducer();
-	const route = origin.dynamic(path);
+	const route = origin.requestsRoute(path);
 	void (async () => {
-		for await (const request of route.requested()) request.accept(source.consume());
+		for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 	})();
-	const request = origin.request(path, { announced: true });
+	const request = origin.follow(path);
 	await settle();
 	expect(request.active.peek()).toBeDefined();
 	const abort = new Error("shutdown");
@@ -240,17 +271,17 @@ test("an origin closing settles an announced request a served route resolved", a
 	source.close();
 });
 
-test("an announced request keeps a refusal that lands with a re-price", async () => {
+test("a follower keeps a refusal that lands with a re-price", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
-	const route = origin.dynamic(path);
+	const route = origin.requestsRoute(path);
 	const requested = route.requested();
-	const request = origin.request(path, { announced: true });
+	const request = origin.follow(path);
 	const pending = (await requested.next()).value;
 	if (!pending) throw new Error("expected a request");
 
 	// Both land in one turn: the watch notification must not retry the refused request.
-	route.update({ cost: 5n });
+	route.updateRoute({ cost: 5n });
 	const denied = new Error("denied");
 	pending.reject(denied);
 	await settle();
@@ -268,29 +299,527 @@ test("an announced request keeps a refusal that lands with a re-price", async ()
 });
 
 for (const received of [false, true]) {
-	test(`a plain request watches its path only through a received route (received: ${received})`, async () => {
+	test(`a request owns discovery through both local and received routes (received: ${received})`, async () => {
 		const origin = new Producer();
 		const path = Path.from("room");
 		const events: string[] = [];
 		const stop = wireOf(origin).interests((prefix, wanted) => events.push(`${prefix} ${wanted}`));
 		const source = new BroadcastProducer();
-		const route = received ? wireOf(origin).receive(path, Route.default) : origin.dynamic(path);
+		const route = received ? wireOf(origin).receive(path, Route.default) : origin.requestsRoute(path);
 		void (async () => {
-			for await (const request of route.requested()) request.accept(source.consume());
+			for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 		})();
 
 		const request = origin.request(path);
 		await settle();
 		expect(request.active.peek()).toBeDefined();
-		// A local route needs no discovery; one a session received stays discovered while held.
-		expect(events).toEqual(received ? ["room true"] : []);
+		// Every request owns discovery, independent of the route that currently serves it.
+		expect(events).toEqual(["room true"]);
 
 		request.close();
 		await settle();
-		expect(events).toEqual(received ? ["room true", "room false"] : []);
+		expect(events).toEqual(["room true", "room false"]);
 		stop();
 		route.close();
 		source.close();
 		origin.close();
 	});
 }
+
+test("a claim answer is hidden until published under its own instance", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.requests(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(path);
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	const prepared = pending.prepare();
+	prepared.broadcast.createTrack("video");
+	await settle();
+	expect(request.active.peek()).toBeUndefined();
+	const published = prepared.publish();
+	await settle();
+	expect(published.route?.instance).toBeDefined();
+	expect(request.active.peek()?.instance).toBe(published.route?.instance);
+	request.close();
+	published.broadcast.close();
+	claim.close();
+	origin.close();
+});
+
+test("a prepared answer cannot announce itself before publish", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.requests(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(path);
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	const prepared = pending.prepare();
+	expect(prepared.broadcast).not.toHaveProperty("announce");
+	expect(prepared.broadcast).not.toHaveProperty("route");
+	await settle();
+	expect(request.active.peek()).toBeUndefined();
+	const published = prepared.publish();
+	const instance = published.route?.instance;
+	expect(instance).toBeDefined();
+	await settle();
+	expect(request.active.peek()?.instance).toBe(instance);
+	request.close();
+	published.broadcast.close();
+	claim.close();
+	origin.close();
+});
+
+test("an application claim cannot accept an arbitrary broadcast", async () => {
+	const origin = new Producer();
+	const claim = origin.requests(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(Path.from("room/alice"));
+	const pending: Request | undefined = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	// @ts-expect-error Only sessions accept a request; an application prepares and publishes.
+	expect(pending.accept).toBeUndefined();
+	request.close();
+	claim.close();
+	origin.close();
+});
+
+test("closing a prepared answer refuses the request and closes its broadcast", async () => {
+	const origin = new Producer();
+	const claim = origin.requests(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(Path.from("room/alice"));
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	const prepared = pending.prepare();
+	prepared.close();
+	prepared.close();
+	prepared[Symbol.dispose]();
+	await settle();
+	expect(request.closed.peek()).toBeInstanceOf(Error);
+	expect(prepared.broadcast.closed.peek()).toBeDefined();
+	claim.close();
+	origin.close();
+});
+
+test("an answer prepared for an abandoned claim is never announced", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.requests(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(path);
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	const prepared = pending.prepare();
+	claim.close();
+	expect(() => prepared.publish()).toThrow("request is closed");
+	const announced = origin.follow(path);
+	await settle();
+	expect(announced.active.peek()).toBeUndefined();
+	announced.close();
+	request.close();
+	origin.close();
+});
+
+for (const cleanup of ["close", "dispose", "broadcast"] as const) {
+	test(`prepared ${cleanup} releases shared requesters and admits a new request`, async () => {
+		const origin = new Producer();
+		const path = Path.from("room/alice");
+		const claim = origin.requests(Path.from("room"));
+		const requests = claim.requested();
+		const first = origin.request(path);
+		const pending = (await requests.next()).value;
+		if (!pending) throw new Error("expected a request");
+		const prepared = pending.prepare();
+		const shared = origin.request(path);
+		if (cleanup === "close") prepared.close();
+		else if (cleanup === "dispose") prepared[Symbol.dispose]();
+		else prepared.broadcast.close();
+		// Requested in the same turn, so the release cannot wait on a reactive notification.
+		const later = origin.request(path);
+		await settle();
+		prepared.close();
+		prepared[Symbol.dispose]();
+
+		for (const request of [first, shared]) {
+			expect(request.closed.peek()).toBeInstanceOf(StreamError);
+			expect((request.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+		}
+		expect(later.closed.peek()).toBeUndefined();
+		expect(() => prepared.publish()).toThrow("prepared answer is closed");
+		const next = (await requests.next()).value;
+		if (!next) throw new Error("expected another request");
+		expect(next).not.toBe(pending);
+		next.reject(new Error("done"));
+		await settle();
+		expect(later.closed.peek()).toBeInstanceOf(Error);
+		claim.close();
+		origin.close();
+	});
+}
+
+test("a throwing handler disposes its prepared answer and leaves the claim answerable", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.requests(Path.from("room"));
+	const failed = (async () => {
+		for await (const request of claim.requested()) {
+			using prepared = request.prepare();
+			prepared.broadcast.createTrack("video");
+			throw new Error("handler failed");
+		}
+	})();
+	const first = origin.request(path);
+	await expect(failed).rejects.toThrow("handler failed");
+	await settle();
+	expect((first.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+	const requests = claim.requested();
+	const later = origin.request(path);
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected another request");
+	{
+		using prepared = pending.prepare();
+		prepared.close();
+	}
+	await settle();
+	expect((later.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+	claim.close();
+	origin.close();
+});
+
+test("using transfers a published answer without closing it on disposal", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.requests(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(path);
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	let published: Publication;
+	{
+		using prepared = pending.prepare();
+		prepared.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode("published") });
+		published = prepared.publish();
+		expect(() => prepared.publish()).toThrow("prepared answer is closed");
+		prepared.close();
+	}
+	await settle();
+	expect(published.broadcast.closed.peek()).toBeUndefined();
+	expect(request.active.peek()?.instance).toBe(published.route?.instance);
+	const reader = request.active.peek()?.track("data").subscribe().ordered();
+	expect(await reader?.readString()).toBe("published");
+	reader?.close();
+	request.close();
+	published.broadcast.close();
+	claim.close();
+	origin.close();
+});
+
+for (const cleanup of ["close", "dispose", "broadcast", "publish"] as const) {
+	test(`an old prepared ${cleanup} cannot refuse the next request for its path`, async () => {
+		const origin = new Producer();
+		const path = Path.from("room/alice");
+		const claim = origin.requests(Path.from("room"));
+		const requests = claim.requested();
+		const first = origin.request(path);
+		const pending = (await requests.next()).value;
+		if (!pending) throw new Error("expected a request");
+		const old = pending.prepare();
+		first.close();
+		await settle();
+		const later = origin.request(path);
+		const next = (await requests.next()).value;
+		if (!next) throw new Error("expected another request");
+		if (cleanup === "close") old.close();
+		else if (cleanup === "dispose") old[Symbol.dispose]();
+		else if (cleanup === "broadcast") old.broadcast.close();
+		else expect(() => old.publish()).toThrow("request is closed");
+		await settle();
+		expect(later.closed.peek()).toBeUndefined();
+		using prepared = next.prepare();
+		prepared.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode(cleanup) });
+		const published = prepared.publish();
+		await settle();
+		expect(later.active.peek()?.instance).toBe(published.route?.instance);
+		const reader = later.active.peek()?.track("data").subscribe().ordered();
+		expect(await reader?.readString()).toBe(cleanup);
+		reader?.close();
+		old.close();
+		later.close();
+		published.broadcast.close();
+		claim.close();
+		origin.close();
+	});
+}
+
+test("a forwarded request cannot be prepared by setting a publisher property", async () => {
+	const origin = new Producer();
+	const route = origin.requestsRoute(Path.from("room"));
+	const requests = route.requested();
+	const request = origin.request(Path.from("room/alice"));
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	Object.assign(pending, { publisher: origin });
+	expect(() => pending.prepare()).toThrow("forwarded requests cannot be prepared");
+	pending.reject(new Error("refused"));
+	request.close();
+	route.close();
+	origin.close();
+});
+
+test("an instance-pinned follower resumes when its instance returns after a gap", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const instance = Instance.random();
+	const source = new BroadcastProducer();
+	const keeper = source.consume();
+	const serve = (instance: Instance.Valid, broadcast: BroadcastProducer) => {
+		const route = origin.requestsRoute(path, { instance: instance });
+		void (async () => {
+			for await (const request of route.requested()) hooks.acceptRequest(request, broadcast.consume());
+		})();
+		return route;
+	};
+	const first = serve(instance, source);
+	const request = origin.follow(path, { instance });
+	await settle();
+	expect(request.active.peek()?.instance).toBe(instance);
+	first.close();
+	await settle();
+	expect(request.active.peek()).toBeUndefined();
+	expect(request.closed.peek()).toBeUndefined();
+	const otherSource = new BroadcastProducer();
+	const other = serve(Instance.random(), otherSource);
+	await settle();
+	expect(request.active.peek()).toBeUndefined();
+	other.close();
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+	const back = serve(instance, source);
+	await settle();
+	expect(request.active.peek()?.instance).toBe(instance);
+	request.close();
+	back.close();
+	keeper.close();
+	source.close();
+	otherSource.close();
+	origin.close();
+});
+
+test("a request owns its scoped discovery until closed", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+	const detach = wire.attach(true);
+	const path = Path.from("room/audio");
+	const interests: string[] = [];
+	let synced: (() => void) | undefined;
+	const stop = wire.interests((prefix, wanted) => {
+		interests.push(`${prefix} ${wanted}`);
+		if (wanted) synced = wire.snapshot(prefix);
+	});
+	const request = origin.request(path);
+	expect(interests).toEqual(["room/audio true"]);
+	synced?.();
+	expect(request.closed.peek()).toBeUndefined();
+	request.close();
+	expect(interests).toEqual(["room/audio true", "room/audio false"]);
+	stop();
+	detach();
+	origin.close();
+});
+
+test("a follower keeps its scoped discovery across instances until closed", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+	const detach = wire.attach(true);
+	const path = Path.from("room/audio");
+	const interests: string[] = [];
+	let synced: (() => void) | undefined;
+	const stop = wire.interests((prefix, wanted) => {
+		interests.push(`${prefix} ${wanted}`);
+		if (wanted) synced = wire.snapshot(prefix);
+	});
+	const follower = origin.follow(path);
+	expect(interests).toEqual(["room/audio true"]);
+	synced?.();
+	await settle();
+	expect(follower.closed.peek()).toBeUndefined();
+	const publication = origin.createBroadcast(path);
+	publication.announce();
+	await settle();
+	expect(follower.active.peek()?.instance).toBe(publication.route?.instance);
+	publication.broadcast.close();
+	await settle();
+	// The instance ending keeps the follower and its discovery open for the next one.
+	expect(follower.active.peek()).toBeUndefined();
+	expect(follower.closed.peek()).toBeUndefined();
+	expect(interests).toEqual(["room/audio true"]);
+	follower.close();
+	expect(interests).toEqual(["room/audio true", "room/audio false"]);
+	stop();
+	detach();
+	origin.close();
+});
+
+test("a pending request fails Unroutable once its discovery syncs without a route", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+	const detach = wire.attach(true);
+	const initialSets: (() => void)[] = [];
+	const stop = wire.interests((prefix, wanted) => {
+		if (wanted) initialSets.push(wire.snapshot(prefix));
+	});
+	const missing = origin.request(Path.from("room/missing"));
+	const found = origin.request(Path.from("room/found"));
+	const pinned = origin.request(Path.from("room/pinned"), { instance: Instance.random() });
+	const follower = origin.follow(Path.from("room/followed"));
+	// The initial set reports these before it lands, and nothing at all for the rest.
+	const route = wire.receive(Path.from("room/found"));
+	const other = wire.receive(Path.from("room/pinned"), { instance: Instance.random() });
+	await settle();
+	for (const request of [missing, found, pinned, follower]) expect(request.closed.peek()).toBeUndefined();
+
+	for (const synced of initialSets) synced();
+	await settle();
+	for (const request of [missing, pinned]) {
+		const err = request.closed.peek();
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+	}
+	expect(found.closed.peek()).toBeUndefined();
+	expect(follower.closed.peek()).toBeUndefined();
+
+	for (const request of [missing, found, pinned, follower]) request.close();
+	route.close();
+	other.close();
+	stop();
+	detach();
+	origin.close();
+});
+
+test("a follower retains a selected handler's explicit unroutable refusal", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const route = origin.requestsRoute(path);
+	const pending = route.requested();
+	const requested = origin.follow(path);
+	const request = (await pending.next()).value;
+	if (!request) throw new Error("request did not reach its handler");
+	const refused = new StreamError(StreamCode.Unroutable);
+	request.reject(refused);
+	await settle();
+	expect(requested.closed.peek()).toBe(refused);
+	requested.close();
+	route.close();
+	origin.close();
+});
+
+test("a pending request retries a route gap and never retargets after resolving", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const first = origin.requestsRoute(path);
+	const requested = origin.request(path);
+	const before = await first.requested().next();
+	expect(before.value).toBeDefined();
+	first.close();
+	await settle();
+	expect(requested.closed.peek()).toBeUndefined();
+	const second = origin.requestsRoute(path);
+	const pending = (await second.requested().next()).value;
+	if (!pending) throw new Error("replacement route was not requested");
+	const source = new BroadcastProducer();
+	const keeper = source.consume();
+	hooks.acceptRequest(pending, source.consume());
+	await settle();
+	expect(requested.active.peek()?.instance).toBe(second.route.instance);
+	const replacement = origin.createBroadcast(path);
+	replacement.announce();
+	await settle();
+	expect(requested.active.peek()?.instance).toBe(second.route.instance);
+	second.close();
+	await settle();
+	expect(requested.closed.peek()).toBeInstanceOf(StreamError);
+	expect(requested.active.peek()).toBeUndefined();
+	requested.close();
+	replacement.broadcast.close();
+	keeper.close();
+	source.close();
+	origin.close();
+});
+
+test("a plain instance pin never takes an answer without that instance", () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+	const detach = wire.attach(false);
+	const path = Path.from("room/audio");
+	const requested = origin.request(path, { instance: Instance.random() });
+	expect(requested.closed.peek()).toBeUndefined();
+	const source = new BroadcastProducer();
+	const withdraw = wire.answer(path, source.consume());
+	expect(requested.active.peek()).toBeUndefined();
+	expect(requested.closed.peek()).toBeUndefined();
+	requested.close();
+	withdraw?.();
+	source.close();
+	detach();
+	origin.close();
+});
+
+// Both instances stay live, and the cheaper one wins the path: a pin follows its own
+// instance's routes, as Rust's lookup does, rather than filter the winner afterward.
+test.each(["request", "follow"] as const)("a %s pinned to a losing instance resolves it", async (method) => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const pinned = Instance.random();
+	const losing = origin.requestsRoute(path, { instance: pinned, cost: 9n });
+	const winning = origin.requestsRoute(path, { instance: Instance.random(), cost: 1n });
+	const asked = losing.requested();
+	const requested = origin[method](path, { instance: pinned });
+	const pending = (await asked.next()).value;
+	if (!pending) throw new Error("the pinned instance's route was not asked");
+	const source = new BroadcastProducer();
+	hooks.acceptRequest(pending, source.consume());
+	await settle();
+	expect(requested.closed.peek()).toBeUndefined();
+	expect(requested.active.peek()?.instance).toBe(pinned);
+
+	// A second pin shares the answer, and the path's own requests still resolve the winner.
+	const again = origin.request(path, { instance: pinned });
+	expect(again.active.peek()?.instance).toBe(pinned);
+	const plain = origin.request(path);
+	const answer = (await winning.requested().next()).value;
+	if (!answer) throw new Error("the winning route was not asked");
+	const other = new BroadcastProducer();
+	hooks.acceptRequest(answer, other.consume());
+	await settle();
+	expect(plain.active.peek()?.instance).toBe(winning.route.instance);
+
+	requested.close();
+	again.close();
+	await settle();
+	expect(plain.active.peek()?.instance).toBe(winning.route.instance);
+	plain.close();
+	source.close();
+	other.close();
+	losing.close();
+	winning.close();
+	origin.close();
+});
+
+test("a peer's pin is served by a local broadcast that loses the path", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin.consume());
+	const path = Path.from("room/audio");
+	const publication = origin.createBroadcast(path);
+	const pinned = Instance.random();
+	publication.announce({ instance: pinned, cost: 9n });
+	const winning = origin.requestsRoute(path, { instance: Instance.random(), cost: 1n });
+	expect(wire.local(path)).toBeUndefined();
+	expect(wire.local(path, pinned)).toBeDefined();
+	expect(await wire.demand(path, pinned)).toBeDefined();
+	winning.close();
+	publication.broadcast.close();
+	origin.close();
+});

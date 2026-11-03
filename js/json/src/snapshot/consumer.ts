@@ -37,11 +37,11 @@ export class Consumer<T> {
 	 * Get the next state in order, or `undefined` once the track ends.
 	 *
 	 * Yields one state per frame and finishes a group before starting the next, buffering every
-	 * state the reader has not reached yet. On a timed track, a group the subscription's `maxDelay`
-	 * proves too old is skipped: the default of zero keeps only the newest group, so a playhead
-	 * reader sets `maxDelay` to how far it trails the live edge. An untimed track never proves a
-	 * group stale, so a reader that falls behind replays the whole backlog; use {@link latest} to
-	 * skip it. A group lost to a gap resyncs from the next one.
+	 * state the reader has not reached yet. A group the subscription's `delay.max` proves too old
+	 * is skipped, counting media time and wall time, or wall time alone for an untimed track. The
+	 * default subscription's zero keeps only the newest group, so a playhead reader sets `delay.max`
+	 * to how far it trails the live edge. Use {@link latest} to skip straight to the head. A group lost to a
+	 * gap resyncs from the next one.
 	 */
 	next(): Promise<Timed<T> | undefined> {
 		return this.#read(false);
@@ -53,7 +53,7 @@ export class Consumer<T> {
 	 * Skips to the newest group and applies every frame already buffered in it, yielding only the
 	 * last: a late joiner (or any consumer that has fallen behind) catches up to the head in one
 	 * step instead of replaying every superseded state. Frames are still decoded in order (the
-	 * DEFLATE window and merge patches are sequential); only the per-frame yield is skipped. Blocks
+	 * merge patches are sequential); only the per-frame yield is skipped. Blocks
 	 * when nothing newer than the last yield has arrived.
 	 */
 	latest(): Promise<Timed<T> | undefined> {
@@ -63,16 +63,16 @@ export class Consumer<T> {
 	async #read(skip: boolean): Promise<Timed<T> | undefined> {
 		for (;;) {
 			if (skip) {
-				// A newer group supersedes everything the current one still holds: it restarts from a
-				// full snapshot, so switching mid-group loses nothing but stale state (mirrors the Rust
-				// consumer). Older groups only hold superseded state too, so raise the floor to the
-				// newest instead of replaying each one.
-				const latest = this.#track.latest();
-				if (this.#group !== undefined && latest !== undefined && latest > this.#group.sequence) {
-					this.#group.close();
-					this.#group = undefined;
+				// Jump to the newest group the reader already has; a newer one supersedes the rest.
+				// Taking groups, not the track's largest position, ignores datagrams (which share
+				// the sequence space) and stays inside any range the caller set on the reader.
+				// Mirrors the Rust consumer. A newer group restarts from a full snapshot, so switching mid-group loses
+				// nothing but stale state.
+				for (let group = this.#track.tryNextGroup(); group; group = this.#track.tryNextGroup()) {
+					this.#group?.close();
+					this.#group = group;
+					this.#framesRead = 0;
 				}
-				if (!this.#group && latest !== undefined) this.#track.setGroups({ start: { included: latest } });
 			}
 
 			if (!this.#group) {
@@ -134,9 +134,10 @@ export class Consumer<T> {
 	}
 }
 
+/** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
-	export type Config<T> = Pick<CodecConfig<T>, "schema" | "compression"> & {
+	export type Config<T> = Pick<CodecConfig<T>, "schema"> & {
 		track: Moq.Track.Subscriber;
 	};
 }

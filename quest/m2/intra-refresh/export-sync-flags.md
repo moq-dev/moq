@@ -4,8 +4,10 @@
 
 Exporting or serving a video rendition with `warmup` set no longer lies to
 downstream players: fMP4 marks a refresh group's first sample as non-sync and
-its fragment as not independent, MKV clears the keyframe flag, and HLS omits
-`EXT-X-INDEPENDENT-SEGMENTS` and marks parts `INDEPENDENT=NO`. A group that
+its fragment as not independent, MKV clears the keyframe flag, HLS omits
+`EXT-X-INDEPENDENT-SEGMENTS` and marks parts `INDEPENDENT=NO`, and DASH stops
+advertising `startWithSAP="1"` (hardcoded today in
+`rs/moq-hls/src/export/mpd.rs`). A group that
 opens on a true IDR keeps its flags. MPEG-TS is unchanged: the recovery-point
 SEI is in the bitstream and the random access indicator is defined for it.
 Audio `warmup` is Opus pre-roll and changes no export flag.
@@ -17,10 +19,11 @@ Audio `warmup` is Opus pre-roll and changes no export flag.
   the decision also needs the IDR check the consumer quest adds to the codec
   modules. The fMP4 and MKV exporters set their sample flags from the same
   answer.
-- `rs/moq-hls` derives the playlist tags from the fragmenter's `independent`.
+- `rs/moq-hls` derives the playlist tags and DASH `startWithSAP` from the
+  fragmenter's `independent`.
 - Tests: a synthetic refresh rendition exports with non-sync group starts and
-  an IDR group with sync flags, in fMP4 and MKV; the HLS playlist test covers
-  the tags.
+  an IDR group with sync flags, in fMP4 and MKV; the HLS playlist and DASH
+  manifest tests cover the tags.
 
 ## Required
 

@@ -1,4 +1,4 @@
-//! Integration tests for QUIC and the iroh transport.
+//! Integration tests for the QUIC transport.
 
 use std::time::Duration;
 
@@ -158,7 +158,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
+		assert_eq!(request.role(), Some(moq_tokio::moq_net::setup::Role::Subscriber));
 		if let Some(expect_path) = expect_path {
 			assert_eq!(request.path(), expect_path);
 		}
@@ -168,7 +168,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		if let Some(expect_authority) = expect_authority {
 			assert_eq!(request.authority(), expect_authority.as_deref());
 		}
-		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
+		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -178,18 +178,18 @@ async fn connect_test(config: ConnectTest<'_>) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -201,13 +201,13 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.await
 		.expect("consume_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
@@ -277,7 +277,7 @@ async fn sni_test() {
 	// Keep accepting so the client handshakes complete, then drop the server.
 	let server_handle = tokio::spawn(async move {
 		let mut server = server;
-		while server.accept().await.is_some() {}
+		while server.accept().await.is_ok() {}
 	});
 
 	let dial = |host_name: &str, fingerprint: &str| {
@@ -294,14 +294,14 @@ async fn sni_test() {
 
 	// The SNI names the second certificate, so that is the one to pin. Hold the
 	// connection: dropping it would tear the session down mid-assertion.
-	let _matched = tokio::time::timeout(TIMEOUT, dial("alt.localhost", &fingerprints[1]))
+	let _matched = kio::clock::timeout(TIMEOUT, dial("alt.localhost", &fingerprints[1]))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	// The same pin with the other SNI must fail: the server serves the first
 	// certificate there, whose fingerprint the client does not accept.
-	let wrong = tokio::time::timeout(TIMEOUT, dial("localhost", &fingerprints[1]))
+	let wrong = kio::clock::timeout(TIMEOUT, dial("localhost", &fingerprints[1]))
 		.await
 		.expect("client connect timed out");
 	assert!(wrong.is_err(), "pinning the wrong certificate must fail the handshake");
@@ -337,6 +337,7 @@ async fn cert_sources_test() {
 /// set follows, without the listener being rebuilt.
 #[cfg(feature = "quic")]
 async fn reload_test() {
+	let logs = crate::Logs::capture();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
 
@@ -360,22 +361,19 @@ async fn reload_test() {
 	std::fs::rename(&new_cert, &cert).expect("rotate cert");
 	std::fs::rename(&new_key, &key).expect("rotate key");
 
-	let reloaded = tokio::time::timeout(TIMEOUT, async {
+	let reloaded = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let now = certificates.fingerprints();
 			if now != before {
 				return now;
 			}
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	})
 	.await
 	.expect("certificate reload timed out");
 
-	assert!(
-		tracing_test::internal::logs_with_scope_contain("moq_tokio", "reloading server certificates"),
-		"no reload log"
-	);
+	assert!(logs.text().contains("reloading server certificates"), "no reload log");
 	assert_eq!(reloaded.len(), 1);
 	drop(server);
 }
@@ -461,7 +459,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	// One shared tuning, handed to both roles the way a binary would.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
-	quic.keep_alive = Some(Duration::from_secs(1));
+	quic.keep_alive = Some((Duration::from_secs(1)).into());
 
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
@@ -486,20 +484,20 @@ async fn mtls_test(scheme: &str, reject: bool) {
 		let has_cert = request.peer_identity().is_some();
 		let _ = identity_tx.send(has_cert);
 		if reject {
-			request.reject(moq_tokio::server::Reject::Forbidden).await?;
+			request.reject(moq_net::SessionError::Unauthorized).await?;
 			return Ok::<_, anyhow::Error>(has_cert);
 		}
-		let (session, _driver) = request.with_publisher(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.consume()).ok().await?;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(has_cert)
 	});
 
 	// The mTLS cases assert on the connect result itself, so keep it a `Result`.
-	let connection = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let connection = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out");
 
-	let has_cert = tokio::time::timeout(TIMEOUT, identity_rx)
+	let has_cert = kio::clock::timeout(TIMEOUT, identity_rx)
 		.await
 		.expect("identity inspection timed out")
 		.expect("server dropped identity result");
@@ -512,7 +510,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	if reject {
 		server_handle.abort();
 	} else {
-		tokio::time::timeout(TIMEOUT, server_handle)
+		kio::clock::timeout(TIMEOUT, server_handle)
 			.await
 			.expect("server task timed out")
 			.expect("server task panicked")
@@ -520,233 +518,16 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	}
 }
 
-// ── Iroh backend ────────────────────────────────────────────────────
-
-#[cfg(feature = "iroh")]
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn iroh_connect() {
-	iroh_connect_test(None).await;
-}
-
-/// `moq-lite-07-wip` is opt-in, so it is on the wire only when both ends configure it.
-/// iroh once built its ALPNs from the default constant and ignored that opt-in.
-#[cfg(feature = "iroh")]
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn iroh_connect_lite_07_wip() {
-	iroh_connect_test(Some("moq-lite-07-wip")).await;
-}
-
-/// A dialer and a listener that share no version never connect, instead of the
-/// listener falling back to the default set.
-#[cfg(feature = "iroh")]
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn iroh_versions_disjoint() {
-	use moq_tokio::iroh::Config as IrohConfig;
-
-	let bind = || async {
-		let mut config = IrohConfig::default();
-		config.enabled = Some(true);
-		config
-			.bind(&moq_tokio::quic::Config::default())
-			.await
-			.expect("failed to bind iroh endpoint")
-			.expect("iroh endpoint not enabled")
-	};
-
-	let server_endpoint = bind().await;
-	let server_endpoint_id = server_endpoint.id();
-	let server_addrs: Vec<std::net::SocketAddr> = server_endpoint.addr().ip_addrs().copied().collect();
-
-	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
-	server_config.tls.generate = vec!["localhost".into()];
-	server_config.version = vec!["moq-lite-07-wip".parse().unwrap()];
-	let mut config = moq_tokio::server::Config::default();
-	config.listen = server_config;
-	config.iroh = Some(server_endpoint);
-	let mut server = config
-		.init()
-		.expect("failed to init server")
-		.listen()
-		.await
-		.expect("failed to listen");
-	let server_handle = tokio::spawn(async move { server.accept().await.is_some() });
-
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.insecure = Some(true);
-	let client = client_config
-		.init(Default::default())
-		.expect("failed to init client")
-		.with_iroh(bind().await)
-		.with_iroh_addrs(server_addrs);
-
-	let url: url::Url = format!("iroh://{server_endpoint_id}/room").parse().unwrap();
-	let result = tokio::time::timeout(TIMEOUT, connect_once(client, url))
-		.await
-		.expect("client connect timed out");
-	assert!(result.is_err(), "the default set must not reach a wip-only listener");
-	server_handle.abort();
-}
-
-#[cfg(feature = "iroh")]
-async fn iroh_connect_test(version: Option<&str>) {
-	use moq_tokio::iroh::Config as IrohConfig;
-
-	let version: Vec<moq_tokio::moq_net::Version> = version.map(|v| v.parse().unwrap()).into_iter().collect();
-
-	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	broadcast
-		.announce(Default::default())
-		.expect("failed to create broadcast");
-	let track = broadcast
-		.create_track("video", timed())
-		.expect("failed to create track");
-
-	let mut group = track.append_group().expect("failed to append group");
-	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
-		.expect("failed to write frame");
-	group.finish().expect("failed to finish group");
-
-	// Create server iroh endpoint
-	let mut server_iroh_config = IrohConfig::default();
-	server_iroh_config.enabled = Some(true);
-	let server_endpoint = server_iroh_config
-		.bind(&moq_tokio::quic::Config::default())
-		.await
-		.expect("failed to bind server iroh endpoint")
-		.expect("server iroh endpoint not enabled");
-
-	// Get the server's direct addresses before moving it into the server.
-	let server_addr = server_endpoint.addr();
-	let server_addrs: Vec<std::net::SocketAddr> = server_addr.ip_addrs().copied().collect();
-
-	let server_endpoint_id = server_endpoint.id();
-
-	// Server still needs a QUIC bind for init, but we'll connect via iroh
-	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
-	server_config.tls.generate = vec!["localhost".into()];
-	server_config.version = version.clone();
-
-	let mut config = moq_tokio::server::Config::default();
-	config.listen = server_config;
-	config.iroh = Some(server_endpoint);
-	let server = config.init().expect("failed to init server");
-	let mut server = server.listen().await.expect("failed to listen");
-
-	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = moq_tokio::origin::spawn();
-	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
-
-	// Create client iroh endpoint
-	let mut client_iroh_config = IrohConfig::default();
-	client_iroh_config.enabled = Some(true);
-	let client_endpoint = client_iroh_config
-		.bind(&moq_tokio::quic::Config::default())
-		.await
-		.expect("failed to bind client iroh endpoint")
-		.expect("client iroh endpoint not enabled");
-
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.insecure = Some(true);
-	client_config.version = version.clone();
-
-	let client = client_config
-		.init(Default::default())
-		.expect("failed to init client")
-		.with_iroh(client_endpoint)
-		.with_iroh_addrs(server_addrs);
-
-	let url: url::Url = format!("iroh://{server_endpoint_id}/room?jwt=abc").parse().unwrap();
-
-	// ── run server and client concurrently ──────────────────────────
-	let server_handle = tokio::spawn(async move {
-		let request = server.accept().await.expect("no incoming connection");
-		// The client wired only a subscriber, so its advertised role reaches the server
-		// over every transport, now that the SETUP is read before the caller authorizes
-		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
-		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
-		// URL, leaving the SETUP as the only place for the request target.
-		assert_eq!(request.transport(), moq_tokio::Transport::Iroh);
-		assert_eq!(request.url(), None);
-		assert_eq!(request.path(), "/room");
-		assert_eq!(request.query(), Some("jwt=abc"));
-		if let Some(version) = version.first() {
-			assert_eq!(request.alpn(), Some(version.alpn()));
-		}
-		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
-
-		let _broadcast = broadcast;
-		let _track = track;
-
-		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(())
-	});
-
-	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
-		.await
-		.expect("client connect timed out")
-		.expect("client connect failed");
-
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
-	assert_eq!(update.prefix.as_str(), "test");
-	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
-		.await
-		.expect("request timed out")
-		.expect("announced broadcast resolves");
-
-	let mut track_sub = bc
-		.track("video")
-		.unwrap()
-		.subscribe(None)
-		.await
-		.expect("consume_track failed");
-
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
-		.await
-		.expect("recv_group timed out")
-		.expect("recv_group failed")
-		.expect("track closed prematurely");
-
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
-		.await
-		.expect("read_frame timed out")
-		.expect("read_frame failed")
-		.expect("group closed prematurely");
-
-	assert_eq!(&frame.payload[..], b"hello");
-
-	drop(connection);
-	server_handle
-		.await
-		.expect("server task panicked")
-		.expect("server task failed");
-}
-
 // ── QUIC backend ────────────────────────────────────────────────────
 
 /// A client that closes before its runtime stops tells the server at once, instead of
 /// leaving it to the idle timeout, which is what a process exiting on a signal does.
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_reaches_server() {
 	// An idle timeout inside TIMEOUT would hide a lost close.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(TIMEOUT * 3);
+	quic.idle_timeout = Some((TIMEOUT * 3).into());
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -783,37 +564,37 @@ async fn quic_client_close_reaches_server() {
 		});
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
+	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("accept timed out")
 		.expect("no incoming connection");
-	let (session, _driver) = request.ok().await.expect("server handshake failed");
+	let session = request.ok().await.expect("server handshake failed");
 	accepted.send(()).expect("client waiting for the accepted session");
 	tokio::task::spawn_blocking(move || client.join())
 		.await
 		.unwrap()
 		.expect("client thread panicked");
 
-	let err = tokio::time::timeout(TIMEOUT, session.closed())
+	let err = kio::clock::timeout(TIMEOUT, session.closed())
 		.await
 		.expect("the server never heard the close");
 	assert!(!err.to_string().contains("timed out"), "{err}");
 }
 
 /// A client that finishes its track and closes before its runtime stops still delivers
-/// the queued group and the track's finish, instead of the close discarding them.
+/// the queued group and the track's finish, retaining its token-only grant through the drain.
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_drains_finished_track() {
-	// Small, since the debug build logging every packet is slow and the drain has
-	// one second. Queued right before the close, it is still unacknowledged then.
-	let payload: Vec<u8> = (0..1024).map(|i| i as u8).collect();
+	// Several congestion windows, so the token must cover data still in flight
+	// after the reconnect task has stopped.
+	let payload: Vec<u8> = (0..64 * 1024).map(|i| i as u8).collect();
 
 	let quic = moq_tokio::quic::Config::default();
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 	let url: url::Url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
@@ -822,6 +603,7 @@ async fn quic_client_close_drains_finished_track() {
 
 	// The client gets a runtime of its own, gone as soon as the client returns: nothing
 	// drives its endpoint afterwards, exactly as when a process exits.
+	let (closing, started) = tokio::sync::oneshot::channel();
 	let expected = payload.clone();
 	let client = std::thread::spawn(move || {
 		let runtime = tokio::runtime::Builder::new_current_thread()
@@ -838,6 +620,8 @@ async fn quic_client_close_drains_finished_track() {
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
+			config.version = vec!["moq-lite-07-wip".parse().unwrap()];
+			config.tokens = vec!["connection".parse().unwrap(), "publish".parse().unwrap()];
 			config.bind = Some("127.0.0.1:0".parse().unwrap());
 			let client = config
 				.init(quic)
@@ -856,50 +640,68 @@ async fn quic_client_close_drains_finished_track() {
 			group.finish().expect("failed to finish group");
 			track.finish().expect("failed to finish track");
 
-			connection.close().await.expect("the close drains");
+			let mut close = Box::pin(connection.close());
+			assert!(futures::FutureExt::now_or_never(close.as_mut()).is_none());
+			closing.send(()).unwrap();
+			close.await.expect("the close drains");
 			client.close().await;
 		});
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
+	let mut request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("accept timed out")
 		.expect("no incoming connection");
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let (_session, _driver) = request
+	request.auth().authorize(&moq_net::auth::Grant::default());
+	let mut requests = request.requests();
+	let _session = request
 		.with_subscriber(origin)
 		.ok()
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let grants = tokio::spawn(async move {
+		let mut issued = Vec::new();
+		while let Some(request) = requests.next().await {
+			let grant = if request.token().as_ref() == b"publish" {
+				moq_net::auth::Grant::all()
+			} else {
+				moq_net::auth::Grant::default()
+			};
+			issued.push(request.accept(grant));
+		}
+	});
+
+	kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
-	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+	let mut track = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
 		.await
 		.expect("subscribe timed out")
 		.expect("subscribe failed");
 
-	let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+	started.await.expect("client started closing");
+	let mut group = kio::clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track ended before the group");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
 		.expect("group ended before the frame");
 	assert!(frame.payload[..] == expected[..], "the frame arrives whole");
 
-	let end = tokio::time::timeout(TIMEOUT, track.recv_group())
+	let end = kio::clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("the track end timed out");
 	match end {
@@ -912,12 +714,13 @@ async fn quic_client_close_drains_finished_track() {
 		.await
 		.unwrap()
 		.expect("client thread panicked");
+	grants.abort();
+	let _ = grants.await;
 }
 
 /// A GOAWAY leaves the old session serving its subscriptions after the replacement
 /// connects, and a close then drains that predecessor too rather than dropping it.
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_drains_migrated_predecessor() {
 	// Several congestion windows, so it is still in flight when the close starts.
@@ -982,28 +785,28 @@ async fn quic_client_close_drains_migrated_predecessor() {
 		});
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
+	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("accept timed out")
 		.expect("no incoming connection");
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let (first, _driver) = request
+	let first = request
 		.with_subscriber(origin)
 		.ok()
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
-	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+	let mut track = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
 		.await
 		.expect("subscribe timed out")
 		.expect("subscribe failed");
@@ -1022,7 +825,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 			.expect("group ended before the frame");
 		(frame.payload, track.recv_group().await.map(|group| group.is_some()))
 	});
-	tokio::time::timeout(TIMEOUT, subscribed_rx)
+	kio::clock::timeout(TIMEOUT, subscribed_rx)
 		.await
 		.expect("the subscription never reached the client")
 		.expect("client thread panicked");
@@ -1031,7 +834,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 		.drain()
 		.send(moq_tokio::moq_net::goaway::Goaway::new())
 		.expect("send goaway");
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
+	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("the replacement never dialed")
 		.expect("no incoming connection");
@@ -1040,12 +843,12 @@ async fn quic_client_close_drains_migrated_predecessor() {
 		.ok()
 		.await
 		.expect("server handshake failed");
-	tokio::time::timeout(TIMEOUT, migrated_rx)
+	kio::clock::timeout(TIMEOUT, migrated_rx)
 		.await
 		.expect("the client never migrated")
 		.expect("client thread panicked");
 
-	let (payload, end) = tokio::time::timeout(TIMEOUT, received)
+	let (payload, end) = kio::clock::timeout(TIMEOUT, received)
 		.await
 		.expect("the track timed out")
 		.expect("reader panicked");
@@ -1065,7 +868,6 @@ async fn quic_client_close_drains_migrated_predecessor() {
 /// A close cuts a predecessor that cannot drain off at its handover deadline,
 /// rather than holding it for the full one second close window.
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_keeps_predecessor_handover() {
 	let quic = moq_tokio::quic::Config::default();
@@ -1097,7 +899,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 			config.tls.insecure = Some(true);
 			config.bind = Some("127.0.0.1:0".parse().unwrap());
 			// Well under the one second close window.
-			config.goaway.handover = Some(Duration::from_millis(500));
+			config.goaway.handover = Some((Duration::from_millis(500)).into());
 			let client = config
 				.init(quic)
 				.expect("failed to init client")
@@ -1111,7 +913,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 
 			// Close while the old session is still inside its handover window.
 			while connection.status().await.expect("connection stopped") != moq_tokio::Status::Migrating {}
-			let start = std::time::Instant::now();
+			let start = kio::clock::now();
 			let err = connection.close().await.expect_err("the predecessor cannot drain");
 			let elapsed = start.elapsed();
 			client.close().await;
@@ -1119,34 +921,34 @@ async fn quic_client_close_keeps_predecessor_handover() {
 		})
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
+	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("accept timed out")
 		.expect("no incoming connection");
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let (first, _driver) = request
+	let first = request
 		.with_subscriber(origin)
 		.ok()
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
-	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+	let mut track = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
 		.await
 		.expect("subscribe timed out")
 		.expect("subscribe failed");
 	// Receiving is what sends the subscription, so read in the background.
 	let _received = tokio::spawn(async move { track.recv_group().await.map(|group| group.is_some()) });
-	tokio::time::timeout(TIMEOUT, subscribed_rx)
+	kio::clock::timeout(TIMEOUT, subscribed_rx)
 		.await
 		.expect("the subscription never reached the client")
 		.expect("client thread panicked");
@@ -1174,70 +976,60 @@ async fn quic_client_close_keeps_predecessor_handover() {
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_raw_quic() {
 	backend_test("moqt").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_raw_quic_no_sni() {
 	no_sni_test("moqt").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_raw_quic_path() {
 	path_test("moqt").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_raw_quic_moql_path() {
 	path_test("moql").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_webtransport_path() {
 	path_test("https").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_webtransport() {
 	backend_test("https").await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_mtls() {
 	mtls_test("https", false).await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_sni_certificate() {
 	sni_test().await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_cert_sources() {
 	cert_sources_test().await;
 }
 
 #[cfg(feature = "quic")]
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_cert_reload() {
 	reload_test().await;
@@ -1316,8 +1108,8 @@ async fn quic_qlog() {
 /// left to redial, and dropping the connection closes the transport because it
 /// holds the last session clone.
 ///
-/// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the connection it just got.
+/// The client comes back because it owns the transport endpoint, and the caller
+/// has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_tokio::Client,
 	url: url::Url,
@@ -1328,16 +1120,17 @@ async fn connect_once(
 
 // ── flow control ────────────────────────────────────────────────────
 
-/// Run a connect with every flow-control window pinned well under the payload, so
-/// the frame only arrives if the receiver keeps issuing credit as it drains.
+/// Run a connect with the stream and send windows pinned well under the payload, so
+/// the frame only arrives if the receiver keeps issuing stream credit as it drains.
+/// The connection window sits at the smallest that fits the largest message, which
+/// holds its credit until it is complete.
 ///
 /// The size is the point: a frame that fits inside one window would pass whether or
 /// not the setting ever reached the backend.
-///
 #[cfg(feature = "quic")]
 async fn window_test(scheme: &str) {
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.receive_window = Some(64 * 1024);
+	quic.receive_window = Some(moq_net::transport::MIN_RECEIVE_WINDOW);
 	quic.stream_receive_window = Some(16 * 1024);
 	quic.send_window = Some(32 * 1024);
 
@@ -1368,7 +1161,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

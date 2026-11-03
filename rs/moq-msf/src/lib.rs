@@ -17,6 +17,8 @@
 //! - <https://www.ietf.org/archive/id/draft-ietf-moq-msf-01.txt>
 //! - <https://www.ietf.org/archive/id/draft-ietf-moq-cmsf-00.txt>
 
+#![warn(missing_docs)]
+
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
@@ -223,10 +225,13 @@ impl<E: CatalogExt> Catalog<E> {
 	pub fn to_json(&self) -> Result<String, serde_json::Error> {
 		serde_json::to_string(self)
 	}
+}
+
+impl<E: CatalogExt> FromStr for Catalog<E> {
+	type Err = serde_json::Error;
 
 	/// Deserialize an MSF catalog from a JSON string.
-	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> Result<Self, serde_json::Error> {
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		serde_json::from_str(s)
 	}
 }
@@ -321,8 +326,17 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 		let init_data_list = wire.init_data_list.unwrap_or_default();
 
 		// id -> init data entry, built once so resolution is linear in the number
-		// of tracks rather than tracks x entries.
-		let by_id: HashMap<&str, &InitData> = init_data_list.iter().map(|e| (e.id.as_str(), e)).collect();
+		// of tracks rather than tracks x entries. A repeated id is refused: readers
+		// that kept different entries would disagree on a track's init bytes.
+		let mut by_id: HashMap<&str, &InitData> = HashMap::with_capacity(init_data_list.len());
+		for entry in &init_data_list {
+			if by_id.insert(entry.id.as_str(), entry).is_some() {
+				return Err(serde::de::Error::custom(format!(
+					"MSF catalog has duplicate initData id {:?}",
+					entry.id
+				)));
+			}
+		}
 
 		let tracks = wire
 			.tracks
@@ -930,12 +944,6 @@ mod test {
 	}
 
 	#[test]
-	fn draft01_string_version_decodes() {
-		let catalog = Catalog::<()>::from_str(r#"{"version":"draft-01","tracks":[]}"#).unwrap();
-		assert!(catalog.tracks.is_empty());
-	}
-
-	#[test]
 	fn unknown_version_string_is_accepted() {
 		// A future draft we don't specifically recognize still decodes; we don't
 		// expose the version, so callers are unaffected.
@@ -992,6 +1000,29 @@ mod test {
 
 		let err = Catalog::<()>::from_str(json).expect_err("unsupported initRef type must fail");
 		assert!(err.to_string().contains("unsupported type"), "unexpected error: {err}");
+	}
+
+	#[test]
+	fn duplicate_init_data_id_errors() {
+		// Keeping either entry would let two readers hand different init bytes to
+		// different parties for the same broadcast.
+		let json = r#"{
+			"version": "draft-01",
+			"initDataList": [
+				{ "id": "v", "type": "inline", "data": "AQID" },
+				{ "id": "v", "type": "inline", "data": "BAUG" }
+			],
+			"tracks": [
+				{ "name": "video0", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initRef": "v" }
+			]
+		}"#;
+
+		let err = Catalog::<()>::from_str(json).expect_err("duplicate initData id must fail");
+		assert!(
+			err.to_string().contains("duplicate initData"),
+			"unexpected error: {err}"
+		);
 	}
 
 	#[test]

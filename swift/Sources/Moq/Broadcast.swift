@@ -9,6 +9,11 @@ public final class BroadcastConsumer: Sendable {
         self.ffi = ffi
     }
 
+    /// Wait until the broadcast ends: its publisher closed it, or every producer left.
+    public func closed() async throws {
+        try await ffi.closed()
+    }
+
     /// Subscribe to a track by name, delivering raw frame payloads with no codec
     /// or container parsing. `subscription` tunes delivery priority, group range, and
     /// staleness; omit for defaults.
@@ -26,32 +31,35 @@ public final class BroadcastConsumer: Sendable {
         GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
     }
 
-    /// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+    /// Resolve a catalog rendition to the broadcast serving its track.
     ///
-    /// `reference` is `Media.Video.broadcast` / `Media.Audio.broadcast`: `nil` or empty names this
-    /// broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
-    /// rendition that carries one before `Media.TrackConsumer.subscribe`, `subscribeTrack`, `fetchGroup`, or
-    /// `Media.GroupConsumer.fetch`, which take a track name rather than a rendition: the rendition's
-    /// `track`, or its catalog key when `nil`. `Audio.Consumer.subscribe` and `Video.Consumer.subscribe` resolve both themselves.
+    /// The rendition's `broadcast` reference, `nil` or empty, names this broadcast; anything else
+    /// names a sibling relative to it (e.g. `./source`). Its `instance` is the stream the reference
+    /// names: a broadcast proven to serve another one throws instead of resolving, while a route
+    /// over a wire that carries no instance cannot prove one, so there it is best effort. Call it on a
+    /// rendition that carries a reference before `subscribeTrack` or `fetchGroup`, which take a
+    /// track name rather than a rendition: the rendition's `track`, or its ID when `nil`. The
+    /// rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
+    /// `Audio.Consumer.subscribe`, and `Video.Consumer.subscribe` resolve it themselves.
     ///
     /// Throws if this broadcast came from a local producer rather than an origin, since a
     /// standalone broadcast has no sibling to name.
-    public func resolve(_ reference: String?) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.resolve(reference: reference))
+    public func resolve(_ rendition: Media.Rendition) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.resolve(rendition: rendition))
     }
 
 }
 
-/// Write side of a broadcast: open tracks and publish frames.
+/// Write side of a broadcast: open tracks and publish frames. Its `Publication`,
+/// if any, announces it.
 ///
-/// Constructing one directly creates a standalone broadcast for serving dynamic
-/// requests (`BroadcastRequest.accept`) or local pub/sub. To publish at a path,
-/// use `OriginProducer.createBroadcast(path:)` instead.
+/// Constructing one directly creates a standalone broadcast for local pub/sub.
+/// To publish at a path, use `OriginProducer.createBroadcast(path:)` instead.
 public final class BroadcastProducer: Sendable {
     let ffi: MoqBroadcastProducer
 
-    /// Create a standalone broadcast for serving dynamic requests or local
-    /// pub/sub. To publish at a path, use `OriginProducer.createBroadcast(path:)`.
+    /// Create a standalone broadcast for local pub/sub. To publish at a path,
+    /// use `OriginProducer.createBroadcast(path:)`.
     public init() throws {
         ffi = try MoqBroadcastProducer()
     }
@@ -66,22 +74,9 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Accept subscriptions to tracks that are not published yet. Hold and iterate
-    /// the returned `BroadcastDynamic` while such requests should be served.
-    public func dynamic() throws -> BroadcastDynamic {
-        BroadcastDynamic(try ffi.dynamic())
-    }
-
-    /// Advertise this broadcast's exact path as a route.
-    ///
-    /// Announcing again re-prices the route in place. Until announced, the
-    /// broadcast is invisible and unroutable for local consumers and peers alike.
-    public func announce(route: Route = Route()) throws {
-        try ffi.announce(route: route)
-    }
-
-    /// Retract this broadcast's advertisement, if any, from local consumers and peers alike.
-    public func unannounce() throws {
-        try ffi.unannounce()
+    /// the returned `BroadcastRequests` while such requests should be served.
+    public func requests() throws -> BroadcastRequests {
+        BroadcastRequests(try ffi.requests())
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
@@ -92,7 +87,9 @@ public final class BroadcastProducer: Sendable {
 
     /// End the broadcast for good: retract it and serve no new tracks.
     ///
-    /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+    /// Tracks still open on it end with `Unroutable` (`Internal` to a moq-transport reader),
+    /// and their later calls throw `MoqError.Closed`; finish a track first to end it cleanly.
+    /// Closing again is a no-op.
     public func close() throws {
         try ffi.close()
     }

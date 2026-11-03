@@ -13,6 +13,12 @@ type BroadcastConsumer struct {
 	inner *ffi.MoqBroadcastConsumer
 }
 
+// Closed blocks until the broadcast ends: its publisher closed it, or every producer
+// left. Cancelling ctx stops waiting.
+func (b *BroadcastConsumer) Closed(ctx context.Context) error {
+	return b.inner.Closed(ctx)
+}
+
 // SubscribeTrack subscribes to a track, receiving arbitrary byte payloads.
 // subscription tunes delivery priority, group range, and staleness; pass nil for defaults.
 func (b *BroadcastConsumer) SubscribeTrack(
@@ -39,6 +45,11 @@ func (b *BroadcastConsumer) FetchGroup(
 	sequence uint64,
 	options *FetchGroupOptions,
 ) (*GroupConsumer, error) {
+	if options != nil {
+		if err := bridge.NonNegative(options.MaxDelay, "max delay"); err != nil {
+			return nil, err
+		}
+	}
 	inner, err := b.inner.FetchGroup(ctx, name, sequence, options)
 	if err != nil {
 		return nil, err
@@ -46,17 +57,23 @@ func (b *BroadcastConsumer) FetchGroup(
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
-// reference: ffi.MoqVideo.Broadcast / ffi.MoqAudio.Broadcast. A nil or empty reference names this
-// broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
-// rendition that carries one before media.NewTrackConsumer, SubscribeTrack, FetchGroup, or
-// media.FetchGroup, which take a track name rather than a rendition: the
-// rendition's Track, or its catalog key when nil. audio.Subscribe and video.Subscribe resolve both themselves.
+// Resolve returns the broadcast serving a catalog rendition, built with
+// media.VideoRendition or media.AudioRendition. The rendition's Broadcast reference, nil or
+// empty, names this broadcast; anything else names a sibling relative to it (e.g. "./source").
+// Its Instance is the stream the reference names: a broadcast proven to serve another one
+// errors instead of resolving, while a route over a wire that carries no instance cannot prove
+// one, so there it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
+// FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
+// when nil. The rendition-based media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and
+// video.Subscribe resolve it themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
-func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string) (*BroadcastConsumer, error) {
-	inner, err := b.inner.Resolve(ctx, reference)
+func (b *BroadcastConsumer) Resolve(ctx context.Context, rendition ffi.MoqRendition) (*BroadcastConsumer, error) {
+	if err := bridge.Rendition(rendition); err != nil {
+		return nil, err
+	}
+	inner, err := b.inner.Resolve(ctx, rendition)
 	if err != nil {
 		return nil, err
 	}
@@ -75,8 +92,7 @@ func (g *GroupConsumer) Sequence() uint64 {
 
 // ReadFrame returns the next raw frame, or (nil, nil) when the group ends.
 func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	frame, err := bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
-	return frameFromFFI(frame), err
+	return bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
 }
 
 // All ranges over raw frames until the group ends or the loop breaks.
@@ -99,17 +115,7 @@ type TrackConsumer struct {
 // or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
 // consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
-		res, err := t.inner.RecvGroup(ctx)
-		if err != nil || res == nil {
-			return nil, err
-		}
-		return *res, nil
-	})
-	if err != nil || res == nil {
-		return nil, err
-	}
-	return &GroupConsumer{inner: res}, nil
+	return t.group(ctx, t.inner.RecvGroup)
 }
 
 // NextGroup returns the next group in sequence order, skipping forward if
@@ -117,8 +123,12 @@ func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 // more than latency. Shares the sequence cursor with ReadFrame: a group one
 // method has already taken is not returned by the other.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
+	return t.group(ctx, t.inner.NextGroup)
+}
+
+func (t *TrackConsumer) group(ctx context.Context, next func(context.Context) (**ffi.MoqGroupConsumer, error)) (*GroupConsumer, error) {
 	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
-		res, err := t.inner.NextGroup(ctx)
+		res, err := next(ctx)
 		if err != nil || res == nil {
 			return nil, err
 		}
@@ -136,35 +146,28 @@ func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 // Cancelling the context cancels this consumer, not just this call: see
 // package docs.
 func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	frame, err := bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
-	return frameFromFFI(frame), err
+	return bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
 }
 
 // RecvDatagram returns the next best-effort datagram in arrival order, or
 // (nil, nil) when the track ends.
 func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
-	datagram, err := bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
-	return datagramFromFFI(datagram), err
+	return bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
 }
 
 // Info returns the publisher-side track properties learned during subscription.
-func (t *TrackConsumer) Info() (TrackInfo, error) {
-	info, err := t.inner.Info()
-	if err != nil {
-		return TrackInfo{}, err
-	}
-	return trackInfoFromFFI(info), nil
+func (t *TrackConsumer) Info() TrackInfo {
+	return trackInfoFromFFI(t.inner.Info())
 }
 
-// Update changes this subscriber's delivery preferences. It fails only on a
-// negative MaxDelay.
+// Update changes this subscriber's delivery preferences. It fails on a
+// negative MaxDelay, or a time anchor the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {
 		return err
 	}
-	t.inner.Update(sub)
-	return nil
+	return t.inner.Update(sub)
 }
 
 // Groups ranges over groups in sequence order.
@@ -195,9 +198,9 @@ type VideoDecodedFrame struct {
 	inner *ffi.MoqVideoDecodedFrame
 }
 
-// TimestampUs is the presentation timestamp in microseconds.
-func (f *VideoDecodedFrame) TimestampUs() uint64 {
-	return f.inner.TimestampUs()
+// Timestamp is the presentation timestamp.
+func (f *VideoDecodedFrame) Timestamp() Timestamp {
+	return f.inner.Timestamp()
 }
 
 // Width is the decoded width in pixels.

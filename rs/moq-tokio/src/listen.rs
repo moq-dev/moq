@@ -79,9 +79,9 @@ pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
-/// Derives [`usage::Args`], so flatten it into a binary's own parser with
+/// Derives [`usage_rs::Args`], so flatten it into a binary's own parser with
 /// `#[usage(flatten)]`. The dial side is [`crate::connect::Config`].
-#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -116,7 +116,7 @@ pub struct Config {
 
 	/// Restrict the server to specific MoQ protocol version(s).
 	///
-	/// By default, the server accepts all supported versions.
+	/// By default, the server accepts every supported version except the opt-in `moq-lite-07-wip`.
 	/// Use this to restrict to specific versions, e.g. `--listen-version moq-lite-02`.
 	/// Can be specified multiple times to accept a subset of versions.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -133,50 +133,46 @@ pub struct Config {
 			"moq-lite-05",
 			"moq-lite-06",
 			"moq-lite-07-wip",
-			"moq-transport-14",
-			"moq-transport-15",
-			"moq-transport-16",
-			"moq-transport-17",
 			"moq-transport-18",
-			"moq-transport-19",
 			"moq-transport-20",
-			"moq-transport-21",
 			"moq-transport-22"
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The moq-transport extensions to offer in SETUP, all by default.
+	/// The extensions to offer in SETUP, every moq-transport one by default.
 	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 
+	/// The implementation to advertise in SETUP, as space-separated `name/version`
+	/// product tokens. Defaults to the binary's own; empty advertises nothing.
+	#[usage(
+		name = "listen-implementation",
+		long = "listen-implementation",
+		env = "MOQ_LISTEN_IMPLEMENTATION",
+		setting = "listen.implementation"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub implementation: Option<String>,
+
 	/// Maximum time for one accepted connection to finish its handshake: the
-	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, through
-	/// [`crate::server::Request::ok`]. Defaults to 10 seconds; set to 0 to wait forever.
+	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, whatever the
+	/// server runs under (admission, say), until the session is accepted. Defaults to
+	/// 10 seconds; set to 0 to wait forever.
 	///
 	/// A peer that connects and then never speaks would otherwise hold its
 	/// connection open indefinitely, since keep-alives count as activity. The
-	/// connection is closed with a timeout code once this passes. See
-	/// [`resolved_timeout`](Self::resolved_timeout) for the value in effect.
-	/// `None` uses the default; an explicit command-line flag or environment variable wins.
-	#[usage(skip)]
-	#[serde(
-		default,
-		with = "crate::cli::duration::serde_duration::option",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub timeout: Option<std::time::Duration>,
-
-	/// Maximum time for an accepted connection to finish its handshake. Defaults to 10s; 0s waits forever.
+	/// connection is closed with a timeout code once this passes.
+	/// `None` uses the default; zero disables this duration.
 	#[usage(
 		name = "listen-timeout",
 		long = "listen-timeout",
 		env = "MOQ_LISTEN_TIMEOUT",
 		setting = "listen.timeout"
 	)]
-	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
-	pub(crate) timeout_arg: Option<crate::cli::Duration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub timeout: Option<crate::cli::Duration>,
 
 	/// The certificates to serve and the roots that authenticate mTLS clients
 	/// (`--listen-tls-*`).
@@ -191,7 +187,7 @@ pub struct Config {
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
 	/// Honored by the QUIC backend. Accept-only, which is why it lives
-	/// here rather than in the shared [`crate::quic::Config`].
+	/// here rather than in the shared QUIC settings.
 	#[usage(
 		name = "listen-preferred-v4",
 		long = "listen-preferred-v4",
@@ -201,7 +197,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub preferred_v4: Option<std::net::SocketAddrV4>,
 
-	/// IPv6 address advertised as the QUIC preferred_address. See [`Self::preferred_v4`].
+	/// IPv6 address advertised as the QUIC preferred_address. Like `--listen-preferred-v4`, for IPv6.
 	#[usage(
 		name = "listen-preferred-v6",
 		long = "listen-preferred-v6",
@@ -211,43 +207,15 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub preferred_v6: Option<std::net::SocketAddrV6>,
 
-	/// Server ID to embed in connection IDs for QUIC-LB compatibility.
-	/// If set, connection IDs will be derived semi-deterministically.
-	#[usage(
-		name = "listen-quic-lb-id",
-		long = "listen-quic-lb-id",
-		env = "MOQ_LISTEN_QUIC_LB_ID",
-		setting = "listen.lb_id"
-	)]
-	#[serde(
-		default,
-		rename = "__cli_lb_id",
-		alias = "lb_id",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub(crate) lb_id: Option<crate::quic::ServerId>,
+	/// QUIC-LB connection-ID encoding (`[listen.lb]`).
+	#[usage(flatten)]
+	#[serde(default)]
+	pub lb: LoadBalancer,
 
-	/// Number of random nonce bytes in QUIC-LB connection IDs.
-	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
-	#[usage(
-		name = "listen-quic-lb-nonce",
-		long = "listen-quic-lb-nonce",
-		env = "MOQ_LISTEN_QUIC_LB_NONCE",
-		setting = "listen.lb_nonce",
-		requires = "--listen-quic-lb-id"
-	)]
-	#[serde(
-		default,
-		rename = "__cli_lb_nonce",
-		alias = "lb_nonce",
-		skip_serializing_if = "Option::is_none"
-	)]
-	pub(crate) lb_nonce: Option<usize>,
-
-	/// QUIC-LB connection-ID encoding.
-	#[usage(skip)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub load_balancer: Option<crate::quic::LoadBalancer>,
+	/// QUIC stateless resets (`--listen-reset-*`).
+	#[usage(flatten)]
+	#[serde(default)]
+	pub reset: Reset,
 
 	/// The released `--server-*` spellings and their env vars, kept parsing but
 	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
@@ -264,32 +232,61 @@ pub struct Config {
 	/// migrate to.
 	#[usage(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub quic: Option<crate::quic::Config>,
+	pub(crate) quic: Option<crate::quic::Config>,
 }
 
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			bind: None,
-			listen: None,
-			#[cfg(feature = "tcp")]
-			tcp: Default::default(),
-			#[cfg(all(feature = "uds", unix))]
-			unix: Default::default(),
-			version: Vec::new(),
-			extensions: Default::default(),
-			timeout: Some(DEFAULT_TIMEOUT),
-			timeout_arg: None,
-			tls: Default::default(),
-			preferred_v4: None,
-			preferred_v6: None,
-			lb_id: None,
-			lb_nonce: None,
-			load_balancer: None,
-			legacy: Default::default(),
-			quic: None,
-		}
-	}
+/// QUIC stateless reset settings (`[listen.reset]`, `--listen-reset-*`).
+#[derive(usage_rs::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Reset {
+	/// A file holding the secret the stateless reset key is derived from, as 64
+	/// hexadecimal characters (`openssl rand -hex 32`).
+	///
+	/// A server restarted with the same secret resets its predecessor's connections,
+	/// so peers reconnect at once instead of waiting out their idle timeout. Every
+	/// holder can reset every other holder's connections, so share it between live
+	/// servers only behind one address that routes by connection ID (QUIC-LB).
+	/// Unset draws a random key per process.
+	#[usage(
+		name = "listen-reset-secret",
+		long = "listen-reset-secret",
+		env = "MOQ_LISTEN_RESET_SECRET",
+		setting = "listen.reset.secret"
+	)]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub secret: Option<std::path::PathBuf>,
+}
+
+/// The QUIC listener settings with defaults applied, produced by [`Config::resolve`].
+///
+/// Exhaustive on purpose, unlike [`crate::connect::Resolved`]: a QUIC runtime outside
+/// this crate destructures it without `..`, so a setting added here fails to compile
+/// until every runtime honors or refuses it.
+#[derive(Clone, Debug)]
+pub struct Resolved {
+	/// The QUIC listen address; unset leaves the choice of default to the runtime.
+	pub bind: Option<Bind>,
+	/// The versions to accept, every one when none was configured.
+	pub versions: moq_net::Versions,
+	/// The extensions to offer in SETUP.
+	pub extensions: moq_net::setup::Extensions,
+	/// The implementation to advertise in SETUP, or the runtime's own when unset.
+	pub implementation: Option<String>,
+	/// The handshake deadline, from [`Config::resolved_timeout`].
+	pub timeout: Option<std::time::Duration>,
+	/// The served identity and the roots that authenticate mTLS clients.
+	pub tls: crate::tls::Listen,
+	/// The IPv4 QUIC preferred_address to advertise.
+	pub preferred_v4: Option<std::net::SocketAddrV4>,
+	/// The IPv6 QUIC preferred_address to advertise.
+	pub preferred_v6: Option<std::net::SocketAddrV6>,
+	/// The QUIC-LB connection-ID encoding.
+	pub lb: LoadBalancer,
+	/// The file the stateless reset key is derived from.
+	pub reset_secret: Option<std::path::PathBuf>,
 }
 
 /// One server's socket in a complete `SO_REUSEPORT` group.
@@ -304,7 +301,7 @@ pub(crate) use moq_sock::shard::Socket;
 /// They carry their original env vars, which is why these are separate args rather
 /// than Usage aliases: an alias renames the flag but not the variable, and a relay
 /// deployed through the environment is the common case.
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(name = "server-bind", long = "server-bind", env = "MOQ_SERVER_BIND", hide = true)]
@@ -322,14 +319,8 @@ pub(crate) struct Legacy {
 			"moq-lite-05",
 			"moq-lite-06",
 			"moq-lite-07-wip",
-			"moq-transport-14",
-			"moq-transport-15",
-			"moq-transport-16",
-			"moq-transport-17",
 			"moq-transport-18",
-			"moq-transport-19",
 			"moq-transport-20",
-			"moq-transport-21",
 			"moq-transport-22"
 		),
 		hide = true
@@ -451,17 +442,38 @@ impl Config {
 				"--listen-unix-allow-* requires --listen-unix-bind",
 			));
 		}
-		// A nonce with no server id used to be dropped, and `lb_id` used to hide
-		// `load_balancer`. Either one is a setting the process would not run.
-		if self.load_balancer.is_some() && (self.lb_id.is_some() || self.lb_nonce.is_some()) {
-			return Err(crate::Error::NoBackend(
-				"load_balancer cannot be combined with lb_id or lb_nonce",
-			));
-		}
-		if self.lb_nonce.is_some() && self.lb_id.is_none() {
+		if self.lb.nonce.is_some() && self.lb.id.is_none() {
 			return Err(crate::Error::NoBackend(
 				"--listen-quic-lb-nonce requires --listen-quic-lb-id",
 			));
+		}
+		let forward = &self.lb.forward;
+		if forward.configured() {
+			let refused = [
+				(
+					self.lb.id.is_none(),
+					"--listen-quic-lb-forward-* requires --listen-quic-lb-id",
+				),
+				(
+					forward.bind.is_none(),
+					"--listen-quic-lb-forward-* requires --listen-quic-lb-forward-bind",
+				),
+				(
+					forward.key.is_none(),
+					"--listen-quic-lb-forward-bind requires --listen-quic-lb-forward-key",
+				),
+				(
+					forward.peers.is_none(),
+					"--listen-quic-lb-forward-bind requires --listen-quic-lb-forward-peers",
+				),
+				(
+					forward.bind.is_some_and(|bind| bind.ip().is_unspecified()),
+					"--listen-quic-lb-forward-bind needs a specific IP, which its peers list",
+				),
+			];
+			if let Some((_, reason)) = refused.into_iter().find(|(set, _)| *set) {
+				return Err(crate::Error::NoBackend(reason));
+			}
 		}
 		Ok(())
 	}
@@ -504,8 +516,12 @@ impl Config {
 				"--listen-preferred-v6 needs a QUIC listener (--listen)",
 			),
 			(
-				self.lb_id.is_some() || self.load_balancer.is_some(),
-				"--listen-quic-lb-id (load_balancer) needs a QUIC listener (--listen)",
+				self.lb.id.is_some(),
+				"--listen-quic-lb-id needs a QUIC listener (--listen)",
+			),
+			(
+				self.reset.secret.is_some(),
+				"--listen-reset-secret needs a QUIC listener (--listen)",
 			),
 		];
 		match refused.into_iter().find(|(set, _)| *set) {
@@ -517,24 +533,76 @@ impl Config {
 	/// How long an accepted connection has to finish its handshake, or `None` to wait
 	/// forever: for zero, and for a timeout too long for the clock to reach.
 	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
-		let timeout = self
-			.timeout_arg
-			.map(Into::into)
-			.or(self.timeout)
-			.unwrap_or(DEFAULT_TIMEOUT);
-		(!timeout.is_zero() && std::time::Instant::now().checked_add(timeout).is_some()).then_some(timeout)
+		let timeout = self.timeout.map(Into::into).unwrap_or(DEFAULT_TIMEOUT);
+		(!timeout.is_zero() && kio::clock::now().checked_add(timeout).is_some()).then_some(timeout)
+	}
+
+	/// The QUIC listener settings, for a runtime outside this crate to map.
+	///
+	/// Refuses released spellings and invalid combinations, as [`crate::Server::new`]
+	/// does. Destructures every field, so a new one fails to compile here until it is
+	/// either carried into [`Resolved`] or named as something a QUIC listener never
+	/// reads.
+	#[cfg(feature = "_transport")]
+	pub fn resolve(&self) -> crate::Result<Resolved> {
+		let deprecated = self.deprecated();
+		if !deprecated.is_empty() {
+			return Err(crate::Error::Deprecated(deprecated));
+		}
+		self.validate()?;
+
+		let Self {
+			bind,
+			version: _,
+			extensions,
+			implementation,
+			timeout: _,
+			tls,
+			preferred_v4,
+			preferred_v6,
+			lb,
+			reset: Reset { secret: reset_secret },
+			// Served by `Server` on the caller's runtime, never by a QUIC listener.
+			#[cfg(feature = "tcp")]
+				tcp: _,
+			#[cfg(all(feature = "uds", unix))]
+				unix: _,
+			// Refused above as deprecated.
+			listen: _,
+			legacy: _,
+			quic: _,
+		} = self;
+
+		Ok(Resolved {
+			bind: bind.clone(),
+			versions: self.versions(),
+			extensions: *extensions,
+			implementation: implementation.clone(),
+			timeout: self.resolved_timeout(),
+			tls: tls.clone(),
+			preferred_v4: *preferred_v4,
+			preferred_v6: *preferred_v6,
+			lb: lb.clone(),
+			reset_secret: reset_secret.clone(),
+		})
 	}
 
 	#[cfg(feature = "quic")]
 	/// Return the effective QUIC-LB connection-ID encoding.
-	pub fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
-		self.lb_id
-			.clone()
-			.map(|id| crate::quic::LoadBalancer {
-				id,
-				nonce: self.lb_nonce.unwrap_or(8),
-			})
-			.or_else(|| self.load_balancer.clone())
+	pub(crate) fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
+		let forward = &self.lb.forward;
+		self.lb.id.clone().map(|id| crate::quic::LoadBalancer {
+			id,
+			nonce: self.lb.nonce.unwrap_or(8),
+			forward: match (forward.bind, &forward.key, &forward.peers) {
+				(Some(bind), Some(key), Some(peers)) => Some(crate::quic::Forward {
+					bind,
+					key: key.clone(),
+					peers: peers.clone(),
+				}),
+				_ => None,
+			},
+		})
 	}
 }
 
@@ -558,7 +626,7 @@ mod tests {
 	}
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {
@@ -603,7 +671,7 @@ mod tests {
 		assert_eq!(config.bind, None);
 		assert!(config.version.is_empty());
 		assert_eq!(config.preferred_v4, None);
-		assert!(config.lb_id.is_none());
+		assert!(config.lb.id.is_none());
 		assert!(config.tls.cert.is_empty());
 		assert!(config.tls.root.is_empty());
 
@@ -675,52 +743,29 @@ mod tests {
 			Some(crate::quic::LoadBalancer {
 				id: "ab".parse().unwrap(),
 				nonce: 9,
+				forward: None,
 			})
 		);
 	}
 
-	/// A nonce with no server id is refused at startup, from either TOML spelling,
-	/// instead of being dropped.
 	#[test]
 	fn quic_lb_nonce_without_id_refuses_to_start() {
-		for toml in ["lb_nonce = 8", "__cli_lb_nonce = 8"] {
-			let config: Config = toml::from_str(toml).unwrap_or_else(|err| panic!("{toml}: {err}"));
-			match config.init(Default::default()) {
-				Err(crate::Error::NoBackend(reason)) => {
-					assert!(reason.contains("requires --listen-quic-lb-id"), "{toml}: {reason}")
-				}
-				Err(err) => panic!("{toml}: {err}"),
-				Ok(_) => panic!("{toml} was ignored"),
-			}
-		}
+		let config: Config = toml::from_str("[lb]\nnonce = 8").unwrap();
+		assert!(
+			matches!(config.validate(), Err(crate::Error::NoBackend(reason)) if reason.contains("requires --listen-quic-lb-id"))
+		);
 	}
 
-	/// `lb_id` must not hide a `load_balancer` value. One source, or startup stops.
 	#[test]
-	fn quic_lb_id_and_load_balancer_cannot_both_be_set() {
-		let both = |toml: &str| {
-			let config: Config = toml::from_str(toml).unwrap_or_else(|err| panic!("{toml}: {err}"));
-			match config.init(Default::default()) {
-				Err(crate::Error::NoBackend(reason)) => {
-					assert!(reason.contains("cannot be combined"), "{toml}: {reason}")
-				}
-				Err(err) => panic!("{toml}: {err}"),
-				Ok(_) => panic!("{toml} let lb_id win"),
-			}
-		};
-		both(
-			r#"
-lb_id = "ab"
-load_balancer = { id = "cd", nonce = 4 }
-"#,
-		);
-		both(
-			r#"
-__cli_lb_id = "ab"
-lb_nonce = 9
-load_balancer = { id = "cd", nonce = 4 }
-"#,
-		);
+	fn removed_load_balancer_paths_are_refused() {
+		for body in [
+			"lb_id = \"ab\"",
+			"lb_nonce = 8",
+			"__cli_lb_id = \"ab\"",
+			"load_balancer = { id = \"ab\", nonce = 8 }",
+		] {
+			assert!(toml::from_str::<Config>(body).is_err(), "{body}");
+		}
 	}
 
 	/// Programmatic configuration keeps the QUIC-LB id and nonce paired.
@@ -731,7 +776,14 @@ load_balancer = { id = "cd", nonce = 4 }
 
 		let config: Config = toml::from_str(
 			r#"
-load_balancer = { id = "ab", nonce = 8 }
+[lb]
+id = "ab"
+nonce = 8
+
+[lb.forward]
+bind = "10.0.0.1:4443"
+key = "forward.key"
+peers = "peers.toml"
 "#,
 		)
 		.unwrap();
@@ -740,8 +792,44 @@ load_balancer = { id = "ab", nonce = 8 }
 			Some(crate::quic::LoadBalancer {
 				id: "ab".parse().unwrap(),
 				nonce: 8,
+				forward: Some(crate::quic::Forward {
+					bind: "10.0.0.1:4443".parse().unwrap(),
+					key: "forward.key".into(),
+					peers: "peers.toml".into(),
+				}),
 			})
 		);
+	}
+
+	/// Forwarding needs a server ID and all three of its settings, and a bind its peers can name.
+	#[test]
+	fn quic_lb_forward_refuses_a_partial_config() {
+		let complete = "[lb]\nid = \"ab\"\n[lb.forward]\nbind = \"10.0.0.1:4443\"\nkey = \"k\"\npeers = \"p\"\n";
+		let config: Config = toml::from_str(complete).unwrap();
+		config.validate().expect("complete");
+
+		for (body, needle) in [
+			(complete.replace("id = \"ab\"\n", ""), "requires --listen-quic-lb-id"),
+			(
+				complete.replace("bind = \"10.0.0.1:4443\"\n", ""),
+				"requires --listen-quic-lb-forward-bind",
+			),
+			(
+				complete.replace("key = \"k\"\n", ""),
+				"requires --listen-quic-lb-forward-key",
+			),
+			(
+				complete.replace("peers = \"p\"\n", ""),
+				"requires --listen-quic-lb-forward-peers",
+			),
+			(complete.replace("10.0.0.1", "0.0.0.0"), "needs a specific IP"),
+		] {
+			let config: Config = toml::from_str(&body).unwrap();
+			match config.validate() {
+				Err(crate::Error::NoBackend(reason)) => assert!(reason.contains(needle), "{body}: {reason}"),
+				other => panic!("{body}: {other:?}"),
+			}
+		}
 	}
 
 	/// A stream-only server opens no QUIC listener even with a bind configured,
@@ -780,13 +868,8 @@ load_balancer = { id = "ab", nonce = 8 }
 			("--listen-preferred-v6", |c| {
 				c.preferred_v6 = Some("[2001:db8::1]:443".parse().unwrap())
 			}),
-			("--listen-quic-lb-id", |c| c.lb_id = Some("ab".parse().unwrap())),
-			("--listen-quic-lb-id (load_balancer)", |c| {
-				c.load_balancer = Some(crate::quic::LoadBalancer {
-					id: "ab".parse().unwrap(),
-					nonce: 8,
-				})
-			}),
+			("--listen-quic-lb-id", |c| c.lb.id = Some("ab".parse().unwrap())),
+			("--listen-reset-secret", |c| c.reset.secret = Some("reset.key".into())),
 		];
 		for (name, set) in cases {
 			let mut config = stream_only();
@@ -852,21 +935,10 @@ load_balancer = { id = "ab", nonce = 8 }
 
 		// Past the clock's range is forever, not a panic on the first accept.
 		let config = Config {
-			timeout: Some(std::time::Duration::MAX),
+			timeout: Some((std::time::Duration::MAX).into()),
 			..Default::default()
 		};
 		assert_eq!(config.resolved_timeout(), None);
-	}
-
-	/// The canonical spellings, which is what `--help` teaches.
-	#[test]
-	fn canonical_spellings_parse() {
-		let config = config_from(["test", "--listen", "[::]:443", "--listen-version", "moq-lite-03"]);
-		assert_eq!(
-			config.bind.as_ref().map(ToString::to_string).as_deref(),
-			Some("[::]:443")
-		);
-		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
 	}
 }
 
@@ -881,4 +953,94 @@ mod duration_tests {
 		|c: &Config| c.resolved_timeout(),
 		|d: std::time::Duration| (!d.is_zero()).then_some(d)
 	);
+}
+
+/// QUIC-LB settings for a listener, unset until a server ID is supplied.
+#[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoadBalancer {
+	/// Server ID to embed in connection IDs for QUIC-LB compatibility.
+	/// If set, connection IDs will be derived semi-deterministically.
+	#[usage(
+		name = "listen-quic-lb-id",
+		long = "listen-quic-lb-id",
+		env = "MOQ_LISTEN_QUIC_LB_ID",
+		setting = "listen.lb.id"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub id: Option<crate::quic::ServerId>,
+
+	/// Number of random nonce bytes in QUIC-LB connection IDs.
+	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
+	#[usage(
+		name = "listen-quic-lb-nonce",
+		long = "listen-quic-lb-nonce",
+		env = "MOQ_LISTEN_QUIC_LB_NONCE",
+		setting = "listen.lb.nonce",
+		requires = "--listen-quic-lb-id"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub nonce: Option<usize>,
+
+	/// Forwarding to the other servers behind this one's address (`[listen.lb.forward]`).
+	#[usage(flatten)]
+	#[serde(default)]
+	pub forward: Forward,
+}
+
+/// QUIC-LB forwarding (`[listen.lb.forward]`, `--listen-quic-lb-forward-*`).
+///
+/// Behind an anycast address or a load-balanced VIP, a route change or a rebalance can land an
+/// established connection's packets on another server. With forwarding, that server hands each
+/// packet whose connection ID names another server to the owner, which processes it as if the
+/// client had sent it there and keeps replying from the shared address. Only packets after the
+/// handshake are forwarded, so the front end must still keep a handshake on one server.
+#[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Forward {
+	/// The UDP address this server receives forwards on, and the one its peers name it by.
+	/// Needs a specific IP, since a forward is accepted only from a peer's listed address.
+	#[usage(
+		name = "listen-quic-lb-forward-bind",
+		long = "listen-quic-lb-forward-bind",
+		env = "MOQ_LISTEN_QUIC_LB_FORWARD_BIND",
+		setting = "listen.lb.forward.bind"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bind: Option<std::net::SocketAddr>,
+
+	/// A file holding the key every server forwarding to this one shares, as 64 hexadecimal
+	/// characters (`openssl rand -hex 32`). It authenticates each forward, which carries a
+	/// client address the receiver would otherwise take on trust.
+	#[usage(
+		name = "listen-quic-lb-forward-key",
+		long = "listen-quic-lb-forward-key",
+		env = "MOQ_LISTEN_QUIC_LB_FORWARD_KEY",
+		setting = "listen.lb.forward.key"
+	)]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub key: Option<std::path::PathBuf>,
+
+	/// A TOML file naming each server's forward address by its hex server ID, such as
+	/// `"02" = "10.0.0.2:4443"`. Reloaded when it changes, keeping the last valid map.
+	/// This server's own entry is skipped, so every server can share one file. A packet for
+	/// a server missing from it is dropped.
+	#[usage(
+		name = "listen-quic-lb-forward-peers",
+		long = "listen-quic-lb-forward-peers",
+		env = "MOQ_LISTEN_QUIC_LB_FORWARD_PEERS",
+		setting = "listen.lb.forward.peers"
+	)]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub peers: Option<std::path::PathBuf>,
+}
+
+impl Forward {
+	/// Whether any forwarding setting is present.
+	pub fn configured(&self) -> bool {
+		self.bind.is_some() || self.key.is_some() || self.peers.is_some()
+	}
 }

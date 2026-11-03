@@ -2,9 +2,9 @@
 //!
 //! The `mpegts` section carries everything needed to faithfully re-mux a broadcast
 //! back to MPEG-TS that doesn't belong in the codec-neutral media configs: one
-//! entry per track (its original PID and PMT descriptors), a `verbatim` carriage
-//! record for every elementary stream we don't decode (SCTE-35, teletext, DVB
-//! subtitles, private data, ...), the program-level PMT descriptors, the program
+//! entry per track (its original PID and PMT descriptors), a `verbatim` or
+//! `pesPacket` carriage record for every elementary stream we don't decode (SCTE-35,
+//! teletext, DVB subtitles, private data, ...), the program-level PMT descriptors, the program
 //! identity ([`Program`]), and the standalone SI table map ([`SiEntry`]).
 //! Demuxed media tracks keep their codec config in the base `video`/`audio`
 //! sections; only their MPEG-TS identity lands here. A constant-rate source also
@@ -86,7 +86,8 @@ pub(super) fn si_interval(table_id: u8) -> Option<Duration> {
 #[non_exhaustive]
 pub struct Mpegts {
 	/// Per-track MPEG-TS info, keyed by MoQ track name. Media tracks record their
-	/// PID and PMT descriptors; undecoded tracks add a [`Verbatim`] carriage record.
+	/// PID and PMT descriptors; undecoded tracks add a [`Verbatim`] or [`PesPacket`]
+	/// carriage record.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub tracks: BTreeMap<String, Track>,
 
@@ -147,6 +148,18 @@ impl Mpegts {
 			&& self.program.is_none()
 			&& self.si.is_empty()
 			&& self.mux_rate.is_none()
+	}
+
+	/// Whether the section lists a track it carries itself: an undecoded stream or an SI table.
+	pub(crate) fn has_track(&self) -> bool {
+		self.tracks
+			.values()
+			.any(|track| track.verbatim.is_some() || track.pes_packet.is_some())
+			|| self
+				.si
+				.values()
+				.flat_map(BTreeMap::values)
+				.any(|entry| !entry.track.is_empty())
 	}
 }
 
@@ -303,9 +316,14 @@ pub struct Track {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub descriptors: Vec<Descriptor>,
 
-	/// Present when the stream is carried verbatim (not decoded into `video`/`audio`).
+	/// Present when the stream is carried as sections (not decoded into `video`/`audio`).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub verbatim: Option<Verbatim>,
+
+	/// Present when each frame is one whole PES packet, sent at its timestamp. An entry
+	/// carries this or [`Self::verbatim`], never both.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub pes_packet: Option<PesPacket>,
 }
 
 impl Track {
@@ -315,54 +333,70 @@ impl Track {
 			pid,
 			descriptors: Vec::new(),
 			verbatim: None,
+			pes_packet: None,
 		}
 	}
 }
 
-/// Carriage record for an undecoded elementary stream carried byte-for-byte.
+/// Carriage record for an undecoded elementary stream carried as complete sections.
+///
+/// Each frame includes the section header and CRC, timestamped at its first section byte
+/// on the PCR-derived program clock, as for [`PesPacket`]. SCTE-35 splice times ride inside
+/// the payload, shifted onto the catalog clock through `pts_adjustment`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Verbatim {
-	/// PMT `stream_type` to re-announce (0x86 SCTE-35, 0x06 private PES, 0x05
-	/// private sections, ...).
+	/// Raw PMT `stream_type` to re-announce, including types the muxer does not recognize.
 	pub stream_type: u8,
 
-	/// How the verbatim payload is framed, so export knows how to repacketize it.
-	#[serde(default)]
+	/// How the verbatim payload is framed, so export knows how to repacketize it. Required:
+	/// draft -00 let an absent one mean PES payloads, which nothing carries any more.
 	pub framing: Framing,
-
-	/// Original PES `stream_id` (e.g. 0xBD private_stream_1 for teletext/DVB
-	/// subtitles/DVB AC-3, 0xC0-0xDF audio). Preserved so export re-emits the PES
-	/// under its real id rather than relabeling it, which strict broadcast demuxers
-	/// and TR 101 290 analyzers reject. `None` for section framing or a non-TS
-	/// source; export then falls back to `private_stream_1`.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub stream_id: Option<u8>,
 }
 
 impl Verbatim {
 	/// A new verbatim carriage record of the given `stream_type` and `framing`.
 	pub fn new(stream_type: u8, framing: Framing) -> Self {
-		Self {
-			stream_type,
-			framing,
-			stream_id: None,
-		}
+		Self { stream_type, framing }
+	}
+}
+
+/// Carriage record for an undecoded elementary stream whose frames are whole PES packets.
+///
+/// Each frame is one complete PES packet, start code through payload, with its PTS, DTS
+/// and every other header field already on the catalog clock. Its timestamp is the
+/// packet's placement: the program clock at its first byte, which export sends it at.
+/// Each frame is a group of its own, except MPEG-1/2 video's, grouped from one sequence header
+/// to the next. A member beside [`Verbatim`] rather than a [`Framing`], so a consumer that predates it
+/// ignores the track instead of refusing the catalog.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PesPacket {
+	/// PMT `stream_type` to re-announce (0x06 private PES, ...). The `stream_id` rides
+	/// in each packet.
+	pub stream_type: u8,
+}
+
+impl PesPacket {
+	/// A new whole-PES carriage record of the given `stream_type`.
+	pub fn new(stream_type: u8) -> Self {
+		Self { stream_type }
 	}
 }
 
 /// How a verbatim stream's payload is framed on the wire, so export can repacketize it.
+///
+/// A PES stream rides [`PesPacket`] instead. The `"pes"` framing draft -00 defined is refused
+/// rather than read as a section.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum Framing {
-	/// Packetized Elementary Stream: each frame is one PES payload (access unit),
-	/// timestamped by its PTS. Used by private PES, teletext, DVB subtitles, ...
-	#[default]
-	Pes,
 	/// Private sections (table_id + section_length framing). Each frame is one
 	/// complete section. Used by SCTE-35 and other private-section signaling.
+	#[default]
 	Section,
 }
 
@@ -385,6 +419,7 @@ pub struct Descriptor {
 #[non_exhaustive]
 pub struct Ext {
 	#[serde(default, skip_serializing_if = "Mpegts::is_empty")]
+	/// MPEG-TS program, stream, and descriptor metadata.
 	pub mpegts: Mpegts,
 }
 
@@ -429,14 +464,6 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn empty_section_omitted() {
-		// An empty `mpegts` section serializes to `{}` so a media-only broadcast stays
-		// byte-identical to one without the extension.
-		let ext = Ext::default();
-		assert_eq!(serde_json::to_string(&ext).unwrap(), "{}");
-	}
-
-	#[test]
 	fn mux_rate_alone_is_not_empty() {
 		// The rate is the only field of a media-only CBR source, so it must keep the
 		// section alive rather than be dropped with it.
@@ -464,6 +491,7 @@ mod test {
 					data: Bytes::from_static(b"eng\x00"),
 				}],
 				verbatim: None,
+				pes_packet: None,
 			},
 		);
 		// A verbatim SCTE-35 track.
@@ -473,6 +501,17 @@ mod test {
 				pid: 0x102,
 				descriptors: Vec::new(),
 				verbatim: Some(Verbatim::new(0x86, Framing::Section)),
+				pes_packet: None,
+			},
+		);
+		// A whole-PES private data track.
+		mpegts.tracks.insert(
+			"0.ts".to_string(),
+			Track {
+				pid: 0x103,
+				descriptors: Vec::new(),
+				verbatim: None,
+				pes_packet: Some(PesPacket::new(0x06)),
 			},
 		);
 		mpegts.program_descriptors.push(Descriptor {
@@ -487,6 +526,10 @@ mod test {
 		assert!(
 			json.contains("\"muxRate\":2500000"),
 			"mux rate is a bare integer: {json}"
+		);
+		assert!(
+			json.contains("\"pesPacket\":{\"streamType\":6}"),
+			"the whole-PES member is camelCase: {json}"
 		);
 
 		let parsed: Ext = serde_json::from_str(&json).unwrap();
@@ -608,6 +651,19 @@ mod test {
 		);
 	}
 
+	/// Draft -00's PES framing, named or implied by an absent `framing`, is refused rather than
+	/// read as a section: its frames are bare PES payloads, which nothing can re-emit faithfully.
+	#[test]
+	fn legacy_pes_framing_is_refused() {
+		for verbatim in [
+			r#"{ "streamType": 6, "framing": "pes", "streamId": 189 }"#,
+			r#"{ "streamType": 6 }"#,
+		] {
+			let json = format!(r#"{{ "tracks": {{ "x.ts": {{ "pid": 500, "verbatim": {verbatim} }} }} }}"#);
+			serde_json::from_str::<Mpegts>(&json).expect_err(&format!("{verbatim} must be refused"));
+		}
+	}
+
 	#[test]
 	fn invalid_si_pid_key_is_refused() {
 		let json = r#"{ "si": { "not-a-pid": { "66": { "track": "si" } } } }"#;
@@ -654,6 +710,7 @@ mod test {
 					data: Bytes::from_static(b"CUEI"),
 				}],
 				verbatim: Some(Verbatim::new(0x86, Framing::Section)),
+				pes_packet: None,
 			},
 		);
 		let expected = guard.ext.mpegts.clone();

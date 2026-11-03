@@ -77,7 +77,7 @@ pub struct TextConfig {
 	/// broadcast that served this catalog (e.g. `../source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
-	pub broadcast: Option<moq_net::path::RelativeOwned>,
+	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
 	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
@@ -88,6 +88,17 @@ pub struct TextConfig {
 	/// field subscribes to the ID instead.
 	#[serde(default)]
 	pub track: Option<String>,
+
+	/// The instance of the stream the reference names, when the catalog knows it. Absent names
+	/// whichever stream the reader resolves first, as in every catalog before this field.
+	///
+	/// A reader refuses a broadcast of another instance rather than fall back to it. A route
+	/// over a wire that carries no instance has one its session minted, which proves nothing,
+	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
+	/// catalog's own stream.
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub instance: Option<moq_net::Instance>,
 
 	/// The serialization format of each cue payload.
 	#[serde_as(as = "DisplayFromStr")]
@@ -141,6 +152,7 @@ impl TextConfig {
 		Self {
 			broadcast: None,
 			track: None,
+			instance: None,
 			format,
 			role: TextRole::default(),
 			lang: None,

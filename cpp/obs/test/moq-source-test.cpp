@@ -1,25 +1,29 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Drives the real moq_source, reached through the obs_source_info it registers,
-// against stubbed libobs and FFmpeg and the real moq-ffi, over a relay in the same
-// process. What the consume path can get wrong is mostly an ordering: an
+// against stubbed libobs and FFmpeg video and the real moq-ffi, which decodes the
+// audio, over a relay in the same process. What the consume path can get wrong is mostly an ordering: an
 // announcement that arrives after the session connects, a result belonging to a
 // connection that settings or teardown have already replaced, a destroy while a
 // connect or a wait for the broadcast is still pending. The relay publishes real
 // media, so each scenario runs the whole chain from connect to decoded frame.
 //
-// Every scenario ends by checking that destroy returned promptly and that nothing
-// the source allocated outlived it.
+// Every scenario ends by checking that destroy released the connection and closed
+// the worker, and that nothing the source allocated outlived it.
 //
 // Run with `just obs test` (ThreadSanitizer) or `just obs ci` (plain). This is
 // not part of the plugin build.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
+#include <cstdarg>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -32,8 +36,6 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
-#include <libavutil/channel_layout.h>
-#include <libavutil/samplefmt.h>
 #include <libswscale/swscale.h>
 }
 
@@ -61,6 +63,7 @@ namespace {
 struct Settings {
 	std::string url;
 	std::string broadcast;
+	bool keylog = false;
 };
 
 Settings g_settings;
@@ -75,34 +78,74 @@ bool g_registered = false;
 std::atomic<int> g_output_frames{0};
 std::atomic<int> g_blank_calls{0};
 std::atomic<uint64_t> g_last_timestamp{0};
+// Every video timestamp OBS was handed, in output order.
+std::mutex g_video_mutex;
+std::vector<uint64_t> g_video_timestamps;
 // PCM buffers the audio decode path handed to OBS.
 std::atomic<int> g_output_audio{0};
 std::atomic<uint64_t> g_last_audio_timestamp{0};
-std::atomic<int> g_audio_frame_unrefs{0};
+
+// The last buffer OBS was handed, copied out: its shape, the first sample of each
+// plane, and the loudest sample in it.
+struct AudioOut {
+	uint32_t frames = 0;
+	enum speaker_layout speakers = SPEAKERS_UNKNOWN;
+	enum audio_format format = AUDIO_FORMAT_UNKNOWN;
+	uint32_t samples_per_sec = 0;
+	uint64_t timestamp = 0;
+	float first[MAX_AV_PLANES] = {};
+	float peak = 0;
+};
+std::mutex g_audio_mutex;
+AudioOut g_last_audio;
+
+AudioOut lastAudio()
+{
+	std::lock_guard<std::mutex> lock(g_audio_mutex);
+	return g_last_audio;
+}
+
+// The mixer rate obs_get_audio_info reports.
+uint32_t g_obs_sample_rate = 48000;
 
 // The bmalloc/bfree balance, so a frame buffer that outlives its decoder shows up
 // as a leak.
 std::atomic<long> g_live_allocs{0};
 
-// Candidate resolve and subscribe failures, logged under the source lock as the candidate
-// is released, so taking that lock afterwards observes the release.
+// Watch one attempt, not whichever replacement a later catalog snapshot may start.
+// The logger runs under the source lock, before the failed attempt is released.
+struct CandidateFailure {
+	std::weak_ptr<Track> track;
+	bool failed = false;
+};
 std::mutex g_candidate_mutex;
-std::condition_variable g_candidate_failed;
-int g_candidate_failures = 0;
+CandidateFailure g_candidate;
 } // namespace
 
 extern "C" {
 
 // Deliberately silent: stdio locking would create happens-before edges between
-// the test thread and the source's worker and mask the races we're after. Only a
-// candidate's resolve or subscribe failure synchronizes, so a scenario can wait on it.
+// the test thread and the source's worker and mask the races we're after. Match
+// the watched role while its attempt is alive; playback identity checks below
+// distinguish an active-track error from the candidate's failure.
 void blog(int, const char *format, ...)
 {
-	if (!strstr(format, "Failed to resolve") && !strstr(format, "Failed to subscribe"))
+	const char *kind = nullptr;
+	if (strstr(format, "Audio track error") || strstr(format, "Failed to subscribe to Audio track")) {
+		kind = "Audio";
+	} else if (strstr(format, "Failed to subscribe to %s track")) {
+		va_list args;
+		va_start(args, format);
+		kind = va_arg(args, const char *);
+		va_end(args);
+	}
+	if (!kind)
 		return;
 	std::lock_guard<std::mutex> lock(g_candidate_mutex);
-	g_candidate_failures++;
-	g_candidate_failed.notify_all();
+	auto candidate = g_candidate.track.lock();
+	if (!candidate || strcmp(candidate->kind, kind) != 0)
+		return;
+	g_candidate.failed = true;
 }
 
 void *bmalloc(size_t size)
@@ -157,6 +200,19 @@ void obs_data_set_default_string(obs_data_t *data, const char *name, const char 
 		settings->broadcast = val;
 }
 
+bool obs_data_get_bool(obs_data_t *data, const char *name)
+{
+	auto *settings = reinterpret_cast<Settings *>(data);
+	return settings && strcmp(name, "quic_keylog") == 0 && settings->keylog;
+}
+
+void obs_data_set_default_bool(obs_data_t *, const char *, bool) {}
+
+obs_property_t *obs_properties_add_bool(obs_properties_t *, const char *, const char *)
+{
+	return reinterpret_cast<obs_property_t *>(0x13);
+}
+
 obs_properties_t *obs_properties_create(void)
 {
 	return reinterpret_cast<obs_properties_t *>(0x11);
@@ -174,6 +230,10 @@ void obs_source_output_video(obs_source_t *, const struct obs_source_frame *fram
 		return;
 	}
 	g_last_timestamp = frame->timestamp;
+	{
+		std::lock_guard<std::mutex> lock(g_video_mutex);
+		g_video_timestamps.push_back(frame->timestamp);
+	}
 	g_output_frames++;
 }
 
@@ -181,8 +241,33 @@ void obs_source_output_audio(obs_source_t *, const struct obs_source_audio *audi
 {
 	if (!audio)
 		return;
+	AudioOut out;
+	out.frames = audio->frames;
+	out.speakers = audio->speakers;
+	out.format = audio->format;
+	out.samples_per_sec = audio->samples_per_sec;
+	out.timestamp = audio->timestamp;
+	// Every plane of the layout must be there; reading each one whole lets ASan and
+	// TSan see a buffer that is short or already freed.
+	for (uint32_t i = 0; i < get_audio_planes(audio->format, audio->speakers); i++) {
+		const auto *plane = reinterpret_cast<const float *>(audio->data[i]);
+		out.first[i] = plane[0];
+		for (uint32_t j = 0; j < audio->frames; j++)
+			out.peak = std::max(out.peak, std::fabs(plane[j]));
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_audio_mutex);
+		g_last_audio = out;
+	}
 	g_last_audio_timestamp = audio->timestamp;
 	g_output_audio++;
+}
+
+bool obs_get_audio_info(struct obs_audio_info *oai)
+{
+	oai->samples_per_sec = g_obs_sample_rate;
+	oai->speakers = SPEAKERS_STEREO;
+	return true;
 }
 
 void obs_register_source_s(const struct obs_source_info *info, size_t size)
@@ -203,30 +288,29 @@ void obs_register_source_s(const struct obs_source_info *info, size_t size)
 namespace {
 std::atomic<long> g_av_allocs{0};
 
-// Decode knobs. Only the failure scenarios move them.
+// Decode knobs. Only the failure and reordering scenarios move them.
 std::atomic<bool> g_find_decoder_ok{true};
-int g_send_result = 0;
-int g_receive_result = 0;
-int g_audio_send_result = 0;
-int g_audio_receive_result = 0;
+// How many pictures the decoder holds back to reorder, as H.264 does for B-frames.
+std::atomic<size_t> g_reorder_delay{0};
+// How many decoded pictures the decoder buffers before refusing input with EAGAIN.
+std::atomic<size_t> g_decoder_capacity{SIZE_MAX};
+// The one picture, by packet pts, whose first receive fails and leaves it in the decoder.
+std::atomic<int64_t> g_unconverted_pts{-1};
 int g_decoded_width = 320;
 int g_decoded_height = 240;
-enum AVSampleFormat g_decoded_audio_format = AV_SAMPLE_FMT_FLTP;
-int g_decoded_audio_samples = 960;
-int64_t g_decoded_audio_pts = AV_NOPTS_VALUE;
-int g_decoded_audio_channels = 2;
-enum AVChannelOrder g_decoded_audio_order = AV_CHANNEL_ORDER_NATIVE;
-uint64_t g_decoded_audio_layout = AV_CH_LAYOUT_STEREO;
-bool g_audio_packet_owned = false;
-bool g_audio_packet_padding_zero = false;
 std::atomic<int> g_last_decoder_extradata{-1};
 std::atomic<int> g_decoder_opens{0};
-// Only packets from the replacement use this timestamp; the old stream keeps decoding.
-std::atomic<int> g_candidate_decode{0}; // 1: send error, 2: receive error, 3: needs more input
+// Only packets from the replacement use this timestamp, in the nanoseconds packets carry; the
+// old stream keeps decoding.
+std::atomic<int> g_candidate_decode{0}; // 2: receive error, 3: needs more input
 std::atomic<int> g_candidate_attempts{0};
+// Holds packets' timestamps for reordering: each packet past the delay releases the
+// earliest held one, and a flush releases the rest in order, then reports EOF.
 struct DecodeState {
-	int64_t timestamp_us = 0;
-	bool audio_pending = false;
+	int64_t last_pts = 0;
+	std::vector<int64_t> held;
+	std::deque<int64_t> ready;
+	bool draining = false;
 };
 
 std::atomic<int> g_sws_scales{0};
@@ -272,60 +356,56 @@ int avcodec_open2(AVCodecContext *, const AVCodec *, AVDictionary **)
 	return 0;
 }
 
-void avcodec_flush_buffers(AVCodecContext *) {}
+void avcodec_flush_buffers(AVCodecContext *ctx)
+{
+	*static_cast<DecodeState *>(ctx->opaque) = DecodeState{};
+}
 
 int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *packet)
 {
 	g_last_decoder_extradata = ctx->extradata_size > 0 ? ctx->extradata[0] : -1;
 	auto &state = *static_cast<DecodeState *>(ctx->opaque);
-	const bool audio = ctx->codec_id == AV_CODEC_ID_AAC || ctx->codec_id == AV_CODEC_ID_OPUS;
-	state.timestamp_us = packet->pts * (audio ? 1 : 1000);
-	if (state.timestamp_us == 1'000'000'000) {
+	if (state.draining)
+		return AVERROR_EOF;
+	if (!packet) {
+		state.draining = true;
+		std::sort(state.held.begin(), state.held.end());
+		state.ready.insert(state.ready.end(), state.held.begin(), state.held.end());
+		state.held.clear();
+		return 0;
+	}
+	if (state.ready.size() >= g_decoder_capacity)
+		return AVERROR(EAGAIN);
+	state.last_pts = packet->pts;
+	if (state.last_pts == 1'000'000'000'000)
 		g_candidate_attempts++;
-		if (g_candidate_decode == 1)
-			return AVERROR_INVALIDDATA;
+	state.held.push_back(packet->pts);
+	if (state.held.size() > g_reorder_delay) {
+		const auto earliest = std::min_element(state.held.begin(), state.held.end());
+		state.ready.push_back(*earliest);
+		state.held.erase(earliest);
 	}
-	if (ctx->codec_id == AV_CODEC_ID_AAC || ctx->codec_id == AV_CODEC_ID_OPUS) {
-		g_audio_packet_owned = packet->buf != nullptr;
-		g_audio_packet_padding_zero = true;
-		for (int i = 0; i < AV_INPUT_BUFFER_PADDING_SIZE; i++)
-			g_audio_packet_padding_zero &= packet->data[packet->size + i] == 0;
-		if (g_audio_send_result < 0)
-			return g_audio_send_result;
-		state.audio_pending = true;
-	}
-	return g_send_result;
+	return 0;
 }
 
 int avcodec_receive_frame(AVCodecContext *ctx, AVFrame *frame)
 {
 	auto &state = *static_cast<DecodeState *>(ctx->opaque);
-	if (state.timestamp_us == 1'000'000'000) {
+	if (state.last_pts == 1'000'000'000'000) {
 		if (g_candidate_decode == 2)
 			return AVERROR_INVALIDDATA;
 		if (g_candidate_decode == 3)
 			return AVERROR(EAGAIN);
 	}
-	if (ctx->codec_id == AV_CODEC_ID_AAC || ctx->codec_id == AV_CODEC_ID_OPUS) {
-		if (g_audio_receive_result < 0)
-			return g_audio_receive_result;
-		if (!state.audio_pending)
-			return AVERROR(EAGAIN);
-		state.audio_pending = false;
-		frame->format = g_decoded_audio_format;
-		frame->sample_rate = ctx->sample_rate;
-		frame->nb_samples = g_decoded_audio_samples;
-		frame->pts = g_decoded_audio_pts;
-		frame->ch_layout.order = g_decoded_audio_order;
-		frame->ch_layout.nb_channels = g_decoded_audio_channels;
-		frame->ch_layout.u.mask = g_decoded_audio_layout;
-		for (int i = 0; i < frame->ch_layout.nb_channels; i++)
-			frame->data[i] = g_fake_plane;
-		return 0;
-	}
-	if (g_receive_result < 0)
-		return g_receive_result;
+	if (state.ready.empty())
+		return state.draining ? AVERROR_EOF : AVERROR(EAGAIN);
+	int64_t unconverted = state.ready.front();
+	if (g_unconverted_pts.compare_exchange_strong(unconverted, -1))
+		return AVERROR_INVALIDDATA;
 
+	frame->pts = state.ready.front();
+	frame->best_effort_timestamp = frame->pts;
+	state.ready.pop_front();
 	frame->format = AV_PIX_FMT_YUV420P;
 	frame->width = g_decoded_width;
 	frame->height = g_decoded_height;
@@ -342,27 +422,10 @@ AVPacket *av_packet_alloc(void)
 	return static_cast<AVPacket *>(calloc(1, sizeof(AVPacket)));
 }
 
-int av_new_packet(AVPacket *pkt, int size)
-{
-	if (!pkt || size < 0)
-		return AVERROR(EINVAL);
-	pkt->data = static_cast<uint8_t *>(calloc(static_cast<size_t>(size) + AV_INPUT_BUFFER_PADDING_SIZE, 1));
-	if (!pkt->data)
-		return AVERROR(ENOMEM);
-	g_av_allocs++;
-	pkt->size = size;
-	pkt->buf = reinterpret_cast<AVBufferRef *>(pkt->data);
-	return 0;
-}
-
 void av_packet_free(AVPacket **pkt)
 {
 	if (!pkt || !*pkt)
 		return;
-	if ((*pkt)->buf) {
-		g_av_allocs--;
-		free((*pkt)->data);
-	}
 	g_av_allocs--;
 	free(*pkt);
 	*pkt = nullptr;
@@ -381,29 +444,6 @@ void av_frame_free(AVFrame **frame)
 	g_av_allocs--;
 	free(*frame);
 	*frame = nullptr;
-}
-
-void av_frame_unref(AVFrame *)
-{
-	g_audio_frame_unrefs++;
-}
-
-void av_channel_layout_default(AVChannelLayout *ch_layout, int nb_channels)
-{
-	if (!ch_layout)
-		return;
-	*ch_layout = AVChannelLayout{};
-	ch_layout->order = AV_CHANNEL_ORDER_NATIVE;
-	ch_layout->nb_channels = nb_channels;
-}
-
-int av_sample_fmt_is_planar(enum AVSampleFormat sample_fmt)
-{
-	return sample_fmt == AV_SAMPLE_FMT_U8P || sample_fmt == AV_SAMPLE_FMT_S16P ||
-			       sample_fmt == AV_SAMPLE_FMT_S32P || sample_fmt == AV_SAMPLE_FMT_FLTP ||
-			       sample_fmt == AV_SAMPLE_FMT_DBLP
-		       ? 1
-		       : 0;
 }
 
 void *av_mallocz(size_t size)
@@ -466,22 +506,28 @@ void reset(std::string url, std::string broadcast = "obs/test")
 {
 	g_settings.url = std::move(url);
 	g_settings.broadcast = std::move(broadcast);
+	g_settings.keylog = false;
 	g_output_frames = 0;
 	g_output_audio = 0;
 	g_last_timestamp = 0;
+	{
+		std::lock_guard<std::mutex> lock(g_video_mutex);
+		g_video_timestamps.clear();
+	}
 	g_last_audio_timestamp = 0;
-	g_audio_frame_unrefs = 0;
+	{
+		std::lock_guard<std::mutex> lock(g_audio_mutex);
+		g_last_audio = AudioOut{};
+	}
+	g_obs_sample_rate = 48000;
 	g_blank_calls = 0;
 	g_sws_scales = 0;
 	g_find_decoder_ok = true;
-	g_send_result = 0;
-	g_receive_result = 0;
-	g_audio_send_result = 0;
-	g_audio_receive_result = 0;
+	g_reorder_delay = 0;
+	g_decoder_capacity = SIZE_MAX;
+	g_unconverted_pts = -1;
 	g_decoded_width = 320;
 	g_decoded_height = 240;
-	g_audio_packet_owned = false;
-	g_audio_packet_padding_zero = false;
 	g_last_decoder_extradata = -1;
 	g_decoder_opens = 0;
 	g_candidate_decode = 0;
@@ -495,24 +541,23 @@ void *createSource()
 	return g_info.create(settingsData(), fakeSource());
 }
 
-// Destroy, then check the invariants every scenario shares: teardown returned
-// promptly, without waiting on a call that was still pending, nothing reached OBS
-// afterwards, and nothing was left allocated.
+// Destroy, then check the invariants every scenario shares: the connection is gone,
+// the worker refuses further output, and nothing was left allocated.
 void destroySource(void *source)
 {
-	auto start = std::chrono::steady_clock::now();
+	auto *ctx = static_cast<moq_source *>(source);
+	std::weak_ptr<Connection> connection;
+	{
+		std::lock_guard<std::mutex> lock(ctx->mutex);
+		connection = ctx->connection;
+	}
+	auto executor = ctx->worker.Executor();
 	g_info.destroy(source);
-	auto elapsed = std::chrono::steady_clock::now() - start;
-	const int frames = g_output_frames;
-	const int audio = g_output_audio;
 
-	CHECK(elapsed < std::chrono::milliseconds(500));
+	CHECK(connection.expired());
+	CHECK(!executor([] { std::abort(); }));
 	CHECK(g_live_allocs == 0);
 	CHECK(g_av_allocs == 0);
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(20));
-	CHECK(g_output_frames == frames);
-	CHECK(g_output_audio == audio);
 }
 
 // Close out a scenario, naming it and saying whether any of its assertions
@@ -526,12 +571,22 @@ void report(const char *name)
 	g_reported = g_failures;
 }
 
+// A timestamp in microseconds, the scale most scenarios write at.
+moq::Timestamp Micros(uint64_t us)
+{
+	return moq::Timestamp{us, 1'000'000};
+}
+
 // A broadcast published on the relay, the way the MoQ output would publish it.
 class Publisher {
 public:
-	Publisher(TestRelay &relay, const std::string &path, bool video = true, bool audio = true)
+	// Frames start after `start_us`, so a scenario can tell two publishers' frames apart.
+	Publisher(TestRelay &relay, const std::string &path, bool video = true, bool audio = true,
+		  uint64_t start_us = 1'000'000)
+		: timestamp_us(start_us)
 	{
-		broadcast = TestOk(relay.origin->create_broadcast(path), "create_broadcast");
+		auto publication = TestOk(relay.origin->create_broadcast(path), "create_broadcast");
+		broadcast = publication->broadcast();
 		if (video) {
 			moq::VideoInit init{};
 			init.format = moq::VideoFormat::kAvc3;
@@ -548,7 +603,7 @@ public:
 				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
 				       "audio producer");
 		}
-		TestOk(broadcast->announce(moq::Route{}), "announce");
+		TestOk(publication->announce(moq::AnnounceRoute{}), "announce");
 	}
 
 	~Publisher() { (void)broadcast->close(); }
@@ -558,9 +613,9 @@ public:
 	{
 		timestamp_us += 20'000;
 		if (video)
-			TestOk(video->write_frame(moq::Frame{TestH264Keyframe(), timestamp_us}), "write video");
+			TestOk(video->write_frame(moq::Frame{TestH264Keyframe(), Micros(timestamp_us)}), "write video");
 		if (audio) {
-			TestOk(audio->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, timestamp_us}), "write audio");
+			TestOk(audio->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, Micros(timestamp_us)}), "write audio");
 			TestOk(audio->cut(), "cut audio");
 		}
 	}
@@ -582,11 +637,111 @@ public:
 	std::shared_ptr<moq::MediaTrackProducer> audio;
 
 private:
-	uint64_t timestamp_us = 1'000'000;
+	uint64_t timestamp_us;
 };
+
+// Whether OBS has been handed video and audio from a publisher that started at `start_us`.
+bool PlaysFrom(uint64_t start_us)
+{
+	return g_last_timestamp > start_us * 1000 && g_last_audio_timestamp > start_us * 1000;
+}
 
 // A URL moq-ffi rejects as soon as the connect runs, for a failure with no network in it.
 const char *const BAD_URL = "not a url";
+
+// An Opus packet libopus refuses (OPUS_INVALID_PACKET). The importer passes it through.
+const std::vector<uint8_t> BAD_OPUS = {0xff, 0xff, 0xff};
+
+// Three AAC-LC frames of a 440 Hz full-scale sine, mono at 44.1 kHz, and the
+// AudioSpecificConfig that opens them; the same fixture rs/moq-audio decodes.
+const std::vector<uint8_t> AAC_CONFIG = {0x12, 0x08};
+const std::vector<std::vector<uint8_t>> AAC_FRAMES = {
+	{0x01, 0x52, 0xf2, 0x8b, 0x1a, 0xd7, 0x8e, 0x7b, 0xfd, 0xa7, 0xef, 0xe7, 0xe3, 0x55, 0xd3,
+	 0x4d, 0x2f, 0x55, 0x2e, 0x47, 0x1c, 0x92, 0x49, 0x11, 0x20, 0x77, 0x3f, 0xbe, 0x74, 0xdd,
+	 0x99, 0xb3, 0x7b, 0xfb, 0x90, 0xc9, 0xf0, 0x61, 0x9f, 0xdc, 0x0c, 0x9f, 0x06, 0x19, 0xfd,
+	 0xe1, 0x1f, 0x1f, 0x00, 0x67, 0xf7, 0x03, 0x87, 0xc0, 0x19, 0xfd, 0xc0, 0xc9, 0xf0, 0x07},
+	{0x01, 0x1e, 0x32, 0x89, 0xe2, 0x9d, 0x6b, 0x33, 0xe7, 0xff, 0xe2, 0xfe, 0xbf, 0xfa, 0xff, 0xe7,
+	 0x2f, 0x8b, 0xd5, 0xd5, 0xe7, 0x5f, 0x3f, 0x59, 0xeb, 0xf1, 0xcb, 0xba, 0xa5, 0x5e, 0x52, 0x4a,
+	 0xbd, 0x8d, 0x74, 0x50, 0x8c, 0x08, 0xa8, 0xa0, 0xd4, 0x51, 0x40, 0xa1, 0x86, 0x5d, 0x06, 0xb4,
+	 0x6c, 0x32, 0xe6, 0x25, 0x9a, 0x66, 0x75, 0xcd, 0xf9, 0xbf, 0x6f, 0x83, 0xb7, 0x53, 0x80},
+	{0x01, 0x1e, 0x32, 0x8a, 0x22, 0x7d, 0x40, 0x87, 0x48, 0xdb, 0xdf, 0xff, 0xf9, 0x4f, 0xff, 0x87, 0xde,
+	 0xef, 0x8b, 0xeb, 0x1e, 0x77, 0x5d, 0xfc, 0x67, 0x8f, 0x8c, 0x77, 0x8a, 0xd6, 0x29, 0x96, 0x1f, 0x29,
+	 0xe7, 0x39, 0xd4, 0x53, 0xcf, 0x3c, 0xf3, 0xce, 0x79, 0xd4, 0x27, 0x9c, 0xf5, 0x65, 0x2a, 0x9b, 0xe9,
+	 0x80, 0xb7, 0xba, 0xa9, 0xf9, 0x58, 0xc7, 0x3c, 0x58, 0x27, 0x8a, 0x60, 0xa1, 0x57},
+};
+
+// A legacy-container PCM frame: the QUIC varint timestamp, then 20 ms of interleaved
+// little-endian f32 at 48 kHz, every sample of channel `c` holding (c + 1) / 10.
+std::vector<uint8_t> PcmFrame(uint64_t timestamp_us, uint32_t channels)
+{
+	std::vector<uint8_t> frame;
+	for (int shift = 24; shift >= 0; shift -= 8)
+		frame.push_back(static_cast<uint8_t>((shift == 24 ? 0x80 : 0) | (timestamp_us >> shift)));
+	for (int sample = 0; sample < 960; sample++) {
+		for (uint32_t c = 0; c < channels; c++) {
+			const float value = static_cast<float>(c + 1) / 10;
+			uint8_t bytes[sizeof(float)];
+			memcpy(bytes, &value, sizeof(float));
+			frame.insert(frame.end(), bytes, bytes + sizeof(float));
+		}
+	}
+	return frame;
+}
+
+// The catalog the source is reading, fetched over a local consumer so a scenario can
+// edit it and deliver it as if the publisher had.
+moq::Catalog CatalogSnapshot(Publisher &publisher)
+{
+	auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
+	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+	auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
+	CHECK(snapshot.has_value());
+	return *snapshot;
+}
+
+// The publisher's catalog with `id` ranked first in its section: the preferred video, or the
+// highest audio bitrate. Neither is part of a rendition's identity.
+moq::Catalog CatalogPreferring(Publisher &publisher, const std::string &id)
+{
+	auto catalog = CatalogSnapshot(publisher);
+	auto video = catalog.video.find(id);
+	auto audio = catalog.audio.find(id);
+	CHECK(video != catalog.video.end() || audio != catalog.audio.end());
+	if (video != catalog.video.end())
+		video->second.preference = 1;
+	if (audio != catalog.audio.end())
+		audio->second.bitrate = UINT64_MAX;
+	return catalog;
+}
+
+// Stops the source reading the publisher's catalog, so a scenario delivers its own. The
+// publisher measures a track's bitrate once it has written a second of media, which
+// would otherwise re-rank renditions partway through a scenario.
+void FreezeCatalog(moq_source *ctx, Publisher &publisher)
+{
+	for (;;) {
+		{
+			// Cancelling stops a catalog not yet completed, but one already completed is
+			// queued on the worker, and running it reads the next. Stop that one in turn.
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto &call = ctx->connection->catalog_call;
+			if (!call)
+				return;
+			call.reset();
+		}
+		// The worker runs in order, so once more media is out, a catalog it had queued has run.
+		const int outputs = g_output_frames + g_output_audio;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames + g_output_audio >= outputs + 3; }));
+	}
+}
+
+// Delivers a catalog as the source's catalog reader would.
+void DeliverCatalog(moq_source *ctx, const moq::Catalog &catalog)
+{
+	std::lock_guard<std::mutex> lock(ctx->mutex);
+	moq_source_subscribe_video(ctx, ctx->connection, catalog);
+	moq_source_subscribe_audio(ctx, ctx->connection, catalog);
+}
 } // namespace
 
 int main()
@@ -594,23 +749,318 @@ int main()
 	register_moq_source();
 	CHECK(g_registered);
 
-	// Connect, wait for the announcement, read the catalog, and decode video and
-	// audio from the tracks it names. Audio is copied into a padded packet FFmpeg
-	// owns, and carries the broadcast's timestamps into OBS.
+	// The TLS key log is off unless the toggle asks for it, and reaches the dial's QUIC config.
 	{
-		TestRelay relay;
+		reset("");
+		void *source = createSource();
+		auto *ctx = static_cast<struct moq_source *>(source);
+		CHECK(!ctx->keylog);
+		CHECK(moq_source_client_config(ctx->keylog).quic.keylog != true);
+
+		g_settings.keylog = true;
+		g_info.update(source, settingsData());
+		CHECK(ctx->keylog);
+		CHECK(moq_source_client_config(ctx->keylog).quic.keylog == true);
+		destroySource(source);
+	}
+	report("key log is opt-in");
+
+	// Connect, wait for the announcement, read the catalog, and decode video and
+	// audio from the tracks it names. moq-audio decodes the Opus to planar float at
+	// the OBS rate, stamped on the same broadcast timeline as the video.
+	{
+		TestRelay relay(true, {"moq-transport-18"});
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
 		CHECK(g_sws_scales > 0);
-		CHECK(g_last_timestamp > 0);
-		CHECK(g_last_audio_timestamp > 0);
-		CHECK(g_audio_packet_owned);
-		CHECK(g_audio_packet_padding_zero);
+		const auto audio = lastAudio();
+		CHECK(audio.format == AUDIO_FORMAT_FLOAT_PLANAR);
+		CHECK(audio.speakers == SPEAKERS_STEREO);
+		CHECK(audio.samples_per_sec == 48000);
+		CHECK(audio.frames == 960);
+		// Both land on the publisher's 20 ms grid, unshifted: the shared timebase.
+		const auto on_grid = [](uint64_t ns) {
+			return ns % 1000 == 0 && ns / 1000 > 1'000'000 && (ns / 1000 - 1'000'000) % 20'000 == 0;
+		};
+		CHECK(on_grid(g_last_timestamp));
+		CHECK(on_grid(audio.timestamp));
+		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
+		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		destroySource(source);
 	}
 	report("plays video and audio");
+
+	// Gaps reset references immediately. An encoder end keeps old non-key tail packets
+	// decodable until a fresh frame reaches its endpoint, or until EOF drains the tail.
+	for (int boundary : {0, 1, 2}) {
+		const bool gap = boundary == 0;
+		const bool eof = boundary == 2;
+		TestRelay relay;
+		reset(relay.Url());
+		g_reorder_delay = 2;
+		Publisher publisher(relay, "obs/test", true, false);
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		auto *ctx = static_cast<moq_source *>(source);
+		std::shared_ptr<Track> held;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			held = conn->video;
+			CHECK(held != nullptr);
+			const int frames = g_output_frames;
+			const auto *state = static_cast<DecodeState *>(held->video_decoder->codec_ctx->opaque);
+			const auto pending = state->held.size();
+			CHECK(pending > 0);
+			// The end and tail sit on a 90 kHz grid, which packets carry floored to nanoseconds.
+			const uint64_t end = static_cast<uint64_t>(state->last_pts) * 9 / 100'000 + 90'000;
+			const auto ticks = [](uint64_t value) {
+				return moq::Timestamp{value, 90'000};
+			};
+			const auto nanos = [](uint64_t value) {
+				return value * 100'000 / 9;
+			};
+			auto inject = [&](moq::MediaRead read) {
+				moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{std::move(read)});
+			};
+			if (gap) {
+				inject(moq::MediaRead{
+					moq::MediaRead::kGap{Micros(123456), std::chrono::microseconds(78901)}});
+				CHECK(g_output_frames == frames + static_cast<int>(pending));
+				CHECK(!held->video_decoder->got_keyframe);
+			} else {
+				inject(moq::MediaRead{moq::MediaRead::kEnd{ticks(end)}});
+				CHECK(held->video_decoder->got_keyframe);
+				// Non-key tail packets below the endpoint still depend on the old references.
+				inject(moq::MediaRead{moq::MediaRead::kFrame{
+					moq::MediaFrame{TestH264Keyframe(), ticks(end - 1), false}}});
+				CHECK(state->last_pts == static_cast<int64_t>(nanos(end - 1)));
+				if (eof) {
+					moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{});
+				} else {
+					inject(moq::MediaRead{moq::MediaRead::kFrame{
+						moq::MediaFrame{TestH264Keyframe(), ticks(end), true}}});
+					CHECK(state->last_pts == static_cast<int64_t>(nanos(end)));
+					CHECK(state->held.size() == 1);
+				}
+				CHECK(g_output_frames == frames + static_cast<int>(pending) + 1);
+				std::lock_guard<std::mutex> output_lock(g_video_mutex);
+				CHECK(std::count(g_video_timestamps.begin(), g_video_timestamps.end(),
+						 nanos(end - 1)) == 1);
+			}
+			CHECK(conn->video == held);
+		}
+		if (gap) {
+			const int frames = g_output_frames;
+			CHECK(publisher.WriteUntil([&] { return g_output_frames > frames; }));
+		}
+		held.reset();
+		destroySource(source);
+	}
+	report("media breaks preserve decoder tail and subscription ownership");
+
+	// H.264 with B-frames arrives in decode order. Each picture reaches OBS with its own
+	// presentation timestamp, and the pictures the decoder still holds when the track
+	// ends cleanly are drained rather than dropped.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		g_reorder_delay = 2;
+		Publisher publisher(relay, "obs/test", true, false);
+		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
+		// Write only once the source reads the track, so it sees the whole group.
+		CHECK(WaitFor([&] {
+			std::lock_guard lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			return conn && conn->pending_video && conn->pending_video->consumer;
+		}));
+
+		// IPBB order: each P-frame is sent before the two B-frames it presents after.
+		const int decode_order[] = {0, 3, 1, 2, 6, 4, 5, 9, 7, 8, 11, 10};
+		const std::vector<uint8_t> delta = {0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x00, 0x33, 0xff};
+		const auto timestamp_us = [](int picture) {
+			return 2'000'000 + uint64_t(picture) * 20'000;
+		};
+		for (int picture : decode_order) {
+			const auto payload = picture == 0 ? TestH264Keyframe() : delta;
+			TestOk(publisher.video->write_frame(moq::Frame{payload, Micros(timestamp_us(picture))}),
+			       "write video");
+		}
+		TestOk(publisher.video->finish(), "finish video");
+
+		std::vector<uint64_t> expected;
+		for (int picture = 0; picture < 12; picture++)
+			expected.push_back(timestamp_us(picture) * 1000);
+		CHECK(WaitFor([] { return g_output_frames >= 12; }));
+		destroySource(source);
+		std::lock_guard<std::mutex> lock(g_video_mutex);
+		CHECK(g_video_timestamps == expected);
+	}
+	report("reordered video keeps decoded timestamps and drains at eof");
+
+	// A picture that fails to decode stays in the decoder, which then refuses the next
+	// packet until that picture is taken. The refused packet is sent again, not skipped.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		g_decoder_capacity = 1;
+		const auto timestamp_us = [](int picture) {
+			return 2'000'000 + uint64_t(picture) * 20'000;
+		};
+		g_unconverted_pts = int64_t(timestamp_us(2) * 1000);
+		Publisher publisher(relay, "obs/test", true, false);
+		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
+		CHECK(WaitFor([&] {
+			std::lock_guard lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			return conn && conn->pending_video && conn->pending_video->consumer;
+		}));
+
+		const std::vector<uint8_t> delta = {0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x00, 0x33, 0xff};
+		std::vector<uint64_t> expected;
+		for (int picture = 0; picture < 6; picture++) {
+			const auto payload = picture == 0 ? TestH264Keyframe() : delta;
+			TestOk(publisher.video->write_frame(moq::Frame{payload, Micros(timestamp_us(picture))}),
+			       "write video");
+			expected.push_back(timestamp_us(picture) * 1000);
+		}
+		// Left unfinished: nothing is held back, and a finish appends an empty end-of-group frame.
+
+		CHECK(WaitFor([] { return g_output_frames >= 6; }));
+		destroySource(source);
+		std::lock_guard<std::mutex> lock(g_video_mutex);
+		CHECK(g_video_timestamps == expected);
+	}
+	report("a refused packet is resent once the decoder drains");
+
+	// A replacement that ends before its first picture is dropped, not drained over the
+	// video that is still playing.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		g_reorder_delay = 2;
+		Publisher publisher(relay, "obs/test", true, false);
+		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		FreezeCatalog(ctx, publisher);
+		moq::VideoInit init{};
+		init.format = moq::VideoFormat::kAvc3;
+		init.data = TestH264Init();
+		auto replacement = TestOk(
+			moq::MediaTrackProducer::video(publisher.broadcast,
+						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+			"replacement video");
+		DeliverCatalog(ctx, CatalogPreferring(publisher, "!replacement"));
+		const auto pending = [&] {
+			std::lock_guard lock(ctx->mutex);
+			const auto &candidate = ctx->connection->pending_video;
+			return candidate && candidate->consumer;
+		};
+		CHECK(publisher.WriteUntil(pending));
+		// One picture, which the decoder holds until a drain.
+		TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), Micros(1'000'000'000)}),
+		       "replacement frame");
+		TestOk(replacement->finish(), "finish replacement");
+		CHECK(publisher.WriteUntil([&] { return !pending(); }));
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
+		destroySource(source);
+		std::lock_guard<std::mutex> lock(g_video_mutex);
+		CHECK(std::none_of(g_video_timestamps.begin(), g_video_timestamps.end(),
+				   [](uint64_t ns) { return ns >= 1'000'000'000'000; }));
+	}
+	report("ended replacement leaves playback");
+
+	// AAC-LC from an ingest decodes through moq-audio, resampled from 44.1 kHz to the
+	// OBS rate and placed on the mono speaker.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test", false, false);
+		moq::AudioInit init{};
+		init.format = moq::AudioFormat::kAac;
+		init.data = AAC_CONFIG;
+		auto aac = TestOk(moq::MediaTrackProducer::audio(publisher.broadcast, moq::MediaTarget::kNamed{}, init),
+				  "aac producer");
+		void *source = createSource();
+		uint64_t samples = 0;
+		CHECK(WaitFor([&] {
+			for (const auto &frame : AAC_FRAMES) {
+				TestOk(aac->write_frame(moq::Frame{frame, moq::Timestamp{44'100 + samples, 44'100}}),
+				       "write aac");
+				samples += 1024;
+			}
+			TestOk(aac->cut(), "cut aac");
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			return lastAudio().peak > 0.5f;
+		}));
+		const auto audio = lastAudio();
+		CHECK(audio.speakers == SPEAKERS_MONO);
+		CHECK(audio.samples_per_sec == 48000);
+		CHECK(g_output_frames == 0);
+		destroySource(source);
+	}
+	report("aac resampled to the obs rate");
+
+	// PCM is placed by its WAVE-convention layout: 5.1 straight onto the OBS 5.1
+	// speakers, quad upmixed onto the 5.1 surround pair, and nine channels refused
+	// while the current audio keeps playing.
+	for (uint32_t channels : {6u, 4u, 9u}) {
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto pcm = TestOk(publisher.broadcast->publish_track("pcm", std::nullopt), "pcm track");
+		auto snapshot = CatalogSnapshot(publisher);
+		auto rendition = snapshot.audio.begin()->second;
+		rendition.codec = "pcm";
+		rendition.track = "pcm";
+		rendition.description.reset();
+		rendition.bitrate.reset();
+		rendition.sample_rate = 48000;
+		rendition.channel_count = channels;
+		snapshot.audio.clear();
+		snapshot.audio.emplace("pcm", rendition);
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			moq_source_subscribe_audio(ctx, ctx->connection, snapshot);
+			CHECK((ctx->connection->pending_audio != nullptr) == (channels != 9));
+		}
+		if (channels == 9) {
+			const int audio = g_output_audio;
+			CHECK(publisher.WriteUntil([&] { return g_output_audio >= audio + 3; }));
+		} else {
+			uint64_t timestamp_us = 2'000'000;
+			CHECK(WaitFor([&] {
+				TestOk(pcm->write_frame(moq::Frame{PcmFrame(timestamp_us, channels), std::nullopt}),
+				       "write pcm");
+				timestamp_us += 20'000;
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				return lastAudio().speakers == SPEAKERS_5POINT1;
+			}));
+			const auto audio = lastAudio();
+			CHECK(audio.samples_per_sec == 48000);
+			CHECK(audio.frames == 960);
+			// PCM has no codec delay, so each frame keeps its packet's timestamp.
+			CHECK(audio.timestamp % 20'000'000 == 0 && audio.timestamp >= 2'000'000'000);
+			const float six[] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f};
+			const float quad[] = {0.1f, 0.2f, 0, 0, 0.3f, 0.4f};
+			const float *expected = channels == 6 ? six : quad;
+			for (int i = 0; i < 6; i++)
+				CHECK(std::fabs(audio.first[i] - expected[i]) < 1e-6f);
+		}
+		destroySource(source);
+		report(channels == 6   ? "pcm 5.1 placed on obs 5.1"
+		       : channels == 4 ? "pcm quad upmixed to obs 5.1"
+				       : "pcm with no obs layout refused");
+	}
 
 	// A metadata-only snapshot leaves the same rendition and decoder running.
 	{
@@ -648,8 +1098,11 @@ int main()
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			const auto &conn = ctx->connection;
+			// The catalog consumer exposes the default, and preference-only metadata keeps the decoder.
+			CHECK(video.preference == 0);
 			video.label = "relabeled";
 			video.bitrate = 1;
+			video.preference = -1;
 			audio.label = "relabeled";
 			audio.bitrate = 1;
 			moq_source_subscribe_video(ctx, conn, *snapshot);
@@ -673,13 +1126,276 @@ int main()
 	}
 	report("reshaped rendition replaces decoder");
 
+	// Renditions rank the way hang's `ranked()` does, whatever their names: video by enabled,
+	// preference, coded area, then bitrate; audio by enabled, bitrate, sample rate, then channel
+	// count. An unknown bitrate ranks below a known one, and exact ties keep name order.
+	{
+		TestRelay relay;
+		Publisher publisher(relay, "obs/test");
+		const auto snapshot = CatalogSnapshot(publisher);
+		const auto base_video = snapshot.video.begin()->second;
+		const auto base_audio = snapshot.audio.begin()->second;
+		const auto names = [](const auto &ranked) {
+			std::vector<std::string> out;
+			for (const auto *entry : ranked)
+				out.push_back(entry->first);
+			return out;
+		};
+		const auto video = [&](bool enabled, int32_t preference, uint32_t width, uint32_t height,
+				       std::optional<uint64_t> bitrate) {
+			auto config = base_video;
+			config.codec = "avc1.42c01e";
+			config.enabled = enabled;
+			config.preference = preference;
+			config.coded = moq::Dimensions{width, height};
+			config.bitrate = bitrate;
+			return config;
+		};
+		std::unordered_map<std::string, moq::Video> videos = {
+			{"a-disabled", video(false, 5, 1920, 1080, 9000000)},
+			{"b-low", video(true, 0, 640, 360, 500000)},
+			{"c-unknown-bitrate", video(true, 0, 1280, 720, std::nullopt)},
+			{"d-tie", video(true, 0, 1280, 720, 2000000)},
+			{"e-tie", video(true, 0, 1280, 720, 2000000)},
+			// 65536x65536 wraps to 0 as a 32-bit area.
+			{"f-huge", video(true, 0, 65536, 65536, 1)},
+			{"g-preferred", video(true, 1, 320, 240, 100000)},
+		};
+		CHECK((names(moq_source_ranked_video(videos)) ==
+		       std::vector<std::string>{"g-preferred", "f-huge", "d-tie", "e-tie", "c-unknown-bitrate", "b-low",
+						"a-disabled"}));
+
+		const auto audio = [&](bool enabled, std::optional<uint64_t> bitrate, uint32_t sample_rate,
+				       uint32_t channel_count) {
+			auto config = base_audio;
+			config.codec = "opus";
+			config.enabled = enabled;
+			config.bitrate = bitrate;
+			config.sample_rate = sample_rate;
+			config.channel_count = channel_count;
+			return config;
+		};
+		std::unordered_map<std::string, moq::Audio> audios = {
+			{"a-disabled", audio(false, 512000, 48000, 2)},
+			{"b-unknown-bitrate", audio(true, std::nullopt, 48000, 2)},
+			{"c-low", audio(true, 64000, 48000, 2)},
+			{"d-mono", audio(true, 128000, 48000, 1)},
+			{"e-slow", audio(true, 128000, 44100, 2)},
+			{"f-stereo", audio(true, 128000, 48000, 2)},
+		};
+		CHECK((names(moq_source_ranked_audio(audios)) ==
+		       std::vector<std::string>{"f-stereo", "d-mono", "e-slow", "c-low", "b-unknown-bitrate",
+						"a-disabled"}));
+
+		// Only enabled renditions are candidates while any is, even one the source holds.
+		const auto all = [](const auto &) {
+			return true;
+		};
+		const auto none = [](const auto &) {
+			return false;
+		};
+		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), all)) ==
+		       std::vector<std::string>{"f-stereo", "d-mono", "e-slow", "c-low", "b-unknown-bitrate"}));
+		// With every rendition disabled, only a held one remains, and nothing when none is held.
+		for (auto &entry : audios)
+			entry.second.enabled = false;
+		const auto held = [](const auto &entry) {
+			return entry.first == "c-low";
+		};
+		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), held)) ==
+		       std::vector<std::string>{"c-low"}));
+		CHECK(moq_source_candidates(moq_source_ranked_audio(audios), none).empty());
+
+		// The codecs moq-audio decodes, with AAC-LC in either spelling hang parses.
+		const auto decodes = [&](const char *codec, uint32_t channels) {
+			auto config = base_audio;
+			config.codec = codec;
+			config.channel_count = channels;
+			return moq_source_audio_decodes(config);
+		};
+		for (const char *codec : {"opus", "pcm", "mp4a.40.2", "mp4a.40.02"})
+			CHECK(decodes(codec, 2));
+		for (const char *codec : {"flac", "mp4a.40.5", "mp4a.40.20", "mp4a.40.", "mp4a.40.0"})
+			CHECK(!decodes(codec, 2));
+		// moq-audio decodes AAC only in mono or stereo, unlike Opus and PCM.
+		CHECK(decodes("mp4a.40.2", 1));
+		CHECK(!decodes("mp4a.40.2", 6));
+		CHECK(decodes("opus", 6));
+		CHECK(decodes("pcm", 6));
+	}
+	report("renditions rank like hang");
+
+	// A disabled rendition is never chosen while an enabled one is available, and an
+	// undecodable top rendition (a codec nothing decodes, a layout moq-audio does not decode
+	// it in, or a channel count OBS has no layout for) falls through to the next playable one.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto snapshot = CatalogSnapshot(publisher);
+		const auto video_id = snapshot.video.begin()->first;
+		const auto audio_id = snapshot.audio.begin()->first;
+		auto video = snapshot.video.begin()->second;
+		auto audio = snapshot.audio.begin()->second;
+		video.track = video_id;
+		audio.track = audio_id;
+
+		moq::Catalog catalog = snapshot;
+		catalog.video.clear();
+		catalog.audio.clear();
+		// Disabled, yet it sorts first by name and outranks everything else.
+		auto disabled_video = video;
+		disabled_video.enabled = false;
+		disabled_video.preference = 10;
+		catalog.video.emplace("a", disabled_video);
+		auto bogus_video = video;
+		bogus_video.codec = "bogus";
+		bogus_video.preference = 5;
+		catalog.video.emplace("b", bogus_video);
+		// A new shape, so choosing it starts a replacement rather than keeping the playing track.
+		auto playable_video = video;
+		playable_video.coded = moq::Dimensions{(video.coded ? video.coded->width : 0) + 16, 16};
+		catalog.video.emplace("c", playable_video);
+
+		auto disabled_audio = audio;
+		disabled_audio.enabled = false;
+		disabled_audio.bitrate = 10000000;
+		catalog.audio.emplace("a", disabled_audio);
+		auto flac_audio = audio;
+		flac_audio.codec = "flac";
+		flac_audio.bitrate = 6000000;
+		catalog.audio.emplace("flac", flac_audio);
+		// HE-AAC: moq-ffi takes any AAC, but moq-audio decodes only AAC-LC.
+		auto he_aac_audio = audio;
+		he_aac_audio.codec = "mp4a.40.5";
+		he_aac_audio.description.reset();
+		he_aac_audio.bitrate = 5500000;
+		catalog.audio.emplace("he-aac", he_aac_audio);
+		// 5.1 AAC-LC: OBS has the layout, but moq-audio decodes AAC only in mono or stereo.
+		auto surround_aac_audio = audio;
+		surround_aac_audio.codec = "mp4a.40.2";
+		surround_aac_audio.description.reset();
+		surround_aac_audio.channel_count = 6;
+		surround_aac_audio.bitrate = 5200000;
+		catalog.audio.emplace("surround-aac", surround_aac_audio);
+		auto unplaceable_audio = audio;
+		unplaceable_audio.channel_count = 9;
+		unplaceable_audio.bitrate = 5000000;
+		catalog.audio.emplace("b", unplaceable_audio);
+		auto playable_audio = audio;
+		playable_audio.sample_rate += 1;
+		catalog.audio.emplace("c", playable_audio);
+
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			moq_source_subscribe_video(ctx, conn, catalog);
+			moq_source_subscribe_audio(ctx, conn, catalog);
+			CHECK(conn->pending_video && conn->pending_video->id == "c");
+			CHECK(conn->pending_audio && conn->pending_audio->id == "c");
+			// The playing tracks stay until the replacement delivers.
+			CHECK(conn->video && conn->video->id == video_id);
+			CHECK(conn->audio && conn->audio->id == audio_id);
+		}
+		destroySource(source);
+	}
+	report("disabled and undecodable renditions fall through");
+
+	// With every rendition disabled, the source holds the one it plays; with none of them
+	// held, the section is handled like an absent one.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto snapshot = CatalogSnapshot(publisher);
+		auto *ctx = static_cast<moq_source *>(source);
+		std::weak_ptr<Track> video;
+		std::weak_ptr<Track> audio;
+		for (auto &entry : snapshot.video)
+			entry.second.enabled = false;
+		for (auto &entry : snapshot.audio)
+			entry.second.enabled = false;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			video = conn->video;
+			audio = conn->audio;
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(conn->video && conn->video == video.lock() && !conn->pending_video);
+			CHECK(conn->audio && conn->audio == audio.lock() && !conn->pending_audio);
+		}
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
+
+		// A disabled rendition the source does not play is not held.
+		auto &config = snapshot.video.begin()->second;
+		config.coded = moq::Dimensions{(config.coded ? config.coded->width : 0) + 16, 16};
+		snapshot.audio.begin()->second.sample_rate += 1;
+		const int blanks = g_blank_calls;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(!conn->video && !conn->pending_video);
+			CHECK(!conn->audio && !conn->pending_audio);
+		}
+		CHECK(g_blank_calls > blanks);
+		destroySource(source);
+	}
+	report("all-disabled section holds the playing rendition");
+
+	// A rendition's stream instance is part of what names it, for the active and the pending
+	// track alike: a sibling publisher restarting behind a stable catalog resubscribes.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto snapshot = CatalogSnapshot(publisher);
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			snapshot.video.begin()->second.instance = "01900000-0000-7000-8000-000000000001";
+			snapshot.audio.begin()->second.instance = "01900000-0000-7000-8000-000000000001";
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(conn->pending_video && conn->pending_audio);
+			const auto pending_video = conn->pending_video;
+			const auto pending_audio = conn->pending_audio;
+			// The same instance keeps the pending track.
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(conn->pending_video == pending_video && conn->pending_audio == pending_audio);
+			// Another instance replaces it.
+			snapshot.video.begin()->second.instance = "01900000-0000-7000-8000-000000000002";
+			snapshot.audio.begin()->second.instance = "01900000-0000-7000-8000-000000000002";
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(conn->pending_video && conn->pending_video != pending_video);
+			CHECK(conn->pending_audio && conn->pending_audio != pending_audio);
+		}
+		destroySource(source);
+	}
+	report("instance change resubscribes");
+
 	// A new rendition that has not delivered a frame cannot stop the old track.
 	{
 		TestRelay relay;
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		FreezeCatalog(ctx, publisher);
 		moq::VideoInit init{};
 		init.format = moq::VideoFormat::kAvc3;
 		init.data = TestH264Init();
@@ -687,10 +1403,11 @@ int main()
 			moq::MediaTrackProducer::video(publisher.broadcast,
 						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
 			"replacement");
+		DeliverCatalog(ctx, CatalogPreferring(publisher, "!replacement"));
 		const int frames = g_output_frames;
 		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
 		CHECK(publisher.WriteUntil([&] {
-			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), 2'000'000}),
+			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), Micros(2'000'000)}),
 			       "replacement frame");
 			return g_last_timestamp == 2'000'000'000;
 		}));
@@ -699,57 +1416,43 @@ int main()
 	report("replacement waits for first frame");
 
 	// A keyframe flag or accepted packet is not proof that the replacement decodes.
-	for (int failure : {1, 2, 3}) {
+	for (int failure : {2, 3}) {
 		TestRelay relay;
 		reset(relay.Url());
-		const bool audio = failure == 1;
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		FreezeCatalog(ctx, publisher);
 		g_candidate_decode = failure;
-		std::shared_ptr<moq::MediaTrackProducer> replacement;
-		if (audio) {
-			moq::AudioInit init{};
-			init.format = moq::AudioFormat::kOpus;
-			init.data = TestOpusHead();
-			replacement = TestOk(moq::MediaTrackProducer::audio(
-						     publisher.broadcast,
-						     moq::MediaTarget::kNamed{std::string("!replacement")}, init),
-					     "replacement audio");
-		} else {
-			moq::VideoInit init{};
-			init.format = moq::VideoFormat::kAvc3;
-			init.data = TestH264Init();
-			replacement = TestOk(moq::MediaTrackProducer::video(
-						     publisher.broadcast,
-						     moq::MediaTarget::kNamed{std::string("!replacement")}, init),
-					     "replacement video");
-		}
+		moq::VideoInit init{};
+		init.format = moq::VideoFormat::kAvc3;
+		init.data = TestH264Init();
+		auto replacement = TestOk(
+			moq::MediaTrackProducer::video(publisher.broadcast,
+						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+			"replacement video");
+		const auto preferring = CatalogPreferring(publisher, "!replacement");
+		DeliverCatalog(ctx, preferring);
 		auto write = [&] {
-			auto payload = audio ? std::vector<uint8_t>{0xfc, 0xff, 0xfe} : TestH264Keyframe();
-			TestOk(replacement->write_frame(moq::Frame{payload, 1'000'000'000}), "replacement frame");
-			if (audio)
-				TestOk(replacement->cut(), "replacement audio cut");
+			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), Micros(1'000'000'000)}),
+			       "replacement frame");
 		};
 		CHECK(publisher.WriteUntil([&] {
 			write();
 			return g_candidate_attempts > 0;
 		}));
-		const int frames = audio ? g_output_audio.load() : g_output_frames.load();
-		CHECK(publisher.WriteUntil(
-			[&] { return (audio ? g_output_audio.load() : g_output_frames.load()) >= frames + 3; }));
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
 		if (failure == 3) {
 			// Metadata-only updates must preserve the candidate's accumulated decode state.
-			auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
-			auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
-			auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
-			CHECK(snapshot.has_value());
-			auto *ctx = static_cast<moq_source *>(source);
+			auto snapshot = preferring;
+			snapshot.video.at("!replacement").label = "relabeled";
 			{
 				std::lock_guard lock(ctx->mutex);
 				auto pending = ctx->connection->pending_video;
 				CHECK(pending != nullptr);
-				moq_source_subscribe_video(ctx, ctx->connection, *snapshot);
+				moq_source_subscribe_video(ctx, ctx->connection, snapshot);
 				CHECK(ctx->connection->pending_video == pending);
 			}
 			g_candidate_decode = 0;
@@ -759,20 +1462,24 @@ int main()
 			}));
 		}
 		destroySource(source);
-		report(audio          ? "failed audio candidate preserves playback"
-		       : failure == 2 ? "failed video candidate preserves playback"
-				      : "video waits for decoded output");
+		report(failure == 2 ? "failed video candidate preserves playback" : "video waits for decoded output");
 	}
 
-	// A malformed packet on the active audio track stops only that track; the pending
-	// replacement still takes over without another catalog update.
+	// An audio replacement whose packets moq-audio refuses is dropped, and the current
+	// audio keeps playing.
 	{
 		TestRelay relay;
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
 		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
-		g_candidate_decode = 3;
+		auto *ctx = static_cast<moq_source *>(source);
+		std::weak_ptr<Track> active;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			active = ctx->connection->audio;
+		}
+		FreezeCatalog(ctx, publisher);
 		moq::AudioInit init{};
 		init.format = moq::AudioFormat::kOpus;
 		init.data = TestOpusHead();
@@ -780,38 +1487,108 @@ int main()
 			moq::MediaTrackProducer::audio(publisher.broadcast,
 						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
 			"replacement audio");
-		auto write = [&] {
-			TestOk(replacement->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, 1'000'000'000}),
+		DeliverCatalog(ctx, CatalogPreferring(publisher, "!replacement"));
+		std::weak_ptr<Track> candidate;
+		CHECK(publisher.WriteUntil([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &pending = ctx->connection->pending_audio;
+			if (!pending || !pending->audio_consumer)
+				return false;
+			candidate = pending;
+			std::lock_guard<std::mutex> failure_lock(g_candidate_mutex);
+			g_candidate = {candidate, false};
+			return true;
+		}));
+		CHECK(publisher.WriteUntil([&] {
+			TestOk(replacement->write_frame(moq::Frame{BAD_OPUS, Micros(1'000'000'000)}),
 			       "replacement frame");
 			TestOk(replacement->cut(), "replacement audio cut");
-		};
-		CHECK(publisher.WriteUntil([&] {
-			write();
-			return g_candidate_attempts > 0;
+			std::lock_guard<std::mutex> lock(g_candidate_mutex);
+			return g_candidate.failed && candidate.expired();
 		}));
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto playing = active.lock();
+			CHECK(playing && ctx->connection->audio == playing);
+		}
+		const int audio = g_output_audio;
+		CHECK(publisher.WriteUntil([&] { return g_output_audio >= audio + 3; }));
+		CHECK(g_last_audio_timestamp < 1'000'000'000'000);
+		destroySource(source);
+	}
+	report("failed audio candidate preserves playback");
+
+	// A packet moq-audio refuses on the active audio track stops only that track; the
+	// pending replacement still takes over without another catalog update.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
+		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
+		FreezeCatalog(ctx, publisher);
+		moq::AudioInit init{};
+		init.format = moq::AudioFormat::kOpus;
+		init.data = TestOpusHead();
+		auto replacement = TestOk(
+			moq::MediaTrackProducer::audio(publisher.broadcast,
+						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+			"replacement audio");
+		DeliverCatalog(ctx, CatalogPreferring(publisher, "!replacement"));
+		std::shared_ptr<Track> pending;
+		CHECK(WaitFor([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			pending = ctx->connection->pending_audio;
+			return pending && pending->audio_consumer;
+		}));
+		TestOk(publisher.audio->write_frame(moq::Frame{BAD_OPUS, Micros(900'000'000)}), "malformed frame");
+		TestOk(publisher.audio->cut(), "malformed cut");
+		CHECK(WaitFor([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			return !ctx->connection->audio;
+		}));
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			CHECK(ctx->connection->pending_audio == pending);
+		}
+		pending.reset();
+		uint64_t timestamp_us = 1'000'000'000;
+		CHECK(WaitFor([&] {
+			TestOk(replacement->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, Micros(timestamp_us)}),
+			       "replacement frame");
+			TestOk(replacement->cut(), "replacement audio cut");
+			timestamp_us += 20'000;
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			return g_last_audio_timestamp >= 1'000'000'000'000;
+		}));
+		destroySource(source);
+	}
+	report("failed active audio keeps pending replacement");
+
+	// A decoded frame that is not whole samples of the track's layout stops the track
+	// rather than reaching OBS.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
 		auto *ctx = static_cast<moq_source *>(source);
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			auto conn = ctx->connection;
 			auto active = conn->audio;
-			auto pending = conn->pending_audio;
-			CHECK(active && pending);
-			g_audio_send_result = AVERROR_INVALIDDATA;
-			moq::MediaFrame malformed{};
-			malformed.timestamp_us = 1;
-			moq_source_on_frame(ctx, conn, active, std::optional<moq::MediaFrame>(malformed));
-			g_audio_send_result = 0;
+			CHECK(active != nullptr);
+			obs_source_audio audio = {};
+			moq::expected<std::optional<moq::AudioRead>> misaligned(
+				moq::AudioRead::kFrame{moq::AudioFrame{Micros(1), {0, 0, 0}}});
+			CHECK(!moq_source_on_audio_read(ctx, conn, active, misaligned, audio));
 			CHECK(!conn->audio);
-			CHECK(conn->pending_audio == pending);
 		}
-		g_candidate_decode = 0;
-		CHECK(publisher.WriteUntil([&] {
-			write();
-			return g_last_audio_timestamp == 1'000'000'000'000;
-		}));
 		destroySource(source);
 	}
-	report("failed active audio keeps pending replacement");
+	report("misaligned audio frame stops the track");
 
 	// The public publishing wrapper cannot author a sibling-reference catalog, so deliver
 	// that snapshot directly; resolution and subscription still cross the real relay.
@@ -826,31 +1603,44 @@ int main()
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto config = snapshot->video.begin()->second;
-		std::shared_ptr<moq::BroadcastProducer> hidden;
+		std::shared_ptr<moq::Publication> hidden;
 		if (sibling) {
-			hidden = TestOk(relay.origin->create_broadcast("obs/test/hidden"), "unannounced sibling");
+			hidden = TestOk(relay.origin->create_broadcast("obs/hidden"), "unannounced sibling");
 			config.broadcast = "./hidden";
+			config.instance = "obs-test-pinned";
 		}
 		snapshot->video.clear();
 		snapshot->video.emplace("!unavailable", config);
 		auto *ctx = static_cast<moq_source *>(source);
-		int failures = 0;
-		{
-			std::lock_guard<std::mutex> lock(g_candidate_mutex);
-			failures = g_candidate_failures;
-		}
+		std::weak_ptr<Track> candidate;
+		std::weak_ptr<Track> active;
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
+			active = ctx->connection->video;
 			moq_source_subscribe_video(ctx, ctx->connection, *snapshot);
 			CHECK(ctx->connection->pending_video != nullptr);
+			candidate = ctx->connection->pending_video;
+			std::lock_guard<std::mutex> failure_lock(g_candidate_mutex);
+			g_candidate = {candidate, false};
 		}
-		{
-			std::unique_lock<std::mutex> lock(g_candidate_mutex);
-			g_candidate_failed.wait(lock, [&] { return g_candidate_failures > failures; });
+		if (hidden) {
+			// An unannounced sibling stays pending, without interrupting current playback.
+			const int frames = g_output_frames;
+			CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
+			// A different stream is a real resolution failure.
+			moq::AnnounceRoute route;
+			route.instance = "obs-test-other";
+			TestOk(hidden->announce(route), "announce mismatched sibling");
 		}
+		CHECK(WaitFor([] {
+			std::lock_guard<std::mutex> lock(g_candidate_mutex);
+			return g_candidate.failed;
+		}));
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
-			CHECK(ctx->connection && !ctx->connection->pending_video);
+			auto playing = active.lock();
+			CHECK(ctx->connection && playing && ctx->connection->video == playing);
+			CHECK(candidate.expired());
 		}
 		const int frames = g_output_frames;
 		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
@@ -894,7 +1684,7 @@ int main()
 	}
 	report("audio only");
 
-	// A catalog naming a codec FFmpeg can't open leaves the video blank, not half
+	// A catalog naming a video codec FFmpeg can't open leaves the video blank, not half
 	// installed, and the audio still plays.
 	{
 		TestRelay relay;
@@ -902,12 +1692,107 @@ int main()
 		Publisher publisher(relay, "obs/test");
 		g_find_decoder_ok = false;
 		void *source = createSource();
-		CHECK(!publisher.WriteUntil([] { return g_output_frames > 0 || g_output_audio > 0; },
-					    std::chrono::milliseconds(500)));
+		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
 		CHECK(g_output_frames == 0);
 		destroySource(source);
 	}
 	report("undecodable rendition");
+
+	// Another publisher instance taking over the path while the source plays, as a GOAWAY
+	// drain's replacement session does, plays without a blank. The old instance keeps playing
+	// until the new one delivers, and the new one keeps playing once the old one ends.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		auto first = std::make_unique<Publisher>(relay, "obs/test");
+		void *source = createSource();
+		CHECK(first->WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		const int blanks = g_blank_calls;
+		const int opens = g_decoder_opens;
+		Publisher second(relay, "obs/test", true, true, 1'000'000'000);
+		// The new instance's video candidate opens its own decoder while the old one still plays.
+		CHECK(first->WriteUntil([&] { return g_decoder_opens == opens + 1; }));
+		int frames = g_output_frames;
+		int audio = g_output_audio;
+		CHECK(first->WriteUntil(
+			[&] { return g_output_frames >= frames + 10 && g_output_audio >= audio + 10; }));
+		CHECK(!PlaysFrom(1'000'000'000));
+		CHECK(second.WriteUntil([] { return PlaysFrom(1'000'000'000); }));
+		first.reset();
+		frames = g_output_frames;
+		audio = g_output_audio;
+		CHECK(second.WriteUntil(
+			[&] { return g_output_frames >= frames + 10 && g_output_audio >= audio + 10; }));
+		CHECK(g_blank_calls == blanks);
+		CHECK(g_decoder_opens == opens + 1);
+		destroySource(source);
+	}
+	report("follows a replacement instance");
+
+	// A replacement instance whose catalog subscribe fails stops the old instance too, blanks,
+	// and waits for the next instance.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher first(relay, "obs/test");
+		void *source = createSource();
+		CHECK(first.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		const int blanks = g_blank_calls;
+		// The relay cannot refuse a catalog, so deliver the failure once the replacement is
+		// handed out; its own catalog never arrives, since it publishes no tracks.
+		auto *ctx = static_cast<moq_source *>(source);
+		Publisher broken(relay, "obs/test", false, false);
+		CHECK(first.WriteUntil([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			return ctx->connection->instance == 2;
+		}));
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			CHECK(ctx->connection->video && ctx->connection->audio);
+			moq_source_on_catalogs(ctx, ctx->connection,
+					       moq::unexpected(moq::Error(moq::Error::kInternal{"catalog refused"})));
+			CHECK(!ctx->connection->video && !ctx->connection->audio);
+		}
+		CHECK(g_blank_calls > blanks);
+		Publisher third(relay, "obs/test", true, true, 1'000'000'000);
+		CHECK(third.WriteUntil([] { return PlaysFrom(1'000'000'000); }));
+		destroySource(source);
+	}
+	report("failed replacement catalog waits for the next instance");
+
+	// A publisher that restarts, ending its broadcast before the new instance announces, plays
+	// again once it returns.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		void *source = createSource();
+		{
+			Publisher first(relay, "obs/test");
+			CHECK(first.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		}
+		Publisher second(relay, "obs/test", true, true, 1'000'000'000);
+		CHECK(second.WriteUntil([] { return PlaysFrom(1'000'000'000); }));
+		destroySource(source);
+	}
+	report("follows a publisher restart");
+
+	// The relay dropping the session: the client reconnects, and the broadcast announced over
+	// the new connect is another instance to play.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		relay.DropSessions();
+		CHECK(WaitFor([&] { return relay.Accepted() == 2; }));
+		const int frames = g_output_frames;
+		const int audio = g_output_audio;
+		CHECK(publisher.WriteUntil(
+			[&] { return g_output_frames >= frames + 10 && g_output_audio >= audio + 10; }));
+		destroySource(source);
+	}
+	report("follows a session reconnect");
 
 	// Changing the broadcast drops the old connection and plays the new one.
 	{
@@ -958,13 +1843,41 @@ int main()
 	}
 	report("connect failure");
 
-	// Destroy while the connect is still pending: it is cancelled, not waited on.
+	// Park the worker before dialing so it cannot process the connect result. Only
+	// cancellation releases it: destroy must cancel before joining, then wait for
+	// the running task to finish before returning.
 	{
 		TestRelay relay(false);
-		reset(relay.Url());
+		reset("");
 		void *source = createSource();
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		auto *ctx = static_cast<moq_source *>(source);
+		std::promise<void> started;
+		std::promise<void> cancelled;
+		auto cancellation = cancelled.get_future();
+		std::atomic<bool> finished{false};
+		// Bounded like WaitFor, so joining before cancelling fails instead of hanging.
+		CHECK(ctx->worker.Executor()([&] {
+			started.set_value();
+			finished = cancellation.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+		}));
+		started.get_future().wait();
+
+		g_settings.url = relay.Url();
+		g_info.update(source, settingsData());
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto &call = ctx->connection->session_call;
+			CHECK(call.has_value());
+			// Keep the real cancellation, observing when it returns without retaining
+			// the Connection whose destruction must invoke it.
+			auto pending = std::make_shared<moq::Continuation>(std::move(*call));
+			call.emplace([pending, &cancelled] {
+				pending->cancel();
+				cancelled.set_value();
+			});
+		}
 		destroySource(source);
+		CHECK(finished);
 	}
 	report("destroy during connect");
 
@@ -973,8 +1886,11 @@ int main()
 		TestRelay relay;
 		reset(relay.Url(), "obs/missing");
 		void *source = createSource();
-		CHECK(WaitFor([&] { return relay.Accepted() == 1; }));
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		auto *ctx = static_cast<moq_source *>(source);
+		CHECK(WaitFor([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			return ctx->connection && ctx->connection->available_call.has_value();
+		}));
 		destroySource(source);
 	}
 	report("destroy waiting for the broadcast");

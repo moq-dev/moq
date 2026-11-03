@@ -7,14 +7,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
+use kio::clock::Instant;
 use serde::{Deserialize, Serialize};
 use stun_types::attribute::XorMappedAddress;
 use stun_types::message::{BINDING, Message, MessageClass, MessageHeader, MessageWriteMutSlice};
 use stun_types::prelude::*;
-use tokio::time::Instant;
 
 /// Configuration for the optional public STUN Binding listener.
-#[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
@@ -55,40 +55,31 @@ impl Counters {
 		self.0.dropped[reason as usize].fetch_add(1, Ordering::Relaxed);
 	}
 
-	pub(crate) fn render(&self, out: &mut String) {
-		use std::fmt::Write;
-		let _ = writeln!(out, "# HELP moq_relay_stun_replies_total STUN Binding replies sent.");
-		let _ = writeln!(out, "# TYPE moq_relay_stun_replies_total counter");
-		let _ = writeln!(
-			out,
-			"moq_relay_stun_replies_total {}",
-			self.0.replies.load(Ordering::Relaxed)
-		);
-		let _ = writeln!(
-			out,
-			"# HELP moq_relay_stun_dropped_total STUN datagrams dropped without replying."
-		);
-		let _ = writeln!(out, "# TYPE moq_relay_stun_dropped_total counter");
-		for (reason, count) in ["invalid", "source", "global", "capacity", "io"]
-			.into_iter()
-			.zip(&self.0.dropped)
-		{
-			let _ = writeln!(
-				out,
-				"moq_relay_stun_dropped_total{{reason=\"{reason}\"}} {}",
-				count.load(Ordering::Relaxed)
-			);
-		}
-		let _ = writeln!(
-			out,
-			"# HELP moq_relay_stun_io_errors_total Recoverable STUN socket I/O errors."
-		);
-		let _ = writeln!(out, "# TYPE moq_relay_stun_io_errors_total counter");
-		let _ = writeln!(
-			out,
-			"moq_relay_stun_io_errors_total {}",
-			self.0.io_errors.load(Ordering::Relaxed)
-		);
+	pub(crate) fn encode(&self, encoder: &mut prometheus_client::encoding::DescriptorEncoder) -> std::fmt::Result {
+		use crate::internal::{counter, single};
+		use prometheus_client::metrics::counter::ConstCounter;
+
+		single(
+			encoder,
+			"moq_relay_stun_replies",
+			"STUN Binding replies sent.",
+			ConstCounter::new(self.0.replies.load(Ordering::Relaxed)),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_stun_dropped",
+			"STUN datagrams dropped without replying.",
+			["invalid", "source", "global", "capacity", "io"]
+				.into_iter()
+				.zip(&self.0.dropped)
+				.map(|(reason, count)| ([("reason", reason)], count.load(Ordering::Relaxed))),
+		)?;
+		single(
+			encoder,
+			"moq_relay_stun_io_errors",
+			"Recoverable STUN socket I/O errors.",
+			ConstCounter::new(self.0.io_errors.load(Ordering::Relaxed)),
+		)
 	}
 }
 
@@ -218,7 +209,7 @@ pub(crate) struct Server {
 }
 
 impl Server {
-	#[cfg(test)]
+	#[cfg(all(test, feature = "stun"))]
 	pub(crate) fn addr(&self) -> SocketAddr {
 		self.socket.local_addr().unwrap()
 	}
@@ -453,7 +444,7 @@ mod tests {
 		let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		client.send_to(&request(), addr).await.unwrap();
 		let mut output = [0; 44];
-		let (len, sender) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut output))
+		let (len, sender) = kio::clock::timeout(Duration::from_secs(5), client.recv_from(&mut output))
 			.await
 			.unwrap()
 			.unwrap();
@@ -497,8 +488,7 @@ mod tests {
 		for reason in [Drop::Invalid, Drop::Source, Drop::Global, Drop::Capacity, Drop::Invalid] {
 			counters.drop(reason);
 		}
-		let mut output = String::new();
-		counters.render(&mut output);
+		let output = crate::internal::render(move |encoder| counters.encode(encoder));
 		assert!(output.contains("moq_relay_stun_replies_total 0"));
 		assert!(output.contains("reason=\"invalid\"} 2"));
 		for reason in ["source", "global", "capacity"] {
@@ -509,6 +499,11 @@ mod tests {
 
 	#[test]
 	#[ignore = "benchmark"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real per-request cost"
+	)]
 	fn benchmark_stun_sources() {
 		println!("sources,requests_per_source,ns_per_request");
 		for sources in [1u32, 64, SOURCES_MAX as u32] {

@@ -1,36 +1,80 @@
 //! Incremental demand, separate from the track's cached content.
-use std::{collections::BTreeMap, sync::Arc, task::Poll, time::Duration};
+use std::{
+	collections::BTreeMap,
+	sync::{
+		Arc,
+		atomic::{self, AtomicU64},
+	},
+	task::Poll,
+	time::Duration,
+};
 
-use super::{Order, Position, Subscription, TrackState, clamp_combined};
+use super::{Delay, Order, Subscription, TrackState, clamp_combined};
+
+mod ranges;
+use ranges::Ranges;
 
 #[derive(Default)]
 pub(super) struct Subscriptions {
 	count: usize,
-	priority: BTreeMap<u8, usize>,
+	priority: BTreeMap<i8, usize>,
+	// Keyed by budget, so `None` counts as the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
-	start: BTreeMap<Option<Position>, usize>,
-	end: BTreeMap<Option<Position>, usize>,
+	// Only stated minimums count, so an unstated one never pulls the smallest to zero.
+	min_delay: BTreeMap<Duration, usize>,
+	ranges: Ranges,
 	descending: usize,
+	/// Subscribers that need the live feed; see [`Subscription::feed`].
+	feed: usize,
+	/// The lowest group consumers want while no refresh is pending, never lowered. See
+	/// [`super::Demand::wanted`].
+	wanted: u64,
+	/// A join over the track's refresh ratio asked for a group past every sequence written,
+	/// and no such group has landed yet. Read against `next` rather than stored as a number,
+	/// so a datagram taking the next sequence can never leave the ask behind.
+	refresh: bool,
+	/// One past the highest sequence written, which a pending refresh asks for.
+	next: u64,
 	waiters: kio::WaiterList,
 }
 
+/// Everything the aggregate holds besides its ranges.
+type Scalars = (i8, Delay, Order, bool);
+
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		(self.count != 0).then(|| Subscription {
-			priority: *self.priority.last_key_value().unwrap().0,
-			max_delay: *self.max_delay.last_key_value().unwrap().0,
-			start: *self.start.first_key_value().unwrap().0,
-			// None absorbs a bounded end, regardless of its map ordering.
-			end: if self.end.contains_key(&None) {
-				None
-			} else {
-				*self.end.last_key_value().unwrap().0
-			},
-			order: if self.descending == 0 {
-				Order::Ascending
-			} else {
-				Order::Descending
-			},
+		let (priority, delay, order, feed) = self.scalars()?;
+		Some(Subscription {
+			priority,
+			delay,
+			ranges: self.ranges.union(),
+			order,
+			feed,
+		})
+	}
+
+	/// The largest delay budget without materializing the subscription's ranges.
+	pub(super) fn max_delay(&self) -> Duration {
+		self.max_delay
+			.last_key_value()
+			.map_or(Duration::ZERO, |(delay, _)| *delay)
+	}
+
+	fn scalars(&self) -> Option<Scalars> {
+		(self.count != 0).then(|| {
+			(
+				*self.priority.last_key_value().unwrap().0,
+				Delay {
+					min: self.min_delay.first_key_value().map(|(min, _)| *min),
+					max: Some(*self.max_delay.last_key_value().unwrap().0).filter(|budget| *budget != Duration::MAX),
+				},
+				if self.descending == 0 {
+					Order::Ascending
+				} else {
+					Order::Descending
+				},
+				self.feed != 0,
+			)
 		})
 	}
 
@@ -50,57 +94,121 @@ impl Subscriptions {
 		}
 	}
 
-	/// Mutate counts under one lock, taking wakes only when an extreme changes.
-	fn replace(&mut self, old: Option<&Subscription>, new: Option<&Subscription>) -> kio::WaiterList {
-		let prev = self.combined();
-		if let Some(old) = old {
-			remove(&mut self.priority, old.priority);
-			remove(&mut self.max_delay, old.max_delay);
-			remove(&mut self.start, old.start);
-			remove(&mut self.end, old.end);
-			self.descending -= usize::from(old.order == Order::Descending);
-			self.count -= 1;
+	/// The lowest group consumers want, whether or not anyone consumes now: the next free
+	/// sequence while a refresh is pending.
+	pub(super) fn wanted(&self) -> u64 {
+		match self.refresh {
+			true => self.next.max(self.wanted),
+			false => self.wanted,
 		}
+	}
+
+	/// [`Self::wanted`], arming `waiter` for its next change.
+	pub(super) fn poll_wanted(&mut self, waiter: &kio::Waiter) -> u64 {
+		waiter.register(&mut self.waiters);
+		self.wanted()
+	}
+
+	/// A join over the refresh ratio: ask for a group past every sequence written. Joins
+	/// while one is pending coalesce into it.
+	pub(super) fn refresh(&mut self) -> kio::WaiterList {
+		if std::mem::replace(&mut self.refresh, true) {
+			return Default::default();
+		}
+		self.waiters.take()
+	}
+
+	/// Sequence `sequence` was written. One at or past the next free sequence moves it: a
+	/// group subscribers receive answers a pending refresh, and anything else, such as a
+	/// datagram, moves the sequence it asks for.
+	pub(super) fn wrote(&mut self, sequence: u64, answers: bool) -> kio::WaiterList {
+		let next = self.next;
+		self.next = next.max(sequence.saturating_add(1));
+		if !self.refresh || sequence < next {
+			return Default::default();
+		}
+		if answers {
+			self.refresh = false;
+			self.wanted = self.wanted.max(sequence);
+		}
+		self.waiters.take()
+	}
+
+	/// Mutate counts under one lock, taking wakes only when the aggregate changes.
+	fn replace(&mut self, old: Option<&Subscription>, new: Option<&Subscription>) -> kio::WaiterList {
+		let prev = self.scalars();
+		// New ranges count before old ones leave, so a range both hold never reads as gone.
+		let mut reshaped = false;
+		let moved = old.map(|old| &old.ranges) != new.map(|new| &new.ranges);
 		if let Some(new) = new {
 			add(&mut self.priority, new.priority);
-			add(&mut self.max_delay, new.max_delay);
-			add(&mut self.start, new.start);
-			add(&mut self.end, new.end);
+			add(&mut self.max_delay, new.budget());
+			if let Some(min) = new.delay.min {
+				add(&mut self.min_delay, min);
+			}
+			if moved {
+				for range in &new.ranges {
+					reshaped |= self.ranges.add(*range);
+				}
+			}
 			self.descending += usize::from(new.order == Order::Descending);
+			self.feed += usize::from(new.feed);
 			self.count += 1;
 		}
-		if self.combined() != prev {
+		if let Some(old) = old {
+			remove(&mut self.priority, old.priority);
+			remove(&mut self.max_delay, old.budget());
+			if let Some(min) = old.delay.min {
+				remove(&mut self.min_delay, min);
+			}
+			if moved {
+				for range in &old.ranges {
+					reshaped |= self.ranges.remove(*range);
+				}
+			}
+			self.descending -= usize::from(old.order == Order::Descending);
+			self.feed -= usize::from(old.feed);
+			self.count -= 1;
+		}
+		if reshaped || self.scalars() != prev {
 			self.waiters.take()
 		} else {
 			Default::default()
 		}
 	}
 
-	#[cfg(test)]
 	pub(super) fn len(&self) -> usize {
 		self.count
 	}
 }
 
-fn add<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) {
-	*counts.entry(value).or_default() += 1;
+/// Count `value`, returning whether it is new.
+fn add<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) -> bool {
+	let count = counts.entry(value).or_default();
+	*count += 1;
+	*count == 1
 }
 
-fn remove<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) {
+/// Uncount `value`, returning whether that was its last.
+fn remove<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) -> bool {
 	let count = counts.get_mut(&value).expect("registered contribution");
 	*count -= 1;
-	if *count == 0 {
+	let last = *count == 0;
+	if last {
 		counts.remove(&value);
 	}
+	last
 }
 
 /// Clones share one contribution, including controls and pending subscriptions.
 #[derive(Clone)]
-pub(crate) struct Preferences(Arc<Preference>);
+pub(in crate::model) struct Preferences(Arc<Preference>);
 
 struct Preference {
 	value: kio::Producer<Subscription>,
 	subscriptions: Option<kio::Lock<Subscriptions>>,
+	/// Bumped under the write whenever the ranges change.
+	ranges_revision: AtomicU64,
 }
 
 impl Preferences {
@@ -114,6 +222,7 @@ impl Preferences {
 		Self(Arc::new(Preference {
 			value: kio::Producer::new(value),
 			subscriptions,
+			ranges_revision: AtomicU64::new(0),
 		}))
 	}
 
@@ -127,6 +236,9 @@ impl Preferences {
 			.subscriptions
 			.as_ref()
 			.map(|subs| subs.lock().replace(Some(&value), Some(&next)));
+		if value.ranges != next.ranges {
+			self.0.ranges_revision.fetch_add(1, atomic::Ordering::Relaxed);
+		}
 		*value = next;
 		drop(value);
 		if let Some(wakes) = &mut wakes {
@@ -137,16 +249,25 @@ impl Preferences {
 }
 
 impl Preferences {
-	pub(crate) fn same_channel(&self, other: &Self) -> bool {
+	pub(in crate::model) fn same_channel(&self, other: &Self) -> bool {
 		self.0.value.same_channel(&other.0.value)
 	}
-	pub(crate) fn read(&self) -> kio::Ref<'_, Subscription> {
+	pub(in crate::model) fn read(&self) -> kio::Ref<'_, Subscription> {
 		self.0.value.read()
 	}
-	pub(crate) fn consume(&self) -> kio::Consumer<Subscription> {
+	/// Counts changes to the ranges, so a reader can tell them apart without comparing every
+	/// range. Read it while holding [`Self::read`] to get the count matching those ranges.
+	pub(in crate::model) fn ranges_revision(&self) -> u64 {
+		self.0.ranges_revision.load(atomic::Ordering::Relaxed)
+	}
+	pub(in crate::model) fn consume(&self) -> kio::Consumer<Subscription> {
 		self.0.value.consume()
 	}
-	pub(crate) fn poll_ref<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R, kio::Ref<'_, Subscription>>>
+	pub(in crate::model) fn poll_ref<F, R>(
+		&self,
+		waiter: &kio::Waiter,
+		f: F,
+	) -> Poll<Result<R, kio::Ref<'_, Subscription>>>
 	where
 		F: FnOnce(&kio::Ref<'_, Subscription>) -> Poll<R>,
 	{
@@ -169,12 +290,15 @@ impl From<kio::Producer<Subscription>> for Preferences {
 		Self(Arc::new(Preference {
 			value,
 			subscriptions: None,
+			ranges_revision: AtomicU64::new(0),
 		}))
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	use super::super::super::subscription::Combined;
+	use super::super::{Anchor, Range};
 	use super::*;
 	use rand::{RngExt, SeedableRng};
 	use std::sync::atomic::{AtomicUsize, Ordering};
@@ -188,22 +312,32 @@ mod tests {
 		let mut slots: Vec<Option<(super::super::Subscriber, Subscription)>> = (0..64).map(|_| None).collect();
 		for step in 0..10_000 {
 			let index = rng.random_range(0..slots.len());
-			let position = |rng: &mut rand::rngs::StdRng| {
-				rng.random_bool(0.75).then(|| Position {
-					group: rng.random_range(0..8),
-					frame: rng.random_range(0..4),
-				})
+			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
+				0 => Anchor::Relative(rng.random_range(0..3)),
+				1 => Anchor::Relative(u64::MAX),
+				_ => Anchor::Absolute(rng.random_range(0..8)),
 			};
+			let ranges: Vec<Range> = (0..rng.random_range(0..3))
+				.map(|_| Range {
+					start: anchor(&mut rng),
+					end: rng.random_bool(0.75).then(|| anchor(&mut rng)),
+				})
+				.collect();
 			let next = Subscription {
 				priority: rng.random_range(0..8),
-				max_delay: Duration::from_millis(rng.random_range(0..8)),
-				start: position(&mut rng),
-				end: position(&mut rng),
+				delay: Delay {
+					min: rng
+						.random_bool(0.75)
+						.then(|| Duration::from_millis(rng.random_range(0..8))),
+					max: Some(Duration::from_millis(rng.random_range(0..8))),
+				},
+				ranges,
 				order: if rng.random_bool(0.5) {
 					Order::Ascending
 				} else {
 					Order::Descending
 				},
+				feed: rng.random_bool(0.25),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),
@@ -217,12 +351,11 @@ mod tests {
 				}
 				(slot, _) => *slot = None,
 			}
-			let mut expected = None;
+			let mut expected = Combined::default();
 			for (_, value) in slots.iter().flatten() {
-				if let Poll::Ready(next) = value.poll_combined(&expected) {
-					expected = Some(next);
-				}
+				expected.add(value);
 			}
+			let expected = expected.finish();
 			assert_eq!(producer.subscription(), expected, "operation {step}");
 		}
 		drop(slots);
@@ -246,7 +379,7 @@ mod tests {
 		let strong = producer.subscribe(
 			Subscription::default()
 				.with_priority(10)
-				.with_max_delay(Duration::from_secs(1)),
+				.with_delay(Delay::default().with_max(Duration::from_secs(1))),
 		);
 		let count = Arc::new(Count(AtomicUsize::new(0)));
 		let waiter = kio::Waiter::new(std::task::Waker::from(count.clone()));
@@ -254,7 +387,7 @@ mod tests {
 		assert!(producer.poll_subscription_changed(&waiter).is_pending());
 		let mut weak = producer.subscribe(
 			Subscription::default()
-				.with_groups(100..200)
+				.with_range(100..200)
 				.with_order(Order::Ascending),
 		);
 		weak.update(Subscription::default().with_priority(5)).unwrap();

@@ -81,23 +81,18 @@ Future<_Resolved> _resolveLibrary(
   );
 }
 
-/// Build moq-ffi from this checkout.
+/// Build moq-ffi from this checkout in the dev profile.
 ///
 /// Always shells out to Cargo rather than reusing whatever is already in
 /// target/: an existing artifact may predate a Rust edit, or have been built by
 /// another recipe with different features. Cargo's own timestamp check makes
 /// the no-op case cheap.
 Future<_Resolved> _build(Uri workspace, String target, String library) async {
-  final cargoArgs = [
-    'build',
-    '--locked',
-    '--release',
-    '--package',
-    'moq-ffi',
-    '--no-default-features',
-    '--manifest-path',
-    workspace.resolve('Cargo.toml').toFilePath(),
-  ];
+  // The shared default build, an alias .cargo/config.toml defines for Cargo
+  // runs in the workspace; it ships the software H.264 fallback. A checkout build is a test build, carrying the hooks
+  // leak_test.dart reads; `--target` keeps it out of the default build's
+  // directory, since a cdylib's file name carries no feature hash.
+  final cargoArgs = ['build-ffi', '--features', 'testing'];
 
   // Android needs the NDK's linker and sysroot, which only cargo-ndk sets up.
   // This mirrors rs/moq-ffi/build.sh.
@@ -105,14 +100,23 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
       ? ['ndk', '--target', target, '--platform', '24', '--', ...cargoArgs]
       : [...cargoArgs, '--target', target];
 
-  final result = await Process.run('cargo', args);
+  // The iOS floor release-ffi.yml builds with, which also avoids its
+  // ___chkstk_darwin linker errors. The hook's filtered environment drops it.
+  final result = await Process.run(
+    'cargo',
+    args,
+    workingDirectory: workspace.toFilePath(),
+    environment: target.contains('-apple-ios')
+        ? const {'IPHONEOS_DEPLOYMENT_TARGET': '16.0'}
+        : null,
+  );
   if (result.exitCode != 0) {
     throw StateError(
       'cargo ${args.join(' ')} failed:\n${result.stdout}\n${result.stderr}',
     );
   }
 
-  final built = workspace.resolve('target/$target/release/$library');
+  final built = workspace.resolve('target/$target/debug/$library');
   if (!await File.fromUri(built).exists()) {
     throw StateError('cargo did not produce ${built.toFilePath()}');
   }

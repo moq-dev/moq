@@ -1,17 +1,24 @@
-/** Sweep observers against routes for one route update, and against tracks for one demand edge. */
+/** Sweep observers against routes for one route update, and against tracks for one listing change. */
 
 import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
-import * as Epoch from "../src/epoch.ts";
 import { HopSchema, Route } from "../src/hop.ts";
+import * as Instance from "../src/instance.ts";
+import { hooks } from "../src/internal.ts";
+import { AnnounceRequest } from "../src/lite/announce.ts";
+import { Publisher } from "../src/lite/publisher.ts";
 import { Subscriber } from "../src/lite/subscriber.ts";
 import { TrackInfo } from "../src/lite/track.ts";
-import { Version } from "../src/lite/version.ts";
+import { ALPN_07_WIP, Version } from "../src/lite/version.ts";
+import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
-import { Writer } from "../src/stream.ts";
+import { Stream, Writer } from "../src/stream.ts";
+
+// Keep protocol diagnostics out of the measured CSV on stdout.
+console.debug = console.error;
 
 const routeCounts = [8, 32, 128];
 const observerCounts = [1, 8, 32];
@@ -19,22 +26,43 @@ const updates = 32;
 let checksum = 0;
 
 console.log("scope,routes,observers,update_us");
-for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-producers"] as const) {
+for (const scope of [
+	"unscoped",
+	"distinct-scopes",
+	"producer-scopes",
+	"rooted-producers",
+	"full-name",
+	"overlap-only",
+] as const) {
 	for (const routeCount of routeCounts) {
 		for (const observerCount of observerCounts) {
 			const origin = new Producer();
 			const handles = Array.from({ length: routeCount }, (_, index) =>
-				origin.dynamic(Path.from(`room/${index}`)),
+				origin.requests(Path.from(`room/${index}${scope === "full-name" ? ".chat" : ""}`)),
 			);
-			const touched = Path.from(scope === "rooted-producers" ? "0" : "room/0");
+			const touched = Path.from(
+				scope === "rooted-producers" ? "0" : scope === "full-name" ? "room/0.chat" : "room/0",
+			);
 			let notifications = 0;
 			const streams = Array.from({ length: observerCount }, (_, index) =>
-				(scope === "producer-scopes"
-					? origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]))
-					: scope === "rooted-producers"
-						? origin.scope(Path.from("room"), new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]))
-						: origin
-				).announced(scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined),
+				scope === "full-name" || scope === "overlap-only"
+					? origin.consume().announced(Path.Pattern.parse("**/*.chat"))
+					: (scope === "producer-scopes"
+							? origin.scope(
+									Path.empty(),
+									new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]),
+								)
+							: scope === "rooted-producers"
+								? origin.scope(
+										Path.from("room"),
+										new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]),
+									)
+								: origin
+						).announced(
+							scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined,
+							// These scopes only overlap `room/<index>`, so they measure the covering view.
+							{ covering: scope !== "unscoped" },
+						),
 			);
 			const readers = streams.map(async (stream) => {
 				for await (const event of stream) {
@@ -48,12 +76,13 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
-				handles[0].update({ cost: BigInt(index + 1) });
+				handles[0].updateRoute({ cost: BigInt(index + 1) });
 				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
 			const elapsed = performance.now() - start;
-			if (notifications !== updates * observerCount) {
-				throw new Error(`expected ${updates * observerCount} notifications, got ${notifications}`);
+			const expected = scope === "overlap-only" ? 0 : updates * observerCount;
+			if (notifications !== expected) {
+				throw new Error(`expected ${expected} notifications, got ${notifications}`);
 			}
 			console.log(`${scope},${routeCount},${observerCount},${((elapsed * 1000) / updates).toFixed(1)}`);
 			for (const stream of streams) stream.close();
@@ -65,62 +94,58 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 }
 if (checksum === 0) throw new Error("benchmark did no work");
 
-// Sweep both axes while only one track's demand changes.
-const demandUpdates = 1024;
-console.log("tracks,observers,demand_update_us");
-for (const trackCount of [8, 32, 128]) {
-	for (const observerCount of [1, 8, 32]) {
+// One created and removed track reaches every listing, however many tracks the broadcast holds.
+const listed = 256;
+console.log("tracks,listings,create_remove_and_read_us");
+for (const trackCount of [8, 128, 1024]) {
+	for (const listingCount of [1, 8, 32]) {
 		const broadcast = new BroadcastProducer();
-		const tracks = Array.from({ length: trackCount }, (_, index) => broadcast.createTrack(`track-${index}`));
-		const demand = broadcast.demand();
-		let notifications = 0;
-		const disposes = Array.from({ length: observerCount }, () =>
-			demand.used.subscribe(() => {
-				notifications++;
-			}),
-		);
-		const start = performance.now();
-		for (let index = 0; index < demandUpdates; index++) {
-			const subscriber = tracks[0].subscribe();
-			await Promise.resolve();
-			await Promise.resolve();
-			if (!demand.used.peek()) throw new Error("missing demand");
-			subscriber.close();
-			await demand.unused();
-			await Promise.resolve();
+		for (let index = 0; index < trackCount; index++) broadcast.createTrack(`held-${index}`);
+		const listings = Array.from({ length: listingCount }, () => broadcast.consume().tracks());
+		// Past each listing's initial set and SYNCED.
+		for (const listing of listings) {
+			for (let index = 0; index <= trackCount; index++) await listing.next();
 		}
-		if (notifications !== demandUpdates * 2 * observerCount) throw new Error(`lost demand edge: ${notifications}`);
-		console.log(
-			`${trackCount},${observerCount},${(((performance.now() - start) * 1000) / demandUpdates).toFixed(1)}`,
-		);
-		for (const dispose of disposes) dispose();
-		for (const track of tracks) track.close();
+		const start = performance.now();
+		for (let index = 0; index < listed; index++) {
+			broadcast.createTrack(`new-${index}`);
+			for (const listing of listings) {
+				const event = await listing.next();
+				if (event?.kind !== "added" || event.name !== `new-${index}`) throw new Error("listing missed a track");
+			}
+			broadcast.removeTrack(`new-${index}`);
+			for (const listing of listings) {
+				if ((await listing.next())?.kind !== "removed") throw new Error("listing missed a removal");
+				checksum++;
+			}
+		}
+		console.log(`${trackCount},${listingCount},${(((performance.now() - start) * 1000) / listed).toFixed(1)}`);
 		broadcast.close();
 	}
 }
 
 // Resolve one touched path while both the table and that path's readers grow.
 console.log("request,routes,readers,update_and_read_us");
-const epoch = Epoch.parse("01900000-0000-7000-8000-000000000001");
+const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
 for (const pinned of [false, true]) {
 	for (const routeCount of routeCounts) {
 		for (const readerCount of observerCounts) {
 			const origin = new Producer();
 			const reader = origin.consume();
-			const options = pinned ? { epoch } : {};
+			const options = pinned ? { instance } : {};
 			const publishers = Array.from({ length: routeCount }, (_, index) => {
-				const source = origin.createBroadcast(Path.from(`room/${index}`));
-				source.announce({ epoch });
-				return source;
+				const sourcePublication = origin.createBroadcast(Path.from(`room/${index}`));
+				sourcePublication.announce({ instance });
+				return sourcePublication;
 			});
 			const background = publishers.map((_, index) => reader.request(Path.from(`room/${index}`), options));
 			const requests = Array.from({ length: readerCount }, () => reader.request(Path.from("room/0"), options));
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
-				publishers[0].announce({ epoch, cost: BigInt(index + 1) });
+				publishers[0].announce({ instance, cost: BigInt(index + 1) });
 				await Promise.resolve();
 				for (const request of requests) {
-					if (!request.active.peek()) throw new Error("same-epoch request lost its front");
+					if (!request.active.peek()) throw new Error("same-instance request lost its front");
 					checksum++;
 				}
 			}
@@ -206,21 +231,24 @@ for (const patternCount of [8, 32, 128]) {
 
 // Restart a served prefix while both its path count and readers per path grow.
 console.log("restart,paths,readers,update_us");
-const nextEpoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
+const nextInstance = Instance.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.dynamic(Path.from("room"), { epoch });
+		const dynamic = origin.requestsRoute(Path.from("room"), { instance });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
 		).flat();
 		const broadcasts = Array.from({ length: pathCount }, () => new BroadcastProducer());
-		for (const broadcast of broadcasts) (await pending.next()).value?.accept(broadcast);
+		for (const broadcast of broadcasts) {
+			const request = (await pending.next()).value;
+			if (request) hooks.acceptRequest(request, broadcast);
+		}
 		await Promise.resolve();
 		const before = requests.map((request) => request.active.peek());
 		const start = performance.now();
-		dynamic.update({ epoch: nextEpoch });
+		dynamic.updateRoute({ instance: nextInstance });
 		await Promise.resolve();
 		const elapsed = performance.now() - start;
 		for (const [index, request] of requests.entries()) {
@@ -274,11 +302,11 @@ for (const routeCount of routeCounts) {
 		const held = sources.map((source, i) => cache.insert(paths[i], cache.instance(paths[i]), source.consume()));
 		const specific = {};
 		const prefix = Path.from("pool/0/job");
-		const epoch = Epoch.mint();
+		const instance = Instance.random();
 		let duplicates = 0;
 		const start = performance.now();
 		for (let round = 0; round < 256; round++) {
-			if (round % 2 === 0) cache.announce(prefix, specific, { ...Route.default, epoch });
+			if (round % 2 === 0) cache.announce(prefix, specific, { ...Route.default, instance });
 			else cache.withdraw(prefix, specific);
 			for (let i = 0; i < consumerCount; i++) {
 				const instance = cache.instance(paths[i]);
@@ -367,5 +395,63 @@ for (const routeCount of routeCounts) {
 			source.close();
 		}
 		console.log(`retirement,${routeCount},${consumerCount},${((elapsed * 1000) / 256).toFixed(2)},${refused}`);
+	}
+}
+
+// Exercise each sender's keyed queue while its first wire write is stalled.
+console.log("scope,routes,observers,update_us");
+for (const routeCount of routeCounts) {
+	for (const observerCount of observerCounts) {
+		const origin = new Producer();
+		const routes = Array.from({ length: routeCount }, (_, index) => {
+			const broadcastPublication = origin.createBroadcast(Path.from(`z/${index}`));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			return broadcast;
+		});
+		const senders = Array.from({ length: observerCount }, () => {
+			const pair = createMockTransportPair(ALPN_07_WIP);
+			const publisher = new Publisher(pair.server, Version.DRAFT_07, HopSchema.parse(1n), origin.consume());
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const stream = new Stream({
+				version: Version.DRAFT_07,
+				readable: new ReadableStream<Uint8Array>(),
+				writable: new WritableStream<Uint8Array>({
+					async write() {
+						entered.resolve();
+						await release.promise;
+					},
+				}),
+			});
+			const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+			return { pair, publisher, entered, release, running };
+		});
+		await Promise.all(senders.map((sender) => sender.entered.promise));
+		const start = performance.now();
+		for (let index = 0; index < updates; index++) {
+			const broadcastPublication = origin.createBroadcast(Path.from(`a/${index}`));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			broadcast.close();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+		console.log(
+			`stalled-announce,${routeCount},${observerCount},${(((performance.now() - start) * 1000) / updates).toFixed(1)}`,
+		);
+		await Promise.all(
+			senders.map(async ({ pair, publisher, release, running }) => {
+				const drained = publisher.drain();
+				release.resolve();
+				await drained;
+				await running;
+				publisher.close();
+				pair.client.close();
+				pair.server.close();
+			}),
+		);
+		for (const route of routes) route.close();
+		origin.close();
 	}
 }

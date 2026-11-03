@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! C bindings for [`moq_net`].
 //!
 //! Provides a C-compatible API for real-time pub/sub over QUIC.
@@ -21,6 +23,7 @@ mod audio;
 mod bandwidth;
 mod client;
 mod consume;
+mod decode;
 mod error;
 mod ffi;
 mod id;
@@ -29,13 +32,15 @@ mod publish;
 mod server;
 mod session;
 mod state;
+mod task;
 mod video;
 
 pub use api::*;
 pub use audio::*;
 pub use bandwidth::*;
+pub use decode::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
 pub use error::*;
-pub use ffi::moq_status_callback;
+pub use ffi::{moq_state_callback, moq_status_callback};
 pub use id::*;
 pub use video::*;
 

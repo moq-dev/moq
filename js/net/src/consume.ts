@@ -1,29 +1,44 @@
 import type * as broadcast from "./broadcast.ts";
-import type * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { Route } from "./hop.ts";
-import { compareRouteCandidates, coveringPrefixes } from "./internal.ts";
+import * as Instance from "./instance.ts";
+import { compareRouteCandidates, coveringPrefixes, Epochs } from "./internal.ts";
 import type * as Path from "./path.ts";
-import { type Instance, sameInstance } from "./wire.ts";
+import { type Served, sameInstance } from "./wire.ts";
+
+// Unroutable, as in Rust: the instance going away is an end, not a failure.
+function retired(): StreamError {
+	return new StreamError(StreamCode.Unroutable, { message: "broadcast instance retired" });
+}
 
 class Validity {
 	#current = new AbortController();
+	#answering = new AbortController();
 
 	get signal(): AbortSignal {
 		return this.#current.signal;
 	}
 
-	update(allowed: boolean): void {
+	/**
+	 * Aborted once another instance takes the path, which may answer a request still unanswered.
+	 * A withdrawal alone leaves it, and the instance winning again keeps it.
+	 */
+	get answering(): AbortSignal {
+		return this.#answering.signal;
+	}
+
+	update(allowed: boolean, replaced = false): void {
 		if (allowed) {
 			if (this.#current.signal.aborted) this.#current = new AbortController();
-		} else if (!this.#current.signal.aborted) {
-			// Unroutable, as in Rust: the instance going away is an end, not a failure.
-			this.#current.abort(new StreamError(StreamCode.Unroutable, { message: "broadcast instance retired" }));
+			if (this.#answering.signal.aborted) this.#answering = new AbortController();
+			return;
 		}
+		if (!this.#current.signal.aborted) this.#current.abort(retired());
+		if (replaced && !this.#answering.signal.aborted) this.#answering.abort(retired());
 	}
 }
 
-type Selection = Instance & { readonly validity?: Validity };
+type Selection = Served & { readonly validity?: Validity };
 
 class Blind implements Selection {
 	readonly identity = {};
@@ -33,7 +48,10 @@ class Blind implements Selection {
 
 /** Consumed broadcasts shared only within the selected serving instance. @internal */
 export class BroadcastCache {
-	#cache = new Map<Path.Valid, Map<Epoch.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>>();
+	#cache = new Map<
+		Path.Valid,
+		Map<Instance.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>
+	>();
 	#announced = new Map<Path.Valid, Map<object, { identity: object; route: Route }>>();
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
@@ -67,19 +85,22 @@ export class BroadcastCache {
 			const entries = this.#announced.get(prefix);
 			if (!entries) continue;
 			let best: { identity: object; route: Route } | undefined;
+			const epochs = new Epochs([...entries.values()].map((entry) => entry.route));
 			for (const entry of entries.values()) {
-				if (!best || compareRouteCandidates(path, entry.route, best.route) < 0) best = entry;
+				if (epochs.supersedes(entry.route)) continue;
+				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) < 0) best = entry;
 			}
 			if (best) {
-				const cached = this.#cache.get(path)?.get(best.route.epoch ?? best.identity);
+				const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
+				// A minted instance names the announcement, not the publisher's stream, so a
+				// request for it can only name the path: it holds while this route is selected.
+				const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
 				return {
 					...best,
-					validity:
-						best.route.epoch === undefined
-							? ((cached?.consumer.closed.peek() === undefined
-									? cached?.selection.validity
-									: undefined) ?? new Validity())
-							: undefined,
+					validity: !named
+						? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
+							new Validity())
+						: undefined,
 				};
 			}
 		}
@@ -87,8 +108,8 @@ export class BroadcastCache {
 	}
 
 	/** Clone the live cached consumer only when it serves the selected instance. */
-	get(path: Path.Valid, instance: Instance): broadcast.Consumer | undefined {
-		const cached = this.#cache.get(path)?.get(instance.route.epoch ?? instance.identity);
+	get(path: Path.Valid, instance: Served): broadcast.Consumer | undefined {
+		const cached = this.#cache.get(path)?.get(instance.route.instance ?? instance.identity);
 		return cached?.consumer.closed.peek() === undefined ? cached?.consumer.clone() : undefined;
 	}
 
@@ -99,7 +120,7 @@ export class BroadcastCache {
 			entries = new Map();
 			this.#cache.set(path, entries);
 		}
-		const key = instance.route.epoch ?? instance.identity;
+		const key = instance.route.instance ?? instance.identity;
 		const entry = { consumer, selection: instance };
 		entries.set(key, entry);
 		for (const prefix of coveringPrefixes(path)) {
@@ -159,7 +180,8 @@ export class BroadcastCache {
 		for (const path of this.#paths.get(prefix) ?? []) {
 			const selected = this.instance(path);
 			for (const entry of this.#cache.get(path)?.values() ?? []) {
-				entry.selection.validity?.update(sameInstance(entry.selection, selected));
+				const same = sameInstance(entry.selection, selected);
+				entry.selection.validity?.update(same, !same && !(selected instanceof Blind));
 			}
 		}
 	}

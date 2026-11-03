@@ -2,7 +2,7 @@
 
 ## Goal
 
-Relay ingest pays two group lock acquisitions (`create_frame_owned`, then
+Relay ingest pays two group lock acquisitions (`create_object`, then
 `frame_commit`), a waiter-list wake, and a clock read for every received
 frame. A frame's payload chunks are already amortized per poll, but a burst of
 small whole frames is not. Egress is already amortized (the `Prefetch`
@@ -24,7 +24,7 @@ Where the path stands:
 - The batched machinery exists but is unused here:
   `group::Producer::write_frames` takes a `frame::Buffer` and pays one lock
   per batch, while the ingest path (lite's `FrameIngest`, the IETF
-  subscriber's object loop) creates each frame through `create_frame_owned`
+  subscriber's object loop) creates each frame through `create_object`
   instead. The `group_write_frames` bench in `rs/moq-net/benches/group.rs`
   compares the two as `single` against `batch32`, a `frame::Buffer::<32>`
   flushed through `write_frames`; take the before number from there.
@@ -35,7 +35,7 @@ are already amortized):
 - Where whole frames are available in one poll turn, feed them through
   `write_frames`/`frame::Buffer` instead of frame-at-a-time creation. This is
   the larger half: a small frame that arrives whole still pays a
-  `create_frame_owned` plus a `frame_commit`, two lock acquisitions where the
+  `create_object` plus a `frame_commit`, two lock acquisitions where the
   batch API pays one for the whole burst.
 - The per-chunk `stats` bumps on the same loop, which `write` still pays
   individually.

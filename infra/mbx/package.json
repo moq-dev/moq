@@ -1,0 +1,11 @@
+{
+	"name": "mbx-moq-dev",
+	"private": true,
+	"devDependencies": {
+		"wrangler": "^4"
+	},
+	"//overrides": "Drop this when upstream stops pinning a vulnerable undici.",
+	"overrides": {
+		"undici@7": "^7.30.1"
+	}
+}

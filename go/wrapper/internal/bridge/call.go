@@ -89,7 +89,15 @@ func CallHandle[T Handle](ctx context.Context, cancel func(), call func(context.
 	return run(ctx, cancel, func() (T, error) { return call(objectCallContext(ctx, cancel)) }, releaseHandle[T])
 }
 
+// CallRelease is CallHandle for a result that may hold a native handle without
+// being one, such as an enum with a handle in one variant: release disposes of
+// whatever a result nobody received holds.
+func CallRelease[T any](ctx context.Context, cancel func(), call func(context.Context) (T, error), release func(T)) (T, error) {
+	return run(ctx, cancel, func() (T, error) { return call(objectCallContext(ctx, cancel)) }, release)
+}
+
 // objectCallContext is the context the generated binding sees. Object-owned
+
 // calls already abort via cancel; sharing the caller's ctx lets the binding
 // return ctx.Err() first and skip that abort, leaving the stream, session, or
 // request active.

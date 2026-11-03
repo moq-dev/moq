@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import { Allocator, allocate, type Want } from "./bandwidth.ts";
+import { Allocator, allocate, Plan, type Want } from "./bandwidth.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 /** Priorities matching hang's, which is what the allocator sees in practice. */
@@ -65,6 +65,57 @@ test("an unregistered share has no grant", () => {
 	expect(allocate(1_000_000, [want(0, VIDEO, 1_000)], 7)).toBeUndefined();
 });
 
+/** One share's slice, dividing every tier again for it alone: the reference a shared division is checked against. */
+function sequential(estimate: number, wants: readonly Want[], id: number): number | undefined {
+	let budget = estimate;
+	let tier: number | undefined = Math.max(...wants.map((want) => want.priority));
+	while (tier !== undefined && Number.isFinite(tier)) {
+		const members = wants.filter((want) => want.priority === tier).sort((a, b) => a.max - b.max);
+		let remaining = members.length;
+		for (const want of members) {
+			const grant = Math.min(want.max, Math.floor(budget / remaining));
+			if (want.id === id) return grant;
+			budget -= grant;
+			remaining -= 1;
+		}
+		const lower = wants.filter((want) => want.priority < (tier as number)).map((want) => want.priority);
+		tier = lower.length ? Math.max(...lower) : undefined;
+	}
+	return undefined;
+}
+
+test("one division matches each share dividing alone", () => {
+	let seed = 42;
+	const next = (bound: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		return seed % bound;
+	};
+	for (let round = 0; round < 2_000; round++) {
+		const count = next(12) + 1;
+		const tiers = next(4) + 1;
+		const entries = Array.from({ length: count }, (_, id) => ({
+			want: want(id, next(tiers) - 1, next(5) * 300 + next(3)),
+			active: next(3) > 0,
+		}));
+		const estimate = next(count * 1_600);
+		const active = entries.filter((entry) => entry.active).map((entry) => entry.want);
+		const plan = new Plan(estimate, active);
+
+		for (const { want, active: demanded } of entries) {
+			// An idle reservation reads what it would get were it demanded again, in registration order.
+			const expected = demanded
+				? sequential(estimate, active, want.id)
+				: sequential(
+						estimate,
+						[...active, want].sort((a, b) => a.id - b.id),
+						want.id,
+					);
+			const actual = demanded ? plan.grant(want.id) : plan.rejoin(want);
+			expect({ want, actual }).toEqual({ want, actual: expected });
+		}
+	}
+});
+
 test("concurrent tracks split the estimate", () => {
 	const estimate = new Signal<number | undefined>(undefined);
 	const allocator = new Allocator(estimate);
@@ -87,7 +138,7 @@ test("concurrent tracks split the estimate", () => {
 	allocator.close();
 });
 
-test("an idle track claims nothing", () => {
+test("an idle track claims nothing", async () => {
 	const estimate = new Signal<number | undefined>(2_000_000);
 	const allocator = new Allocator(estimate);
 
@@ -99,10 +150,18 @@ test("an idle track claims nothing", () => {
 	const idle = allocator.reserve(idleTrack.demand(), 4_000_000);
 
 	expect(watched.peek()).toBe(2_000_000);
-	// Not zero: an idle share reports "no opinion" so a sender that is mid-shutdown
-	// holds its rate instead of retuning to the floor on the way out.
-	expect(idle.peek()).toBeUndefined();
+	// What it would get if a viewer joined, so a rendition stopped for lack of
+	// bandwidth can resume after its viewers left.
+	expect(idle.peek()).toBe(1_000_000);
+	expect(idle.rate.peek()).toBe(1_000_000);
 
+	// The idle share keeps following the estimate.
+	const next = idle.rate.changed();
+	estimate.set(4_000_000);
+	expect(await next).toBe(2_000_000);
+	expect(watched.peek()).toBe(4_000_000);
+
+	estimate.set(2_000_000);
 	idleTrack.subscribe();
 	expect(watched.peek()).toBe(1_000_000);
 	expect(idle.peek()).toBe(1_000_000);
@@ -125,7 +184,7 @@ test("a share wakes when a sibling goes idle", async () => {
 	expect(mine.peek()).toBe(1_000_000);
 	expect(sibling.peek()).toBe(1_000_000);
 
-	const next = mine.grant.changed();
+	const next = mine.rate.changed();
 	siblingSub.close();
 	expect(await next).toBe(2_000_000);
 	expect(mine.peek()).toBe(2_000_000);
@@ -144,7 +203,7 @@ test("an unchanged slice still follows the estimate past the cap", async () => {
 	estimate.set(10_000_000);
 	expect(reserved.peek()).toBe(4_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	// Still miles above the reservation, so the slice holds at 4 Mbps.
 	estimate.set(9_000_000);
 	expect(reserved.peek()).toBe(4_000_000);
@@ -172,7 +231,7 @@ test("a parked share is woken by sibling demand", async () => {
 	expect(reserved.peek()).toBe(1_000_000);
 	expect(sibling.peek()).toBe(1_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	siblingSub.close();
 	expect(await next).toBe(2_000_000);
 
@@ -186,6 +245,7 @@ test("a closed track is pruned", () => {
 	const first = track(VIDEO);
 	first.subscribe();
 	const firstShare = allocator.reserve(first.demand(), 4_000_000);
+	first.finish();
 	first.close();
 
 	const second = track(VIDEO);
@@ -211,7 +271,7 @@ test("closing a reservation releases it", async () => {
 	const second = allocator.reserve(secondTrack.demand(), 4_000_000);
 	expect(second.peek()).toBe(1_000_000);
 
-	const orphan = first.grant;
+	const orphan = first.rate;
 	expect(orphan.peek()).toBe(1_000_000);
 
 	const next = orphan.changed();
@@ -258,7 +318,7 @@ test("update wakes a parked reader", async () => {
 	const reserved = allocator.reserve(producer.demand(), 1_000_000);
 	expect(reserved.peek()).toBe(1_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	reserved.update(4_000_000);
 	expect(await next).toBe(4_000_000);
 
@@ -284,7 +344,7 @@ test("a closed allocator reports no grant", () => {
 
 	allocator.close();
 	expect(reserved.peek()).toBeUndefined();
-	expect(reserved.grant.peek()).toBeUndefined();
+	expect(reserved.rate.peek()).toBeUndefined();
 });
 
 test("reserve and update reject a non-finite or negative ceiling", () => {

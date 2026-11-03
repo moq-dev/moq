@@ -41,78 +41,68 @@ periodic cuts, and an intact object alone do not ensure available PAT/PMT,
 codec configuration, clock context, or references for every MPTS program.
 
 The README owns the guide and integration proof for the modes present in
-m1: semantic remux and raw import/carriage. The deferred raw export quest
-extends the guide and proves its output when it lands; it does not block
-this proof. Reuse the children's fixtures and CI recipes, including their
-known-bad controls. Publish
+m1: semantic remux and raw import/carriage. Raw export and its packet-level
+proof landed in #5856; the guide covers it too. Reuse the children's
+fixtures and CI recipes, including their known-bad controls. Publish
 a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.
 
-Decided 2026-10-16 by the maintainer, for private PES timing and headers
-(#5718):
+Private PES (decided 2026-10-16, #5718) landed in #5832 and #5921: a
+private PES rides whole as a timed `pesPacket` track, stamped with its
+program-clock placement, and the draft -00 `pes` framing is refused. The
+guide documents that contract and the clock fields that refuse a stream.
 
-- **Carriage.** A PES without a PTS is not untimed. The multiplex places
-  every byte on the program clock; only its presentation time is absent.
-  So a private PES track stays timed on the legacy container, which keeps
-  the timestamp in its payload and so survives transports without
-  net-level timestamps (IETF drafts 14-16, lite-05/06's send-time stamps),
-  and never becomes an untimed track. Each frame's timestamp is the PES's
-  source placement: the program clock at its first byte, interpolated
-  between the PCRs on either side (ISO 13818-1 2.4.2.2) and moved onto the
-  catalog clock like the media. Its payload is the whole PES packet: PTS
-  and DTS rebased, every other header byte kept, so PTS presence, special
-  stream-ID forms and optional fields round-trip without per-stream-type
-  timing rules. A PES that carries a PTS also gets placement, not its PTS,
-  as its frame timestamp; the PTS lives in the bytes.
-- **Signalling.** A new `pesPacket` member of the `mpegts.tracks` entry,
-  beside `verbatim` rather than a new `framing` value. Old consumers ignore
-  an entry with neither `verbatim` nor a described track, so a published
-  exporter silently drops these tracks (teletext, DVB subtitles, DVB AC-3,
-  KLV, unknown private types) from the rebuilt TS and its PMT, with no
-  error, instead of refusing the whole catalog. Chosen over the loud
-  refusal so old exporters keep the media and sections.
-- **Legacy `pes`.** The `pes` framing is removed, not kept for a release:
-  export refuses a catalog that names it, and the AC-3 repack goes with
-  it. So a current exporter refuses broadcasts from published importers
-  and recordings that carry private PES, and draft -01 breaks -00 there.
-  The deletion lands with the importer switch, so main never writes a
-  catalog its exporter refuses.
-- **Clock fields.** Only PTS and DTS are rebased. ESCR, `pack_header_field`,
-  TREF and PES-level scrambling refuse their stream with a warning and an
-  importer health count. TS-packet-layer details (continuity, adaptation
-  fields, packet boundaries) stay with the raw fallback.
+The semantic fidelity audit (2026-10-20) maps each source mechanism to its
+contract in the semantic lane. The guide's profile table starts from it;
+each open row has a child quest, and an audit finding is not authorization
+to guess a public API. Preserved means carried through the catalog or a
+track and re-emitted; normalized means rebuilt with the stated meaning;
+refused means an error or a counted drop.
 
-Rejected: an untimed track with a container that takes time from the net
-frame, which loses timing on those transports and in archive replay and
-needs timedness fixed before the first PES; a per-track "no PTS" flag,
-which keeps the synthesized header and misleads old exporters; and
-extrapolating placement from earlier PCRs without waiting, which is wrong
-on variable-rate multiplexes.
+| Mechanism | Contract | Owner |
+|:--|:--|:--|
+| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; AUs cross PES boundaries with source or explicitly proportional POC-derived PTS; DTS normalized from decode order | landed |
+| AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo, and 3 to 8 channels with an OpusHead in the Vorbis layout. Other mapping families (such as 255) refuse | landed |
+| Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
+| PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
+| Private sections (0x05), SCTE-35 (0x86 + `CUEI`) | Preserved: `verbatim` section, `pts_adjustment` rebased | landed |
+| MPEG-1/2 video (0x01/0x02) | Preserved: `pesPacket` grouped from one sequence header to the next, keeping its clock role | landed |
+| DSM-CC types (0x0A to 0x0D), 0x86 without `CUEI` | DSM-CC preserved as a `verbatim` section; 0x86 without `CUEI` refused, counted in `refused` | landed |
+| CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; counted in `refused`, unclaimed PIDs when the import reads every program | landed |
+| DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
+| Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
+| PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the export rebuilds the PMT at the next `version_number` | landed |
+| PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch, and a running export moves the PMT behind a PAT at the next `version_number` | landed |
+| Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
+| PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
+| Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
+| PSI and SI repetition | Normalized: PAT/PMT every 500 ms and at keyframes, SI at DVB maxima | landed |
+| Media PES headers, TS packet layer | Normalized: rebuilt by export; the raw lane keeps them | landed |
+| PAT network PID entry | Preserved: listed on 0x0010 when a NIT is carried | landed |
 
-The planning children settle catalog and clock contracts before production
-changes. Their output adds independently completable implementation quests to
-this line; an audit finding is not authorization to guess a public API.
+Decided in the 2026-10-22 root-cause audit: the rows above kept getting
+patched one at a time because two foundations were missing. Decode time is
+reconstructed from history instead of decode order, and import state has no
+owner that retires it. Those quests rank ahead of the remaining rows. Rejected: carrying
+decode time in every frame container, one shared ingest byte budget,
+and replacing the demux with GStreamer or another parser (it fixes neither
+cause). Out of scope for now: decoupling catalog publication from mux-rate
+measurement, except for a supervised restart, which reuses its predecessor's
+measurement (decided 2026-10-28). Re-planned the same day: decode order covers MKV and FLV too and
+absorbs the release audit's export-reorder quest, and the shared parser lands
+before the open stream-routes and PAT drafts, which rebase onto it.
+
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
-decoder-time admission (#5306) have landed; PSI runs and catalog linger
-remain with their current quests.
+decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
+catalog linger (#5305).
 
 ## Required
 
-- [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
-- [Raw stream types](/quest/m1/ts-reliability/stream-type.md) - unknown stream types survive export instead of failing the PMT
-- [Whole-PES export](/quest/m1/ts-reliability/pes-export.md) - export writes `pesPacket` tracks byte for byte at their placement
-- [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES travels whole at its source placement, a missing PTS stays missing, and the `pes` framing is deleted
-- [Section placement](/quest/m1/ts-reliability/section-placement.md) - sections share the PCR placement clock instead of the video PTS
-- [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
-- [Data-track breaks](/quest/m1/ts-reliability/data-break.md) - a data track's declared break reads as a break, not as media lost upstream
-- [T-STD TS export](/quest/m1/tstd/README.md) - the semantic mux schedules the content it admits within its supported buffer models
+- [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - the export re-acquires on a sub-group step back from any source instead of dropping its video
+- [TS timing checks survive a stalled PCR](/quest/m1/ts-reliability/pcr-stall.md) - the TS importer's TR 101 290 timing checks keep running while a program's PCR stalls or goes missing
 
 ## Related
 
-- [Epoch anchor](/quest/m2/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch, derived from the epoch
-- [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
-- [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 
-- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - a new mode that does not gate correctness of existing TS modes

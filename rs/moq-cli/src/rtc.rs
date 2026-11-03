@@ -14,7 +14,7 @@ use crate::moq::{ImportTarget, notify_ready};
 
 /// WebRTC endpoint args: exactly one of `--connect` (WHIP/WHEP client) /
 /// `--listen` (WHIP/WHEP server). The parent direction picks WHIP vs WHEP.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(group("rtc-mode", required))]
 pub struct Args {
@@ -61,6 +61,7 @@ pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Resu
 	let mut config = server_config(&listen);
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
+	config.linger = target.linger;
 	let server = moq_rtc::Server::new(config);
 	serve(server.publish_router(publisher), "WHIP", listen).await
 }
@@ -88,8 +89,8 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 }
 
 /// WHEP client: pull a remote broadcast into the Origin under `target.name` (import),
-/// announced under `epoch`.
-pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoch) -> anyhow::Result<()> {
+/// announced under `instance`.
+pub async fn connect_import(target: ImportTarget, url: Url, instance: moq_net::Instance) -> anyhow::Result<()> {
 	let name = &target.name;
 	let producer = target
 		.origin
@@ -98,7 +99,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
 	// can discover the broadcast while it connects.
 	producer
-		.announce(moq_net::origin::Route::default().with_epoch(epoch))
+		.announce(moq_net::origin::Route::default().with_instance(instance, 0))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHEP client pulling");
@@ -108,24 +109,26 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
 	let client = moq_rtc::Client::new(config);
-	client.subscribe(url, producer).await?;
+	client.subscribe(url, producer.broadcast().clone()).await?;
 	Ok(())
 }
 
 /// WHIP client: push a broadcast from the Origin to a remote (export).
 pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: String) -> anyhow::Result<()> {
-	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
-	// the egress re-resolves it (and any referenced sibling broadcast) through the origin.
-	origin
-		.routed(&name)
+	// Wait for the broadcast to be announced before dialing; the egress resolves any
+	// referenced sibling broadcast through the same origin.
+	let broadcast = origin
+		.follow(name.as_str(), None)?
+		.available()
 		.await
-		.with_context(|| format!("origin closed before broadcast `{name}` was announced"))?;
+		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+	let source = moq_mux::Source::new(origin, broadcast);
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHIP client pushing");
 	notify_ready();
 
 	let client = moq_rtc::Client::new(moq_rtc::client::Config::default());
-	client.publish(url, origin, &name).await?;
+	client.publish(url, source).await?;
 	Ok(())
 }
 

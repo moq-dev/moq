@@ -1,4 +1,5 @@
 export * from "./announce.ts";
+export * from "./compat.ts";
 export * from "./connection.ts";
 export * from "./datagram.ts";
 export * from "./fetch.ts";
@@ -10,4 +11,5 @@ export * from "./setup.ts";
 export * from "./stream.ts";
 export * from "./subscribe.ts";
 export * from "./track.ts";
+export * from "./tracks.ts";
 export * from "./version.ts";

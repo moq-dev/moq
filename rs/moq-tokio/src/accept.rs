@@ -29,8 +29,10 @@ use std::{
 		Arc, Mutex,
 		atomic::{AtomicU64, Ordering},
 	},
-	time::{Duration, Instant},
+	time::Duration,
 };
+
+use kio::clock::Instant;
 
 /// Delay after an accept failure that is not one connection's fault, escalating
 /// while they continue and reset by the next successful accept.
@@ -345,7 +347,7 @@ impl std::fmt::Debug for Health {
 /// the same tick from retrying in lockstep.
 fn jitter(delay: Duration) -> Duration {
 	use rand::RngExt as _;
-	delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
+	delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0)
 }
 
 #[cfg(test)]
@@ -465,5 +467,14 @@ mod tests {
 		// The counters do NOT reset. They are what a scrape landing after the
 		// episode has to see, since the process could not answer one during it.
 		assert_eq!(health.failures(Failure::Exhausted), 6);
+	}
+
+	#[cfg(unix)]
+	#[kio::test]
+	async fn exhaustion_stall_uses_the_retry_clock() {
+		let health = Health::new("test");
+		let _ = health.failed(&io(libc::EMFILE));
+		kio::clock::sleep(Duration::from_secs(30)).await;
+		assert_eq!(health.stalled(), Some(Duration::from_secs(30)));
 	}
 }

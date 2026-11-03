@@ -2,13 +2,13 @@
 //!
 //! A publisher and a subscriber session run on one worker (two sockets, two
 //! [`moq_uring::quic::Connection`]s over loopback), negotiated end to end by
-//! `moq_net::Server::accept_lite` / `Client::connect_lite`, with a broadcast,
+//! `moq_net::Server::accept` / `Client::connect`, with a broadcast,
 //! a track, and a frame flowing through the model.
 //!
 //! Origin drivers run through Tokio's explicit-time adapter while session
 //! drivers use the worker's clock and timer.
 
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(feature = "quic")]
 
 use crate::support;
 
@@ -20,7 +20,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring session test: {reason}");
 			None
 		}
@@ -80,7 +80,7 @@ fn lite_session_over_the_worker() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	// The server's certificate is our own self-signed one; this is loopback.
 	dial.verify = false;
@@ -93,12 +93,15 @@ fn lite_session_over_the_worker() {
 			.expect("quic accept");
 		let (session, driver) = moq_net::Server::new()
 			.with_publisher(&pub_origin)
-			.accept_lite(
-				std::time::Instant::now(),
-				moq_uring::transport::Session::new(quic::web::Session::raw(conn), moq_net::transport::Binding::InBand),
+			.accept(
+				moq_net::time::Instant::now(),
+				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+					quic::web::Session::raw(conn),
+					moq_net::transport::Address::Setup,
+				)),
 			)
 			.await
-			.expect("accept_lite");
+			.expect("accept");
 		let _ = server_handle.run(driver).await;
 		// Serve until the client walks away.
 		session.closed().await;
@@ -107,24 +110,22 @@ fn lite_session_over_the_worker() {
 	let sub = sub_origin.clone();
 	let payload = worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
-			assert_eq!(
-				web_transport_trait::poll::Session::protocol(&conn),
-				Some(ALPN),
-				"negotiated ALPN"
-			);
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
+			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
-				.connect_lite(
-					std::time::Instant::now(),
-					moq_uring::transport::Session::new(
+				.connect(
+					moq_net::time::Instant::now(),
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
-						moq_net::transport::Binding::InBand,
-					),
+						moq_net::transport::Address::Setup,
+					)),
 				)
 				.await
-				.expect("connect_lite");
+				.expect("connect");
 			let task_handle = handle.clone();
 			handle.spawn(async move {
 				let _ = task_handle.run(driver).await;
@@ -132,9 +133,10 @@ fn lite_session_over_the_worker() {
 
 			let bc = {
 				let consumer = sub.consume();
-				consumer.routed("test").await.expect("broadcast announced");
 				consumer
-					.request_broadcast("test", None)
+					.follow("test", None)
+					.unwrap()
+					.available()
 					.await
 					.expect("broadcast resolves")
 			};
@@ -228,22 +230,22 @@ fn two_lite_sessions_share_the_server_socket() {
 			server_handle.spawn(async move {
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(
-						std::time::Instant::now(),
-						moq_uring::transport::Session::new(
+					.accept(
+						moq_net::time::Instant::now(),
+						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
-						),
+							moq_net::transport::Address::Setup,
+						)),
 					)
 					.await
-					.expect("accept_lite");
+					.expect("accept");
 				let _ = session_handle.run(driver).await;
 				session.closed().await;
 			});
 		}
 	});
 
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 
@@ -254,18 +256,20 @@ fn two_lite_sessions_share_the_server_socket() {
 				let client_sock = handle
 					.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 					.expect("client socket");
-				let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+				let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+					.await
+					.expect("quic connect");
 				let (session, driver) = moq_net::Client::new()
 					.with_subscriber(sub.clone())
-					.connect_lite(
-						std::time::Instant::now(),
-						moq_uring::transport::Session::new(
+					.connect(
+						moq_net::time::Instant::now(),
+						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
-						),
+							moq_net::transport::Address::Setup,
+						)),
 					)
 					.await
-					.expect("connect_lite");
+					.expect("connect");
 				let task_handle = handle.clone();
 				handle.spawn(async move {
 					let _ = task_handle.run(driver).await;
@@ -273,9 +277,10 @@ fn two_lite_sessions_share_the_server_socket() {
 
 				let bc = {
 					let consumer = sub.consume();
-					consumer.routed("test").await.expect("broadcast announced");
 					consumer
-						.request_broadcast("test", None)
+						.follow("test", None)
+						.unwrap()
+						.available()
 						.await
 						.expect("broadcast resolves")
 				};
@@ -328,7 +333,7 @@ fn configured_roots_verify_the_server() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	// Verification on, trusting nothing but the certificate this server
 	// presents. The platform store is off, so if it leaked in, an unrelated
@@ -344,12 +349,10 @@ fn configured_roots_verify_the_server() {
 
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
-			assert_eq!(
-				web_transport_trait::poll::Session::protocol(&conn),
-				Some(ALPN),
-				"negotiated ALPN"
-			);
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
+			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 		})
 		.expect("worker");
 }
@@ -394,7 +397,7 @@ fn required_client_auth_refuses_an_anonymous_client() {
 	.expect("endpoint");
 	let server_addr = endpoint.local_addr();
 
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 	// No identity: this client is anonymous.
@@ -409,12 +412,12 @@ fn required_client_auth_refuses_an_anonymous_client() {
 
 	worker
 		.block_on(async move {
-			match quic::client::connect(client_sock, &dial).await {
+			match quic::client::connect(client_sock, &dial, server_addr, "localhost").await {
 				// The dial itself was refused; done.
 				Err(_) => {}
 				// Established locally, but the server's refusal closes it.
-				Ok(mut conn) => {
-					std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_closed(&mut conn, cx)).await;
+				Ok(conn) => {
+					conn.closed().await;
 				}
 			}
 		})
@@ -452,7 +455,7 @@ fn a_root_bundle_is_loaded_whole() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.system_roots = false;
 	dial.roots = vec![bundle.roots.clone()];
@@ -465,12 +468,10 @@ fn a_root_bundle_is_loaded_whole() {
 
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
-			assert_eq!(
-				web_transport_trait::poll::Session::protocol(&conn),
-				Some(ALPN),
-				"negotiated ALPN"
-			);
+			let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+				.await
+				.expect("quic connect");
+			assert_eq!(conn.protocol(), Some(ALPN), "negotiated ALPN");
 		})
 		.expect("worker");
 }

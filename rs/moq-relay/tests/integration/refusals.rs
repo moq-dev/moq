@@ -25,7 +25,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 /// admission configured: each test sets its own. WebSocket is served only when `ws`,
 /// on the HTTP port. A QUIC dial's WebSocket fallback goes to the QUIC port, where
 /// nothing listens over TCP, so it cannot reach admission and count a second time.
-fn config(dir: &std::path::Path, ws: bool) -> Config {
+pub(crate) fn config(dir: &std::path::Path, ws: bool) -> Config {
 	let (cert, key) = certificate(dir);
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -34,13 +34,18 @@ fn config(dir: &std::path::Path, ws: bool) -> Config {
 	config.web.http.listen = Some("127.0.0.1:0".parse().expect("parse http"));
 	config.web.ws = ws;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some((Duration::ZERO).into());
 	config
 }
 
 struct Running {
+	stats: moq_net::stats::Registry,
+	origin: moq_net::origin::Consumer,
 	quic: SocketAddr,
-	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	http: SocketAddr,
 	metrics: String,
 	trigger: moq_relay::shutdown::Trigger,
@@ -49,15 +54,19 @@ struct Running {
 
 async fn start(config: Config) -> Running {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let stats = relay.stats().registry().clone();
+	let origin = relay.cluster().origin.consume();
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	let internal = relay.internal().addr().expect("internal listener bound");
-	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
 	ready.wait().await.expect("relay ready");
 	Running {
+		stats,
+		origin,
 		quic,
 		http,
 		metrics: format!("http://{internal}/metrics"),
@@ -69,7 +78,7 @@ async fn start(config: Config) -> Running {
 impl Running {
 	async fn stop(self) {
 		self.trigger.start();
-		tokio::time::timeout(TIMEOUT, self.running)
+		kio::clock::timeout(TIMEOUT, self.running)
 			.await
 			.expect("run did not return after the shutdown trigger")
 			.expect("run panicked")
@@ -93,12 +102,14 @@ impl Running {
 	}
 }
 
-fn client() -> moq_tokio::Client {
+pub(crate) fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 /// Dial `url` as a publisher or a subscriber and require the relay to refuse.
@@ -110,12 +121,12 @@ async fn assert_refused(url: url::Url, publisher: bool) {
 		true => client().with_publisher(origin.consume()),
 		false => client().with_subscriber(origin),
 	};
-	let connected = tokio::time::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
+	let connected = kio::clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 		.await
 		.expect("connect timeout");
 	if let Ok(session) = connected {
 		// How it closed does not matter here; /metrics says why.
-		let _ = tokio::time::timeout(TIMEOUT, session.closed())
+		let _ = kio::clock::timeout(TIMEOUT, session.closed())
 			.await
 			.expect("the relay kept a session it should refuse");
 	}
@@ -214,4 +225,329 @@ async fn unavailable_auth_server_is_counted() {
 	assert_eq!(relay.refused("unavailable").await, 1);
 	assert_eq!(relay.refused("refused").await, 0);
 	relay.stop().await;
+}
+
+/// A refusal creates the root stats group even when no session was ever admitted.
+#[tokio::test]
+async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metrics() {
+	use moq_net::stats::{RefusalKind, Tier};
+	let dir = tempfile::tempdir().unwrap();
+	let mut config = config(dir.path(), false);
+	config.auth.public = vec!["anon/**".parse().unwrap()];
+	config.stats.enabled = true;
+	config.stats.depth = 1;
+	config.stats.node = Some("test".into());
+	let relay = start(config).await;
+	assert_refused(format!("https://{}/rooms", relay.quic).parse().unwrap(), false).await;
+	assert_eq!(
+		relay.refused("refused").await,
+		1,
+		"native admission counts exactly once"
+	);
+	let broadcast = kio::clock::timeout(
+		TIMEOUT,
+		relay.origin.follow(".stats/node/test", None).unwrap().available(),
+	)
+	.await
+	.unwrap()
+	.unwrap();
+	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
+	let mut totals = consumer.totals().await.unwrap();
+	kio::clock::timeout(TIMEOUT, async {
+		loop {
+			let frame = totals.next().await.unwrap().unwrap();
+			if frame
+				.get("")
+				.is_some_and(|total| total.sessions.sessions_refused.refused == 1)
+			{
+				break;
+			}
+		}
+	})
+	.await
+	.expect("refusal-only root totals");
+	relay
+		.stats
+		.tier(Tier::new(moq_net::Path::from_static("gateway")))
+		.refuse(moq_net::Path::from_static("tenant"), RefusalKind::Forbidden);
+	assert_eq!(
+		relay.refused("forbidden").await,
+		1,
+		"embedder stats and metrics share the counter"
+	);
+	kio::clock::timeout(TIMEOUT, async {
+		loop {
+			let frame = totals.next().await.unwrap().unwrap();
+			if frame
+				.get("gateway")
+				.is_some_and(|total| total.sessions.sessions_refused.forbidden == 1)
+			{
+				break;
+			}
+		}
+	})
+	.await
+	.expect("embedder outcome in its own tier");
+	relay.stop().await;
+}
+
+/// Typed peer closes flow through the actual QUIC listener into failure stats.
+#[tokio::test]
+async fn peer_zero_close_is_clean_and_application_close_counts_once() {
+	let dir = tempfile::tempdir().unwrap();
+	let mut config = config(dir.path(), false);
+	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.stats.enabled = true;
+	config.stats.node = Some("test".into());
+	let relay = start(config).await;
+	let broadcast = relay
+		.origin
+		.follow(".stats/node/test", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
+	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
+	let mut totals = consumer.totals().await.unwrap();
+	for (index, error) in [moq_net::Error::Cancel, moq_net::Error::App(42)]
+		.into_iter()
+		.enumerate()
+	{
+		let connection = client()
+			.with_reconnect(false)
+			.connect(format!("https://{}/", relay.quic).parse::<url::Url>().unwrap());
+		let session = connection.established().await.unwrap();
+		session.abort(error);
+		kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let frame = totals.next().await.unwrap().unwrap();
+				if let Some(total) = frame.get("")
+					&& total.sessions.sessions_ended > index as u64
+				{
+					assert_eq!(total.sessions.sessions_failed.application, index as u64);
+					assert_eq!(total.sessions.sessions_failed.idle_timeout, 0);
+					assert_eq!(total.sessions.sessions_failed.transport, 0);
+					break;
+				}
+			}
+		})
+		.await
+		.expect("peer close reaches the session stats");
+	}
+	relay.stop().await;
+}
+
+#[tokio::test]
+async fn explicit_auth_server_refusal_counts_once() {
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let url = format!("http://{}/", listener.local_addr().unwrap());
+	let app = axum::Router::new().route(
+		"/",
+		axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+	);
+	let (stop, stopped) = tokio::sync::oneshot::channel();
+	let server = tokio::spawn(async move {
+		axum::serve(listener, app)
+			.with_graceful_shutdown(async {
+				let _ = stopped.await;
+			})
+			.await
+			.unwrap();
+	});
+	let dir = tempfile::tempdir().unwrap();
+	let mut config = config(dir.path(), false);
+	config.auth.url = Some(url.parse().unwrap());
+	config.stats.enabled = true;
+	let relay = start(config).await;
+	assert_refused(format!("https://{}/room", relay.quic).parse().unwrap(), false).await;
+	assert_eq!(relay.refused("refused").await, 1);
+	assert_eq!(relay.stats.snapshot().sessions()[0].1.sessions_refused.refused, 1);
+	relay.stop().await;
+	stop.send(()).unwrap();
+	server.await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
+	let keys = tempfile::tempdir().unwrap();
+	let key = moq_auth::Key::generate(moq_auth::Algorithm::HS256, None).unwrap();
+	let key_path = keys.path().join("key.jwk");
+	key.to_file(&key_path).unwrap();
+	let mut claims = moq_auth::Claims::default()
+		.with_root("verified/tenant")
+		.with_subscribe([moq_auth::Pattern::all()]);
+	claims.expires = Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
+	let token = key.sign(&claims).unwrap();
+	for tier in [None, Some("edge")] {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let mut policy = moq_auth::serve::Policy::default();
+		policy.keys = Some(moq_auth::serve::Keys::File(key_path.clone()));
+		policy.tier = tier.map(str::to_owned);
+		let server = moq_auth::serve::Server::new(policy).unwrap();
+		let auth_url = format!("http://{}/", listener.local_addr().unwrap());
+		let running = tokio::spawn(async move {
+			server.serve(listener).await.unwrap();
+		});
+		let dir = tempfile::tempdir().unwrap();
+		let mut config = config(dir.path(), false);
+		config.auth.url = Some(auth_url.parse().unwrap());
+		config.stats.enabled = true;
+		let relay = start(config).await;
+		assert_refused(
+			format!("https://{}/attacker/path?jwt={token}", relay.quic)
+				.parse()
+				.unwrap(),
+			false,
+		)
+		.await;
+		assert_eq!(relay.refused("expired").await, 1);
+		assert_eq!(relay.refused("refused").await, 0);
+		let mut report = moq_net::stats::Report::default();
+		relay.stats.report(&mut report);
+		assert_eq!(report.sessions.len(), 1);
+		let entry = &report.sessions[0];
+		assert_eq!(entry.tier.as_str(), tier.unwrap_or(""));
+		assert_eq!(entry.label.as_str(), "verified/tenant");
+		let presence = entry.presence;
+		assert_eq!(presence.sessions_started, 0);
+		assert_eq!(presence.sessions_refused.expired, 1);
+		relay.stop().await;
+		running.abort();
+		assert!(running.await.unwrap_err().is_cancelled());
+	}
+}
+
+/// Dial a bare WebTransport session so the peer can send a forbidden SETUP Path.
+async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session {
+	use moq_tokio::quic::{driver, web};
+
+	let mut tls = moq_tokio::tls::Connect::default();
+	tls.insecure = Some(true);
+	let mut tls = tls.build().unwrap();
+	tls.alpn_protocols = vec![b"h3".to_vec()];
+	let endpoint =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap()).unwrap();
+	let conn = endpoint
+		.connect(
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
+			addr,
+			"localhost",
+		)
+		.unwrap()
+		.await
+		.unwrap();
+	let request = web::proto::ConnectRequest::new(
+		format!("https://{addr}/room?jwt=url-token")
+			.parse::<url::Url>()
+			.unwrap(),
+	)
+	.with_protocol(alpn);
+	web::Session::connect(conn, request).await.unwrap()
+}
+
+/// Presence is forbidden even when Path is empty or matches the HTTP request.
+async fn uri_setup_paths(io_uring: bool) {
+	use moq_tokio::quic::web::{SessionError, WebTransportError};
+
+	let _ = moq_tokio::crypto::install_default();
+	let versions: Vec<moq_net::Version> = [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-18",
+		"moq-transport-22",
+	]
+	.into_iter()
+	.map(|version| version.parse().unwrap())
+	.collect();
+	let dir = tempfile::tempdir().unwrap();
+	let mut config = config(dir.path(), false);
+	config.listen.version = versions.clone();
+	if io_uring {
+		config.runtime.workers = Some(1);
+		config.runtime.pin = false;
+		config.runtime.io_uring = true;
+	}
+	let mut relay = Relay::load(config).await.unwrap().with_signals(false);
+	let addr = relay.quic_addr().unwrap();
+	let mut admissions = relay.admissions().unwrap();
+	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
+	for version in versions {
+		for path in [
+			Some(""),
+			Some("/room?jwt=url-token"),
+			Some("/admin?jwt=setup-token"),
+			None,
+		] {
+			let peer = kio::clock::timeout(TIMEOUT, web_peer(addr, version.alpn()))
+				.await
+				.unwrap();
+			// Minimal SETUP: lite has a parameter count and varint size; IETF has
+			// delta-encoded option IDs and a u16 size. All values here fit one byte.
+			let mut params = if version.is_lite() {
+				vec![u8::from(path.is_some())]
+			} else {
+				Vec::new()
+			};
+			if let Some(path) = path {
+				params.extend_from_slice(&[if version.is_lite() { 2 } else { 1 }, path.len() as u8]);
+				params.extend_from_slice(path.as_bytes());
+			}
+			let mut bytes = if version.is_lite() {
+				vec![1, params.len() as u8]
+			} else {
+				vec![0xaf, 0, 0, params.len() as u8]
+			};
+			bytes.extend(params);
+			let mut setup = peer.open_uni(Default::default()).await.unwrap();
+			setup.write_all(&bytes[..]).await.unwrap();
+			if version.is_lite() {
+				setup.finish().unwrap();
+			}
+			if path.is_some() {
+				let error = kio::clock::timeout(TIMEOUT, async {
+					tokio::select! {
+						error = peer.closed() => error,
+						_ = admissions.next() => panic!("{version} admitted SETUP Path {path:?}"),
+					}
+				})
+				.await
+				.expect("forbidden SETUP Path must close the session");
+				assert!(
+					matches!(error, SessionError::WebTransportError(WebTransportError::Closed(3, _))),
+					"{version}, {path:?}: {error:?}"
+				);
+			} else {
+				let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+				assert_eq!(admission.request.path, "/room", "{version}");
+				assert_eq!(admission.request.query.as_deref(), Some("jwt=url-token"), "{version}");
+				// A valid request reached authorization; no session needs to start.
+				drop(admission);
+			}
+		}
+	}
+	trigger.start();
+	kio::clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn tokio_refuses_uri_setup_paths() {
+	uri_setup_paths(false).await;
+}
+
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[tokio::test]
+async fn uring_refuses_uri_setup_paths() {
+	match moq_uring::Worker::new(Default::default()) {
+		Ok(_) => (),
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
+			eprintln!("skipping io_uring SETUP Path test: {reason}");
+			return;
+		}
+		Err(error) => panic!("io_uring worker setup failed: {error}"),
+	}
+	uri_setup_paths(true).await;
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from moq_ffi import (
     MoqBroadcastConsumer,
@@ -12,6 +13,7 @@ from moq_ffi import (
 )
 
 from ._records import _subscription
+from ._stream import _Stream
 from .types import (
     Datagram,
     FetchGroupOptions,
@@ -20,12 +22,15 @@ from .types import (
     TrackInfo,
 )
 
+if TYPE_CHECKING:
+    from .media import Audio, Video
+
 
 def _frame(frame: MoqFrame | None) -> Frame | None:
     return None if frame is None else Frame._from_ffi(frame)
 
 
-class GroupConsumer:
+class GroupConsumer(_Stream[Frame]):
     """Async iterator of raw frames within a single group."""
 
     def __init__(self, inner: MoqGroupConsumer) -> None:
@@ -36,20 +41,8 @@ class GroupConsumer:
         """The sequence number of this group within the track."""
         return self._inner.sequence()
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Frame:
-        frame = await self._inner.read_frame()
-        if frame is None:
-            raise StopAsyncIteration
-        return Frame._from_ffi(frame)
+    async def _next(self) -> Frame | None:
+        return await self.read_frame()
 
     async def read_frame(self) -> Frame | None:
         """Read the next raw frame. Returns `None` when the group ends."""
@@ -60,7 +53,7 @@ class GroupConsumer:
         self._inner.cancel()
 
 
-class TrackConsumer:
+class TrackConsumer(_Stream[GroupConsumer]):
     """Async iterator of groups from a track, in sequence order.
 
     Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
@@ -74,20 +67,8 @@ class TrackConsumer:
     def __init__(self, inner: MoqTrackConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> GroupConsumer:
-        group = await self.next_group()
-        if group is None:
-            raise StopAsyncIteration
-        return group
+    async def _next(self) -> GroupConsumer | None:
+        return await self.next_group()
 
     async def groups_as_arrived(self) -> AsyncIterator[GroupConsumer]:
         """Iterate groups in arrival order, including out-of-sequence deliveries.
@@ -149,7 +130,10 @@ class TrackConsumer:
         return TrackInfo._from_ffi(self._inner.info())
 
     def update(self, subscription: Subscription) -> None:
-        """Change this subscriber's delivery preferences."""
+        """Change this subscriber's delivery preferences.
+
+        Raises on a time anchor the track can't serve.
+        """
         self._inner.update(subscription._ffi())
 
     def cancel(self) -> None:
@@ -166,6 +150,10 @@ class BroadcastConsumer:
 
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
+
+    async def closed(self) -> None:
+        """Wait until the broadcast ends: its publisher closed it, or every producer left."""
+        await self._inner.closed()
 
     async def subscribe_track(self, name: str, subscription: Subscription | None = None) -> TrackConsumer:
         """Subscribe to a track and receive arbitrary byte payloads.
@@ -187,20 +175,22 @@ class BroadcastConsumer:
         """
         return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
 
-    async def resolve(self, reference: str | None) -> "BroadcastConsumer":
-        """Resolve a catalog rendition's ``broadcast`` reference to the broadcast
-        serving its track.
+    async def resolve(self, id: str, rendition: Video | Audio) -> "BroadcastConsumer":
+        """Resolve the catalog rendition ``id`` to the broadcast serving its track.
 
-        ``reference`` is ``catalog.video[name].broadcast`` /
-        ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
-        anything else names a sibling relative to it (e.g. ``./source``). Call it on
-        a rendition that carries one before :meth:`~moq.media.TrackConsumer.subscribe`,
-        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.GroupConsumer.fetch`,
-        which take a track name rather than a rendition: the rendition's ``track``, or its
-        catalog key when unset. The audio and video namespace decoders resolve both
-        themselves.
+        The rendition's ``broadcast`` reference, ``None`` or empty, names this
+        broadcast; anything else names a sibling relative to it (e.g. ``./source``).
+        Its ``instance`` is the stream the reference names: a broadcast proven to
+        serve another one raises instead of resolving, while a route over a wire
+        that carries no instance cannot prove one, so there it is best effort. Call it on a
+        rendition that carries a reference before :meth:`subscribe_track` or
+        :meth:`fetch_group`, which take a track name rather than a rendition: the
+        rendition's ``track``, or ``id`` when unset. The rendition-based consumers in
+        the media, audio, and video namespaces resolve it themselves.
 
         Raises if this broadcast came from a local producer rather than an origin,
         since a standalone broadcast has no sibling to name.
         """
-        return BroadcastConsumer(await self._inner.resolve(reference))
+        from .media import _rendition
+
+        return BroadcastConsumer(await self._inner.resolve(_rendition(id, rendition)))

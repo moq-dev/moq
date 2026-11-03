@@ -1,8 +1,8 @@
 import type { Catalog } from "@moq/hang";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
+import { formatBitrate } from "@moq/ui";
 import type MoqWatch from "../../element";
-import { formatBitrate } from "../format";
 import { check, icon } from "../icons";
 
 function resolution(config: Catalog.VideoConfig): string | undefined {
@@ -53,7 +53,7 @@ export function qualityTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	parent.run((effect) => {
 		const source = watch.video.source;
 		const catalog = effect.get(source.out.catalog);
-		const target = effect.get(watch.controls.target);
+		const target = effect.get(watch.controls.video.target);
 		const active = effect.get(source.out.track);
 		const renditions = catalog?.renditions ?? {};
 		const entries = Object.entries(renditions);
@@ -71,7 +71,7 @@ export function qualityTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		const autoSub = active && !manual ? `auto · currently ${active}` : "adapts to bandwidth";
 		container.appendChild(
 			qualityRow(effect, "Auto", autoSub, !manual, false, () => {
-				watch.controls.target.update((prev) => ({ ...prev, name: undefined }));
+				watch.controls.video.target.update((prev) => ({ ...prev, name: undefined }));
 			}),
 		);
 
@@ -86,7 +86,7 @@ export function qualityTab(parent: Effect, watch: MoqWatch): HTMLElement {
 			const title = resolution(config) ?? name;
 			container.appendChild(
 				qualityRow(effect, title, detail(config), manual === name, active === name, () => {
-					watch.controls.target.update((prev) => ({ ...prev, name }));
+					watch.controls.video.target.update((prev) => ({ ...prev, name }));
 				}),
 			);
 		}

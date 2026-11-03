@@ -1,8 +1,10 @@
 mod aac;
 mod codec;
+mod layout;
 
 pub use aac::*;
 pub use codec::*;
+pub use layout::*;
 
 use std::collections::{BTreeMap, btree_map};
 
@@ -32,6 +34,9 @@ pub struct Audio {
 	/// A map of track name to rendition configuration.
 	/// This is not an array so it will work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
+	///
+	/// A malformed rendition refuses the whole catalog when decoding.
+	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
 	pub renditions: BTreeMap<String, AudioConfig>,
 }
 
@@ -99,7 +104,7 @@ pub struct AudioConfig {
 	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
-	pub broadcast: Option<moq_net::path::RelativeOwned>,
+	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
 	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
@@ -111,36 +116,56 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub track: Option<String>,
 
+	/// The instance of the stream the reference names, when the catalog knows it. Absent names
+	/// whichever stream the reader resolves first, as in every catalog before this field.
+	///
+	/// A reader refuses a broadcast of another instance rather than fall back to it. A route
+	/// over a wire that carries no instance has one its session minted, which proves nothing,
+	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
+	/// catalog's own stream.
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub instance: Option<moq_net::Instance>,
+
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
 	pub label: Option<String>,
 
-	// The codec, see the registry for details:
-	// https://w3c.github.io/webcodecs/codec_registry.html
+	/// The codec, see the registry for details:
+	/// <https://w3c.github.io/webcodecs/codec_registry.html>
 	#[serde_as(as = "DisplayFromStr")]
 	pub codec: AudioCodec,
 
-	// The sample rate of the audio in Hz
+	/// The sample rate of the audio in Hz, never zero.
 	pub sample_rate: u32,
 
-	// The number of channels in the audio
+	/// The number of channels in the audio, never zero.
 	#[serde(rename = "numberOfChannels")]
 	pub channel_count: u32,
 
-	// The maximum bitrate of the audio track in bits per second.
+	/// What the decoded channels carry, or the codec's own channel order when absent.
+	///
+	/// Live state, like video `color`.
 	#[serde(default)]
+	#[serde_as(as = "Option<DisplayFromStr>")]
+	pub layout: Option<AudioLayout>,
+
+	/// The maximum bitrate of the audio track in bits per second, at most 2^53 - 1.
+	#[serde(default)]
+	#[serde_as(as = "Option<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
 	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	/// must not select it. Only written when false.
+	/// should not select it, though one may keep it selected while no enabled alternative exists.
+	/// Only written when false.
 	#[serde(
 		default = "crate::catalog::enabled_default",
 		skip_serializing_if = "crate::catalog::enabled_skip"
 	)]
 	pub enabled: bool,
 
-	// Some codecs include a description so the decoder can be initialized without extra data.
-	// If not provided, there may be in-band metadata (marginally higher overhead).
+	/// Some codecs include a description so the decoder can be initialized without extra data.
+	/// If not provided, there may be in-band metadata (marginally higher overhead).
 	#[serde(default)]
 	#[serde_as(as = "Option<Hex>")]
 	pub description: Option<Bytes>,
@@ -182,6 +207,11 @@ pub struct AudioConfig {
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub delay: Option<std::time::Duration>,
+	/// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
+	/// is not HLS-renderable. An undecodable value is absent, so it can never reject the media.
+	#[serde(default)]
+	#[serde_as(as = "serde_with::DefaultOnError<_>")]
+	pub hls: Option<crate::catalog::Hls>,
 }
 
 impl AudioConfig {
@@ -195,10 +225,12 @@ impl AudioConfig {
 		Self {
 			broadcast: None,
 			track: None,
+			instance: None,
 			label: None,
 			codec: codec.into(),
 			sample_rate,
 			channel_count,
+			layout: None,
 			bitrate: None,
 			enabled: true,
 			description: None,
@@ -206,7 +238,38 @@ impl AudioConfig {
 			jitter: None,
 			warmup: None,
 			delay: None,
+			hls: None,
 		}
+	}
+
+	/// Whether `other` keeps this config's track identity: the fields a consumer cannot change
+	/// without reinitializing its decoder or demuxer (`codec`, `description`, `container`,
+	/// `sample_rate`, and `channel_count`).
+	///
+	/// A track name always means the same content, so a publisher that changes any of them
+	/// publishes under a new name; every other field may update in place. See the draft's
+	/// [Track Identity](https://github.com/moq-dev/moq/blob/main/drafts/draft-lcurley-moq-hang.md#identity).
+	pub fn same_identity(&self, other: &Self) -> bool {
+		self.codec == other.codec
+			&& self.description == other.description
+			&& self.container == other.container
+			&& self.sample_rate == other.sample_rate
+			&& self.channel_count == other.channel_count
+	}
+}
+
+impl crate::catalog::Rendition for AudioConfig {
+	fn check(&self) -> crate::Result<()> {
+		if self.sample_rate == 0 {
+			return Err(crate::Error::Zero("sampleRate"));
+		}
+		if self.channel_count == 0 {
+			return Err(crate::Error::Zero("numberOfChannels"));
+		}
+		if let Some(layout) = &self.layout {
+			layout.check(self.channel_count)?;
+		}
+		Ok(())
 	}
 }
 
@@ -279,17 +342,6 @@ mod test {
 		assert_eq!(catalog.ranked().count(), 1);
 		catalog.renditions.get_mut("track").unwrap().enabled = true;
 		assert_eq!(catalog.enabled().count(), 1);
-	}
-
-	#[test]
-	fn label_round_trips() {
-		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
-		config.label = Some("English".to_string());
-
-		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert_eq!(encoded["label"], "English");
-		let decoded: AudioConfig = serde_json::from_value(encoded).expect("failed to decode");
-		assert_eq!(decoded.label.as_deref(), Some("English"));
 	}
 
 	#[test]

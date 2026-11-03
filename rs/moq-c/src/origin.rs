@@ -2,17 +2,8 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_string};
-
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// `close` is an `Option` so `*_close` can drop just the sender without
-/// removing the entry. The task delivers one final terminal callback and then
-/// removes itself, so `user_data` stays valid until that callback fires.
-struct TaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
-}
+use crate::task::Task;
+use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_route, moq_string};
 
 /// Global state managing all active resources.
 ///
@@ -29,16 +20,19 @@ pub struct Origin {
 	announced: NonZeroSlab<AnnouncedRecord>,
 
 	/// Announcement listener tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	announced_task: NonZeroSlab<Option<TaskEntry>>,
+	announced_task: NonZeroSlab<Task>,
 
 	/// Pending consume-until-announced tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	consume_task: NonZeroSlab<Option<TaskEntry>>,
+	consume_task: NonZeroSlab<Task>,
 
 	/// Served routes from [Self::dynamic], retracted when the handle is closed.
-	dynamic: NonZeroSlab<Option<DynamicEntry>>,
+	dynamic: NonZeroSlab<DynamicEntry>,
 
 	/// Broadcast requests delivered to a dynamic handler, freed after accept/reject.
-	broadcast_request: NonZeroSlab<Option<moq_net::origin::Request>>,
+	broadcast_request: NonZeroSlab<(moq_net::origin::Request, crate::ffi::Background)>,
+
+	/// Claim answers being filled before their exact route is announced.
+	prepared: NonZeroSlab<(moq_net::origin::Prepared, crate::ffi::Background, Id)>,
 }
 
 #[derive(Clone)]
@@ -79,9 +73,15 @@ impl Producer {
 /// One announce event and the C string views borrowed from it.
 struct AnnouncedRecord {
 	prefix: String,
-	captures: Option<Vec<String>>,
+	/// Owns the strings `capture_views` borrows; never read directly.
+	_captures: Vec<String>,
 	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
+	hops: Vec<u64>,
+	cost: u64,
+	/// The route's instance.
+	instance: String,
+	predecessor: String,
 }
 
 // The raw pointers only borrow immutable String allocations owned by this record.
@@ -91,21 +91,24 @@ unsafe impl Send for AnnouncedRecord {}
 impl AnnouncedRecord {
 	fn new(event: moq_net::announce::Event) -> Self {
 		use moq_net::announce::Event;
-		let (update, kind) = match event {
-			Event::Start(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_START),
-			Event::Update(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE),
-			Event::End(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_END),
-			Event::Restart(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART),
+		let (update, kind, predecessor) = match event {
+			Event::Start(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_START, String::new()),
+			Event::Update(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE, String::new()),
+			Event::End(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_END, String::new()),
+			Event::Restart(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART, String::new()),
+			Event::Takeover { announce, predecessor } => (
+				announce,
+				moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER,
+				predecessor.to_string(),
+			),
 		};
-		let captures = update.captures.map(|captures| {
-			captures
-				.into_iter()
-				.map(|capture| capture.to_string())
-				.collect::<Vec<_>>()
-		});
+		let captures: Vec<_> = update
+			.captures
+			.expect("bindings only list full announcement matches")
+			.into_iter()
+			.map(|capture| capture.to_string())
+			.collect();
 		let capture_views = captures
-			.as_deref()
-			.unwrap_or_default()
 			.iter()
 			.map(|capture| moq_string {
 				data: capture.as_ptr().cast(),
@@ -115,17 +118,24 @@ impl AnnouncedRecord {
 
 		Self {
 			prefix: update.prefix.to_string(),
-			captures,
+			_captures: captures,
 			capture_views,
 			kind,
+			hops: update.route.hops.iter().map(|hop| hop.id()).collect(),
+			cost: update.route.cost.value(),
+			instance: update
+				.route
+				.instance
+				.map(|instance| instance.to_string())
+				.unwrap_or_default(),
+			predecessor,
 		}
 	}
 }
 
 struct DynamicEntry {
-	inner: Option<moq_net::origin::Dynamic>,
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
+	task: Task,
+	inner: Option<moq_net::origin::Requests>,
 }
 
 impl Origin {
@@ -161,26 +171,11 @@ impl Origin {
 			.scope("", &moq_net::Patterns::from(scope))?
 			.with_hidden(hidden)
 			.announced();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_announce,
-		};
-		let id = self.announced_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_announced(on_announce, consumer, channel.1))).await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.announced_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.announced_task.spawn(
+			on_announce,
+			|state| &mut state.origin.announced_task,
+			|close| async move { driver.watch(Self::run_announced(on_announce, consumer, close)).await },
+		)
 	}
 
 	async fn run_announced(
@@ -212,8 +207,18 @@ impl Origin {
 			prefix_len: announced.prefix.len(),
 			captures: announced.capture_views.as_ptr(),
 			captures_len: announced.capture_views.len(),
-			has_captures: announced.captures.is_some(),
 			kind: announced.kind,
+			route: moq_route {
+				hops: announced.hops.as_ptr(),
+				hops_len: announced.hops.len(),
+				cost: announced.cost,
+				instance: moq_string {
+					data: announced.instance.as_ptr().cast::<c_char>(),
+					len: announced.instance.len(),
+				},
+			},
+			predecessor: announced.predecessor.as_ptr().cast::<c_char>(),
+			predecessor_len: announced.predecessor.len(),
 		};
 		Ok(())
 	}
@@ -231,122 +236,110 @@ impl Origin {
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.announced_task
-			.get_mut(announced)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::AnnouncementNotFound)?
-			.close
-			.take()
-			.ok_or(Error::AnnouncementNotFound)?;
-		Ok(())
+		self.announced_task.close(announced, Error::AnnouncementNotFound)
 	}
 
-	/// Wait until the broadcast at `path` is announced, then deliver its handle via the callback.
+	/// Follow the broadcast at `path`, delivering each publisher instance's handle via the callback.
 	///
-	/// The callback fires the broadcast handle (> 0) once announced, then a terminal `0`. On error
-	/// or cancellation it fires a single terminal code (`0` on close, negative on error). Returns a
-	/// task handle for cancellation via [`Self::consume_announced_close`].
-	pub fn consume_announced(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
+	/// The callback fires a broadcast handle (> 0) for each instance serving the path, until a
+	/// single terminal code (`0` on close, negative on error). Returns a task handle for
+	/// cancellation via [`Self::resolve_close`].
+	pub fn follow(
+		&mut self,
+		origin: Id,
+		path: String,
+		instance: Option<moq_net::Instance>,
+		on_broadcast: OnStatus,
+	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
 		let consumer = origin.consume_owned();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_broadcast,
-		};
-		let id = self.consume_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res =
-				crate::ffi::run(driver.watch(Self::run_consume_announced(on_broadcast, consumer, path, channel.1)))
-					.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.consume_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.consume_task.spawn(
+			on_broadcast,
+			|state| &mut state.origin.consume_task,
+			|close| async move {
+				driver
+					.watch(Self::run_follow(on_broadcast, consumer, path, instance, close))
+					.await
+			},
+		)
 	}
 
-	async fn run_consume_announced(
+	async fn run_follow(
 		callback: OnStatus,
 		consumer: Consumer,
 		path: String,
+		instance: Option<moq_net::Instance>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// `routed_broadcast` rides out the churn between something covering the path
-		// and the path actually resolving (failover, an advertise-only announce
-		// racing its handler). `biased` so a pending close always wins.
-		let broadcast = tokio::select! {
-			biased;
-			_ = &mut close => return Ok(()),
-			resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
-				Ok(broadcast) => broadcast,
-				// An unreachable path and a closed origin both mean no broadcast
-				// can ever arrive here.
-				Err(moq_net::Error::Unauthorized | moq_net::Error::Closed) => {
-					return Err(Error::BroadcastNotFound);
-				}
-				Err(err) => return Err(err.into()),
-			},
+		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
+		let mut announced = match consumer.follow(path.as_str(), instance) {
+			Ok(announced) => announced,
+			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
+			Err(err) => return Err(err.into()),
 		};
+		let mut delivered = false;
 
-		// Hold the lock only to buffer the broadcast; release it before the callback.
-		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;
-		callback.call(broadcast_id);
-		Ok(())
+		// Deliver each publisher instance serving the path: the first, then each one that takes
+		// over or returns. `biased` so a pending close always wins.
+		loop {
+			let broadcast = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				available = announced.available() => match available {
+					Ok(broadcast) => broadcast,
+					// The origin closing ends the wait, cleanly once a handle was delivered.
+					Err(moq_net::Error::Closed) if delivered => return Ok(()),
+					Err(moq_net::Error::Closed) => return Err(Error::BroadcastNotFound),
+					Err(err) => return Err(err.into()),
+				},
+			};
+
+			// Hold the lock only to buffer the broadcast; release it before the callback.
+			let broadcast_id = State::lock().consume.start(broadcast, Some(consumer.clone()))?;
+			delivered = true;
+			callback.call(broadcast_id);
+		}
 	}
 
 	/// Request the broadcast at `path`, delivering its handle once it can be served.
 	///
-	/// Unlike [`Self::consume`] (announced-only, fails fast) and [`Self::consume_announced`]
-	/// (waits indefinitely for a future announcement), this resolves against any route
-	/// announced now: the callback fires the broadcast
-	/// handle (> 0) once served, then a terminal `0`; or a single terminal code (`0` on close,
-	/// negative on error) if it can't be served. Returns a task handle for cancellation.
-	pub fn request(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
+	/// Unlike [`Self::follow`] (waits indefinitely, delivering each publisher instance), this
+	/// resolves one instance: the callback fires the broadcast handle (> 0) once served, then a
+	/// terminal `0`; or a single terminal code (`0` on close, negative on error) if it can't be
+	/// served. Returns a task handle for cancellation.
+	pub fn request(
+		&mut self,
+		origin: Id,
+		path: String,
+		instance: Option<moq_net::Instance>,
+		on_broadcast: OnStatus,
+	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
 		let consumer = origin.consume_owned();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_broadcast,
-		};
-		let id = self.consume_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_request(on_broadcast, consumer, path, channel.1))).await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.consume_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.consume_task.spawn(
+			on_broadcast,
+			|state| &mut state.origin.consume_task,
+			|close| async move {
+				driver
+					.watch(Self::run_request(on_broadcast, consumer, path, instance, close))
+					.await
+			},
+		)
 	}
 
 	async fn run_request(
 		callback: OnStatus,
 		consumer: Consumer,
 		path: String,
+		instance: Option<moq_net::Instance>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Resolves to an error when no announced route can serve the path.
-		let pending = consumer.request_broadcast(path.as_str(), None);
+		let pending = consumer.request(path.as_str(), instance);
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {
@@ -361,26 +354,18 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn consume_announced_close(&mut self, task: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.consume_task
-			.get_mut(task)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::NotFound)?
-			.close
-			.take()
-			.ok_or(Error::NotFound)?;
-		Ok(())
+	pub fn resolve_close(&mut self, task: Id) -> Result<(), Error> {
+		self.consume_task.close(task, Error::NotFound)
 	}
 
 	/// Create an unannounced broadcast at `path` on an origin.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
-	pub fn create_broadcast<P: moq_net::AsPath>(
+	pub fn create_broadcast<P: TryInto<moq_net::Path, Error: Into<moq_net::Error>>>(
 		&self,
 		origin: Id,
 		path: P,
-	) -> Result<(moq_net::broadcast::Producer, crate::ffi::Background), Error> {
+	) -> Result<(moq_net::origin::Publication, crate::ffi::Background), Error> {
 		let origin = self.get(origin)?;
 		let result = origin.producer.create_broadcast(path);
 		origin.driver.check()?;
@@ -389,45 +374,43 @@ impl Origin {
 
 	/// Advertise `prefix` and serve requests beneath it, delivering each as a
 	/// broadcast-request handle via `on_request`.
-	pub fn dynamic(
-		&mut self,
-		origin: Id,
-		prefix: &str,
-		route: moq_net::origin::Route,
-		on_request: OnStatus,
-	) -> Result<Id, Error> {
+	pub fn dynamic(&mut self, origin: Id, prefix: &str, on_request: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
-		let result = origin.producer.dynamic(prefix, route);
+		let result = origin.producer.requests(prefix);
 		origin.driver.check()?;
 		let inner = result?;
-		let channel = oneshot::channel();
-		let id = self.dynamic.insert(Some(DynamicEntry {
+		let (task, close) = Task::new(on_request);
+		let id = self.dynamic.insert(DynamicEntry {
+			task,
 			inner: Some(inner),
-			close: Some(channel.0),
-			callback: on_request,
-		}))?;
+		})?;
 
+		let request_driver = driver.clone();
 		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_dynamic(id, channel.1))).await;
-			let entry = State::lock().origin.dynamic.remove(id).flatten();
+			let res = crate::ffi::run(driver.watch(Self::run_dynamic(id, close, request_driver))).await;
+			let entry = State::lock().origin.dynamic.remove(id);
 			if let Some(entry) = entry {
-				entry.callback.call(res);
+				entry.task.callback.call(res);
 			}
 		});
 
 		Ok(id)
 	}
 
-	async fn run_dynamic(id: Id, mut close: oneshot::Receiver<()>) -> Result<(), Error> {
+	async fn run_dynamic(
+		id: Id,
+		mut close: oneshot::Receiver<()>,
+		driver: crate::ffi::Background,
+	) -> Result<(), Error> {
 		loop {
 			let request = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				res = kio::wait(|waiter| {
 					let state = State::lock();
-					match state.origin.dynamic.get(id).and_then(|entry| entry.as_ref()).and_then(|entry| entry.inner.as_ref()) {
+					match state.origin.dynamic.get(id).and_then(|entry| entry.inner.as_ref()) {
 						Some(dynamic) => dynamic.poll_requested_broadcast(waiter),
 						None => std::task::Poll::Ready(Err(moq_net::Error::Closed)),
 					}
@@ -438,13 +421,11 @@ impl Origin {
 				},
 			};
 
-			let request_id = State::lock().origin.broadcast_request.insert(Some(request))?;
-			let callback = State::lock()
+			let request_id = State::lock()
 				.origin
-				.dynamic
-				.get(id)
-				.and_then(|entry| entry.as_ref())
-				.map(|entry| entry.callback);
+				.broadcast_request
+				.insert((request, driver.clone()))?;
+			let callback = State::lock().origin.dynamic.get(id).map(|entry| entry.task.callback);
 			let Some(callback) = callback else {
 				return Ok(());
 			};
@@ -452,35 +433,17 @@ impl Origin {
 		}
 	}
 
-	pub fn dynamic_update(&self, dynamic: Id, route: moq_net::origin::Route) -> Result<(), Error> {
-		let dynamic = self
-			.dynamic
-			.get(dynamic)
-			.and_then(|entry| entry.as_ref())
-			.and_then(|entry| entry.inner.as_ref())
-			.ok_or(Error::NotFound)?;
-		Ok(dynamic.update(route)?)
-	}
-
 	pub fn dynamic_close(&mut self, dynamic: Id) -> Result<(), Error> {
-		let entry = self
-			.dynamic
-			.get_mut(dynamic)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::NotFound)?;
+		let entry = self.dynamic.get_mut(dynamic).ok_or(Error::NotFound)?;
 		let inner = entry.inner.take().ok_or(Error::NotFound)?;
-		entry.close.take();
+		entry.task.close(Error::NotFound)?;
 		drop(inner);
 		Ok(())
 	}
 
 	pub fn broadcast_request_path(&self, request: Id, dst: &mut crate::moq_string) -> Result<(), Error> {
-		let request = self
-			.broadcast_request
-			.get(request)
-			.and_then(|slot| slot.as_ref())
-			.ok_or(Error::NotFound)?;
-		let path = request.path();
+		let request = self.broadcast_request.get(request).ok_or(Error::NotFound)?;
+		let path = request.0.path();
 		*dst = crate::moq_string {
 			data: path.as_str().as_ptr().cast::<std::ffi::c_char>(),
 			len: path.as_str().len(),
@@ -488,8 +451,27 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn broadcast_request_take(&mut self, request: Id) -> Result<moq_net::origin::Request, Error> {
-		self.broadcast_request.remove(request).flatten().ok_or(Error::NotFound)
+	pub fn broadcast_request_take(
+		&mut self,
+		request: Id,
+	) -> Result<(moq_net::origin::Request, crate::ffi::Background), Error> {
+		self.broadcast_request.remove(request).ok_or(Error::NotFound)
+	}
+
+	pub fn prepared_insert(
+		&mut self,
+		prepared: moq_net::origin::Prepared,
+		driver: crate::ffi::Background,
+		broadcast: Id,
+	) -> Result<Id, Error> {
+		self.prepared.insert((prepared, driver, broadcast))
+	}
+
+	pub fn prepared_take(
+		&mut self,
+		prepared: Id,
+	) -> Result<(moq_net::origin::Prepared, crate::ffi::Background, Id), Error> {
+		self.prepared.remove(prepared).ok_or(Error::NotFound)
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {
@@ -514,8 +496,8 @@ mod supervision_tests {
 			})
 			.unwrap();
 		let mut publish = crate::publish::Publish::default();
-		let broadcast = publish
-			.create(origins.create_broadcast(origin, "retained").unwrap())
+		let (publication, _broadcast) = publish
+			.create_publication(origins.create_broadcast(origin, "retained").unwrap())
 			.unwrap();
 		origins.close(origin).unwrap();
 		*trigger
@@ -524,13 +506,13 @@ mod supervision_tests {
 		assert!(matches!(completion.finished().await, Err(Error::Panic)));
 		drop(completion);
 		assert!(matches!(
-			publish.announce(broadcast, Default::default()),
+			publish.announce(publication, Default::default()),
 			Err(Error::Panic)
 		));
 		let healthy = origins.create().unwrap();
-		let broadcast = publish
-			.create(origins.create_broadcast(healthy, "healthy").unwrap())
+		let (publication, _broadcast) = publish
+			.create_publication(origins.create_broadcast(healthy, "healthy").unwrap())
 			.unwrap();
-		publish.announce(broadcast, Default::default()).unwrap();
+		publish.announce(publication, Default::default()).unwrap();
 	}
 }

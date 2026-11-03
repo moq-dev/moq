@@ -11,7 +11,7 @@ test("a step row must play beyond the profile change", () => {
 	}
 	const result = Bun.spawnSync(["bash", script, "--profiles", "step", "--duration", "31", "--list"]);
 	expect(result.exitCode).toBe(0);
-	expect(result.stdout.toString()).toContain("chromium-opus-48000-step-plain");
+	expect(result.stdout.toString()).toContain("chromium-opus-48000-step");
 });
 
 test("short steady rows remain supported", () => {
@@ -27,8 +27,8 @@ test("the nightly matrix includes both new profiles", () => {
 		.trim()
 		.split("\n")
 		.filter((row) => row.startsWith("chromium-"));
-	expect(rows).toHaveLength(24);
+	expect(rows).toHaveLength(12);
 	for (const profile of ["bursty", "step"]) {
-		expect(rows.filter((row) => row.includes(`-${profile}-`))).toHaveLength(4);
+		expect(rows.filter((row) => row.endsWith(`-${profile}`))).toHaveLength(2);
 	}
 });

@@ -29,7 +29,7 @@ informative:
 This document specifies how a MoQ Transport {{moqt}} track carries DEFLATE-compressed payloads.
 Each subgroup is one raw DEFLATE stream, sync flushed at each object boundary, so every object stays self-delimited while later objects compress against the earlier ones in the subgroup.
 Small repetitive payloads compress several times better than they do alone, and a dropped group costs nothing beyond itself because the window never spans one.
-Nothing is added to the wire: the application declares the track compressed, and a relay forwards it unchanged.
+The transport declares a track compressed and carries each object's inflated size, so a relay forwards the compressed bytes to a peer that understands them and inflates them for one that does not.
 
 --- middle
 
@@ -53,7 +53,7 @@ Each subgroup is a separate DEFLATE stream: its object payloads share one window
 
 The application decides which subgroups a track uses; a consumer knows which to expect and decodes each one's objects in order.
 
-A publisher MUST NOT send a compressed track in datagrams, which are neither ordered nor reliable.
+A datagram carries a group of one object, so it is a stream of its own: compressed alone, starting cold.
 
 An object with no payload is skipped, neither advancing nor resetting the window.
 
@@ -68,19 +68,53 @@ A publisher MUST omit it from each object and a consumer MUST append it before d
 
 A zero-length payload is neither compressed nor decompressed.
 
-The stream is never terminated: no object ends in a final block, so a consumer decompresses incrementally and MUST NOT treat the absent end of stream as truncation.
+The stream is never terminated: a publisher MUST NOT emit a final block, and a consumer MUST treat one as malformed and abandon the subgroup.
+A consumer decompresses incrementally and MUST NOT treat the absent end of stream as truncation.
 
 A consumer missing an object MUST abandon the rest of the subgroup, which it can no longer decompress.
 The compression level is a publisher's choice; any conformant stream decodes.
 
 
 # Declaring Compression {#declare}
-The application declares a track compressed, conventionally with a `.z` suffix on the track name, or in its catalog.
+The transport declares a track compressed, and gives each object's inflated size beside its compressed one.
+{{moql}} does both from moq-lite-07: a Compression codec id in TRACK_INFO, and an Inflated Size on each FRAME and datagram.
 A consumer MUST NOT infer compression from the payload: raw DEFLATE has no magic number, so a wrong guess yields plausible garbage.
 
-There is deliberately no transport signal.
-A relay drops objects and re-frames what it forwards, so a transport that knew about the window would make the relay responsible for emitting a stream that still decodes, which means carrying a DEFLATE implementation.
-Instead a relay forwards opaque bytes, and an endpoint that has never heard of this document never asks for a compressed track.
+A consumer MUST treat an object that inflates to more or less than its declared size as malformed, and abandon the subgroup.
+
+A relay forwards the compressed objects as received to a peer whose transport declares compression.
+For any other peer it inflates them, once per subgroup however many such peers it serves, and sends the original objects without the declaration.
+If a declaration is sealed inside Immutable Properties, the relay MUST preserve those bytes and MUST refuse delivery when it cannot remove the declaration for an inflated copy.
+A peer is never sent compressed bytes it was not told about.
+
+
+# MoQ Transport Signaling {#signaling}
+This extension applies to MoQ Transport draft-18 and later.
+A peer offers it with the FLATE Setup Option, key `0x40B6A`, an integer with value 1.
+Other values are invalid.
+Both endpoints MUST offer FLATE before either sends a compressed track.
+Earlier drafts, and a peer that did not offer FLATE, receive inflated payloads without these declarations, subject to the sealed-property refusal in {{declare}}.
+
+## Compression Track Property {#property}
+COMPRESSION, property type `0x40B6C`, has Track scope and integer value 1 for the format in {{stream}}.
+Absence means plain payloads; other values are invalid.
+A receiver MUST refuse a compressed track unless FLATE was negotiated.
+The property can appear in the mutable list or Immutable Properties, but MUST NOT appear more than once across them.
+A relay recognizes it rather than retaining a second mutable copy among unknown properties.
+The declaration applies even when a subscriber omits Track Properties from an answer using INCLUDE_PROPERTIES=0: the subscriber already knows the track's properties.
+
+## Inflated Size Object Property {#size}
+INFLATED_SIZE, property type `0x40B6E`, has Object scope and an integer value equal to the payload's size before compression.
+Every Normal Object on a compressed track MUST carry it, including an empty payload, whose size is zero.
+A plain track or a status object MUST NOT carry it.
+It can appear in the mutable list or Immutable Properties, but MUST NOT appear more than once across them.
+The base Object Payload Length remains the size of the compressed bytes.
+The same rules apply to subgroup streams, FETCH streams, and datagrams.
+
+A receiver MUST validate the declared size against the same resource limits as an uncompressed payload before admitting it, and MUST NOT allocate a buffer solely from that declaration.
+Incremental inflate output is charged to the receiver's cache budget and shared across its plain readers.
+A relay restates the size beside forwarded compressed bytes and removes its mutable declaration beside inflated bytes.
+A sealed declaration MUST match the stored object's inflated size; a relay MUST refuse forwarding when that cannot be preserved.
 
 
 # Security Considerations
@@ -89,17 +123,37 @@ The compressed size of one payload reveals how much it has in common with the pa
 A publisher MUST NOT compress a secret and attacker-influenced data in the same subgroup.
 Encryption does not mitigate this, since the sizes are visible to anyone on the path.
 
-A few bytes can inflate to gigabytes, so a consumer MUST bound the decompressed size of each object and abandon the subgroup once that bound is exceeded.
+A few bytes can inflate to gigabytes, so a consumer MUST check each declared inflated size against its limits before decompressing, and never inflate past it.
 Each open subgroup also holds a window of up to 32 KiB, so a consumer SHOULD bound how many it decompresses at once.
 
 
 # IANA Considerations
 
-This document requests no registrations.
-The format lives inside object payloads, which {{moqt}} treats as opaque.
+This document requests the following entry in the MOQT Setup Options registry:
+
+| Value | Name | Specification |
+|:------|:-----|:--------------|
+| 0x40B6A | FLATE | This Document |
+
+It also requests these entries in the MOQ Properties registry, outside the application-specific and Mandatory Track Property ranges:
+
+| Value | Name | Scope | Specification |
+|:------|:-----|:------|:--------------|
+| 0x40B6C | COMPRESSION | Track | This Document |
+| 0x40B6E | INFLATED_SIZE | Object | This Document |
 
 
 --- back
+
+# Changelog
+
+## Since draft-lcurley-moq-flate-00 (in progress)
+
+- Negotiated FLATE signaling adds COMPRESSION and INFLATED_SIZE properties to MoQ Transport draft-18 and later; sealed declarations are forwarded unchanged or refused when incompatible.
+- Compression is declared by the transport instead of the application: {{moql}} carries a Compression codec in TRACK_INFO and each object's Inflated Size on FRAME and datagrams.
+- A relay inflates for a peer whose transport does not declare compression.
+- A datagram is compressed alone, as a stream of its own.
+- A consumer rejects an object that inflates to other than its declared size, or that ends in a final block.
 
 # Acknowledgments
 {:numbered="false"}

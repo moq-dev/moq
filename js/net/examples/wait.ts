@@ -10,7 +10,7 @@ async function main() {
 
 	// Wait for a broadcast that may not exist yet. a plain `request` would subscribe blind and get reset
 	// if nobody is publishing the path; this waits for the announcement instead.
-	const broadcast = origin.request(Moq.Path.from("my-broadcast"), { announced: true });
+	const broadcast = origin.follow(Moq.Path.from("my-broadcast"));
 
 	const effect = new Effect();
 	effect.run((effect) => {
@@ -23,7 +23,7 @@ async function main() {
 		}
 
 		console.log("broadcast is live");
-		const track = active.track("chat").subscribe({ priority: 0 });
+		const track = active.track("chat").subscribe();
 		effect.cleanup(() => track.close());
 
 		effect.spawn(async () => {

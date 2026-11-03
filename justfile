@@ -14,7 +14,8 @@ mod kt
 mod swift
 mod go
 mod dart
-# The C++ package over moq-ffi.
+# The C and C++ packages over moq-ffi.
+mod c
 mod cpp
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
@@ -29,6 +30,7 @@ mod drafts
 mod gh '.github'
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
+mod carla 'demo/carla'
 mod pub 'demo/pub'
 mod relay 'demo/relay'
 mod sub 'demo/sub'
@@ -43,12 +45,14 @@ dev:
     just demo
 
 # Benchmark the current tree, or compare it with a commit: `just bench origin/main`.
-bench $BASE="":
-    bench/run.sh "$BASE"
+# TRANSPORTS picks what chat and fanout dial. Example: `just bench origin/main ws`.
+bench $BASE="" $TRANSPORTS="quic ws wss tcp tls":
+    BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh "$BASE"
 
-# Benchmark the Rust, Go, Python, and Kotlin bindings against two Rust baselines.
-bench-ffi:
-    bench/ffi.sh
+# Compare admitted suites across checkouts and worker counts; see bench/README.md.
+[positional-arguments]
+bench-local *args:
+    python3 bench/local.py "$@"
 
 # Measure audio group sizes across relay publisher/subscriber and fanout shapes.
 bench-audio:
@@ -58,16 +62,24 @@ bench-audio:
 # io_uring workers; WORKERS defaults to every logical CPU.
 # Example: `just bench-runtime 5 16`.
 bench-runtime $ROUNDS="3" $WORKERS="":
-    MOQ_BENCH_RUNTIME_ROUNDS="$ROUNDS" MOQ_BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
+    BENCH_RUNTIME_ROUNDS="$ROUNDS" BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
 
 # Sweep the relay's QUIC shard count against room and fanout connection counts;
 # 0 shards is the shared runtime. Example: `just bench-shard "0 1 8" "64 512"`.
 bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
-    MOQ_BENCH_SHARD_COUNTS="$SHARDS" MOQ_BENCH_SHARD_CONNECTIONS="$CONNECTIONS" bench/run.sh --shard
+    BENCH_SHARD_COUNTS="$SHARDS" BENCH_SHARD_CONNECTIONS="$CONNECTIONS" bench/run.sh --shard
 
-# Attribute relay worker std mutex waits by stack, for each worker count.
-bench-lock $WORKLOAD="fanout" $WORKERS="1 4 16":
-    MOQ_BENCH_LOCK_WORKLOAD="$WORKLOAD" MOQ_BENCH_LOCK_WORKERS="$WORKERS" bench/run.sh --lock
+# Profile the relay at each worker count: std mutex waits by stack (lock), CPU
+# stacks (cpu), or jemalloc heap and churn (heap), over one transport (quic, ws, wss, tcp, or tls).
+# Example: `just bench-profile "cpu heap" fanout-heavy 4`, or `just bench-profile cpu chat 4 tokio-workers "" ws`.
+bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16" $RUNTIME="tokio-workers" $BASE="" $TRANSPORT="quic":
+    BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" BENCH_PROFILE_RUNTIME="$RUNTIME" BENCH_BASE="$BASE" BENCH_PROFILE_TRANSPORT="$TRANSPORT" bench/run.sh --profile
+
+# Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
+# `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.
+[positional-arguments]
+bench-browser *args:
+    bench/browser/run.sh "$@"
 
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
@@ -84,27 +96,63 @@ install:
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 
-# CI runs `check` as two parallel jobs, since one runner doing both takes about
-# the sum of their times. Same dispatch, with MOQ_STRICT=1.
+# The landing worker runs this gate in one job. The test build also enforces
+# default-feature clippy; the feature matrix and optimized bindings run
+# nightly and on release PRs. Missing tools fail under CI_STRICT. The host
+# land gate also sets CHECK_FAIL_FAST=1, so a failing batch stops at its first
+# failed module.
 
-# Run half of `check` for CI: JOB `check` lints and compiles, `test` runs the tests.
-ci $JOB $BASE="":
-    sh/dispatch.sh "ci-$JOB" "$BASE"
+# Run the landing worker's Linux gate over the branch diff against BASE.
+ci $BASE="":
+    CI_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh ci "$BASE"
 
-# Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
-ci-select $JOB $BASE="":
-    sh/dispatch.sh "ci-$JOB" "$BASE" --query
+# Run the queue's Linux gate over every package: `just gate [MODULE|-MODULE]...`
+# runs only the named modules, or skips each `-` one (see CHECK_MODULES).
+gate *modules:
+    CHECK_MODULES={{ quote(modules) }} just ci --all
+
+# Diff every published API against its last release: `just api-diff [--deny] [rust|js|ffi]...`.
+# `--deny` fails on any break, as backports into `release` must.
+[positional-arguments]
+api-diff *args:
+    sh/api-diff/run.sh "$@"
+
+# Report what CI selects before installing the dev shell or build caches.
+ci-select $BASE="":
+    sh/dispatch.sh ci "$BASE" --query
+
+# Report the native platform suites before installing their toolchains.
+ci-select-platform $BASE="":
+    sh/dispatch.sh ci-platform "$BASE" --query
+
+# Check every supported source file; exclusions live in biome.jsonc.
+biome *args:
+    bun install --frozen-lockfile
+    bun biome check --error-on-warnings {{ args }} .
+
+# Apply Biome's fixes; installs without a frozen lockfile, like the other fixers.
+biome-fix:
+    bun install
+    bun biome check --error-on-warnings --write .
 
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"
+
+# Build .oss-scanner/ with Anthropic's OSS Scanner tools/check: `just oss-scanner [REF] [REPO]`. REF must be pushed.
+[positional-arguments]
+oss-scanner *args:
+    sh/oss-scanner.sh "$@"
+
+# Set every eligible package to one minor at a release cut; omit to check.
+version TARGET="":
+    python3 sh/version.py {{ if TARGET == "" { "" } else { quote(TARGET) } }}
 
 # Build the packages.
 build:
     just js build
     just rs build
     just py build
-    just js wasm
 
 # Delete this checkout's build artifacts and caches; `all` includes agent worktrees.
 clean SCOPE="here":

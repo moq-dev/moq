@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { authorize, type Claims, ClaimsSchema, type Permissions, ScopeSchema } from "./claims.ts";
+import { encodeGrant, GrantSchema } from "./contract.ts";
 import { encodeGrants } from "./wire.ts";
 
 // These cases mirror the Rust moq-auth crate's claims::tests one-for-one, so both
@@ -10,7 +11,7 @@ function claims(root: string, subscribe: string[], publish: string[]): Claims {
 }
 
 function texts(permissions: Permissions) {
-	return { subscribe: permissions.subscribe.path.toJSON(), publish: permissions.publish.path.toJSON() };
+	return { subscribe: permissions.subscribe.toJSON(), publish: permissions.publish.toJSON() };
 }
 
 test("claims granting nothing are rejected, matching Rust's useless-token rule", () => {
@@ -21,13 +22,13 @@ test("claims granting nothing are rejected, matching Rust's useless-token rule",
 	expect(() => ClaimsSchema.parse({ root: "demo" })).toThrow();
 
 	// `**` is everything under the root, which is a real grant.
-	expect(ClaimsSchema.parse({ root: "demo", publish: ["**"] }).publish?.toJSON()).toEqual(["**"]);
+	expect(ClaimsSchema.parse({ root: "demo", publish: ["**"] }).publish).toEqual(["**"]);
 });
 
 test("claims read legacy put/get prefixes as subtrees", () => {
 	const claims = ClaimsSchema.parse({ root: "demo", put: ["alice", "/a//b/"], get: "" });
-	expect(claims.publish?.toJSON()).toEqual(["a/b/**", "alice/**"]);
-	expect(claims.subscribe?.toJSON()).toEqual(["**"]);
+	expect(claims.publish).toEqual(["alice/**", "a/b/**"]);
+	expect(claims.subscribe).toEqual(["**"]);
 	expect(ScopeSchema.parse({ root: "demo", put: ["room"] }).publish).toEqual(["room/**"]);
 });
 
@@ -96,7 +97,7 @@ test("authorize - empty root", () => {
 
 test("authorize - slashes are implicit", () => {
 	const permissions = authorize(claims("/room/123/", ["bob/**"], []), "//room/123//");
-	expect(permissions.subscribe.path.toJSON()).toEqual(["bob/**"]);
+	expect(permissions.subscribe.toJSON()).toEqual(["bob/**"]);
 });
 
 test("authorize - respects segment boundaries", () => {
@@ -116,12 +117,40 @@ test("authorize - no access at path", () => {
 test("authorize - wildcards rebase as a set", () => {
 	// `**/chat` reached at `chat` is both the path itself and deeper `**/chat`.
 	const permissions = authorize(claims("", ["**/chat"], []), "chat");
-	expect(permissions.subscribe.path.toJSON()).toEqual(["", "**/chat"]);
+	expect(permissions.subscribe.toJSON()).toEqual(["", "**/chat"]);
 });
 
-test("a capped role retains its cap instead of encoding legacy put", () => {
-	const claims = ClaimsSchema.parse({ publish: { path: "alice/**", rate: 8_000_000 } });
-	const encoded = encodeGrants(claims);
-	expect(encoded).toHaveProperty("publish.rate", 8_000_000);
-	expect(encoded).not.toHaveProperty("put");
+test("shared rate vectors parse and re-encode like Rust", async () => {
+	const vectors = await Bun.file(new URL("../../../rs/moq-auth/rate.json", import.meta.url)).json();
+	for (const row of vectors.valid) {
+		expect(encodeGrants(ClaimsSchema.parse(row.input))).toEqual(row.claims);
+		expect(encodeGrant(GrantSchema.parse(row.input))).toEqual(row.grant);
+	}
+	for (const input of vectors.invalid) {
+		expect(ClaimsSchema.safeParse(input).success).toBe(false);
+		expect(GrantSchema.safeParse(input).success).toBe(false);
+	}
+});
+
+test("a capped role decodes beside its patterns and never encodes as a prefix", () => {
+	for (const role of ["publish", "subscribe"] as const) {
+		// Subtrees alone would be written as legacy prefixes, which a cap must not be.
+		const claims = ClaimsSchema.parse({
+			publish: ["alice/**"],
+			subscribe: ["**"],
+			[role]: { path: ["alice/**"], rate: 8000 },
+		});
+		expect(claims[role]).toEqual(["alice/**"]);
+		expect(claims[`${role}_rate`]).toBe(8000);
+		const encoded = encodeGrants(claims);
+		expect(encoded).not.toHaveProperty("put");
+		expect(encoded).not.toHaveProperty("get");
+		expect(encoded[role]).toEqual({ path: ["alice/**"], rate: 8000 });
+	}
+	expect(() => ClaimsSchema.parse({ publish: { path: ["**"], rate: 0 } })).toThrow(/rate must be a positive integer/);
+});
+
+test("a key scope bounds paths, never bitrate", () => {
+	expect(ScopeSchema.safeParse({ publish: { path: ["**"], rate: 8000 } }).success).toBe(false);
+	expect(ScopeSchema.safeParse({ publish: ["**"], subscribe: { path: ["**"], rate: 8000 } }).success).toBe(false);
 });

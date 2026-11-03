@@ -87,7 +87,13 @@ impl Vaapi {
 		};
 		let decoder = Decoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 
-		let exporting = config.output == Output::Native;
+		// The renderer imports the NV12 this exports, so `Render` keeps it too
+		// in a build that has the renderer; without one it would only download.
+		let exporting = match config.output {
+			Output::Native => true,
+			Output::Cpu => false,
+			Output::Render => cfg!(feature = "render"),
+		};
 		tracing::info!(decoder = NAME, exporting, "opened H.264 decoder");
 		Ok(Box::new(Self {
 			decoder,
@@ -289,7 +295,7 @@ mod tests {
 
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut decoder = Vaapi::open(Codec::H264, &decode_config()).expect("VAAPI H.264 decoder");
@@ -342,7 +348,7 @@ mod tests {
 
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut exporting = Vaapi::open(Codec::H264, &gpu_decode_config()).expect("VAAPI H.264 decoder");
@@ -432,7 +438,7 @@ mod tests {
 
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut decoder = Vaapi::open(Codec::H264, config).expect("VAAPI H.264 decoder");

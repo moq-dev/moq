@@ -2,7 +2,7 @@
 
 use std::task::{Poll, ready};
 
-use moq_net::PathOwned;
+use moq_net::Path;
 use serde::de::DeserializeOwned;
 
 use super::Catalog;
@@ -10,33 +10,40 @@ use crate::Result;
 
 /// Reads typed catalog roots from an already subscribed catalog track.
 pub struct Consumer<E = ()> {
-	inner: moq_json::snapshot::Consumer<Catalog<E>>,
-	base: PathOwned,
+	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
+	inner: moq_json::snapshot::Consumer<serde_json::Value>,
+	base: Path,
+	_ext: std::marker::PhantomData<E>,
 }
 
 impl<E: DeserializeOwned + Default> Consumer<E> {
-	/// Wrap an uncompressed catalog track subscription.
+	/// Wrap a catalog track subscription, compressed or not.
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
-		Self::with_config(track, moq_json::snapshot::consumer::Config::default())
-	}
-
-	/// Wrap a DEFLATE-compressed catalog track subscription.
-	pub fn compressed(track: moq_net::track::Subscriber) -> Self {
-		let mut config = moq_json::snapshot::consumer::Config::default();
-		config.compression = moq_json::Compression::Deflate;
-		Self::with_config(track, config)
-	}
-
-	fn with_config(track: moq_net::track::Subscriber, config: moq_json::snapshot::consumer::Config) -> Self {
 		Self {
 			base: track.broadcast().path.clone(),
-			inner: moq_json::snapshot::Consumer::new(track, config),
+			inner: moq_json::snapshot::Consumer::new(track, Default::default()),
+			_ext: std::marker::PhantomData,
 		}
 	}
 
 	/// Poll for the next catalog update.
+	///
+	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
+	/// `broadcast` reference, contribution, or echo prefix walks above the root. Such a reference names no broadcast, and the
+	/// root is the consumer's authorized subtree, so it is an attempt to reference content the
+	/// consumer cannot name. The whole catalog is rejected rather than the one rendition: a
+	/// publisher that emits one has a bug (or is hostile), and silently serving the rest hides
+	/// that from the operator while the missing rendition surfaces much later as a track that
+	/// never fills.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let catalog = ready!(self.inner.poll_next(waiter)).map_err(|err| crate::Error::Json(err.to_string()))?;
+		let value = ready!(self.inner.poll_latest(waiter))
+			.map_err(|err| match err {
+				// A transport failure stays typed so callers can tell a lost source from a bad catalog.
+				moq_json::Error::Net(err) => crate::Error::Moq(err),
+				err => crate::Error::Json(err.to_string()),
+			})?
+			.map(|value| value.value);
+		let catalog = value.map(Catalog::from_value).transpose()?;
 		if let Some(catalog) = catalog.as_ref() {
 			catalog.check_renditions()?;
 			check_resolvable(&self.base, catalog)?;
@@ -53,7 +60,11 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	}
 }
 
-fn check_resolvable<E>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
+/// Reject the catalog if a track reference, contribution, or echo prefix walks above the root.
+///
+/// Every section carrying a relative broadcast path must be included here; a section left out
+/// silently exempts its paths from the containment check.
+fn check_resolvable<E>(base: &Path, catalog: &Catalog<E>) -> Result<()> {
 	let video = catalog.video.renditions.iter();
 	let audio = catalog.audio.renditions.iter();
 	let text = catalog.text.renditions.iter();
@@ -67,6 +78,7 @@ fn check_resolvable<E>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 		.chain(json.map(|(_, config)| config.broadcast.as_ref()))
 		.chain(binary.map(|(_, config)| config.broadcast.as_ref()))
 		.flatten()
+		.chain(catalog.contributions.values().map(|entry| &entry.broadcast))
 	{
 		if !rel.is_empty() && base.try_resolve(rel).is_none() {
 			return Err(crate::Error::EscapingBroadcast(rel.to_string()));
@@ -84,27 +96,42 @@ fn check_resolvable<E>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use std::str::FromStr;
 
 	#[test]
 	fn echo_prefix_cannot_escape_the_catalog_root() {
-		let base = moq_net::PathOwned::from("room/live");
+		let base = moq_net::Path::from_static("room/live");
 		let mut catalog = Catalog::<()>::from_str(include_str!("../../fixtures/catalog-stats-echo.json")).unwrap();
 		assert!(check_resolvable(&base, &catalog).is_ok());
 		let echo = catalog.echo.as_mut().unwrap();
-		echo.path = moq_net::path::RelativeOwned::from("../viewers");
+		echo.path = moq_net::path::Relative::new("../viewers").unwrap();
 		assert!(check_resolvable(&base, &catalog).is_ok());
-		catalog.echo.as_mut().unwrap().path = moq_net::path::RelativeOwned::from("../../viewers");
+		catalog.echo.as_mut().unwrap().path = moq_net::path::Relative::new("../../viewers").unwrap();
 		assert!(matches!(
 			check_resolvable(&base, &catalog),
 			Err(crate::Error::EscapingBroadcast(_))
 		));
 	}
 
+	#[test]
+	fn contributions_cannot_escape_the_root() {
+		let base = moq_net::Path::from_static("room/main.hang");
+		for (reference, accepted) in [("./alice.hang", true), ("../alice.hang", true), ("../../escape", false)] {
+			let json = serde_json::json!({ "contributions": { "alice": { "broadcast": reference } } }).to_string();
+			let catalog = Catalog::<()>::from_str(&json).unwrap();
+			match check_resolvable(&base, &catalog) {
+				Ok(()) => assert!(accepted, "{reference} must be refused"),
+				Err(crate::Error::EscapingBroadcast(_)) => assert!(!accepted, "{reference} must be accepted"),
+				Err(err) => panic!("unexpected error: {err}"),
+			}
+		}
+	}
+
 	#[tokio::test]
 	async fn subscribe_validates_echo_prefix_before_yielding() {
 		for (reference, accepted) in [("viewers", true), ("../../viewers", false)] {
 			let mut info = moq_net::broadcast::Info::new();
-			info.path = "room/live".into();
+			info.path = moq_net::Path::from_static("room/live");
 			let broadcast = info.produce();
 			let track = broadcast
 				.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
@@ -141,5 +168,37 @@ mod test {
 			.unwrap();
 		group.finish().unwrap();
 		assert_eq!(consumer.next().await.unwrap(), Some(published));
+	}
+
+	#[tokio::test]
+	async fn a_lost_track_is_a_transport_error() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
+			.unwrap();
+		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
+		track.abort(moq_net::Error::Cancel).unwrap();
+		assert!(matches!(
+			consumer.next().await,
+			Err(crate::Error::Moq(moq_net::Error::Cancel))
+		));
+	}
+
+	#[tokio::test]
+	async fn a_newer_version_is_a_typed_refusal() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
+			.unwrap();
+		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5,"video":[]}"#)
+			.unwrap();
+		group.finish().unwrap();
+		assert!(matches!(
+			consumer.next().await,
+			Err(crate::Error::UnsupportedVersion(5))
+		));
 	}
 }

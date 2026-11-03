@@ -2,19 +2,17 @@ import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { defineConfig } from "vite";
 import solidPlugin from "vite-plugin-solid";
-import { crossOriginIsolation } from "../../js/common/vite-plugin-isolate";
-import { worklet } from "../../js/common/vite-plugin-worklet";
-import { consoleOverlay } from "./console-overlay";
-import { openTabs } from "./open-tabs";
+import { worklet } from "../../js/common/vite-plugin-worklet.ts";
+import { consoleOverlay } from "./console-overlay.ts";
+import { openTabs } from "./open-tabs.ts";
 
 export default defineConfig({
 	root: "src",
-	envDir: resolve(__dirname),
+	envDir: resolve(import.meta.dirname),
 	plugins: [
 		tailwindcss(),
 		solidPlugin(),
 		worklet(),
-		crossOriginIsolation(),
 		consoleOverlay(),
 		// Open the stats, publish, and watch demos each in their own tab.
 		// Order matters: the browser focuses the last tab, so watch ends up in front.
@@ -25,10 +23,10 @@ export default defineConfig({
 		sourcemap: process.env.NODE_ENV === "production" ? false : "inline",
 		rollupOptions: {
 			input: {
-				watch: resolve(__dirname, "src/watch.html"),
-				publish: resolve(__dirname, "src/publish.html"),
-				stats: resolve(__dirname, "src/stats.html"),
-				meet: resolve(__dirname, "src/meet.html"),
+				watch: resolve(import.meta.dirname, "src/watch.html"),
+				publish: resolve(import.meta.dirname, "src/publish.html"),
+				stats: resolve(import.meta.dirname, "src/stats.html"),
+				meet: resolve(import.meta.dirname, "src/meet.html"),
 			},
 		},
 	},
@@ -38,6 +36,6 @@ export default defineConfig({
 	},
 	optimizeDeps: {
 		// No idea why this needs to be done, but I don't want to figure it out.
-		exclude: ["@libav.js/variant-opus-af"],
+		exclude: ["@moq/libav"],
 	},
 });

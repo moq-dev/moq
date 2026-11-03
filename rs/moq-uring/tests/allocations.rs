@@ -1,6 +1,6 @@
 //! The worker's UDP send and pump path must not allocate in steady state.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(target_os = "linux")]
 
@@ -57,7 +57,7 @@ const SENDS: usize = 1_000;
 fn steady_state_sends_do_not_allocate() {
 	let mut worker = match Worker::new(Config::default()) {
 		Ok(worker) => worker,
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring allocation test: {reason}");
 			return;
 		}
@@ -80,14 +80,8 @@ fn steady_state_sends_do_not_allocate() {
 			// Grow every reusable pool before observing the steady state.
 			for _ in 0..100 {
 				let mut tx = socket.acquire().await.expect("warmup acquire");
-				tx[..4800].fill(0x5a);
-				tx.send(udp::Transmit {
-					to,
-					len: 4800,
-					segment: 1200,
-					ecn: None,
-				})
-				.expect("warmup send");
+				tx.resize(4800, 0x5a);
+				tx.send(udp::Transmit::new(to, 1200)).expect("warmup send");
 			}
 
 			let mut acquires = 0;
@@ -101,13 +95,8 @@ fn steady_state_sends_do_not_allocate() {
 				acquires += counted().0;
 
 				count_from_zero();
-				tx[..4800].fill(0x5a);
-				let sent = tx.send(udp::Transmit {
-					to,
-					len: 4800,
-					segment: 1200,
-					ecn: None,
-				});
+				tx.resize(4800, 0x5a);
+				let sent = tx.send(udp::Transmit::new(to, 1200));
 				let (allocs, deallocs) = counted();
 				sent.expect("send");
 				stage_allocs += allocs;

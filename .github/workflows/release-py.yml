@@ -20,7 +20,9 @@ on:
       - "py/moq-rs/**"
       - ".github/workflows/release-py.yml"
       - "sh/gh/release.sh"
-  workflow_run:
+  # Publishes only a protected release tag at the run's commit; see
+  # "Require a release tag at the run's commit".
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Release Py FFI"]
     types:
       - completed
@@ -50,6 +52,23 @@ jobs:
       publish: ${{ steps.pypi.outputs.exists == 'false' && (github.event_name == 'workflow_run' || (steps.ffi-gate.outputs.unreleased != 'true' && steps.ffi-pypi.outputs.exists == 'true')) }}
 
     steps:
+      # head_branch names a branch as readily as a tag, and anyone who can push
+      # may name a branch and a workflow after a release. Only a tag the
+      # `release tags` ruleset protects, at the run's commit, is a release.
+      - name: Require a release tag at the run's commit
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
+          if [[ "$commit" != "$SHA" ]]; then
+            echo "::error::$TAG is not a release tag at $SHA"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
@@ -104,20 +123,13 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: just gh release pypi-exists moq-rs "$VERSION"
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter, as check.yml does, so the dev
-          # shell is substituted rather than built from source.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
 
       - name: Build
         run: nix develop --command just py package
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: python-wrapper
           path: py/dist/*
@@ -135,10 +147,10 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-wrapper
           path: dist
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1

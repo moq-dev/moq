@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Plays a tone in headless Chromium over a seeded, impaired UDP path, and grades what it heard.
+# Plays a tone in headless Chromium and in the native `moq play` over a seeded, impaired UDP path,
+# and grades what each heard.
 #
-# One row is one page playing one codec through one shaper profile on one ring, for --duration
-# seconds of audio. See README.md for the profiles, the metric contract, and the void rules.
+# One row is one player playing one codec through one shaper profile, for --duration seconds of
+# audio. The `native` runtime plays on a private null sink; `chromium` is the browser's. See
+# README.md for the profiles, the metric contract, and the void rules.
 set -euo pipefail
+
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
 
 AQ_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$AQ_DIR/../.." && pwd)
@@ -16,17 +22,17 @@ source "$AQ_DIR/../lib/harness.sh"
 RERUN="$(harness_env AQ_PROFILE RELAY_BIN)just test audio-quality$(harness_argv "$@")"
 
 ALL_PROFILES=(near-zero mild wide bursty step fixed-250)
-ALL_RINGS=(isolated plain)
+ALL_RUNTIMES=(chromium native)
 ALL_CODECS=(opus aac)
 
-# Every recorded trace is a profile too, replayed through the rings instead of played in a browser.
+# Every recorded trace is a profile too, replayed through the ring instead of played in a browser.
 ALL_TRACES=()
 for trace in "$AQ_DIR"/traces/*.json; do
     ALL_TRACES+=("$(basename "$trace" .json)")
 done
 
 PROFILES=("${ALL_PROFILES[@]}" "${ALL_TRACES[@]}")
-RINGS=("${ALL_RINGS[@]}")
+RUNTIMES=("${ALL_RUNTIMES[@]}")
 CODECS=("${ALL_CODECS[@]}")
 DURATION=60
 SEED=7
@@ -63,10 +69,10 @@ while [[ $# -gt 0 ]]; do
             PROFILES=("${ALL_TRACES[@]}")
             shift
             ;;
-        --rings)
+        --runtimes)
             need "$1" $# "${2:-}"
             split "$2"
-            RINGS=("${SPLIT[@]}")
+            RUNTIMES=("${SPLIT[@]}")
             shift 2
             ;;
         --codecs)
@@ -140,7 +146,7 @@ for p in "${PROFILES[@]}"; do
         exit 2
     fi
 done
-for r in "${RINGS[@]}"; do valid "$r" ring "${ALL_RINGS[@]}"; done
+for r in "${RUNTIMES[@]}"; do valid "$r" runtime "${ALL_RUNTIMES[@]}"; done
 for c in "${CODECS[@]}"; do valid "$c" codec "${ALL_CODECS[@]}"; done
 
 if [[ $LIST -eq 0 && -n "$OUT" && -d "$OUT" ]] && [[ -n "$(ls -A "$OUT" 2>/dev/null)" ]]; then
@@ -156,7 +162,7 @@ rate_of() {
     esac
 }
 
-# Every profile but the control adapts. The element requires a unit on a fixed delay.
+# Every profile but the control adapts. The element and the player require a unit on a fixed delay.
 delay_of() {
     case "$1" in
         fixed-250) echo "250ms" ;;
@@ -183,11 +189,24 @@ for profile in "${PROFILES[@]}"; do
         continue
     fi
     for codec in "${CODECS[@]}"; do
-        for ring in "${RINGS[@]}"; do
-            ROWS+=("chromium-$codec-$(rate_of "$codec")-$profile-$ring")
+        for runtime in "${RUNTIMES[@]}"; do
+            ROWS+=("$runtime-$codec-$(rate_of "$codec")-$profile")
         done
     done
 done
+
+# Which rows need which player: the page and Playwright, or the native build and a null sink.
+BROWSER=0
+NATIVE=0
+for tag in "${ROWS[@]}"; do
+    case "$tag" in
+        chromium-*) BROWSER=1 ;;
+        native-*) NATIVE=1 ;;
+    esac
+done
+
+# Replays run the browser player's ring, so the native runtime has nothing to replay.
+[[ " ${RUNTIMES[*]} " == *" chromium "* ]] || TRACES=()
 
 # A trace's codec and rate are its recording's, so replay.ts names those rows.
 joined() {
@@ -195,10 +214,13 @@ joined() {
     echo "$*"
 }
 replay=(bun "$CLIENT/replay.ts" --traces "$AQ_DIR/traces" --profiles "$(joined "${TRACES[@]}")")
-replay+=(--rings "$(joined "${RINGS[@]}")" --codecs "$(joined "${CODECS[@]}")")
-listed=$("${replay[@]}" --list)
-mapfile -t REPLAYS <<<"$listed"
-[[ -n "$listed" ]] || REPLAYS=()
+replay+=(--codecs "$(joined "${CODECS[@]}")")
+REPLAYS=()
+if [[ ${#TRACES[@]} -gt 0 ]]; then
+    listed=$("${replay[@]}" --list)
+    mapfile -t REPLAYS <<<"$listed"
+    [[ -n "$listed" ]] || REPLAYS=()
+fi
 
 if [[ $LIST -eq 1 ]]; then
     printf '%s\n' "${ROWS[@]}" "${REPLAYS[@]}"
@@ -208,6 +230,7 @@ fi
 
 tools=(bun)
 [[ ${#ROWS[@]} -eq 0 ]] || tools+=(cargo ffmpeg)
+[[ $NATIVE -eq 0 ]] || tools+=(python3 pulseaudio)
 for tool in "${tools[@]}"; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "error: $tool not found; run inside 'nix develop'" >&2
@@ -222,11 +245,13 @@ echo "installing the workspace..."
 
 failed=0
 
-# The browser rows need the relay, the publishers, the shaper, and a page; replays need none of it.
+# The live rows need the relay, the publishers, the shaper, and a player; replays need none of it.
 if [[ ${#ROWS[@]} -gt 0 ]]; then
     # ── build ───────────────────────────────────────────────────────────────
     flag=()
     [[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
+    # The native rows play through the same binary that publishes, built with its speaker.
+    [[ $NATIVE -eq 0 ]] || flag+=(--features moq-cli/play)
     echo "building moq-relay, moq, moq-shaper ($PROFILE)..."
     (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli -p moq-shaper)
     TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
@@ -236,12 +261,19 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
 
     # Into the run directory: vite empties its output first, so a shared dist/ would vanish under a
     # concurrent run's page loads.
-    echo "building the page..."
-    (
-        cd "$CLIENT"
-        bunx playwright install chromium
-        bunx vite build --outDir "$HARNESS_RUN/page" --emptyOutDir
-    )
+    if [[ $BROWSER -eq 1 ]]; then
+        echo "building the page..."
+        (
+            cd "$CLIENT"
+            bunx vite build --outDir "$HARNESS_RUN/page" --emptyOutDir
+        )
+    fi
+
+    # A cold build leaves hundreds of MB dirty, and on the nightly runner each periodic writeback
+    # burst stalls the page's main thread for ~300 ms, so the first row would grade the build's
+    # flush instead of the player. Flush it before any row plays.
+    echo "flushing the build to disk..."
+    sync
 
     # ── relay ───────────────────────────────────────────────────────────────
     harness_port relay
@@ -288,10 +320,10 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
 
     echo ""
     echo "running ${#ROWS[@]} rows at ${DURATION}s each (seed $SEED)"
+    row=0
     for tag in "${ROWS[@]}"; do
-        IFS=- read -r _ codec _ rest <<<"$tag"
-        ring="${rest##*-}"
-        profile="${rest%-*}"
+        row=$((row + 1))
+        IFS=- read -r _ codec _ profile <<<"$tag"
         echo ""
         echo "── $tag ──"
 
@@ -310,19 +342,34 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
         done
 
         status=0
-        capture_args=()
-        [[ $CAPTURE -eq 0 ]] || capture_args=(--capture)
-        [[ $TRACE -eq 0 ]] || capture_args+=(--trace)
-        harness_spawn "driver-$tag" "$HARNESS_RUN/driver-$tag.log" bun "$CLIENT/driver.ts" \
-            --url "http://127.0.0.1:$SHAPER_PORT" \
-            --fingerprint "$RELAY_URL/certificate.sha256" \
-            --broadcast "tone-$codec.hang" \
-            --page "$HARNESS_RUN/page" \
-            --ring "$ring" \
-            --delay "$(delay_of "$profile")" \
-            --duration "$DURATION" \
-            --tag "$tag" \
-            --out "$HARNESS_RUN" "${capture_args[@]}"
+        if [[ "$tag" == native-* ]]; then
+            # A null sink per row, so no row inherits another's device state. Numbered rather
+            # than tagged: its socket path has to fit a Unix socket's 108 bytes.
+            harness_spawn "driver-$tag" "$HARNESS_RUN/driver-$tag.log" \
+                python3 "$AQ_DIR/../lib/pulse.py" --dir "$HARNESS_RUN/pulse-$row" -- \
+                bun "$CLIENT/native.ts" \
+                --moq "$MOQ" \
+                --url "https://127.0.0.1:$SHAPER_PORT" \
+                --fingerprint "$RELAY_URL/certificate.sha256" \
+                --broadcast "tone-$codec.hang" \
+                --delay "$(delay_of "$profile")" \
+                --duration "$DURATION" \
+                --tag "$tag" \
+                --out "$HARNESS_RUN"
+        else
+            capture_args=()
+            [[ $CAPTURE -eq 0 ]] || capture_args=(--capture)
+            [[ $TRACE -eq 0 ]] || capture_args+=(--trace)
+            harness_spawn "driver-$tag" "$HARNESS_RUN/driver-$tag.log" bun "$CLIENT/driver.ts" \
+                --url "http://127.0.0.1:$SHAPER_PORT" \
+                --fingerprint "$RELAY_URL/certificate.sha256" \
+                --broadcast "tone-$codec.hang" \
+                --page "$HARNESS_RUN/page" \
+                --delay "$(delay_of "$profile")" \
+                --duration "$DURATION" \
+                --tag "$tag" \
+                --out "$HARNESS_RUN" "${capture_args[@]}"
+        fi
         harness_wait "$HARNESS_PID" || status=$?
         if [[ $status -ne 0 ]]; then
             failed=1

@@ -12,13 +12,13 @@ pub enum ClientError {
 	UnexpectedEnd,
 
 	#[error("connection error: {0}")]
-	Connection(#[from] crate::quic::driver::ConnectionError),
+	Connection(#[from] crate::quic::driver::connection::Error),
 
 	#[error("failed to write: {0}")]
-	WriteError(#[from] crate::quic::driver::WriteError),
+	WriteError(#[from] crate::quic::driver::send::Error),
 
 	#[error("failed to read: {0}")]
-	ReadError(#[from] crate::quic::driver::ReadError),
+	ReadError(#[from] crate::quic::driver::recv::Error),
 
 	#[error("failed to exchange h3 settings: {0}")]
 	SettingsError(#[from] SettingsError),
@@ -27,14 +27,7 @@ pub enum ClientError {
 	HttpError(#[from] ConnectError),
 
 	#[error("quic error: {0}")]
-	ConnectError(#[from] crate::quic::driver::ConnectError),
-
-	#[error("invalid DNS name: {0}")]
-	InvalidDnsName(String),
-
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	#[error("rustls error: {0}")]
-	Rustls(#[from] rustls::Error),
+	ConnectError(#[from] crate::quic::driver::endpoint::ConnectError),
 }
 
 /// An errors returned by [`crate::quic::web::Session`], split based on if they are underlying QUIC errors or
@@ -43,23 +36,21 @@ pub enum ClientError {
 #[non_exhaustive]
 pub enum SessionError {
 	#[error("connection error: {0}")]
-	ConnectionError(crate::quic::driver::ConnectionError),
+	ConnectionError(crate::quic::driver::connection::Error),
 
 	#[error("webtransport error: {0}")]
 	WebTransportError(#[from] WebTransportError),
 
 	#[error("send datagram error: {0}")]
-	SendDatagramError(#[from] crate::quic::driver::SendDatagramError),
+	SendDatagramError(#[from] crate::quic::driver::send::Error),
 }
 
-impl From<crate::quic::driver::ConnectionError> for SessionError {
-	fn from(e: crate::quic::driver::ConnectionError) -> Self {
+impl From<crate::quic::driver::connection::Error> for SessionError {
+	fn from(e: crate::quic::driver::connection::Error) -> Self {
 		match &e {
-			crate::quic::driver::ConnectionError::ApplicationClosed(close) => {
+			crate::quic::driver::connection::Error::ApplicationClosed(close) => {
 				match web_transport_proto::error_from_http3(close.error_code.into_inner()) {
-					Some(code) => {
-						WebTransportError::Closed(code, String::from_utf8_lossy(&close.reason).into_owned()).into()
-					}
+					Some(code) => WebTransportError::Closed(code, close.reason.clone()).into(),
 					None => SessionError::ConnectionError(e),
 				}
 			}
@@ -67,6 +58,9 @@ impl From<crate::quic::driver::ConnectionError> for SessionError {
 		}
 	}
 }
+
+/// The HTTP/3 code a closed session's streams are reset and stopped with.
+const WT_SESSION_GONE: u64 = 0x170d7b68;
 
 /// Why a session closed, shared by the session and its streams. The first close wins.
 ///
@@ -107,6 +101,24 @@ impl CloseReason {
 		}
 	}
 
+	/// The session's close reason when the peer reset or stopped a stream with
+	/// WT_SESSION_GONE, which tears down the streams of a closed session
+	/// (draft-ietf-webtrans-http3 §4.4), or None for any other code.
+	///
+	/// The reset can beat the close capsule, so until it lands the code and reason are
+	/// unknown: [`WebTransportError::SessionGone`], never a guessed clean close.
+	pub(crate) fn session_gone(&self, code: crate::quic::driver::VarInt) -> Option<SessionError> {
+		if self.raw || code.into_inner() != WT_SESSION_GONE {
+			return None;
+		}
+		Some(
+			self.reason
+				.get()
+				.cloned()
+				.unwrap_or_else(|| WebTransportError::SessionGone.into()),
+		)
+	}
+
 	/// Record the close reason, returning false if one was already recorded.
 	pub(crate) fn set(&self, err: SessionError) -> bool {
 		self.reason.set(err).is_ok()
@@ -117,8 +129,8 @@ impl CloseReason {
 	pub(crate) fn map(&self, err: SessionError) -> SessionError {
 		let conn = match &err {
 			SessionError::ConnectionError(conn)
-			| SessionError::SendDatagramError(crate::quic::driver::SendDatagramError::ConnectionLost(conn)) => Some(conn),
-			SessionError::WebTransportError(WebTransportError::Closed(..)) => None,
+			| SessionError::SendDatagramError(crate::quic::driver::send::Error::Connection(conn)) => Some(conn),
+			SessionError::WebTransportError(WebTransportError::Closed(..) | WebTransportError::SessionGone) => None,
 			_ => return err,
 		};
 
@@ -127,11 +139,9 @@ impl CloseReason {
 		}
 
 		match conn {
-			Some(crate::quic::driver::ConnectionError::ApplicationClosed(close)) if self.raw => {
+			Some(crate::quic::driver::connection::Error::ApplicationClosed(close)) if self.raw => {
 				match u32::try_from(close.error_code.into_inner()) {
-					Ok(code) => {
-						WebTransportError::Closed(code, String::from_utf8_lossy(&close.reason).into_owned()).into()
-					}
+					Ok(code) => WebTransportError::Closed(code, close.reason.clone()).into(),
 					Err(_) => err,
 				}
 			}
@@ -150,14 +160,18 @@ pub enum WebTransportError {
 	#[error("unknown session")]
 	UnknownSession,
 
+	/// The peer tore down the session's streams before its close reason arrived.
+	#[error("session gone")]
+	SessionGone,
+
 	#[error("read error: {0}")]
-	ReadError(#[from] crate::quic::driver::ReadExactError),
+	ReadError(#[from] crate::quic::driver::recv::Error),
 
 	#[error("write error: {0}")]
-	WriteError(#[from] crate::quic::driver::WriteError),
+	WriteError(#[from] crate::quic::driver::send::Error),
 }
 
-/// An error when writing to [`crate::quic::web::SendStream`]. Similar to [`crate::quic::driver::WriteError`].
+/// An error when writing to [`crate::quic::web::SendStream`]. Similar to [`crate::quic::driver::send::Error`].
 #[derive(Clone, Error, Debug)]
 #[non_exhaustive]
 pub enum WriteError {
@@ -170,27 +184,28 @@ pub enum WriteError {
 	#[error("session error: {0}")]
 	SessionError(#[from] SessionError),
 
+	/// The stream was already finished or reset.
 	#[error("stream closed")]
 	ClosedStream,
 }
 
-impl From<crate::quic::driver::WriteError> for WriteError {
-	fn from(e: crate::quic::driver::WriteError) -> Self {
+impl From<crate::quic::driver::send::Error> for WriteError {
+	fn from(e: crate::quic::driver::send::Error) -> Self {
 		match e {
-			crate::quic::driver::WriteError::Stopped(code) => {
+			crate::quic::driver::send::Error::Stopped(code) => {
 				match web_transport_proto::error_from_http3(code.into_inner()) {
 					Some(code) => WriteError::Stopped(code),
 					None => WriteError::InvalidStopped(code),
 				}
 			}
-			crate::quic::driver::WriteError::ClosedStream => WriteError::ClosedStream,
-			crate::quic::driver::WriteError::ConnectionLost(e) => WriteError::SessionError(e.into()),
-			crate::quic::driver::WriteError::ZeroRttRejected => unreachable!("0-RTT not supported"),
+			crate::quic::driver::send::Error::Connection(e) => WriteError::SessionError(e.into()),
+			// Only datagrams fail otherwise, and they report a session error.
+			e => WriteError::SessionError(e.into()),
 		}
 	}
 }
 
-/// An error when reading from [`crate::quic::web::RecvStream`]. Similar to [`crate::quic::driver::ReadError`].
+/// An error when reading from [`crate::quic::web::RecvStream`]. Similar to [`crate::quic::driver::recv::Error`].
 #[derive(Clone, Error, Debug)]
 #[non_exhaustive]
 pub enum ReadError {
@@ -203,77 +218,42 @@ pub enum ReadError {
 	#[error("invalid RESET_STREAM: {0}")]
 	InvalidReset(crate::quic::driver::VarInt),
 
+	/// The stream was already stopped.
 	#[error("stream already closed")]
 	ClosedStream,
-}
 
-impl From<crate::quic::driver::ReadError> for ReadError {
-	fn from(value: crate::quic::driver::ReadError) -> Self {
-		match value {
-			crate::quic::driver::ReadError::Reset(code) => {
-				match web_transport_proto::error_from_http3(code.into_inner()) {
-					Some(code) => ReadError::Reset(code),
-					None => ReadError::InvalidReset(code),
-				}
-			}
-			crate::quic::driver::ReadError::ConnectionLost(e) => ReadError::SessionError(e.into()),
-			crate::quic::driver::ReadError::ClosedStream => ReadError::ClosedStream,
-			crate::quic::driver::ReadError::ZeroRttRejected => unreachable!("0-RTT not supported"),
-			crate::quic::driver::ReadError::IllegalOrderedRead => {
-				unreachable!("WebTransport streams are only read in order")
-			}
-		}
-	}
-}
+	/// The connection's receive window was stuck and this stream was discarded to free it.
+	#[error("evicted")]
+	Evicted,
 
-/// An error returned by [`crate::quic::web::RecvStream::read_exact`]. Similar to [`crate::quic::driver::ReadExactError`].
-#[derive(Clone, Error, Debug)]
-#[non_exhaustive]
-pub enum ReadExactError {
+	/// The stream finished before [`read_exact`](crate::quic::web::RecvStream::read_exact)
+	/// filled its buffer, after this many bytes.
 	#[error("finished early")]
 	FinishedEarly(usize),
 
-	#[error("read error: {0}")]
-	ReadError(#[from] ReadError),
-}
-
-impl From<crate::quic::driver::ReadExactError> for ReadExactError {
-	fn from(e: crate::quic::driver::ReadExactError) -> Self {
-		match e {
-			crate::quic::driver::ReadExactError::FinishedEarly(size) => ReadExactError::FinishedEarly(size),
-			crate::quic::driver::ReadExactError::ReadError(e) => ReadExactError::ReadError(e.into()),
-		}
-	}
-}
-
-/// An error returned by [`crate::quic::web::RecvStream::read_to_end`]. Similar to [`crate::quic::driver::ReadToEndError`].
-#[derive(Clone, Error, Debug)]
-#[non_exhaustive]
-pub enum ReadToEndError {
+	/// The stream is longer than [`read_to_end`](crate::quic::web::RecvStream::read_to_end)'s limit.
 	#[error("too long")]
 	TooLong,
 
-	#[error("read error: {0}")]
-	ReadError(#[from] ReadError),
+	/// A lease wanted more than the connection receive window can hold.
+	#[error("want exceeds the receive window")]
+	TooLarge,
 }
 
-impl From<crate::quic::driver::ReadToEndError> for ReadToEndError {
-	fn from(e: crate::quic::driver::ReadToEndError) -> Self {
-		match e {
-			crate::quic::driver::ReadToEndError::TooLong => ReadToEndError::TooLong,
-			crate::quic::driver::ReadToEndError::Read(e) => ReadToEndError::ReadError(e.into()),
+impl From<crate::quic::driver::recv::Error> for ReadError {
+	fn from(value: crate::quic::driver::recv::Error) -> Self {
+		use crate::quic::driver::recv::Error;
+		match value {
+			Error::Reset(code) => match web_transport_proto::error_from_http3(code.into_inner()) {
+				Some(code) => ReadError::Reset(code),
+				None => ReadError::InvalidReset(code),
+			},
+			Error::Connection(e) => ReadError::SessionError(e.into()),
+			Error::Evicted => ReadError::Evicted,
+			Error::FinishedEarly(n) => ReadError::FinishedEarly(n),
+			Error::TooLong => ReadError::TooLong,
+			Error::TooLarge => ReadError::TooLarge,
 		}
-	}
-}
-
-/// An error indicating the stream was already closed.
-#[derive(Clone, Error, Debug)]
-#[error("stream closed")]
-pub struct ClosedStream;
-
-impl From<crate::quic::driver::ClosedStream> for ClosedStream {
-	fn from(_: crate::quic::driver::ClosedStream) -> Self {
-		ClosedStream
 	}
 }
 
@@ -285,13 +265,13 @@ pub enum ServerError {
 	UnexpectedEnd,
 
 	#[error("connection error")]
-	Connection(#[from] crate::quic::driver::ConnectionError),
+	Connection(#[from] crate::quic::driver::connection::Error),
 
 	#[error("failed to write")]
-	WriteError(#[from] crate::quic::driver::WriteError),
+	WriteError(#[from] crate::quic::driver::send::Error),
 
 	#[error("failed to read")]
-	ReadError(#[from] crate::quic::driver::ReadError),
+	ReadError(#[from] crate::quic::driver::recv::Error),
 
 	#[error("failed to exchange h3 settings")]
 	SettingsError(#[from] SettingsError),
@@ -306,32 +286,6 @@ pub enum ServerError {
 	#[error("rustls error: {0}")]
 	Rustls(#[from] rustls::Error),
 }
-
-// #[derive(Clone, Error, Debug)]
-// pub enum SendDatagramError {
-//     #[error("Unsupported peer")]
-//     UnsupportedPeer,
-
-//     #[error("Datagram support Disabled by peer")]
-//     DatagramSupportDisabled,
-
-//     #[error("Datagram Too large")]
-//     TooLarge,
-
-//     #[error("Session errorr: {0}")]
-//     SessionError(#[from] SessionError),
-// }
-
-// impl From<crate::quic::driver::SendDatagramError> for SendDatagramError {
-//     fn from(value: crate::quic::driver::SendDatagramError) -> Self {
-//          match value {
-//              crate::quic::driver::SendDatagramError::UnsupportedByPeer => SendDatagramError::UnsupportedPeer,
-//              crate::quic::driver::SendDatagramError::Disabled => SendDatagramError::DatagramSupportDisabled,
-//              crate::quic::driver::SendDatagramError::TooLarge => SendDatagramError::TooLarge,
-//              crate::quic::driver::SendDatagramError::ConnectionLost(e) =>
-// SendDatagramError::SessionError(e.into()),          }
-//     }
-// }
 
 impl web_transport_trait::Error for SessionError {
 	fn session_error(&self) -> Option<(u32, String)> {
@@ -406,5 +360,26 @@ mod tests {
 		// Past u32 and outside the HTTP/3 range: neither form.
 		let invalid = crate::quic::driver::VarInt::from_u64(1 << 40).unwrap();
 		assert_eq!(close.decode_stream_code(invalid), None);
+	}
+
+	/// WT_SESSION_GONE reports the session's close, before and after its capsule arrives.
+	#[test]
+	fn session_gone_reads_as_the_close() {
+		let gone = crate::quic::driver::VarInt::from_u64(WT_SESSION_GONE).unwrap();
+		let close = CloseReason::new(false);
+		assert!(matches!(
+			close.session_gone(gone),
+			Some(SessionError::WebTransportError(WebTransportError::SessionGone))
+		));
+
+		close.set(WebTransportError::Closed(7, "bye".into()).into());
+		assert!(matches!(
+			close.session_gone(gone),
+			Some(SessionError::WebTransportError(WebTransportError::Closed(7, reason))) if reason == "bye"
+		));
+		assert!(close.session_gone(close.encode_stream_code(7)).is_none());
+
+		// Raw QUIC has no HTTP/3 code space, so the same number is an application code.
+		assert!(CloseReason::new(true).session_gone(gone).is_none());
 	}
 }

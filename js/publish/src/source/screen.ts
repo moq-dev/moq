@@ -3,7 +3,7 @@ import type * as Audio from "../audio";
 import type * as Video from "../video";
 import type { Media } from "./types";
 
-// Signals the screen capture reads.
+/** Signals the screen capture reads. */
 export type ScreenInput = {
 	// Whether to hold the capture open. Defaults to true. Enabling prompts the user to pick a surface,
 	// so construct an enabled screen source during a user gesture or start it later with a live input.
@@ -18,13 +18,15 @@ export interface ScreenProps extends Inputs<ScreenInput> {
 	audio?: Audio.Constraints | boolean | Signal<Audio.Constraints | boolean | undefined>;
 }
 
-type ScreenOutput = {
+/** Signals the screen capture derives. */
+export type ScreenOutput = {
 	// The captured surface, or undefined while disabled or dismissed.
 	source: Signal<Media | undefined>;
 };
 
 /** Captures a screen, window, or tab that the user picks. */
 export class Screen {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<ScreenInput>;
 
 	/** The live-editable video constraints, or false to capture audio only. */
@@ -35,6 +37,7 @@ export class Screen {
 	readonly #out: ScreenOutput = {
 		source: new Signal<Media | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
@@ -73,38 +76,41 @@ export class Screen {
 		const audio = effect.get(this.audio);
 
 		// TODO Expose these to the application.
-		// @ts-expect-error Chrome only
+		// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `CaptureController`.
 		let controller: CaptureController | undefined;
-		// @ts-expect-error Chrome only
+		// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `CaptureController`.
 		if (typeof self.CaptureController !== "undefined") {
-			// @ts-expect-error Chrome only
+			// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `CaptureController`.
 			controller = new CaptureController();
 			controller.setFocusBehavior("no-focus-change");
 		}
 
 		effect.spawn(async () => {
-			const media = await effect.race(
-				navigator.mediaDevices
-					.getDisplayMedia({
-						video,
-						audio,
-						// @ts-expect-error Chrome only
-						controller,
-						preferCurrentTab: false,
-						selfBrowserSurface: "exclude",
-						surfaceSwitching: "include",
-						// TODO We should try to get system audio, but need to be careful about feedback.
-						// systemAudio: "exclude",
-					})
-					.catch(() => undefined),
+			const pending = navigator.mediaDevices.getDisplayMedia({
+				video,
+				audio,
+				// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `CaptureController`.
+				controller,
+				preferCurrentTab: false,
+				selfBrowserSurface: "exclude",
+				surfaceSwitching: "include",
+				// TODO We should try to get system audio, but need to be careful about feedback.
+				// systemAudio: "exclude",
+			});
+			// The picker may outlive this run; its eventual stream still belongs to the run.
+			effect.cleanup(() =>
+				pending.then(
+					(stream) => {
+						for (const track of stream.getTracks()) track.stop();
+					},
+					() => {},
+				),
 			);
+			const media = await effect.race(pending.catch(() => undefined));
 			if (!media) return;
 
 			const v = media.getVideoTracks().at(0) as Video.StreamTrack | undefined;
 			const a = media.getAudioTracks().at(0) as Audio.StreamTrack | undefined;
-
-			effect.cleanup(() => v?.stop());
-			effect.cleanup(() => a?.stop());
 
 			// A track that arrives dead already fired "ended", so the listener below would never run
 			// and we would publish a corpse.

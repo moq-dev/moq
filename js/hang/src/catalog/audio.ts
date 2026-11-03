@@ -1,24 +1,31 @@
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
+import { HlsFieldSchema } from "./hls";
 import { u53Schema } from "./integers";
-import { RelativeBroadcastSchema } from "./path";
-
-// Backwards compatibility: old track schema
-const TrackSchema = z.object({
-	name: z.string(),
-});
+import { InstanceSchema, RelativeBroadcastSchema } from "./path";
+import { codecNumber, countSchema, renditions } from "./section";
 
 /**
- * Schema for a single audio rendition's decoder config.
- * Mirrors WebCodecs AudioDecoderConfig (https://w3c.github.io/webcodecs/#audio-decoder-config).
+ * Whether `codec` parses: an AAC string names its object type, while any other string is carried
+ * as a codec this build may not decode. Mirrors the Rust `AudioCodec` parser.
  */
-export const AudioConfigSchema = z.object({
+function codecValid(codec: string): boolean {
+	if (codec.startsWith("mp4a.40.")) return codecNumber(codec.slice("mp4a.40.".length), 10, 0xff);
+	return true;
+}
+
+const AudioConfigFields = z.object({
 	// Optional reference to another broadcast that publishes this track, expressed
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The instance of the stream the reference names, when known. Absent accepts whichever stream
+	// resolves first. A route of another instance fails the entry; a route over a wire that
+	// carries no instance has one its session minted, which proves nothing, so there it is best
+	// effort. Without `broadcast`, it names the catalog's own stream.
+	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
@@ -28,7 +35,7 @@ export const AudioConfigSchema = z.object({
 
 	// Registered WebCodecs codec string, or Hang's "pcm" extension for
 	// interleaved little-endian IEEE-754 binary32 samples.
-	codec: z.string(),
+	codec: z.string().check(z.refine(codecValid, "malformed codec string")),
 
 	// The container format, used to decode the timestamp and more.
 	container: ContainerSchema,
@@ -38,18 +45,25 @@ export const AudioConfigSchema = z.object({
 	// Otherwise, the initialization information is in-band.
 	description: z.optional(hexSchema),
 
-	// The sample rate of the audio in Hz
-	sampleRate: u53Schema,
+	// The sample rate of the audio in Hz, never zero.
+	sampleRate: countSchema,
 
-	// The number of channels in the audio
-	numberOfChannels: u53Schema,
+	// The number of channels in the audio, never zero.
+	numberOfChannels: countSchema,
+
+	// What the decoded channels carry. Absent means the codec's own channel order. "ambisonic" is
+	// full-sphere AmbiX (ACN order, SN3D normalization) whose order follows from numberOfChannels,
+	// a square of at least 4. Typed as a plain string so an unrecognized layout survives a
+	// republish; a consumer treats one as absent.
+	layout: z.optional(z.string()),
 
 	// The maximum bitrate of the audio in bits per second.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),
 
 	// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	// must not select it. Default: true, so publishers only write it when false.
+	// should not select it, though one may keep it selected while no enabled alternative exists.
+	// Default: true, so publishers only write it when false.
 	enabled: z.optional(z.boolean()),
 
 	// The maximum delay between a frame being ready and the publisher flushing it, in whole
@@ -82,26 +96,34 @@ export const AudioConfigSchema = z.object({
 			z.transform((value) => (value === 0 ? undefined : value)),
 		),
 	),
+
+	// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
+	// is not HLS-renderable. A malformed value is absent, so it can never reject the media.
+	hls: HlsFieldSchema,
 });
 
-/** Schema for the catalog audio section: a map of track name to rendition config. */
-export const AudioSchema = z.union([
-	z.object({
-		// A map of track name to rendition configuration.
-		// This is not an array so it will work with JSON Merge Patch.
-		renditions: z.record(z.string(), AudioConfigSchema),
+/**
+ * Schema for a single audio rendition's decoder config.
+ * Mirrors WebCodecs AudioDecoderConfig (https://w3c.github.io/webcodecs/#audio-decoder-config).
+ */
+export const AudioConfigSchema = AudioConfigFields.check(
+	z.refine((c) => c.layout !== "ambisonic" || isAmbisonic(c.numberOfChannels), {
+		message: "ambisonic audio needs a square channel count of at least 4",
 	}),
-	// Backwards compatibility: transform old {track, config} format to new object format
-	z.pipe(
-		z.object({
-			track: TrackSchema,
-			config: AudioConfigSchema,
-		}),
-		z.transform((old) => ({
-			renditions: { [old.track.name]: old.config },
-		})),
-	),
-]);
+);
+
+// (order + 1)² channels for an order of at least 1.
+function isAmbisonic(channels: number): boolean {
+	const order = Math.round(Math.sqrt(channels));
+	return order >= 2 && order * order === channels;
+}
+
+/** Schema for the catalog audio section: a map of track name to rendition config. */
+export const AudioSchema = z.object({
+	// A map of track name to rendition configuration; a malformed rendition refuses the catalog.
+	// This is not an array so it will work with JSON Merge Patch.
+	renditions: renditions(AudioConfigSchema),
+});
 
 /** The catalog audio section: renditions keyed by track name. */
 export type Audio = z.infer<typeof AudioSchema>;

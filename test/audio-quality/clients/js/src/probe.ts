@@ -10,6 +10,8 @@
  *
  * @module
  */
+import { Milli, Nano } from "@moq/clock";
+import { Effect } from "@moq/signals";
 import type MoqWatch from "@moq/watch/element";
 import { Capture } from "./capture.ts";
 import { type Arrival, type Environment, SAMPLE_INTERVAL_MS, type Sample, SILENCE_RMS, type Stall } from "./schema.ts";
@@ -59,13 +61,19 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			})
 		: undefined;
 
+	const signals = new Effect();
+	// Peeking does not request PROBE reports on an audio-only page.
+	signals.subscribe(watch.player.in.probe, () => {});
+
 	// Stall changes are taken as they happen: a re-stall shorter than the sample grid is exactly the
 	// one a 250 ms read would miss, and it is what tells a stall from an underrun.
 	let stalls: Stall[] = [];
-	audio.out.stalled.subscribe((stalled) => {
-		const context = audio.out.context.peek();
-		if (context) stalls.push({ at: context.currentTime * 1000, stalled });
-	});
+	signals.cleanup(
+		audio.out.stalled.subscribe((stalled) => {
+			const context = audio.out.context.peek();
+			if (context) stalls.push({ at: context.currentTime * 1000, stalled });
+		}),
+	);
 
 	// The tap follows the output node, which the player rebuilds with its graph. A tap left on the old
 	// node would report a perfect run as one long silence.
@@ -120,7 +128,6 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			stalled: audio.out.stalled.peek(),
 			delay: sync.out.delay.peek(),
 			rtt: watch.player.in.probe.peek()?.rtt,
-			networkJitter: sync.out.jitter.peek(),
 			jitter: audio.source.out.config.peek()?.jitter,
 			renditionDelay: audio.source.out.config.peek()?.delay,
 			outputLatency: context ? context.outputLatency * 1000 : undefined,
@@ -140,19 +147,26 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			note(`${level}: ${args.map(String).join(" ")}`);
 			original(...args);
 		};
+		signals.cleanup(() => {
+			console[level] = original;
+		});
 	}
 
-	setInterval(() => samples.push(sample()), SAMPLE_INTERVAL_MS);
+	signals.interval(() => samples.push(sample()), Nano.fromMilli(Milli(SAMPLE_INTERVAL_MS)));
 
 	return {
 		drain: () => samples.splice(0, samples.length),
 		arrivals: () => recording?.drain() ?? [],
 		error: () => recording?.error(),
 		async finish() {
-			attach();
-			await current?.finish();
-			samples.push(sample());
-			await recording?.close();
+			try {
+				attach();
+				await current?.finish();
+				samples.push(sample());
+				await recording?.close();
+			} finally {
+				signals.close();
+			}
 		},
 		environment() {
 			const catalog = broadcast.out.catalog.peek();
@@ -160,7 +174,6 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			// One rendition is published per broadcast here, so the first is the one playing.
 			const config = Object.values(catalog.audio?.renditions ?? {})[0];
 			return {
-				crossOriginIsolated: globalThis.crossOriginIsolated === true,
 				transport: watch.connection.transport.peek(),
 				codec: config?.codec,
 				rate: config?.sampleRate,

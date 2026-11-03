@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "moq-room"
 description = "Headless multi-participant rooms over MoQ: announce-derived roster, token claims, and a chat track."
 authors = ["Luke Curley <kixelated@gmail.com>"]
@@ -13,13 +14,16 @@ keywords = ["quic", "webtransport", "conferencing", "live"]
 categories = ["multimedia", "network-programming"]
 
 [dependencies]
-kio = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-auth = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
-web-async = { workspace = true }
 
 [dev-dependencies]
-moq-tokio = { path = "../moq-tokio", default-features = false }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["net"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+workspace-hack = { path = "../workspace-hack" }
+
+[lints]
+workspace = true

@@ -715,6 +715,10 @@ mod tests {
 
 				// The send is local and the filter is synchronous, but the receive
 				// still has to be given a moment to land.
+				#[expect(
+					clippy::disallowed_methods,
+					reason = "a sync test with no runtime waits on a real kernel socket"
+				)]
 				std::thread::sleep(std::time::Duration::from_millis(50));
 				assert_eq!(
 					receiver(&sockets),

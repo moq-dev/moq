@@ -5,7 +5,8 @@
 				"codec": "avc1.64001f",
 				"codedWidth": 1280,
 				"codedHeight": 720,
-				"container": { "kind": "legacy" }
+				"container": { "kind": "legacy" },
+				"hls": { "track": "video.hls", "duration": 2000 }
 			}
 		}
 	},
@@ -15,16 +16,10 @@
 				"codec": "opus",
 				"sampleRate": 48000,
 				"numberOfChannels": 2,
-				"container": { "kind": "legacy" }
+				"container": { "kind": "legacy" },
+				"hls": { "track": "audio.hls", "duration": 2000 }
 			}
 		}
 	},
-	"clock": { "wall": 1751846400000000, "timescale": 1000000 },
-	"archive": {
-		"timelines": {
-			"video": { "track": "video.timeline.z", "duration": 2000 },
-			"audio": { "track": "audio.timeline.z", "duration": 2000 }
-		},
-		"timescale": 1000
-	}
+	"clock": { "wall": 1751846400000000, "timescale": 1000000 }
 }

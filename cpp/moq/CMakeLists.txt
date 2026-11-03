@@ -8,33 +8,8 @@ endif()
 
 project(moq-cpp VERSION ${_version} LANGUAGES CXX)
 
-# Builds moq-ffi as a staticlib with cargo and renders its bindings with uniffi-bindgen-cpp,
-# the same no-Corrosion custom target rs/moq-c/CMakeLists.txt uses. The cargo profile follows
-# CMAKE_BUILD_TYPE (release unless Debug), even on a multi-config generator (Visual Studio),
-# whose --config never changes it: the staticlib links the release CRT either way.
 set(_workspace "${CMAKE_CURRENT_SOURCE_DIR}/../..")
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(_profile debug)
-    set(_cargo_flags "")
-else()
-    set(_profile release)
-    set(_cargo_flags --release)
-endif()
-if(DEFINED ENV{CARGO_TARGET_DIR})
-    set(_cargo_target "$ENV{CARGO_TARGET_DIR}")
-else()
-    set(_cargo_target "${_workspace}/target")
-endif()
-if(WIN32)
-    set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/moq_ffi.lib")
-    set(_metadata "${_cargo_target}/${_profile}/moq_ffi.dll")
-elseif(APPLE)
-    set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/libmoq_ffi.a")
-    set(_metadata "${_cargo_target}/${_profile}/libmoq_ffi.dylib")
-else()
-    set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/libmoq_ffi.a")
-    set(_metadata "${_cargo_target}/${_profile}/libmoq_ffi.so")
-endif()
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/moq-ffi.cmake")
 
 find_program(UNIFFI_BINDGEN_CPP uniffi-bindgen-cpp REQUIRED)
 
@@ -44,49 +19,32 @@ find_program(UNIFFI_BINDGEN_CPP uniffi-bindgen-cpp REQUIRED)
 # Rendered to a scratch directory and copied only when changed, so a no-op cargo build does
 # not recompile the bindings.
 set(_generated "${CMAKE_CURRENT_BINARY_DIR}/include/moq/ffi")
+# moq::IMPLEMENTATION names this package's version, which lives in VERSION.
+set(_version_header "${CMAKE_CURRENT_BINARY_DIR}/include/moq/version.hpp")
+configure_file(cmake/version.hpp.in "${_version_header}" @ONLY)
 set(_generated_files moq.hpp moq.cpp moq_scaffolding.hpp uniffi_expected.hpp)
 list(TRANSFORM _generated_files PREPEND "${_generated}/" OUTPUT_VARIABLE _generated_paths)
 set(_render "${CMAKE_CURRENT_BINARY_DIR}/render")
 list(TRANSFORM _generated_files PREPEND "${_render}/" OUTPUT_VARIABLE _render_paths)
 add_custom_target(moq_ffi ALL
-    COMMAND cargo build --locked --package moq-ffi ${_cargo_flags}
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${_render}"
-    COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${_metadata}"
+    COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${MOQ_FFI_METADATA}"
         --config "${CMAKE_CURRENT_SOURCE_DIR}/uniffi.toml" --out-dir "${_render}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_render_paths} "${_generated}"
     WORKING_DIRECTORY "${_workspace}"
-    BYPRODUCTS "${MOQ_FFI_LIB}" "${_metadata}" ${_generated_paths}
-    COMMENT "Building moq-ffi and rendering its C++ bindings"
+    BYPRODUCTS ${_generated_paths}
+    COMMENT "Rendering the moq-ffi C++ bindings"
     VERBATIM
 )
-# System libraries the staticlib needs from an external linker. moq-ffi and moq-c share one
-# dependency tree, so they share rs/moq-c/native-libs/, which says how to regenerate it.
-if(APPLE)
-    set(_platform apple)
-elseif(WIN32)
-    set(_platform windows)
-else()
-    set(_platform linux)
+if(MOQ_FFI_CARGO)
+    add_dependencies(moq_ffi ${MOQ_FFI_CARGO})
 endif()
-file(STRINGS "${_workspace}/rs/moq-c/native-libs/${_platform}.txt" _lines)
-set(MOQ_NATIVE_LIBS "")
-foreach(_line IN LISTS _lines)
-    string(STRIP "${_line}" _line)
-    if(_line STREQUAL "" OR _line MATCHES "^#")
-        continue()
-    elseif(_line MATCHES "^framework:(.+)$")
-        list(APPEND MOQ_NATIVE_LIBS "-framework ${CMAKE_MATCH_1}")
-    else()
-        list(APPEND MOQ_NATIVE_LIBS "${_line}")
-    endif()
-endforeach()
-
 # The bindings compile here at the including project's CMAKE_CXX_STANDARD (else the compiler's
-# default, at least C++17) and with its flags; see src/moq.cpp. A standard raised only on a
-# consumer's own target does not reach this library.
+# default, at least C++17) and with its flags. Only a target that links them builds them: the
+# package ships the source, not this library.
 # Named moq-cpp so an in-tree build can sit beside moq-c's `moq` target.
-add_library(moq-cpp STATIC src/moq.cpp)
+add_library(moq-cpp STATIC EXCLUDE_FROM_ALL src/moq.cpp)
 add_library(moq::cpp ALIAS moq-cpp)
 add_dependencies(moq-cpp moq_ffi)
 target_compile_features(moq-cpp PUBLIC cxx_std_17)
@@ -103,6 +61,7 @@ if(PROJECT_IS_TOP_LEVEL)
 
     install(DIRECTORY include/moq DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     install(FILES ${_generated_paths} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/moq/ffi)
+    install(FILES "${_version_header}" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/moq)
     install(FILES src/moq.cpp DESTINATION ${CMAKE_INSTALL_DATADIR}/moq-cpp)
     install(FILES "${MOQ_FFI_LIB}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
 

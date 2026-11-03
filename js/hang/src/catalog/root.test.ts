@@ -1,9 +1,8 @@
 import { expect, test } from "bun:test";
-import * as z from "@zod/mini";
-import { ARCHIVE_VERSION, ArchiveSchema } from "./archive.ts";
+import * as z from "zod/mini";
 import { u53 } from "./integers.ts";
-import type { RelativeBroadcast } from "./path.ts";
-import { checkRenditions, DuplicateRendition, RootSchema } from "./root.ts";
+import type { ReferenceInstance, RelativeBroadcast } from "./path.ts";
+import { checkRenditions, DuplicateRendition, encode, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
 import { track } from "./track.ts";
 
 // The base catalog carries the media sections (`video`/`audio`) and the data track sections
@@ -32,7 +31,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 		video: {
 			renditions: {
 				video: {
-					broadcast: "././source/",
+					broadcast: "././source",
 					codec: "avc1.64001f",
 					container: { kind: "legacy" },
 				},
@@ -40,9 +39,79 @@ test("rendition broadcast reference is parsed and normalized", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	// Normalized like Rust path::Relative: redundant `.` and empty segments are dropped.
+	if (!parsed.video) throw new Error("missing video section");
+	// Normalized like Rust path::Relative: redundant `.` segments are dropped.
 	expect(parsed.video.renditions.video?.broadcast).toBe("source" as RelativeBroadcast);
+
+	// Spelled like a path, so an empty segment or a lone backslash refuses the catalog.
+	for (const broadcast of ["./source/", "/source", "a//b", "a\\b"]) {
+		const video = { broadcast, codec: "avc1.64001f", container: { kind: "legacy" } };
+		expect(RootSchema.safeParse({ video: { renditions: { video } } }).success).toBe(false);
+	}
+});
+
+// Mirrors Rust's `reference_instances_roundtrip_in_every_section`.
+test("every reference-bearing section carries an optional instance", () => {
+	const INSTANCE = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceInstance;
+	const catalog = (instance: string) => ({
+		contributions: { c: { broadcast: "./a", instance } },
+		video: {
+			renditions: {
+				v: { broadcast: "./a", instance, codec: "avc1.64001f", container: { kind: "legacy" } },
+			},
+		},
+		audio: {
+			renditions: {
+				a: {
+					broadcast: "./a",
+					instance,
+					codec: "opus",
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					container: { kind: "legacy" },
+				},
+			},
+		},
+		text: { renditions: { t: { broadcast: "./a", instance, format: "vtt" } } },
+		json: { tracks: { j: { broadcast: "./a", instance, mode: "snapshot" } } },
+		binary: { tracks: { b: { broadcast: "./a", instance, mode: "snapshot" } } },
+	});
+
+	const parsed = RootSchema.parse(catalog(INSTANCE));
+	if (!parsed.video) throw new Error("missing video section");
+	if (!parsed.audio) throw new Error("missing audio section");
+	expect(parsed.video.renditions.v?.instance).toBe(INSTANCE);
+	expect(parsed.audio.renditions.a?.instance).toBe(INSTANCE);
+	expect(parsed.text?.renditions.t?.instance).toBe(INSTANCE);
+	expect(parsed.json?.tracks.j?.instance).toBe(INSTANCE);
+	expect(parsed.binary?.tracks.b?.instance).toBe(INSTANCE);
+	expect(parsed.contributions?.c?.instance).toBe(INSTANCE);
+
+	// An empty instance refuses the catalog, as in Rust.
+	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
+});
+
+// Mirrors Rust's `contributions_roundtrip_and_refuse_malformed_entries`.
+test("a contribution parses beside a same-ID rendition and a malformed one is refused", () => {
+	const video = { alice: { codec: "avc1.64001f", container: { kind: "legacy" } } };
+	const parsed = RootSchema.parse({
+		contributions: { alice: { broadcast: "./alice.hang" } },
+		video: { renditions: video },
+	});
+	expect(parsed.contributions?.alice).toEqual({ broadcast: "alice.hang" as RelativeBroadcast });
+	// Contribution IDs are their own namespace, so one may share a rendition's ID.
+	expect(() => checkRenditions(parsed)).not.toThrow();
+	expect(encode(parsed).version).toBeUndefined();
+
+	for (const contributions of [
+		[],
+		{ alice: null },
+		{ alice: {} },
+		{ alice: { broadcast: 42 } },
+		{ alice: { broadcast: "./alice.hang", instance: "" } },
+	]) {
+		expect(RootSchema.safeParse({ contributions }).success).toBe(false);
+	}
 });
 
 test("rendition parent broadcast reference stays distinct from empty", () => {
@@ -58,7 +127,7 @@ test("rendition parent broadcast reference stays distinct from empty", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 	expect(parsed.video.renditions.video?.broadcast).toBe("." as RelativeBroadcast);
 });
 
@@ -71,7 +140,7 @@ test("rendition without broadcast reference stays undefined", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 	expect(parsed.video.renditions.video?.broadcast).toBeUndefined();
 });
 
@@ -135,73 +204,36 @@ test("clock stays off the wire when absent", () => {
 	expect(JSON.stringify(RootSchema.parse({}))).not.toContain('"clock"');
 });
 
-test("archive round-trips at the root", () => {
+test("a rendition's hls field round-trips", () => {
+	const hls = { track: "video.hls", duration: 2000 };
 	const parsed = RootSchema.parse({
-		archive: {
-			timelines: { video: { track: "video.timeline.z", duration: 2000 } },
-			replay: "./recordings/clip",
-			store: "https://objects.example/rec/",
-			version: ARCHIVE_VERSION,
-		},
+		video: { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" }, hls } } },
 	});
-	expect(parsed.archive).toMatchObject({
-		timelines: { video: { track: "video.timeline.z", duration: 2000 } },
-		timescale: 1000,
-		replay: "recordings/clip",
-		store: "https://objects.example/rec/",
-		version: 2,
-	});
-	expect(JSON.stringify(parsed)).not.toContain('"timeline":');
+	if (!parsed.video) throw new Error("missing video section");
+	expect(parsed.video.renditions.video?.hls).toEqual({ track: hls.track, duration: u53(hls.duration) });
+	expect(JSON.stringify(parsed)).toContain('"hls":{"track":"video.hls","duration":2000}');
 });
 
-test("a legacy root timeline is not an archive", () => {
-	const parsed = RootSchema.parse({ timeline: { track: "timeline.z" } });
-	expect(parsed.archive).toBeUndefined();
-});
-
-test("an incompatible archive leaves media playable", () => {
-	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
-	const media = RootSchema.parse({ video });
-	for (const archive of [
-		{ track: "timeline.z", timescale: 1000 },
-		{ timelines: {}, store: "not a url" },
-		{ timelines: {}, timescale: 0 },
-		{ timelines: { video: 42 } },
-		{ future: "archive" },
-		"archive",
-		[],
-		null,
-	]) {
-		expect(() => ArchiveSchema.parse(archive)).toThrow();
-		const parsed = RootSchema.parse({ video, archive });
-		expect(parsed.archive).toBeUndefined();
-		expect(parsed.video).toEqual(media.video);
-		expect(JSON.stringify(parsed)).not.toContain('"archive"');
+test("a malformed hls field leaves the rendition playable", () => {
+	const config = { codec: "avc1.64001f", container: { kind: "legacy" } };
+	for (const hls of [{ track: "video.hls" }, { duration: 2000 }, { track: 42, duration: 2000 }, "video.hls", null]) {
+		const parsed = RootSchema.parse({ video: { renditions: { video: { ...config, hls } } } });
+		if (!parsed.video) throw new Error("missing video section");
+		expect(parsed.video.renditions.video?.hls).toBeUndefined();
+		expect(parsed.video.renditions.video?.codec).toBe(config.codec);
 	}
 });
 
-test("an incompatible archive does not hide invalid media", () => {
-	expect(() =>
-		RootSchema.parse({
-			archive: { track: "timeline.z" },
-			video: { renditions: { video: { codec: 42, container: { kind: "legacy" } } } },
-		}),
-	).toThrow();
-});
-
-// The exact shape Rust's moq-mux publishes for every broadcast, so a native publisher's catalog
-// stays playable.
-test("a Rust per-track archive parses", () => {
+// The root `archive` section is gone: a catalog from an older publisher still parses, with its
+// media intact and the entry left as an unknown extension.
+test("an old root archive is ignored", () => {
+	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+	const media = RootSchema.parse({ video });
 	const parsed = RootSchema.parse({
-		archive: {
-			timelines: {
-				"catalog.json": { track: "catalog.json.timeline.z", duration: 0 },
-				video0: { track: "video0.timeline.z", duration: 4000 },
-			},
-			timescale: 1000,
-		},
+		video,
+		archive: { timelines: { video: { track: "video.timeline.z", duration: 2000 } }, timescale: 1000 },
 	});
-	expect(parsed.archive?.timelines.video0?.track).toBe("video0.timeline.z");
+	expect(parsed.video).toEqual(media.video);
 });
 
 test("an absent or foreign text section parses to empty", () => {
@@ -257,6 +289,38 @@ test("one track name in two broadcasts keeps both renditions", () => {
 test("an ID used by both video and audio is refused", () => {
 	const parsed = RootSchema.parse({ video: { renditions: { main: avc } }, audio: { renditions: { main: opus } } });
 	expect(() => checkRenditions(parsed)).toThrow(DuplicateRendition);
+});
+
+// A newer draft may reshape a section, so the version is refused before any section is read,
+// wherever it sits in the object, including through an extended schema.
+test("a newer catalog version is refused", () => {
+	const reshaped = { video: { renditions: { hd: { codec: 42 } } }, version: 5 };
+	expect(() => RootSchema.parse(reshaped)).toThrow(UnsupportedVersion);
+	const ExtendedSchema = z.extend(RootSchema, { scte35: z.optional(z.string()) });
+	expect(() => ExtendedSchema.parse(reshaped)).toThrow(UnsupportedVersion);
+});
+
+test("a supported catalog version is read", () => {
+	for (const version of [undefined, 3, VERSION]) expect(RootSchema.parse({ version }).version).toBe(version);
+	for (const version of ["4", -1, 4.5]) {
+		expect(() => RootSchema.parse({ version })).toThrow(z.core.$ZodError);
+	}
+});
+
+// Only a field an older reader would misread raises the version.
+test("the catalog version is needed only for misread fields", () => {
+	const audio = { ...opus, warmup: 80 };
+	const root = (hd: object) =>
+		RootSchema.parse({ video: { renditions: { hd } }, audio: { renditions: { en: audio } } });
+
+	expect(encode(root(avc)).version).toBeUndefined();
+	expect(encode(root({ ...avc, track: "hd" })).version).toBeUndefined();
+	expect(encode(root({ ...avc, track: "video" })).version).toBe(4);
+	expect(encode(root({ ...avc, warmup: 500 })).version).toBe(4);
+	const data = RootSchema.parse({ json: { tracks: { chat: { mode: "stream", track: "chat.json" } } } });
+	expect(encode(data).version).toBe(4);
+	// A carried version is recomputed, never trusted.
+	expect(encode({ ...root(avc), version: 4 }).version).toBeUndefined();
 });
 
 test("shared stats and echo discovery round trips without changing old catalogs", async () => {

@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { type Backend, Renderer } from "./renderer";
 
 // Let the probe's promise chain and the effects it wakes run to completion.
 async function settle(): Promise<void> {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 }
 
 type Kind = "2d" | "webgpu";
@@ -266,7 +267,7 @@ describe("Renderer", () => {
 		const renderer = create(canvas, "webgpu");
 		try {
 			await settle();
-			expect(renderer.out.error.peek()).toBe("unsupported");
+			expect(renderer.out.error.peek()?.name).toBe("NotSupportedError");
 			expect(canvas.kind).toBeUndefined();
 			expect(paint()).toBe(0);
 		} finally {
@@ -310,7 +311,7 @@ describe("Renderer", () => {
 		expect(gpu.devices[1].destroyed).toBe(true);
 	});
 
-	it("reports surface-lost when no device replaces a lost one, and recovers on a fresh canvas", async () => {
+	it("reports InvalidStateError when no device replaces a lost one, and recovers on a fresh canvas", async () => {
 		gpu.adapters = [{}];
 		const canvas = new Signal<FakeCanvas | undefined>(new FakeCanvas());
 		const renderer = create(canvas);
@@ -322,7 +323,7 @@ describe("Renderer", () => {
 			gpu.devices[0].lose();
 			await settle();
 
-			expect(renderer.out.error.peek()).toBe("surface-lost");
+			expect(renderer.out.error.peek()?.name).toBe("InvalidStateError");
 			expect(paint()).toBe(0);
 
 			// The lost canvas only hands out WebGPU, so recovery is a fresh canvas, which "auto"
@@ -340,13 +341,13 @@ describe("Renderer", () => {
 		}
 	});
 
-	it("reports surface-lost for a canvas that holds another kind of context", async () => {
+	it("reports InvalidStateError for a canvas that holds another kind of context", async () => {
 		const canvas = new FakeCanvas();
 		canvas.getContext("webgpu");
 		const renderer = create(canvas, "2d");
 		try {
 			await settle();
-			expect(renderer.out.error.peek()).toBe("surface-lost");
+			expect(renderer.out.error.peek()?.name).toBe("InvalidStateError");
 		} finally {
 			renderer.close();
 		}

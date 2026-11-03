@@ -9,8 +9,16 @@ use url::Url;
 use crate::{Error, Id, moq_protocol_error};
 
 /// A callback receiving a positive handle/value, zero on clean completion, or a negative error.
-#[allow(non_camel_case_types)]
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
+
+/// A callback receiving each session lifecycle change; the `MOQ_CONNECTION_PHASE_CLOSED` one is terminal.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state: *const crate::moq_connection_state)>;
 
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
@@ -205,6 +213,7 @@ impl OnStatus {
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
 	/// - The callback function pointer must be valid if provided.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
 	pub unsafe fn new(user_data: *mut c_void, on_status: moq_status_callback) -> Result<Self, Error> {
 		Ok(Self {
 			user_data,
@@ -223,7 +232,43 @@ impl OnStatus {
 	}
 }
 
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread for the callback's lifetime.
 unsafe impl Send for OnStatus {}
+
+/// A [moq_state_callback] and its user data.
+#[derive(Clone, Copy)]
+pub struct OnState {
+	user_data: *mut c_void,
+	on_state: extern "C" fn(user_data: *mut c_void, state: *const crate::moq_connection_state),
+}
+
+impl OnState {
+	/// Wrap a C state callback.
+	///
+	/// # Safety
+	/// - The caller must keep `user_data` valid until the terminal callback.
+	/// - The callback and `user_data` must be safe to use on moq-c's runtime thread.
+	pub unsafe fn new(user_data: *mut c_void, on_state: moq_state_callback) -> Result<Self, Error> {
+		Ok(Self {
+			user_data,
+			on_state: on_state.ok_or(Error::InvalidPointer)?,
+		})
+	}
+
+	/// Deliver one snapshot, recording its failure first so the callback can read `moq_error()`.
+	pub fn call(&self, state: &crate::session::Lifecycle) {
+		if let Some(failure) = &state.failure {
+			record(failure);
+		}
+		let state = state.to_c();
+		(self.on_state)(self.user_data, &state);
+	}
+}
+
+// SAFETY: The constructor requires the callback and user_data to remain valid and
+// safe to use on moq-c's runtime thread until the terminal callback.
+unsafe impl Send for OnState {}
 
 /// Types that can be converted to C-compatible return codes.
 pub trait ReturnCode {
@@ -332,7 +377,12 @@ thread_local! {
 /// Called at the FFI boundary (sync return and callback dispatch) right before
 /// the numeric code is produced, so the conversion in `code()` stays pure.
 fn record_error<C: ReturnCode>(ret: &C) {
-	let Some(err) = ret.error() else { return };
+	if let Some(err) = ret.error() {
+		record(err);
+	}
+}
+
+fn record(err: &Error) {
 	// CString::new fails only on an interior NUL, which our messages never
 	// contain; skip storing rather than truncating if it ever happens.
 	if let Ok(msg) = CString::new(err.to_string()) {
@@ -456,6 +506,16 @@ pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], 
 
 	let data = unsafe { std::slice::from_raw_parts(data, size) };
 	Ok(data)
+}
+
+/// Parse an optional timestamp, NULL meaning untimed.
+///
+/// # Safety
+/// `timestamp` must be NULL or a valid pointer to a [crate::moq_timestamp].
+pub unsafe fn parse_timestamp(timestamp: *const crate::moq_timestamp) -> Result<Option<moq_net::Timestamp>, Error> {
+	Ok(unsafe { timestamp.as_ref() }
+		.map(|&timestamp| timestamp.try_into())
+		.transpose()?)
 }
 
 #[cfg(test)]

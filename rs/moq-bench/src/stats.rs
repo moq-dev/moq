@@ -1,7 +1,8 @@
+use kio::clock::Wall;
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::Serialize;
@@ -37,6 +38,10 @@ pub struct Stats {
 	/// Completed group deliveries across all subscriptions (the displayed total).
 	/// A group the relay failed part-way is omitted and counted as lost.
 	pub groups_recv: AtomicU64,
+	/// Completed deliveries older than their subscription's first group, such as
+	/// cached history filled in after the subscribe. Included in `groups_recv`,
+	/// excluded from `groups_expected`, and never counted as loss.
+	pub groups_history: AtomicU64,
 	/// Settled sequence spans plus any failed live-frontier groups.
 	pub groups_expected: AtomicU64,
 	/// Completed deliveries within `groups_expected`. The shortfall is the gaps
@@ -68,6 +73,7 @@ impl Stats {
 			frames_recv: AtomicU64::new(0),
 			bytes_recv: AtomicU64::new(0),
 			groups_recv: AtomicU64::new(0),
+			groups_history: AtomicU64::new(0),
 			groups_expected: AtomicU64::new(0),
 			groups_present: AtomicU64::new(0),
 			groups_lost: AtomicU64::new(0),
@@ -100,9 +106,8 @@ impl Stats {
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
 		// Read the clock before locking so contention is not measured as latency.
-		let now_ms = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or_default()
+		let now_ms = kio::clock::wall()
+			.saturating_duration_since(Wall::UNIX_EPOCH)
 			.as_millis();
 		self.latency.observe(sent_ms, now_ms);
 	}
@@ -125,7 +130,7 @@ impl Stats {
 	/// recorded stats are partial is invalid, so the caller must fail the run
 	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
-		let mut ticker = tokio::time::interval(interval);
+		let mut ticker = kio::clock::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
 
@@ -168,6 +173,7 @@ impl Stats {
 				recv_mbps = format_args!("{recv_mbps:.1}"),
 				recv_fps = format_args!("{recv_fps:.0}"),
 				recv_groups = now.groups_recv,
+				history_groups = now.groups_history,
 				lost_groups = now.groups_lost,
 				loss = format_args!("{loss:.2}%"),
 				latency_samples = now.latency_samples,
@@ -210,8 +216,16 @@ struct Record<'a> {
 
 impl<'a> Record<'a> {
 	fn new(previous: &Snapshot, snapshot: &'a Snapshot, interval: &'a IntervalLatency) -> anyhow::Result<Self> {
-		let interval_start_ms = previous.captured_at.duration_since(UNIX_EPOCH)?.as_millis();
-		let interval_end_ms = snapshot.captured_at.duration_since(UNIX_EPOCH)?.as_millis();
+		let interval_start_ms = previous
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.expect("Wall is after the Unix epoch")
+			.as_millis();
+		let interval_end_ms = snapshot
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.expect("Wall is after the Unix epoch")
+			.as_millis();
 		Ok(Self {
 			timestamp_ms: interval_end_ms,
 			interval_start_ms,
@@ -239,7 +253,7 @@ struct Activity {
 struct Snapshot {
 	ready: bool,
 	#[serde(skip)]
-	captured_at: SystemTime,
+	captured_at: Wall,
 	connections: Connections,
 	broadcasts: Activity,
 	subscriptions: Activity,
@@ -248,6 +262,7 @@ struct Snapshot {
 	frames_recv: u64,
 	bytes_recv: u64,
 	groups_recv: u64,
+	groups_history: u64,
 	groups_expected: u64,
 	groups_present: u64,
 	groups_lost: u64,
@@ -354,6 +369,7 @@ impl Snapshot {
 			frames_recv: stats.frames_recv.load(Ordering::Relaxed),
 			bytes_recv: stats.bytes_recv.load(Ordering::Relaxed),
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
+			groups_history: stats.groups_history.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
 			groups_present,
 			groups_lost,
@@ -419,7 +435,7 @@ impl Latency {
 		// include only part of an observation. One that reads the clock before the
 		// boundary but locks after it counts in the next interval, unaltered.
 		let state = self.state.lock().expect("latency lock poisoned");
-		let captured_at = SystemTime::now();
+		let captured_at = kio::clock::wall();
 		let LatencyState {
 			buckets,
 			max_ms,
@@ -443,7 +459,7 @@ impl Latency {
 }
 
 struct LatencySnapshot {
-	captured_at: SystemTime,
+	captured_at: Wall,
 	samples: u64,
 	p50_ms: Option<u64>,
 	p90_ms: Option<u64>,
@@ -557,9 +573,8 @@ mod tests {
 	async fn report_fails_on_output_error() {
 		tokio::time::pause();
 
-		let dir = std::env::temp_dir().join("moq-bench-stats-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("out.jsonl");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("out.jsonl");
 		std::fs::write(&path, b"").unwrap();
 		// A read-only handle: the first write fails.
 		let file = std::fs::File::open(&path).unwrap();
@@ -719,10 +734,10 @@ mod tests {
 	fn report_bounds_belong_to_captured_samples() {
 		let stats = Stats::default();
 		let mut previous = Snapshot::take(&stats);
-		previous.captured_at = UNIX_EPOCH + Duration::from_millis(1_000);
+		previous.captured_at = Wall::UNIX_EPOCH + Duration::from_millis(1_000);
 		stats.latency.observe(1_000, 1_050);
 		let mut snapshot = Snapshot::take(&stats);
-		snapshot.captured_at = UNIX_EPOCH + Duration::from_millis(2_000);
+		snapshot.captured_at = Wall::UNIX_EPOCH + Duration::from_millis(2_000);
 
 		// This delivery belongs to the next capture, even if report construction is delayed.
 		stats.latency.observe(2_000, 2_050);
@@ -745,7 +760,11 @@ mod tests {
 	fn observation_racing_a_capture_keeps_its_latency() {
 		let latency = Latency::default();
 		let first = latency.snapshot();
-		let captured_ms = first.captured_at.duration_since(UNIX_EPOCH).unwrap().as_millis();
+		let captured_ms = first
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.unwrap()
+			.as_millis();
 
 		latency.observe(captured_ms - 100, captured_ms - 50);
 		latency.observe(captured_ms - 50, captured_ms - 100);
@@ -760,10 +779,16 @@ mod tests {
 	/// Sweep observation concurrency and report density without a network bottleneck.
 	#[test]
 	#[ignore = "performance measurement; run by the nightly stats benchmark"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real observation throughput"
+	)]
 	fn benchmark_observation_contention() {
 		use std::sync::Barrier;
 		use std::time::Instant;
 
+		println!("writers,snapshots,ns_per_sample");
 		for writers in [1, 4, 16] {
 			for snapshots in [0, 10, 100] {
 				let stats = Stats::default();
@@ -797,10 +822,8 @@ mod tests {
 				let elapsed = elapsed.elapsed();
 				assert_eq!(Snapshot::take(&stats).latency_samples, (writers * samples) as u64);
 				println!(
-					"writers={writers} snapshots={snapshots} samples={} elapsed_ns={} samples_per_second={:.0}",
-					writers * samples,
-					elapsed.as_nanos(),
-					(writers * samples) as f64 / elapsed.as_secs_f64()
+					"{writers},{snapshots},{:.2}",
+					elapsed.as_nanos() as f64 / (writers * samples) as f64
 				);
 			}
 		}

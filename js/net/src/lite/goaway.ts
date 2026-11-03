@@ -1,17 +1,6 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { Version } from "./version.ts";
-
-function guardGoaway(version: Version) {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-			throw new Error("goaway not supported for this version");
-		default:
-			break;
-	}
-}
+import { hasGoaway, type Version } from "./version.ts";
 
 /// Sent to gracefully shut down a session and optionally redirect to a new URI.
 ///
@@ -38,12 +27,12 @@ export class Goaway {
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
-		guardGoaway(version);
+		if (!hasGoaway(version)) throw new Error("goaway not supported for this version");
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
 	static async decode(r: Reader, version: Version): Promise<Goaway> {
-		guardGoaway(version);
+		if (!hasGoaway(version)) throw new Error("goaway not supported for this version");
 		return Message.decode(r, Goaway.#decode);
 	}
 }

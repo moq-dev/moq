@@ -65,6 +65,8 @@ const room = new Room({ connection, identity });
 // member.player exposes the complete Watch.Player pipeline.
 ```
 
+`Local` publishes through `Publish.Broadcast`, which encodes while enabled: while `cameraEnabled` is on, the camera's hd and sd renditions encode even when nobody in the room watches, so a member who arrives late can fetch the last few seconds. While `microphoneEnabled` is on, the microphone keeps raw audio and encodes it once someone listens. Turn either off to stop that capture.
+
 hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Location stays an app-defined catalog extension (`TRACK.location`). hang.live's JSON chat (`TRACK.chat` = `hang/chat.json`) is also an extension; the JSON window track is `Chat.TRACK` (`"chat"`).
 
 ```ts
@@ -74,7 +76,7 @@ const publisher = Chat.Publisher.create(broadcast);
 publisher.send("hello");
 
 const subscriber = Chat.Subscriber.subscribe(broadcast.consume());
-const event = await subscriber.recv(); // push, pop, or skip
+const event = await subscriber.recv(); // { value: push, pop, or skip, at: when it was sent }
 // Call publisher.finish() and subscriber.close() when done.
 ```
 

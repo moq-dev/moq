@@ -4,7 +4,8 @@ import { Terminal } from "../src/audio/terminal";
 // Decoder count × callback size checks that trimming costs a span calculation,
 // independent of the PCM payload size. Periodic gaps exercise the priming path.
 const CALLBACKS = 4096;
-console.log("decoders,frames,warmup_us,ns_per_callback");
+// No timing suffix on warmup: the trend report would read that dimension as a measurement.
+console.log("decoders,frames,warmup,ns_per_callback");
 let retained = 0;
 for (const count of [1, 16, 64]) {
 	for (const frames of [120, 960, 2880]) {
@@ -30,7 +31,7 @@ for (const count of [1, 16, 64]) {
 				timings.push(((performance.now() - start) * 1e6) / (CALLBACKS * count));
 			}
 			timings.sort((a, b) => a - b);
-			console.log(`${count},${frames},${warmup},${timings[1]?.toFixed(1)}`);
+			console.log(`${count},${frames},${warmup / 1000}ms,${timings[1]?.toFixed(1)}`);
 		}
 	}
 }

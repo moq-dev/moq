@@ -25,6 +25,8 @@
 //!
 //! Varint encoding is QUIC-style throughout via [`moq_net::varint`].
 
+#![warn(missing_docs)]
+
 use bytes::{Buf, Bytes, BytesMut};
 use moq_net::{BoundsExceeded, DecodeError, EncodeError, varint};
 

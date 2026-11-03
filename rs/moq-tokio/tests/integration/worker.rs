@@ -106,7 +106,7 @@ fn bind_workers(
 /// Pinning is off throughout: a CI container may restrict which cores it may run
 /// on, and none of these tests are about placement.
 fn config(count: u16) -> worker::Config {
-	worker::Config::new(count).with_pin(false)
+	worker::Config::new(count)
 }
 
 /// Workers that outlive their owner are a leak with teeth: the threads keep
@@ -154,9 +154,9 @@ async fn stopping_the_group_closes_its_sessions() {
 	for member in group.members() {
 		member.serve(|server| async move {
 			let mut listener = server.listen().await.unwrap();
-			while let Some(request) = listener.accept().await {
+			while let Ok(request) = listener.accept().await {
 				tokio::spawn(async move {
-					let (_session, _driver) = request.ok().await.unwrap();
+					let _session = request.ok().await.unwrap();
 					std::future::pending::<()>().await;
 				});
 			}
@@ -165,21 +165,20 @@ async fn stopping_the_group_closes_its_sessions() {
 
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.fingerprint = fingerprints;
-	connect.once = Some(true);
 	#[cfg(feature = "websocket")]
 	{
 		connect.websocket.enabled = Some(false);
 	}
 	// Far past the wait below, so only a close on the wire can end the session.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(std::time::Duration::from_secs(600));
+	quic.idle_timeout = Some((std::time::Duration::from_secs(600)).into());
 	quic.keep_alive = None;
-	let client = connect.init(quic).unwrap();
+	let client = connect.init(quic).unwrap().with_reconnect(false);
 	let url: url::Url = format!("https://{addr}/").parse().unwrap();
 	let session = client.connect(url).established().await.expect("connect");
 
 	group.shutdown().await;
-	tokio::time::timeout(std::time::Duration::from_secs(5), session.closed())
+	kio::clock::timeout(std::time::Duration::from_secs(5), session.closed())
 		.await
 		.expect("the session must see the close")
 		.expect_err("a stopped server ends the session");
@@ -271,7 +270,7 @@ async fn spawner_abort_reaches_the_worker() {
 	has_started.await.expect("future started");
 	task.abort();
 
-	let waited = tokio::time::timeout(std::time::Duration::from_secs(5), was_dropped).await;
+	let waited = kio::clock::timeout(std::time::Duration::from_secs(5), was_dropped).await;
 	assert!(waited.expect("abort reached the worker").is_err());
 	group.shutdown().await;
 }
@@ -304,7 +303,7 @@ async fn spawner_abort_races_the_handoff() {
 	// the oneshot the forwarding task has yet to read.
 	task.abort();
 
-	let waited = tokio::time::timeout(std::time::Duration::from_secs(5), was_dropped).await;
+	let waited = kio::clock::timeout(std::time::Duration::from_secs(5), was_dropped).await;
 	assert!(waited.expect("abort reached the worker").is_err());
 	group.shutdown().await;
 }
@@ -593,16 +592,16 @@ async fn completing_a_member_stops_its_siblings() {
 	drop(members);
 
 	assert_eq!(
-		tokio::time::timeout(std::time::Duration::from_secs(10), done)
+		kio::clock::timeout(std::time::Duration::from_secs(10), done)
 			.await
 			.expect("completing member hangs")
 			.expect("completing member failed"),
 		"done"
 	);
-	tokio::time::timeout(std::time::Duration::from_secs(10), group.finished())
+	kio::clock::timeout(std::time::Duration::from_secs(10), group.finished())
 		.await
 		.expect("the group must report the end of serving");
-	let _ = tokio::time::timeout(std::time::Duration::from_secs(10), sibling)
+	let _ = kio::clock::timeout(std::time::Duration::from_secs(10), sibling)
 		.await
 		.expect("a stopped sibling must not hang");
 
@@ -639,14 +638,14 @@ async fn cancelling_a_member_stops_its_siblings() {
 	drop(members);
 
 	task_a.abort();
-	tokio::time::timeout(std::time::Duration::from_secs(10), group.finished())
+	kio::clock::timeout(std::time::Duration::from_secs(10), group.finished())
 		.await
 		.expect("an abort must end the group");
 	// The aborted handle reports cancellation; the sibling is stopped with it.
-	let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task_a)
+	let _ = kio::clock::timeout(std::time::Duration::from_secs(10), task_a)
 		.await
 		.expect("an aborted member must not hang");
-	let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task_b)
+	let _ = kio::clock::timeout(std::time::Duration::from_secs(10), task_b)
 		.await
 		.expect("a cancelled sibling must not hang");
 
@@ -683,15 +682,15 @@ async fn a_panicking_member_stops_its_siblings() {
 	});
 	drop(members);
 
-	let err = tokio::time::timeout(std::time::Duration::from_secs(10), panics)
+	let err = kio::clock::timeout(std::time::Duration::from_secs(10), panics)
 		.await
 		.expect("a panicking member must not hang")
 		.expect_err("a panic must reach its handle");
 	assert!(err.is_panic(), "expected a panic, got cancellation");
-	tokio::time::timeout(std::time::Duration::from_secs(10), group.finished())
+	kio::clock::timeout(std::time::Duration::from_secs(10), group.finished())
 		.await
 		.expect("a panic must end the group");
-	let _ = tokio::time::timeout(std::time::Duration::from_secs(10), sibling)
+	let _ = kio::clock::timeout(std::time::Duration::from_secs(10), sibling)
 		.await
 		.expect("a panicking sibling must not hang");
 
@@ -720,7 +719,7 @@ async fn shutdown_with_work_in_flight_joins() {
 
 	group.shutdown().await;
 	for task in tasks {
-		let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+		let _ = kio::clock::timeout(std::time::Duration::from_secs(10), task)
 			.await
 			.expect("shutdown must stop every member");
 	}
@@ -753,7 +752,7 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 
 	drop(group);
 	for task in tasks {
-		let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+		let _ = kio::clock::timeout(std::time::Duration::from_secs(10), task)
 			.await
 			.expect("dropping the group must stop every member");
 	}
@@ -783,11 +782,11 @@ async fn rotated_identity_reaches_every_worker() {
 		member.serve(move |server| async move {
 			let certificates = server.certificates();
 			let mut listener = server.listen().await.unwrap();
-			while let Some(request) = listener.accept().await {
+			while let Ok(request) = listener.accept().await {
 				let send = send.clone();
 				let certificates = certificates.clone();
 				tokio::spawn(async move {
-					let (session, _driver) = request.ok().await.unwrap();
+					let session = request.ok().await.unwrap();
 					send.send((index, certificates.fingerprints())).unwrap();
 					let _ = session.closed().await;
 				});
@@ -817,12 +816,11 @@ async fn rotated_identity_reaches_every_worker() {
 				// Fresh client endpoints make independent handshakes, without session resumption.
 				let mut config = moq_tokio::connect::Config::default();
 				config.tls.fingerprint = expected.clone();
-				config.once = Some(true);
 				#[cfg(feature = "websocket")]
 				{
 					config.websocket.enabled = Some(false);
 				}
-				let client = config.init(Default::default()).unwrap();
+				let client = config.init(Default::default()).unwrap().with_reconnect(false);
 				let url: url::Url = format!("https://{addr}/").parse().unwrap();
 				let session = client
 					.connect(url)
@@ -836,7 +834,29 @@ async fn rotated_identity_reaches_every_worker() {
 			}
 		}
 	};
-	let result = tokio::time::timeout(std::time::Duration::from_secs(10), probe).await;
+	let result = kio::clock::timeout(std::time::Duration::from_secs(10), probe).await;
 	group.shutdown().await;
 	result.expect("every worker must serve both snapshots");
+}
+
+/// Both shutdowns join on tokio's blocking pool, which a caller outside any runtime
+/// reaches through moq-tokio's fallback.
+#[test]
+fn shutting_down_outside_a_runtime_joins_the_workers() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+
+	let workers =
+		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
+	let owned = bound(workers.local_addr());
+	futures::executor::block_on(workers.shutdown());
+	assert!(owned.is_disjoint(&open_sockets()), "the workers left the port bound");
+
+	let workers =
+		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
+	let owned = bound(workers.local_addr());
+	futures::executor::block_on(workers.split().shutdown());
+	assert!(owned.is_disjoint(&open_sockets()), "the group left the port bound");
 }

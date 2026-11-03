@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"math"
 	"time"
 
 	"moq.dev/moq"
@@ -27,12 +26,11 @@ type EncoderInput = ffi.MoqAudioEncoderInput
 type Packet = ffi.MoqAudioPacket
 
 // EncoderFinish holds the packets Encoder.Finish drains and the padded samples to discard.
-type EncoderFinish = ffi.MoqAudioEncoderFinish
+type EncoderFinish = ffi.MoqAudioEncoderFinished
 
-// EncoderOutput configures the codec side: codec, track name, rate, channels, bitrate, and frame duration (0 takes the codec's own frame).
+// EncoderOutput configures the codec side: codec, rate, channels, bitrate, and frame duration (0 takes the codec's own frame; 10 ms Opus halves the packetization delay).
 type EncoderOutput struct {
 	Codec         Codec
-	Track         *string
 	SampleRate    *uint32
 	Channels      *uint32
 	Bitrate       *uint32
@@ -40,56 +38,125 @@ type EncoderOutput struct {
 }
 
 func (o EncoderOutput) ffi() (ffi.MoqAudioEncoderOutput, error) {
-	frame, err := bridge.Duration(o.FrameDuration, "audio frame duration")
-	if err == nil && frame > math.MaxUint32 {
-		err = fmt.Errorf("audio frame duration %v exceeds %d microseconds", o.FrameDuration, uint32(math.MaxUint32))
+	// Go's zero value is the native null: the codec's own frame.
+	var frame *time.Duration
+	if o.FrameDuration != 0 {
+		frame = &o.FrameDuration
 	}
-	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, Track: o.Track, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDurationUs: uint32(frame)}, err
+	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDuration: frame}, bridge.NonNegative(frame, "audio frame duration")
 }
 
-// DecoderOutput configures the PCM a Consumer delivers and how stale a group may get before it is skipped.
+// DecoderOutput configures the PCM a Consumer delivers, how stale a group may get before it is skipped, and the playout delay.
 type DecoderOutput struct {
 	Format     SampleFormat
 	SampleRate *uint32
 	Channels   *uint32
-	MaxDelay   *time.Duration
+	// Delay.Min is the jitter buffer to hold ahead of the playhead, and where a cold join starts;
+	// Delay.Max bounds how stale a group may get before it is skipped, and adds no buffering. nil
+	// is zero for both.
+	Delay *media.Delay
+	// Estimate measures the playout delay from arrival timing, never below Delay.Min; false holds
+	// exactly Delay.Min. nil estimates.
+	Estimate *bool
+	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.
+	// A live player sets media.DecodeStartLatest so a reopened decoder skips the cached backlog.
+	Start media.DecodeStart
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
-	delay, err := bridge.OptionalDuration(o.MaxDelay, "audio max delay")
-	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, MaxDelayUs: delay}, err
+	if err := delay(o.Delay, "audio"); err != nil {
+		return ffi.MoqAudioDecoderOutput{}, err
+	}
+	// Go's zero value is the native null: the oldest group.
+	var start *media.DecodeStart
+	if o.Start != 0 {
+		start = &o.Start
+	}
+	estimate := o.Estimate == nil || *o.Estimate
+	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, Delay: o.Delay, Estimate: estimate, Start: start}, nil
+}
+
+// delay refuses a negative bound, which the FFI cannot carry.
+func delay(d *media.Delay, kind string) error {
+	if d == nil {
+		return nil
+	}
+	if err := bridge.NonNegative(&d.Min, kind+" min delay"); err != nil {
+		return err
+	}
+	return bridge.NonNegative(d.Max, kind+" max delay")
 }
 
 // Frame is interleaved PCM with its presentation timestamp.
-type Frame struct {
-	Timestamp time.Duration
-	Data      []byte
+type Frame = ffi.MoqAudioFrame
+
+// Read is one item a Consumer reads, in delivery order: a ReadFrame, ReadGap, or ReadEnd.
+type Read interface{ read() }
+
+// ReadFrame is decoded PCM.
+type ReadFrame struct {
+	Frame Frame
 }
 
-func (f Frame) ffi() (ffi.MoqAudioFrame, error) {
-	us, err := bridge.Duration(f.Timestamp, "audio timestamp")
-	return ffi.MoqAudioFrame{TimestampUs: us, Data: f.Data}, err
+// ReadGap is media lost after what was already read: what follows does not continue it.
+type ReadGap struct {
+	// Timestamp is the furthest presentation point already read.
+	Timestamp moq.Timestamp
+	// Duration is an upper bound on how long until the next frame resumes.
+	Duration time.Duration
 }
 
-func frame(raw ffi.MoqAudioFrame) Frame {
-	return Frame{Timestamp: time.Duration(raw.TimestampUs) * time.Microsecond, Data: raw.Data}
+// ReadEnd is where the publisher stopped its encoder: it paused, switched source, or finished.
+// Frames that follow and start before End are its remaining media; the first at or past End
+// comes from a fresh encoder.
+type ReadEnd struct {
+	// End is where the stopped encoder's media stops.
+	End moq.Timestamp
+}
+
+func (ReadFrame) read() {}
+func (ReadGap) read()   {}
+func (ReadEnd) read()   {}
+
+func audioRead(raw ffi.MoqAudioRead) (Read, error) {
+	switch read := raw.(type) {
+	case ffi.MoqAudioReadFrame:
+		return ReadFrame{Frame: read.Frame}, nil
+	case ffi.MoqAudioReadGap:
+		return ReadGap{Timestamp: read.Timestamp, Duration: read.Duration}, nil
+	case ffi.MoqAudioReadEnd:
+		return ReadEnd{End: read.End}, nil
+	}
+	return nil, fmt.Errorf("unknown audio read: %T", raw)
 }
 
 // Producer encodes PCM and publishes it as a track in a broadcast's catalog.
 type Producer struct{ inner *ffi.MoqAudioProducer }
 
-// NewProducer opens an audio track on the catalog's broadcast and registers its rendition; bandwidth may be nil.
-func NewProducer(catalog *media.CatalogProducer, input EncoderInput, output EncoderOutput, bandwidth *moq.Bandwidth) (*Producer, error) {
-	out, err := output.ffi()
+// ProducerOptions holds input, codec settings, and publication ownership.
+type ProducerOptions struct {
+	// Input is the raw media layout the caller writes.
+	Input EncoderInput
+	// Output is the codec configuration.
+	Output EncoderOutput
+	// Track names the published track; nil derives a name from the codec.
+	Track *string
+	// Bandwidth reserves the track against a session allocator when non-nil.
+	Bandwidth *moq.Allocator
+}
+
+// NewProducer opens an audio track on the catalog's broadcast and registers its rendition.
+func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Producer, error) {
+	out, err := options.Output.ffi()
 	if err != nil {
 		return nil, err
 	}
-	var bw **ffi.MoqBandwidth
-	if bandwidth != nil {
-		raw := bridge.Bandwidth(bandwidth)
+	var bw **ffi.MoqAllocator
+	if options.Bandwidth != nil {
+		raw := bridge.Allocator(options.Bandwidth)
 		bw = &raw
 	}
-	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), input, out, bw)
+	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), ffi.MoqAudioProducerOptions{Input: options.Input, Output: out, Track: options.Track, Bandwidth: bw})
 	if err != nil {
 		return nil, err
 	}
@@ -110,11 +177,7 @@ func (p *Producer) Reanchor() error { return p.inner.Reanchor() }
 
 // Write encodes and publishes one PCM frame in the configured input layout.
 func (p *Producer) Write(value Frame) error {
-	raw, err := value.ffi()
-	if err != nil {
-		return err
-	}
-	return p.inner.Write(raw)
+	return p.inner.Write(value)
 }
 
 // Reservation returns this track's bandwidth reservation, or nil without one.
@@ -132,7 +195,7 @@ func (p *Producer) Finish() error { return p.inner.Finish() }
 // Encoder encodes PCM without publishing it.
 type Encoder struct{ inner *ffi.MoqAudioEncoder }
 
-// NewEncoder opens a codec-only encoder; output.Track is ignored.
+// NewEncoder opens a codec-only encoder.
 func NewEncoder(output EncoderOutput) (*Encoder, error) {
 	raw, err := output.ffi()
 	if err != nil {
@@ -148,6 +211,12 @@ func NewEncoder(output EncoderOutput) (*Encoder, error) {
 // FrameSize is the samples per channel each Encode call takes.
 func (e *Encoder) FrameSize() (uint64, error) { return e.inner.FrameSize() }
 
+// TrackInit is the OpusHead or AudioSpecificConfig that publishes these packets via media.NewAudioTrackProducer.
+func (e *Encoder) TrackInit() (media.AudioInit, error) { return e.inner.TrackInit() }
+
+// SetBitrate retunes the live encoder in bits per second.
+func (e *Encoder) SetBitrate(value uint64) error { return e.inner.SetBitrate(value) }
+
 // Encode encodes one codec-sized interleaved f32 frame.
 func (e *Encoder) Encode(pcm []float32) (Packet, error) { return e.inner.Encode(pcm) }
 
@@ -157,31 +226,39 @@ func (e *Encoder) Finish(pcm []float32) (EncoderFinish, error) { return e.inner.
 // Consumer subscribes to an audio rendition and yields decoded PCM.
 type Consumer struct{ inner *ffi.MoqAudioConsumer }
 
-// Subscribe subscribes to the named catalog rendition, following its broadcast reference.
-func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, name string, rendition media.Audio, output DecoderOutput) (*Consumer, error) {
+// Subscribe subscribes to the catalog rendition id, following its broadcast and track.
+func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, id string, rendition media.Audio, output DecoderOutput) (*Consumer, error) {
+	if err := bridge.NonNegative(rendition.Jitter, "jitter"); err != nil {
+		return nil, err
+	}
 	out, err := output.ffi()
 	if err != nil {
 		return nil, err
 	}
-	inner, err := ffi.MoqAudioConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), name, rendition, out)
+	inner, err := ffi.MoqAudioConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), id, rendition, out)
 	if err != nil {
 		return nil, err
 	}
 	return &Consumer{inner}, nil
 }
 
-// Next returns the next decoded frame, or (nil, nil) when the track ends.
-func (d *Consumer) Next(ctx context.Context) (*Frame, error) {
+// Next returns the next decoded frame, gap, or encoder end, or (nil, nil) when the track ends.
+func (d *Consumer) Next(ctx context.Context) (Read, error) {
 	raw, err := bridge.Call(ctx, d.inner.Cancel, d.inner.Next)
 	if err != nil || raw == nil {
 		return nil, err
 	}
-	value := frame(*raw)
-	return &value, nil
+	return audioRead(*raw)
 }
 
-// All ranges over decoded frames until the track ends or the loop breaks.
-func (d *Consumer) All(ctx context.Context) iter.Seq2[*Frame, error] { return bridge.Seq(ctx, d.Next) }
+// All ranges over every read until the track ends or the loop breaks.
+func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] { return bridge.Seq(ctx, d.Next) }
+
+// Delay is the playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
+// The estimate measures when Next returns, so call it again as soon as the previous frame is handled.
+func (d *Consumer) Delay() time.Duration {
+	return d.inner.Delay()
+}
 
 // Cancel stops the stream.
 func (d *Consumer) Cancel() { d.inner.Cancel() }

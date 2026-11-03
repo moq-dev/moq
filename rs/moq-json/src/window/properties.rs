@@ -46,6 +46,8 @@ fn value() -> BoxedStrategy<Value> {
 enum Edit {
 	Push(Value),
 	Pop(u64),
+	/// Restate the window with [`Encoder::snapshot`], as a refresh does.
+	Restate,
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +107,11 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 					records.drain(..count);
 					frame
 				}
+				Edit::Restate => {
+					let frame = encoder.snapshot().unwrap();
+					prop_assert!(frame.keyframe);
+					Some(frame)
+				}
 			};
 			if let Some(frame) = frame {
 				if frame.keyframe {
@@ -132,7 +139,7 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 	}
 
 	for mode in ["following", "late", "lagging"] {
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default().with_compression(config.compression));
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		let mut notified = BTreeSet::new();
 		let mut received = BTreeSet::new();
 		let mut contents = BTreeMap::new();
@@ -231,12 +238,17 @@ fn window_codec_property_matches_every_readers_logical_window() {
 	let mut runner = TestRunner::new(Config {
 		cases,
 		rng_seed: RngSeed::Fixed(u64::from(seed)),
+		rng_algorithm: proptest::test_runner::RngAlgorithm::XorShift,
 		failure_persistence: None,
 		..Default::default()
 	});
 	let steps = proptest::collection::vec(
 		(
-			prop_oneof![value().prop_map(Edit::Push), (0u64..=8).prop_map(Edit::Pop)],
+			prop_oneof![
+				4 => value().prop_map(Edit::Push),
+				4 => (0u64..=8).prop_map(Edit::Pop),
+				1 => Just(Edit::Restate),
+			],
 			0u8..16,
 			any::<bool>(),
 		)
@@ -248,16 +260,10 @@ fn window_codec_property_matches_every_readers_logical_window() {
 		1..65,
 	);
 	let sequence = (
-		(
-			proptest::sample::select(vec![0, 1, 2, 8, 100]),
-			any::<bool>(),
-			proptest::option::of(1usize..=8),
-		)
-			.prop_map(|(op_ratio, compression, checkpoint_records)| ProducerConfig {
-				op_ratio,
-				compression,
-				checkpoint_records,
-			}),
+		(any::<bool>(), proptest::option::of(1usize..=8)).prop_map(|(ops, checkpoint_records)| ProducerConfig {
+			ops,
+			checkpoint_records,
+		}),
 		steps,
 		0usize..64,
 	);

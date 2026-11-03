@@ -41,7 +41,7 @@ var (
 	ErrVideo = ffi.ErrMoqErrorVideo
 	// ErrURL matches a malformed URL passed when connecting or publishing.
 	ErrURL = ffi.ErrMoqErrorUrl
-	// ErrTimeOverflow matches a timestamp that overflowed its timescale.
+	// ErrTimeOverflow matches a timestamp value or scale outside the supported range, or a zero scale.
 	ErrTimeOverflow = ffi.ErrMoqErrorTimeOverflow
 	// ErrLogLevel matches an unparseable log level string passed to LogLevel.
 	ErrLogLevel = ffi.ErrMoqErrorLogLevel
@@ -77,14 +77,14 @@ var (
 	ErrUnsupported = ffi.ErrMoqErrorUnsupported
 	// ErrAlreadyCommitted is returned when a track already reading one way (arrival order, sequence order, or a typed reader) is asked to read another; subscribe again for a second cursor.
 	ErrAlreadyCommitted = ffi.ErrMoqErrorAlreadyCommitted
-	// ErrInvalidRoute is returned when a route has an invalid hop ID or too many hops.
-	ErrInvalidRoute = ffi.ErrMoqErrorInvalidRoute
-	// ErrInvalidEpoch is returned when an epoch is not a lowercase hyphenated UUIDv7.
-	ErrInvalidEpoch = ffi.ErrMoqErrorInvalidEpoch
+	// ErrInvalidInstance is returned when an instance is empty.
+	ErrInvalidInstance = ffi.ErrMoqErrorInvalidInstance
 	// ErrInvalidPattern is returned when a path pattern is empty, has a doubled slash, or uses a reserved segment form.
 	ErrInvalidPattern = ffi.ErrMoqErrorInvalidPattern
 	// ErrUnresolvableBroadcast is returned when a referenced sibling broadcast cannot be resolved without an origin.
 	ErrUnresolvableBroadcast = ffi.ErrMoqErrorUnresolvableBroadcast
+	// ErrUnsupportedCatalog is returned when a catalog needs a newer moq-hang draft than this build reads; upgrade to read it.
+	ErrUnsupportedCatalog = ffi.ErrMoqErrorUnsupportedCatalog
 	// ErrLog is returned when installing or configuring the native log subscriber fails.
 	ErrLog = ffi.ErrMoqErrorLog
 	// ErrConfig is returned when Dial or Listen is given a value the native side cannot use.
@@ -99,7 +99,8 @@ func IsShutdown(err error) bool {
 }
 
 // IsAuthError reports whether err is an authentication/authorization failure
-// (HTTP 401/403, an expired token, or a protocol Unauthorized or Expired session close).
+// (HTTP 401/403, an expired token, a protocol Unauthorized or Expired session
+// close, or a track revocation).
 func IsAuthError(err error) bool {
 	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrExpired) {
 		return true

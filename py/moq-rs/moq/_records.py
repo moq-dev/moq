@@ -1,8 +1,9 @@
-"""Root records that carry durations, owned here so they read as ``timedelta``.
+"""Root records the wrapper owns, as frozen dataclasses with Python defaults.
 
-moq-ffi spells every duration as integer microseconds, because not every target
-language has a duration type. Python does, so these mirror the generated records
-with ``timedelta`` fields and convert at the boundary.
+Media timestamps cross as exact :class:`Timestamp` records; durations cross as
+``timedelta``. ``ClientTls`` lives here with the rest of the client
+config, so a bare string passed for a list is refused instead of splitting into
+characters.
 """
 
 from __future__ import annotations
@@ -10,31 +11,41 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from importlib import metadata
+from typing import ClassVar, cast
 
 from moq_ffi import (
+    MoqAnchor,
     MoqBackoff,
+    MoqClientTls,
+    MoqCongestionControl,
     MoqConnectionStats,
     MoqDatagram,
     MoqFrame,
+    MoqGrant,
+    MoqOrder,
+    MoqQuicConfig,
+    MoqRange,
     MoqSubscription,
+    MoqTimestamp,
     MoqTrackInfo,
+    MoqVideoDecodedFrame,
+    MoqVideoPixelFormat,
+    MoqVideoSurface,
+    MoqWebSocketConfig,
+    moq_subscription_defaults,
 )
 
 _MICROSECOND = timedelta(microseconds=1)
 
 
-def _to_us(value: timedelta, name: str) -> int:
-    if value < timedelta(0):
-        raise ValueError(f"{name} must not be negative: {value}")
-    return value // _MICROSECOND
-
-
-def _opt_us(value: timedelta | None, name: str) -> int | None:
-    return None if value is None else _to_us(value, name)
-
-
-def _from_us(us: int) -> timedelta:
-    return timedelta(microseconds=us)
+def _implementation() -> str:
+    """This package's product token, which its sessions advertise ahead of moq-ffi's."""
+    try:
+        return f"moq-py/{metadata.version('moq-rs')}"
+    except metadata.PackageNotFoundError:
+        # Imported from a source tree rather than an installed distribution.
+        return "moq-py/dev"
 
 
 def _strs(value: Sequence[str], name: str) -> list[str]:
@@ -44,8 +55,46 @@ def _strs(value: Sequence[str], name: str) -> list[str]:
     return list(value)
 
 
-def _opt_from_us(us: int | None) -> timedelta | None:
-    return None if us is None else _from_us(us)
+@dataclass(frozen=True)
+class Timestamp:
+    """An exact media timestamp: ``value`` units at ``scale`` units per second.
+
+    ``value`` is at most ``2**61 - 1`` and ``scale`` is non-zero and at most ``2**62 - 1``;
+    a write past either bound raises ``moq.Error.TimeOverflow``. A read carries the
+    track's timescale, and a write at another scale is floored to it.
+    """
+
+    value: int
+    scale: int
+
+    @staticmethod
+    def from_timedelta(duration: timedelta) -> Timestamp:
+        """Exactly ``duration``, at microsecond scale since that is a ``timedelta``'s own unit."""
+        if duration < timedelta(0):
+            raise ValueError(f"timestamp must not be negative: {duration}")
+        return Timestamp(duration // _MICROSECOND, 1_000_000)
+
+    def to_timedelta(self) -> timedelta:
+        """This timestamp as a ``timedelta``, rounded down to a whole microsecond.
+
+        The timestamp itself is exact; keep it, not the ``timedelta``, to republish a tick such as 90 kHz.
+        """
+        return timedelta(microseconds=self.value * 1_000_000 // self.scale)
+
+    def _ffi(self) -> MoqTimestamp:
+        return MoqTimestamp(value=self.value, scale=self.scale)
+
+    @staticmethod
+    def _from_ffi(value: MoqTimestamp) -> Timestamp:
+        return Timestamp(value.value, value.scale)
+
+
+def _opt_ts(value: Timestamp | None) -> MoqTimestamp | None:
+    return None if value is None else value._ffi()
+
+
+def _opt_from_ts(value: MoqTimestamp | None) -> Timestamp | None:
+    return None if value is None else Timestamp._from_ffi(value)
 
 
 @dataclass(frozen=True)
@@ -56,14 +105,14 @@ class Frame:
     """
 
     payload: bytes
-    timestamp: timedelta | None = None
+    timestamp: Timestamp | None = None
 
     def _ffi(self) -> MoqFrame:
-        return MoqFrame(payload=self.payload, timestamp_us=_opt_us(self.timestamp, "timestamp"))
+        return MoqFrame(payload=self.payload, timestamp=_opt_ts(self.timestamp))
 
     @staticmethod
     def _from_ffi(frame: MoqFrame) -> Frame:
-        return Frame(payload=frame.payload, timestamp=_opt_from_us(frame.timestamp_us))
+        return Frame(payload=frame.payload, timestamp=_opt_from_ts(frame.timestamp))
 
 
 @dataclass(frozen=True)
@@ -74,38 +123,125 @@ class Datagram:
     """
 
     sequence: int
-    timestamp: timedelta | None
+    timestamp: Timestamp | None
     payload: bytes
 
     @staticmethod
     def _from_ffi(datagram: MoqDatagram) -> Datagram:
         return Datagram(
             sequence=datagram.sequence,
-            timestamp=_opt_from_us(datagram.timestamp_us),
+            timestamp=_opt_from_ts(datagram.timestamp),
             payload=datagram.payload,
         )
+
+
+class Anchor:
+    """Where one end of a :class:`Range` falls, mirroring moq-net's ``track::Anchor``.
+
+    Build one with ``Anchor.ABSOLUTE(group=...)``, ``Anchor.RELATIVE(groups=...)``, or
+    ``Anchor.TIME(timestamp=...)``.
+    """
+
+    ABSOLUTE: ClassVar[type[_AnchorAbsolute]]
+    RELATIVE: ClassVar[type[_AnchorRelative]]
+    TIME: ClassVar[type[_AnchorTime]]
+
+    def _ffi(self) -> MoqAnchor:
+        raise TypeError("build an Anchor with Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
+
+
+# The generated variants subclass MoqAnchor only at runtime, so each _ffi casts for pyright.
+@dataclass(frozen=True)
+class _AnchorAbsolute(Anchor):
+    """This group, delivered from its first frame."""
+
+    group: int
+
+    def _ffi(self) -> MoqAnchor:
+        return cast(MoqAnchor, MoqAnchor.ABSOLUTE(group=self.group))
+
+
+@dataclass(frozen=True)
+class _AnchorRelative(Anchor):
+    """The group this many before the latest, clamped to group 0: ``0`` is the latest group."""
+
+    groups: int
+
+    def _ffi(self) -> MoqAnchor:
+        return cast(MoqAnchor, MoqAnchor.RELATIVE(groups=self.groups))
+
+
+@dataclass(frozen=True)
+class _AnchorTime(Anchor):
+    """The group containing this presentation time. An untimed track refuses it."""
+
+    timestamp: Timestamp
+
+    def _ffi(self) -> MoqAnchor:
+        return cast(MoqAnchor, MoqAnchor.TIME(timestamp=self.timestamp._ffi()))
+
+
+Anchor.ABSOLUTE = _AnchorAbsolute
+Anchor.RELATIVE = _AnchorRelative
+Anchor.TIME = _AnchorTime
+
+
+@dataclass(frozen=True)
+class Range:
+    """A span of a track to deliver, from ``start`` to ``end``, ``None`` to keep following the live edge.
+
+    A relative or time start is the first frame of its group, and a relative or time end
+    includes its whole group. An absolute end is exclusive.
+    """
+
+    start: Anchor
+    end: Anchor | None = None
+
+    def _ffi(self) -> MoqRange:
+        return MoqRange(start=self.start._ffi(), end=None if self.end is None else self.end._ffi())
 
 
 @dataclass(frozen=True)
 class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
+    ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once. ``group_start`` is a floor and ``group_end`` an exclusive end, ``None`` for
-    no bound.
+    zero skips at once, ``None`` sets no subscriber limit and leaves the publisher's max
+    age alone to bound it, and it caps every range. ``ranges`` are the spans of the track
+    to deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which
+    pending group the publisher sends first, ``None`` for newest first.
+
+    A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
 
     priority: int = 0
-    max_delay: timedelta = timedelta(0)
-    group_start: int | None = None
-    group_end: int | None = None
+    max_delay: timedelta | None = timedelta(0)
+    ranges: Sequence[Range] | None = None
+    order: MoqOrder | None = None
+
+    @classmethod
+    def default(cls) -> Subscription:
+        """moq-net's defaults, whose zero ``max_delay`` skips a superseded group at once.
+
+        A ``None`` subscription means the same; ``dataclasses.replace`` this one to change
+        a field.
+        """
+        defaults = moq_subscription_defaults()
+        return cls(
+            priority=defaults.priority,
+            max_delay=defaults.max_delay,
+            # The FFI defaults never restrict ranges, so there is no record to convert.
+            ranges=None,
+            order=defaults.order,
+        )
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
-            max_delay_us=_to_us(self.max_delay, "max_delay"),
-            group_start=self.group_start,
-            group_end=self.group_end,
+            max_delay=self.max_delay,
+            ranges=None if self.ranges is None else [r._ffi() for r in self.ranges],
+            order=self.order,
         )
 
 
@@ -117,28 +253,39 @@ def _subscription(subscription: Subscription | None) -> MoqSubscription | None:
 class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
-    ``priority`` defaults to 127, the middle of the range. ``max_age`` is how long the
-    publisher caches a non-latest group, ``None`` for no limit. ``timescale`` is ticks
-    per second: ``None`` means the track is untimed, on both publish and receive.
+    ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint. It breaks
+    ties between subscriptions of equal subscriber priority. ``max_age`` is how long the
+    publisher caches a non-latest group, ``None`` for no limit. ``refresh`` is how many
+    times its first frame a group's later bytes may grow before a joining subscriber
+    asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
+    ``None`` means the track is untimed, on both publish and receive.
+    ``compress`` DEFLATEs each group on the wire to peers that support it; readers
+    always see the original frames.
     """
 
-    priority: int = 127
+    priority: int = 0
     max_age: timedelta | None = None
+    refresh: int | None = None
     timescale: int | None = None
+    compress: bool = False
 
     def _ffi(self) -> MoqTrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
-            max_age_us=_opt_us(self.max_age, "max_age"),
+            max_age=self.max_age,
+            refresh=self.refresh,
             timescale=self.timescale,
+            compress=self.compress,
         )
 
     @staticmethod
     def _from_ffi(info: MoqTrackInfo) -> TrackInfo:
         return TrackInfo(
             priority=info.priority,
-            max_age=None if info.max_age_us is None else _from_us(info.max_age_us),
+            max_age=info.max_age,
+            refresh=info.refresh,
             timescale=info.timescale,
+            compress=info.compress,
         )
 
 
@@ -163,11 +310,97 @@ class Backoff:
 
     def _ffi(self) -> MoqBackoff:
         return MoqBackoff(
-            initial_us=_opt_us(self.initial, "initial"),
+            initial=self.initial,
             multiplier=self.multiplier,
-            max_us=_opt_us(self.max, "max"),
-            timeout_us=_opt_us(self.timeout, "timeout"),
+            max=self.max,
+            timeout=self.timeout,
         )
+
+
+@dataclass(frozen=True)
+class ClientTls:
+    """Certificate trust and the mTLS identity for a :class:`Client`.
+
+    ``insecure`` skips certificate verification, for local development only. ``roots``
+    are PEM root certificate files to trust instead of the platform roots, and
+    ``system_roots`` whether to also trust the platform roots (``None`` trusts them only
+    when ``roots`` is empty). ``fingerprints`` pin the peer to hex SHA-256 certificate
+    fingerprints, accepting what :meth:`Server.cert_fingerprints` reports. ``cert`` and
+    ``key`` are the paired PEM chain and private key to present for mTLS. ``host_name``
+    verifies the certificate against another name (SNI) than the URL's host.
+    """
+
+    insecure: bool = False
+    roots: Sequence[str] = ()
+    system_roots: bool | None = None
+    fingerprints: Sequence[str] = ()
+    cert: str | None = None
+    key: str | None = None
+    host_name: str | None = None
+
+    def _ffi(self) -> MoqClientTls:
+        return MoqClientTls(
+            insecure=self.insecure,
+            roots=_strs(self.roots, "roots"),
+            system_roots=self.system_roots,
+            fingerprints=_strs(self.fingerprints, "fingerprints"),
+            cert=self.cert,
+            key=self.key,
+            host_name=self.host_name,
+        )
+
+
+@dataclass(frozen=True)
+class QuicConfig:
+    """QUIC transport tuning for a :class:`Client`; the WebSocket fallback ignores it.
+
+    ``max_streams`` caps the concurrent streams the peer may open toward this endpoint
+    (0 is refused); MoQ opens one per group, so a subscriber to many tracks wants it
+    raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
+    the ping interval (zero uses the default). ``gso``, ``mtu_discovery``, and
+    ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
+    directory, which must exist, for qlog traces when :func:`qlog_supported`.
+    ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
+    decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
+    ``None`` keeps the library default throughout.
+    """
+
+    max_streams: int | None = None
+    idle_timeout: timedelta | None = None
+    keep_alive: timedelta | None = None
+    gso: bool | None = None
+    mtu_discovery: bool | None = None
+    congestion_control: MoqCongestionControl | None = None
+    qlog: str | None = None
+    keylog: bool = False
+
+    def _ffi(self) -> MoqQuicConfig:
+        return MoqQuicConfig(
+            max_streams=self.max_streams,
+            idle_timeout=self.idle_timeout,
+            keep_alive=self.keep_alive,
+            gso=self.gso,
+            mtu_discovery=self.mtu_discovery,
+            congestion_control=self.congestion_control,
+            qlog=self.qlog,
+            keylog=self.keylog,
+        )
+
+
+@dataclass(frozen=True)
+class WebSocketConfig:
+    """The WebSocket fallback, raced against QUIC for ``http(s)`` URLs.
+
+    ``enabled=False`` stops the fallback, for a relay that only serves QUIC, so a failed
+    QUIC dial reports its own error. ``delay`` is the head start QUIC gets before the
+    fallback joins the race; ``None`` uses 200 ms, and zero races both at once.
+    """
+
+    enabled: bool | None = None
+    delay: timedelta | None = None
+
+    def _ffi(self) -> MoqWebSocketConfig:
+        return MoqWebSocketConfig(enabled=self.enabled, delay=self.delay)
 
 
 @dataclass(frozen=True)
@@ -176,24 +409,77 @@ class ConnectionStats:
 
     rtt: timedelta | None
     estimated_send_rate_bps: int | None
-    estimated_recv_rate_bps: int | None
     bytes_sent: int | None
     bytes_received: int | None
     bytes_lost: int | None
     packets_sent: int | None
     packets_received: int | None
     packets_lost: int | None
+    version: str | None = None
+    """The negotiated protocol version, spelled like ``Client(versions=...)``."""
 
     @staticmethod
     def _from_ffi(stats: MoqConnectionStats) -> ConnectionStats:
         return ConnectionStats(
-            rtt=None if stats.rtt_us is None else _from_us(stats.rtt_us),
+            rtt=stats.rtt,
             estimated_send_rate_bps=stats.estimated_send_rate_bps,
-            estimated_recv_rate_bps=stats.estimated_recv_rate_bps,
             bytes_sent=stats.bytes_sent,
             bytes_received=stats.bytes_received,
             bytes_lost=stats.bytes_lost,
             packets_sent=stats.packets_sent,
             packets_received=stats.packets_received,
             packets_lost=stats.packets_lost,
+            version=stats.version,
         )
+
+
+@dataclass(frozen=True)
+class Grant:
+    """What the peer lets this side do, in this side's own paths.
+
+    An empty pattern list grants nothing in that direction; ``**`` grants everything.
+    """
+
+    publish: tuple[str, ...]
+    """The broadcast patterns this side may publish to the peer."""
+    subscribe: tuple[str, ...]
+    """The broadcast patterns this side may subscribe to from the peer."""
+    expires: timedelta | None = None
+    """How long until the grant lapses, measured when it was read, or ``None`` for never."""
+
+    @staticmethod
+    def _from_ffi(grant: MoqGrant | None) -> Grant | None:
+        if grant is None:
+            return None
+        return Grant(
+            publish=tuple(grant.publish),
+            subscribe=tuple(grant.subscribe),
+            expires=grant.expires,
+        )
+
+
+class VideoDecodedFrame:
+    """One decoded picture. It owns the decoder's buffer until garbage collected, so drop it promptly."""
+
+    def __init__(self, inner: MoqVideoDecodedFrame) -> None:
+        self._inner = inner
+
+    def timestamp(self) -> Timestamp:
+        """The presentation timestamp, at the track's timescale."""
+        return Timestamp._from_ffi(self._inner.timestamp())
+
+    def width(self) -> int:
+        """The picture's width in pixels."""
+        return self._inner.width()
+
+    def height(self) -> int:
+        """The picture's height in pixels."""
+        return self._inner.height()
+
+    def pixels(self, format: MoqVideoPixelFormat) -> bytes:
+        """The picture converted to tightly packed CPU pixels in ``format``."""
+        return self._inner.pixels(format)
+
+    def surface(self) -> MoqVideoSurface | None:
+        """The decoder's platform surface, when the decoder output asked for one."""
+        return self._inner.surface()

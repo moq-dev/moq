@@ -7,18 +7,17 @@
 # live subscription still delivers each burst's newest group, so only the FETCH
 # recovery of the groups it skipped is removed.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
-index 55006c5f7..93f2f9677 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -4456,6 +4456,11 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
- 
+@@ -8302,6 +8302,11 @@
  			match &mut self.state {
  				FetchRunState::Open { request } => {
+ 					ready!(self.gate.poll_ready(waiter));
 +					// MUTATION: never send the FETCH, so nothing ever answers it.
 +					if request.is_some() {
 +						return Poll::Pending;
 +					}
 +
- 					let mut stream = match ready!(Stream::poll_open(
- 						&mut self.session,
- 						self.serve.subscriber.version,
+ 					// The fill already has readers holding its demand. Backpressure keeps their
+ 					// owned request alive; abandoning it above releases this wait too.
+ 					let mut stream =

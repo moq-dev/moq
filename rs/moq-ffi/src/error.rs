@@ -69,6 +69,20 @@ pub enum MoqProtocolKind {
 	TooManyRequests,
 	/// The authorization token expired and can be refreshed. Session 0x18.
 	Expired,
+	/// A token registration exceeded the advertised cache size.
+	AuthTokenCacheOverflow,
+	/// The peer could not parse an authorization token.
+	MalformedAuthToken,
+	/// A token referred to an alias that was never registered.
+	UnknownAuthTokenAlias,
+	/// The peer reused or sent an invalid request ID.
+	InvalidRequestId,
+	/// The peer sent a path it may not send.
+	InvalidPath,
+	/// The peer sent an authority it may not send.
+	InvalidAuthority,
+	/// The peer exceeded its outstanding request update limit.
+	TooManyRequestUpdates,
 }
 
 /// A protocol failure a peer sent (or this side will send): scope, verbatim code, kind,
@@ -127,6 +141,13 @@ fn session_kind(err: &moq_net::SessionError) -> MoqProtocolKind {
 		moq_net::SessionError::Timeout => MoqProtocolKind::Timeout,
 		moq_net::SessionError::Version => MoqProtocolKind::Version,
 		moq_net::SessionError::TooManyRequests => MoqProtocolKind::TooManyRequests,
+		moq_net::SessionError::AuthTokenCacheOverflow => MoqProtocolKind::AuthTokenCacheOverflow,
+		moq_net::SessionError::MalformedAuthToken => MoqProtocolKind::MalformedAuthToken,
+		moq_net::SessionError::UnknownAuthTokenAlias => MoqProtocolKind::UnknownAuthTokenAlias,
+		moq_net::SessionError::InvalidRequestId => MoqProtocolKind::InvalidRequestId,
+		moq_net::SessionError::InvalidPath => MoqProtocolKind::InvalidPath,
+		moq_net::SessionError::InvalidAuthority => MoqProtocolKind::InvalidAuthority,
+		moq_net::SessionError::TooManyRequestUpdates => MoqProtocolKind::TooManyRequestUpdates,
 		moq_net::SessionError::App(_) => MoqProtocolKind::App,
 		moq_net::SessionError::Unknown(_) => MoqProtocolKind::Unknown,
 		_ => MoqProtocolKind::Unknown,
@@ -161,60 +182,106 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 ///
 /// Exports `Display`, which the bindings surface as the error's string form.
 /// Diagnostic payloads are named `reason`; structured protocol failures use `details`.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
 #[uniffi::export(Display)]
 #[non_exhaustive]
 pub enum MoqError {
 	/// A protocol failure carrying the peer's session or stream code.
 	#[error("{details}")]
-	Protocol { details: MoqProtocolError },
+	Protocol {
+		/// The protocol registry, wire code, and diagnostic message.
+		details: MoqProtocolError,
+	},
 
 	/// The underlying QUIC/WebTransport connection failed.
 	#[error("transport: {reason}")]
-	Transport { reason: String },
+	Transport {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// A local failure without a session or stream code.
 	#[error("internal: {reason}")]
-	Internal { reason: String },
+	Internal {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The media catalog or container could not be processed.
 	#[error("{reason}")]
-	Media { reason: String },
+	Media {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// Media could not be imported or exported.
 	#[error("{reason}")]
-	Mux { reason: String },
+	Mux {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// A JSON track could not be processed.
 	#[error("{reason}")]
-	JsonTrack { reason: String },
+	JsonTrack {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	// Native codec errors, behind the optional `audio`/`video` features.
-	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+	/// An audio codec operation failed.
+	#[cfg(feature = "audio")]
 	#[error("{reason}")]
-	Audio { reason: String },
+	Audio {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	/// A video codec operation failed.
+	#[cfg(feature = "video")]
 	#[error("{reason}")]
-	Video { reason: String },
+	Video {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The connection URL could not be parsed.
 	#[error("url: {reason}")]
-	Url { reason: String },
+	Url {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// A timestamp value or scale is outside the supported range, or the scale is zero.
 	#[error("timestamp overflow")]
 	TimeOverflow,
 
+	/// The requested log level is invalid.
 	#[error("log level: {reason}")]
-	LogLevel { reason: String },
+	LogLevel {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// An owned native task panicked; cancellation is reported separately.
-	#[cfg(not(target_arch = "wasm32"))]
 	#[error("task: {reason}")]
-	Task { reason: String },
+	Task {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// JSON could not be parsed or encoded.
 	#[error("json: {reason}")]
-	Json { reason: String },
+	Json {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The operation was cancelled.
 	#[error("cancelled")]
 	Cancelled,
 
+	/// The handle or connection is closed.
 	#[error("closed")]
 	Closed,
 
@@ -225,24 +292,43 @@ pub enum MoqError {
 	#[error("busy")]
 	Busy,
 
+	/// A connection could not be established.
 	#[error("connect: {reason}")]
-	Connect { reason: String },
+	Connect {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The local server socket could not be bound.
 	#[error("bind: {reason}")]
-	Bind { reason: String },
+	Bind {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// A connection was refused during the handshake.
 	#[error("reject: {reason}")]
-	Reject { reason: String },
+	Reject {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The request has already been accepted or rejected.
 	#[error("already responded")]
 	AlreadyResponded,
 
+	/// Codec configuration or bitstream parsing failed.
 	#[error("codec: {reason}")]
-	Codec { reason: String },
+	Codec {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// Authorization is required or invalid.
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// Authorization does not permit the requested operation.
 	#[error("forbidden")]
 	Forbidden,
 
@@ -273,37 +359,63 @@ pub enum MoqError {
 	#[error("already committed to another way of reading")]
 	AlreadyCommitted,
 
-	/// A route carried an invalid hop id or too many hops.
-	#[error("invalid route: {reason}")]
-	InvalidRoute { reason: String },
-
 	/// A path pattern was empty, had a doubled slash, or used a reserved segment form.
 	#[error("invalid pattern: {reason}")]
-	InvalidPattern { reason: String },
+	InvalidPattern {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
-	/// An epoch was not a lowercase hyphenated UUIDv7.
+	/// An instance was empty.
 	#[error("{reason}")]
-	InvalidEpoch { reason: String },
+	InvalidInstance {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// A catalog rendition named another broadcast, but this consumer came from a standalone
 	/// broadcast rather than an origin, so there is nothing to resolve the reference against.
 	#[error("unresolvable broadcast reference: {reason}")]
-	UnresolvableBroadcast { reason: String },
+	UnresolvableBroadcast {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The logger could not be initialized.
 	#[error("log: {reason}")]
-	Log { reason: String },
+	Log {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// A configuration record held a value the constructor cannot use.
 	#[error("config: {reason}")]
-	Config { reason: String },
+	Config {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
+
+	/// A catalog needs a newer moq-hang draft than this build reads; upgrade to read it.
+	#[error("unsupported catalog version {version}")]
+	UnsupportedCatalog {
+		/// The catalog version this build cannot read.
+		version: u64,
+	},
 }
 
 impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
 			moq_net::Error::Transport(message) => Self::Transport { reason: message },
+			moq_net::Error::IdleTimeout => Self::Transport {
+				reason: "transport idle timeout".into(),
+			},
 			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
-			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
+			// A track whose own session closed aborts its open groups with this; a remote
+			// SESSION_CLOSED decodes as `Internal`, so only the local close lands here.
+			moq_net::Error::Closed
+			| moq_net::Error::GoingAway
+			| moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)) => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,
 			moq_net::Error::Expired => Self::Expired,
@@ -343,6 +455,7 @@ impl From<hang::Error> for MoqError {
 	fn from(err: hang::Error) -> Self {
 		match err {
 			hang::Error::Moq(err) => err.into(),
+			hang::Error::UnsupportedVersion(version) => Self::UnsupportedCatalog { version },
 			err => Self::Media {
 				reason: err.to_string(),
 			},
@@ -377,7 +490,7 @@ impl From<moq_json::Error> for MoqError {
 	}
 }
 
-#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+#[cfg(feature = "audio")]
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
 		Self::Audio {
@@ -386,7 +499,7 @@ impl From<moq_audio::Error> for MoqError {
 	}
 }
 
-#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+#[cfg(feature = "video")]
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
 		Self::Video {
@@ -420,10 +533,9 @@ from_message! {
 	tracing::metadata::ParseLevelError => LogLevel,
 	serde_json::Error => Json,
 	moq_net::InvalidPattern => InvalidPattern,
-	moq_net::InvalidEpoch => InvalidEpoch,
+	moq_net::InvalidInstance => InvalidInstance,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 from_message! {
 	tokio::task::JoinError => Task,
 }
@@ -433,11 +545,48 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn named_session_codes_keep_a_known_kind() {
+		for (code, kind) in [
+			(0x0, MoqProtocolKind::Cancel),
+			(0x1, MoqProtocolKind::Internal),
+			(0x2, MoqProtocolKind::Unauthorized),
+			(0x3, MoqProtocolKind::ProtocolViolation),
+			(0x4, MoqProtocolKind::InvalidRequestId),
+			(0x6, MoqProtocolKind::KeyValueFormatting),
+			(0x7, MoqProtocolKind::TooManyRequests),
+			(0x8, MoqProtocolKind::InvalidPath),
+			(0x10, MoqProtocolKind::GoawayTimeout),
+			(0x11, MoqProtocolKind::Timeout),
+			(0x13, MoqProtocolKind::AuthTokenCacheOverflow),
+			(0x15, MoqProtocolKind::Version),
+			(0x16, MoqProtocolKind::MalformedAuthToken),
+			(0x17, MoqProtocolKind::UnknownAuthTokenAlias),
+			(0x18, MoqProtocolKind::Expired),
+			(0x19, MoqProtocolKind::InvalidAuthority),
+			(0x1b, MoqProtocolKind::TooManyRequestUpdates),
+		] {
+			let error = MoqProtocolError::from_session(&moq_net::SessionError::from_code(code));
+			assert_eq!(error.scope, MoqErrorScope::Session);
+			assert_eq!(error.code, code);
+			assert_eq!(error.kind, kind, "session code {code:#x}");
+		}
+	}
+
+	#[test]
 	fn session_limit_has_a_known_kind() {
 		let error = super::MoqProtocolError::from_session(&moq_net::SessionError::TooManyRequests);
 		assert_eq!(error.scope, super::MoqErrorScope::Session);
 		assert_eq!(error.code, moq_net::SessionError::TooManyRequests.to_code());
 		assert_eq!(error.kind, super::MoqProtocolKind::TooManyRequests);
+	}
+
+	#[test]
+	fn unsupported_catalog_survives_the_mux() {
+		let error = moq_mux::Error::Hang(hang::Error::UnsupportedVersion(5));
+		assert!(matches!(
+			MoqError::from(error),
+			MoqError::UnsupportedCatalog { version: 5 }
+		));
 	}
 
 	#[test]
@@ -543,6 +692,21 @@ mod tests {
 		}
 	}
 
+	/// A relay that found its upstream malformed says so, and a binding can tell that
+	/// apart from a relay bug's INTERNAL_ERROR.
+	#[test]
+	fn stream_malformed_track_keeps_its_kind() {
+		let err = MoqError::from(moq_net::Error::from(moq_net::StreamError::MalformedTrack));
+		match err {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.scope, MoqErrorScope::Stream);
+				assert_eq!(protocol.code, 0x12);
+				assert_eq!(protocol.kind, MoqProtocolKind::MalformedTrack);
+			}
+			other => panic!("expected Protocol, got {other}"),
+		}
+	}
+
 	#[test]
 	fn stream_app_code_is_verbatim() {
 		let err = MoqError::from(moq_net::Error::from(moq_net::StreamError::App(7)));
@@ -567,6 +731,19 @@ mod tests {
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}
+	}
+
+	/// A group cut by its own session closing is a shutdown; one reset by a peer is not.
+	#[test]
+	fn local_session_close_is_closed() {
+		let local = moq_net::StreamError::Session(moq_net::SessionError::Cancel);
+		assert!(matches!(MoqError::from(moq_net::Error::from(local)), MoqError::Closed));
+
+		let received = moq_net::StreamError::from_code(0x3);
+		let MoqError::Protocol { details } = MoqError::from(moq_net::Error::from(received)) else {
+			panic!("a peer's SESSION_CLOSED lost its code");
+		};
+		assert_eq!(details.kind, MoqProtocolKind::SessionClosed);
 	}
 
 	#[test]

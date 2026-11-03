@@ -8,11 +8,9 @@ on:
   push:
     tags:
       - "moq-dart-v*"
-  pull_request:
-    paths:
-      - ".github/workflows/release-dart.yml"
-      - "dart/moq/**"
-      - "sh/dart/**"
+  # Dry-run: check the source package, publish nothing. Only a tag push
+  # publishes, so nightly.yml calls this on main in place of main PRs.
+  workflow_call:
 
 permissions:
   contents: read
@@ -46,7 +44,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          if [[ "$EVENT_NAME" != "push" ]]; then
             VERSION=$(sed -n 's/^version: //p' dart/moq/pubspec.yaml | head -1)
           else
             just gh release parse-version moq-dart
@@ -54,8 +52,8 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Check source package (PR)
-        if: github.event_name == 'pull_request'
+      - name: Check source package (dry-run)
+        if: github.event_name != 'push'
         working-directory: dart/moq
         run: |
           if [ -f pubspec.lock ]; then
@@ -92,7 +90,7 @@ jobs:
 
       - name: Upload package
         if: github.event_name == 'push'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dart-package
           path: release-out/*
@@ -109,7 +107,7 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dart-package
           path: package

@@ -35,14 +35,25 @@ done < <(env -0)
 shopt -u nocasematch
 
 host=$(rustc -vV | sed -n 's/^host: //p')
-env -i "${hook_env[@]}" cargo build --locked --release --package moq-ffi --no-default-features \
-    --target "$host" \
-    --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+# Checkouts use a dev build; benchmark and release staging opt into release.
+profile=${MOQ_FFI_PROFILE:-debug}
+# The shared default build (.cargo/config.toml). The debug one adds the hook's test
+# hooks, which is safe only because `--target` gives it a directory no default build
+# writes; the release build is benchmarked, so it leaves out the counting allocator.
+case "$profile" in
+    debug) profile_args=(--features testing) ;;
+    release) profile_args=(--release) ;;
+    *)
+        echo "error: unsupported MOQ_FFI_PROFILE: $profile" >&2
+        exit 1
+        ;;
+esac
+(cd "$WORKSPACE_DIR" && env -i "${hook_env[@]}" cargo build-ffi "${profile_args[@]}" --target "$host")
 
 case "$host" in
-    *-apple-*) library="$WORKSPACE_DIR/target/$host/release/libmoq_ffi.dylib" ;;
-    *-windows-*) library="$WORKSPACE_DIR/target/$host/release/moq_ffi.dll" ;;
-    *) library="$WORKSPACE_DIR/target/$host/release/libmoq_ffi.so" ;;
+    *-apple-*) library="$WORKSPACE_DIR/target/$host/$profile/libmoq_ffi.dylib" ;;
+    *-windows-*) library="$WORKSPACE_DIR/target/$host/$profile/moq_ffi.dll" ;;
+    *) library="$WORKSPACE_DIR/target/$host/$profile/libmoq_ffi.so" ;;
 esac
 
 mkdir -p "$OUTPUT_DIR"

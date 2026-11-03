@@ -48,14 +48,14 @@ async fn serve(case: Case) -> Server {
 	};
 
 	tokio::spawn(async move {
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			tokio::spawn(async move {
 				match case {
 					Case::Reject => {
-						request.reject(moq_tokio::server::Reject::App(CODE)).await.ok();
+						request.reject(moq_net::SessionError::App(CODE)).await.ok();
 					}
 					Case::Abort | Case::AbortThenDrop => {
-						let Ok((session, _driver)) = request.ok().await else {
+						let Ok(session) = request.ok().await else {
 							return;
 						};
 						session.abort(moq_net::Error::App(CODE));
@@ -81,7 +81,7 @@ async fn client_error(url: &str, websocket: bool) -> moq_tokio::Error {
 	let client = config.init(Default::default()).expect("failed to init client");
 
 	let connection = client.with_reconnect(false).connect(url.parse::<url::Url>().unwrap());
-	tokio::time::timeout(Duration::from_secs(10), async {
+	kio::clock::timeout(Duration::from_secs(10), async {
 		match connection.established().await {
 			Ok(connection) => connection.closed().await.expect_err("closed without an error"),
 			Err(err) => err,
@@ -93,9 +93,11 @@ async fn client_error(url: &str, websocket: bool) -> moq_tokio::Error {
 
 async fn check(case: Case) {
 	let server = serve(case).await;
+	// The server binds IPv4 only, so `localhost` would race a dead `::1` on hosts that list it
+	// first, paying the Happy Eyeballs stagger on every dial.
 	let urls = [
-		(format!("https://localhost:{}/", server.quic), false),
-		(format!("moqt://localhost:{}/", server.quic), false),
+		(format!("https://127.0.0.1:{}/", server.quic), false),
+		(format!("moqt://127.0.0.1:{}/", server.quic), false),
 		(format!("ws://127.0.0.1:{}/", server.websocket), true),
 	];
 

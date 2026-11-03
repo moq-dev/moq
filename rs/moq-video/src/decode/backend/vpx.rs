@@ -22,6 +22,7 @@ use vpx_sys::{
 };
 
 use super::{Backend, Codec, Config};
+use crate::color::Range;
 use crate::frame::{I420, Surface};
 use crate::{Color, Error, Frame, Size};
 
@@ -157,22 +158,25 @@ fn describes_frame(err: vpx_codec_err_t) -> bool {
 }
 
 /// The color space libvpx reports for a picture, when [`Color`] can name it.
+///
+/// An unspecified space takes the guess for the picture's own size: libvpx
+/// never scales, and a keyframe can change the size across 576 lines.
 fn color(codec: Codec, img: &vpx_image_t) -> Option<Color> {
-	let full = img.range == vpx_color_range::VPX_CR_FULL_RANGE;
-	match (codec, img.cs) {
+	let color = match (codec, img.cs) {
 		// VP8 defines one color space (RFC 6386 section 9.2): BT.601, studio
 		// swing. libvpx leaves `cs` unset for it.
-		(Codec::Vp8, _) => Some(Color::Bt601Limited),
-		(_, vpx_color_space::VPX_CS_BT_601 | vpx_color_space::VPX_CS_SMPTE_170) => Some(match full {
-			true => Color::Bt601Full,
-			false => Color::Bt601Limited,
-		}),
-		(_, vpx_color_space::VPX_CS_BT_709) => Some(match full {
-			true => Color::Bt709Full,
-			false => Color::Bt709Limited,
-		}),
-		_ => None,
-	}
+		(Codec::Vp8, _) => return Some(Color::BT601),
+		(_, vpx_color_space::VPX_CS_BT_601 | vpx_color_space::VPX_CS_SMPTE_170) => Color::BT601,
+		(_, vpx_color_space::VPX_CS_BT_709) => Color::BT709,
+		(_, vpx_color_space::VPX_CS_UNKNOWN) => Color::infer(Size::new(img.d_w, img.d_h)),
+		// VP9 signals the matrix but not the transfer, so BT.2020 could be SDR,
+		// PQ or HLG; only the container knows.
+		_ => return None,
+	};
+	Some(match img.range == vpx_color_range::VPX_CR_FULL_RANGE {
+		true => color.with_range(Range::Full),
+		false => color,
+	})
 }
 
 /// Copies one decoded picture out of libvpx's frame buffer.
@@ -460,15 +464,16 @@ mod tests {
 	}
 
 	/// VP8 has exactly one color space; VP9 names its own, and these fixtures
-	/// leave it unspecified.
+	/// leave it unspecified, so it follows the picture's size.
 	#[test]
 	fn color_comes_from_the_bitstream() {
 		let color = |vector: &Vector| {
 			let (_, frame) = decode(&mut open(vector.codec), vector, |_, frame| frame).remove(0);
-			frame.surface.color()
+			(frame.size(), frame.surface.color())
 		};
-		assert_eq!(color(&VP8_64), Some(Color::Bt601Limited));
-		assert_eq!(color(&VP9_64), None);
+		assert_eq!(color(&VP8_64).1, Some(Color::BT601));
+		let (size, vp9) = color(&VP9_64);
+		assert_eq!(vp9, Some(Color::infer(size)));
 	}
 
 	/// A keyframe at a new size switches the decoder over without reopening it.

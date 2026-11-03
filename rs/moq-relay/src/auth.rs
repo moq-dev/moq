@@ -3,39 +3,49 @@
 //! process answering [`Admissions`]. Nothing else admits anyone; a verified client
 //! certificate is reported to whoever decides as a fact.
 
+mod caps;
 mod refresh;
+
+pub(crate) use caps::{Caps, Pacer};
 
 use std::sync::Arc;
 
 use axum::http;
 use moq_auth::{Bytes, Grant, Request, lease};
 use moq_auth::{Pattern, Patterns};
-use moq_net::{Path, PathOwned, stats::Tier};
+use moq_net::{Path, stats::Tier};
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, serde_as};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
-/// The longest a decider may take to answer an admission, the bound
-/// `moq_auth::Client` puts on a server, so a stalled decider refuses rather
-/// than parks the session behind it.
-const ADMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest a decider may take to verify a token presented in band. A
+/// connection's admission has no bound of its own: it runs under the listener's
+/// handshake deadline, which a token arriving after the handshake does not.
+const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
-#[derive(usage::Args, Clone, Debug, Serialize, Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct Config {
-	/// The auth server asked once per session event: `connect`, `revalidate`, and
+	/// The auth server asked once per session event: `connect`, `attach`, `revalidate`, and
 	/// `end`, each one JSON POST carrying everything the relay knows. `https://`
 	/// presents the `--connect-tls-*` identity, `unix://` speaks HTTP over a socket,
 	/// and `http://` is accepted for a loopback host only.
 	#[usage(long = "auth-url", env = "MOQ_AUTH_URL", setting = "auth.url")]
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub url: Option<Url>,
+
+	/// PEM roots used instead of system roots to verify the auth server's hostname.
+	#[usage(long = "auth-root", env = "MOQ_AUTH_ROOT", setting = "auth.root")]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_>")]
+	pub root: Vec<std::path::PathBuf>,
 
 	/// Patterns an anonymous session may both publish and subscribe to, rooted at
 	/// `/`, such as `anon/**`. Repeatable or comma-separated. Sets a static grant
@@ -72,16 +82,9 @@ pub struct Config {
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public_publish: Vec<Pattern>,
 
-	/// Maximum in-band tokens one session has the auth server verifying at once,
-	/// counting checks still running past the admission timeout. Later tokens wait
-	/// for a slot. Defaults to 128.
-	#[usage(
-		long = "auth-verifications",
-		env = "MOQ_AUTH_VERIFICATIONS",
-		default = "128",
-		setting = "auth.verifications"
-	)]
-	pub verifications: usize,
+	#[usage(skip)]
+	#[serde(rename = "verifications", skip_serializing)]
+	pub(crate) removed_verifications: Option<serde::de::IgnoredAny>,
 
 	/// The 0.14 flags and env vars #3688 removed, kept parsing but hidden. Never
 	/// read as settings: [`deprecated`](Self::deprecated) names what replaced each.
@@ -111,33 +114,18 @@ pub struct Config {
 	pub(crate) tls: Option<serde::de::IgnoredAny>,
 }
 
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			url: None,
-			public: Vec::new(),
-			public_subscribe: Vec::new(),
-			public_publish: Vec::new(),
-			verifications: VERIFICATIONS,
-			legacy: Legacy::default(),
-			key: None,
-			key_dir: None,
-			auth_api: None,
-			domains: None,
-			mtls_tier: None,
-			tls: None,
-		}
-	}
-}
-
-/// The default for [`Config::verifications`].
+/// Maximum in-band token verifications one session, or requests one HTTP/2
+/// connection, may hold at its decider.
 const VERIFICATIONS: usize = 128;
 
 /// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
 /// deployed through the environment would otherwise ignore them without a word.
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
+	#[usage(long = "auth-verifications", env = "MOQ_AUTH_VERIFICATIONS", hide = true)]
+	verifications: Option<usize>,
+
 	#[usage(name = "auth-key", long = "auth-key", env = "MOQ_AUTH_KEY", hide = true)]
 	key: Option<String>,
 	#[usage(name = "auth-key-dir", long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR", hide = true)]
@@ -204,6 +192,22 @@ impl Config {
 	/// ignored.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.legacy.verifications.is_some() {
+			found.changed(
+				"--auth-verifications",
+				Some("MOQ_AUTH_VERIFICATIONS"),
+				"the fixed per-session verification policy",
+				"the configurable verification window is removed",
+			);
+		}
+		if self.removed_verifications.is_some() {
+			found.toml(
+				"[auth] verifications",
+				"the fixed per-session verification policy",
+				None,
+			);
+		}
+
 		let legacy = &self.legacy;
 		for (set, flag, env, toml, new) in [
 			(
@@ -256,7 +260,7 @@ impl Config {
 				"--auth-tls-*",
 				"MOQ_AUTH_TLS_*",
 				self.tls.is_some().then_some("[auth.tls]"),
-				"--connect-tls-*, which an https:// --auth-url presents",
+				"--connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
 			),
 		] {
 			if set {
@@ -285,6 +289,8 @@ impl Config {
 	/// prefix `anon/`, and a pattern reads it as exactly the broadcast `anon`, so
 	/// either silent reading would mislead someone upgrading.
 	pub fn validate(&self, client_ca: bool) -> anyhow::Result<()> {
+		let deprecated = self.deprecated();
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		let flags = [
 			("--auth-public", &self.public),
 			("--auth-public-publish", &self.public_publish),
@@ -311,16 +317,12 @@ impl Config {
 			),
 			_ => {}
 		}
-		if self.verifications == 0 {
-			anyhow::bail!("--auth-verifications must be at least 1, or no in-band token is ever verified");
-		}
 		Ok(())
 	}
 
 	/// Build the [`Auth`] this configuration describes, after [`validate`](Self::validate)
 	/// with the same `client_ca`. `tls` is the client identity an `https://` server
-	/// is dialed with; `node` names this relay in every request. Must be called
-	/// within a Tokio runtime, which drives the admission decider.
+	/// is dialed with, never its server trust; `node` names this relay in every request.
 	pub fn init(
 		&self,
 		node: impl Into<String>,
@@ -331,30 +333,27 @@ impl Config {
 		let decider = match (&self.url, self.public_grant()) {
 			(Some(url), _) => {
 				let tls = tls.build()?;
+				let tls = crate::http_client::server_tls(&tls, &self.root)?;
 				Decider::Server(moq_auth::Client::new(url.clone(), Some(tls))?)
 			}
-			(None, Some(grant)) => Decider::Public(
+			(None, Some(grant)) => Decider::Public(Arc::new(
 				moq_auth::Claims::default()
 					.with_publish(grant.publish)
 					.with_subscribe(grant.subscribe),
-			),
+			)),
 			(None, None) => unreachable!("validated above"),
 		};
-		let (auth, admissions) = Auth::embedded(node);
-		let mut auth = auth.with_verifications(self.verifications);
-		auth.in_band = matches!(decider, Decider::Server(_));
-		decider.spawn(admissions);
-		Ok(auth)
+		Ok(Auth::new(node, decider))
 	}
 }
 
-/// Why a session was refused, and the HTTP status a transport-level reject carries.
+/// Why a session was refused, with the HTTP status and session code that report it.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
 	/// The auth server answered and the answer was no.
-	#[error("the auth server refused the session")]
-	Refused,
+	#[error(transparent)]
+	Refused(moq_auth::Refusal),
 
 	/// The auth server could not be asked, or answered nonsense; nothing is
 	/// admitted because the server was down.
@@ -373,7 +372,8 @@ pub enum Error {
 impl From<moq_auth::Error> for Error {
 	fn from(err: moq_auth::Error) -> Self {
 		match err {
-			moq_auth::Error::Refused | moq_auth::Error::UselessGrant => Self::Refused,
+			moq_auth::Error::Refused(refusal) => Self::Refused(refusal),
+			moq_auth::Error::UselessGrant => Self::Refused(Default::default()),
 			other => Self::Unavailable(other.to_string()),
 		}
 	}
@@ -386,6 +386,9 @@ impl From<&Error> for http::StatusCode {
 			Error::Unavailable(_) => http::StatusCode::BAD_GATEWAY,
 			Error::Request(_) => http::StatusCode::BAD_REQUEST,
 			Error::Forbidden(_) => http::StatusCode::FORBIDDEN,
+			Error::Refused(refusal) if refusal.reason == moq_auth::refusal::Reason::Forbidden => {
+				http::StatusCode::FORBIDDEN
+			}
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
 	}
@@ -394,6 +397,24 @@ impl From<&Error> for http::StatusCode {
 impl From<Error> for http::StatusCode {
 	fn from(err: Error) -> Self {
 		Self::from(&err)
+	}
+}
+
+/// The code a refused session closes with, or a refused in-band token is answered with.
+impl From<&Error> for moq_net::SessionError {
+	fn from(err: &Error) -> Self {
+		match err {
+			Error::Refused(refusal) => match refusal.reason {
+				moq_auth::refusal::Reason::Expired => Self::Expired,
+				moq_auth::refusal::Reason::Malformed => Self::MalformedAuthToken,
+				_ => Self::Unauthorized,
+			},
+			Error::Forbidden(_) => Self::Unauthorized,
+			// The status is what separates "your credential is bad" from "the auth server is
+			// down". Collapsing both into Unauthorized tells a client to stop reconnecting
+			// through an outage it could have waited out.
+			err => Self::App(http::StatusCode::from(err).as_u16()),
+		}
 	}
 }
 
@@ -413,16 +434,22 @@ pub struct Token {
 	/// The path the session dialed, which a grant without `root` is relative to.
 	pub(crate) path: String,
 	/// The root the session is scoped to: the grant's `root` alias, else the dialed path.
-	pub root: PathOwned,
+	pub root: Path,
 	/// Subtrees read from elsewhere on the origin: each path, relative to `root`,
 	/// resolves at the absolute path it maps to.
-	pub mounts: Vec<(PathOwned, PathOwned)>,
-	/// Subscribe paths and an optional download cap, relative to `root`.
-	pub subscribe: moq_auth::Access,
-	/// Publish paths and an optional upload cap, relative to `root`.
-	pub publish: moq_auth::Access,
+	pub mounts: Vec<(Path, Path)>,
+	/// Patterns the session may subscribe to, relative to `root`.
+	pub subscribe: moq_auth::Patterns,
+	/// Patterns the session may publish, relative to `root`.
+	pub publish: moq_auth::Patterns,
+	/// The most the session may publish, or no cap when absent.
+	pub publish_rate: Option<moq_auth::Rate>,
+	/// The most the session may receive from its subscriptions, or no cap when absent.
+	pub subscribe_rate: Option<moq_auth::Rate>,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
+	/// The path this session's stats record under, empty when the grant names none.
+	pub label: Path,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
 	pub peer: bool,
 	/// Whether the peer is upstream, so it is never offered another upstream's routes.
@@ -435,42 +462,51 @@ impl Token {
 	/// The token keeps the patterns the grant yields: the origin scopes by any
 	/// pattern union, so `alice`, `*/chat`, and `alice/**` each mean exactly what
 	/// they say.
-	pub fn new(path: &str, grant: &Grant) -> Self {
-		let root = grant.root.as_deref().unwrap_or(path);
-		Self {
+	///
+	/// The dialed path is a URL path, whose one leading `/` is syntax rather than a
+	/// segment. Fails with [`Error::Request`] if the rest of it is not a valid path,
+	/// and with [`Error::Forbidden`] if a root, mount, tier, or label the grant names
+	/// is not: one [`Path::new`] refuses.
+	pub fn new(path: &str, grant: &Grant) -> Result<Self, Error> {
+		let invalid = |err: moq_net::path::Error| Error::Forbidden(err.to_string());
+		let root = match &grant.root {
+			Some(root) => Path::new(root).map_err(invalid)?,
+			None => Path::new(path.strip_prefix('/').unwrap_or(path))
+				.map_err(|err| Error::Request(format!("path {path:?}: {err}")))?,
+		};
+		Ok(Self {
 			path: path.to_string(),
-			root: Path::new(root).to_owned(),
+			root,
 			mounts: grant
 				.mounts
 				.iter()
-				.map(|(at, target)| (Path::new(at).to_owned(), Path::new(target).to_owned()))
-				.collect(),
+				.map(|(at, target)| Ok((Path::new(at)?, Path::new(target)?)))
+				.collect::<Result<_, _>>()
+				.map_err(invalid)?,
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
-			tier: crate::configured_tier(grant.tier.clone()),
+			publish_rate: grant.publish_rate,
+			subscribe_rate: grant.subscribe_rate,
+			tier: crate::configured_tier(grant.tier.clone()).map_err(invalid)?,
+			label: Path::new(grant.label.as_deref().unwrap_or_default()).map_err(invalid)?,
 			peer: grant.peer,
 			upstream: grant.upstream,
-		}
-	}
-
-	pub(crate) fn uncapped(&self) -> Result<(), Error> {
-		check_rates(&self.publish, &self.subscribe)
+		})
 	}
 
 	/// Rebuild the token from a re-checked grant, relative to the same dialed path,
 	/// so a grant that drops its `root` alias resolves back to what was dialed.
-	pub(crate) fn recheck(&self, grant: &Grant) -> Self {
+	pub(crate) fn recheck(&self, grant: &Grant) -> Result<Self, Error> {
 		Self::new(&self.path, grant)
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// mounts, and every path still held. Caps are not compared: a cap change is
-	/// applied to the live connection rather than ending it.
+	/// mounts, and every path still held.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root
 			&& self.mounts == other.mounts
-			&& other.subscribe.path.covers(&self.subscribe.path)
-			&& other.publish.path.covers(&self.publish.path)
+			&& other.subscribe.covers(&self.subscribe)
+			&& other.publish.covers(&self.publish)
 	}
 }
 
@@ -489,12 +525,17 @@ pub struct Lease {
 	/// The live session a re-check re-authorizes in place, once attached.
 	session: Option<moq_net::auth::Handle>,
 	/// When the grant runs out, enforced here whoever drives the lease: a fixed
-	/// grant has no driver, and an auth server's may be mid-outage. Fixed on tokio's
+	/// grant has no driver, and an auth server's may be mid-outage. Fixed on the ambient
 	/// clock when the grant arrives, so re-polling [`ended`](Self::ended) never
 	/// restarts the countdown.
-	expires: Option<tokio::time::Instant>,
+	expires: Option<kio::clock::Instant>,
 	/// The session's stats context, moved to a re-checked tier.
 	stats: moq_net::stats::Session,
+	/// What holds the connection to its grant's caps, or `None` on a transport that
+	/// cannot, which refuses any capped grant.
+	pacer: Option<Pacer>,
+	/// The caps the connection holds.
+	caps: Caps,
 }
 
 struct Source {
@@ -505,26 +546,45 @@ struct Source {
 impl Lease {
 	/// Hold `consumer` for a session that dialed `path`, reducing its grant to
 	/// what the origin scopes by.
-	pub fn new(path: &str, consumer: lease::Consumer) -> Self {
+	///
+	/// Fails if the grant's paths are too long; see [`Token::new`]. Fails too if the
+	/// grant caps a bitrate, which nothing here enforces.
+	pub fn new(path: &str, consumer: lease::Consumer) -> Result<Self, Error> {
 		let grant = consumer.grant();
-		Self {
+		Self::granted(path, &grant, consumer, None)
+	}
+
+	/// Hold `consumer` with its token built from `grant`, a snapshot of it. A later
+	/// update still reaches [`Self::ended`] as a change, which re-checks it.
+	///
+	/// A capped grant needs `pacer` to hold the connection to it, and is refused without.
+	fn granted(path: &str, grant: &Grant, consumer: lease::Consumer, pacer: Option<Pacer>) -> Result<Self, Error> {
+		let caps = Caps::of(grant);
+		if caps.is_capped() && pacer.is_none() {
+			return Err(Error::Forbidden(caps::UNENFORCED.into()));
+		}
+		Ok(Self {
 			refresh: None,
 			source: None,
-			token: Token::new(path, &grant),
+			token: Token::new(path, grant)?,
 			expires: grant.deadline(),
 			consumer,
 			session: None,
 			stats: Default::default(),
-		}
+			pacer,
+			caps,
+		})
 	}
 
 	/// Take AUTH decisions before the protocol driver chooses its default acceptor.
 	pub(crate) fn preparing(
 		mut self,
 		handle: moq_net::auth::Handle,
-		role: Option<moq_net::Role>,
+		requests: moq_net::auth::Requests,
+		role: Option<moq_net::setup::Role>,
 	) -> Result<Self, moq_net::Error> {
-		self.refresh = Some(refresh::Refresh::new(&mut self, handle, role)?);
+		let refresh = refresh::Refresh::new(&mut self, handle, requests, role)?;
+		self.refresh = Some(refresh);
 		Ok(self)
 	}
 
@@ -533,6 +593,14 @@ impl Lease {
 	pub(crate) fn authorizing(mut self, session: &moq_net::Session) -> Self {
 		self.session = Some(session.auth());
 		self
+	}
+
+	pub(crate) fn close_session(self, error: &moq_net::Error, bytes: Bytes) {
+		let reason = match error {
+			moq_net::Error::Cancel => "closed".to_string(),
+			error => error.to_string(),
+		};
+		self.close(reason, bytes);
 	}
 
 	/// Attach the session's stats context, so a re-checked tier retags it live.
@@ -545,6 +613,15 @@ impl Lease {
 	/// the latest re-check that resized it.
 	pub fn token(&self) -> &Token {
 		&self.token
+	}
+
+	/// The caps the connection is held to: the union of its live credentials once
+	/// [prepared](Self::preparing), which the connection applies before answering SETUP.
+	pub(crate) fn caps(&self) -> Caps {
+		match &self.refresh {
+			Some(refresh) => refresh.caps(),
+			None => self.caps,
+		}
 	}
 
 	/// Ask the lease's producer to re-check now. A no-op on a fixed lease.
@@ -577,17 +654,20 @@ impl Lease {
 		loop {
 			let expire = async {
 				match self.expires {
-					Some(at) => tokio::time::sleep_until(at).await,
+					Some(at) => kio::clock::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
 			tokio::select! {
 				changed = self.consumer.changed() => match changed {
 					Ok(grant) => {
-						let fresh = self.token.recheck(&grant);
-						if let Err(err) = fresh.uncapped() {
-							return err.to_string().into();
+						if let Err(reason) = still_valid(&grant) {
+							return reason;
 						}
+						let fresh = match self.token.recheck(&grant) {
+							Ok(fresh) => fresh,
+							Err(err) => return err.to_string().into(),
+						};
 						if fresh.root != self.token.root {
 							return lease::Reason::Narrowed;
 						}
@@ -602,17 +682,26 @@ impl Lease {
 						if fresh.upstream != self.token.upstream {
 							return "upstream changed".into();
 						}
+						let caps = Caps::of(&grant);
+						if caps != self.caps {
+							let Some(pacer) = &self.pacer else {
+								return caps::UNENFORCED.into();
+							};
+							tracing::info!(%caps, "bitrate caps changed");
+							pacer.pace(caps);
+							self.caps = caps;
+						}
 						if fresh.publish != self.token.publish || fresh.subscribe != self.token.subscribe {
 							match &self.session {
 								Some(session) => {
 									tracing::info!(
-										publish = %join(&fresh.publish.path),
-										subscribe = %join(&fresh.subscribe.path),
+										publish = %join(&fresh.publish),
+										subscribe = %join(&fresh.subscribe),
 										"grant changed; re-authorizing the session",
 									);
 									session.authorize(&moq_net::auth::Grant {
-										publish: fresh.publish.path.clone(),
-										subscribe: fresh.subscribe.path.clone(),
+										publish: fresh.publish.clone(),
+										subscribe: fresh.subscribe.clone(),
 										expires: None,
 									});
 									self.token.publish = fresh.publish;
@@ -622,10 +711,11 @@ impl Lease {
 								None => {}
 							}
 						}
-						if fresh.tier != self.token.tier {
-							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
-							self.stats.set_tier(fresh.tier.clone());
+						if fresh.tier != self.token.tier || fresh.label != self.token.label {
+							tracing::info!(tier = %fresh.tier, label = %fresh.label, "stats tier or label changed");
+							self.stats.retag(fresh.tier.clone(), &fresh.label);
 							self.token.tier = fresh.tier;
+							self.token.label = fresh.label;
 						}
 						self.expires = grant.deadline();
 					},
@@ -636,19 +726,42 @@ impl Lease {
 		}
 	}
 
+	/// Resolve once the lease has ended and the decider heard; see
+	/// [`moq_auth::lease::Consumer::reported`]. Take it before [`close`](Self::close).
+	pub(crate) fn reported(&self) -> impl Future<Output = ()> + Send + 'static {
+		self.consumer.reported()
+	}
+
 	/// End the lease with the session's close classification and the totals it
-	/// moved, and learn what it ended with: that, or the decider's reason if it
-	/// revoked first. Dropping the consumer reports zero bytes.
-	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+	/// moved, and learn what ended the session: that, or for a gateway the
+	/// decider's reason if it revoked first. Dropping the consumer reports zero bytes.
+	pub fn close(mut self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+		use futures::FutureExt;
+
 		let mut reason = reason.into();
 		// A gateway has one credential, so its revocation caused the transfer to
-		// end. A refreshed session instead reports the result of its whole union.
-		if self.refresh.is_none()
-			&& let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop())
-		{
-			reason = ended;
+		// end. A refreshed session instead reports the result of its whole union,
+		// which may have ended before the supervisor saw it: its first credential
+		// may have ended with a reason a replacement outlived.
+		match &mut self.refresh {
+			None => {
+				if let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop()) {
+					reason = ended;
+				}
+				self.consumer.close(reason, bytes)
+			}
+			Some(refresh) => {
+				// The session has closed by now, withdrawing every grant it was issued.
+				// That is the effect of `reason`, not a verdict that overrides it.
+				if let Some(ended) = refresh.ended().now_or_never()
+					&& ended != lease::Reason::Dropped
+				{
+					reason = ended;
+				}
+				self.consumer.close(reason.clone(), bytes);
+				reason
+			}
 		}
-		self.consumer.close(reason, bytes)
 	}
 }
 
@@ -661,10 +774,13 @@ fn join(patterns: &Patterns) -> String {
 		.join(",")
 }
 
-/// The session failure a lease end exposes to a client.
+/// The session failure a lease end exposes to a client, which is also how the session's
+/// stats count it: `expired` for an expired grant, a clean close for a shutdown, and
+/// `application` for any other reason.
 pub(crate) fn error(reason: &lease::Reason) -> moq_net::Error {
 	match reason {
 		lease::Reason::Expired => moq_net::Error::Expired,
+		lease::Reason::Shutdown => moq_net::Error::GoingAway,
 		_ => moq_net::Error::Unauthorized,
 	}
 }
@@ -674,7 +790,8 @@ pub(crate) fn error(reason: &lease::Reason) -> moq_net::Error {
 /// Work is dropped when the lease expires, narrows, or is revoked. A completed
 /// work future ends the lease with zero byte totals. A gateway that tracks
 /// transport totals can use [`Lease::ended`] and [`Lease::close`] directly.
-pub async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Output = T>) -> Result<T, lease::Reason> {
+#[cfg(test)]
+pub(crate) async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Output = T>) -> Result<T, lease::Reason> {
 	tokio::select! {
 		biased;
 		reason = lease.ended() => {
@@ -688,54 +805,70 @@ pub async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Output = T
 	}
 }
 
+/// Who answers an [`Admission`].
+///
+/// Each admission is decided where it is submitted: nothing long-lived sits between
+/// a session and its answer, so a panic deciding one costs only that session.
+#[derive(Clone)]
 enum Decider {
+	/// The embedding process, through [`Admissions`].
+	Embedded(mpsc::UnboundedSender<Admission>),
 	Server(moq_auth::Client),
 	/// The public rules, as a token with an empty root.
-	Public(moq_auth::Claims),
+	Public(Arc<moq_auth::Claims>),
 	Refuse,
 }
 
 impl Decider {
-	fn spawn(self, mut admissions: Admissions) {
-		tokio::spawn(async move {
-			while let Some(admission) = admissions.next().await {
-				match &self {
-					Self::Server(client) => {
-						let client = client.clone();
-						// A panic drops the admission, which answers it as unavailable.
-						tokio::spawn(moq_tokio::panic::isolate(async move {
-							let lease = match &admission.connection {
-								Some(connection) => client.attach(connection, admission.request.clone()).await,
-								None => client.connect(admission.request.clone()).await,
-							};
-							match lease {
-								Ok(lease) => admission.grant(lease),
-								Err(err) => admission.refuse(err.into()),
-							}
-						}));
-					}
-					// Nothing here can verify a token, so one is refused rather than ignored:
-					// its holder expects it to count, and the public grant is not what it says.
-					Self::Public(_) if presents_token(&admission.request) => {
-						tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
-						admission.refuse(Error::Refused);
-					}
-					Self::Public(rules) => match rules.authorize(&admission.request.path) {
-						Ok(access) => {
-							let grant = Grant::new(access.publish, access.subscribe);
-							admission.grant(lease::Consumer::fixed(grant));
+	fn decide(&self, mut admission: Admission) -> Result<(), Error> {
+		match self {
+			Self::Embedded(admissions) => admissions
+				.send(admission)
+				.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?,
+			Self::Server(client) => {
+				let client = client.clone();
+				// A panic drops the admission, which answers it as unavailable.
+				tokio::spawn(moq_tokio::panic::isolate(async move {
+					let ask = async {
+						match &admission.connection {
+							Some(connection) => client.attach(connection, admission.request.clone()).await,
+							None => client.connect(admission.request.clone()).await,
 						}
-						// A path the rules don't reach is a refusal, never an outage a
-						// client would retry.
-						Err(err) => {
-							tracing::debug!(path = %admission.request.path, %err, "public rules refused");
-							admission.refuse(Error::Refused);
-						}
-					},
-					Self::Refuse => admission.refuse(Error::Refused),
-				}
+					};
+					// The relay stopped waiting (its handshake deadline passed): drop the
+					// request to the server, so an expired admission leaves nothing in flight.
+					let lease = tokio::select! {
+						biased;
+						() = admission.reply.closed() => return,
+						lease = ask => lease,
+					};
+					match lease {
+						Ok(lease) => admission.grant(lease),
+						Err(err) => admission.refuse(err.into()),
+					}
+				}));
 			}
-		});
+			// Nothing here can verify a token, so one is refused rather than ignored:
+			// its holder expects it to count, and the public grant is not what it says.
+			Self::Public(_) if presents_token(&admission.request) => {
+				tracing::debug!(path = ?admission.request.path, "a token was presented to public rules");
+				admission.refuse(Error::Refused(Default::default()));
+			}
+			Self::Public(rules) => match rules.authorize(&admission.request.path) {
+				Ok(access) => {
+					let grant = Grant::new(access.publish, access.subscribe);
+					admission.grant(lease::Consumer::fixed(grant));
+				}
+				// A path the rules don't reach is a refusal, never an outage a
+				// client would retry.
+				Err(err) => {
+					tracing::debug!(path = ?admission.request.path, ?err, "public rules refused");
+					admission.refuse(Error::Refused(Default::default()));
+				}
+			},
+			Self::Refuse => admission.refuse(Error::Refused(Default::default())),
+		}
+		Ok(())
 	}
 }
 
@@ -750,14 +883,15 @@ fn presents_token(request: &Request) -> bool {
 		})
 }
 
-/// Admits sessions by queueing every request for one admission decider.
+/// Admits sessions through one admission decider.
 #[derive(Clone)]
 pub struct Auth {
-	admissions: mpsc::UnboundedSender<Admission>,
+	decider: Decider,
 	node: Arc<str>,
 	/// Whether the decider can verify a token presented in band; public rules cannot.
 	in_band: bool,
 	/// How many in-band tokens one session may have the decider verifying at once.
+	#[cfg(test)]
 	verifications: usize,
 }
 
@@ -767,31 +901,38 @@ impl Auth {
 	/// refused. Dropping the `Admissions` fails every later session as unavailable.
 	pub fn embedded(node: impl Into<String>) -> (Self, Admissions) {
 		let (sender, receiver) = mpsc::unbounded_channel();
-		let auth = Self {
-			admissions: sender,
-			node: Arc::from(node.into()),
-			in_band: true,
-			verifications: VERIFICATIONS,
-		};
-		(auth, Admissions(receiver))
+		(Self::new(node, Decider::Embedded(sender)), Admissions(receiver))
 	}
 
-	/// Verify at most `verifications` in-band tokens per session at once, as
-	/// `--auth-verifications` does for a configured `Auth`; later ones wait for a slot.
-	/// Panics on 0, which would leave every in-band token waiting forever.
-	pub fn with_verifications(mut self, verifications: usize) -> Self {
-		assert!(verifications > 0, "an Auth must verify at least one token at a time");
+	fn new(node: impl Into<String>, decider: Decider) -> Self {
+		Self {
+			in_band: !matches!(decider, Decider::Public(_)),
+			decider,
+			node: Arc::from(node.into()),
+			#[cfg(test)]
+			verifications: VERIFICATIONS,
+		}
+	}
+
+	#[cfg(test)]
+	pub(crate) fn with_verifications(mut self, verifications: usize) -> Self {
+		assert!(verifications > 0);
 		self.verifications = verifications;
 		self
 	}
 
+	/// How many credentials one session, or one HTTP/2 connection, may have the decider verifying at once.
+	pub(crate) fn verifications(&self) -> usize {
+		#[cfg(test)]
+		return self.verifications;
+		#[cfg(not(test))]
+		VERIFICATIONS
+	}
+
 	/// An `Auth` that refuses every session a server or a public grant would have
 	/// decided, admitting only what the relay decides for itself (a LAN peer).
-	/// Must be called within a Tokio runtime, which drives the refusal decider.
 	pub fn refuse(node: impl Into<String>) -> Self {
-		let (auth, admissions) = Self::embedded(node);
-		Decider::Refuse.spawn(admissions);
-		auth
+		Self::new(node, Decider::Refuse)
 	}
 
 	/// The name this relay puts in every request.
@@ -805,10 +946,30 @@ impl Auth {
 	}
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
+	///
+	/// Waits on the decider for as long as the caller does. The caller owns the
+	/// deadline: a listener bounds it with the connection's handshake deadline
+	/// ([`moq_tokio::server::Request::within`]), and dropping the future withdraws
+	/// the admission from the decider.
+	///
+	/// A path naming a `.` or `..` segment is refused before the decider sees it. A
+	/// URL transport resolves those away, but an in-band SETUP Path arrives verbatim,
+	/// and `/tenant-a/../tenant-b` would reach the decider spelled under `tenant-a`.
+	///
+	/// A grant that caps a bitrate is refused: nothing here holds the session to it.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
-		let consumer = self.decide(request.clone()).await?;
-		let mut lease = Lease::new(&request.path, consumer);
-		lease.token.uncapped()?;
+		self.admit_paced(request, None).await
+	}
+
+	/// [Admit](Self::admit) a session whose connection `pacer` holds to a capped grant.
+	pub(crate) async fn admit_paced(&self, request: Request, pacer: Option<Pacer>) -> Result<Lease, Error> {
+		if navigates(&request.path) {
+			return Err(Error::Request(format!("path {:?} has a dot segment", request.path)));
+		}
+		// Build the token from the grant the admission checked: re-reading it could
+		// pick up an update that skipped the check.
+		let (consumer, grant) = self.decide(request.clone()).await?;
+		let mut lease = Lease::granted(&request.path, &grant, consumer, pacer)?;
 		lease.source = Some(Source {
 			auth: self.clone(),
 			request,
@@ -816,32 +977,33 @@ impl Auth {
 		Ok(lease)
 	}
 
-	async fn decide(&self, request: Request) -> Result<lease::Consumer, Error> {
+	async fn decide(&self, request: Request) -> Result<(lease::Consumer, Grant), Error> {
 		let answer = self.submit(request, None)?;
-		let answered = tokio::time::timeout(ADMIT_TIMEOUT, answer)
-			.await
-			.map_err(|_| timed_out())?;
-		answered_with(answered)
+		answered_with(answer.await)
 	}
 
-	/// Queue one admission for the decider, returning its pending answer.
+	/// Hand one admission to the decider, returning its pending answer.
 	fn submit(&self, request: Request, connection: Option<lease::Consumer>) -> Result<Answer, Error> {
 		let (reply, answer) = oneshot::channel();
-		self.admissions
-			.send(Admission {
-				request,
-				connection,
-				reply,
-			})
-			.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
+		self.decider.decide(Admission {
+			request,
+			connection,
+			reply,
+		})?;
 		Ok(answer)
 	}
 
 	/// Admit a session on a grant decided locally, bypassing the server: the LAN
 	/// mesh credential, which the relay minted for itself.
 	pub(crate) fn admit_fixed(&self, path: &str, grant: Grant) -> Lease {
-		Lease::new(path, lease::Consumer::fixed(grant))
+		Lease::new(path, lease::Consumer::fixed(grant)).expect("the relay's own grant fits")
 	}
+}
+
+/// Whether `path` has a segment URL resolution reads as `.` or `..`, percent-encoded or not.
+fn navigates(path: &str) -> bool {
+	path.split('/')
+		.any(|segment| matches!(segment.to_ascii_lowercase().replace("%2e", ".").as_str(), "." | ".."))
 }
 
 /// A decider's pending answer to one [`Admission`].
@@ -853,33 +1015,36 @@ fn timed_out() -> Error {
 
 /// Check a decider's answer against the contract every decider is held to: a
 /// grant that admits nothing or asks for a re-check without a bound is a bug, not
-/// a refusal.
+/// a refusal. Returns the grant snapshot it checked.
 fn answered_with(
 	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
-) -> Result<lease::Consumer, Error> {
+) -> Result<(lease::Consumer, Grant), Error> {
 	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
 	let grant = consumer.grant();
 	grant.validate()?;
-	check_rates(&grant.publish, &grant.subscribe)?;
-	Ok(consumer)
+	Ok((consumer, grant))
 }
 
-/// Refuse caps before reducing a grant to the paths its origin can enforce.
-fn check_rates(publish: &moq_auth::Access, subscribe: &moq_auth::Access) -> Result<(), Error> {
-	if publish.rate.is_some() || subscribe.rate.is_some() {
-		return Err(Error::Forbidden("this transport cannot enforce bitrate caps".into()));
-	}
-	Ok(())
+/// Hold a changed grant to the contract its first answer met: one that admits nothing
+/// narrowed the session away, and one already past its expiry ended it.
+fn still_valid(grant: &Grant) -> Result<(), lease::Reason> {
+	grant.validate().map_err(|err| match err {
+		moq_auth::Error::UselessGrant => lease::Reason::Narrowed,
+		moq_auth::Error::GrantExpired => lease::Reason::Expired,
+		err => err.to_string().into(),
+	})
 }
 
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
 ///
 /// The transport has already accepted each one; it waits for its answer, so a
-/// slow decider holds connects the way a slow auth server would, and one that
-/// takes longer than a server may (ten seconds) is refused as unavailable. An
-/// [attached](Admission::attached) token holds one of its session's verification
-/// slots until the decider answers or drops it, even past that, and the session's
-/// later tokens wait for a slot before they reach the decider.
+/// slow decider holds connects the way a slow auth server would. A connection's
+/// admission has no bound of its own: whoever awaits [`Auth::admit`] owns the
+/// deadline, which the relay's listeners set to their handshake deadline. An
+/// [attached](Admission::attached) token is refused as unavailable after ten
+/// seconds, but holds one of its session's verification slots until the decider
+/// answers or drops it, even past that, and the session's later tokens wait for a
+/// slot before they reach the decider.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
@@ -933,17 +1098,7 @@ impl Admission {
 /// The `moq_auth::Request` for an accepted transport request: every fact the
 /// transport knows, nothing parsed on the server's behalf.
 pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
-	let transport = match request.transport() {
-		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
-		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
-		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
-		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
-		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
-		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
-		// A transport this build does not know is still a session on the wire; the
-		// server sees the same facts either way.
-		other => unreachable!("unknown transport {other}"),
-	};
+	let transport = transport(request.transport());
 	// A URL-less transport reports its root as empty; the contract says what was dialed.
 	let path = match request.path() {
 		"" => "/".to_string(),
@@ -957,21 +1112,58 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	});
 	out.remote = request.remote_addr();
 	out.local = request.local_addr();
-	out.server_name = request
-		.server_name()
-		.map(str::to_owned)
-		.or_else(|| request.authority().map(str::to_owned));
+	// Only the SNI: a WebTransport CONNECT authority or WebSocket `Host` is client-chosen
+	// without having selected a certificate, so a session without SNI reports none.
+	out.server_name = request.server_name().map(str::to_owned);
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().and_then(role);
+	out.implementation = request.peer_implementation().map(str::to_owned);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
 	out
 }
 
+/// Build an auth request from the path, credential, role, and implementation carried in SETUP.
+#[cfg(any(feature = "test-support", all(target_os = "linux", feature = "_uring")))]
+pub(crate) fn request_for_setup(
+	auth: &Auth,
+	setup: &moq_net::server::Handshake,
+	transport: moq_auth::Transport,
+) -> Request {
+	let (path, query) = match setup.path().split_once('?') {
+		Some((path, query)) => (path, Some(query.to_string())),
+		None => (setup.path(), None),
+	};
+	let mut request = auth.request(transport, if path.is_empty() { "/" } else { path });
+	request.query = query;
+	request.token = setup.token().map(|token| moq_auth::Token {
+		kind: token.kind,
+		value: token.value.clone(),
+	});
+	request.role = setup.role().and_then(role);
+	request.implementation = setup.peer_implementation().map(str::to_owned);
+	request
+}
+
+/// The auth transport for a session's transport.
+fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
+	match transport {
+		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
+		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
+		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
+		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
+		moq_tokio::Transport::WebRtc => moq_auth::Transport::WebRtc,
+		// A transport this build does not know is still a session on the wire; the
+		// server sees the same facts either way.
+		other => unreachable!("unknown transport {other}"),
+	}
+}
+
 /// The auth role for a session role, `None` for one `moq-auth` cannot name yet.
-pub(crate) fn role(role: moq_net::Role) -> Option<moq_auth::Role> {
+pub(crate) fn role(role: moq_net::setup::Role) -> Option<moq_auth::Role> {
 	match role {
-		moq_net::Role::Publisher => Some(moq_auth::Role::Publisher),
-		moq_net::Role::Subscriber => Some(moq_auth::Role::Subscriber),
+		moq_net::setup::Role::Publisher => Some(moq_auth::Role::Publisher),
+		moq_net::setup::Role::Subscriber => Some(moq_auth::Role::Subscriber),
 		_ => None,
 	}
 }
@@ -990,9 +1182,8 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::time::SystemTime;
 
-	fn patterns(texts: &[&str]) -> moq_auth::Access {
+	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -1005,54 +1196,137 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn capped_grants_are_refused_on_every_transport() {
-		use moq_auth::Transport::*;
-		for transport in [
-			Quic,
-			Iroh,
-			WebSocket,
-			Tcp,
-			Unix,
-			Http,
-			Rtmp,
-			Srt,
-			WebRtc,
-			WebTransport,
-			Unknown,
+	async fn an_invalid_label_at_revalidation_ends_the_lease() {
+		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/room", consumer).unwrap();
+		let mut wildcard = grant;
+		wildcard.label = Some("project/*".into());
+		producer.update(wildcard);
+		assert!(lease.ended().await.to_string().contains("invalid stats label"));
+		assert!(lease.token().label.is_empty(), "the label never applied");
+	}
+
+	#[test]
+	fn typed_refusal_preserves_transport_status() {
+		use moq_auth::refusal::Reason;
+		use moq_net::SessionError;
+		for (reason, status, code) in [
+			(
+				Reason::Refused,
+				http::StatusCode::UNAUTHORIZED,
+				SessionError::Unauthorized,
+			),
+			(Reason::Expired, http::StatusCode::UNAUTHORIZED, SessionError::Expired),
+			(
+				Reason::Forbidden,
+				http::StatusCode::FORBIDDEN,
+				SessionError::Unauthorized,
+			),
+			(
+				Reason::Malformed,
+				http::StatusCode::UNAUTHORIZED,
+				SessionError::MalformedAuthToken,
+			),
 		] {
+			let mut refusal = moq_auth::Refusal::default();
+			refusal.reason = reason;
+			let error = Error::from(moq_auth::Error::Refused(refusal));
+			assert_eq!(http::StatusCode::from(&error), status);
+			assert_eq!(SessionError::from(&error), code);
+		}
+		let outage = Error::Unavailable("down".into());
+		assert_eq!(SessionError::from(&outage), SessionError::App(502));
+	}
+
+	#[test]
+	fn every_transport_has_an_auth_name() {
+		use moq_tokio::Transport as T;
+		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Unix, T::WebRtc] {
+			assert_eq!(super::transport(transport).as_str(), transport.as_str());
+		}
+	}
+
+	/// Nothing holds a session admitted without a pacer to a cap, whatever its transport
+	/// claims, so a capped grant is refused rather than dropped: at admission, and on a
+	/// lease built without one.
+	#[tokio::test(start_paused = true)]
+	async fn capped_grants_are_refused_without_a_pacer() {
+		use moq_auth::Transport::*;
+		let rate = moq_auth::Rate::from_bps(8000).unwrap();
+		for transport in [Quic, WebTransport, Iroh, WebSocket, Http, Rtmp, Srt] {
 			for publish in [false, true] {
+				let mut grant = Grant::new(Pattern::all(), Pattern::all());
+				match publish {
+					true => grant.publish_rate = Some(rate),
+					false => grant.subscribe_rate = Some(rate),
+				}
 				let (auth, mut admissions) = Auth::embedded("test");
 				let request = auth.request(transport, "/room");
 				let (result, ()) = tokio::join!(auth.admit(request), async {
-					let mut grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
-					let access = if publish {
-						&mut grant.publish
-					} else {
-						&mut grant.subscribe
-					};
-					access.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
-					admissions.next().await.unwrap().grant(lease::Consumer::fixed(grant));
+					admissions
+						.next()
+						.await
+						.unwrap()
+						.grant(lease::Consumer::fixed(grant.clone()));
 				});
 				let Err(Error::Forbidden(message)) = result else {
-					panic!("{transport} admitted a cap")
+					panic!("{transport} admitted a cap it cannot enforce");
 				};
-				assert!(
-					message.contains("cannot enforce bitrate caps"),
-					"{transport}: {message}"
-				);
+				assert_eq!(message, caps::UNENFORCED, "{transport}");
+
+				let (auth, mut admissions) = Auth::embedded("test");
+				let request = auth.request(transport, "/room");
+				let pacer = Pacer::new(|_| {});
+				let (result, ()) = tokio::join!(auth.admit_paced(request, Some(pacer)), async {
+					admissions
+						.next()
+						.await
+						.unwrap()
+						.grant(lease::Consumer::fixed(grant.clone()));
+				});
+				assert_eq!(result.expect("paced").caps(), Caps::of(&grant), "{transport}");
+
+				assert!(matches!(
+					Lease::new("/room", lease::Consumer::fixed(grant)),
+					Err(Error::Forbidden(_))
+				));
 			}
 		}
 	}
 
+	/// A lease without in-band auth applies a re-checked cap through its pacer, and ends
+	/// on one without a pacer.
 	#[tokio::test(start_paused = true)]
-	async fn a_cap_added_at_revalidation_ends_the_lease() {
-		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
-		let (producer, consumer) = lease::Producer::new(grant.clone());
-		let mut lease = Lease::new("/room", consumer);
-		let mut capped = grant;
-		capped.subscribe.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+	async fn a_rechecked_cap_reaches_the_connection() {
+		use futures::FutureExt;
+		let rate = moq_auth::Rate::from_bps(8000).unwrap();
+		let uncapped = Grant::new(Pattern::all(), Pattern::all());
+		let mut capped = uncapped.clone();
+		capped.subscribe_rate = Some(rate);
+
+		let applied = Arc::new(std::sync::Mutex::new(Vec::new()));
+		let record = applied.clone();
+		let pacer = Pacer::new(move |caps| record.lock().unwrap().push(caps));
+		let (producer, consumer) = lease::Producer::new(uncapped.clone());
+		let (auth, mut admissions) = Auth::embedded("test");
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit_paced(request, Some(pacer)), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let mut lease = lease.unwrap();
+		for grant in [&capped, &uncapped] {
+			producer.update(grant.clone());
+			assert!(lease.ended().now_or_never().is_none(), "a cap change keeps the lease");
+		}
+		producer.revoke(lease::Reason::Refused);
+		assert_eq!(lease.ended().await, lease::Reason::Refused);
+		assert_eq!(*applied.lock().unwrap(), [Caps::of(&capped), Caps::default()]);
+
+		let (producer, consumer) = lease::Producer::new(uncapped);
+		let mut lease = Lease::new("/room", consumer).unwrap();
 		producer.update(capped);
-		assert!(lease.ended().await.to_string().contains("cannot enforce bitrate caps"));
+		assert_eq!(lease.ended().await.to_string(), caps::UNENFORCED);
 	}
 
 	#[test]
@@ -1063,7 +1337,7 @@ mod tests {
 		assert!(config(None, &["anon/**"]).validate(false).is_ok());
 
 		let split = Config {
-			public_subscribe: patterns(&["anon/**"]).path.into_iter().collect(),
+			public_subscribe: patterns(&["anon/**"]).into_iter().collect(),
 			..Default::default()
 		};
 		assert!(split.validate(false).is_ok());
@@ -1072,19 +1346,15 @@ mod tests {
 		assert!(grant.publish.is_empty());
 	}
 
-	/// The verification concurrency defaults to 128, reads from `[auth]`, and refuses 0,
-	/// which would leave every in-band token waiting forever.
+	/// Removed explicit window values, including zero, are refused by name.
 	#[test]
-	fn verifications_default_and_refuse_zero() {
-		let config = config(Some("http://127.0.0.1:4440/"), &[]);
-		assert_eq!(config.verifications, 128);
-		let parsed: Config = toml::from_str("url = \"http://127.0.0.1:4440/\"\nverifications = 4\n").unwrap();
-		assert_eq!(parsed.verifications, 4);
-		let zero = Config {
-			verifications: 0,
-			..config
-		};
-		assert!(zero.validate(false).is_err());
+	fn configurable_verifications_are_refused() {
+		for value in [0, 4] {
+			let parsed: Config =
+				toml::from_str(&format!("url = \"http://127.0.0.1:4440/\"\nverifications = {value}\n")).unwrap();
+			let error = parsed.validate(false).unwrap_err();
+			assert!(error.to_string().contains("verifications"), "{error}");
+		}
 	}
 
 	/// Public rules grant a certificate what they grant anyone, so a client CA
@@ -1107,8 +1377,8 @@ mod tests {
 	#[tokio::test]
 	async fn public_rules_are_rooted_at_slash() {
 		let auth = Config {
-			public_publish: patterns(&["anon/**"]).path.into_iter().collect(),
-			public_subscribe: patterns(&["anon/**", "*/chat"]).path.into_iter().collect(),
+			public_publish: patterns(&["anon/**"]).into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "*/chat"]).into_iter().collect(),
 			..Default::default()
 		}
 		.init("relay-1", &moq_tokio::tls::Connect::default(), false)
@@ -1121,7 +1391,7 @@ mod tests {
 			("/rooms", "rooms", &[], &["chat"]),
 		] {
 			let lease = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await.unwrap();
-			assert_eq!(lease.token().root, Path::new(root).to_owned(), "{path}");
+			assert_eq!(lease.token().root, Path::new(root).unwrap(), "{path}");
 			assert_eq!(lease.token().publish, patterns(publish), "{path}");
 			assert_eq!(lease.token().subscribe, patterns(subscribe), "{path}");
 		}
@@ -1131,7 +1401,7 @@ mod tests {
 			let Err(err) = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await else {
 				panic!("{path} was admitted");
 			};
-			assert!(matches!(err, Error::Refused), "{path}: {err}");
+			assert!(matches!(err, Error::Refused(_)), "{path}: {err}");
 			assert_eq!(http::StatusCode::from(&err), http::StatusCode::UNAUTHORIZED);
 		}
 	}
@@ -1156,7 +1426,7 @@ mod tests {
 			let Err(err) = auth.admit(request).await else {
 				panic!("a token was admitted on the public grant");
 			};
-			assert!(matches!(err, Error::Refused), "{err}");
+			assert!(matches!(err, Error::Refused(_)), "{err}");
 		}
 
 		// An empty `jwt=` is no token.
@@ -1181,7 +1451,7 @@ mod tests {
 		});
 		for request in [anonymous, certificate] {
 			let lease = auth.admit(request).await.unwrap();
-			assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
+			assert_eq!(lease.token().root, Path::from_static("anon/room"));
 			assert_eq!(lease.token().subscribe, patterns(&["**"]));
 			assert_eq!(lease.token().tier, Tier::default());
 		}
@@ -1196,7 +1466,7 @@ mod tests {
 			assert!(err.contains(&format!("`{hint}`")), "{public}: {err}");
 		}
 		let split = Config {
-			public_subscribe: patterns(&["anon/**", "live"]).path.into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
 			..Default::default()
 		};
 		let err = split.validate(false).unwrap_err().to_string();
@@ -1206,22 +1476,6 @@ mod tests {
 		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
 		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
 		assert!(config(None, &[&deepest]).validate(false).is_ok());
-	}
-
-	#[test]
-	fn config_init_requires_a_runtime() {
-		let result = std::panic::catch_unwind(|| {
-			let _ = config(None, &["anon/**"])
-				.init("relay-1", &moq_tokio::tls::Connect::default(), false)
-				.unwrap();
-		});
-		assert!(result.is_err());
-	}
-
-	#[test]
-	fn refuse_requires_a_runtime() {
-		let result = std::panic::catch_unwind(|| Auth::refuse("relay-1"));
-		assert!(result.is_err());
 	}
 
 	/// The embedder's answer is the session's verdict; an answer that never comes,
@@ -1236,7 +1490,7 @@ mod tests {
 			assert_eq!(admission.request.path, "/anon/room");
 			admission.grant(lease::Consumer::fixed(Grant::new(patterns(&["**"]), patterns(&["**"]))));
 			let admission = admissions.next().await.expect("an admission");
-			admission.refuse(Error::Refused);
+			admission.refuse(Error::Refused(Default::default()));
 			// A grant that admits nothing is the decider's mistake, refused like a server's.
 			let admission = admissions.next().await.expect("an admission");
 			admission.grant(lease::Consumer::fixed(Grant::new(Patterns::new(), Patterns::new())));
@@ -1246,9 +1500,9 @@ mod tests {
 		};
 		let admit = async {
 			let lease = auth.admit(request()).await.expect("granted");
-			assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
-			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
-			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
+			assert_eq!(lease.token().root, Path::from_static("anon/room"));
+			assert!(matches!(auth.admit(request()).await, Err(Error::Refused(_))));
+			assert!(matches!(auth.admit(request()).await, Err(Error::Refused(_))));
 			assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
 		};
 		let (admissions, ()) = tokio::join!(decide, admit);
@@ -1263,7 +1517,7 @@ mod tests {
 		let clone = auth.clone();
 		drop(auth);
 		assert!(
-			tokio::time::timeout(std::time::Duration::ZERO, admissions.next())
+			kio::clock::timeout(std::time::Duration::ZERO, admissions.next())
 				.await
 				.is_err()
 		);
@@ -1275,44 +1529,46 @@ mod tests {
 	async fn refuse_answers_the_admission_queue() {
 		let auth = Auth::refuse("relay-1");
 		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
-		assert!(matches!(auth.admit(request).await, Err(Error::Refused)));
+		assert!(matches!(auth.admit(request).await, Err(Error::Refused(_))));
 	}
 
 	/// The session supervisor re-polls `ended` on every nudge; that must not
 	/// restart the countdown to `expires`.
-	#[tokio::test(start_paused = true)]
+	#[kio::test]
 	async fn re_polling_keeps_the_expiry_deadline() {
 		use std::time::Duration;
 
+		let start = kio::clock::now();
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(10));
-		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(10));
+		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant)).unwrap();
 		for _ in 0..9 {
 			assert!(
-				tokio::time::timeout(Duration::from_secs(1), lease.ended())
+				kio::clock::timeout(Duration::from_secs(1), lease.ended())
 					.await
 					.is_err()
 			);
 		}
-		let reason = tokio::time::timeout(Duration::from_secs(2), lease.ended())
-			.await
-			.expect("expired at the deadline despite re-polling");
-		assert_eq!(reason, lease::Reason::Expired);
+		assert_eq!(lease.ended().await, lease::Reason::Expired);
+		assert_eq!(
+			kio::clock::now(),
+			start + Duration::from_secs(10),
+			"expired at the deadline despite re-polling"
+		);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[kio::test]
 	async fn an_expired_grant_ends_at_once() {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
 
-		let start = tokio::time::Instant::now();
-		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
+		let start = kio::clock::now();
+		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant)).unwrap();
 		assert_eq!(lease.ended().await, lease::Reason::Expired);
-		// A millisecond for Tokio's timer resolution.
-		assert!(start.elapsed() <= Duration::from_millis(1), "no grace after expiry");
+		assert_eq!(kio::clock::now(), start, "no grace after expiry");
 	}
 
 	#[test]
@@ -1320,28 +1576,69 @@ mod tests {
 		let mut grant = Grant::new(patterns(&["alice/**"]), patterns(&["**"]));
 		grant.root = Some("pid/room".into());
 		grant.tier = Some("gold".into());
-		let token = Token::new("/vanity/room", &grant);
-		assert_eq!(token.root, Path::new("pid/room").to_owned());
+		grant.label = Some("project/key/123".into());
+		let token = Token::new("/vanity/room", &grant).unwrap();
+		assert_eq!(token.root, Path::from_static("pid/room"));
 		assert_eq!(token.publish, patterns(&["alice/**"]));
 		assert_eq!(token.subscribe, patterns(&["**"]));
-		assert_eq!(token.tier, Tier::new("gold"));
+		assert_eq!(token.tier, Tier::new(moq_net::Path::from_static("gold")));
+		assert_eq!(token.label, Path::from_static("project/key/123"));
 
 		let patterns = patterns(&["*/chat", "alice", ""]);
-		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new()));
+		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new())).unwrap();
 		assert_eq!(token.publish, patterns);
+		assert!(
+			token.label.is_empty(),
+			"an absent label is the empty label, not the root"
+		);
+	}
+
+	/// A dot segment never reaches the decider, however it is spelled; a name that
+	/// only contains dots is an ordinary segment.
+	#[tokio::test]
+	async fn admit_refuses_dot_segments() {
+		let auth = config(None, &["**"])
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
+		for path in ["/tenant-a/../tenant-b", "/..", "/a/.", "/a/%2e%2E/b", "/a/.%2e", "/%2E"] {
+			let Err(err) = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await else {
+				panic!("{path} was admitted");
+			};
+			assert!(matches!(err, Error::Request(_)), "{path}: {err}");
+		}
+		for path in ["/a/...", "/.hidden", "/a/..b"] {
+			auth.admit(auth.request(moq_auth::Transport::Quic, path))
+				.await
+				.unwrap_or_else(|err| panic!("{path}: {err}"));
+		}
+	}
+
+	#[test]
+	fn token_refuses_empty_segments() {
+		let all = || Grant::new(patterns(&["**"]), patterns(&["**"]));
+		// The dialed URL path's one leading `/` is syntax; any other empty segment is the client's.
+		assert_eq!(Token::new("/room", &all()).unwrap().root, Path::from_static("room"));
+		for dialed in ["/room/", "//room", "/room//cam"] {
+			assert!(matches!(Token::new(dialed, &all()), Err(Error::Request(_))), "{dialed}");
+		}
+
+		// A grant naming one is the auth server's.
+		let mut grant = all();
+		grant.root = Some("room/".into());
+		assert!(matches!(Token::new("/room", &grant), Err(Error::Forbidden(_))));
 	}
 
 	#[test]
 	fn a_narrower_recheck_is_not_covered() {
-		let wide = Token::new("/room", &Grant::new(patterns(&["**"]), patterns(&["**"])));
-		let narrow = Token::new("/room", &Grant::new(patterns(&["alice/**"]), patterns(&["**"])));
-		let moved = Token::new("/other", &Grant::new(patterns(&["**"]), patterns(&["**"])));
+		let wide = Token::new("/room", &Grant::new(patterns(&["**"]), patterns(&["**"]))).unwrap();
+		let narrow = Token::new("/room", &Grant::new(patterns(&["alice/**"]), patterns(&["**"]))).unwrap();
+		let moved = Token::new("/other", &Grant::new(patterns(&["**"]), patterns(&["**"]))).unwrap();
 		let mut mounted = Grant::new(patterns(&["**"]), patterns(&["**"]));
 		mounted.mounts.insert(".svc".into(), ".svc/room".into());
-		let mounted = Token::new("/room", &mounted);
+		let mounted = Token::new("/room", &mounted).unwrap();
 		assert_eq!(
 			mounted.mounts,
-			[(Path::new(".svc").to_owned(), Path::new(".svc/room").to_owned())]
+			[(Path::from_static(".svc"), Path::from_static(".svc/room"))]
 		);
 		assert!(wide.covered_by(&wide));
 		assert!(narrow.covered_by(&wide));
@@ -1358,7 +1655,7 @@ mod tests {
 	async fn a_recheck_that_flips_the_link_closes() {
 		let grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
 		let (producer, consumer) = lease::Producer::new(grant.clone());
-		let mut lease = Lease::new("/", consumer);
+		let mut lease = Lease::new("/", consumer).unwrap();
 		assert!(!lease.token().peer);
 
 		let mut peer = grant;
@@ -1369,7 +1666,7 @@ mod tests {
 		// Routes already offered to (or withheld from) the session were filtered
 		// by whether it is upstream, so flipping that closes it too.
 		let (producer, consumer) = lease::Producer::new(peer.clone());
-		let mut lease = Lease::new("/", consumer);
+		let mut lease = Lease::new("/", consumer).unwrap();
 		let mut upstream = peer;
 		upstream.upstream = true;
 		producer.update(upstream);
@@ -1381,12 +1678,18 @@ mod tests {
 		let everything = || Grant::new(patterns(&["**"]), patterns(&["**"]));
 		let mut aliased = everything();
 		aliased.root = Some("pid/room".into());
-		let token = Token::new("/vanity/room", &aliased);
-		assert_eq!(token.root, Path::new("pid/room").to_owned());
+		let token = Token::new("/vanity/room", &aliased).unwrap();
+		assert_eq!(token.root, Path::from_static("pid/room"));
 
 		// The same alias still names the same root.
-		assert_eq!(token.recheck(&aliased).root, token.root);
+		assert_eq!(token.recheck(&aliased).unwrap().root, token.root);
 		// A grant without the alias is relative to what was dialed, not to the old root.
-		assert_eq!(token.recheck(&everything()).root, Path::new("vanity/room").to_owned());
+		assert_eq!(
+			token.recheck(&everything()).unwrap().root,
+			Path::from_static("vanity/room")
+		);
 	}
 }
+
+#[cfg(test)]
+mod admission_tests;

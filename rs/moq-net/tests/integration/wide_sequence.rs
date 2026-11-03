@@ -1,6 +1,6 @@
 #![cfg(feature = "async")]
 
-//! A group sequence only moq-lite 07 can carry, relayed to a moq-lite 06 reader.
+//! Group sequence boundaries, directly and through a forwarding origin.
 
 use crate::support;
 
@@ -8,6 +8,62 @@ use std::time::Duration;
 
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
+
+/// Published QUIC-varint sequences keep all their bits on the live feed, directly
+/// and through a forwarding origin, even beyond JavaScript's exact number range.
+#[kio::test]
+async fn largest_quic_sequence_reaches_the_subscriber() {
+	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-18"] {
+		for relayed in [false, true] {
+			let version: Version = alpn.parse().unwrap();
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+			let client = produce_origin(3);
+			let broadcast = publisher.create_broadcast("ladder").unwrap();
+			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+			let track = broadcast.create_track("data", info).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(if relayed { relay.clone() } else { client.clone() });
+			let _upstream = connect_mock(options).await;
+			let _downstream = if relayed {
+				let mut options = MockConnectOptions::new(version);
+				options.server_publish = Some(relay.consume());
+				options.client_subscribe = Some(client.clone());
+				Some(connect_mock(options).await)
+			} else {
+				None
+			};
+			let remote = client
+				.consume()
+				.follow("ladder", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
+			let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
+			for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
+				// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
+				let timestamp = Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
+				let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+				group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
+				group.finish().unwrap();
+				let mut got = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
+					.await
+					.unwrap_or_else(|_| panic!("{alpn} relayed={relayed} sequence={sequence} hung"))
+					.unwrap()
+					.unwrap();
+				assert_eq!(got.sequence, sequence, "{alpn} relayed={relayed}");
+				let frame = got.read_frame().await.unwrap().unwrap();
+				assert_eq!(frame.payload, b"ladder".as_ref());
+				// Lite-02 carries no timestamps.
+				let timed = alpn != "moq-lite-02";
+				assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn} relayed={relayed}");
+			}
+		}
+	}
+}
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -22,7 +78,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 /// The relay accepts the wide sequence from lite-07, refuses that subscription to the
 /// lite-06 reader that cannot encode it, and keeps the session serving other tracks.
-#[moq_net_sim::test]
+#[kio::test]
 async fn wide_sequence_fails_only_its_subscription() {
 	const WIDE: u64 = 1 << 62;
 
@@ -49,16 +105,20 @@ async fn wide_sequence_fails_only_its_subscription() {
 	let _downstream = connect_mock(options).await;
 
 	// lite-07 carries the full 64 bits, so the relay holds the group.
-	relay.consume().routed("bench").await.unwrap();
-	let cached = relay.consume().request_broadcast("bench", None).await.unwrap();
+	let cached = relay
+		.consume()
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let mut sub = cached.track("wide").unwrap().subscribe(None).await.unwrap();
 	assert_eq!(sub.recv_group().await.unwrap().unwrap().sequence, WIDE);
 
 	let consumer = client.consume();
-	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench", None).await.unwrap();
+	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
-	let result = moq_net_sim::timeout(Duration::from_secs(5), async {
+	let result = kio::clock::timeout(Duration::from_secs(5), async {
 		let mut sub = remote.track("wide").unwrap().subscribe(None).await?;
 		sub.recv_group().await.map(|group| group.map(|group| group.sequence))
 	})
@@ -78,7 +138,7 @@ async fn wide_sequence_fails_only_its_subscription() {
 
 /// A subscription that starts inside the QUIC range and later receives a group of
 /// `1 << 62` fails only that subscription. The session and the other track continue.
-#[moq_net_sim::test]
+#[kio::test]
 async fn a_later_wide_group_fails_only_that_subscription() {
 	const WIDE: u64 = 1 << 62;
 
@@ -105,8 +165,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let _downstream = connect_mock(options).await;
 
 	let consumer = client.consume();
-	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench", None).await.unwrap();
+	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
 	let mut sub = remote.track("wide").unwrap().subscribe(None).await.unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
@@ -116,7 +175,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let mut group = wide.create_group(moq_net::group::Info { sequence: WIDE }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
 
-	let result = moq_net_sim::timeout(Duration::from_secs(5), sub.recv_group())
+	let result = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
 		.await
 		.expect("the wide group hung the subscription instead of failing it");
 	match result {

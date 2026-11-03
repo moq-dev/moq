@@ -15,9 +15,7 @@ if(NOT TARGET moq::cpp)
     )
 
     # The generated bindings compile here, in the consumer's project, at its CMAKE_CXX_STANDARD
-    # (else the compiler's default, at least C++17) and with its flags. A standard raised only
-    # on the consumer's own target does not reach this library, so <moq/moq.hpp> and the
-    # bindings disagree on uniffi::expected and the link fails: set CMAKE_CXX_STANDARD instead.
+    # (else the compiler's default, at least C++17) and with its flags.
     add_library(moq-cpp STATIC "@PACKAGE_CMAKE_INSTALL_DATADIR@/moq-cpp/moq.cpp")
     target_compile_features(moq-cpp PUBLIC cxx_std_17)
     target_include_directories(moq-cpp PUBLIC "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")

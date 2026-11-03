@@ -40,9 +40,11 @@ fn public_auth(config: &mut Config) {
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
@@ -50,9 +52,12 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 		tokio::net::TcpStream::connect(http).await.is_err(),
 		"HTTP still accepted after the owner stopped"
 	);
+	// A closed UDP port never answers, so this only ends at the timeout. A live
+	// listener answers a loopback handshake well inside it, and on Linux the
+	// socket check before this is what proves the port closed.
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
-	let after = tokio::time::timeout(
-		Duration::from_secs(2),
+	let after = kio::clock::timeout(
+		Duration::from_millis(500),
 		client().with_reconnect(false).connect(url).established(),
 	)
 	.await;
@@ -134,7 +139,7 @@ fn open_sockets() -> std::collections::HashSet<u64> {
 /// worker thread and listener goes through, as opposed to aborting the task.
 async fn stop(trigger: moq_relay::shutdown::Trigger, running: tokio::task::JoinHandle<anyhow::Result<()>>) {
 	trigger.start();
-	tokio::time::timeout(TIMEOUT, running)
+	kio::clock::timeout(TIMEOUT, running)
 		.await
 		.expect("run did not return after the shutdown trigger")
 		.expect("run panicked")
@@ -148,8 +153,8 @@ async fn embed_and_stop(mut config: Config) {
 
 	// No drain window: the sessions are already gone by the time the owner
 	// stops, and the test should not wait out the default.
-	config.drain_timeout = Duration::ZERO;
-	let relay = Relay::load(config).await.expect("load relay");
+	config.drain_timeout = Some((Duration::ZERO).into());
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	assert_eq!(
@@ -163,7 +168,6 @@ async fn embed_and_stop(mut config: Config) {
 	// are cloned before `run` consumes the relay.
 	let origin = relay.cluster().origin.clone();
 	let trigger = relay.shutdown_trigger().clone();
-	let ready = relay.ready();
 	let web = relay
 		.web()
 		.routes()
@@ -173,6 +177,7 @@ async fn embed_and_stop(mut config: Config) {
 			axum::routing::post(|| async { ([("access-control-allow-origin", "https://trusted.example")], "private") }),
 		)
 		.route("/plain-post", axum::routing::post(|| async { "plain" }));
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.with_web(web).run());
 	ready.wait().await.expect("relay ready");
 	assert!(!running.is_finished(), "the relay stopped while serving");
@@ -270,7 +275,7 @@ async fn embed_and_stop(mut config: Config) {
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
-	let subscriber = tokio::time::timeout(
+	let subscriber = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_reconnect(false)
@@ -282,13 +287,13 @@ async fn embed_and_stop(mut config: Config) {
 	.expect("connect timeout")
 	.expect("connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let announced = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -298,12 +303,12 @@ async fn embed_and_stop(mut config: Config) {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut group = tokio::time::timeout(TIMEOUT, subscription.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -396,14 +401,15 @@ async fn worker_tokio_custom_route_and_quic() {
 	embed_and_stop(config).await;
 }
 
-/// io_uring workers. Off the default feature set; `just rs uring` and nightly
-/// `--all-features` compile it. Skips below the 6.12 floor unless MOQ_STRICT.
+/// io_uring workers. Off the default feature set; the Linux gate's test build,
+/// `just rs uring`, and nightly `--all-features` compile it. Skips below the
+/// 6.12 floor unless CI_STRICT.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
-		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring embed test: {reason}");
 			return;
 		}
@@ -419,6 +425,74 @@ async fn uring_custom_route_and_quic() {
 	embed_and_stop(config).await;
 }
 
+/// The WebRTC media path on the QUIC port reaches the embedder's feed, whichever
+/// worker read it, and the feed's reply leaves from the QUIC port.
+async fn webrtc_feed(mut config: Config) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	config.drain_timeout = Some((Duration::ZERO).into());
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let quic = relay.quic_addr().expect("quic listener bound");
+	let feed = relay.webrtc().expect("tokio serves QUIC");
+	let trigger = relay.shutdown_trigger().clone();
+	let running = tokio::spawn(relay.run());
+
+	// Enough sources that a reuseport group's 4-tuple hash spreads them over every member.
+	let mut peers = Vec::new();
+	for i in 0..16u8 {
+		let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
+		peer.send_to(&[0x16, 0xfe, 0xfd, i], quic).await.expect("send DTLS");
+		peers.push(peer);
+	}
+	let mut seen = std::collections::HashSet::new();
+	kio::clock::timeout(TIMEOUT, async {
+		while seen.len() < peers.len() {
+			let datagram = feed.recv().await.expect("feed open");
+			assert_eq!(datagram.data[..3], [0x16, 0xfe, 0xfd]);
+			seen.insert(datagram.remote);
+		}
+	})
+	.await
+	.expect("every peer's datagram reached the feed");
+
+	let peer = &peers[0];
+	feed.send(&moq_tokio::quic::demux::Transmit {
+		destination: peer.local_addr().expect("peer addr"),
+		ecn: None,
+		contents: b"reply",
+		segment_size: None,
+		src_ip: None,
+	})
+	.await
+	.expect("send reply");
+	let mut buf = [0; 16];
+	let (len, from) = kio::clock::timeout(TIMEOUT, peer.recv_from(&mut buf))
+		.await
+		.expect("reply arrived")
+		.expect("recv reply");
+	assert_eq!(&buf[..len], b"reply");
+	assert_eq!(from.port(), quic.port());
+
+	stop(trigger, running).await;
+}
+
+#[tokio::test]
+async fn shared_tokio_webrtc_feed() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	webrtc_feed(http_and_quic(&cert, &key, "127.0.0.1:0".into())).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn worker_tokio_webrtc_feed() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
+	config.runtime.workers = Some(2);
+	config.runtime.pin = false;
+	webrtc_feed(config).await;
+}
+
 /// An embedder-owned accept loop joins the relay's own /metrics exposition.
 #[tokio::test]
 async fn embedded_listener_health_reaches_metrics() {
@@ -426,12 +500,12 @@ async fn embedded_listener_health_reaches_metrics() {
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	config.drain_timeout = Duration::ZERO;
-	let relay = Relay::load(config).await.expect("load relay");
+	config.drain_timeout = Some((Duration::ZERO).into());
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let internal = relay.internal().addr().expect("internal listener bound");
-	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
 	let health = moq_tokio::accept::Health::new("embedded");
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.with_listeners([health]).run());
 	ready.wait().await.expect("relay ready");
 	let body = reqwest::get(format!("http://{internal}/metrics"))
@@ -447,7 +521,7 @@ async fn embedded_listener_health_reaches_metrics() {
 	stop(trigger, running).await;
 }
 
-#[derive(usage::Cli, Clone, Debug, Default, serde::Deserialize)]
+#[derive(usage_rs::Cli, Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 #[usage(name = "embedded-relay", unknown_flags = "error", args_override_self = false)]
 #[usage(settings)]
@@ -463,24 +537,43 @@ struct EmbeddedConfig {
 /// A flattened relay merges its settings without resetting the embedder's flags.
 #[test]
 fn embedded_cli_merges_only_relay_settings() {
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("relay.toml");
+	std::fs::write(&path, "[cluster]\nid = 7\n[stats]\nenabled = false\n").unwrap();
 	let (mut parsed, cli) = EmbeddedConfig::parse_from_with_settings(&[
+		path.as_os_str(),
 		std::ffi::OsStr::new("--worker-name"),
 		std::ffi::OsStr::new("recorder"),
 		std::ffi::OsStr::new("--cluster-id"),
 		std::ffi::OsStr::new("9"),
 	])
 	.expect("parse embedding CLI");
-	let file = toml::from_str::<toml::Value>("[cluster]\nid = 7\n").unwrap();
-	let source = moq_tokio::cli::FileSource {
-		path: std::path::Path::new("relay.toml"),
-		value: &file,
-	};
-	parsed
-		.relay
-		.merge_into(&cli, &usage::config::EnvLayer::from_process(), Some(source))
-		.unwrap();
+	parsed.relay.merge(&cli).unwrap();
 	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
 	assert_eq!(parsed.relay.cluster.id, Some(9));
+	assert_eq!(parsed.relay.source("cluster.id"), Some("--cluster-id"));
+	assert!(!parsed.relay.stats.enabled);
+	assert!(parsed.relay.source("stats.enabled").unwrap().contains("enabled"));
+	// The explicit file value equals the runtime default but still has file provenance.
+	let (mut defaults, cli) = EmbeddedConfig::parse_from_with_settings(&[]).unwrap();
+	defaults.relay.merge(&cli).unwrap();
+	assert_eq!(defaults.relay.stats.enabled, parsed.relay.stats.enabled);
+	assert_ne!(
+		defaults.relay.source("stats.enabled"),
+		parsed.relay.source("stats.enabled")
+	);
+}
+
+/// A composed CLI refuses obsolete file keys before constructing a relay or initializing logging.
+#[test]
+fn embedded_loader_refuses_obsolete_file_settings() {
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("relay.toml");
+	std::fs::write(&path, "[server]\nbind = \"127.0.0.1:0\"\n").unwrap();
+	let (mut parsed, cli) = EmbeddedConfig::parse_from_with_settings(&[path.as_os_str()]).unwrap();
+	let error = parsed.relay.merge(&cli).unwrap_err();
+	assert!(error.to_string().contains("[server]"), "{error}");
+	assert!(error.to_string().contains("[listen]"), "{error}");
 }
 
 /// The next route and whether it is active.
@@ -488,7 +581,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

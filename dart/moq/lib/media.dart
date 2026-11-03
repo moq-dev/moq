@@ -12,9 +12,6 @@ typedef TrackStreamProducer = MoqMediaTrackStreamProducer;
 /// The write side of a container, which publishes each track it describes.
 typedef ContainerProducer = MoqMediaContainerProducer;
 
-/// The write side of a container fed a raw byte stream.
-typedef ContainerStreamProducer = MoqMediaContainerStreamProducer;
-
 /// The read side of a media track: yields frames with codec metadata in decode order.
 typedef TrackConsumer = MoqMediaTrackConsumer;
 
@@ -29,6 +26,18 @@ typedef Catalog = MoqCatalog;
 
 /// A media frame whose keyframe flag marks group starts or video keyframes; audio flags only group starts.
 typedef MediaFrame = MoqMediaFrame;
+
+/// One encoded frame, a gap, or an encoder end.
+typedef Read = MoqMediaRead;
+
+/// An encoded frame and its container metadata.
+typedef ReadFrame = FrameMoqMediaRead;
+
+/// Lost media; what follows does not continue it.
+typedef ReadGap = GapMoqMediaRead;
+
+/// Where a stopped encoder's media stops.
+typedef ReadEnd = EndMoqMediaRead;
 
 /// The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming).
 typedef Video = MoqVideo;
@@ -60,14 +69,17 @@ typedef ContainerFormat = MoqContainerFormat;
 /// A shared source timestamp offset that does not keep its broadcast open.
 typedef Timebase = MoqMediaTimebase;
 
-/// A byte-stream container format and an optional shared source timebase.
-typedef ContainerStreamInit = MoqContainerStreamInit;
-
 /// A container format, its leading bytes, and an optional shared source timebase.
 typedef ContainerInit = MoqContainerInit;
 
 /// A width and height pair, in pixels.
 typedef Dimensions = MoqDimensions;
+
+/// How far behind the live edge a decoder plays: `min` is the playout delay and where a cold join starts, and `max`, null for no limit, is how far a stalled group may fall behind before it is skipped. The subscription carries both; a `min` past `max` starts at `max`.
+typedef Delay = MoqDelay;
+
+/// Where an audio or video decoder starts on a track that already holds groups: `latest` for a live player.
+typedef DecodeStart = MoqDecodeStart;
 
 /// A weak catalog handle that closes with its broadcast.
 typedef CatalogProducer = MoqMediaCatalogProducer;
@@ -81,17 +93,20 @@ typedef Named = NamedMoqMediaTarget;
 /// A subscriber-requested track.
 typedef Requested = RequestedMoqMediaTarget;
 
-/// A track name, container, and live delivery options.
+/// A catalog rendition: its ID (catalog key) and its video or audio config.
+typedef Rendition = MoqRendition;
+
+/// A catalog video rendition.
+typedef VideoRendition = VideoMoqRendition;
+
+/// A catalog audio rendition.
+typedef AudioRendition = AudioMoqRendition;
+
+/// A catalog rendition and live delivery options.
 typedef TrackConfig = MoqMediaTrackConfig;
 
-/// A fetched group name, sequence, container, and delivery options.
+/// A catalog rendition's group sequence and fetch delivery options.
 typedef GroupConfig = MoqMediaGroupConfig;
 
 /// The packaging advertised for a media track.
 typedef Container = MoqContainer;
-
-/// Duration view over a media frame's presentation time.
-extension MediaFrameDuration on MoqMediaFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}

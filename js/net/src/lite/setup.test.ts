@@ -11,6 +11,7 @@ const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
 const PARAM_HOP = 0x5n;
+const PARAM_IMPLEMENTATION = 0x6n;
 
 function concat(chunks: Uint8Array[]): Uint8Array {
 	const total = chunks.reduce((sum, c) => sum + c.byteLength, 0);
@@ -35,33 +36,33 @@ async function bytes(f: (w: Writer) => Promise<void>, version: Version): Promise
 	return concat(written);
 }
 
-async function roundTrip(msg: Setup): Promise<Setup> {
-	const reader = new Reader(
-		undefined,
-		await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05),
-		Version.DRAFT_05,
-	);
-	const got = await Setup.decode(reader, Version.DRAFT_05);
+async function roundTrip(msg: Setup, version: Version = Version.DRAFT_05): Promise<Setup> {
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version), version), version);
+	const got = await Setup.decode(reader, version);
 	expect(await reader.done()).toBe(true);
 	return got;
 }
 
 // Hand-frame a SETUP carrying a single raw parameter, so we can feed the decoder values
 // our own encoder would never produce (unknown levels, empty paths).
-async function decodeParam(id: bigint, value: Uint8Array): Promise<Setup> {
+async function decodeParams(entries: [bigint, Uint8Array][], version: Version = Version.DRAFT_05): Promise<Setup> {
 	const body = await bytes(async (w) => {
-		await w.u53(1); // parameter count
-		await w.u62(id);
-		await w.u53(value.byteLength);
-		if (value.byteLength > 0) await w.write(value);
-	}, Version.DRAFT_05);
-
+		await w.u53(entries.length);
+		for (const [id, value] of entries) {
+			await w.u62(id);
+			await w.u53(value.byteLength);
+			if (value.byteLength > 0) await w.write(value);
+		}
+	}, version);
 	const framed = await bytes(async (w) => {
-		await w.u53(body.byteLength); // Message size prefix
+		await w.u53(body.byteLength);
 		await w.write(body);
-	}, Version.DRAFT_05);
+	}, version);
+	return Setup.decode(new Reader(undefined, framed, version), version);
+}
 
-	return await Setup.decode(new Reader(undefined, framed, Version.DRAFT_05), Version.DRAFT_05);
+async function decodeParam(id: bigint, value: Uint8Array, version: Version = Version.DRAFT_05): Promise<Setup> {
+	return decodeParams([[id, value]], version);
 }
 
 test("empty SETUP round-trips on draft-05", async () => {
@@ -69,6 +70,7 @@ test("empty SETUP round-trips on draft-05", async () => {
 	expect(got.probe).toBe(ProbeLevel.None);
 	expect(got.path).toBeUndefined();
 	expect(got.role).toBe(Role.Both);
+	expect(got.implementation).toBeUndefined();
 });
 
 test("each probe level round-trips on draft-05", async () => {
@@ -147,6 +149,28 @@ test("hop 0 decodes as absent", async () => {
 	expect(got.hop).toBeUndefined();
 });
 
+test("SETUP with implementation round-trips", async () => {
+	const got = await roundTrip(
+		new Setup({ hop: HopSchema.parse(7n), implementation: "moq-ffi/0.4.12 moq-net-rs/0.3.10" }),
+		Version.DRAFT_07,
+	);
+	expect(got.implementation).toBe("moq-ffi/0.4.12 moq-net-rs/0.3.10");
+	expect(got.hop).toBe(HopSchema.parse(7n));
+});
+
+test("an empty implementation is omitted rather than encoded", async () => {
+	const empty = await bytes((w) => new Setup({ implementation: "" }).encode(w, Version.DRAFT_05), Version.DRAFT_05);
+	const none = await bytes((w) => new Setup().encode(w, Version.DRAFT_05), Version.DRAFT_05);
+	expect(empty).toEqual(none);
+});
+
+test("SETUP rejects an implementation with malformed UTF-8", async () => {
+	expect(
+		(await decodeParam(PARAM_IMPLEMENTATION, new TextEncoder().encode("x/1"), Version.DRAFT_07)).implementation,
+	).toBe("x/1");
+	await expect(decodeParam(PARAM_IMPLEMENTATION, new Uint8Array([0xc3, 0x28]), Version.DRAFT_07)).rejects.toThrow();
+});
+
 test("SETUP is rejected before draft-05", async () => {
 	await expect(bytes((w) => new Setup().encode(w, Version.DRAFT_04), Version.DRAFT_04)).rejects.toThrow();
 });
@@ -182,4 +206,42 @@ test("SETUP decode refuses an oversized length before reading the body", async (
 	await expect(Setup.decode(new Reader(undefined, prefix, Version.DRAFT_05), Version.DRAFT_05)).rejects.toThrow(
 		"too large",
 	);
+});
+
+const PARAM_TOKEN = 0x7;
+
+test("SETUP token round-trips on lite-07 only", async () => {
+	const msg = new Setup({ token: new TextEncoder().encode("jwt") });
+	const wire = await bytes((w) => msg.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	// Length, one parameter, its id, then the token's length and bytes.
+	expect([...wire]).toEqual([0x06, 0x01, PARAM_TOKEN, 0x03, 0x6a, 0x77, 0x74]);
+	const got = await Setup.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
+	expect(new TextDecoder().decode(got.token)).toBe("jwt");
+
+	await expect(bytes((w) => msg.encode(w, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
+	// An older version ignores the parameter like any unknown one.
+	const older = await Setup.decode(new Reader(undefined, wire, Version.DRAFT_06), Version.DRAFT_06);
+	expect(older.token).toBeUndefined();
+});
+
+test("SETUP refuses an empty token", async () => {
+	const empty = new Setup({ token: new Uint8Array() });
+	await expect(bytes((w) => empty.encode(w, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
+	const wire = new Uint8Array([0x03, 0x01, PARAM_TOKEN, 0x00]);
+	await expect(Setup.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
+});
+
+test("older SETUP versions ignore the unknown Implementation parameter before parsing it", async () => {
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
+		for (const value of [new TextEncoder().encode("x/1"), new Uint8Array([0xff])]) {
+			expect((await decodeParam(PARAM_IMPLEMENTATION, value, version)).implementation).toBeUndefined();
+		}
+	}
+});
+
+test("SETUP parameter count is bounded by the message instead of a separate count cap", async () => {
+	const entries: [bigint, Uint8Array][] = Array.from({ length: 1024 }, (_, n) => [BigInt(n + 100), new Uint8Array()]);
+	await decodeParams(entries);
+	entries.push(entries[0]);
+	await expect(decodeParams(entries)).rejects.toThrow("duplicate parameter id");
 });

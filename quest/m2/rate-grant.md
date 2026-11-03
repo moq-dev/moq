@@ -3,21 +3,27 @@
 ## Goal
 
 An honest client targets its cap instead of discovering it through
-backpressure: the in-band AUTH grant carries the session's `publish.rate`
-and `subscribe.rate`, and `@moq/publish` (and the Rust publisher) clamp the
-encoder's target bitrate to `publish.rate`.
+backpressure: the in-band AUTH grant carries the session's `publish_rate`
+and `subscribe_rate`, and `@moq/publish` (and the Rust publisher) clamp the
+encoder's target bitrate to `publish_rate`.
 
 ## Plan
 
 The public grant today carries publish patterns, subscribe patterns, and an
-expiry; add the two rates in the same nested shape as the
-[claim](/doc/bin/relay/auth.md#claims). The encoder clamp leaves headroom for audio
-and container overhead under the cap. A grant change (refresh, union)
+expiry; extend it with the two rates admitted by the transport policy.
+The encoder clamp leaves headroom for audio and container overhead under the cap. A grant change (refresh, union)
 re-clamps a live encoder.
 
 Decided in the quest audit: this quest owns net's in-band grants, their lite
-codecs, relay propagation, and publisher clamps. Token and HTTP grant types in
-`moq-auth` and `js/auth` already carry [bitrate caps](/doc/bin/relay/auth.md#claims); reuse their admitted caps here.
+codecs, relay propagation, and publisher clamps.
+
+Token claims and HTTP grants carry optional caps as `moq_auth::Rate`
+(`publish_rate`, `subscribe_rate`, bits per second), converted at the relay
+boundary so moq-auth never depends on moq-net. QUIC sessions enforce them and
+every other transport refuses them (`rs/moq-relay/src/auth/caps.rs`). Its
+parsers and refusal rules must prevent any transport without enforcement from
+silently discarding a cap. This quest reuses only caps that admission actually
+enforces.
 
 Update the AUTH grant in `drafts/draft-lcurley-moq-lite.md` and run
 `just drafts check`. Rates target the next unpublished lite version after finalized lite-07,
@@ -32,7 +38,3 @@ target never exceeds the cap minus overhead; a raised cap lets it climb back.
 Public API: the in-band grant types in `rs/moq-net` and `js/net` gain the two
 rates, and the publishers gain a clamp. Wire: the AUTH grant gains optional
 rates, on the next unpublished lite version after lite-07 only.
-
-## Required
-
-- [In-band auth](/quest/m1/auth/README.md) - the AUTH grant this extends

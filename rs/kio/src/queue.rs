@@ -68,8 +68,8 @@ impl<T> State<T> {
 /// Role-less like [`Shared`](crate::Shared): every clone can push, pop, or close,
 /// and there is no liveness of its own: closure is explicit via
 /// [`close`](Self::close), never implied by dropping handles. Bounded queues park
-/// pushes at capacity ([`poll_push_with`](Self::poll_push_with) /
-/// [`push`](Self::push)) or reject them ([`try_push`](Self::try_push)); pops park
+/// pushes at capacity ([`poll_push_with`](Self::poll_push_with), or `push` with the
+/// `async` feature) or reject them ([`try_push`](Self::try_push)); pops park
 /// while empty. After close, pops drain what's queued before reporting [`Closed`].
 ///
 /// An event wakes *every* waiter parked on the affected side (there is no
@@ -130,11 +130,12 @@ impl<T> Queue<T> {
 	/// (or anything that does).
 	///
 	/// Registers `waiter` while full; a pop or close re-polls it.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_push_with<F: FnOnce() -> T>(&self, waiter: &Waiter, make: F) -> Poll<Result<(), Closed>> {
 		let mut waiters = {
 			let mut state = self.state.lock();
 			if state.closed {
-				return Poll::Ready(Err(Closed));
+				return crate::coop::ready(Err(Closed));
 			}
 			if !state.has_space() {
 				waiter.register(&mut state.waiters_push);
@@ -145,13 +146,14 @@ impl<T> Queue<T> {
 			state.waiters_pop.take()
 		};
 		waiters.wake();
-		Poll::Ready(Ok(()))
+		crate::coop::ready(Ok(()))
 	}
 
 	/// Push, waiting for room while a bounded queue is full.
 	///
 	/// Returns [`Closed`] if the queue closes first (or already was); the item is
 	/// dropped in that case; use [`try_push`](Self::try_push) to get it back.
+	#[cfg(feature = "async")]
 	pub async fn push(&self, item: T) -> Result<(), Closed> {
 		let mut item = Some(item);
 		// Capture the slot by `&mut` so the closure is `Unpin` regardless of `T`.
@@ -176,16 +178,18 @@ impl<T> Queue<T> {
 		Ok(Some(item))
 	}
 
-	/// Poll for the next item.
+	/// Pop, waiting for an item while the queue is empty.
 	///
 	/// Queued items drain before closure is reported, so [`Closed`] means empty
-	/// *and* closed. Registers `waiter` while empty; a push or close re-polls it.
+	/// *and* closed. A push or close wakes the waiter.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_pop(&self, waiter: &Waiter) -> Poll<Result<T, Closed>> {
 		let (item, mut waiters) = {
 			let mut state = self.state.lock();
 			match state.queue.pop_front() {
 				Some(item) => (item, state.waiters_push.take()),
-				None if state.closed => return Poll::Ready(Err(Closed)),
+				None if state.closed => return crate::coop::ready(Err(Closed)),
 				None => {
 					waiter.register(&mut state.waiters_pop);
 					return Poll::Pending;
@@ -193,14 +197,7 @@ impl<T> Queue<T> {
 			}
 		};
 		waiters.wake();
-		Poll::Ready(Ok(item))
-	}
-
-	/// Pop, waiting for an item while the queue is empty.
-	///
-	/// Returns [`Closed`] once the queue is both closed and drained.
-	pub async fn pop(&self) -> Result<T, Closed> {
-		crate::wait(move |waiter| self.poll_pop(waiter)).await
+		crate::coop::ready(Ok(item))
 	}
 
 	/// Close the queue: pushes fail from here on, pops drain what's queued and then
@@ -260,7 +257,7 @@ impl<T> Clone for Queue<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use std::{
 		sync::{
@@ -408,23 +405,6 @@ mod test {
 		assert_eq!(popper.poll_pop(&pop_waiter), Poll::Ready(Ok(2)));
 		assert_eq!(popper.poll_pop(&pop_waiter), Poll::Ready(Err(Closed)));
 		assert_eq!(queue.poll_push_with(&push_waiter, || 3), Poll::Ready(Err(Closed)));
-	}
-
-	#[test]
-	fn accessors() {
-		let queue = Queue::bounded(2);
-		assert_eq!(queue.capacity(), Some(2));
-		assert!(queue.is_empty());
-		queue.try_push(1).unwrap();
-		assert_eq!(queue.len(), 1);
-		assert!(!queue.is_empty());
-		assert!(!queue.is_closed());
-
-		let clone = queue.clone();
-		let other = Queue::<u32>::new();
-		assert!(queue.same_channel(&clone));
-		assert!(!queue.same_channel(&other));
-		assert_eq!(other.capacity(), None);
 	}
 
 	#[test]

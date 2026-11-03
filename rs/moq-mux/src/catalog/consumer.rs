@@ -28,6 +28,10 @@ pub struct Consumer<E: CatalogExt = ()> {
 	inner: State<E>,
 }
 
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per catalog subscription, and the live variant is the working state; it is only large when a workspace build unifies extra features"
+)]
 enum State<E: CatalogExt> {
 	Hang(super::hang::Consumer<E>),
 	Msf(super::msf::Consumer<E>),
@@ -37,7 +41,7 @@ enum State<E: CatalogExt> {
 impl<E: CatalogExt> Consumer<E> {
 	pub(crate) fn format(&self) -> CatalogFormat {
 		match &self.inner {
-			State::Hang(consumer) => consumer.format(),
+			State::Hang(_) => CatalogFormat::Hang,
 			State::Msf(_) => CatalogFormat::Msf,
 			State::Closed(format) => *format,
 		}
@@ -53,13 +57,6 @@ impl<E: CatalogExt> Consumer<E> {
 						.subscribe(hang::Catalog::default_subscription())
 						.await?;
 					State::Hang(super::hang::Consumer::new(track))
-				}
-				CatalogFormat::HangZ => {
-					let track = broadcast
-						.track(hang::Catalog::COMPRESSED_NAME)?
-						.subscribe(hang::Catalog::default_subscription())
-						.await?;
-					State::Hang(super::hang::Consumer::compressed(track))
 				}
 				CatalogFormat::Msf => {
 					let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None).await?;
@@ -101,10 +98,9 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn eof_releases_each_catalog_subscription() {
-		for format in [CatalogFormat::Hang, CatalogFormat::HangZ, CatalogFormat::Msf] {
+		for format in [CatalogFormat::Hang, CatalogFormat::Msf] {
 			let name = match format {
 				CatalogFormat::Hang => hang::Catalog::DEFAULT_NAME,
-				CatalogFormat::HangZ => hang::Catalog::COMPRESSED_NAME,
 				CatalogFormat::Msf => moq_msf::DEFAULT_NAME,
 			};
 			let broadcast = moq_net::broadcast::Info::new().produce();

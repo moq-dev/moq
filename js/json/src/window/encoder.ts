@@ -1,33 +1,22 @@
-import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
-import { Group } from "@moq/net";
+import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
 
-/** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Kept well below the net per-group cap so a roll always precedes GroupTooLarge. */
+/** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Bounds how many operations a joiner must replay after its checkpoint. */
 const MAX_GROUP_FRAMES = 1024;
 
-/** Op ratio used when {@link Config.opRatio} is left unset. */
-export const DEFAULT_OP_RATIO = 8;
-
-type Edit = { push: string } | { pop: number };
+// A restatement changes nothing on commit; it only opens a group.
+type Edit = { push: string } | { pop: number } | { restate: true };
 
 /** Options for an {@link Encoder}. */
 export interface Config {
 	/**
-	 * How much the ops in a group may cost before a fresh group is emitted.
+	 * Encode edits as ops appended to the group's header. `false` restates the window in a new
+	 * single-frame group for every edit.
 	 *
-	 * A new group opens once the pushes and pops *already written* exceed `opRatio` times the size of
-	 * the group's header frame. The pending op is excluded, so the one that tips the group over budget
-	 * still lands. `0` disables ops entirely, so every edit is its own single-frame group.
-	 *
-	 * The window's counterpart to Snapshot's `deltaRatio`. Defaults to `8`.
+	 * A group of ops runs until a joiner wants a fresh one, judged by the track's `refresh` ratio
+	 * (see {@link Encoder.snapshot}), or until it reaches the frame or byte cap. The window's
+	 * counterpart to Snapshot's `deltas`. Defaults to `true`.
 	 */
-	opRatio?: number;
-
-	/**
-	 * Compress each group as one sync-flushed `deflate-raw` stream, so every op reuses the header and
-	 * the ops before it as context. A {@link Decoder} reading the frames must set the same flag.
-	 * Defaults to `false`.
-	 */
-	compression?: boolean;
+	ops?: boolean;
 
 	/**
 	 * Maximum records retained and repeated in a group checkpoint.
@@ -47,7 +36,7 @@ export interface Encoded {
 	/**
 	 * Whether this frame is a group header, which must open a new group.
 	 *
-	 * The encoder decides this, never the caller: the op budget and the frame cap force a new group
+	 * The encoder decides this, never the caller: the frame and byte caps force a new group
 	 * independently of which edit was requested.
 	 */
 	keyframe: boolean;
@@ -74,8 +63,7 @@ export interface Pending extends Encoded {
  * @public
  */
 export class Encoder<T> {
-	#opRatio: number;
-	#compress: boolean;
+	#ops: boolean;
 	#checkpointRecords?: number;
 
 	// The decodable checkpoint suffix. Without a checkpoint bound this is the complete window.
@@ -85,11 +73,8 @@ export class Encoder<T> {
 	// Absolute index of #window[0], which may follow #offset in checkpoint mode.
 	#start = 0;
 
-	#flate?: Flate;
-	// Bytes of pushes and pops in this group, excluding its header frame.
-	#opBytes = 0;
-	// Reference size the op budget is measured against: this group's header frame.
-	#headerLen = 0;
+	// What moq-net's group tail charges for this group's frames, header included.
+	#groupCharge = 0;
 	#groupFrames = 0;
 	// Whether the next frame must be a header after a lost frame.
 	#resync = true;
@@ -100,11 +85,7 @@ export class Encoder<T> {
 	#generation = 0;
 
 	constructor(config: Config = {}) {
-		this.#opRatio = config.opRatio ?? DEFAULT_OP_RATIO;
-		if (!Number.isSafeInteger(this.#opRatio) || this.#opRatio < 0 || this.#opRatio > 0xffffffff) {
-			throw new Error("opRatio must be an unsigned 32-bit integer");
-		}
-		this.#compress = config.compression ?? false;
+		this.#ops = config.ops ?? true;
 		this.#checkpointRecords = config.checkpointRecords;
 		if (
 			this.#checkpointRecords !== undefined &&
@@ -140,9 +121,7 @@ export class Encoder<T> {
 
 	/** Discard group-local state after an encoded frame did not reach the wire. */
 	#resyncGroup(): void {
-		this.#flate = undefined;
-		this.#opBytes = 0;
-		this.#headerLen = 0;
+		this.#groupCharge = 0;
 		this.#groupFrames = 0;
 		this.#resync = true;
 		this.#pending = false;
@@ -197,27 +176,30 @@ export class Encoder<T> {
 		return this.#emitPopHeader(offset, edit);
 	}
 
-	/** Whether the pending edit may ride as an op in the open group. */
-	#opAllowed(): boolean {
-		return (
-			this.#opRatio !== 0 &&
-			this.#groupFrames > 0 &&
-			this.#groupFrames < MAX_GROUP_FRAMES &&
-			this.#opBytes <= this.#opRatio * this.#headerLen
-		);
+	/**
+	 * Restate the retained window in a header, which must open a new group.
+	 *
+	 * For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
+	 * the track's `demand().wanted` passes the largest group written, so the joiner reads the window
+	 * without the ops before it. The frame is a {@link Pending} like any other.
+	 */
+	snapshot(): Pending {
+		return this.#emitHeader(this.#offset, this.#start, this.#window, { restate: true });
 	}
 
-	/** Compress an already-serialized op into the open group, if its header remains cached. */
-	#emitOp(text: string): Uint8Array | undefined {
-		const bytes = new TextEncoder().encode(text);
-		if (bytes.length > DEFAULT_MAX_FRAME_SIZE) {
-			throw new Error("window frame exceeds the decoder's decompressed size limit");
-		}
-		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
+	/** Whether the pending edit may ride as an op in the open group, which is under its frame cap. */
+	#opAllowed(): boolean {
+		return this.#ops && this.#groupFrames > 0 && this.#groupFrames < MAX_GROUP_FRAMES;
+	}
 
-		this.#opBytes += payload.length;
+	/** Encode an already-serialized op into the open group, if its header remains cached. */
+	#emitOp(text: string): Uint8Array | undefined {
+		const payload = new TextEncoder().encode(text);
+
 		this.#groupFrames += 1;
-		if (this.#headerLen + this.#opBytes > Group.MAX_GROUP_CACHE_BYTES) {
+		// Roll before the group's tail sheds the checkpoint, so a joiner always finds it.
+		this.#groupCharge += tailCharge(payload.length);
+		if (this.#groupCharge > TAIL_BYTES) {
 			this.#resyncGroup();
 			return undefined;
 		}
@@ -242,21 +224,12 @@ export class Encoder<T> {
 		// bytes a reader sees are then identical to what the matching push carried.
 		const checkpoint = start === offset ? "" : `,"start":${start}`;
 		const text = `{"offset":${offset}${checkpoint},"records":[${window.join(",")}]}`;
-		const bytes = new TextEncoder().encode(text);
-		if (bytes.length > DEFAULT_MAX_FRAME_SIZE) {
-			throw new Error("window header exceeds the decoder's decompressed size limit");
-		}
-
-		// A fresh per-group encoder (cold window), with the header as frame 0.
-		const flate = this.#compress ? new Flate() : undefined;
-		const payload = flate ? flate.frame(bytes) : bytes;
-		if (payload.length > Group.MAX_GROUP_CACHE_BYTES) {
+		const payload = new TextEncoder().encode(text);
+		if (payload.length > MAX_FRAME_BYTES) {
 			throw new Error("window header exceeds the group cache limit");
 		}
 
-		this.#flate = flate;
-		this.#headerLen = payload.length;
-		this.#opBytes = 0;
+		this.#groupCharge = tailCharge(payload.length);
 		this.#groupFrames = 1;
 		this.#resync = false;
 
@@ -288,7 +261,7 @@ export class Encoder<T> {
 				this.#window.splice(0, dropped);
 				this.#start += dropped;
 			}
-		} else {
+		} else if ("pop" in edit) {
 			const offset = this.#offset + edit.pop;
 			const stored = Math.min(Math.max(offset - this.#start, 0), this.#window.length);
 			this.#window.splice(0, stored);

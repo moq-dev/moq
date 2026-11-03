@@ -23,33 +23,37 @@
 //! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored), and
 //! [`Release`] writes that track back out on a fixed delay.
 
-mod adts;
+use crate::codec::aac::adts;
 mod damage;
+mod demux;
 mod export;
 mod follower;
 mod health;
 mod import;
 mod mux_rate;
+mod passthrough;
 mod programs;
 mod psi;
 mod release;
 mod schedule;
 mod si;
+mod step;
+mod unclaimed;
 
 // The `mpegts` catalog section (per-track PID + descriptors plus verbatim carriage
 // of undecoded elementary streams) and the `Catalog` capability, re-exported flat so
 // they read as `ts::Catalog`, `ts::Mpegts`, ... instead of stuttering under `catalog`.
 mod catalog;
 
-pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, Track, Verbatim};
+pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, PesPacket, Program, SiEntry, Track, Verbatim};
 pub use export::Export;
 pub use follower::Follower;
 pub use import::*;
 pub use passthrough::Passthrough;
 pub use programs::Programs;
 pub use release::Release;
+pub use step::{Restart, Step};
 
-pub mod passthrough;
 pub mod stats;
 
 #[cfg(test)]
@@ -57,8 +61,22 @@ mod export_test;
 #[cfg(test)]
 mod export_timing_test;
 #[cfg(test)]
+mod fixture;
+#[cfg(test)]
 mod import_test;
+#[cfg(test)]
+mod oracle;
 #[cfg(test)]
 mod passthrough_test;
 #[cfg(test)]
+mod pes_packet_test;
+#[cfg(test)]
+mod recovery_test;
+#[cfg(test)]
 mod release_test;
+#[cfg(test)]
+mod revision_test;
+#[cfg(test)]
+mod routes_test;
+#[cfg(test)]
+mod step_test;

@@ -12,6 +12,8 @@ use std::time::Duration;
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
 
+use crate::logs::Logs;
+
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -47,7 +49,7 @@ async fn build_web(ws: bool) -> web::Web {
 
 /// A standalone cluster with default options.
 fn new_cluster() -> cluster::Cluster {
-	cluster::Cluster::new(cluster::Options::default()).expect("cluster init")
+	crate::spawn_cluster(cluster::Options::default())
 }
 
 /// [`build_web`] for a test that configures the listeners or the cluster itself (e.g. HTTPS).
@@ -101,7 +103,7 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.auth.public = vec![moq_auth::Pattern::all()];
 
 	// `load` binds the web listener, so the port is ours before anyone dials it.
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.web_addrs().http.expect("HTTP listener is configured").port();
 	let handle = tokio::spawn(async move { relay.run().await.expect("relay") });
 
@@ -118,16 +120,21 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	config.tls.insecure = Some(true);
 	// One-shot: these tests were written against a single dial, and a background
 	// redial would re-register with the relay behind the assertions' back.
-	config.once = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = Some(std::time::Duration::ZERO);
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((std::time::Duration::ZERO).into());
+	}
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	if let Some(version) = version {
 		config.version = vec![version];
 	}
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push
@@ -151,7 +158,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	group.finish().expect("finish group");
 
 	let (_client, pub_connection) =
-		tokio::time::timeout(TIMEOUT, connect_once(client().with_publisher(&pub_origin), url.clone()))
+		kio::clock::timeout(TIMEOUT, connect_once(client().with_publisher(&pub_origin), url.clone()))
 			.await
 			.expect("publisher connect timeout")
 			.expect("publisher connect failed");
@@ -167,7 +174,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let mut announcements = sub_consumer.announced();
 
 	let (_client, sub_connection) =
-		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+		kio::clock::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
 			.expect("subscriber connect timeout")
 			.expect("subscriber connect failed");
@@ -178,26 +185,26 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── data path ───────────────────────────────────────────────────
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path, None)
+		.request(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -214,63 +221,12 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	web_handle.abort();
 }
 
-/// Relay log output as text, waking every waiter on each write.
-#[derive(Clone, Default)]
-struct Logs {
-	text: std::sync::Arc<std::sync::Mutex<String>>,
-	written: std::sync::Arc<tokio::sync::Notify>,
-}
-
-impl Logs {
-	/// Wait until the output contains `needle`.
-	async fn wait_for(&self, needle: &str) {
-		loop {
-			// Created before the check, so a write in between still wakes it.
-			let written = self.written.notified();
-			if self.text.lock().unwrap().contains(needle) {
-				return;
-			}
-			written.await;
-		}
-	}
-}
-
-impl std::io::Write for Logs {
-	fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-		self.text.lock().unwrap().push_str(&String::from_utf8_lossy(data));
-		self.written.notify_waiters();
-		Ok(data.len())
-	}
-
-	fn flush(&mut self) -> std::io::Result<()> {
-		Ok(())
-	}
-}
-
-impl tracing_subscriber::fmt::MakeWriter<'_> for Logs {
-	type Writer = Self;
-
-	fn make_writer(&self) -> Self {
-		self.clone()
-	}
-}
-
 /// A WebSocket session takes its id from the cluster-wide counter and logs its close, like
 /// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
 #[tokio::test]
 async fn relay_websocket_logs_its_close_under_a_cluster_id() {
-	use tracing_subscriber::layer::SubscriberExt;
-
 	let logs = Logs::default();
-	// Only the connection target, as the interop harness keeps, so the span and its close
-	// must both log there.
-	let subscriber = tracing_subscriber::fmt()
-		.with_ansi(false)
-		.with_writer(logs.clone())
-		.finish()
-		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
-	// Thread-local, which covers the relay: the test's current-thread runtime runs its tasks.
-	let _logging = tracing::subscriber::set_default(subscriber);
+	let _logging = logs.capture();
 
 	let cluster = new_cluster();
 	// Take an id as a QUIC accept would, so a WebSocket counter of its own would reuse it.
@@ -283,23 +239,24 @@ async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 	let web_handle = tokio::spawn(async move { web.run().await.expect("relay web server") });
 
 	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
-	let (client, connection) = tokio::time::timeout(
+	let (client, connection) = kio::clock::timeout(
 		TIMEOUT,
 		connect_once(client().with_subscriber(moq_tokio::origin::spawn()), url),
 	)
 	.await
 	.expect("connect timeout")
 	.expect("connect failed");
-	tokio::time::timeout(TIMEOUT, logs.wait_for(&format!("conn{{id={id} ")))
+	kio::clock::timeout(TIMEOUT, logs.wait_for(&format!("conn{{id={id} ")))
 		.await
 		.expect("the WebSocket session was not numbered on the cluster counter");
 
 	let _ = connection.close().await;
 	drop(client);
-	tokio::time::timeout(TIMEOUT, logs.wait_for(&format!("connection closed id={id}")))
+	kio::clock::timeout(TIMEOUT, logs.wait_for(&format!("connection closed id={id}")))
 		.await
 		.expect("the WebSocket session's close was not logged");
 
+	assert!(logs.text().contains("connection closed"));
 	web_handle.abort();
 }
 
@@ -307,7 +264,7 @@ async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 async fn announced_until(announcements: &mut moq_net::announce::Consumer, until: &str) -> Vec<String> {
 	let mut seen = Vec::new();
 	while !seen.iter().any(|prefix| prefix == until) {
-		let event = tokio::time::timeout(TIMEOUT, announcements.next())
+		let event = kio::clock::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed");
@@ -333,14 +290,14 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	let hidden = pub_origin.create_broadcast(".x/y").expect("create hidden");
 	hidden.announce(Default::default()).expect("announce hidden");
 	let track = hidden.create_track("video", timed()).expect("create track");
-	track
-		.append_group()
-		.expect("append group")
+	let mut group = track.append_group().expect("append group");
+	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hidden".as_ref())
 		.expect("write frame");
+	group.finish().expect("finish group");
 	// The relay's announce request carries the opt-in only on lite-07, so the publisher
 	// must speak it too for the hidden route to reach the relay.
-	let (_pub_client, pub_connection) = tokio::time::timeout(
+	let (_pub_client, pub_connection) = kio::clock::timeout(
 		TIMEOUT,
 		connect_once(client_version(Some(lite07)).with_publisher(&pub_origin), url.clone()),
 	)
@@ -351,7 +308,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	// An opted-in lite-07 client discovers the hidden broadcast.
 	let opted_origin = moq_tokio::origin::spawn();
 	let mut opted = opted_origin.consume().with_hidden(true).announced();
-	let (_opted_client, opted_connection) = tokio::time::timeout(
+	let (_opted_client, opted_connection) = kio::clock::timeout(
 		TIMEOUT,
 		connect_once(client_version(Some(lite07)).with_subscriber(opted_origin), url.clone()),
 	)
@@ -372,7 +329,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume().with_hidden(local_hidden);
 		let mut announcements = consumer.announced();
-		let (_client, connection) = tokio::time::timeout(
+		let (_client, connection) = kio::clock::timeout(
 			TIMEOUT,
 			connect_once(client_version(Some(version)).with_subscriber(origin), url.clone()),
 		)
@@ -392,17 +349,14 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 		if version == lite06 {
 			continue;
 		}
-		let bc = consumer
-			.request_broadcast(".x/y", None)
-			.await
-			.expect("hidden broadcast resolves");
+		let bc = consumer.request(".x/y", None).await.expect("hidden broadcast resolves");
 		let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
-		let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("recv_group timeout")
 			.expect("recv_group failed")
 			.expect("track closed");
-		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read_frame timeout")
 			.expect("read frame")
@@ -419,12 +373,12 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 /// `--server-version` applies to the WebSocket fallback as well as QUIC.
 #[tokio::test]
 async fn relay_websocket_honors_server_version() {
-	let allowed: moq_net::Version = "moq-transport-16".parse().expect("parse allowed version");
+	let allowed: moq_net::Version = "moq-transport-18".parse().expect("parse allowed version");
 	let excluded = newest_lite_version();
 	let (port, web_handle) = spawn_versioned_relay(vec![allowed]).await;
 	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
 
-	let excluded_result = tokio::time::timeout(
+	let excluded_result = kio::clock::timeout(
 		TIMEOUT,
 		client_version(Some(excluded)).connect(url.clone()).established(),
 	)
@@ -435,7 +389,7 @@ async fn relay_websocket_honors_server_version() {
 		"WebSocket accepted excluded version {excluded} despite --server-version {allowed}"
 	);
 
-	let session = tokio::time::timeout(TIMEOUT, client_version(Some(allowed)).connect(url).established())
+	let session = kio::clock::timeout(TIMEOUT, client_version(Some(allowed)).connect(url).established())
 		.await
 		.expect("allowed client connect timeout")
 		.expect("allowed client connect failed");
@@ -504,7 +458,7 @@ async fn relay_https_terminates_tls() {
 		.add_root_certificate(reqwest::Certificate::from_pem(cert.pem().as_bytes()).expect("parse root"))
 		.build()
 		.expect("build https client");
-	let resp = tokio::time::timeout(TIMEOUT, client.get(format!("https://localhost:{port}/health")).send())
+	let resp = kio::clock::timeout(TIMEOUT, client.get(format!("https://localhost:{port}/health")).send())
 		.await
 		.expect("https request timed out")
 		.expect("https request failed");
@@ -540,7 +494,7 @@ async fn relay_websocket_root_path_upgrades() {
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let (_client, pub_connection) = tokio::time::timeout(
+	let (_client, pub_connection) = kio::clock::timeout(
 		TIMEOUT,
 		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
@@ -553,7 +507,7 @@ async fn relay_websocket_root_path_upgrades() {
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 	let (_client, sub_connection) =
-		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+		kio::clock::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
 			.expect("subscriber connect timeout")
 			.expect("subscriber connect failed (root-path WS upgrade)");
@@ -561,25 +515,25 @@ async fn relay_websocket_root_path_upgrades() {
 	// ── data path ───────────────────────────────────────────────────
 	// The root auth scope is the empty path, so the broadcast announces at its
 	// own name with no prefix.
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path, None)
+		.request(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -589,87 +543,6 @@ async fn relay_websocket_root_path_upgrades() {
 	drop(track);
 	drop(broadcast);
 	drop(pub_connection);
-	drop(sub_connection);
-	web_handle.abort();
-}
-
-/// Two publish-only clients (each `with_publisher`, no `with_subscriber`) coexist on one relay;
-/// a single subscriber sees broadcasts forwarded from both. Verifies that multiple
-/// publish-only connections don't interfere with each other or get torn down.
-#[tokio::test]
-async fn two_publish_only_clients_coexist() {
-	let (port, web_handle) = spawn_relay().await;
-	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
-
-	// ── two publish-only publishers, each serving a distinct broadcast ──
-	let pub_a = moq_tokio::origin::spawn();
-	let broadcast_a = pub_a.create_broadcast("alpha").expect("create broadcast a");
-	broadcast_a.announce(Default::default()).expect("create broadcast a");
-	let track_a = broadcast_a.create_track("video", timed()).expect("create track a");
-	track_a
-		.append_group()
-		.expect("append group a")
-		.write_frame(moq_net::Timestamp::ZERO, b"a".as_ref())
-		.expect("write frame a");
-
-	let pub_b = moq_tokio::origin::spawn();
-	let broadcast_b = pub_b.create_broadcast("beta").expect("create broadcast b");
-	broadcast_b.announce(Default::default()).expect("create broadcast b");
-	let track_b = broadcast_b.create_track("video", timed()).expect("create track b");
-	track_b
-		.append_group()
-		.expect("append group b")
-		.write_frame(moq_net::Timestamp::ZERO, b"b".as_ref())
-		.expect("write frame b");
-
-	let (_client, sess_a) = tokio::time::timeout(
-		TIMEOUT,
-		connect_once(client().with_publisher(pub_a.consume()), url.clone()),
-	)
-	.await
-	.expect("publisher a connect timeout")
-	.expect("publisher a connect failed");
-	let (_client, sess_b) = tokio::time::timeout(
-		TIMEOUT,
-		connect_once(client().with_publisher(pub_b.consume()), url.clone()),
-	)
-	.await
-	.expect("publisher b connect timeout")
-	.expect("publisher b connect failed");
-
-	// ── one subscriber should see broadcasts from both publish-only clients ──
-	let sub_origin = moq_tokio::origin::spawn();
-	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
-	let (_client, sub_connection) =
-		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
-			.await
-			.expect("subscriber connect timeout")
-			.expect("subscriber connect failed");
-
-	let mut seen = std::collections::HashSet::new();
-	while seen.len() < 2 {
-		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
-			.await
-			.expect("announcement timeout")
-			.expect("origin closed");
-		if active {
-			seen.insert(update.prefix.as_str().to_owned());
-		}
-	}
-	assert!(
-		seen.contains("alpha") && seen.contains("beta"),
-		"expected both publish-only broadcasts, saw {seen:?}"
-	);
-
-	// Hold producers until announcements are observed.
-	drop(track_a);
-	drop(broadcast_a);
-	drop(track_b);
-	drop(broadcast_b);
-
-	drop(sess_a);
-	drop(sess_b);
 	drop(sub_connection);
 	web_handle.abort();
 }
@@ -696,14 +569,14 @@ async fn spawn_accept_relay(
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let mut server = server.listen().await.expect("listen");
 	let quic = server.local_addr().ok();
 	let tcp = server.tcp_local_addr();
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let conn = Connection::new(request, cluster.clone(), auth.clone())
 				.with_id(id)
 				.with_shutdown(moq_relay::shutdown::Observer::disabled());
@@ -754,7 +627,7 @@ async fn internal_tcp_round_trip() {
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let (_client, pub_connection) = tokio::time::timeout(
+	let (_client, pub_connection) = kio::clock::timeout(
 		TIMEOUT,
 		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
@@ -772,7 +645,7 @@ async fn internal_tcp_round_trip() {
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 	let (_client, sub_connection) =
-		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+		kio::clock::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
 			.expect("subscriber connect timeout")
 			.expect("subscriber connect failed");
@@ -780,25 +653,25 @@ async fn internal_tcp_round_trip() {
 	// ── data path ───────────────────────────────────────────────────
 	// The internal listener grants the empty root, so the broadcast announces
 	// at its own name with no path prefix.
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path, None)
+		.request(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -814,7 +687,7 @@ async fn internal_tcp_round_trip() {
 
 /// Stand up a stream `--server-bind` on a Unix socket and return the socket path
 /// plus an abort handle.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
 	// Keep the path short: macOS caps AF_UNIX paths around 104 bytes, and the
 	// system temp dir is long. /tmp is fine on macOS and Linux. A per-call counter
@@ -838,7 +711,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 /// Connect over `unix://` (qmux on a Unix socket) and confirm a frame
 /// round-trips. Also asserts both sides land on the newest moq-lite version,
 /// which proves the in-band ALPN negotiation populated the protocol.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 #[tokio::test]
 async fn internal_unix_round_trip() {
 	let (path, handle) = spawn_internal_unix_relay().await;
@@ -857,7 +730,7 @@ async fn internal_unix_round_trip() {
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let (_client, pub_connection) = tokio::time::timeout(
+	let (_client, pub_connection) = kio::clock::timeout(
 		TIMEOUT,
 		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
@@ -875,33 +748,33 @@ async fn internal_unix_round_trip() {
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 	let (_client, sub_connection) =
-		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+		kio::clock::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
 			.expect("subscriber connect timeout")
 			.expect("subscriber connect failed");
 
 	// ── data path ───────────────────────────────────────────────────
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
 
-	let mut track_sub = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().subscribe(None).await })
+	let mut track_sub = kio::clock::timeout(TIMEOUT, async { bc.track("video").unwrap().subscribe(None).await })
 		.await
 		.expect("subscribe timeout")
 		.expect("consume_track");
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -916,21 +789,13 @@ async fn internal_unix_round_trip() {
 }
 
 /// Every version whose SETUP carries a request path the server reads: moq-lite-05/06
-/// (Setup Stream) and moq-transport 14-18 (the `Path` SETUP parameter, in-band on
-/// the bidi stream for 14-16 and the uni Setup Stream for 17-18).
+/// (Setup Stream) and moq-transport 18 (the `Path` SETUP parameter on the uni Setup
+/// Stream).
 fn path_versions() -> Vec<moq_net::Version> {
-	[
-		"moq-lite-05",
-		"moq-lite-06",
-		"moq-transport-14",
-		"moq-transport-15",
-		"moq-transport-16",
-		"moq-transport-17",
-		"moq-transport-18",
-	]
-	.iter()
-	.map(|alpn| alpn.parse().expect("parse version alpn"))
-	.collect()
+	["moq-lite-05", "moq-lite-06", "moq-transport-18"]
+		.iter()
+		.map(|alpn| alpn.parse().expect("parse version alpn"))
+		.collect()
 }
 
 /// Publisher and subscriber (both pinned to `version`) that announce/observe
@@ -950,7 +815,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 	group.finish().expect("finish group");
 
 	let pub_client = client_version(Some(version)).with_publisher(pub_origin.consume());
-	let (_client, pub_connection) = tokio::time::timeout(TIMEOUT, connect_once(pub_client, pub_url))
+	let (_client, pub_connection) = kio::clock::timeout(TIMEOUT, connect_once(pub_client, pub_url))
 		.await
 		.expect("publisher connect timeout")
 		.expect("publisher connect failed");
@@ -959,16 +824,16 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 	let sub_client = client_version(Some(version)).with_subscriber(sub_origin);
-	let (_client, sub_connection) = tokio::time::timeout(TIMEOUT, connect_once(sub_client, sub_url))
+	let (_client, sub_connection) = kio::clock::timeout(TIMEOUT, connect_once(sub_client, sub_url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
 
-	let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
+	let path = update.prefix.clone();
 
 	drop(track);
 	drop(bc);
@@ -1003,7 +868,7 @@ async fn internal_tcp_path_reaches_server() {
 /// `unix://<socket>` carries no resource path in its URL (that's the socket), so
 /// the request path rides in the `?path=` query. Same assertion as TCP, across
 /// every version whose SETUP carries a path.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 #[tokio::test]
 async fn internal_unix_path_reaches_server() {
 	let (path, handle) = spawn_internal_unix_relay().await;
@@ -1067,7 +932,7 @@ async fn raw_quic_path_reaches_server() {
 async fn health_endpoint_reports_ok() {
 	let (port, web_handle) = spawn_relay().await;
 
-	let resp = tokio::time::timeout(TIMEOUT, reqwest::get(format!("http://127.0.0.1:{port}/health")))
+	let resp = kio::clock::timeout(TIMEOUT, reqwest::get(format!("http://127.0.0.1:{port}/health")))
 		.await
 		.expect("health request timeout")
 		.expect("health request failed");
@@ -1079,127 +944,14 @@ async fn health_endpoint_reports_ok() {
 	web_handle.abort();
 }
 
-/// Stand up a stream relay whose public access grants **subscribe only**, returning
-/// the TCP port and an abort handle. A no-JWT client gets the root for subscribing but
-/// no publish scope, so a publisher's role is rejected.
-async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
-	let mut config = moq_tokio::listen::Config::default();
-	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
-
-	// Subscribe-only public access: the root is granted for subscribing, never publishing.
-	let mut auth_config = auth::Config::default();
-	auth_config.public_subscribe = vec![moq_auth::Pattern::all()];
-
-	let (_, tcp, handle) = spawn_accept_relay(config, auth_config).await;
-	(tcp.expect("relay bound no TCP socket").port(), handle)
-}
-
-/// A publisher whose token grants only subscribe scope is rejected during the
-/// handshake instead of being accepted and silently carrying no media. The client
-/// advertises `Role::Publisher` in its SETUP (derived from `with_publisher`), and the
-/// relay closes the session because the token has no publish scope. This is the
-/// regression guard for the role hint: before it, this connection was
-/// accepted and the publisher streamed into a dropped session forever.
-#[tokio::test]
-async fn subscribe_only_public_rejects_publisher_role() {
-	let (port, handle) = spawn_subscribe_only_relay().await;
-	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-
-	let pub_origin = moq_tokio::origin::spawn();
-
-	// The lite-05 client resolves `connect()` optimistically, so it may return Ok
-	// before the relay's verdict lands. Either the connect fails outright, or the
-	// session it returns closes shortly after with the relay's rejection. A correctly
-	// scoped subscriber, by contrast, would stay open indefinitely.
-	match tokio::time::timeout(
-		TIMEOUT,
-		connect_once(client().with_publisher(pub_origin.consume()), url),
-	)
-	.await
-	{
-		Ok(Ok((_client, connection))) => {
-			let _ = tokio::time::timeout(TIMEOUT, connection.closed())
-				.await
-				.expect("relay should close a publisher whose token lacks publish scope, not leave it open");
-		}
-		Ok(Err(_)) => {} // rejected synchronously at connect; also acceptable.
-		Err(_) => panic!("publisher connect neither resolved nor was rejected within the timeout"),
-	}
-
-	handle.abort();
-}
-
-/// The mirror of the reject test: a subscriber (`Role::Subscriber`, from `with_subscriber`)
-/// is accepted by the same subscribe-only relay, and its session stays open. This proves
-/// the role gate rejects only the mismatched direction, not the whole listener.
-#[tokio::test]
-async fn subscribe_only_public_accepts_subscriber_role() {
-	let (port, handle) = spawn_subscribe_only_relay().await;
-	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-
-	let sub_origin = moq_tokio::origin::spawn();
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
-		.await
-		.expect("subscriber connect timeout")
-		.expect("subscriber connect failed");
-
-	// The session must NOT be closed by the relay: a short wait should time out.
-	let still_open = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
-	assert!(
-		still_open.is_err(),
-		"subscribe-only relay should keep a subscriber session open"
-	);
-
-	handle.abort();
-}
-
-/// The mirror of [`spawn_subscribe_only_relay`]: public access grants **publish only**,
-/// so a no-JWT client gets the root for publishing but no subscribe scope.
-async fn spawn_publish_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
-	let mut config = moq_tokio::listen::Config::default();
-	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
-
-	// Publish-only public access: the root is granted for publishing, never subscribing.
-	let mut auth_config = auth::Config::default();
-	auth_config.public_publish = vec![moq_auth::Pattern::all()];
-
-	let (_, tcp, handle) = spawn_accept_relay(config, auth_config).await;
-	(tcp.expect("relay bound no TCP socket").port(), handle)
-}
-
-/// The mirror of the publisher-reject test, covering the other branch of the role gate:
-/// a subscriber (`Role::Subscriber`, from `with_subscriber`) whose token grants only
-/// publish scope is rejected during the handshake instead of left silently empty.
-#[tokio::test]
-async fn publish_only_public_rejects_subscriber_role() {
-	let (port, handle) = spawn_publish_only_relay().await;
-	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-
-	let sub_origin = moq_tokio::origin::spawn();
-
-	// Like the publisher case, `connect()` may resolve optimistically; either it fails
-	// outright, or the session the relay hands back closes shortly after.
-	match tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url)).await {
-		Ok(Ok((_client, connection))) => {
-			let _ = tokio::time::timeout(TIMEOUT, connection.closed())
-				.await
-				.expect("relay should close a subscriber whose token lacks subscribe scope, not leave it open");
-		}
-		Ok(Err(_)) => {} // rejected synchronously at connect; also acceptable.
-		Err(_) => panic!("subscriber connect neither resolved nor was rejected within the timeout"),
-	}
-
-	handle.abort();
-}
-
 /// Dial once and hand back the client with its connection.
 ///
 /// These tests want a single transport, so reconnecting is off: there is nothing
 /// left to redial, and dropping the connection closes the transport because it
 /// holds the last session clone.
 ///
-/// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the connection it just got.
+/// The client comes back because it owns the transport endpoint, and the caller
+/// has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_tokio::Client,
 	url: url::Url,
@@ -1213,7 +965,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

@@ -9,7 +9,7 @@ and syscalls. Not io_uring specific: anything on the relay's hot path qualifies,
 including the shared moq-net model layer and kio.
 
 Every implementation quest lands with a measured before/after (`just bench BASE` on Linux,
-plus the targeted micro-benches it names). A measured no-win is a valid
+or `just bench-runtime` for an io_uring change, plus the targeted micro-benches it names). A measured no-win is a valid
 outcome that abandons the quest.
 
 ## Plan
@@ -20,11 +20,8 @@ Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
 - Decided in the 2026-10-05 audit: perf quests that edit moq-uring's QUIC
-  driver (Run to quiescence) measure their before and after on `moq-quic`.
-- `moq-uring`'s only backend is `moq-quic`. Every profile names its backend. The
-  historical quiche-flavor numbers cited in
-  [Run to quiescence](/quest/m2/perf/uring-quiescence.md) and
-  [moq-uring on moq-clock](/quest/m1/time/uring.md) are re-measured on `moq-quic`.
+  driver measure their before and after on `moq-quic`.
+- `moq-uring`'s only backend is `moq-quic`. Every profile names its backend.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
@@ -49,36 +46,51 @@ package, and none of the uring micro-opts is measured on `moq-quic`. The unmeasu
 ones moved out (3200 to m2; 3129 with the open contract, 3201, 3202, and 3204
 to m3), and NAPI busy polling (3203), registered wait arguments (3205), and
 the priority `set_track` wakes were dropped. Egress requeue folded into Run to
-quiescence; egress keep-alive folded into Group cost. The benchmark noise
-estimate comes first, since every quest here accepts "within noise". The
-profiling recipe and One enter per turn rank next: they produce the numbers
-that decide the rest.
+quiescence.
 
 Decided 2026-10-08: the CPU and allocation profile merged into the profiling
-recipe ([Relay profiling](/quest/m2/perf/lock-profile.md)), so the relay has
-one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
+recipe (`just bench-profile`), so the relay has one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
 equally unmeasured ring micro-opt; cache shard was deleted, since #5031's
 profile shows no pool contention.
 
-Decided 2026-10-10: #3122's per-turn clock read merged into
-[moq-uring on moq-clock](/quest/m1/time/uring.md), where the worker's turn
-sample becomes its `moq-clock` clock; it keeps #3122's measurement bar.
+#3122's per-turn clock read landed in
+[#5926](https://github.com/moq-dev/moq/pull/5926): the io_uring worker is a
+`kio::clock` backend that samples the clock once per turn, cutting
+`clock_gettime` from 44.7 to 1.05 calls per turn. A later `perf` profile
+([#7505](https://github.com/moq-dev/moq/pull/7505)) put the io_uring relay's
+`[vdso]` cycle share at 0.5% before #5926 and 0.0 to 0.2% after, below the
+tokio workers' 0.2 to 0.4%. #5926 also cut chat's relay instructions per
+delivered frame by about 5%; video's 1.5% drop was within noise. The remaining
+`[vdso]` samples come mostly from the per-turn read and `moq_net`
+`Timestamp::from(Instant)`.
 
 Decided 2026-10-14: kio channel contention ranks first. Its 215% lock wait on
 the default tokio runtime is the largest measured cost, and the lock-wait
 recipe it needs has shipped. It stays in m2, since m1 defers general
 optimization.
 
+Decided 2026-10-22: the WebSocket and TCP stream transports join this line
+as the [Stream transports](/quest/m2/perf/stream/README.md) epic, ranked
+second, and the io_uring TCP line moves in from m3. io_uring pays far more
+for TCP than for UDP, so it no longer waits on fleet demand.
+
+Decided 2026-10-22 from the io_uring audit: `just bench BASE` runs only
+tokio, so an io_uring quest measures with `just bench-runtime` at both
+revisions on the same host and worker count, and profiles with
+`just bench-profile MODES WORKLOAD WORKERS io-uring-workers [BASE]`.
+
 ## Required
 
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
-- [Relay profiling](/quest/m2/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
-- [One enter per turn](/quest/m2/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
-- [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
+- [Stream transports](/quest/m2/perf/stream/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
+- [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
+- [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - a measured verdict on the tokio driver's connection-wide mutex and per-packet endpoint-to-connection hop, with levers built only on evidence
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
-- [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, with before/after measurements on `moq-quic`
+- [kio waiter costs](/quest/m2/perf/kio-waiter-costs.md) - long-lived waiters stop being rebuilt every poll, IETF fetch keeps one close watch per stream, and a short `kio::log` costs less
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
-
-## Related
-
-- [moq-uring on moq-clock](/quest/m1/time/uring.md) - one clock read per worker turn, formerly #3122
+- [Mesh session cost](/quest/m2/perf/mesh-session-cost.md) - moq-net's per-session announce, route sync, and scope work drops, swept over sessions and announces
+- [Cluster route memory](/quest/m2/perf/cluster-route-memory.md) - a full-mesh cluster's ~3.7 KB per route per broadcast shrinks, the in-memory hop is profiled, and `bench-profile lock` tolerates lost records
+- [Small hot-path waste](/quest/m2/perf/hot-path-waste.md) - one track-name copy per lite subscription, no full-history `#drift` walk, and one header buffer per JS object
+- [Track-state reads skip when nothing changed](/quest/m2/perf/cursor-version-skip.md) - `Cursor::sync`, `probe` and `GroupExpiry` skip unchanged reads, then group reads move onto a Watch
+- [An idle TS export with a delay costs what one without does](/quest/m2/perf/ts-idle-jitter.md) - the jitter scan and memcmp stop leading the idle poll
+- [Fanout takes the route lock less](/quest/m2/perf/route-lock.md) - fewer than 41 route-lock acquisitions per fanout round

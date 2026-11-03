@@ -6,6 +6,7 @@ description: The reactive primitives under every @moq package
 # @moq/signals
 
 [![npm](https://img.shields.io/npm/v/@moq/signals)](https://www.npmjs.com/package/@moq/signals)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/signals)
 
 Reactive signals with explicit tracking and automatic cleanup. Every `@moq`
 package exposes its state through these, so this is how you drive and observe
@@ -56,7 +57,7 @@ DOM without a framework, which is what the UI overlays use.
 import { useValue } from "@moq/signals/react";
 
 function Volume({ watch }) {
-    const volume = useValue(watch.controls.volume);
-    return <input type="range" value={volume} onChange={(e) => watch.controls.volume.set(+e.target.value)} />;
+    const volume = useValue(watch.controls.audio.volume);
+    return <input type="range" value={volume} onChange={(e) => watch.controls.audio.volume.set(+e.target.value)} />;
 }
 ```

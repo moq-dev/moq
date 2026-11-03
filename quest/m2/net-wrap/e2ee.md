@@ -1,0 +1,126 @@
+# [M] moq-e2ee implements the moq-net traits
+
+## Goal
+
+moq-e2ee's broadcast, track, and group wrappers implement the
+[moq-net traits](/quest/m2/net-wrap/traits.md), so anything generic over them
+publishes or consumes an encrypted broadcast unchanged, under semantic track
+names.
+
+## Plan
+
+The wrappers merged in #5876 diverge from moq-net, and they adapt to it, not
+the reverse (decided 2026-10-20, maintainer):
+
+- `finish(self)` and `abort(self)` without an error become moq-net's
+  `finish` and `abort(self, Error)`.
+- `track::Producer::create_group(u64)` takes `group::Info`.
+- `broadcast::Consumer::subscribe(semantic, ..)`, which returns a
+  `kio::Pending`, becomes `track(semantic)` then `.subscribe(..)`.
+- `moq_e2ee::Error` converts into `moq_net::Error`, keeping the draft's
+  typed codes (such as an authentication failure) distinguishable rather
+  than collapsing into `Error::Dropped`.
+- Datagrams: the wrapper's datagram producer and consumer match the
+  separate datagram types of
+  [Datagram tracks](/quest/m1/datagram-tracks/README.md), so the trait read
+  yields only authenticated datagrams. A datagram that fails authentication, or a duplicate, is
+  dropped there and the track continues. The draft's `authentication`
+  event stays on moq-e2ee's own consumer, outside the trait, for callers
+  that hold the concrete type. A trait read can't carry it without
+  breaking the exact mirror.
+- `track::Info.compress` is logical. Ciphertext doesn't compress, so the
+  wrapper compresses each group, and each datagram alone with a fresh
+  window, with moq-net's
+  [track compression](/doc/concept/compression.md) before AEAD, creates the
+  physical track uncompressed, and inflates after decryption. Sessions drop
+  a sealed datagram past the transport's datagram size as they drop an
+  oversized plaintext one, so document that the AEAD tag and any compression
+  growth count against the caller's payload budget. The physical size
+  describes ciphertext, so each sealed frame and datagram carries its
+  inflated size inside the authenticated payload: `frame::Info.size` stays
+  the logical size, the subscriber reserves only that declared size against
+  the same group and pool limits as a plain frame, and an inflate that
+  differs from it is an error, as moq-net's compression contract requires.
+  This keeps
+  [rust-publish](/quest/m2/e2ee/rust-publish.md)'s rule that protected
+  catalogs compress before encryption, and needs moq-net to expose its group
+  codec to the wrapper. `@moq/e2ee` does the same in
+  [JS](/quest/m2/net-wrap/js.md).
+- The subscriber's wrapper learns the logical flag from authenticated E2EE
+  metadata, never from the physical track (decided 2026-10-20, maintainer):
+  the physical track's `compress` is always false, so it can't signal it.
+  The metadata lives in the E2EE track mapping, and a flag that fails
+  authentication fails the track loudly. Not the encrypted catalog: the
+  catalog track is itself compressed, so a subscriber would need the flag
+  before it could inflate the catalog that carries it. The
+  [E2EE epic](/quest/m2/e2ee/README.md) also keeps catalog formats out of
+  moq-e2ee, and the [compression migration](https://github.com/moq-dev/moq/pull/7046) dropped hang's
+  `compression` field. The subscriber needs the flag before inflating,
+  without changing moq-net's `track(name)`; propose the encoding in the PR.
+  Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
+  `.z` sibling rule.
+- Datagram header allowance (decided 2026-10-31, maintainer, a follow-up
+  of [moq-dev/moq#7435](https://github.com/moq-dev/moq/pull/7435)):
+  `MAX_DATAGRAM_HEADER` (`rs/moq-e2ee/src/limits.rs`,
+  `js/e2ee/src/limits.ts`; 28 after #7435, lite-07's Type plus three 9-byte
+  varints) also counts the optional lite datagram fields: the relayed fields
+  the lite `ietf` extension adds, and moq-net's Inflated Size header field,
+  which a compressed physical track's datagram carries outside the AEAD
+  (`rs/moq-net/src/lite/datagram.rs`). Without them a maximum-size protected
+  datagram can encode past the 1200-byte body and be dropped. That header
+  field is not the wrapper's own inflated size above, which sits inside the
+  authenticated payload and counts against the plaintext budget instead.
+  Today a caller's `track::Info` reaches the physical track unchanged, so it
+  can be compressed. Once the wrapper creates the physical track
+  uncompressed, the header field never appears and the allowance needs only
+  the `ietf` fields. Of those, the relay state, object ID, priority, and
+  status have a fixed worst case, but `encode_datagram`
+  (`rs/moq-net/src/lite/ietf.rs`) also writes the forwarded properties
+  block, which may run to `MAX_OBJECT_EXTENSIONS` (64 KiB,
+  `rs/moq-net/src/ietf/group.rs`), so no fixed allowance covers it, and the
+  lite publisher drops a datagram whose body exceeds 1200 bytes
+  (`rs/moq-net/src/lite/publisher.rs`). Choose during implementation between
+  capping the properties a hop forwards on a protected datagram (and
+  counting that cap) or documenting that relay properties are outside the
+  allowance, so such a datagram may be dropped, and record the choice in the
+  PR. Sealing and opening share
+  `MAX_DATAGRAM_PAYLOAD` today (`rs/moq-e2ee/src/track.rs`,
+  `js/e2ee/src/track.ts`), so a wider allowance would also make `open`
+  refuse a datagram an older sender sealed under the narrower one. Split
+  the seal and open limits, or pick the limit by wire version, so a
+  receiver still opens anything that fits the body. Update the e2ee
+  draft's plaintext bound and the `moq-e2ee-00` vectors with it, covering
+  both limits and a datagram with non-empty relay properties.
+- Ranges: every moq-net range starts at a group's first frame
+  ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)), so the wrapper reads each physical group whole
+  and inflates from frame 0.
+- Frames: AEAD authenticates a whole frame, so the wrapper's frame producer
+  buffers chunks from `write` and seals at `finish`, and its frame consumer
+  yields chunks only after the frame authenticates.
+- Listing (maintainer, 2026-10-24): the wire listing (moq-lite's Tracks
+  stream, IETF SUBSCRIBE_TRACKS) carries physical names unchanged, so
+  relays list a protected broadcast like any other. The consumer's `tracks`
+  opens each listed physical name and reports its semantic name. A name that does not
+  open (relay-forged, another epoch's, malformed) is skipped after one open
+  and keeps no state: a relay can inject names into a listing, so ending
+  the listing would let it deny discovery. Test a forged and an
+  older-epoch name among valid ones. Recovery is crate-private
+  `generation::Producer::open` today; move it to the consuming generation,
+  which holds the same name keys, so both sides can open.
+- Demand and preference cross the wrapper: an encrypted track's demand is
+  its physical track's, and preference updates reach the physical track.
+- Keep the nonce rules the epic specifies: a group producer still owns its
+  frame numbering, and a re-created or re-served track name resumes above
+  its high-water marks (decided 2026-10-25, maintainer, replacing the
+  refusal; moq-e2ee's claims already resume).
+- Test the wrappers against the questline's pass-through test cases. The
+  moq-json round trip through an encrypted track waits for
+  [moq-json to take the traits](/quest/m2/net-wrap/json.md).
+
+Public API: the moq-e2ee wrapper signatures change to moq-net's. Wire:
+`draft-lcurley-moq-e2ee.md` gains the authenticated logical `compress` flag
+and each compressed object's authenticated inflated size.
+
+## Required
+
+- [moq-net traits](/quest/m2/net-wrap/traits.md) - the traits this implements

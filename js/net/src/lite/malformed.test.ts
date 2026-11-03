@@ -131,8 +131,8 @@ for (const [alpn, version] of versions) {
 }
 
 for (const [alpn, version] of [[ALPN_04, Version.DRAFT_04], ...versions] as const) {
-	// An unassigned type, and the Auth Stream on versions that predate it.
-	for (const typ of version === Version.DRAFT_07 ? [8] : [8, StreamId.Auth]) {
+	// An unassigned type, and the Tracks and Auth Streams on versions that predate them.
+	for (const typ of version === Version.DRAFT_07 ? [9] : [9, StreamId.Tracks, StreamId.Auth]) {
 		test(`${alpn}: unknown stream type ${typ} resets only its stream`, async () => {
 			const f = fixture(alpn, version);
 			try {

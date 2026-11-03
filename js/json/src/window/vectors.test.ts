@@ -40,14 +40,14 @@ test("the encoder emits the shared frame bytes", () => {
 });
 
 test("the encoder emits the shared group header bytes", () => {
-	// opRatio 0 forces every edit to restate the window in a new group.
-	const encoder = new Encoder<{ n: number }>({ opRatio: 0 });
+	// Without ops every edit restates the window in a new group.
+	const encoder = new Encoder<{ n: number }>({ ops: false });
 	commit(encoder.push({ n: 0 }));
 	expect(commit(encoder.push({ n: 1 }))).toBe(frame("group header from zero"));
 });
 
 test("the encoder emits the shared bounded checkpoint bytes", () => {
-	const encoder = new Encoder<{ n: number }>({ opRatio: 0, checkpointRecords: 1 });
+	const encoder = new Encoder<{ n: number }>({ ops: false, checkpointRecords: 1 });
 	commit(encoder.push({ n: 0 }));
 	expect(commit(encoder.push({ n: 1 }))).toBe(frame("group header with a bounded checkpoint"));
 });

@@ -8,8 +8,8 @@ description: SRT contribution and playback
 `moq import srt` accepts SRT pushes (`--listen`) or pulls from a remote SRT
 source (`--connect`); `moq export srt` serves SRT to players or pushes to a
 remote. The payload is MPEG-TS, so the same codecs and behavior as
-[`import ts`](/bin/cli) apply: H.264/H.265 video and AAC, MP2, AC-3, or E-AC-3
-audio. A damaged unit is dropped and the session stays up; video resumes at its
+[`import ts`](/bin/cli) apply: H.264/H.265 video and AAC, MP2, AC-3, E-AC-3, or
+Opus audio. A damaged unit is dropped and the session stays up; video resumes at its
 next keyframe, freezing for up to one GOP.
 
 ```bash
@@ -25,19 +25,18 @@ moq --connect https://relay.example.com/anon --broadcast event.hang import srt -
 ```
 
 Each connection publishes under a fresh
-[epoch](/concept/moq-lite#publisher-epochs), so an encoder that reconnects
+[instance](/concept/moq-lite#publisher-instances), so an encoder that reconnects
 while its stale connection is still open replaces it at once: viewers see the
 broadcast restart, and their next subscribe reaches the new feed. An
-`export srt` stream ends with its broadcast; `--linger` and `--stitch` follow a
+`export srt` stream ends with its broadcast; `--follow` and `--stitch` follow a
 return or a replacement on the same connection, as they do for
-[`export ts`](/bin/cli#retention-and-latency). The linger also bounds a
-mid-stream replacement's first catalog; expiry ends the export with an error.
-With the default `--linger 0s`, that catalog must already be available.
+[`export ts`](/bin/cli#retention-and-latency).
 
 A multi-program feed is refused unless `--program`
 picks one: `--program 2` imports program 2 alone, and `--program all`
 publishes each program as its own broadcast (`event.hang` becomes
-`event/1.hang`, `event/2.hang`, and so on).
+`event/1.hang`, `event/2.hang`, and so on), following the PAT as programs
+join and leave.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import srt --listen '[::]:9000' --program all

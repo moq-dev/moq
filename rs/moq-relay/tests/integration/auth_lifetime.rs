@@ -9,10 +9,12 @@
 //! what it moved.
 //! The last tests swap the server for an in-process decider answering
 //! `Admissions`, and prove the lease it drives reaches the session the same way,
-//! including an outage that keeps it until `expires`, on Tokio's paused clock.
+//! including an outage that keeps it until exactly `expires`, on a clock only
+//! the test moves.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -37,6 +39,8 @@ enum Answer {
 	Grant(Grant),
 	Status(u16),
 	Token(Grant, moq_auth::Token),
+	/// A 403 carrying a typed refusal.
+	Refuse(moq_auth::refusal::Reason),
 }
 
 /// A server whose answers the test changes mid-session, recording every request.
@@ -48,6 +52,10 @@ struct Script {
 	/// fetch without touching the sessions serving it.
 	revalidate_http: Arc<Mutex<Option<Answer>>>,
 	seen: Arc<Mutex<Vec<Request>>>,
+	/// Answers each `end` only once a permit is added, when [`Self::hold_ends`] set it.
+	end_gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+	/// Notified as each `end` arrives.
+	end_arrived: Arc<tokio::sync::Notify>,
 }
 
 impl Script {
@@ -57,7 +65,16 @@ impl Script {
 			revalidate: Arc::new(Mutex::new(Answer::Grant(grant))),
 			revalidate_http: Arc::new(Mutex::new(None)),
 			seen: Arc::new(Mutex::new(Vec::new())),
+			end_gate: Arc::default(),
+			end_arrived: Arc::default(),
 		}
+	}
+
+	/// Hold every `end` reply until the returned gate gets a permit.
+	fn hold_ends(&self) -> Arc<tokio::sync::Semaphore> {
+		let gate = Arc::new(tokio::sync::Semaphore::new(0));
+		*self.end_gate.lock().unwrap() = Some(gate.clone());
+		gate
 	}
 
 	fn on_connect(&self, answer: Answer) {
@@ -85,7 +102,7 @@ impl Script {
 	async fn handle(State(script): State<Script>, Json(request): Json<Request>) -> Response {
 		script.seen.lock().unwrap().push(request.clone());
 		let answer = match request.event {
-			Event::Connect => script.connect.lock().unwrap().clone(),
+			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate if request.transport == moq_auth::Transport::Http => script
 				.revalidate_http
 				.lock()
@@ -93,13 +110,25 @@ impl Script {
 				.clone()
 				.unwrap_or_else(|| script.revalidate.lock().unwrap().clone()),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
-			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
+			Event::End { .. } => {
+				script.end_arrived.notify_one();
+				let gate = script.end_gate.lock().unwrap().clone();
+				if let Some(gate) = gate {
+					drop(gate.acquire().await);
+				}
+				return StatusCode::NO_CONTENT.into_response();
+			}
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),
 			Answer::Token(grant, token) if request.token.as_ref() == Some(&token) => Json(grant).into_response(),
 			Answer::Token(..) => StatusCode::UNAUTHORIZED.into_response(),
 			Answer::Status(code) => StatusCode::from_u16(code).unwrap().into_response(),
+			Answer::Refuse(reason) => {
+				let mut refusal = moq_auth::Refusal::default();
+				refusal.reason = reason;
+				(StatusCode::FORBIDDEN, Json(refusal)).into_response()
+			}
 		}
 	}
 
@@ -120,7 +149,7 @@ fn all() -> Patterns {
 /// Everything under the dialed path, re-checked every second, good for `expires_in`.
 fn grant(expires_in: Duration) -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::now() + expires_in);
+	grant.expires = Some(kio::clock::wall() + expires_in);
 	grant.revalidate = Some(Duration::from_secs(1));
 	grant
 }
@@ -137,7 +166,7 @@ fn build_auth(url: url::Url) -> moq_relay::auth::Auth {
 /// Stand up the relay's accept loop on a plain-TCP qmux listener and return the
 /// port plus an abort handle.
 async fn spawn_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	spawn_relay_with(auth, cluster).await
 }
 
@@ -146,17 +175,29 @@ async fn spawn_relay_with(
 	auth: moq_relay::auth::Auth,
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	spawn_relay_config(auth, cluster, moq_tokio::listen::Config::default()).await
+}
 
-	let mut config = moq_tokio::listen::Config::default();
+async fn spawn_relay_config(
+	auth: moq_relay::auth::Auth,
+	cluster: cluster::Cluster,
+	mut config: moq_tokio::listen::Config,
+) -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	// Opt in to lite-07 beside the defaults, so a client pinned to it can reach the AUTH stream.
+	config.version = moq_net::Versions::all()
+		.iter()
+		.copied()
+		.chain(["moq-lite-07-wip".parse().unwrap()])
+		.collect();
 	let server = config.init(Default::default()).expect("server init");
 	let mut server = server.listen().await.expect("listen");
 	let port = server.tcp_local_addr().expect("TCP listener is configured").port();
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let conn = Connection::new(request, cluster.clone(), auth.clone()).with_id(id);
 			id += 1;
 			tokio::spawn(async move {
@@ -171,7 +212,7 @@ async fn spawn_relay_with(
 /// Stand up the relay's axum web stack with WebSocket enabled and return the
 /// port plus an abort handle.
 async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	spawn_ws_relay_with(auth, cluster).await
 }
 
@@ -209,10 +250,15 @@ async fn spawn_ws_relay_with(
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
-	config.websocket.delay = Some(Duration::ZERO);
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 fn room_url(scheme: &str, port: u16) -> url::Url {
@@ -234,7 +280,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let pub_session = tokio::time::timeout(
+	let pub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_publisher(pub_origin.consume())
@@ -249,7 +295,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
-	let sub_session = tokio::time::timeout(
+	let sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_subscriber(sub_origin)
@@ -261,24 +307,24 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
 	let bc = sub_consumer
-		.request_broadcast("test", None)
+		.request("test", None)
 		.await
 		.expect("announced broadcast resolves");
 
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("consume_track");
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -300,7 +346,7 @@ async fn assert_refused(url: &url::Url) {
 
 async fn assert_refused_with(client: moq_tokio::Client, url: &url::Url) {
 	let origin = moq_tokio::origin::spawn();
-	let result = tokio::time::timeout(
+	let result = kio::clock::timeout(
 		TIMEOUT,
 		client
 			.with_subscriber(origin)
@@ -311,7 +357,7 @@ async fn assert_refused_with(client: moq_tokio::Client, url: &url::Url) {
 	.await
 	.expect("connect timeout");
 	if let Ok(session) = result {
-		let closed = tokio::time::timeout(Duration::from_secs(3), session.closed())
+		let closed = kio::clock::timeout(Duration::from_secs(3), session.closed())
 			.await
 			.expect("the relay admitted a session the server refused");
 		assert!(closed.is_err(), "a refused session closed cleanly");
@@ -323,7 +369,7 @@ async fn spawn_quic_relay(
 	auth: moq_relay::auth::Auth,
 	root: Option<std::path::PathBuf>,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	spawn_quic_relay_with(auth, root, cluster).await
 }
 
@@ -342,7 +388,7 @@ async fn spawn_quic_relay_with(
 	let addr = server.local_addr().expect("quic addr");
 	let mut server = server.listen().await.expect("listen");
 	let handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let conn = Connection::new(request, cluster.clone(), auth.clone());
 			tokio::spawn(async move {
 				conn.run().await;
@@ -353,7 +399,7 @@ async fn spawn_quic_relay_with(
 }
 
 async fn assert_closed(session: moq_tokio::Connection, within: Duration, what: &str) {
-	let _ = tokio::time::timeout(within, session.closed())
+	let _ = kio::clock::timeout(within, session.closed())
 		.await
 		.unwrap_or_else(|_| panic!("relay should close the {what} session"));
 }
@@ -381,10 +427,19 @@ async fn admits_and_reports_the_session() {
 	relay.abort();
 }
 
+/// Write all of `data` to a raw qmux stream.
+async fn write_all(send: &mut qmux::SendStream, mut data: &[u8]) {
+	use moq_net::transport::poll::SendStream as _;
+	while !data.is_empty() {
+		let n = send.write(data).await.expect("write");
+		data = &data[n..];
+	}
+}
+
 /// A moq-transport client's SETUP token reaches the auth server byte for byte.
 #[tokio::test]
 async fn forwards_the_setup_token() {
-	use web_transport_trait::{RecvStream as _, SendStream as _, Session as _};
+	use moq_net::transport::poll::{RecvStream as _, Session as _};
 
 	for websocket in [false, true] {
 		let value = [0x00, 0xff, 0x80, b'x'];
@@ -402,33 +457,43 @@ async fn forwards_the_setup_token() {
 			spawn_relay(auth).await
 		};
 
-		// Draft-16 CLIENT_SETUP: AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
+		// Draft-18 SETUP (0x2F00): AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
 		let encoded = [&[0x03, 0x00][..], &value].concat();
-		let params = [&[0x01, 0x03, encoded.len() as u8][..], &encoded].concat();
-		let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
+		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
+		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
 		let session = if websocket {
-			qmux::ws::Client::new()
-				.with_protocol("moqt-16", &[qmux::Version::QMux01])
+			let (session, driver) = qmux::ws::Client::new()
+				.with_protocol("moqt-18", &[qmux::Version::QMux01])
 				.connect(&format!("ws://127.0.0.1:{port}/room?source=setup"))
 				.await
-				.expect("connect WebSocket")
+				.expect("connect WebSocket");
+			tokio::spawn(driver);
+			session
 		} else {
-			qmux::tcp::Config::new(qmux::Version::QMux01)
-				.protocols(["moqt-16"])
-				.connect(("127.0.0.1", port))
-				.await
-				.expect("connect TCP")
+			let (session, driver) = qmux::tcp::connect(("127.0.0.1", port), {
+				let mut config = qmux::Config::new(qmux::Version::QMux01);
+				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-18".into()]);
+				config
+			})
+			.await
+			.expect("connect TCP");
+			tokio::spawn(driver);
+			session
 		};
-		let (mut send, mut recv) = session.open_bi().await.expect("open the control stream");
-		send.write_all(&setup).await.expect("send CLIENT_SETUP");
-		let mut reply = [0u8; 1];
-		assert_eq!(
-			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
-				.await
-				.expect("SERVER_SETUP timeout")
-				.expect("SERVER_SETUP"),
-			Some(1)
-		);
+		let mut send = session
+			.open_uni(Default::default())
+			.await
+			.expect("open the setup stream");
+		write_all(&mut send, &setup).await;
+		let mut recv = kio::clock::timeout(TIMEOUT, session.accept_uni())
+			.await
+			.expect("SETUP timeout")
+			.expect("the server's setup stream");
+		let reply = kio::clock::timeout(TIMEOUT, recv.read_chunk(1))
+			.await
+			.expect("SETUP timeout")
+			.expect("SETUP");
+		assert_eq!(reply.map(|chunk| chunk.len()), Some(1));
 		let seen = script.seen.lock().unwrap().clone();
 		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
 		assert_eq!(connect.token, Some(token));
@@ -436,10 +501,79 @@ async fn forwards_the_setup_token() {
 			assert_eq!(connect.transport, moq_auth::Transport::WebSocket);
 			assert_eq!(connect.path, "/room");
 			assert_eq!(connect.query.as_deref(), Some("source=setup"));
-			assert_eq!(connect.server_name.as_deref(), Some("127.0.0.1"));
+			// Plain `ws://` has no SNI; the `Host` header never stands in for one.
+			assert_eq!(connect.server_name, None);
 			assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
-			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-16"));
+			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-18"));
 		}
+		relay.abort();
+	}
+}
+
+/// A configured token is the connection credential: on lite-07 it reaches the auth server
+/// as the SETUP token with nothing in the query, and on lite-06, which has no SETUP token,
+/// in the query as a `?jwt=`.
+#[tokio::test]
+async fn a_configured_token_is_the_connection_credential() {
+	let token = moq_auth::Token {
+		kind: moq_auth::Token::OUT_OF_BAND,
+		value: b"credential".to_vec(),
+	};
+	for (versions, setup, query) in [
+		(vec!["moq-lite-07-wip"], Some(token.clone()), None),
+		(vec!["moq-lite-06"], None, Some("jwt=credential")),
+	] {
+		let script = Script::new(grant(Duration::from_secs(3600)));
+		// Over SETUP, anonymous admission fails, so an established session proves the token
+		// was used. The scripted server cannot check a query token, so that case only asserts
+		// what it was sent.
+		if let Some(token) = &setup {
+			script.on_connect(Answer::Token(grant(Duration::from_secs(3600)), token.clone()));
+		}
+		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
+
+		let mut config = moq_tokio::connect::Config::default();
+		config.version = versions.iter().map(|version| version.parse().unwrap()).collect();
+		config.tokens = vec!["credential".parse().unwrap()];
+		let client = config.init(Default::default()).unwrap();
+		let url: url::Url = format!("tcp://127.0.0.1:{port}/room").parse().unwrap();
+		let session = kio::clock::timeout(
+			TIMEOUT,
+			client
+				.with_reconnect(false)
+				.with_subscriber(moq_tokio::origin::spawn())
+				.connect(url)
+				.established(),
+		)
+		.await
+		.expect("connect timeout")
+		.expect("the configured token was refused");
+		if setup.is_some() {
+			// Lite-07 answers the SETUP token over AUTH, so its grant proves admission.
+			let mut grant = session.auth().grant();
+			kio::clock::timeout(TIMEOUT, async {
+				while grant.peek().is_none() {
+					grant.changed().await.expect("the relay refused the configured token");
+				}
+			})
+			.await
+			.expect("grant timeout");
+		} else {
+			// Lite-06 has no AUTH answer and a client is live before admission, so give a
+			// refusal time to land.
+			assert!(
+				kio::clock::timeout(Duration::from_millis(500), session.closed())
+					.await
+					.is_err(),
+				"{versions:?}: the relay refused the configured token"
+			);
+		}
+
+		let seen = script.seen.lock().unwrap().clone();
+		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
+		assert_eq!(connect.token, setup, "{versions:?}");
+		assert_eq!(connect.query.as_deref(), query, "{versions:?}");
+		session.abort(moq_net::Error::Cancel);
 		relay.abort();
 	}
 }
@@ -460,19 +594,21 @@ async fn refusals_and_outages_refuse_at_connect() {
 	relay.abort();
 }
 
-/// A re-check that moves the tier keeps the session and retags its stats live:
-/// both sessions' presence leaves the old tier for the new one, and media sent
-/// afterwards records under the new tier in both directions.
+/// A re-check that moves the tier and stats label keeps the session and retags its
+/// stats live: both sessions' presence leaves the old tier and label for the new
+/// ones, and media sent afterwards records there in both directions.
 #[tokio::test]
 async fn a_moved_tier_retags_the_live_session() {
-	let script = Script::new(grant(Duration::from_secs(3600)));
-	let mut cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let mut labeled = grant(Duration::from_secs(3600));
+	labeled.label = Some("project/key/1".into());
+	let script = Script::new(labeled);
+	let mut cluster = crate::spawn_cluster(cluster::Options::default());
 	cluster.stats = stats::Registry::new(stats::Config::new());
 	let registry = cluster.stats.clone();
 	let (port, relay) = spawn_relay_with(build_auth(script.spawn().await), cluster).await;
 	let url = room_url("tcp", port);
 
-	let moved = stats::Tier::new("moved");
+	let moved = stats::Tier::new(moq_net::Path::from_static("moved"));
 	let active = |tier: &stats::Tier| {
 		registry
 			.snapshot()
@@ -489,13 +625,29 @@ async fn a_moved_tier_retags_the_live_session() {
 			.find(|(t, r, _)| t == tier && *r == role)
 			.map_or(0, |(_, _, traffic)| traffic.bytes)
 	};
+	// Each label's (active sessions, sent bytes, received bytes), from one report.
+	let labels = || {
+		let mut report = stats::Report::default();
+		registry.report(&mut report);
+		report
+			.sessions
+			.into_iter()
+			.map(|entry| {
+				let presence = entry.presence;
+				(
+					(entry.tier, entry.label.to_string()),
+					(presence.active(), presence.sent_bytes, presence.received_bytes),
+				)
+			})
+			.collect::<HashMap<_, _>>()
+	};
 
 	// A publisher whose track stays open across the move, and a subscriber to it.
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
-	let pub_session = tokio::time::timeout(
+	let pub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_publisher(pub_origin.consume())
@@ -510,7 +662,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
-	let sub_session = tokio::time::timeout(
+	let sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_subscriber(sub_origin)
@@ -521,14 +673,14 @@ async fn a_moved_tier_retags_the_live_session() {
 	.await
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
-	let (update, announced) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, announced) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(announced, "expected announce, got retraction");
 	let bc = sub_consumer
-		.request_broadcast("test", None)
+		.request("test", None)
 		.await
 		.expect("announced broadcast resolves");
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
@@ -539,12 +691,12 @@ async fn a_moved_tier_retags_the_live_session() {
 			.write_frame(moq_net::Timestamp::ZERO, payload)
 			.expect("write frame");
 		group.finish().expect("finish group");
-		let mut group = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 			.await
 			.expect("recv_group timeout")
 			.expect("recv_group failed")
 			.expect("track closed prematurely");
-		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read_frame timeout")
 			.expect("read_frame failed")
@@ -555,18 +707,21 @@ async fn a_moved_tier_retags_the_live_session() {
 	round_trip(b"before").await;
 	assert_eq!(active(&stats::Tier::default()), 2);
 	assert_eq!(active(&moved), 0);
+	assert_eq!(
+		labels()[&(stats::Tier::default(), "project/key/1".to_string())],
+		(2, 6, 6),
+		"sessions and bytes count under the grant's label"
+	);
 
 	let mut moved_grant = grant(Duration::from_secs(3600));
 	moved_grant.tier = Some("moved".into());
+	moved_grant.label = Some("project/key/2".into());
 	script.on_revalidate(Answer::Grant(moved_grant));
 
-	let deadline = tokio::time::Instant::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	while active(&moved) < 2 {
-		assert!(
-			tokio::time::Instant::now() < deadline,
-			"the re-checked tier never applied"
-		);
-		tokio::time::sleep(Duration::from_millis(50)).await;
+		assert!(kio::clock::now() < deadline, "the re-checked tier never applied");
+		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
 	assert_eq!(active(&stats::Tier::default()), 0, "presence left the old tier");
 
@@ -585,15 +740,26 @@ async fn a_moved_tier_retags_the_live_session() {
 	);
 	assert_eq!(bytes(&moved, stats::Role::Subscriber), 5, "ingress from the publisher");
 	assert_eq!(bytes(&moved, stats::Role::Publisher), 5, "egress to the subscriber");
+	let labels = labels();
+	assert_eq!(
+		labels[&(stats::Tier::default(), "project/key/1".to_string())],
+		(0, 6, 6),
+		"earlier bytes stay under the old label"
+	);
+	assert_eq!(
+		labels[&(moved.clone(), "project/key/2".to_string())],
+		(2, 5, 5),
+		"later presence and bytes move to the new label"
+	);
 
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), pub_session.closed())
+		kio::clock::timeout(Duration::from_millis(200), pub_session.closed())
 			.await
 			.is_err(),
 		"a tier change must not close the publisher"
 	);
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), sub_session.closed())
+		kio::clock::timeout(Duration::from_millis(200), sub_session.closed())
 			.await
 			.is_err(),
 		"a tier change must not close the subscriber"
@@ -607,7 +773,8 @@ async fn a_moved_tier_retags_the_live_session() {
 /// prefix keeps flowing, a wider one brings the path back, and neither session closes.
 #[tokio::test]
 async fn a_rechecked_grant_resizes_live_sessions() {
-	for scheme in ["tcp", "ws"] {
+	// Each scheme waits out two re-check cadences, so run them side by side.
+	futures::future::join_all(["tcp", "ws"].map(|scheme| async move {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = match scheme {
@@ -624,7 +791,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			broadcast.announce(Default::default()).expect("announce broadcast");
 			tracks.push((broadcast, track));
 		}
-		let pub_session = tokio::time::timeout(
+		let pub_session = kio::clock::timeout(
 			TIMEOUT,
 			client()
 				.with_publisher(pub_origin.consume())
@@ -638,7 +805,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		let sub_origin = moq_tokio::origin::spawn();
 		let sub_consumer = sub_origin.consume();
-		let sub_session = tokio::time::timeout(
+		let sub_session = kio::clock::timeout(
 			TIMEOUT,
 			client()
 				.with_subscriber(sub_origin)
@@ -652,7 +819,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		let mut subs = Vec::new();
 		for path in ["alice/audio", "alice/video"] {
-			let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast(path))
+			let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow(path, None).unwrap().available())
 				.await
 				.expect("announcement timeout")
 				.expect("announced broadcast resolves");
@@ -675,7 +842,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		};
 		for (index, sub) in subs.iter_mut().enumerate() {
 			send(index, 0);
-			tokio::time::timeout(TIMEOUT, sub.recv_group())
+			kio::clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.expect("recv_group timeout")
 				.expect("recv_group failed")
@@ -688,7 +855,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		script.on_revalidate(Answer::Grant(narrow));
 
 		let err = loop {
-			match tokio::time::timeout(TIMEOUT, subs[0].recv_group())
+			match kio::clock::timeout(TIMEOUT, subs[0].recv_group())
 				.await
 				.expect("the deafened track never ended")
 			{
@@ -706,7 +873,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		);
 
 		send(1, 1);
-		let group = tokio::time::timeout(TIMEOUT, subs[1].recv_group())
+		let group = kio::clock::timeout(TIMEOUT, subs[1].recv_group())
 			.await
 			.expect("recv_group timeout")
 			.expect("recv_group failed")
@@ -715,7 +882,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Undeafen: the path is announced again and a new subscription flows.
 		script.on_revalidate(Answer::Grant(grant(Duration::from_secs(3600))));
-		let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast("alice/audio"))
+		let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow("alice/audio", None).unwrap().available())
 			.await
 			.expect("the undeafened path was never announced again")
 			.expect("announced broadcast resolves");
@@ -726,23 +893,29 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			.await
 			.expect("subscribe");
 		send(0, 1);
-		let group = tokio::time::timeout(TIMEOUT, audio.recv_group())
-			.await
-			.expect("recv_group timeout")
-			.expect("recv_group failed")
-			.expect("the undeafened track closed");
-		assert!(group.sequence >= 1, "{scheme}");
+		// The SUBSCRIBE went out with the TRACK, so the latest group when it arrived may come first.
+		loop {
+			let group = kio::clock::timeout(TIMEOUT, audio.recv_group())
+				.await
+				.expect("recv_group timeout")
+				.expect("recv_group failed")
+				.expect("the undeafened track closed");
+			if group.sequence >= 1 {
+				break;
+			}
+		}
 
 		for (session, what) in [(pub_session, "publisher"), (sub_session, "subscriber")] {
 			assert!(
-				tokio::time::timeout(Duration::from_millis(200), session.closed())
+				kio::clock::timeout(Duration::from_millis(200), session.closed())
 					.await
 					.is_err(),
 				"{scheme}: a resize must not close the {what}"
 			);
 		}
 		relay.abort();
-	}
+	}))
+	.await;
 }
 
 /// A re-check that moves the root still closes the session: nothing it holds is
@@ -766,11 +939,13 @@ async fn a_moved_root_closes_live_sessions() {
 /// 403, 401, and an empty grant are all a no.
 #[tokio::test]
 async fn a_refusal_closes_live_sessions() {
-	for (label, answer) in [
+	// Each answer waits out a re-check cadence, so run them side by side.
+	let answers = [
 		("403", Answer::Status(403)),
 		("401", Answer::Status(401)),
 		("empty grant", Answer::Grant(Grant::default())),
-	] {
+	];
+	futures::future::join_all(answers.map(|(label, answer)| async move {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 		let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
@@ -780,7 +955,7 @@ async fn a_refusal_closes_live_sessions() {
 		assert_closed(pub_session, Duration::from_secs(5), &format!("{label} publisher")).await;
 		assert_closed(sub_session, Duration::from_secs(5), &format!("{label} subscriber")).await;
 
-		tokio::time::sleep(Duration::from_millis(200)).await;
+		kio::clock::sleep(Duration::from_millis(200)).await;
 		let ends = script.ends();
 		assert!(ends.len() >= 2, "{label}: an end per session, got {}", ends.len());
 		for end in &ends {
@@ -791,7 +966,8 @@ async fn a_refusal_closes_live_sessions() {
 		}
 
 		relay.abort();
-	}
+	}))
+	.await;
 }
 
 /// The one-shot HTTP routes are sessions of their own: `/announced` is admitted
@@ -812,7 +988,7 @@ async fn http_routes_hold_a_lease() {
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("write frame");
-	let pub_session = tokio::time::timeout(
+	let pub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_publisher(pub_origin.consume())
@@ -828,7 +1004,7 @@ async fn http_routes_hold_a_lease() {
 	// the /announced handler only reports what has arrived so far.
 	let sub_origin = moq_tokio::origin::spawn();
 	let mut announcements = sub_origin.consume().announced();
-	let _sub_session = tokio::time::timeout(
+	let _sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_subscriber(sub_origin)
@@ -839,7 +1015,7 @@ async fn http_routes_hold_a_lease() {
 	.await
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -878,7 +1054,7 @@ async fn http_routes_hold_a_lease() {
 		Event::End { reason, .. } => reason.clone(),
 		_ => unreachable!(),
 	};
-	tokio::time::sleep(Duration::from_millis(200)).await;
+	kio::clock::sleep(Duration::from_millis(200)).await;
 	let done = ends(&script);
 	assert_eq!(done.len(), 1, "the announced session ended");
 	assert_eq!(end_reason(&done[0]), "done".into());
@@ -889,7 +1065,7 @@ async fn http_routes_hold_a_lease() {
 		.await
 		.expect("fetch request");
 	assert_eq!(fetch.status(), 200);
-	let first = tokio::time::timeout(TIMEOUT, fetch.chunk())
+	let first = kio::clock::timeout(TIMEOUT, fetch.chunk())
 		.await
 		.expect("first frame timeout")
 		.expect("first frame")
@@ -897,12 +1073,12 @@ async fn http_routes_hold_a_lease() {
 	assert_eq!(&first[..], b"hello");
 
 	// The body is still streaming, so the fetch's lease is still held.
-	tokio::time::sleep(Duration::from_millis(200)).await;
+	kio::clock::sleep(Duration::from_millis(200)).await;
 	assert_eq!(ends(&script).len(), 1, "the fetch must not end while its body streams");
 
 	// A refusal on the fetch's re-check cuts the transfer; the publisher is untouched.
 	script.on_revalidate_http(Answer::Status(403));
-	let cut = tokio::time::timeout(Duration::from_secs(5), async {
+	let cut = kio::clock::timeout(Duration::from_secs(5), async {
 		loop {
 			match fetch.chunk().await {
 				Ok(Some(_)) => continue,
@@ -914,12 +1090,12 @@ async fn http_routes_hold_a_lease() {
 	.expect("the refused fetch kept streaming");
 	assert!(cut.is_err(), "a refused fetch must not end cleanly: {cut:?}");
 
-	tokio::time::sleep(Duration::from_millis(200)).await;
+	kio::clock::sleep(Duration::from_millis(200)).await;
 	let ended = ends(&script);
 	assert_eq!(ended.len(), 2, "the fetch session ended");
 	assert_eq!(end_reason(&ended[1]), moq_auth::lease::Reason::Refused);
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), pub_session.closed())
+		kio::clock::timeout(Duration::from_millis(200), pub_session.closed())
 			.await
 			.is_err(),
 		"refusing the fetch must not close the publisher"
@@ -942,22 +1118,18 @@ async fn the_end_carries_duration_and_bytes() {
 		.unwrap();
 	let (pub_session, sub_session) = connect_and_round_trip(&url).await;
 
-	tokio::time::sleep(Duration::from_millis(300)).await;
+	kio::clock::sleep(Duration::from_millis(300)).await;
 	drop(pub_session);
 	drop(sub_session);
 
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
+	let deadline = kio::clock::now() + Duration::from_secs(5);
 	let ends = loop {
 		let ends = script.ends();
 		if ends.len() >= 2 {
 			break ends;
 		}
-		assert!(
-			std::time::Instant::now() < deadline,
-			"ends never arrived: {}",
-			ends.len()
-		);
-		tokio::time::sleep(Duration::from_millis(50)).await;
+		assert!(kio::clock::now() < deadline, "ends never arrived: {}", ends.len());
+		kio::clock::sleep(Duration::from_millis(50)).await;
 	};
 	for end in &ends {
 		let Event::End { duration, bytes, .. } = &end.event else {
@@ -968,6 +1140,70 @@ async fn the_end_carries_duration_and_bytes() {
 	}
 
 	relay.abort();
+}
+
+/// A session the drain deadline force-closes reports its `end` to the auth server,
+/// and the drain waits for that report rather than exiting under it.
+#[tokio::test]
+async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
+	let clock = manual();
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let gate = script.hold_ends();
+	let auth = build_auth(script.spawn().await);
+	let drain_timeout = Duration::from_millis(100);
+	let (trigger, observer) = moq_relay::shutdown::Observer::new(drain_timeout);
+
+	let lease = auth
+		.admit(auth.request(moq_auth::Transport::Quic, "/room"))
+		.await
+		.expect("admitted before draining");
+	let (client, server) = memory_sessions().await;
+	let supervised = tokio::spawn(moq_relay::supervise(server, lease, observer.serve(), None));
+
+	// Keep the deadline from racing the client receiving GOAWAY under load.
+	tokio::time::pause();
+	trigger.start();
+	kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
+		.await
+		.expect("GOAWAY timeout")
+		.expect("a GOAWAY");
+	let drained = tokio::spawn({
+		let observer = observer.clone();
+		async move { observer.drained().await }
+	});
+	clock.advance(drain_timeout);
+	tokio::time::advance(drain_timeout).await;
+	// The end report crosses HTTP, so resume real time after forcing the close.
+	tokio::time::resume();
+	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
+		.await
+		.expect("the end never reached the server");
+	tokio::task::yield_now().await;
+	assert!(
+		!drained.is_finished(),
+		"the drain ended before the server answered the end"
+	);
+
+	gate.add_permits(1);
+	kio::clock::timeout(TIMEOUT, drained)
+		.await
+		.expect("the drain outlived the end")
+		.unwrap();
+	supervised.await.expect("supervisor task").expect("drained session");
+	let ends = script.ends();
+	let [end] = ends.as_slice() else {
+		panic!("one end per session: {ends:?}")
+	};
+	assert!(
+		matches!(
+			&end.event,
+			Event::End {
+				reason: moq_auth::lease::Reason::Shutdown,
+				..
+			}
+		),
+		"{end:?}"
+	);
 }
 
 /// A certificate is a fact: with no server grant for it, a verified peer is
@@ -995,11 +1231,13 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	let mtls_client = || {
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.once = Some(true);
 		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 		config.tls.cert = Some(client_cert.clone());
 		config.tls.key = Some(client_key.clone());
-		config.init(Default::default()).expect("client init")
+		config
+			.init(Default::default())
+			.expect("client init")
+			.with_reconnect(false)
 	};
 	// No grant for certificates: refused, over QUIC with a certificate and over
 	// WebSocket without one.
@@ -1021,7 +1259,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	let (addr, relay) = spawn_quic_relay(build_auth(narrow), Some(root.clone())).await;
 	let url: url::Url = format!("moql://127.0.0.1:{}/mine", addr.port()).parse().unwrap();
 	let origin = moq_tokio::origin::spawn();
-	let session = tokio::time::timeout(
+	let session = kio::clock::timeout(
 		TIMEOUT,
 		mtls_client()
 			.with_publisher(origin.consume())
@@ -1033,7 +1271,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	.expect("connect timeout")
 	.expect("a scoped certificate is admitted");
 	assert!(
-		tokio::time::timeout(Duration::from_secs(2), session.closed())
+		kio::clock::timeout(Duration::from_secs(2), session.closed())
 			.await
 			.is_err(),
 		"the scoped publisher stays admitted"
@@ -1047,7 +1285,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	relay.abort();
 }
 
-/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-peer`,
+/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-link peer`,
 /// is a cluster peer: what it announces entered the cluster elsewhere.
 #[tokio::test]
 async fn an_mtls_peer_is_a_cluster_peer() {
@@ -1058,14 +1296,14 @@ async fn an_mtls_peer_is_a_cluster_peer() {
 	);
 }
 
-/// Without `--mtls-peer`, a certificate identifies a client ingesting here.
+/// Without `--mtls-link peer`, a certificate identifies a client ingesting here.
 #[tokio::test]
 async fn an_mtls_client_ingests_here() {
 	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);
 }
 
 /// The source the relay records for a broadcast announced over a certificate
-/// session, admitted by `moq auth serve` with `mtls_peer` set as given.
+/// session, admitted by `moq auth serve` with the peer link role when requested.
 async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -1073,13 +1311,13 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.mtls = moq_auth::Permissions::new(all(), all());
-	policy.mtls_peer = mtls_peer;
+	policy.mtls_link = mtls_peer.then_some(moq_auth::serve::Link::Peer);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
 	tokio::spawn(async move { server.serve(listener).await });
 
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let (addr, relay) = spawn_quic_relay_with(build_auth(auth_url), Some(root), cluster.clone()).await;
 
 	let mut config = moq_tokio::connect::Config::default();
@@ -1091,7 +1329,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	let _forwarded = peer.create_broadcast("forwarded").expect("create");
 	_forwarded.announce(Default::default()).expect("announce");
 	let url: url::Url = format!("moql://127.0.0.1:{}/", addr.port()).parse().unwrap();
-	let _session = tokio::time::timeout(
+	let _session = kio::clock::timeout(
 		TIMEOUT,
 		config
 			.init(Default::default())
@@ -1106,7 +1344,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	.expect("the peer is admitted");
 
 	let mut announced = cluster.origin.consume().announced();
-	let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+	let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("timed out waiting for forwarded")
 		.expect("origin closed");
@@ -1189,7 +1427,7 @@ async fn an_embedded_decider_admits_and_revokes() {
 	publisher.revoke(moq_auth::lease::Reason::Refused);
 	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), sub_session.closed())
+		kio::clock::timeout(Duration::from_millis(200), sub_session.closed())
 			.await
 			.is_err(),
 		"revoking one lease must not close the other session"
@@ -1199,7 +1437,7 @@ async fn an_embedded_decider_admits_and_revokes() {
 	let (refusing, mut refusals) = moq_relay::auth::Auth::embedded("test-relay");
 	tokio::spawn(async move {
 		while let Some(admission) = refusals.next().await {
-			admission.refuse(moq_relay::auth::Error::Refused);
+			admission.refuse(moq_relay::auth::Error::Refused(Default::default()));
 		}
 	});
 	let (refused_port, refusing_relay) = spawn_relay(refusing).await;
@@ -1217,53 +1455,26 @@ async fn an_embedded_decider_admits_and_revokes() {
 }
 
 /// A fixed lease has no driver, so the relay itself closes the session at the
-/// grant's `expires`, on every transport that holds a lease.
-#[tokio::test]
+/// grant's `expires`. The TCP and WebSocket paths hand their lease to the same
+/// `supervise`, as `a_rechecked_grant_resizes_live_sessions` proves.
+#[tokio::test(start_paused = true)]
 async fn a_fixed_lease_still_expires() {
-	for scheme in ["tcp", "ws"] {
-		let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test-relay");
-		tokio::spawn(async move {
-			while let Some(admission) = admissions.next().await {
-				let mut grant = Grant::new(all(), all());
-				grant.expires = Some(SystemTime::now() + Duration::from_secs(1));
-				admission.grant(moq_auth::lease::Consumer::fixed(grant));
-			}
-		});
-		let (port, relay) = match scheme {
-			"tcp" => spawn_relay(auth).await,
-			_ => spawn_ws_relay(auth).await,
-		};
-		let (pub_session, sub_session) = connect_and_round_trip(&room_url(scheme, port)).await;
-		assert_closed(pub_session, Duration::from_secs(5), &format!("{scheme} publisher")).await;
-		assert_closed(sub_session, Duration::from_secs(5), &format!("{scheme} subscriber")).await;
-		relay.abort();
-	}
+	let clock = manual();
+	closes_at_expires(&clock, moq_auth::lease::Consumer::fixed(expiring())).await;
 }
 
-/// A connected `(client, server)` session pair over an in-memory byte stream, so a
+/// A connected `(client, server)` session pair over the in-memory transport, so a
 /// test on Tokio's paused clock never waits on a socket: the clock only advances
-/// once every byte in flight has landed.
+/// once every message in flight has landed.
 async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
-	let config = || {
-		let mut config = qmux::Config::new(qmux::Version::QMux01);
-		config.protocol = qmux::Protocol::Negotiate(moq_net::ALPNS.iter().map(|alpn| alpn.to_string()).collect());
-		config
-	};
-	let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
-	let (client, server) = tokio::io::duplex(64 * 1024);
-	let (client, server) = tokio::try_join!(
-		qmux::Session::connect(stream(client), config()),
-		qmux::Session::accept(stream(server), config()),
-	)
-	.expect("qmux handshake");
+	let mut config = moq_net::transport::memory::Config::default();
+	config.protocol = Some(crate::memory::newest().alpn().to_string());
+	let (client, server) = moq_net::transport::memory::pair(config);
 
-	let now = tokio::time::Instant::now().into_std();
+	let now = moq_net::time::Instant::now();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
-			.connect(
-				now,
-				moq_tokio::transport::Session::new(client, moq_net::transport::Binding::InBand),
-			)
+			.connect(now, client)
 			.await
 			.expect("client handshake");
 		tokio::spawn(moq_net::time::run(driver));
@@ -1271,10 +1482,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	};
 	let server = async {
 		let (session, driver) = moq_net::Server::new()
-			.accept(
-				now,
-				moq_tokio::transport::Session::new(server, moq_net::transport::Binding::InBand),
-			)
+			.accept(now, server)
 			.await
 			.expect("server handshake");
 		tokio::spawn(moq_net::time::run(driver));
@@ -1289,49 +1497,61 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 /// server's outage keeps the grant is `moq_auth::Client`'s to test.
 #[tokio::test(start_paused = true)]
 async fn an_outage_keeps_the_session_until_expires() {
-	let expires = SystemTime::now() + Duration::from_secs(3);
+	let clock = manual();
+	let (producer, consumer) = moq_auth::lease::Producer::new(expiring());
+	closes_at_expires(&clock, consumer).await;
+	let (reason, _) = producer.closed().await;
+	assert_eq!(reason, moq_auth::lease::Reason::Expired);
+}
+
+/// How long after the manual clock's start [`expiring`] grants run out.
+const EXPIRES: Duration = Duration::from_secs(3);
+
+/// Make the test runtime's clock one that only the test moves, wall time included,
+/// so a grant's life is measured exactly. Call it before anything reads the clock.
+fn manual() -> kio::clock::Installed {
+	kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
+}
+
+/// Everything under the dialed path, until [`EXPIRES`] from now on the ambient clock.
+fn expiring() -> Grant {
+	let mut grant = Grant::new(all(), all());
+	grant.expires = Some(kio::clock::wall() + EXPIRES);
+	grant
+}
+
+/// Supervise an in-memory session admitted on `consumer`, whose grant nobody renews,
+/// and assert it closes at exactly [`EXPIRES`] on `clock`.
+async fn closes_at_expires(clock: &kio::clock::Installed, consumer: moq_auth::lease::Consumer) {
 	let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test-relay");
-	let decider = tokio::spawn(async move {
-		let admission = admissions.next().await.expect("an admission");
-		let mut grant = Grant::new(all(), all());
-		grant.expires = Some(expires);
-		let (producer, consumer) = moq_auth::lease::Producer::new(grant);
-		admission.grant(consumer);
-		producer
+	let (lease, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Tcp, "/room")), async {
+		admissions.next().await.expect("an admission").grant(consumer);
 	});
-
-	// `expires` is wall-clock time, which the relay maps onto Tokio's clock
-	// somewhere inside `admit`, so bracket it: the bounds hold however long it takes.
-	let (wall, tick) = (SystemTime::now(), tokio::time::Instant::now());
-	let lease = auth
-		.admit(auth.request(moq_auth::Transport::Tcp, "/room"))
-		.await
-		.expect("admitted");
-	let earliest = tick + expires.duration_since(SystemTime::now()).unwrap();
-	let latest = tokio::time::Instant::now() + expires.duration_since(wall).unwrap();
-	let producer = decider.await.expect("decider");
-
 	let (client, server) = memory_sessions().await;
 	let supervised = tokio::spawn(moq_relay::supervise(
 		server,
-		lease,
-		moq_relay::shutdown::Observer::disabled(),
+		lease.expect("admitted"),
+		moq_relay::shutdown::Observer::disabled().serve(),
 		None,
 	));
 
-	// A millisecond either side for Tokio's timer resolution.
-	let tolerance = Duration::from_millis(1);
-	assert!(
-		tokio::time::timeout_at(earliest - tolerance, client.closed())
-			.await
-			.is_err(),
-		"an outage must not close the session before expires"
-	);
-	tokio::time::timeout_at(latest + tolerance, client.closed())
+	clock.advance(EXPIRES - Duration::from_nanos(1));
+	// Paused tokio fires this watchdog only once nothing else can run, and never
+	// moves the manual clock.
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the watchdog runs on paused tokio, beside the installed manual clock"
+	)]
+	let early = tokio::time::timeout(Duration::from_secs(1), client.closed()).await;
+	assert!(early.is_err(), "closed before expires");
+	clock.advance(Duration::from_nanos(1));
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the watchdog runs on paused tokio, beside the installed manual clock"
+	)]
+	tokio::time::timeout(TIMEOUT, client.closed())
 		.await
-		.expect("closed at expires, not later");
-	let (reason, _) = producer.closed().await;
-	assert_eq!(reason, moq_auth::lease::Reason::Expired);
+		.expect("closed at expires");
 	supervised
 		.await
 		.expect("supervisor")
@@ -1348,15 +1568,15 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		let mut config = Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 		// The sessions are gone by the time the trigger fires; no need to wait out the default window.
-		config.drain_timeout = Duration::from_millis(100);
+		config.drain_timeout = Some((Duration::from_millis(100)).into());
 		config
 	};
 
-	let untaken = Relay::load(config()).await.expect("load relay");
+	let untaken = Relay::load(config()).await.expect("load relay").with_signals(false);
 	let err = untaken.run().await.expect_err("nobody can authenticate");
 	assert!(err.to_string().contains("nobody can authenticate"), "{err}");
 
-	let mut relay = Relay::load(config()).await.expect("load relay");
+	let mut relay = Relay::load(config()).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
 	assert!(relay.admissions().is_none(), "taken once");
@@ -1370,11 +1590,109 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 	drop(sub_session);
 
 	trigger.start();
-	tokio::time::timeout(TIMEOUT, running)
+	kio::clock::timeout(TIMEOUT, running)
 		.await
 		.expect("run returned after the trigger")
 		.expect("relay task panicked")
 		.expect("relay exited with an error");
+}
+
+/// A relay deciding admissions in process, listening on TCP with `timeout` as its
+/// handshake deadline, and a client connecting to it.
+async fn connect_through_embedded_admission(
+	timeout: Duration,
+) -> (
+	Relay,
+	auth::Admissions,
+	tokio::task::JoinHandle<moq_tokio::Result<moq_tokio::Connection>>,
+) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let mut config = Config::default();
+	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	config.listen.timeout = Some((timeout).into());
+	config.drain_timeout = Some((Duration::from_millis(100)).into());
+	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
+	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
+	let url = room_url("tcp", port);
+	let connecting = tokio::spawn(async move { client().with_reconnect(false).connect(url).established().await });
+	(relay, admissions, connecting)
+}
+
+/// `listen.timeout` bounds admission as part of the handshake: a decision that never
+/// comes closes the connection at the deadline, not after a fixed cap of its own.
+#[tokio::test]
+async fn an_unanswered_admission_closes_at_the_handshake_deadline() {
+	let (relay, mut admissions, connecting) = connect_through_embedded_admission(Duration::from_secs(1)).await;
+	let trigger = relay.shutdown_trigger().clone();
+	let running = tokio::spawn(relay.run());
+	let admission = admissions.next().await.expect("the admission is asked");
+
+	// Only timers decide what follows: the deadline passes with nobody answering.
+	tokio::time::pause();
+	tokio::time::advance(Duration::from_secs(2)).await;
+	tokio::time::resume();
+	// The close reaches the client over loopback within moments; the old fixed cap
+	// would have held the connection for another eight seconds.
+	let connecting = kio::clock::timeout(TIMEOUT, connecting)
+		.await
+		.expect("the client never settled")
+		.expect("client task");
+	if let Ok(connection) = connecting {
+		kio::clock::timeout(Duration::from_secs(3), connection.closed())
+			.await
+			.expect("the connection outlived the handshake deadline")
+			.expect_err("closed as refused, not cleanly");
+	}
+	// A decision now has nobody to tell.
+	drop(admission);
+
+	trigger.start();
+	kio::clock::timeout(TIMEOUT, running)
+		.await
+		.expect("run returned after the trigger")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
+}
+
+/// Admission has no bound but the handshake deadline: a decision past the old
+/// ten-second cap still admits the session, under a deadline or with `"0"`, which
+/// sets none. The wait stays under the transport's keep-alive, which a longer jump
+/// of the paused clock would trip on its own.
+#[tokio::test]
+async fn a_late_decision_within_the_deadline_admits() {
+	let wait = Duration::from_secs(11);
+	for timeout in [Duration::from_secs(30), Duration::ZERO] {
+		let (relay, mut admissions, connecting) = connect_through_embedded_admission(timeout).await;
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		let admission = admissions.next().await.expect("the admission is asked");
+
+		tokio::time::pause();
+		tokio::time::advance(wait).await;
+		tokio::time::resume();
+		admission.grant(moq_auth::lease::Consumer::fixed(grant(Duration::from_secs(3600))));
+		let connection = kio::clock::timeout(TIMEOUT, connecting)
+			.await
+			.expect("the late decision never reached the client")
+			.expect("client task")
+			.unwrap_or_else(|err| panic!("{timeout:?}: refused after {wait:?}: {err}"));
+		// Admitted, so the session stays up; a refusal would have closed it by now.
+		assert!(
+			kio::clock::timeout(Duration::from_secs(1), connection.closed())
+				.await
+				.is_err(),
+			"{timeout:?}: closed after the decision {wait:?} in"
+		);
+		drop(connection);
+
+		trigger.start();
+		kio::clock::timeout(TIMEOUT, running)
+			.await
+			.expect("run returned after the trigger")
+			.expect("relay task panicked")
+			.expect("relay exited with an error");
+	}
 }
 
 /// The next route and whether it is active.
@@ -1382,12 +1700,15 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
 
 /// The auth server sees the accepted transport, independent of negotiated MoQ ALPN.
+/// An IP-literal dial sends no SNI, so neither reports a `server_name`: the
+/// WebTransport CONNECT host selected no certificate and never stands in for one.
 #[tokio::test]
 async fn quic_and_webtransport_report_distinct_auth_transports() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
@@ -1403,6 +1724,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 			.unwrap_or_else(|| panic!("auth connect for {path}: {seen:?}"));
 		assert_eq!(request.transport.as_str(), expected, "{scheme}");
 		assert!(request.alpn.as_ref().is_some_and(|alpn| alpn.starts_with("moq-lite-")));
+		assert_eq!(request.server_name, None, "{scheme}");
 		drop(connections);
 	}
 	relay.abort();
@@ -1415,7 +1737,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
 		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
-		initial.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		initial.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = if scheme == "tcp" {
@@ -1425,10 +1747,12 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		};
 		let client = || {
 			let mut config = moq_tokio::connect::Config::default();
-			config.once = Some(true);
 			config.version = vec!["moq-transport-22".parse().unwrap()];
-			config.websocket.delay = Some(Duration::ZERO);
-			config.init(Default::default()).unwrap()
+			#[cfg(feature = "websocket")]
+			{
+				config.websocket.delay = Some((Duration::ZERO).into());
+			}
+			config.init(Default::default()).unwrap().with_reconnect(false)
 		};
 		let origin = moq_tokio::origin::spawn();
 		let a = origin.create_broadcast("a/cam").unwrap();
@@ -1437,7 +1761,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let b = origin.create_broadcast("b/cam").unwrap();
 		let b_track = b.create_track("video", timed()).unwrap();
 		b.announce(Default::default()).unwrap();
-		let publisher = tokio::time::timeout(
+		let publisher = kio::clock::timeout(
 			TIMEOUT,
 			client()
 				.with_publisher(origin.consume())
@@ -1449,7 +1773,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		.unwrap();
 		let received = moq_tokio::origin::spawn();
 		let read = received.consume();
-		let subscriber = tokio::time::timeout(
+		let subscriber = kio::clock::timeout(
 			TIMEOUT,
 			client()
 				.with_subscriber(received)
@@ -1459,19 +1783,19 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		.await
 		.unwrap()
 		.unwrap();
-		let a_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("a/cam"))
+		let a_read = kio::clock::timeout(TIMEOUT, read.follow("a/cam", None).unwrap().available())
 			.await
 			.unwrap()
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
-		replacement.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
-		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))
+		let token = kio::clock::timeout(TIMEOUT, subscriber.auth().add("replacement"))
 			.await
 			.unwrap()
 			.unwrap();
-		let b_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("b/cam"))
+		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
 			.unwrap();
@@ -1482,14 +1806,14 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap();
 		group.finish().unwrap();
 		assert!(
-			tokio::time::timeout(TIMEOUT, b_sub.recv_group())
+			kio::clock::timeout(TIMEOUT, b_sub.recv_group())
 				.await
 				.unwrap()
 				.unwrap()
 				.is_some()
 		);
 		drop(token);
-		let ended = tokio::time::timeout(TIMEOUT, b_sub.recv_group())
+		let ended = kio::clock::timeout(TIMEOUT, b_sub.recv_group())
 			.await
 			.expect("withdrawn prefix stayed authorized");
 		assert!(
@@ -1506,7 +1830,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap();
 		group.finish().unwrap();
 		assert!(
-			tokio::time::timeout(TIMEOUT, a_sub.recv_group())
+			kio::clock::timeout(TIMEOUT, a_sub.recv_group())
 				.await
 				.unwrap()
 				.unwrap()
@@ -1517,6 +1841,97 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		relay.abort();
 		let _ = relay.await;
 	}
+}
+
+/// Request tokens share one auth-server lease until their last announce ends.
+#[tokio::test]
+async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
+	let script = Script::new(Grant::new(all(), all()));
+	let mut server = moq_tokio::listen::Config::default();
+	server.extensions.solicit = false;
+	let cluster = crate::spawn_cluster(cluster::Options::default());
+	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
+	let mut config = moq_tokio::connect::Config::default();
+	config.version = vec!["moq-transport-22".parse().unwrap()];
+	config.extensions.auth = false;
+	config.extensions.solicit = false;
+	let client = config.init(Default::default()).unwrap().with_reconnect(false);
+	let origin = moq_tokio::origin::spawn();
+	let publisher = client
+		.clone()
+		.with_publisher(origin.consume())
+		.connect(room_url("tcp", port))
+		.established()
+		.await
+		.unwrap();
+	let received = moq_tokio::origin::spawn();
+	let read = received.consume();
+	let subscriber = client
+		.with_subscriber(received)
+		.connect(room_url("tcp", port))
+		.established()
+		.await
+		.unwrap();
+	let (token, _) = publisher.auth().add("shared").await.unwrap();
+	let first = origin
+		.publish("first", moq_net::origin::Route::default().with_auth(token.clone()))
+		.unwrap();
+	let second = origin
+		.publish("second", moq_net::origin::Route::default().with_auth(token.clone()))
+		.unwrap();
+	for path in ["first", "second"] {
+		kio::clock::timeout(TIMEOUT, read.follow(path, None).unwrap().available())
+			.await
+			.unwrap()
+			.unwrap();
+	}
+	let attaches = || {
+		script
+			.seen
+			.lock()
+			.unwrap()
+			.iter()
+			.filter(|request| request.event == Event::Attach)
+			.cloned()
+			.collect::<Vec<_>>()
+	};
+	let attached = attaches();
+	assert_eq!(attached.len(), 1);
+	let mut announced = read.announced();
+	drop(first);
+	kio::clock::timeout(TIMEOUT, async {
+		while let Some((route, live)) = next_update(&mut announced).await {
+			if route.prefix.as_str() == "first" && !live {
+				break;
+			}
+		}
+	})
+	.await
+	.unwrap();
+	assert!(script.ends().iter().all(|request| request.auth.is_none()));
+	drop(second);
+	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
+		.await
+		.unwrap();
+	let ended = script.ends();
+	assert_eq!(ended.len(), 1);
+	assert_eq!(ended[0].id, attached[0].id);
+	assert_eq!(ended[0].auth, attached[0].auth);
+	assert!(ended[0].auth.is_some());
+	let _later = origin
+		.publish("later", moq_net::origin::Route::default().with_auth(token))
+		.unwrap();
+	kio::clock::timeout(TIMEOUT, read.follow("later", None).unwrap().available())
+		.await
+		.unwrap()
+		.unwrap();
+	let reopened = attaches();
+	assert_eq!(reopened.len(), 2);
+	assert_ne!(reopened[0].auth, reopened[1].auth);
+	publisher.abort(moq_net::Error::Cancel);
+	subscriber.abort(moq_net::Error::Cancel);
+	relay.abort();
+	let _ = relay.await;
 }
 
 /// Both admission paths apply the selected cap before starting the session driver.
@@ -1531,7 +1946,7 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 			let mut options = cluster::Options::default();
 			options.session.announces = 1;
 			options.peer.announces = 2;
-			let cluster = cluster::Cluster::new(options).unwrap();
+			let cluster = crate::spawn_cluster(options);
 			let consumer = cluster.origin.consume();
 			let mut observed = consumer.announced();
 			let (port, relay) = match scheme {
@@ -1548,20 +1963,20 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 				.unwrap();
 			let first = origin.create_broadcast("one").unwrap();
 			first.announce(Default::default()).unwrap();
-			tokio::time::timeout(TIMEOUT, next_update(&mut observed))
+			kio::clock::timeout(TIMEOUT, next_update(&mut observed))
 				.await
 				.unwrap()
 				.unwrap();
 			let second = origin.create_broadcast("two").unwrap();
 			second.announce(Default::default()).unwrap();
 			if peer {
-				let (route, active) = tokio::time::timeout(TIMEOUT, next_update(&mut observed))
+				let (route, active) = kio::clock::timeout(TIMEOUT, next_update(&mut observed))
 					.await
 					.unwrap()
 					.unwrap();
 				assert!(active, "the peer must retain its second announcement: {route:?}");
 			} else {
-				let error = tokio::time::timeout(TIMEOUT, session.closed())
+				let error = kio::clock::timeout(TIMEOUT, session.closed())
 					.await
 					.expect("the second client announcement exceeds the cap");
 				assert!(
@@ -1584,24 +1999,35 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 /// Browser-visible policy refusals happen after the WebSocket upgrade, in MoQ's close registry.
 #[tokio::test]
 async fn websocket_refusal_is_in_band() {
-	use web_transport_trait::{Error as _, SendStream as _, Session as _};
-	for (status, code) in [
-		(401, moq_net::SessionError::Unauthorized),
-		(403, moq_net::SessionError::Unauthorized),
-		(502, moq_net::SessionError::App(502)),
+	use moq_auth::refusal::Reason;
+	use moq_net::transport::{
+		Error as _,
+		poll::{SendStream as _, Session as _},
+	};
+	for (answer, code) in [
+		(Answer::Status(401), moq_net::SessionError::Unauthorized),
+		(Answer::Status(403), moq_net::SessionError::Unauthorized),
+		(Answer::Status(502), moq_net::SessionError::App(502)),
+		(Answer::Refuse(Reason::Forbidden), moq_net::SessionError::Unauthorized),
+		(Answer::Refuse(Reason::Expired), moq_net::SessionError::Expired),
+		(
+			Answer::Refuse(Reason::Malformed),
+			moq_net::SessionError::MalformedAuthToken,
+		),
 	] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
-		script.on_connect(Answer::Status(status));
+		script.on_connect(answer);
 		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
-		let session = qmux::ws::Client::new()
+		let (session, driver) = qmux::ws::Client::new()
 			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])
 			.connect(&format!("ws://127.0.0.1:{port}/room"))
 			.await
 			.expect("policy refusal must not reject the browser-opaque HTTP upgrade");
-		let mut send = session.open_uni().await.expect("open SETUP");
-		send.write_all(&[1, 1, 0]).await.expect("send empty SETUP");
+		tokio::spawn(driver);
+		let mut send = session.open_uni(Default::default()).await.expect("open SETUP");
+		write_all(&mut send, &[1, 1, 0]).await;
 		send.finish().expect("finish SETUP");
-		let closed = tokio::time::timeout(TIMEOUT, session.closed())
+		let closed = kio::clock::timeout(TIMEOUT, session.closed())
 			.await
 			.expect("refused session stayed open");
 		assert_eq!(closed.session_error().map(|(code, _)| code), Some(code.to_code()));
@@ -1616,7 +2042,7 @@ async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let url = room_url("ws", port);
 	let origin = moq_tokio::origin::spawn();
-	let result = tokio::time::timeout(
+	let result = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_publisher(origin.consume())
@@ -1628,7 +2054,7 @@ async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
 	.expect("publisher handshake timed out");
 
 	let error = match result {
-		Ok(session) => tokio::time::timeout(TIMEOUT, session.closed())
+		Ok(session) => kio::clock::timeout(TIMEOUT, session.closed())
 			.await
 			.expect("mismatched publisher stayed open")
 			.unwrap_err(),
@@ -1651,7 +2077,7 @@ async fn websocket_unauthorized_stops_native_reconnect() {
 	script.on_connect(Answer::Status(401));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let connection = client().with_reconnect(true).connect(room_url("ws", port));
-	let error = tokio::time::timeout(TIMEOUT, connection.closed())
+	let error = kio::clock::timeout(TIMEOUT, connection.closed())
 		.await
 		.expect("unauthorized reconnect loop did not stop")
 		.unwrap_err();

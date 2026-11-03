@@ -6,7 +6,7 @@
 //! session.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -73,7 +73,7 @@ impl Script {
 	async fn handle(State(script): State<Script>, Json(request): Json<Request>) -> Response {
 		script.seen.lock().unwrap().push(request.clone());
 		let answer = match request.event {
-			Event::Connect => script.connect.lock().unwrap().clone(),
+			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
 			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
 		};
@@ -99,7 +99,7 @@ fn all() -> Patterns {
 /// A grant that lasts an hour and would not re-check on its own during a test.
 fn grant() -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+	grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 	grant.revalidate = Some(Duration::from_secs(3600));
 	grant
 }
@@ -143,7 +143,7 @@ impl Fixture {
 		});
 
 		let (url, handle) = if websocket {
-			let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+			let cluster = crate::spawn_cluster(cluster::Options::default());
 			let mut server_config = moq_tokio::listen::Config::default();
 			server_config.bind = Some("[::]:0".parse().unwrap());
 			server_config.tls.generate = vec!["localhost".into()];
@@ -169,11 +169,11 @@ impl Fixture {
 			let server = config.init(Default::default()).expect("server init");
 			let mut server = server.listen().await.expect("listen");
 			let port = server.tcp_local_addr().expect("TCP listener is configured").port();
-			let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+			let cluster = crate::spawn_cluster(cluster::Options::default());
 			let sessions = sessions.clone();
 			let handle = tokio::spawn(async move {
 				let mut id = 0;
-				while let Some(request) = server.accept().await {
+				while let Ok(request) = server.accept().await {
 					let conn = Connection::new(request, cluster.clone(), auth.clone())
 						.with_id(id)
 						.with_sessions(sessions.clone());
@@ -239,14 +239,19 @@ impl Fixture {
 fn client_at(bind: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
-	config.websocket.delay = Some(Duration::ZERO);
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some(bind.parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn connect(url: url::Url, bind: &str) -> moq_tokio::Connection {
-	tokio::time::timeout(
+	kio::clock::timeout(
 		TIMEOUT,
 		client_at(bind)
 			.with_subscriber(moq_tokio::origin::spawn())
@@ -260,7 +265,7 @@ async fn connect(url: url::Url, bind: &str) -> moq_tokio::Connection {
 }
 
 async fn wait_listed(fixture: &Fixture, n: usize) -> List {
-	let deadline = std::time::Instant::now() + Duration::from_secs(5);
+	let deadline = kio::clock::now() + Duration::from_secs(5);
 	loop {
 		let (status, list) = fixture.list("").await;
 		assert_eq!(status, reqwest::StatusCode::OK);
@@ -268,11 +273,11 @@ async fn wait_listed(fixture: &Fixture, n: usize) -> List {
 			return list;
 		}
 		assert!(
-			std::time::Instant::now() < deadline,
+			kio::clock::now() < deadline,
 			"expected {n} sessions, got {}",
 			list.sessions.len()
 		);
-		tokio::time::sleep(Duration::from_millis(25)).await;
+		kio::clock::sleep(Duration::from_millis(25)).await;
 	}
 }
 
@@ -296,12 +301,12 @@ async fn push_by_id_refuses_inside_the_cadence() {
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 	assert_eq!(nudged.ids.as_slice(), std::slice::from_ref(&id));
 
-	tokio::time::timeout(Duration::from_secs(3), session.closed())
+	kio::clock::timeout(Duration::from_secs(3), session.closed())
 		.await
 		.expect("a push must close the session well inside the cadence")
 		.expect_err("refused as Unauthorized");
 
-	tokio::time::sleep(Duration::from_millis(200)).await;
+	kio::clock::sleep(Duration::from_millis(200)).await;
 	let ends = script.ends();
 	assert_eq!(ends.len(), 1);
 	assert_eq!(ends[0].id, id);
@@ -347,16 +352,16 @@ async fn path_and_cidr_select_a_subset() {
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 	assert_eq!(nudged.ids.len(), 2);
 
-	tokio::time::timeout(Duration::from_secs(3), a.closed())
+	kio::clock::timeout(Duration::from_secs(3), a.closed())
 		.await
 		.expect("path match a")
 		.expect_err("refused");
-	tokio::time::timeout(Duration::from_secs(3), b.closed())
+	kio::clock::timeout(Duration::from_secs(3), b.closed())
 		.await
 		.expect("path match b")
 		.expect_err("refused");
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), c.closed())
+		kio::clock::timeout(Duration::from_millis(200), c.closed())
 			.await
 			.is_err(),
 		"the unmatched session must stay"
@@ -375,7 +380,7 @@ async fn websocket_is_listed_and_closes_on_a_push() {
 	script.on_revalidate(Answer::Status(403));
 	let (status, _) = fixture.revalidate(&format!("?id={}", list.sessions[0].id)).await;
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
-	tokio::time::timeout(Duration::from_secs(3), session.closed())
+	kio::clock::timeout(Duration::from_secs(3), session.closed())
 		.await
 		.expect("websocket push")
 		.expect_err("refused");
@@ -394,12 +399,12 @@ async fn empty_filter_reaches_all() {
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 	assert_eq!(nudged.ids.len(), 2);
 
-	tokio::time::timeout(Duration::from_secs(3), async {
+	kio::clock::timeout(Duration::from_secs(3), async {
 		loop {
 			if script.revalidate_ids().len() >= 2 {
 				break;
 			}
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 		}
 	})
 	.await
@@ -420,18 +425,18 @@ async fn a_pushed_retier_arrives_on_the_next_reply() {
 	let (status, _) = fixture.revalidate("").await;
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 
-	tokio::time::timeout(Duration::from_secs(3), async {
+	kio::clock::timeout(Duration::from_secs(3), async {
 		loop {
 			if script.events().contains(&Event::Revalidate) {
 				break;
 			}
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 		}
 	})
 	.await
 	.expect("the push re-checked");
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), session.closed())
+		kio::clock::timeout(Duration::from_millis(200), session.closed())
 			.await
 			.is_err(),
 		"a retier must not close the session"

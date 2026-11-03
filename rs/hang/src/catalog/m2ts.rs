@@ -18,8 +18,8 @@ pub struct M2ts {
 	/// The track carrying the packets, published in the same broadcast as the catalog.
 	pub track: String,
 
-	/// Whether every group starts at a random access point of the multiplex's one video stream,
-	/// so a subscriber can decode from the first object of any group.
+	/// Whether every group starts at a random access point of the multiplex's video stream, or of
+	/// its clock PID when it has none, so a subscriber can decode from the first object of any.
 	///
 	/// Only ever true for a single program with at most one video stream: programs or video
 	/// streams sharing a clock can stagger their GOPs, leaving no packet that starts all of them.

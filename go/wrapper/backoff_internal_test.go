@@ -28,26 +28,21 @@ func TestBackoffFfiLeavesUnsetFieldsToTheNativeDefaults(t *testing.T) {
 		{
 			name: "a partial override keeps the defaults for everything else",
 			in:   Backoff{Max: time.Second},
-			want: ffi.MoqBackoff{MaxUs: ptr[uint64](1_000_000)},
+			want: ffi.MoqBackoff{Max: ptr(time.Second)},
 		},
 		{
 			name: "RetryForever is the only way to reach the native zero timeout",
 			in:   Backoff{Timeout: RetryForever},
-			want: ffi.MoqBackoff{TimeoutUs: ptr[uint64](0)},
-		},
-		{
-			name: "a sub-microsecond delay floors at 1us instead of truncating to zero",
-			in:   Backoff{Initial: time.Nanosecond},
-			want: ffi.MoqBackoff{InitialUs: ptr[uint64](1)},
+			want: ffi.MoqBackoff{Timeout: ptr(time.Duration(0))},
 		},
 		{
 			name: "explicit values pass through",
 			in:   Backoff{Initial: 500 * time.Millisecond, Multiplier: 3, Max: 10 * time.Second, Timeout: time.Minute},
 			want: ffi.MoqBackoff{
-				InitialUs:  ptr[uint64](500_000),
+				Initial:    ptr(500 * time.Millisecond),
 				Multiplier: ptr[uint32](3),
-				MaxUs:      ptr[uint64](10_000_000),
-				TimeoutUs:  ptr[uint64](60_000_000),
+				Max:        ptr(10 * time.Second),
+				Timeout:    ptr(time.Minute),
 			},
 		},
 	}
@@ -65,7 +60,7 @@ func TestBackoffFfiLeavesUnsetFieldsToTheNativeDefaults(t *testing.T) {
 	}
 }
 
-// A negative duration would wrap to ~1.8e19 us when cast, so it is refused.
+// The generated converter panics on a negative duration, so it is refused first.
 func TestBackoffFfiRejectsNegatives(t *testing.T) {
 	for _, in := range []Backoff{{Initial: -time.Second}, {Max: -time.Hour}, {Timeout: -2 * time.Second}} {
 		if _, err := in.ffi(); err == nil {

@@ -91,20 +91,49 @@ test("resolves draft-01 initRef into inline initData", () => {
 	expect(catalog.tracks[0].initData).toBe("AQID");
 });
 
-test("leaves initData undefined for a dangling or non-inline initRef", () => {
-	const catalog = decode(
-		encodeJson({
-			version: "draft-01",
-			initDataList: [{ id: "v0", type: "url", data: "https://example.com/init" }],
-			tracks: [
-				{ name: "a", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "missing" },
-				{ name: "b", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "v0" },
-			],
-		}),
-	);
+// Mirrors the Rust side: a malformed initRef must not decode as a track with no init data.
+function initRefCatalog(entry: { type: string; data: string }, track: Record<string, unknown>): Uint8Array {
+	return encodeJson({
+		version: "draft-01",
+		initDataList: [{ id: "v0", ...entry }],
+		tracks: [{ name: "video0", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", ...track }],
+	});
+}
 
-	expect(catalog.tracks[0].initData).toBeUndefined();
-	expect(catalog.tracks[1].initData).toBeUndefined();
+test("rejects a dangling initRef", () => {
+	const raw = initRefCatalog({ type: "inline", data: "AQID" }, { initRef: "missing" });
+	expect(() => decode(raw)).toThrow(/missing initData/);
+});
+
+test("rejects an initRef to a non-inline entry", () => {
+	const raw = initRefCatalog({ type: "url", data: "https://example.com/init" }, { initRef: "v0" });
+	expect(() => decode(raw)).toThrow(/unsupported type/);
+});
+
+test("rejects inline initData that disagrees with its initRef", () => {
+	const raw = initRefCatalog({ type: "inline", data: "AQID" }, { initData: "BAUG", initRef: "v0" });
+	expect(() => decode(raw)).toThrow(/conflicting/);
+});
+
+test("accepts inline initData that matches its initRef", () => {
+	const catalog = decode(initRefCatalog({ type: "inline", data: "AQID" }, { initData: "AQID", initRef: "v0" }));
+	expect(catalog.tracks[0].initData).toBe("AQID");
+});
+
+test("rejects a duplicate initDataList id", () => {
+	// Mirrors the Rust side: keeping either entry would let two readers disagree on init bytes.
+	const raw = encodeJson({
+		version: "draft-01",
+		initDataList: [
+			{ id: "v", type: "inline", data: "AQID" },
+			{ id: "v", type: "inline", data: "BAUG" },
+		],
+		tracks: [
+			{ name: "video0", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "v" },
+		],
+	});
+
+	expect(() => decode(raw)).toThrow(/duplicate initData/);
 });
 
 test("rejects an unsupported numeric version", () => {
@@ -274,4 +303,22 @@ test("preserves a track namespace through MSF decoding and encoding", () => {
 			{ name: "video", namespace: "room/left", packaging: "loc", role: "video", codec: "vp8", isLive: false },
 		]);
 	}
+});
+
+test("refuses duplicate JSON members before schema validation", () => {
+	for (const text of [
+		'{"version":1,"version":"draft-01","tracks":[]}',
+		'{"version":1,"tracks":[{"name":"a","name":"b","packaging":"loc"}]}',
+		'{"version":1,"tracks":[],"extension":{"x":0,"x":1}}',
+	]) {
+		expect(() => decode(new TextEncoder().encode(text))).toThrow(/duplicate JSON object key/);
+	}
+});
+
+test("refuses malformed Unicode in catalogs", () => {
+	for (const text of ['\ufeff{"version":1}', '{"version":1,"extension":"\\ud800"}', '{"version":1,"\\udfff":0}']) {
+		expect(() => decode(new TextEncoder().encode(text))).toThrow();
+	}
+	const prefix = new TextEncoder().encode('{"version":1,"extension":"');
+	expect(() => decode(new Uint8Array([...prefix, 0xff, 0x22, 0x7d]))).toThrow();
 });

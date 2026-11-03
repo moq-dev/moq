@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Print the paths the branch changed since BASE, one per line.
 #
-# Usage: sh/changed.sh [BASE]
+# Usage: sh/changed.sh [--merge-base] [BASE]
 #
+# --merge-base prints the resolved merge-base commit instead.
 # BASE: the argument, then $GITHUB_BASE_REF, then the open PR's base,
 # then an upstream named main or release, then origin/main.
 # For an unpublished or offline stack, pass its base explicitly: an arbitrary
 # upstream cannot distinguish a stacked base from a differently named PR head.
 set -euo pipefail
 
+merge_base_only=
+if [[ "${1:-}" == --merge-base ]]; then
+    merge_base_only=1
+    shift
+fi
 base=${1:-}
 
 cd "$(git rev-parse --show-toplevel)"
@@ -56,6 +62,10 @@ merge_base=$(git merge-base "$base" HEAD) || {
     exit 1
 }
 echo "changed: base $base" >&2
+if [[ -n "$merge_base_only" ]]; then
+    echo "$merge_base"
+    exit
+fi
 
 # Untracked files count too: a brand new crate or module is the whole change.
 # A rename lists both sides, since a reader of the old path is affected too.

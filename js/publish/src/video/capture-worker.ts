@@ -1,5 +1,5 @@
-// Reads camera frames off a native MediaStreamTrackProcessor, which Safari (18+) and Firefox expose
-// only inside a dedicated worker. Bundled by vite-plugin-worklet (`?worklet`).
+// Reads camera frames off a native MediaStreamTrackProcessor, which Safari (18+) exposes only inside
+// a dedicated worker. Bundled by vite-plugin-worklet (`?worklet`).
 //
 // Frames are transferred back one at a time, each in response to a `pull`, so a busy main thread
 // drops frames at the capture source instead of queueing them (and their GPU memory) in the message
@@ -60,7 +60,7 @@ async function handle(msg: ToWorker): Promise<void> {
 function start(track: MediaStreamTrack): void {
 	source = track;
 
-	// @ts-expect-error No typescript types yet.
+	// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `MediaStreamTrackProcessor`.
 	const processor = new MediaStreamTrackProcessor({ track });
 	reader = (processor.readable as ReadableStream<VideoFrame>).getReader();
 }

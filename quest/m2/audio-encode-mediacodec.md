@@ -21,7 +21,7 @@ behind the `mediacodec` feature and the encode seam.
 - Multichannel is device-dependent; probe the encoder's capabilities at open
   and refuse a layout it does not list.
 - Round-trip regression through the MediaCodec decoder; runtime proof on a
-  device or emulator.
+  device or emulator through `just rs android-test`, as in the decode quest.
 
 ## Required
 

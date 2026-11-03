@@ -1,9 +1,10 @@
 import type { Milli } from "@moq/clock";
-import type * as Epoch from "../epoch.ts";
+import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { decodeEpoch, encodeEpoch } from "./epoch.ts";
+import { decodePin, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
+import { fromWire, toWire } from "./priority.ts";
 import { hasFetchMaxDelay, hasFrameBounds, Version } from "./version.ts";
 
 function guardFetch(version: Version) {
@@ -19,7 +20,7 @@ function guardFetch(version: Version) {
 export class Fetch {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. Lite-07+. */
-	epoch?: Epoch.Valid;
+	instance?: Instance.Valid;
 	track: string;
 	priority: number;
 	/** Reader freshness budget. Lite-07+ only; omission uses publisher retention alone. */
@@ -37,7 +38,7 @@ export class Fetch {
 
 	constructor({
 		broadcast,
-		epoch,
+		instance,
 		track,
 		priority,
 		maxDelay,
@@ -46,7 +47,7 @@ export class Fetch {
 		endFrame,
 	}: {
 		broadcast: Path.Valid;
-		epoch?: Epoch.Valid;
+		instance?: Instance.Valid;
 		track: string;
 		priority: number;
 		maxDelay?: Milli;
@@ -55,7 +56,7 @@ export class Fetch {
 		endFrame?: number;
 	}) {
 		this.broadcast = broadcast;
-		this.epoch = epoch;
+		this.instance = instance;
 		this.track = track;
 		this.priority = priority;
 		this.maxDelay = maxDelay;
@@ -66,9 +67,9 @@ export class Fetch {
 
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.broadcast));
-		await encodeEpoch(w, version, this.epoch);
+		await encodePin(w, version, this.instance);
 		await w.string(this.track);
-		await w.u8(this.priority);
+		await w.u8(toWire(this.priority));
 		if (hasFetchMaxDelay(version)) await w.u53(this.maxDelay === undefined ? 0 : this.maxDelay + 1);
 		else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
 		await w.u53(this.group);
@@ -84,15 +85,15 @@ export class Fetch {
 
 	static async #decode(r: Reader, version: Version): Promise<Fetch> {
 		const broadcast = Path.decode(await r.string());
-		const epoch = await decodeEpoch(r, version);
+		const instance = await decodePin(r, version);
 		const track = await r.string();
-		const priority = await r.u8();
+		const priority = fromWire(await r.u8());
 		const encodedMaxDelay = hasFetchMaxDelay(version) ? await r.u53() : 0;
 		const maxDelay = encodedMaxDelay > 0 ? ((encodedMaxDelay - 1) as Milli) : undefined;
 		const group = await r.u53();
 
 		if (!hasFrameBounds(version)) {
-			return new Fetch({ broadcast, epoch, track, priority, maxDelay, group });
+			return new Fetch({ broadcast, instance, track, priority, maxDelay, group });
 		}
 
 		const startFrame = await r.u53();
@@ -103,7 +104,7 @@ export class Fetch {
 
 		return new Fetch({
 			broadcast,
-			epoch,
+			instance,
 			track,
 			priority,
 			maxDelay,

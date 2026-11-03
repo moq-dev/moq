@@ -195,8 +195,8 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		let _ = sender.send(Item::Group(group.sequence));
 
 		let mut first = true;
-		while let Some(frames) = container.read(&mut group).await? {
-			for frame in frames {
+		while let Some(wire) = group.read_frame().await? {
+			for frame in container.decode(wire)? {
 				let timestamp = frame.timestamp;
 				// The first frame of a group is a keyframe by construction. This drives
 				// the decoder's gating and parameter-set injection; each rung asks its

@@ -1,12 +1,13 @@
 //! The `play` verb's command-line surface.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
 use moq_mux::catalog::CatalogFormat;
 
-use crate::subscribe::{CatalogFormatArg, SelectArgs};
+use crate::subscribe::{CatalogFormatArg, Mode, SelectArgs};
 
 /// The longest delay the speaker can hold, which is what bounds `--delay`.
 ///
@@ -57,7 +58,7 @@ impl fmt::Display for Delay {
 }
 
 /// Play one MoQ broadcast through a native window or an audio-only speaker.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Catalog format, detected from the broadcast suffix when omitted.
@@ -79,6 +80,15 @@ pub struct Args {
 	/// Rendition selection by track name or codec.
 	#[usage(flatten)]
 	pub select: SelectArgs,
+
+	/// Write what the speaker played to this file, one JSON sample per line every 250ms.
+	///
+	/// Each line has the playhead, the playout target, the render quanta the speaker played
+	/// and how many were quiet, and the gaps and stalls since the line before, in the metric
+	/// schema of `test/audio-quality`, whose analyzer reduces it to underruns, skips, and
+	/// silence. Audio only, so it needs `--video off`.
+	#[usage(long, value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
+	pub metrics: Option<PathBuf>,
 }
 
 impl Args {
@@ -127,6 +137,12 @@ impl Args {
 	pub fn validate(&self) -> anyhow::Result<()> {
 		use crate::subscribe::VideoCodecArg;
 
+		self.select.validate()?;
+		anyhow::ensure!(
+			self.metrics.is_none() || self.select.video == Some(Mode::Off),
+			"--metrics needs audio-only playback: pass --video off"
+		);
+
 		anyhow::ensure!(
 			cfg!(feature = "vpx") || !matches!(self.select.video_codec, Some(VideoCodecArg::Vp8 | VideoCodecArg::Vp9)),
 			"`play` was built without the `vpx` feature, so it cannot decode vp8 or vp9; pass --video-codec h264, h265, or av1"
@@ -144,7 +160,7 @@ impl Args {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	struct Cli {
 		#[usage(flatten)]
 		args: Args,
@@ -179,17 +195,31 @@ mod tests {
 	/// Playback can leave a role out, but not both, and not one it also narrows.
 	#[test]
 	fn a_role_can_be_left_out() {
-		let selection = parse(&["--no-video"]).select.selection(None);
+		let selection = parse(&["--video", "off"]).select.selection(None);
 		assert!(!selection.has_video());
 		assert!(selection.has_audio());
 
 		for refused in [
-			["--no-video", "--no-audio"].as_slice(),
-			&["--no-video", "--video-codec", "h264"],
-			&["--no-audio", "--audio-name", "stereo"],
+			["--video", "off", "--audio", "off"].as_slice(),
+			&["--video", "off", "--video-codec", "h264"],
+			&["--audio", "off", "--audio-name", "stereo"],
 		] {
-			let argv: Vec<&std::ffi::OsStr> = refused.iter().map(std::ffi::OsStr::new).collect();
-			assert!(Cli::parse_from(&argv).is_err(), "{refused:?} parsed");
+			assert!(parse(refused).validate().is_err(), "{refused:?} must be refused");
+		}
+	}
+
+	/// The metrics count the speaker alone, so they need audio-only playback.
+	#[test]
+	fn metrics_need_audio_only_playback() {
+		let args = parse(&["--video", "off", "--metrics", "play.ndjson"]);
+		assert_eq!(args.metrics, Some(PathBuf::from("play.ndjson")));
+		args.validate().unwrap();
+		for flags in [
+			["--metrics", "play.ndjson"].as_slice(),
+			&["--video", "on", "--metrics", "play.ndjson"],
+			&["--video", "off", "--audio", "off", "--metrics", "play.ndjson"],
+		] {
+			assert!(parse(flags).validate().is_err(), "{flags:?}");
 		}
 	}
 
@@ -262,8 +292,8 @@ mod tests {
 		assert_eq!(parse(&[]).catalog_format("room.msf"), CatalogFormat::Msf);
 		assert_eq!(parse(&[]).catalog_format("room"), CatalogFormat::DEFAULT);
 		assert_eq!(
-			parse(&["--catalog-format", "hangz"]).catalog_format("room.msf"),
-			CatalogFormat::HangZ
+			parse(&["--catalog-format", "hang"]).catalog_format("room.msf"),
+			CatalogFormat::Hang
 		);
 	}
 }

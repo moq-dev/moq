@@ -31,10 +31,10 @@ export class CatalogProducer {
 
 	/** Edit the catalog; estimate-only changes publish at most once a second with a trailing update. */
 	mutate(fn: (catalog: Catalog.Root) => void): void {
-		const value = structuredClone(this.#value);
-		fn(value);
+		const draft = structuredClone(this.#value);
+		fn(draft);
 		// Every consumer refuses a catalog that fails this, so refuse the edit before it reaches one.
-		Catalog.checkRenditions(value);
+		const value = Catalog.encode(draft);
 		// Estimates only rise for a track; a renamed rendition starts its new track over.
 		for (const field of ["jitter", "delay"] as const) {
 			const previous = new Map(advertised(this.#value, field));
@@ -72,15 +72,10 @@ export class CatalogProducer {
 	/**
 	 * Serve a track: seed it with the current catalog, then forward updates.
 	 *
-	 * Pass `opts.compression` to DEFLATE-compress this subscriber's frames, so the same catalog can be
-	 * served both plaintext and compressed (e.g. `catalog.json` and `catalog.json.z`).
+	 * Create the track with `compress: true`: catalog JSON is small and repetitive.
 	 */
-	serve(track: Moq.Track.Producer, effect: Effect, opts?: { compression?: boolean }): void {
-		const output = new Json.Snapshot.Producer<Catalog.Root>({
-			track,
-			compression: opts?.compression ? "deflate" : "none",
-			deltaRatio: 0,
-		});
+	serve(track: Moq.Track.Producer, effect: Effect): void {
+		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 		output.update({ value: this.#value, at: Time.Timestamp.now() });
 
 		this.#outputs.add(output);

@@ -29,36 +29,40 @@ test("track-owning wrappers take one options object", () => {
 });
 
 test("consumer options omit producer-only knobs", () => {
-	const delta: Has<"deltaRatio", SnapshotConsumerInit> = false;
+	const delta: Has<"deltas", SnapshotConsumerInit> = false;
 	const initial: Has<"initial", SnapshotConsumerInit> = false;
-	const op: Has<"opRatio", WindowConsumerInit> = false;
+	const op: Has<"ops", WindowConsumerInit> = false;
 	const checkpoint: Has<"checkpointRecords", WindowConsumerInit> = false;
 	expect([delta, initial, op, checkpoint]).toEqual([false, false, false, false]);
 
 	const track: Has<"track", SnapshotConsumerInit> = true;
-	const compression: Has<"compression", SnapshotConsumerInit> = true;
 	const schema: Has<"schema", SnapshotConsumerInit> = true;
-	expect([track, compression, schema]).toEqual([true, true, true]);
+	expect([track, schema]).toEqual([true, true]);
 
-	const producerDelta: Has<"deltaRatio", SnapshotProducerInit> = true;
-	const producerOp: Has<"opRatio", WindowProducerInit> = true;
-	const streamCompression: Has<"compression", StreamProducerInit> = true;
-	expect([producerDelta, producerOp, streamCompression]).toEqual([true, true, true]);
+	const producerDelta: Has<"deltas", SnapshotProducerInit> = true;
+	const producerOp: Has<"ops", WindowProducerInit> = true;
+	expect([producerDelta, producerOp]).toEqual([true, true]);
+
+	// Compression is the track's, not a codec option.
+	const snapshotCompression: Has<"compression", SnapshotProducerInit> = false;
+	const streamCompression: Has<"compression", StreamProducerInit> = false;
+	const windowCompression: Has<"compression", WindowProducerInit> = false;
+	expect([snapshotCompression, streamCompression, windowCompression]).toEqual([false, false, false]);
 });
 
 test("object literals reject producer knobs and positional tracks", () => {
 	const track = new Track.Producer("test").subscribe();
 	const reject = () => {
-		// @ts-expect-error deltaRatio is producer-only
-		new Snapshot.Consumer({ track, deltaRatio: 8 });
+		// @ts-expect-error deltas is producer-only
+		new Snapshot.Consumer({ track, deltas: true });
 		// @ts-expect-error initial is producer-only
 		new Snapshot.Consumer({ track, initial: {} });
 		// @ts-expect-error a positional track is not an options object
 		new Snapshot.Consumer(track);
 		// @ts-expect-error a producer track is not a subscriber
 		new Snapshot.Consumer({ track: new Track.Producer("test") });
-		// @ts-expect-error opRatio is producer-only
-		new Window.Consumer({ track, opRatio: 8 });
+		// @ts-expect-error ops is producer-only
+		new Window.Consumer({ track, ops: true });
 		// @ts-expect-error checkpointRecords is producer-only
 		new Window.Consumer({ track, checkpointRecords: 4 });
 		// @ts-expect-error a positional track is not an options object
@@ -73,10 +77,10 @@ test("object literals reject producer knobs and positional tracks", () => {
 		new Stream.Encoder({ track: new Track.Producer("test") });
 		// @ts-expect-error Decoder does not take a track
 		new Window.Decoder({ track });
-		// @ts-expect-error compression is an enum, not a boolean
-		new Snapshot.Producer({ track: new Track.Producer("test"), compression: true });
-		// @ts-expect-error compression is an enum, not a boolean
-		new Stream.Producer({ track: new Track.Producer("test"), compression: true });
+		// @ts-expect-error compression is set on the track
+		new Snapshot.Producer({ track: new Track.Producer("test"), compression: "deflate" });
+		// @ts-expect-error compression is set on the track
+		new Stream.Producer({ track: new Track.Producer("test"), compression: "deflate" });
 	};
 	expect(reject).toBeDefined();
 });

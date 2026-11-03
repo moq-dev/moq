@@ -53,7 +53,7 @@ Decided 2026-09-30:
 - moq-net's `transport::poll` traits gain an unordered chunk read and an
   offset write whose defaults report unsupported, and moq-net falls back to
   ordered I/O. Only the
-  `moq-quic` backends implement them; browsers, qmux, and iroh keep the defaults.
+  `moq-quic` backends implement them; browsers and qmux keep the defaults.
   Additive, so it lands on `main`.
 - Always on wherever both of the relay's streams support it. No config knob.
 - The relay's own egress is `moq-quic` for every native and browser viewer, so browser
@@ -71,9 +71,9 @@ stats field, which its quest documents inline.
 ## Required
 
 - [Loss delay](/quest/m3/cut-through/loss-delay.md) - relays report, per broadcast, the ingress bytes a loss held back by at least one RTT
-- [Bench](/quest/m3/cut-through/bench.md) - a lossy relay hop swept over loss, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
+- [Bench](/quest/m3/cut-through/bench.md) - a congested relay hop swept over ingress rate, queue depth, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
 
 ## Related
 
 - [QoS](/quest/m2/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
-- [Frame slots are cached for free](https://github.com/moq-dev/moq/pull/5239) - changes how the cache charges the in-flight frames a cut-through build would hold
+- [Frame slot accounting](https://github.com/moq-dev/moq/pull/5239) - landed: the cache charges frame slot growth, which covers the in-flight frames a cut-through build would hold

@@ -14,6 +14,12 @@ a currently maintained upstream implementation, including
 unmeasured percentage claims as a decision. Verify the actual versions at
 implementation time.
 
+Candidates seen in the 2026-10-19 dependency audit: unsafe-libopus itself has
+been idle upstream since 2024-11. `opus` 0.4 now binds libopus through the
+maintained `opusic-sys` rather than `audiopus_sys`, and `opus-rs` (restsend)
+and `mousiki` are pure-Rust ports with recent releases. Check each one's
+libopus baseline before measuring.
+
 Measure relevant voice/music rates, frame sizes, DTX, loss behavior, startup,
 CPU, and package/toolchain cost. Keep native compilation optional and use the
 existing private backend seam; do not add another public configuration surface

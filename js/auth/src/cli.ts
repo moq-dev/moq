@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 import { closeSync, fchmodSync, openSync, readFileSync, writeFileSync } from "node:fs";
-import * as base64 from "@hexagon/base64";
 import { Command, Option } from "commander";
+import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, ClaimsSchema, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
+import * as Path from "./path.ts";
 import { encodeGrants } from "./wire.ts";
 
 const program = new Command();
@@ -35,6 +36,8 @@ program
 					...(options.publish && { publish: options.publish }),
 					...(options.subscribe && { subscribe: options.subscribe }),
 				});
+				// A scope root `Key.sign` would refuse could never sign anything beneath it.
+				Path.validate(scope.root);
 				key = { ...key, scope };
 			}
 
@@ -42,7 +45,7 @@ program
 				// Written the legacy way when that says the same thing, so older readers load it.
 				const json = JSON.stringify(k.scope ? { ...k, scope: encodeGrants(k.scope) } : k, null, 2);
 				if (options.base64) {
-					return base64.fromArrayBuffer(new TextEncoder().encode(json).buffer, true);
+					return base64url.encode(json);
 				}
 				return json;
 			};

@@ -12,9 +12,9 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
-pub(crate) use crate::model::ledger::{GRACE, grace};
+pub(crate) use crate::ledger::{GRACE, grace};
 use crate::{
-	model::ledger::Ledger,
+	ledger::Ledger,
 	time::{Deadline, Instant},
 };
 
@@ -25,14 +25,9 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
-	/// Fetches waiting on an accounted group, rather than every ledger write.
-	waiting: kio::Lock<Waiting>,
-}
-
-#[derive(Debug, Default)]
-struct Waiting {
-	groups: std::collections::BTreeMap<u64, kio::WaiterList>,
-	sweep: usize,
+	// The publisher's FIN ended the track, its only end before lite-05, so a session that
+	// dies before the tail settles declares that end before aborting.
+	ended: bool,
 }
 
 impl Default for Tail {
@@ -48,8 +43,18 @@ impl Tail {
 			ledger: Ledger::new(grace),
 			streams: 0,
 			active: 0,
-			waiting: Default::default(),
+			ended: false,
 		}
+	}
+
+	/// Record that the publisher's FIN ended the track.
+	pub fn end(&mut self) {
+		self.ended = true;
+	}
+
+	/// Whether the publisher's FIN ended the track.
+	pub fn is_ended(&self) -> bool {
+		self.ended
 	}
 
 	/// Change the grace, for a subscription whose max delay changed.
@@ -62,7 +67,6 @@ impl Tail {
 		if groups.is_empty() {
 			return;
 		}
-		self.wake_groups(groups.clone());
 		self.ledger.account(groups, now);
 		self.expire(now);
 	}
@@ -72,13 +76,8 @@ impl Tail {
 		self.ledger.demand(groups, now);
 	}
 
-	/// Fold every gap older than the grace into the runs around it, waking fetches held on them.
+	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
-		for (gap, at) in self.ledger.folds() {
-			if at <= now {
-				self.wake_groups(gap);
-			}
-		}
 		self.ledger.expire(now);
 	}
 
@@ -88,39 +87,14 @@ impl Tail {
 	}
 
 	/// See [`Ledger::folds_at`].
+	#[cfg(test)]
 	pub fn folds_at(&self, group: u64) -> Option<Instant> {
-		self.ledger.folds_at(group)
+		self.ledger.folds_at(group, self.ledger.grace())
 	}
 
-	/// Register only for this group's accounting, including an explicit drop.
-	pub fn watch_group(&self, group: u64, waiter: &kio::Waiter) {
-		let mut waiting = self.waiting.lock();
-		if waiting.groups.len() >= waiting.sweep {
-			waiting.groups.retain(|_, list| !list.is_empty());
-			waiting.sweep = (waiting.groups.len() * 2).max(16);
-		}
-		waiting.groups.entry(group).or_default().register(waiter);
-	}
-
-	fn wake_groups(&self, groups: Range<u64>) {
-		let mut woken = Vec::new();
-		{
-			let mut waiting = self.waiting.lock();
-			while let Some(at) = waiting.groups.range(groups.clone()).next().map(|(at, _)| *at) {
-				woken.extend(waiting.groups.remove(&at));
-			}
-		}
-		woken.iter_mut().for_each(kio::WaiterList::wake);
-	}
-
-	/// See [`Ledger::folds`].
-	pub fn folds(&self) -> impl Iterator<Item = (Range<u64>, Instant)> + '_ {
-		self.ledger.folds()
-	}
-
-	/// See [`Ledger::gaps`].
-	pub fn gaps(&self, groups: Range<u64>) -> Vec<Range<u64>> {
-		self.ledger.gaps(groups)
+	/// Whether a data stream whose header arrived is still being read.
+	pub fn is_reading(&self) -> bool {
+		self.active > 0
 	}
 
 	/// Data streams received, whether they finished or were reset.
@@ -196,7 +170,7 @@ pub(crate) struct Settle {
 
 impl Settle {
 	/// Start waiting on `tail`, giving up on missing streams after its grace.
-	pub fn new(runtime: &crate::time::Clock, tail: kio::Consumer<Tail>) -> Self {
+	pub fn new(runtime: &crate::time::Deadlines, tail: kio::Consumer<Tail>) -> Self {
 		let grace = tail.read().ledger.grace();
 		Self {
 			tail,
@@ -206,10 +180,13 @@ impl Settle {
 
 	/// Ready once no stream is being read and either `complete` holds or the grace
 	/// expired, or once the subscription is gone.
+	///
+	/// `complete` runs whenever no stream is being read, the grace notwithstanding, so a
+	/// caller recording what it found sees a stream that finished after the grace.
 	pub fn poll(&mut self, waiter: &kio::Waiter, mut complete: impl FnMut(&Tail) -> bool) -> Poll<()> {
 		let expired = self.grace.poll(waiter).is_ready();
 		self.tail
-			.poll(waiter, |tail| match tail.active == 0 && (expired || complete(tail)) {
+			.poll(waiter, |tail| match tail.active == 0 && (complete(tail) || expired) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			})
@@ -223,15 +200,15 @@ mod tests {
 
 	/// The grace gives up on streams that never arrived, never on one still being read:
 	/// its group, or the END_OF_TRACK it carries, still belongs to the track.
-	#[moq_net_sim::test]
+	#[kio::test]
 	async fn the_grace_waits_for_a_stream_being_read() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let reading = Reading::open(&tail, Some(0), runtime.now());
 		let mut settle = Settle::new(&runtime, tail.consume());
 		let mut settled = std::pin::pin!(kio::wait(|waiter| settle.poll(waiter, |_| false)));
 
-		moq_net_sim::sleep(GRACE * 2).await;
+		kio::clock::sleep(GRACE * 2).await;
 		assert!(
 			futures::poll!(settled.as_mut()).is_pending(),
 			"a stream is still being read"
@@ -241,10 +218,31 @@ mod tests {
 		settled.await;
 	}
 
+	/// A stream that outlives the grace still reaches `complete` once it finishes.
+	#[kio::test]
+	async fn completion_is_judged_after_the_grace() {
+		let runtime = crate::time::sim();
+		let tail = kio::Producer::new(Tail::default());
+		let reading = Reading::open(&tail, Some(0), runtime.now());
+		let mut settle = Settle::new(&runtime, tail.consume());
+		kio::clock::sleep(GRACE * 2).await;
+
+		drop(reading);
+		let mut complete = false;
+		kio::wait(|waiter| {
+			settle.poll(waiter, |tail| {
+				complete = tail.streams() == 1;
+				complete
+			})
+		})
+		.await;
+		assert!(complete);
+	}
+
 	/// A stream parked on another one does not hold the end open.
-	#[moq_net_sim::test]
+	#[kio::test]
 	async fn a_parked_stream_does_not_hold_the_end() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let mut reading = Reading::open(&tail, None, runtime.now());
 		reading.park();

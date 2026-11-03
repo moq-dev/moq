@@ -4,9 +4,7 @@
 //! traffic-class control messages the peer sees no mark, its ACKs carry no
 //! ECN counts, and moq-quic disables ECN on the first one.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
-
-#![cfg(target_os = "linux")]
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 use std::net::UdpSocket;
 
@@ -15,7 +13,7 @@ use moq_uring::{Config, Error, Worker, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring ecn test: {reason}");
 			None
 		}
@@ -40,14 +38,10 @@ fn round_trip(bind: &str, config: udp::Config, ecn: Option<udp::Ecn>, datagrams:
 		.block_on(async move {
 			let mut buf = tx.acquire().await.expect("acquire");
 			let len = SEGMENT * datagrams;
-			buf[..len].fill(0xAB);
-			buf.send(udp::Transmit {
-				to,
-				len,
-				segment: SEGMENT,
-				ecn,
-			})
-			.expect("send");
+			buf.resize(len, 0xAB);
+			let mut transmit = udp::Transmit::new(to, SEGMENT);
+			transmit.ecn = ecn;
+			buf.send(transmit).expect("send");
 
 			let mut packets = Vec::new();
 			let mut received = 0;

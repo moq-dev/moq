@@ -1,32 +1,25 @@
-import { expect, test } from "bun:test";
-import { TRACK, userFields } from "./metadata.ts";
-
-test("userFields seeds from values", () => {
-	const user = userFields({ id: "a", name: "Ada", avatar: "ada.png" });
-	expect(user.id.peek()).toBe("a");
-	expect(user.name.peek()).toBe("Ada");
-	expect(user.avatar.peek()).toBe("ada.png");
-	expect(user.color.peek()).toBeUndefined();
-});
-
-test("core tracks are hang/*.json and extras share the section", () => {
-	expect(TRACK.user).toBe("hang/user.json");
-	expect(TRACK.preview).toBe("hang/preview.json");
-	expect(TRACK.chat).toBe("hang/chat.json");
-	expect(TRACK.location).toBe("hang/location.json");
-});
-
+import { expect, spyOn, test } from "bun:test";
 import * as Json from "@moq/json";
 import * as Net from "@moq/net";
 import type * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type * as Watch from "@moq/watch";
-import { consume, type ExtendedCatalog, type Preview, serve } from "./metadata.ts";
+import { consume, type ExtendedCatalog, type Preview, serve, TRACK, userFields } from "./metadata.ts";
 
 // Drain queued effects and their asynchronous subscription continuations.
 async function flush() {
 	for (let i = 0; i < 30; i++) await Promise.resolve();
 }
+
+// Track names are wire identifiers shared with every other publisher and subscriber.
+test("track names match the hang catalog section", () => {
+	expect({ ...TRACK }).toEqual({
+		user: "hang/user.json",
+		preview: "hang/preview.json",
+		chat: "hang/chat.json",
+		location: "hang/location.json",
+	});
+});
 
 test("metadata updates keep the same track and reach an existing subscriber", async () => {
 	const net = new Net.Broadcast.Producer();
@@ -78,6 +71,49 @@ test("metadata clears when entries disappear or broadcast becomes inactive", asy
 		expect(consumed.preview.peek()).toEqual({});
 	} finally {
 		consumed.close();
+		user.finish();
+		preview.finish();
+		net.close();
+	}
+});
+
+test("metadata refuses values that do not match their schema and keeps the last valid one", async () => {
+	const net = new Net.Broadcast.Producer();
+	const catalog = new Signal<ExtendedCatalog | undefined>({
+		hang: { user: { track: TRACK.user }, preview: { track: TRACK.preview } },
+	});
+	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
+	// Unvalidated producers, standing in for a remote publisher that sends anything.
+	const user = new Json.Snapshot.Producer<unknown>({
+		track: net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI }),
+	});
+	const preview = new Json.Snapshot.Producer<unknown>({
+		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
+	});
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
+	try {
+		// A `null` used to throw at `value.id` and end the update loop.
+		user.update({ value: null, at: Net.Time.Timestamp.now() });
+		preview.update({ value: { info: { video: "yes" } }, at: Net.Time.Timestamp.now() });
+		await flush();
+		expect(consumed.user.name.peek()).toBeUndefined();
+		expect(consumed.preview.peek()).toEqual({});
+
+		// The subscription survives a refused value.
+		user.update({ value: { name: "Alice" }, at: Net.Time.Timestamp.now() });
+		preview.update({ value: { info: { video: true } }, at: Net.Time.Timestamp.now() });
+		await flush();
+		expect(consumed.user.name.peek()).toBe("Alice");
+		expect(consumed.preview.peek()).toEqual({ video: true });
+
+		user.update({ value: { name: 42 }, at: Net.Time.Timestamp.now() });
+		await flush();
+		expect(consumed.user.name.peek()).toBe("Alice");
+		expect(warn).toHaveBeenCalledTimes(3);
+	} finally {
+		consumed.close();
+		warn.mockRestore();
 		user.finish();
 		preview.finish();
 		net.close();

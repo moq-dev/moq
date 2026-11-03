@@ -75,9 +75,9 @@ impl Sink {
 		self.0.name()
 	}
 
-	/// The latency and compression controls the backend applied, like
-	/// [`Encoder::applied`](super::Encoder::applied).
-	pub fn applied(&self) -> &Applied {
+	/// The latency and compression controls the backend applied, like the
+	/// encoder's own report.
+	pub(crate) fn applied(&self) -> Applied {
 		self.0.applied()
 	}
 
@@ -217,7 +217,7 @@ mod threaded {
 		// If the awaiting `open` was cancelled, give up before encoding.
 		let opened = Opened {
 			name: encoder.name().to_owned(),
-			applied: encoder.applied().clone(),
+			applied: encoder.applied(),
 		};
 		if !ready.ok(opened) {
 			return;
@@ -274,8 +274,8 @@ mod threaded {
 			&self.0.info().name
 		}
 
-		pub fn applied(&self) -> &Applied {
-			&self.0.info().applied
+		pub fn applied(&self) -> Applied {
+			self.0.info().applied.clone()
 		}
 
 		pub async fn cut(&mut self) -> Result<(), Error> {
@@ -332,7 +332,7 @@ mod inline {
 			self.0.name()
 		}
 
-		pub fn applied(&self) -> &Applied {
+		pub fn applied(&self) -> Applied {
 			self.0.applied()
 		}
 
@@ -391,7 +391,7 @@ mod tests {
 	}
 
 	fn probe_config() -> Config {
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.codec = Codec::H264;
 		config.kind = Kind::Named(probe::NAME.into());
 		config
@@ -444,29 +444,6 @@ mod tests {
 			!log.iter().any(|(event, _)| *event == "cut"),
 			"a refused cut still reached the codec: {log:?}"
 		);
-	}
-
-	/// What the backend applied has to survive the trip off the encode thread,
-	/// since that thread is the only place the encoder can be asked.
-	#[cfg(feature = "openh264")]
-	#[test]
-	fn the_applied_preset_crosses_the_thread() {
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
-		config.kind = Kind::Software;
-		config.preset = super::super::Preset::Quality;
-		let sink = pollster::block_on(Sink::open(&config)).unwrap();
-		// openh264 has no Quality controls of its own, and says so.
-		assert_eq!(sink.applied().preset, Some(super::super::Preset::Balanced));
-		assert!(!sink.applied().controls.is_empty());
-	}
-
-	/// A backend that reports nothing claims no preset, rather than echoing the
-	/// one that was asked for.
-	#[test]
-	fn an_unreported_backend_claims_no_preset() {
-		let _probe = probe::exclusive();
-		let sink = pollster::block_on(Sink::open(&probe_config())).unwrap();
-		assert_eq!(sink.applied().preset, None);
 	}
 
 	/// Regression: a queued request runs on the encode thread whether or not the

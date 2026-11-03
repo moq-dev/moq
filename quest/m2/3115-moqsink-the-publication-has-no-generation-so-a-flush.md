@@ -44,7 +44,3 @@ opening its own, so aggregate EOS membership is one set per generation.
   buffer, and a second EOS; a pad that flushes late
   joins the current generation, not a third; the post-EOS buffer without a
   flush still answers `Eos`.
-
-## Closes
-
-- [#3115](https://github.com/moq-dev/moq/issues/3115) - close this issue when the quest finishes

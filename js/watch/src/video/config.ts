@@ -1,19 +1,18 @@
 import type * as Catalog from "@moq/hang/catalog";
 
-/** Internal key used to describe which fields can change a support probe's result. */
-export const supportCacheKey = Symbol("supportCacheKey");
-
 /** The catalog fields that determine the demuxer and WebCodecs decoder instance. */
 export type DecoderConfig = Pick<
 	Catalog.VideoConfig,
 	"codec" | "container" | "description" | "displayAspectWidth" | "displayAspectHeight"
 > & {
 	optimizeForLatency: boolean;
+	interlaced: boolean;
 };
 
 /** The routing and decoder state whose changes require a new playback pipeline. */
 export type PlaybackIdentity = {
 	broadcast: Catalog.VideoConfig["broadcast"];
+	instance: Catalog.VideoConfig["instance"];
 	track: Catalog.VideoConfig["track"];
 	decoder: DecoderConfig;
 };
@@ -22,6 +21,7 @@ export type PlaybackIdentity = {
 export function playbackIdentity(config: Catalog.VideoConfig): PlaybackIdentity {
 	return {
 		broadcast: config.broadcast,
+		instance: config.instance,
 		track: config.track,
 		decoder: {
 			codec: config.codec,
@@ -30,6 +30,7 @@ export function playbackIdentity(config: Catalog.VideoConfig): PlaybackIdentity 
 			displayAspectWidth: config.displayAspectWidth,
 			displayAspectHeight: config.displayAspectHeight,
 			optimizeForLatency: config.optimizeForLatency ?? true,
+			interlaced: config.interlaced ?? false,
 		},
 	};
 }

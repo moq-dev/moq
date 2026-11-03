@@ -6,9 +6,8 @@ The transcoder, given a source rendition with `warmup` set, never encodes a
 picture its decoder has not fully recovered. Every group it transcodes,
 whether fetched on demand for a rung or read live after a skip, is preceded
 by enough earlier groups decoded as history that its first picture is clean.
-Players stay live with stripes instead, via the browser
-[dual decoder](/quest/m2/intra-refresh/dual-decoder.md) and the
-[native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md).
+Players stay live with stripes instead, via the min-delay and max-delay
+decoder pairs in `@moq/watch` and the native `moq_video::decode::Consumer`.
 Renditions without `warmup` behave exactly as today.
 
 ## Plan
@@ -38,8 +37,8 @@ The fix is history rather than a withhold rule:
   slice NAL type (H.264 type 5; H.265 `IDR_W_RADL`, `IDR_N_LP`, the BLA types)
   with the NAL walkers in `rs/moq-mux/src/codec/{h264,h265}`. Other codecs
   never set `warmup`.
-- Rung fetch: fetch groups N-K through N-1 alongside N, decode them first, and
-  start the encoder at N. If history is no longer available, fail the fetch
+- Rung fetch: fetch groups N-K through N as one range subscription, decode
+  N-K through N-1 first, and start the encoder at N. If history is no longer available, fail the fetch
   loudly instead of encoding stripes.
 - Live feed: for a `warmup` rendition, read groups in sequence order, not
   arrival order. Treat a skipped sequence as a discontinuity and decode the K
@@ -56,7 +55,3 @@ The fix is history rather than a withhold rule:
 ## Required
 
 - [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - K derives from `warmup`, which must be a safe upper bound
-
-## Related
-
-- [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - the player path, which shows stripes instead

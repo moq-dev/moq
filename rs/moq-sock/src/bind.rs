@@ -10,7 +10,7 @@
 
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use std::io;
-use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, UdpSocket};
 use std::sync::Once;
 use std::time::Duration;
 
@@ -38,6 +38,13 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// bytes rather than an allocation, so an oversized request costs an idle socket
 /// nothing, while a link's nominal speed says little about the path it feeds (a
 /// VM's virtio NIC reports 10Gbps through a 100Mbps uplink).
+///
+/// Measured by moq-uring's `benchmark_socket_queues` at 480 Mbps of 1200-byte
+/// datagrams, on both receive paths: this request absorbed a 100ms worker stall
+/// with no drop, where the 208 KiB default dropped 13% of a run with 20ms stalls
+/// and 1 MiB dropped 2%. A bigger queue only costs delay when a worker cannot keep
+/// up at all: then it fills, and sitting full it held ~130ms of backlog, against
+/// 4ms at the default. The receive pool depth changed none of this.
 const UDP_BUFFER: usize = 8 * 1024 * 1024;
 
 /// The sysctl capping `SO_RCVBUF`, named in the warning so an operator knows what
@@ -119,8 +126,36 @@ pub fn udp(options: Udp) -> io::Result<UdpSocket> {
 	if options.reuse_port {
 		set_reuse_port(&socket)?;
 	}
-	socket.bind(&addr.into())?;
+	bind_socket(&socket, addr)?;
 	Ok(socket.into())
+}
+
+/// Bind `socket`, keeping a dual-stack ephemeral port free on the IPv4 side too.
+///
+/// macOS picks a dual-stack ephemeral port checking only IPv6 sockets, so it can hand out
+/// a port an IPv4 socket already holds as `127.0.0.1`, which then receives all the IPv4
+/// traffic meant for this one. An explicit port is checked against both families, so let
+/// an IPv4 probe of the same type pick it and claim it here. Another socket can take the
+/// port in between, so draw a few times before giving up. The probe and `socket` must not
+/// set `SO_REUSEADDR`, which narrows the BSD conflict check to the exact address.
+fn bind_socket(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
+	let mut addr = match addr {
+		SocketAddr::V6(addr) if addr.port() == 0 && socket.only_v6().is_ok_and(|only| !only) => addr,
+		_ => return socket.bind(&addr.into()),
+	};
+	let ipv4 = addr.ip().to_ipv4_mapped().unwrap_or(Ipv4Addr::UNSPECIFIED);
+	let mut attempts = 8;
+	loop {
+		let probe = Socket::new(Domain::IPV4, socket.r#type()?, None)?;
+		probe.bind(&SocketAddrV4::new(ipv4, 0).into())?;
+		let probed = probe.local_addr()?.as_socket().ok_or(io::ErrorKind::AddrNotAvailable)?;
+		drop(probe);
+		addr.set_port(probed.port());
+		match socket.bind(&addr.into()) {
+			Err(err) if err.kind() == io::ErrorKind::AddrInUse && attempts > 1 => attempts -= 1,
+			result => return result,
+		}
+	}
 }
 
 /// Request [`UDP_BUFFER`] in both directions, best-effort.
@@ -289,9 +324,13 @@ pub fn tcp(addr: SocketAddr) -> io::Result<TcpListener> {
 	let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
 	make_dual_stack(&socket, addr);
 	// Match std's TcpListener, which sets SO_REUSEADDR on Unix (not Windows) so a
-	// restarted relay can rebind a port still in TIME_WAIT.
+	// restarted relay can rebind a port still in TIME_WAIT. An ephemeral bind sets it
+	// afterwards, since it would hide the port's IPv4 holders from `bind_socket`, but
+	// accepted connections still inherit it for a later rebind of the port.
 	#[cfg(not(windows))]
-	socket.set_reuse_address(true)?;
+	if addr.port() != 0 {
+		socket.set_reuse_address(true)?;
+	}
 	// Enable keepalive on the listening socket so every accepted connection
 	// inherits it (accept() carries socket options across on Linux, macOS, and
 	// Windows). Setting it once here reaches every HTTP/HTTPS/WebSocket connection
@@ -303,7 +342,11 @@ pub fn tcp(addr: SocketAddr) -> io::Result<TcpListener> {
 	if let Err(err) = socket.set_tcp_keepalive(&keepalive) {
 		tracing::warn!(%err, "failed to enable TCP keepalive; dead peers may linger");
 	}
-	socket.bind(&addr.into())?;
+	bind_socket(&socket, addr)?;
+	#[cfg(not(windows))]
+	if addr.port() == 0 {
+		socket.set_reuse_address(true)?;
+	}
 	socket.listen(1024)?;
 	let listener: TcpListener = socket.into();
 	listener.set_nonblocking(true)?;
@@ -363,6 +406,28 @@ mod tests {
 		assert!(!socket.only_v6().unwrap(), "IPv6 socket should be dual-stack");
 	}
 
+	/// A dual-stack ephemeral port must be free on the IPv4 side too: a socket already
+	/// holding it as `127.0.0.1` would otherwise receive every IPv4 reply. macOS checks
+	/// only IPv6 sockets when it picks one, so draw many ports against many holders.
+	#[test]
+	fn udp_dual_stack_ephemeral_port_is_free_for_ipv4() {
+		let holders: Vec<UdpSocket> = (0..100).map(|_| UdpSocket::bind("127.0.0.1:0").unwrap()).collect();
+		let held: std::collections::HashSet<u16> = holders.iter().map(|s| s.local_addr().unwrap().port()).collect();
+
+		for _ in 0..4000 {
+			let socket = match udp(Udp::new("[::]:0".parse().unwrap())) {
+				Ok(socket) => socket,
+				Err(err) if skip_if_no_ipv6(&err) => return,
+				Err(err) => panic!("failed to bind IPv6 UDP socket: {err}"),
+			};
+			let port = socket.local_addr().unwrap().port();
+			assert!(
+				!held.contains(&port),
+				"dual-stack socket took port {port}, held by an IPv4 socket"
+			);
+		}
+	}
+
 	/// A specific IPv6 address can't carry IPv4, so the socket must not claim to:
 	/// Windows rejects the QUIC driver's IPv4 socket options on a dual-stack `[::1]` socket.
 	/// Linux forces v6-only on such a bind itself, so only Windows can regress.
@@ -415,12 +480,6 @@ mod tests {
 		if let Some(sysctl) = Direction::Recv.sysctl() {
 			assert!(logs_contain(sysctl));
 		}
-	}
-
-	#[test]
-	fn udp_ipv4_still_binds() {
-		let socket = udp(Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
-		assert!(socket.local_addr().unwrap().is_ipv4());
 	}
 
 	/// A reuseport group is only useful if every member can hold the same port,
@@ -507,5 +566,26 @@ mod tests {
 		};
 		let socket = Socket::from(listener);
 		assert!(!socket.only_v6().unwrap(), "IPv6 listener should be dual-stack");
+	}
+
+	/// The TCP twin of `udp_dual_stack_ephemeral_port_is_free_for_ipv4`: a listener
+	/// holding the port as `127.0.0.1` would otherwise take every IPv4 connection.
+	#[test]
+	fn tcp_dual_stack_ephemeral_port_is_free_for_ipv4() {
+		let holders: Vec<TcpListener> = (0..100).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+		let held: std::collections::HashSet<u16> = holders.iter().map(|s| s.local_addr().unwrap().port()).collect();
+
+		for _ in 0..4000 {
+			let listener = match tcp("[::]:0".parse().unwrap()) {
+				Ok(listener) => listener,
+				Err(err) if skip_if_no_ipv6(&err) => return,
+				Err(err) => panic!("failed to bind IPv6 TCP listener: {err}"),
+			};
+			let port = listener.local_addr().unwrap().port();
+			assert!(
+				!held.contains(&port),
+				"dual-stack listener took port {port}, held by an IPv4 listener"
+			);
+		}
 	}
 }

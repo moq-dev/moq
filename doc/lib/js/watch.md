@@ -6,6 +6,7 @@ description: Subscribe, decode, and render broadcasts in the browser
 # @moq/watch
 
 [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/watch)
 
 A player: subscribes to a broadcast, picks renditions, decodes with
 WebCodecs, renders video to a canvas and audio through WebAudio, and keeps them
@@ -29,37 +30,77 @@ in sync at the latency you ask for.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
 | `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
-| `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can mount before the stream exists. |
-| `catalog-format` | `hang`, `hangz`, `msf`, or `manual`; detected from the name by default. |
+| `follow` | Follow the broadcast's announcements (default on): wait for one before subscribing, so a player can mount before the stream exists, and move to each restart. Off requests the name once. |
+| `catalog-format` | `hang`, `msf`, or `manual`; detected from the name by default. |
+| `echo` | The viewer's name for [feedback](/concept/stats#media-reports), one path segment not starting with `.`. Once the catalog solicits feedback, the player publishes `<echo path>/<name>.echo`. Absent publishes none. |
 
-Every attribute is also a reactive property. The
+Every attribute is also a reactive property, and property or UI changes reflect
+back into the attributes. An invalid value is refused rather than defaulted: the
+property setter throws, and invalid markup reports a browser `error` event and
+suspends the element until corrected or removed. The
 [README](https://www.npmjs.com/package/@moq/watch) lists types and defaults.
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
-`el.error` (also `el.player.error`) reports a fatal audio or video decode error.
+`el.audio.out.error` and `el.video.out.error` report a fatal decode error.
 The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
-broken media automatically. Individual decoder errors are available at
-`el.audio.out.error` and `el.video.out.error`.
+broken media automatically.
 
-`el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. On
-`error` the origin refused the broadcast, `el.broadcast.out.error` says why,
+A video rendition encoded with intra refresh has no keyframes, and its catalog
+`warmup` says how long a decoder takes to clean up after joining. The player
+decodes such a rendition twice: one decoder holds your delay and may show
+refresh stripes after a join or a skip, while a second starts one group earlier
+and tolerates `warmup` more lateness, so its picture is clean. The clean
+picture shows whenever it has caught up. Each decoder costs its own CPU and
+decoder memory, and both share one subscription. A rendition without `warmup`
+uses one decoder.
+
+An H.264 group of such a rendition opens on a recovery point that is not an
+IDR. Chromium's WebCodecs refuses to open a decoder on that picture: it wants
+an IDR or a recovery point that counts zero frames. So when a decoder opens on
+one, the player inserts a second recovery point with a zero count before its
+first slice. The slices are untouched; the stripes clear as the sweep
+completes.
+
+`el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
+On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
+On `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.
 
 The broadcast's announcement is its online signal: the player starts when a
 route serving the name is announced, goes `offline` when none is left, and
-waits for one to return for as long as it is mounted. When the exact route
+waits for one to return for as long as it is mounted. A catalog track that
+ends cleanly keeps playing until the broadcast ends, so a viewer drains a
+finished broadcast's tail. When the exact route
 ends while a covering prefix still serves the name, it moves to the prefix. A
 name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
 once, with a fresh catalog, and video, audio, and the clock start over on its
 timeline instead of waiting for it to catch up to the old one.
+
+## Feedback
+
+A publisher solicits feedback with the catalog's `echo` section, such as
+`<moq-publish echo-path="viewers">`. Given `echo="alice"`, the player resolves
+that path against the broadcast and publishes `alice.echo` there, with one
+`feedback.json` track reporting what each rendition was received and played
+under its catalog ID: frames, bytes, decoded, late, decode errors, stalls and
+stalled time, audio underruns, and the newest arrival, plus the PROBE
+round-trip time. It writes about once a second while someone subscribes, and
+follows the catalog: a removed or moved section retracts the broadcast. Each
+player publishes its own broadcast, reporting only what it counted, so a second
+player on one connection that resolves the same feedback path, for any catalog,
+publishes nothing and warns until the first one leaves; give each player its own
+name. The decoders'
+`out.stats` and the stats panel read the same counters. The token must allow
+publishing under the echo path.
 
 ## Binding from a framework
 
@@ -85,6 +126,7 @@ broadcast consumer, and decode JSON with
 
 ```ts
 import * as Json from "@moq/json";
+import * as Moq from "@moq/net";
 import { Hang } from "@moq/watch";
 
 // Run after the element module has loaded and the node has mounted.
@@ -103,7 +145,10 @@ const dispose = el.signals.run((effect) => {
     const name = metadata?.[0];
     if (!active || !name) return;
 
-    const track = active.track(name).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
+    const track = active.track(name).subscribe({
+        ...Moq.Track.Subscription.default(),
+        priority: Hang.Catalog.PRIORITY.catalog,
+    });
     effect.cleanup(() => track.close());
 
     const consumer = new Json.Snapshot.Consumer<unknown>({ track });
@@ -119,7 +164,7 @@ const dispose = el.signals.run((effect) => {
 
 Call `dispose()` on unmount. The effect re-runs when the catalog or the
 active broadcast changes, so a reconnect resubscribes on its own: the
-broadcast's announced request moves to each start or restart, and switches only
+broadcast's follower moves to each start or restart, and switches only
 when that resolves another broadcast. A request ending is never the trigger, so
 following a restart needs a relay with discovery.
 
@@ -137,7 +182,7 @@ const player = new Watch.Player({
     origin: connection.origin,
     probe: connection.probe,
     name: Moq.Path.from("alice.hang"),
-    canvas,
+    video: { canvas },
 });
 // player.broadcast, player.video, player.audio, player.text, player.sync,
 // player.renderer, and player.emitter expose the pipeline.
@@ -145,11 +190,11 @@ const player = new Watch.Player({
 ```
 
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
-to change later, such as `muted` or `delay`. `Player` is the pipeline inside
+to change later, such as `audio.muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
 
-To chart when each frame arrived against when it plays, open an `arrivals()`
-handle on a decoder. It yields every frame received while it is open, stamped
+To chart when each audio frame arrived against when it plays, open an
+`arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped
 when the frame came off the transport, and a gap wherever media after an earlier
 frame will never arrive (a latency skip, a hole):
 
@@ -170,7 +215,7 @@ last frame's timestamp, and it covers any pause the publisher declared.
 
 Unread frames queue on the handle, so keep reading and keep your own window.
 Leaving the loop or calling `arrivals.close()` stops observing and releases
-them; nothing is retained without an open handle. Video reports the rendition on screen.
+them; nothing is retained without an open handle.
 
 ## Buffered playback
 
@@ -185,8 +230,10 @@ response emitted in one burst with future timestamps, wants the opposite. Set
 
 Durations need a unit; a bare number is rejected. Audio holds the buffer as
 encoded frames, so a large one is cheap; video waits as decoded pictures, which
-hold decoder memory, so a long video buffer is not. `el.reset()` flushes and re-anchors at the
-next frame, which is how a producer interrupts an utterance.
+hold decoder memory, so a long video buffer is not. The first video frame shows
+as a poster at once, and playback starts once every enabled track has buffered
+the delay. `el.reset()` flushes and re-anchors at the next frame, which is how a
+producer interrupts an utterance.
 
 ## Strict CSP
 

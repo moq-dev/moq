@@ -79,6 +79,18 @@ pub enum Error {
 	#[error("encoder {0} cannot cut a group on request")]
 	CutUnsupported(&'static str),
 
+	/// A frame's samples are in a different color space than the one the
+	/// encoder writes into the bitstream, so encoding it would mislabel it.
+	/// Open the encoder with [`encode::Config::color`](crate::encode::Config::color)
+	/// set to the frame's [`Surface::color`](crate::Surface::color).
+	#[error("frame is {frame:?} but the encoder signals {encoder:?}")]
+	ColorMismatch {
+		/// The space the frame's samples are in.
+		frame: crate::Color,
+		/// The space the encoder was opened with.
+		encoder: crate::Color,
+	},
+
 	/// The group configuration can't be honored by any backend (the message
 	/// says why).
 	#[error("invalid group configuration: {0}")]

@@ -14,8 +14,12 @@
 //! back. Because the wrapper never yields an error upward, `axum_server`'s flat
 //! sleep is unreachable.
 
+mod demux;
 mod idle;
+pub(crate) use demux::{Classified, Stream, Tls, classify};
 pub(crate) use idle::Admission;
+#[cfg(feature = "websocket")]
+pub(crate) use idle::Io;
 
 use std::{
 	io,
@@ -35,6 +39,23 @@ pub(crate) struct Accepted {
 	pub(crate) admission: Option<Admission>,
 }
 
+impl Accepted {
+	pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+		self.stream.local_addr()
+	}
+}
+
+#[cfg(all(test, unix, feature = "websocket"))]
+impl Accepted {
+	/// A socket accepted outside [`Listener`], holding no admission.
+	pub(crate) fn new(stream: TcpStream) -> Self {
+		Self {
+			stream,
+			admission: None,
+		}
+	}
+}
+
 impl AsyncRead for Accepted {
 	fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
 		Pin::new(&mut self.stream).poll_read(cx, buf)
@@ -49,6 +70,11 @@ impl AsyncWrite for Accepted {
 	}
 	fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		Pin::new(&mut self.stream).poll_shutdown(cx)
+	}
+}
+impl AsRef<TcpStream> for Accepted {
+	fn as_ref(&self) -> &TcpStream {
+		&self.stream
 	}
 }
 #[cfg(unix)]
@@ -71,11 +97,11 @@ impl Address for Peer {
 	type Listener = Listener;
 }
 
-/// Lets a handler extract the peer address as `ConnectInfo<Peer>`, so the auth
-/// request can report where a WebSocket or HTTP session came from.
-impl axum::extract::connect_info::Connected<Peer> for Peer {
+/// Expose the accepted socket through Axum's standard extractor, including to
+/// routes supplied by an embedder.
+impl axum::extract::connect_info::Connected<Peer> for SocketAddr {
 	fn connect_info(target: Peer) -> Self {
-		target
+		target.0
 	}
 }
 
@@ -171,6 +197,12 @@ impl AddrListener<Accepted, Peer> for Listener {
 		loop {
 			match self.inner.accept().await {
 				Ok((stream, peer)) => {
+					// WebSocket qmux already batches records, so Nagle would only hold a
+					// batch's tail for the peer's delayed ACK. Only a reset socket refuses it.
+					if let Err(err) = stream.set_nodelay(true) {
+						tracing::debug!(%peer, %err, "dropped a connection that refused TCP_NODELAY");
+						continue;
+					}
 					// Enter before returning the socket: axum_server spawns the TLS
 					// acceptor, and waiting for that task would leave an uncounted gap.
 					let admission = self
@@ -183,7 +215,7 @@ impl AddrListener<Accepted, Peer> for Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						tokio::time::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}
@@ -212,10 +244,11 @@ mod tests {
 		assert_eq!(listener.get_local_addr().unwrap().0, addr);
 
 		let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
-		let (_stream, peer) = listener.accept_stream().await.unwrap();
+		let (accepted, peer) = listener.accept_stream().await.unwrap();
 		let client = connect.await.unwrap();
 
 		assert_eq!(peer.0, client.local_addr().unwrap());
+		assert!(accepted.stream.nodelay().unwrap());
 		for &failure in Failure::ALL {
 			assert_eq!(health.failures(failure), 0, "{failure} on a healthy accept");
 		}

@@ -45,7 +45,7 @@ const QUEUE = 32;
 // conversion at all, and Web Audio resamples the device to it far better than we could.
 const DEFAULT_SAMPLE_RATE = 48_000;
 
-// Signals the capture reads.
+/** Signals the capture reads. */
 export type CaptureInput = {
 	// The track or decoded samples to pump PCM off.
 	source: Getter<Source | undefined>;
@@ -62,7 +62,8 @@ export type CaptureProps = Inputs<CaptureInput> & {
 	channelCount?: number | Signal<number | undefined>;
 };
 
-type CaptureOutput = {
+/** Signals the capture derives. */
+export type CaptureOutput = {
 	// The PCM to encode, replaced whenever the source changes. Subscribe for a stream of your own:
 	// several renditions share one capture, and each needs every frame rather than the newest.
 	frames: Signal<Fanout<AudioFrame> | undefined>;
@@ -84,6 +85,7 @@ type CaptureOutput = {
  * resample and restamp them, which is the whole thing publishing a file has to avoid.
  */
 export class Capture {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<CaptureInput>;
 
 	/** Override the capture rate in Hz. Defaults to the device's, snapped to one every codec takes. */
@@ -97,6 +99,7 @@ export class Capture {
 		format: new Signal<Format | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// Whether the track's context is suspended until the page's first click or keypress.
@@ -157,7 +160,7 @@ export class Capture {
 	}
 
 	// Decoded samples need no graph and declare their own format, so this only converts them to the
-	// planar shape the framer wants. Note it never reads `enabled`: muting must not tear the stream
+	// planar shape the framer wants. Note it never reads `enabled`: disabling must not tear the stream
 	// down, because a one-shot stream can't be read again.
 	#runSamples(source: SampleSource, effect: Effect): void {
 		const { sampleRate, channelCount } = source;
@@ -170,7 +173,7 @@ export class Capture {
 	}
 
 	#runTrack(source: SourceConfig, effect: Effect): void {
-		// Releasing the capture device while muted is the whole point of gating on `enabled`.
+		// Releasing the capture device while disabled is the whole point of gating on `enabled`.
 		if (!effect.get(this.in.enabled)) return;
 
 		const settings = source.track.getSettings();

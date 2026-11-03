@@ -19,113 +19,160 @@ pub(crate) fn message(err: impl std::error::Error) -> String {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum KeyError {
+	/// The algorithm does not match the key type.
 	#[error("invalid algorithm for key type")]
 	InvalidAlgorithm,
 
+	/// The algorithm does not match the named curve.
 	#[error("invalid algorithm for {0} curve")]
 	InvalidAlgorithmForCurve(&'static str),
 
+	/// An EC coordinate has the wrong length for the named curve.
 	#[error("invalid coordinate length for {0}")]
 	InvalidCoordinateLength(&'static str),
 
+	/// The curve does not fit the named key type.
 	#[error("invalid curve for {0} key")]
 	InvalidCurve(&'static str),
 
+	/// Signing needs a private key, but the key is public.
 	#[error("missing private key")]
 	MissingPrivateKey,
 
+	/// A symmetric secret is shorter than the minimum length in bytes.
 	#[error("oct key secret must be at least {0} bytes")]
 	SecretTooShort(usize),
 
+	/// A symmetric key has no public half to export.
 	#[error("OCT key cannot be converted to public key")]
 	NoPublicKey,
 
+	/// The key's operations exclude verification.
 	#[error("key does not support verification")]
 	VerifyUnsupported,
 
+	/// The key's operations exclude signing.
 	#[error("key does not support signing")]
 	SignUnsupported,
 
+	/// The key set has no key that can sign.
 	#[error("cannot find signing key")]
 	NoSigningKey,
 
+	/// The key set has no key with this `kid`.
 	#[error("cannot find key with kid {0}")]
 	KeyNotFound(String),
 
+	/// The JWT header has no `kid` to select a key with.
 	#[error("missing kid in JWT header")]
 	MissingKid,
-
-	#[error("missing x() point in EC key")]
-	MissingEcX,
-
-	#[error("missing y() point in EC key")]
-	MissingEcY,
 }
 
 /// Top-level error type for moq-auth.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A key could not be configured or used.
 	#[error(transparent)]
 	Key(#[from] KeyError),
 
+	/// The token grants neither publish nor subscribe.
 	#[error("no publish or subscribe allowed; token is useless")]
 	UselessToken,
 
-	#[error("path `{0}` does not overlap the token root")]
+	/// A root being minted into a token or key scope is not spelled as a path must be.
+	#[error("invalid root {0}")]
+	InvalidRoot(String),
+
+	/// The path does not overlap the token's root.
+	#[error("path {0:?} does not overlap the token root")]
 	RootMismatch(String),
 
-	#[error("token grants no access to path `{0}`")]
+	/// The token grants no access to this path.
+	#[error("token grants no access to path {0:?}")]
 	NoAccess(String),
 
+	/// The key scope allows neither publish nor subscribe.
 	#[error("no publish or subscribe allowed; key scope is useless")]
 	UselessScope,
 
+	/// The token claims more than the key's scope allows.
 	#[error("token capabilities exceed the key scope")]
 	ScopeExceeded,
 
+	/// The algorithm name is not supported.
 	#[error("invalid algorithm: {0}")]
 	InvalidAlgorithm(String),
 
+	/// The token's expiry has passed.
 	#[error("token has expired")]
 	TokenExpired,
 
+	/// The token's not-before time has not arrived.
 	#[error("token is not valid yet")]
 	TokenNotYetValid,
 
+	/// A path pattern did not parse.
 	#[error(transparent)]
 	Pattern(#[from] moq_pattern::InvalidPattern),
 
+	/// The grant allows nothing, so the session is refused.
 	#[error("grant names nothing; the session is refused")]
 	UselessGrant,
 
+	/// The grant marks an upstream but not a peer.
 	#[error("grant marks an upstream that is not a peer")]
 	UpstreamWithoutPeer,
 
+	/// The grant asks to be revalidated but never expires.
 	#[error("grant asks to be revalidated but never expires")]
 	UnboundedRevalidate,
 
+	/// The grant sets session limits without a revalidate cadence.
 	#[error("session limits need a revalidate cadence, which ages out the slots of a relay that died")]
 	LimitsWithoutRevalidate,
 
+	/// The grant's expiry is beyond what the system clock can represent.
 	#[error("the grant bound reaches past the system clock's range")]
 	ExpiresOutOfRange,
 
+	/// The grant's revalidate interval is zero.
 	#[error("grant asks to be revalidated at no interval")]
 	ZeroRevalidate,
 
+	/// No ES256 or EdDSA key is available to sign or verify a peer grant.
+	#[error("peer grants need an ES256 or EdDSA key")]
+	NoPeerKey,
+
+	/// A peer grant's presenter key carries private material.
+	#[error("a peer grant's presenter key must be public")]
+	PrivatePresenter,
+
+	/// The grant's expiry has passed.
 	#[error("grant has already expired")]
 	GrantExpired,
 
-	#[error("the auth server refused the session")]
-	Refused,
+	/// A stats label is not a literal path.
+	#[error("invalid stats label: {0}")]
+	InvalidLabel(moq_pattern::InvalidPattern),
 
+	/// A stats tier is not `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.
+	#[error("invalid stats tier {0:?}: use segments of ASCII letters, digits, '.', '_', and '-' joined by '/'")]
+	InvalidTier(String),
+
+	/// The auth server refused the session.
+	#[error(transparent)]
+	Refused(#[from] crate::Refusal),
+
+	/// The auth server could not be reached or answered with an error.
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
 
+	/// The auth URL is plain http:// to a host other than loopback.
 	#[error("auth URL must be https://, unix://, or http:// to a loopback address: {0}")]
 	InsecureUrl(String),
 
+	/// The auth URL has an unsupported scheme, or is a `unix:` URL that names no socket path.
 	#[error("invalid auth URL: {0}")]
 	InvalidUrl(String),
 
@@ -133,6 +180,7 @@ pub enum Error {
 	#[error("{0}")]
 	Json(String),
 
+	/// A local file could not be read or written.
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
@@ -140,6 +188,7 @@ pub enum Error {
 	#[error("{0}")]
 	Base64(String),
 
+	/// A decoded field is not valid UTF-8.
 	#[error(transparent)]
 	Utf8(#[from] std::string::FromUtf8Error),
 
@@ -154,6 +203,18 @@ pub enum Error {
 	/// Fetching a remote JWKS failed.
 	#[error("{0}")]
 	Other(String),
+
+	/// A mesh coordinator refused the request.
+	#[error("mesh coordinator refused: {0}")]
+	Mesh(#[from] crate::mesh::ErrorReply),
+
+	/// The mesh coordinator's state file could not be read, parsed, or written.
+	#[error("mesh state: {0}")]
+	MeshState(String),
+
+	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
+	#[error("unsupported CPU: {0}")]
+	UnsupportedCpu(String),
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's
@@ -175,12 +236,18 @@ from_message! {
 	serde_json::Error => Json,
 	base64::DecodeError => Base64,
 	jsonwebtoken::errors::Error => Jwt,
-	p256::elliptic_curve::pkcs8::Error => Crypto,
-	p256::elliptic_curve::Error => Crypto,
-	rsa::Error => Crypto,
-	rsa::pkcs1::Error => Crypto,
-	aws_lc_rs::error::Unspecified => Crypto,
-	aws_lc_rs::error::KeyRejected => Crypto,
+}
+
+impl Error {
+	/// A crypto backend's error, converted by hand so its crate stays out of this crate's API.
+	pub(crate) fn crypto(err: impl std::error::Error) -> Self {
+		Self::Crypto(message(err))
+	}
+
+	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
+	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
+		Self::UnsupportedCpu(err.to_string())
+	}
 }
 
 #[cfg(feature = "client")]
@@ -192,6 +259,7 @@ impl From<reqwest::Error> for Error {
 	}
 }
 
+/// A [`Result`](std::result::Result) with this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]

@@ -158,8 +158,9 @@ pub struct Frame {
 	pub(crate) height: u32,
 	/// Row pitch in bytes of both planes (>= `width`).
 	pub(crate) pitch: u32,
-	/// The space the samples are in, when the crate converted them itself.
-	color: Option<Color>,
+	/// The space the samples are in: the one a `Converter` wrote, or the stream's
+	/// when a decoder produced them.
+	pub(crate) color: Option<Color>,
 }
 
 impl std::fmt::Debug for Frame {

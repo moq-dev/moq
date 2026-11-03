@@ -1,13 +1,16 @@
 // An open Track Stream is interest in the track: the subscriber keeps it open until its
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
-import { describe, expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+
+import { describe, expect, spyOn, test } from "bun:test";
+import { Elapsed, Milli, Nano, timeout } from "@moq/clock";
+import { SessionCode } from "../error.ts";
 import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
+import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch } from "./fetch.ts";
 import { Publisher } from "./publisher.ts";
@@ -19,15 +22,13 @@ import { ALPN_05, Version } from "./version.ts";
 
 /** Whether `promise` settles within `ms`. */
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const pending = new Promise<false>((resolve) => {
-		timer = setTimeout(() => resolve(false), ms);
-	});
-	try {
-		return await Promise.race([promise.then(() => true), pending]);
-	} finally {
-		clearTimeout(timer);
-	}
+	return await timeout(Nano.fromMilli(Milli(ms)), promise).then(
+		() => true,
+		(error: unknown) => {
+			if (error instanceof Elapsed) return false;
+			throw error;
+		},
+	);
 }
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
@@ -38,7 +39,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const reader = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ maxDelay: Milli(100) });
+			.subscribe({ delay: { max: Milli(100) } });
 
 		const track = await Stream.accept(pair.server, version);
 		if (!track) throw new Error("the subscriber never asked for TRACK_INFO");
@@ -59,7 +60,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const fin = track.reader.done();
 		expect(await settlesWithin(fin, 50)).toBe(false);
 
-		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
+		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0]) }, version);
 		expect(await fin).toBe(true);
 
 		reader.close();
@@ -116,14 +117,15 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
-			const demand = broadcast.demand();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			let producer: TrackProducer | undefined;
 			const serving = (async () => {
 				for (;;) {
 					const request = await wireOf(broadcast).requested();
 					if (!request) return;
-					request.accept({ timescale: Timescale.MILLI });
+					producer = request.accept({ timescale: Timescale.MILLI });
 				}
 			})();
 
@@ -134,11 +136,12 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 			await TrackInfo.decode(client.reader, version);
 			expect(await client.reader.done()).toBe(true);
-			expect(await settlesWithin(demand.unused(), 50)).toBe(false);
+			if (!producer) throw new Error("the track was never answered");
+			expect(await settlesWithin(Promise.resolve(producer.closed), 50)).toBe(false);
 
 			if (close === "FIN") client.writer.close();
 			else client.writer.reset(new Error("gone"));
-			expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
+			expect(await settlesWithin(Promise.resolve(producer.closed), 1000)).toBe(true);
 
 			publisher.close();
 			broadcast.close();
@@ -147,20 +150,44 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		},
 	);
 
+	test("data after a TRACK request closes the session", async () => {
+		const pair = createMockTransportPair(ALPN_05);
+		const closing = spyOn(pair.server, "close");
+		const origin = new OriginProducer();
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
+
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("the publisher never accepted the TRACK stream");
+		void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
+
+		await client.writer.u53(0);
+		await expect(client.reader.done()).rejects.toThrow();
+		expect(closing).toHaveBeenCalledWith(expect.objectContaining({ closeCode: SessionCode.ProtocolViolation }));
+
+		publisher.close();
+		broadcast.close();
+		origin.close();
+	});
+
 	test.each(["FIN", "reset"] as const)(
 		"a requester's %s while TRACK_INFO is blocked lets the track go",
 		async (close) => {
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
-			const demand = broadcast.demand();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			let producer: TrackProducer | undefined;
 			const serving = (async () => {
 				for (;;) {
 					const request = await wireOf(broadcast).requested();
 					if (!request) return;
-					request.accept({ timescale: Timescale.MILLI });
+					producer = request.accept({ timescale: Timescale.MILLI });
 				}
 			})();
 
@@ -182,11 +209,12 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
 
 			await writing;
-			expect(demand.used.peek()).toBe(true);
+			if (!producer) throw new Error("the track was never answered");
+			expect(producer.closed.peek()).toBeUndefined();
 
 			if (close === "FIN") client.writer.close();
 			else client.writer.reset(new Error("gone"));
-			expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
+			expect(await settlesWithin(Promise.resolve(producer.closed), 1000)).toBe(true);
 
 			publisher.close();
 			broadcast.close();
@@ -199,18 +227,18 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
-		const demand = broadcast.demand();
-		let requests = 0;
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
+		const producers: TrackProducer[] = [];
 		const serving = (async () => {
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				requests++;
-				request.accept({ timescale: Timescale.MILLI });
+				producers.push(request.accept({ timescale: Timescale.MILLI }));
 			}
 		})();
+		const released = (index: number) => Promise.resolve(producers[index].closed);
 
 		const open = async () => {
 			const client = await Stream.open(pair.client, { version });
@@ -223,13 +251,13 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const second = await open();
 		await TrackInfo.decode(first.reader, version);
 		await TrackInfo.decode(second.reader, version);
-		expect(requests).toBe(1);
+		expect(producers.length).toBe(1);
 
 		first.writer.close();
-		expect(await settlesWithin(demand.unused(), 50)).toBe(false);
+		expect(await settlesWithin(released(0), 50)).toBe(false);
 
 		second.writer.close();
-		expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
+		expect(await settlesWithin(released(0), 1000)).toBe(true);
 
 		publisher.close();
 		broadcast.close();
@@ -241,18 +269,18 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
-		const demand = broadcast.demand();
-		let requests = 0;
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
+		const producers: TrackProducer[] = [];
 		const serving = (async () => {
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				requests++;
-				request.accept({ timescale: Timescale.MILLI });
+				producers.push(request.accept({ timescale: Timescale.MILLI }));
 			}
 		})();
+		const released = (index: number) => Promise.resolve(producers[index].closed);
 
 		const open = async () => {
 			const client = await Stream.open(pair.client, { version });
@@ -264,15 +292,15 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const first = await open();
 		await TrackInfo.decode(first.reader, version);
 		first.writer.close();
-		expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
+		expect(await settlesWithin(released(0), 1000)).toBe(true);
 
 		const second = await open();
 		await TrackInfo.decode(second.reader, version);
-		expect(requests).toBe(2);
-		expect(await settlesWithin(demand.unused(), 50)).toBe(false);
+		expect(producers.length).toBe(2);
+		expect(await settlesWithin(released(1), 50)).toBe(false);
 
 		second.writer.close();
-		expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
+		expect(await settlesWithin(released(1), 1000)).toBe(true);
 
 		publisher.close();
 		broadcast.close();
@@ -300,10 +328,10 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
-			const demand = broadcast.demand();
-			// Answered by hand, after every requester left.
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			// Answered by hand, once every requester has left.
 			const requested = wireOf(broadcast).requested();
 
 			const first = await requester(pair, publisher, kind);
@@ -312,14 +340,10 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const second = await requester(pair, publisher, kind);
 
 			first.writer.reset(new Error("gone"));
-			expect(await settlesWithin(demand.unused(), 50)).toBe(false);
-
 			second.writer.reset(new Error("gone"));
-			expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
 
 			// The handler still gets an open track, and the answer lets it go.
 			const producer = request.accept({ timescale: Timescale.MILLI });
-			expect(producer.closed.peek()).toBeUndefined();
 			expect(await settlesWithin(Promise.resolve(producer.closed), 1000)).toBe(true);
 
 			publisher.close();
@@ -332,20 +356,20 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
-		const demand = broadcast.demand();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const requested = wireOf(broadcast).requested();
 
 		await requester(pair, publisher, kind);
 		const request = await requested;
 		if (!request) throw new Error("the publisher never asked for the track");
-		expect(demand.used.peek()).toBe(true);
 
 		pair.server.close();
-		expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
+		// The handler still gets an open track, and the answer lets it go.
+		const producer = request.accept({ timescale: Timescale.MILLI });
+		expect(await settlesWithin(Promise.resolve(producer.closed), 1000)).toBe(true);
 
-		request.reject();
 		publisher.close();
 		broadcast.close();
 		origin.close();
@@ -355,9 +379,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
-		const demand = broadcast.demand();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		// Answered by hand, after the first TRACK stream has left.
 		const requested = wireOf(broadcast).requested();
 
@@ -365,21 +389,50 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const request = await requested;
 		if (!request) throw new Error("the publisher never asked for the track");
 		first.writer.reset(new Error("gone"));
-		expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
 
 		// The next TRACK stream joins the request still waiting on the application.
 		const second = await requester(pair, publisher, "TRACK");
-		expect(demand.used.peek()).toBe(true);
 		expect(await settlesWithin(wireOf(broadcast).requested(), 50)).toBe(false);
-		request.accept({ timescale: Timescale.MILLI });
+		const producer = request.accept({ timescale: Timescale.MILLI });
 		await TrackInfo.decode(second.reader, version);
-		expect(await settlesWithin(demand.unused(), 50)).toBe(false);
+		expect(await settlesWithin(Promise.resolve(producer.closed), 50)).toBe(false);
 
 		second.writer.close();
-		expect(await settlesWithin(demand.unused(), 1000)).toBe(true);
+		expect(await settlesWithin(Promise.resolve(producer.closed), 1000)).toBe(true);
 
 		publisher.close();
 		broadcast.close();
+		origin.close();
+	});
+
+	// An unchecked track's timestamps go out as received, so TRACK_INFO declares its own scale.
+	test("an unchecked track is served with its timescale", async () => {
+		const pair = createMockTransportPair(ALPN_05);
+		const origin = new OriginProducer();
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
+		const serving = (async () => {
+			for (;;) {
+				const request = await wireOf(broadcast).requested();
+				if (!request) return;
+				request.accept({ timescale: Timescale.MICRO, unchecked: true });
+			}
+		})();
+
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("the publisher never accepted the TRACK stream");
+		void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
+
+		const info = await TrackInfo.decode(client.reader, version);
+		expect(info.timescale).toBe(Timescale.MICRO);
+
+		client.writer.close();
+		publisher.close();
+		broadcast.close();
+		await serving;
 		origin.close();
 	});
 });

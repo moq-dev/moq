@@ -4,7 +4,7 @@
 //! runtime and the frame crossing worker threads through the shared origin.
 //!
 //! Linux-only like the mode itself. Unsupported local kernels skip loudly;
-//! MOQ_STRICT makes CI refuse them.
+//! CI_STRICT makes CI refuse them.
 #![cfg(all(target_os = "linux", feature = "_uring"))]
 
 use std::net::SocketAddr;
@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
+
+use crate::logs::Logs;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKERS: u16 = 2;
@@ -22,10 +24,10 @@ fn timed() -> moq_net::track::Info {
 }
 
 /// Whether this kernel can run the io_uring workers at all.
-fn supported() -> bool {
+pub(crate) fn supported() -> bool {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => true,
-		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring relay test: {reason}");
 			false
 		}
@@ -87,15 +89,23 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 }
 
 fn client() -> moq_tokio::Client {
+	offering(Vec::new())
+}
+
+/// A one-shot client offering only `version` (every version when empty).
+fn offering(version: Vec<moq_net::Version>) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config.version = version;
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connection {
-	tokio::time::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
+	kio::clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed")
@@ -114,12 +124,17 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 
 	// The stock loop serves everything: the uring workers own QUIC, the shared
 	// runtime owns auth and supervision.
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	// A WebTransport publisher (https, the browser path)...
 	let wt_url: url::Url = format!("https://127.0.0.1:{port}/uring").parse().expect("parse url");
@@ -149,13 +164,13 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	}
 
 	for (index, (_connection, consumer, announced)) in subscribers.iter_mut().enumerate() {
-		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(announced))
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(announced))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active, "expected announce, got retraction");
-		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+		let broadcast = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
 			.expect("announced broadcast resolves");
@@ -166,12 +181,12 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 			.subscribe(None)
 			.await
 			.expect("subscribe");
-		let mut group = tokio::time::timeout(TIMEOUT, subscription.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} recv_group timeout"))
 			.expect("recv_group failed")
 			.expect("track closed prematurely");
-		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} read_frame timeout"))
 			.expect("read_frame failed")
@@ -190,9 +205,102 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	let _ = running.await;
 }
 
+/// The workers serve every version the listener lists, not only moq-lite on
+/// its own ALPN: moq-transport, both on its own ALPN and over the bidi SETUP
+/// exchange, and the SETUP-negotiated moq-lite versions. A moq-transport
+/// publisher feeds a subscriber per version over raw QUIC and WebTransport,
+/// each of which must negotiate exactly the version it was pinned to.
+#[tokio::test]
+async fn uring_workers_serve_every_configured_version() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+
+	let pinned = |version: &str| {
+		let version: moq_net::Version = version.parse().expect("known version");
+		(version, offering(vec![version]))
+	};
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
+	let port = relay.addr().expect("workers bound an address").port();
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
+
+	let origin = moq_tokio::origin::spawn();
+	let broadcast = origin.create_broadcast("test").expect("create broadcast");
+	broadcast.announce(Default::default()).expect("announce broadcast");
+	let track = broadcast.create_track("video", timed()).expect("create track");
+	let mut group = track.append_group().expect("append group");
+	group
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.expect("write frame");
+	group.finish().expect("finish group");
+
+	let raw = format!("moql://127.0.0.1:{port}/versions");
+	let (version, client) = pinned("moq-transport-22");
+	let publisher = connect(client.with_publisher(&origin), raw.parse().unwrap()).await;
+	assert_eq!(publisher.version(), Some(version), "publisher version");
+
+	// moq-lite-02 negotiates in the SETUP; moq-transport-22 reads its SETUP off a
+	// uni stream.
+	for name in ["moq-transport-22", "moq-lite-02"] {
+		for scheme in ["moql", "https"] {
+			let url: url::Url = format!("{scheme}://127.0.0.1:{port}/versions").parse().unwrap();
+			let (version, client) = pinned(name);
+			let origin = moq_tokio::origin::spawn();
+			let consumer = origin.consume();
+			let mut announced = consumer.announced();
+			let connection = connect(client.with_subscriber(origin), url).await;
+			assert_eq!(connection.version(), Some(version), "{scheme} {name}");
+
+			let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
+				.await
+				.unwrap_or_else(|_| panic!("{scheme} {name}: announcement timeout"))
+				.expect("origin closed");
+			// moq-lite-02 has no in-band path, so a raw QUIC session sits at the root.
+			let path = update.prefix.as_str().to_owned();
+			assert!(active && path.ends_with("test"), "{scheme} {name}: announced {path}");
+			let broadcast = kio::clock::timeout(TIMEOUT, consumer.request(&path, None))
+				.await
+				.unwrap_or_else(|_| panic!("{scheme} {name}: request timeout"))
+				.expect("announced broadcast resolves");
+			let mut subscription = broadcast
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.expect("subscribe");
+			let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
+				.await
+				.unwrap_or_else(|_| panic!("{scheme} {name}: recv_group timeout"))
+				.expect("recv_group failed")
+				.expect("track closed prematurely");
+			let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
+				.await
+				.unwrap_or_else(|_| panic!("{scheme} {name}: read_frame timeout"))
+				.expect("read_frame failed")
+				.expect("group closed prematurely");
+			assert_eq!(&frame.payload[..], b"hello", "{scheme} {name}");
+		}
+	}
+
+	assert!(!running.is_finished(), "the relay stopped while serving");
+	drop(publisher);
+	running.abort();
+	let _ = running.await;
+}
+
 /// A session the workers accept reports its peer address, the listener's
 /// address, and the name the client dialed, as the tokio listener does: the
-/// SNI on raw QUIC and WebTransport alike.
+/// SNI on raw QUIC and WebTransport alike, and none for an IP-literal dial, which
+/// sends no SNI, rather than the WebTransport CONNECT host.
 #[tokio::test]
 async fn uring_workers_report_link_facts() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -202,34 +310,44 @@ async fn uring_workers_report_link_facts() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
 	let local = relay.addr().expect("bound address");
 	let port = local.port();
 	let sessions = relay.sessions().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let mut connections = Vec::new();
 	for scheme in ["moql", "https"] {
-		let url: url::Url = format!("{scheme}://localhost:{port}/link").parse().expect("parse url");
-		connections.push(connect(client(), url).await);
+		for host in ["localhost", "127.0.0.1"] {
+			let url: url::Url = format!("{scheme}://{host}:{port}/link/{host}")
+				.parse()
+				.expect("parse url");
+			connections.push(connect(client(), url).await);
+		}
 	}
 
 	// A client can see its session established before the relay lists it.
-	let deadline = std::time::Instant::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	let views = loop {
 		let views = sessions.list(&Default::default());
-		if views.len() == 2 {
+		if views.len() == 4 {
 			break views;
 		}
-		assert!(std::time::Instant::now() < deadline, "expected 2 sessions: {views:?}");
-		tokio::time::sleep(Duration::from_millis(25)).await;
+		assert!(kio::clock::now() < deadline, "expected 4 sessions: {views:?}");
+		kio::clock::sleep(Duration::from_millis(25)).await;
 	};
 	for view in &views {
 		let remote = view.remote.expect("peer address");
 		assert!(remote.ip().is_loopback() && remote.port() != 0, "peer address {remote}");
 		assert_ne!(remote, local, "the peer is not the listener");
 		assert_eq!(view.local, Some(local), "listener address");
-		assert_eq!(view.server_name.as_deref(), Some("localhost"), "dialed name");
+		let sni = view.path.ends_with("/localhost").then_some("localhost");
+		assert_eq!(view.server_name.as_deref(), sni, "dialed name of {}", view.path);
 	}
 
 	drop(connections);
@@ -242,9 +360,9 @@ async fn uring_workers_report_link_facts() {
 /// are each sent a GOAWAY and leave, and `run` then returns with the worker
 /// threads joined and the port free.
 ///
-/// What an arrival is told is left of the window only reaches the wire on
-/// moq-transport-17+, which the workers do not speak; `shutdown_signal.rs`
-/// reads it through the shared runtime, whose supervision this path shares.
+/// Run once offering every version, and once pinned to moq-transport, whose
+/// GOAWAY carries the deadline on the wire: the established session is told
+/// the whole window, and the arrival only what is left of it.
 #[tokio::test]
 async fn uring_workers_drain_on_the_trigger() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -252,24 +370,36 @@ async fn uring_workers_drain_on_the_trigger() {
 		return;
 	}
 
+	drain_on_the_trigger(None).await;
+	drain_on_the_trigger(Some("moq-transport-18".parse().expect("known version"))).await;
+}
+
+/// One relay drained under [`uring_workers_drain_on_the_trigger`], its two
+/// sessions offering only `version`, or every version when `None`.
+async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	const DRAIN: Duration = Duration::from_secs(2);
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 
 	let mut config = uring_config(&cert, &key);
-	config.drain_timeout = DRAIN;
+	config.drain_timeout = Some((DRAIN).into());
 	config.auth.public.clear();
 	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let mut admissions = relay.admissions().expect("embedded admission");
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
-	// One-shot (see `client`), so a session leaves on its GOAWAY rather than
+	// One-shot (see `offering`), so a session leaves on its GOAWAY rather than
 	// migrating, and closing cleanly shows it was one.
-	let client = client();
+	let client = offering(version.into_iter().collect());
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
+	let label = version.map_or("every version", |version| version.as_str());
+	// Only moq-transport puts the deadline on the wire.
+	let ietf = matches!(version, Some(moq_net::Version::Ietf(_)));
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");
@@ -277,40 +407,84 @@ async fn uring_workers_drain_on_the_trigger() {
 	let (_first_lease, first_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	first.grant(first_consumer);
 	let established = connecting.await.expect("client task");
+	if version.is_some() {
+		assert_eq!(established.version(), version, "{label}: negotiated version");
+	}
 
 	// Hold the next real connection at authentication. Its admission keeps the
 	// drain open even after the first session leaves, without an unrelated peer.
 	let arriving = tokio::spawn(connect(client, url));
 	let pending = admissions.next().await.expect("pending admission");
+	// The relay fixes its deadline inside `start`, so these bracket it: what is
+	// left of each bounds what the relay tells the arrival from below and above.
+	let earliest = kio::clock::now() + DRAIN;
 	trigger.start();
-	let goaway = tokio::time::timeout(TIMEOUT, established.draining().expect("connected").recv())
+	let deadline = kio::clock::now() + DRAIN;
+	let draining = established.draining().expect("connected");
+	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
-		.expect("no GOAWAY after the trigger")
+		.unwrap_or_else(|_| panic!("{label}: no GOAWAY after the trigger"))
 		.expect("session closed without a GOAWAY");
-	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
-	tokio::time::timeout(TIMEOUT, established.closed())
+	assert_eq!(goaway.uri(), "", "{label}: expected a reconnect-to-me GOAWAY");
+	if ietf {
+		let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
+		assert!(
+			timeout > DRAIN / 2 && timeout <= DRAIN,
+			"{label}: an established session gets the whole window, got {timeout:?}"
+		);
+	}
+	kio::clock::timeout(TIMEOUT, established.closed())
 		.await
-		.expect("the drained session never closed")
+		.unwrap_or_else(|_| panic!("{label}: the drained session never closed"))
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
+	if ietf {
+		// Admit the arrival halfway into the window, so what is left of it is
+		// distinguishable from a fresh one. Measured from the deadline, not from
+		// the first session leaving, so a slow close cannot push the admission
+		// past the deadline (where the relay rejects it).
+		kio::clock::sleep_until(deadline - DRAIN / 2).await;
+	}
 	let (_arrival_lease, arrival_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+	let granted = kio::clock::now();
 	pending.grant(arrival_consumer);
 	let arrival = arriving.await.expect("arrival task");
-	let goaway = tokio::time::timeout(Duration::from_secs(1), arrival.draining().expect("connected").recv())
+	let draining = arrival.draining().expect("connected");
+	let goaway = kio::clock::timeout(
+		Duration::from_secs(1),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
+	)
+	.await
+	.unwrap_or_else(|_| panic!("{label}: an arrival mid-drain was not sent a GOAWAY"))
+	.expect("arrival closed without a GOAWAY");
+	assert_eq!(goaway.uri(), "", "{label}: expected a reconnect-to-me GOAWAY");
+	if ietf {
+		// Only what is left of the window, not a fresh one that would outlive the
+		// relay. The wire rounds up to whole milliseconds.
+		let left = deadline.saturating_duration_since(granted) + Duration::from_millis(1);
+		let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
+		assert!(
+			timeout <= left,
+			"{label}: an arrival mid-drain got {timeout:?}, past the {left:?} left of the window"
+		);
+		// Nor less: the relay read its clock no later than now, and the wire
+		// rounds up, so the remaining window is a floor.
+		let least = earliest.saturating_duration_since(kio::clock::now());
+		assert!(
+			timeout >= least,
+			"{label}: an arrival mid-drain got {timeout:?}, short of the {least:?} left of the window"
+		);
+	}
+	kio::clock::timeout(TIMEOUT, arrival.closed())
 		.await
-		.expect("an arrival mid-drain was not sent a GOAWAY")
-		.expect("arrival closed without a GOAWAY");
-	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
-	tokio::time::timeout(TIMEOUT, arrival.closed())
-		.await
-		.expect("the arrival never closed")
+		.unwrap_or_else(|_| panic!("{label}: the arrival never closed"))
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
 	// `run` joins the worker threads before returning, so returning at all is
 	// the clean join; the rebind proves every worker let go of the port.
-	tokio::time::timeout(TIMEOUT, running)
+	kio::clock::timeout(TIMEOUT, running)
 		.await
-		.expect("run did not return after the drain window")
+		.unwrap_or_else(|_| panic!("{label}: run did not return after the drain window"))
 		.expect("run panicked")
 		.expect("run returned an error after the drain");
 	std::net::UdpSocket::bind(("127.0.0.1", port)).expect("a worker still holds the QUIC port");
@@ -353,8 +527,10 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 		let addr = listener.local_addr().expect("local addr");
 		let routes = relay.web().routes();
 		let serving = tokio::spawn(async move { axum::serve(listener, routes).await });
+		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
-		let result = tokio::time::timeout(TIMEOUT, async {
+		ready.wait().await.expect("relay ready");
+		let result = kio::clock::timeout(TIMEOUT, async {
 			for rotated in [false, true] {
 				if rotated {
 					let replacement = tempfile::tempdir_in(dir.path()).expect("replacement directory");
@@ -373,9 +549,11 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 				for scheme in ["moql", "https"] {
 					let mut dial = moq_tokio::connect::Config::default();
 					dial.tls.fingerprint = vec![expected.clone()];
-					dial.once = Some(true);
 					dial.bind = Some("127.0.0.1:0".parse().unwrap());
-					let client = dial.init(Default::default()).expect("pinned client");
+					let client = dial
+						.init(Default::default())
+						.expect("pinned client")
+						.with_reconnect(false);
 					let url = format!("{scheme}://localhost:{port}/rotation").parse().unwrap();
 					let connection = connect(client, url).await;
 					drop(connection);
@@ -384,7 +562,7 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 		})
 		.await;
 		trigger.start();
-		tokio::time::timeout(TIMEOUT, running)
+		kio::clock::timeout(TIMEOUT, running)
 			.await
 			.expect("relay shutdown")
 			.expect("relay task")
@@ -420,17 +598,18 @@ async fn workers_share_a_generated_identity() {
 		let addr = listener.local_addr().unwrap();
 		let routes = relay.web().routes();
 		let serving = tokio::spawn(async move { axum::serve(listener, routes).await });
+		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 		let fingerprint = http_get(addr, "/certificate.sha256").await;
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.fingerprint = vec![fingerprint];
-		dial.once = Some(true);
 		dial.bind = Some("127.0.0.1:0".parse().unwrap());
 		let url = format!("https://localhost:{port}/generated").parse().unwrap();
-		let connection = connect(dial.init(Default::default()).unwrap(), url).await;
+		let connection = connect(dial.init(Default::default()).unwrap().with_reconnect(false), url).await;
 		drop(connection);
 		trigger.start();
-		tokio::time::timeout(TIMEOUT, running)
+		kio::clock::timeout(TIMEOUT, running)
 			.await
 			.expect("relay shutdown")
 			.expect("relay task")
@@ -461,18 +640,21 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	config.auth.url = Some(spawn_auth_server(mtls_only()).await);
 	config.listen.tls.root = vec![root];
 
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let client = || {
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.insecure = Some(true);
-		dial.once = Some(true);
 		dial.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 		dial.tls.cert = Some(client_cert.clone());
 		dial.tls.key = Some(client_key.clone());
-		dial.init(Default::default()).expect("client init")
+		dial.init(Default::default())
+			.expect("client init")
+			.with_reconnect(false)
 	};
 
 	// The server grants a certificate everything, so one certificate covers
@@ -496,13 +678,13 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
+	let announced = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -512,12 +694,12 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut group = tokio::time::timeout(TIMEOUT, subscription.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -552,9 +734,11 @@ async fn uring_workers_write_qlog_traces() {
 	std::fs::create_dir(&traces).expect("create qlog dir");
 	let mut config = uring_config(&cert, &key);
 	config.quic.qlog = Some(traces.clone());
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	// A real session, so a trace covers a handshake and application data
 	// rather than a connection that only ever exchanged Initials.
@@ -574,7 +758,7 @@ async fn uring_workers_write_qlog_traces() {
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
-	let (_, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+	let (_, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -590,7 +774,7 @@ async fn uring_workers_write_qlog_traces() {
 	running.abort();
 	let _ = running.await;
 
-	let written = tokio::time::timeout(TIMEOUT, async {
+	let written = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let files: Vec<_> = std::fs::read_dir(&traces)
 				.expect("read qlog dir")
@@ -600,7 +784,7 @@ async fn uring_workers_write_qlog_traces() {
 			if !files.is_empty() {
 				return files;
 			}
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	})
 	.await
@@ -637,10 +821,12 @@ async fn uring_refusals_reach_metrics() {
 	let mut config = uring_config(&cert, &key);
 	config.auth.public = vec!["anon/**".parse().unwrap()];
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let internal = relay.internal().addr().expect("internal listener bound");
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	// `/rooms` is outside the public rules. A client may finish connecting before
 	// the verdict lands, so a session that closes promptly counts as refused.
@@ -650,14 +836,14 @@ async fn uring_refusals_reach_metrics() {
 		(2, format!("moql://127.0.0.1:{port}/rooms")),
 	] {
 		let url: url::Url = url.parse().expect("parse url");
-		let connected = tokio::time::timeout(
+		let connected = kio::clock::timeout(
 			TIMEOUT,
 			client().with_reconnect(false).connect(url.clone()).established(),
 		)
 		.await
 		.expect("connect timeout");
 		if let Ok(connection) = connected {
-			let _ = tokio::time::timeout(TIMEOUT, connection.closed())
+			let _ = kio::clock::timeout(TIMEOUT, connection.closed())
 				.await
 				.expect("the workers kept a session they should refuse");
 		}
@@ -705,9 +891,105 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
+}
+
+/// A moq-transport SETUP credential reaches the decider on both ring transports.
+#[cfg(feature = "quic")]
+#[tokio::test]
+async fn uring_forwards_the_setup_token() {
+	use moq_tokio::quic::{driver, web};
+
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let mut config = uring_config(&cert, &key);
+	config.auth.public.clear();
+	let mut relay = Relay::load(config).await.unwrap().with_signals(false);
+	let addr = relay.addr().unwrap();
+	let mut admissions = relay.admissions().expect("embedded auth");
+	let token = moq_auth::Token {
+		kind: moq_auth::Token::OUT_OF_BAND,
+		value: vec![0x00, 0xff, 0x80, b'x'],
+	};
+	let expected = token.clone();
+	let deciding = tokio::spawn(async move {
+		for transport in [moq_auth::Transport::Quic, moq_auth::Transport::WebTransport] {
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			assert_eq!(admission.request.token, Some(expected.clone()));
+			assert_eq!(admission.request.transport, transport);
+			if transport == moq_auth::Transport::WebTransport {
+				assert_eq!(admission.request.path, "/room");
+				assert_eq!(admission.request.query.as_deref(), Some("source=setup"));
+			} else {
+				assert_eq!(admission.request.path, "/");
+				assert!(admission.request.query.is_none());
+			}
+			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
+		}
+	});
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	let tls = config.tls.build().unwrap();
+	let client =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap()).unwrap();
+	for webtransport in [false, true] {
+		let mut tls = tls.clone();
+		tls.alpn_protocols = vec![if webtransport {
+			b"h3".to_vec()
+		} else {
+			b"moqt-18".to_vec()
+		}];
+		let conn = client
+			.connect(
+				&driver::client::Config::new(std::sync::Arc::new(tls)),
+				addr,
+				"localhost",
+			)
+			.unwrap()
+			.await
+			.unwrap();
+		let session = if webtransport {
+			let url: url::Url = format!("https://{addr}/room?source=setup").parse().unwrap();
+			let request = web::proto::ConnectRequest::new(url).with_protocol("moqt-18".to_string());
+			web::Session::connect(conn, request).await.unwrap()
+		} else {
+			web::Session::raw(conn)
+		};
+		// Draft-18 SETUP (0x2F00): AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
+		let encoded = [&[0x03, 0x00][..], &token.value].concat();
+		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
+		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
+		let mut send = session.open_uni(Default::default()).await.unwrap();
+		send.write_all(&setup[..]).await.unwrap();
+		let mut recv = kio::clock::timeout(TIMEOUT, session.accept_uni())
+			.await
+			.unwrap()
+			.unwrap();
+		let mut reply = [0u8; 1];
+		assert_eq!(
+			kio::clock::timeout(TIMEOUT, recv.read(&mut &mut reply[..]))
+				.await
+				.unwrap()
+				.unwrap(),
+			Some(1),
+			"SETUP"
+		);
+	}
+	deciding.await.unwrap();
+	client.close(driver::VarInt::from_u32(0), "test complete").await;
+	running.abort();
+	let _ = running.await;
 }
 
 /// The embedded auth decider receives the same transport facts as the Tokio path.
@@ -721,13 +1003,13 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	let (cert, key) = certificate(dir.path());
 	let mut config = uring_config(&cert, &key);
 	config.auth.public.clear();
-	let mut relay = Relay::load(config).await.unwrap();
+	let mut relay = Relay::load(config).await.unwrap().with_signals(false);
 	let port = relay.addr().unwrap().port();
 	let mut admissions = relay.admissions().expect("embedded auth");
 	let deciding = tokio::spawn(async move {
 		let mut leases = Vec::new();
 		for expected in ["quic", "webtransport"] {
-			let admission = tokio::time::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
 			let actual = admission.request.transport.as_str();
 			assert!(
 				admission
@@ -745,7 +1027,9 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 		}
 		leases
 	});
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 	let mut connections = Vec::new();
 	for scheme in ["moql", "https"] {
 		let url = format!("{scheme}://127.0.0.1:{port}/transport").parse().unwrap();
@@ -757,115 +1041,329 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	let _ = running.await;
 }
 
+/// `listen.extensions` reaches the workers' SETUP, as it does the tokio listener's.
+/// A moq-transport client's connection token reaches the decider while the relay
+/// offers MoQ Auth, and is refused as unsupported once it is turned off, since no
+/// request would carry it.
+#[tokio::test]
+async fn uring_workers_offer_the_configured_extensions() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+	let grant = || moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all.clone()));
+	for offered in [true, false] {
+		let mut config = uring_config(&cert, &key);
+		config.auth.public.clear();
+		config.listen.extensions.auth = offered;
+		let mut relay = Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().expect("embedded auth");
+		let ready = relay.ready();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
+
+		let mut dial = moq_tokio::connect::Config::default();
+		dial.tls.insecure = Some(true);
+		dial.bind = Some("127.0.0.1:0".parse().unwrap());
+		dial.version = vec!["moq-transport-22".parse().unwrap()];
+		let client = dial.init(Default::default()).unwrap();
+		let url = format!("moql://127.0.0.1:{port}/extensions").parse().unwrap();
+		let (connection, ()) = tokio::join!(connect(client, url), async {
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			assert!(!admission.attached(), "offered {offered}: the session arrived attached");
+			admission.grant(grant());
+		});
+
+		let auth = connection.auth();
+		let presented = kio::clock::timeout(TIMEOUT, auth.add("token"));
+		match offered {
+			true => {
+				let (token, ()) = tokio::join!(presented, async {
+					let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+					assert!(admission.attached(), "an AUTH token arrived as a new session");
+					admission.grant(grant());
+				});
+				let (_, answer) = token
+					.expect("the token was never answered")
+					.expect("the token was refused");
+				assert_eq!(answer, moq_net::auth::Answer::Granted);
+			}
+			false => {
+				// Without MoQ Auth no AUTH stream carries it: only a request naming it does.
+				let (_, answer) = presented
+					.await
+					.expect("the token was never answered")
+					.expect("a moq-transport request can carry the token");
+				assert_eq!(answer, moq_net::auth::Answer::Requests, "a token without MoQ Auth");
+			}
+		}
+
+		drop(connection);
+		running.abort();
+		let _ = running.await;
+	}
+}
+
 /// `listen.timeout` bounds every handshake phase from the first packet: TLS,
 /// HTTP/3 before CONNECT, and MoQ SETUP over raw QUIC and WebTransport. Each
 /// phase closes in its own error space.
+///
+/// The relay and the client run on a manual clock, so only the test passes time.
+/// Both select no congestion control, so neither paces: a pacer waits on time
+/// passing.
 #[cfg(feature = "quic")]
-#[tokio::test]
-async fn uring_workers_bound_stalled_handshakes() {
+#[test]
+fn uring_workers_bound_stalled_handshakes() {
 	use moq_tokio::quic::{driver, web};
 	use web_transport_trait::Error as _;
+
+	const LISTEN: Duration = Duration::from_millis(200);
 
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	if !supported() {
 		return;
 	}
-	let dir = tempfile::tempdir().expect("tempdir");
-	let (cert, key) = certificate(dir.path());
-	let mut config = uring_config(&cert, &key);
-	config.listen.timeout = Some(Duration::from_millis(200));
-	let relay = Relay::load(config).await.expect("load relay");
-	let port = relay.addr().expect("workers bound an address").port();
-	let addr = SocketAddr::from(([127, 0, 0, 1], port));
-	let running = tokio::spawn(relay.run());
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.expect("runtime");
+	let clock = kio::clock::Manual::new().install(runtime.handle());
+	runtime.block_on(async move {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let (cert, key) = certificate(dir.path());
+		let mut config = uring_config(&cert, &key);
+		config.listen.timeout = Some(LISTEN.into());
+		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::None);
+		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+		let port = relay.addr().expect("workers bound an address").port();
+		let addr = SocketAddr::from(([127, 0, 0, 1], port));
+		let ready = relay.ready();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 
-	let mut config = moq_tokio::connect::Config::default();
-	config.tls.insecure = Some(true);
-	let tls = config.tls.build().expect("tls config");
-	let crypto = |alpn: &[u8]| {
-		let mut tls = tls.clone();
-		tls.alpn_protocols = vec![alpn.to_vec()];
-		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
-		driver::ClientConfig::new(std::sync::Arc::new(crypto))
-	};
-	let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client");
+		let mut config = moq_tokio::connect::Config::default();
+		config.tls.insecure = Some(true);
+		let tls = config.tls.build().expect("tls config");
+		let crypto = |alpn: &[u8]| {
+			let mut tls = tls.clone();
+			tls.alpn_protocols = vec![alpn.to_vec()];
+			let mut transport = driver::transport::Config::default();
+			transport.congestion = std::sync::Arc::new(moq_congestion::Unlimited);
+			let mut config = driver::client::Config::new(std::sync::Arc::new(tls));
+			config.transport = transport;
+			config
+		};
+		let client =
+			driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+				.expect("client");
 
-	// TLS: the relay never hears more than the ClientHello, so only its own
-	// deadline can end the handshake before the idle timeout does.
-	let hop = stall_after_hello(addr).await;
-	let stalled = client.connect_with(crypto(b"moq-lite-06"), hop, "localhost").unwrap();
-	let error = tokio::time::timeout(TIMEOUT, async {
-		match stalled.await {
-			Ok(conn) => conn.closed().await,
-			Err(err) => err,
-		}
-	})
-	.await
-	.expect("listener did not bound the QUIC handshake");
-	assert!(
-		!matches!(error, driver::ConnectionError::TimedOut),
-		"the relay must close a stalled QUIC handshake: {error}"
-	);
-
-	// `h3` stalls before CONNECT, where only HTTP/3 codes apply.
-	const H3_GENERAL_PROTOCOL_ERROR: u32 = 0x0101;
-	let timeout = moq_net::SessionError::Timeout.to_code();
-	for (scheme, code) in [("moql", timeout), ("https", timeout), ("h3", H3_GENERAL_PROTOCOL_ERROR)] {
-		let session = tokio::time::timeout(TIMEOUT, async {
-			let alpn: &[u8] = if scheme == "moql" { b"moq-lite-06" } else { b"h3" };
-			let conn = client
-				.connect_with(crypto(alpn), addr, "localhost")
-				.unwrap()
-				.await
-				.unwrap();
-			if scheme == "https" {
-				let url: url::Url = format!("https://{addr}/stalled").parse().unwrap();
-				let request = web::proto::ConnectRequest::new(url).with_protocol("moq-lite-06".to_string());
-				web::Session::connect(conn, request).await.unwrap()
-			} else {
-				web::Session::raw(conn)
+		// TLS: the relay never hears more than the ClientHello. Once it answers, its
+		// deadline is armed, and passing it is the only way the handshake can end:
+		// the client's own timeouts are far beyond the time this test lets pass.
+		let (hop, answered) = stall_after_hello(addr).await;
+		let stalled = client.connect(&crypto(b"moq-lite-06"), hop, "localhost").unwrap();
+		let stalled = tokio::spawn(async move {
+			match stalled.await {
+				Ok(conn) => conn.closed().await,
+				Err(err) => err,
 			}
-		})
-		.await
-		.expect("transport handshake timeout");
-		let error = tokio::time::timeout(TIMEOUT, session.closed())
-			.await
-			.expect("listener did not enforce its handshake deadline");
-		// The WebTransport wrapper translates its close code back to the MoQ value.
-		assert_eq!(
-			error.session_error().map(|(code, _)| code),
-			Some(code),
-			"{scheme}: {error}"
+		});
+		answered.await.expect("the relay answered the ClientHello");
+		clock.advance(LISTEN);
+		let error = stalled.await.unwrap();
+		assert!(
+			!matches!(error, driver::connection::Error::TimedOut),
+			"the relay must close a stalled QUIC handshake: {error}"
 		);
-	}
-	client.close(driver::VarInt::from_u32(0), b"test complete");
-	client.wait_idle().await;
-	running.abort();
-	let _ = running.await;
+
+		// `h3` stalls before CONNECT, where only HTTP/3 codes apply.
+		const H3_GENERAL_PROTOCOL_ERROR: u32 = 0x0101;
+		let timeout = moq_net::SessionError::Timeout.to_code();
+		for (scheme, code) in [("moql", timeout), ("https", timeout), ("h3", H3_GENERAL_PROTOCOL_ERROR)] {
+			let session = async {
+				let alpn: &[u8] = if scheme == "moql" { b"moq-lite-06" } else { b"h3" };
+				let conn = client.connect(&crypto(alpn), addr, "localhost").unwrap().await.unwrap();
+				// The client is connected once it sends its Finished, but the relay has
+				// left the TLS phase only once it confirms the handshake.
+				while conn.stats().frame_rx.handshake_done == 0 {
+					tokio::task::yield_now().await;
+				}
+				if scheme == "https" {
+					let url: url::Url = format!("https://{addr}/stalled").parse().unwrap();
+					let request = web::proto::ConnectRequest::new(url).with_protocol("moq-lite-06".to_string());
+					web::Session::connect(conn, request).await.unwrap()
+				} else {
+					web::Session::raw(conn)
+				}
+			}
+			.await;
+			// No time passed since the first packet armed the deadline.
+			clock.advance(LISTEN);
+			let error = session.closed().await;
+			// The WebTransport wrapper translates its close code back to the MoQ value.
+			assert_eq!(
+				error.session_error().map(|(code, _)| code),
+				Some(code),
+				"{scheme}: {error}"
+			);
+		}
+		// Not awaited: draining waits on time this clock never passes.
+		drop(client.close(driver::VarInt::from_u32(0), "test complete"));
+		running.abort();
+		let _ = running.await;
+	});
 }
 
 /// A UDP hop to `server` that forwards one client's datagrams until the server
 /// first answers, and every answer back, so the server never sees the client
-/// finish its handshake. Returns the address to dial.
+/// finish its handshake. Returns the address to dial, and a signal for the
+/// server's first answer.
 #[cfg(feature = "quic")]
-async fn stall_after_hello(server: SocketAddr) -> SocketAddr {
+async fn stall_after_hello(server: SocketAddr) -> (SocketAddr, tokio::sync::oneshot::Receiver<()>) {
 	let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind hop");
 	let addr = socket.local_addr().expect("hop address");
+	let (answered_tx, answered) = tokio::sync::oneshot::channel();
 	tokio::spawn(async move {
 		let mut client = None;
-		let mut answered = false;
+		let mut answered = Some(answered_tx);
 		let mut buf = vec![0; usize::from(u16::MAX)];
 		while let Ok((len, from)) = socket.recv_from(&mut buf).await {
 			if from == server {
-				answered = true;
 				if let Some(client) = client {
 					let _ = socket.send_to(&buf[..len], client).await;
 				}
-			} else if !answered {
+				if let Some(answered) = answered.take() {
+					let _ = answered.send(());
+				}
+			} else if answered.is_some() {
 				client = Some(from);
 				let _ = socket.send_to(&buf[..len], server).await;
 			}
 		}
 	});
-	addr
+	(addr, answered)
+}
+
+/// The harness keeps only the connection target, including its span on worker and shared tasks.
+#[tokio::test]
+async fn uring_sessions_log_their_close_under_a_connection_span() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let logs = Logs::default();
+	let _logging = logs.capture();
+	let parent = tracing::info_span!(target: "moq_relay::connection", "embedder");
+	let _parent = parent.enter();
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.unwrap()
+		.with_signals(false);
+	let port = relay.addr().unwrap().port();
+	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
+	let mut connections = Vec::new();
+	for (id, scheme) in ["moql", "https"].into_iter().enumerate() {
+		let url = format!("{scheme}://127.0.0.1:{port}/logs").parse().unwrap();
+		connections.push(connect(client(), url).await);
+		kio::clock::timeout(TIMEOUT, logs.wait_for(&format!("conn{{id={id} ")))
+			.await
+			.expect("negotiated log missing");
+	}
+	// Both sessions are still open when the drain starts, so the workers stop
+	// right after they leave: their closes must not depend on a stopped worker.
+	trigger.start();
+	for connection in connections {
+		let _ = connection.close().await;
+	}
+	kio::clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
+	for id in 0..2 {
+		kio::clock::timeout(TIMEOUT, logs.wait_for(&format!("connection closed id={id}")))
+			.await
+			.unwrap_or_else(|_| panic!("conn {id} never logged its close: {}", logs.text()));
+	}
+	let text = logs.text();
+	let negotiated: Vec<_> = text.lines().filter(|line| line.contains("negotiated")).collect();
+	let closed: Vec<_> = text.lines().filter(|line| line.contains("connection closed")).collect();
+	assert_eq!(negotiated.len(), 2, "{text}");
+	assert_eq!(closed.len(), 2, "{text}");
+	assert!(
+		negotiated
+			.iter()
+			.chain(&closed)
+			.all(|line| line.contains("embedder:conn{")),
+		"worker and shared-runtime logs must keep their embedder parent: {text}"
+	);
+	for id in 0..2 {
+		for lines in [&negotiated, &closed] {
+			assert!(
+				lines.iter().any(|line| line.contains(&format!("conn{{id={id} "))),
+				"missing conn {id}: {text}"
+			);
+		}
+	}
+}
+
+/// A ring refused at worker startup reaches a `Ready` waiter with the actionable error.
+#[tokio::test]
+async fn uring_startup_reports_the_memlock_limit() {
+	// Resource limits belong to the process, so isolate even under libtest.
+	if !test_env::Env::default().set("MOQ_TEST_MEMLOCK", "0").isolate() {
+		return;
+	}
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	// CAP_IPC_LOCK, which root holds, exempts io_uring from the limit.
+	let status = std::fs::read_to_string("/proc/self/status").expect("process status");
+	let effective = status
+		.lines()
+		.find_map(|line| line.strip_prefix("CapEff:"))
+		.expect("effective capabilities");
+	let effective = u64::from_str_radix(effective.trim(), 16).expect("capability mask");
+	const CAP_IPC_LOCK: u32 = 14;
+	if effective & (1 << CAP_IPC_LOCK) != 0 {
+		eprintln!("skipping the memlock test: CAP_IPC_LOCK lifts the limit");
+		return;
+	}
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
+	let mut limit = libc::rlimit {
+		rlim_cur: 0,
+		rlim_max: 0,
+	};
+	// SAFETY: valid out-pointer in an isolated test process.
+	assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) }, 0);
+	limit.rlim_cur = 0;
+	// SAFETY: valid limit in an isolated test process.
+	assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) }, 0);
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	let error = ready.wait().await.expect_err("a worker needs locked memory");
+	let message = format!("{error:#}");
+	for expected in [
+		"io_uring worker 0 failed to start",
+		"RLIMIT_MEMLOCK",
+		"ulimit -l",
+		"LimitMEMLOCK=",
+	] {
+		assert!(message.contains(expected), "{message}");
+	}
+	running
+		.await
+		.expect("join relay")
+		.expect_err("run fails with the waiter");
 }

@@ -1,8 +1,7 @@
 import * as z from "zod/mini";
-import { CompressionSchema } from "./compression";
 import { u53Schema } from "./integers";
 import { ModeSchema } from "./mode";
-import { RelativeBroadcastSchema } from "./path";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path";
 
 /**
  * Schema for a single JSON track: application data published as a live JSON document or log.
@@ -11,22 +10,24 @@ import { RelativeBroadcastSchema } from "./path";
  * the application.
  *
  * A *loose* object: fields this build doesn't recognize pass through untouched, so an entry using
- * a future mode or compression round-trips rather than losing the fields that describe it.
+ * a future mode round-trips rather than losing the fields that describe it.
  */
 export const JsonConfigSchema = z.looseObject({
 	// Optional reference to another broadcast that publishes this track, expressed
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The instance of the stream the reference names, when known. Absent accepts whichever stream
+	// resolves first. A route of another instance fails the entry; a route over a wire that
+	// carries no instance has one its session minted, which proves nothing, so there it is best
+	// effort. Without `broadcast`, it names the catalog's own stream.
+	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
 
 	// Whether the track is a latest-value document or an append log. Always stated.
 	mode: ModeSchema,
-
-	// The compression applied to each frame, or absent when they are plaintext.
-	compression: z.optional(CompressionSchema),
 
 	// An optional identifier for the shape of each value, typically a JSON Schema URL.
 	// Purely descriptive: a consumer that doesn't recognize it can still read the track.

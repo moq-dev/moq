@@ -41,6 +41,7 @@ export class Consumer<T> {
 
 	#group?: Moq.Group.Consumer;
 	// Whether a read is in flight, so a second concurrent one is refused rather than served wrong.
+	// Covers JSON validation too, so a schema cannot reenter this consumer.
 	#reading = false;
 	// Whether the log's one group has been taken, so a second is a rolled log rather than the first.
 	#taken = false;
@@ -52,7 +53,7 @@ export class Consumer<T> {
 
 	constructor(config: Consumer.Config<T>) {
 		this.#track = config.track;
-		this.#decoder = new Decoder(config);
+		this.#decoder = new Decoder({ schema: config.schema });
 	}
 
 	/** Get the next record with its frame's timestamp, or `undefined` once the track ends. */
@@ -79,8 +80,6 @@ export class Consumer<T> {
 				}
 				this.#pending = undefined;
 				this.#taken = true;
-				// Each group is its own compressed stream, so the window starts cold.
-				this.#decoder.reset();
 				this.#group = group;
 			}
 
@@ -142,6 +141,7 @@ export class Consumer<T> {
 	}
 }
 
+/** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Stream consumer options, including the source track. */
 	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Subscriber };

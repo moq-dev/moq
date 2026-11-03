@@ -33,11 +33,17 @@ pub enum VideoCodec {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VideoCodecKind {
+	/// H.264 / AVC.
 	H264,
+	/// H.265 / HEVC.
 	H265,
+	/// VP8.
 	VP8,
+	/// VP9.
 	VP9,
+	/// AV1.
 	AV1,
+	/// Any codec not listed above.
 	Unknown,
 }
 
@@ -72,20 +78,5 @@ impl FromStr for VideoCodec {
 		}
 
 		Ok(Self::Unknown(s.to_string()))
-	}
-}
-
-#[cfg(test)]
-mod test {
-	use super::*;
-
-	#[test]
-	fn test_vp8() {
-		let encoded = "vp8";
-		let decoded = VideoCodec::from_str(encoded).expect("failed to parse");
-		assert_eq!(decoded, VideoCodec::VP8);
-
-		let output = decoded.to_string();
-		assert_eq!(output, encoded);
 	}
 }

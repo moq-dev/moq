@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, btree_map};
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::Mode;
 use crate::catalog::millis::MillisCeil;
-use crate::catalog::{Compression, Mode};
 
 /// The binary tracks a broadcast publishes, keyed by track name.
 ///
 /// Each frame is an opaque blob: a thumbnail, a serialized state snapshot, a sequence of samples in
-/// some application format. Each entry says how to read the track ([`mode`](BinaryConfig::mode) and
-/// [`compression`](BinaryConfig::compression)) without a consumer having to know the application.
+/// some application format. Each entry says how to read the track (its [`mode`](BinaryConfig::mode))
+/// without a consumer having to know the application.
 /// Use [`Json`](crate::catalog::Json) instead when the payloads are JSON, so a generic consumer can
 /// read them.
 ///
@@ -71,7 +71,7 @@ pub struct BinaryConfig {
 	/// broadcast that served this catalog (e.g. `./source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
-	pub broadcast: Option<moq_net::path::RelativeOwned>,
+	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
 	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
@@ -83,14 +83,20 @@ pub struct BinaryConfig {
 	#[serde(default)]
 	pub track: Option<String>,
 
+	/// The instance of the stream the reference names, when the catalog knows it. Absent names
+	/// whichever stream the reader resolves first, as in every catalog before this field.
+	///
+	/// A reader refuses a broadcast of another instance rather than fall back to it. A route
+	/// over a wire that carries no instance has one its session minted, which proves nothing,
+	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
+	/// catalog's own stream.
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub instance: Option<moq_net::Instance>,
+
 	/// Whether the track is a latest-value blob or an append log. Always stated: see [`Mode`].
 	#[serde_as(as = "serde_with::DisplayFromStr")]
 	pub mode: Mode,
-
-	/// The compression applied to each frame, or `None` when they are written through untouched.
-	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	pub compression: Option<Compression>,
 
 	/// An optional media type for each payload (e.g. `image/jpeg`). Purely descriptive: a consumer
 	/// that doesn't recognize it can still read the track.
@@ -117,7 +123,7 @@ pub struct BinaryConfig {
 
 	/// Fields this build doesn't recognize, kept so the entry round-trips.
 	///
-	/// A future [`Mode`] or [`Compression`] almost certainly comes with fields describing it, and
+	/// A future [`Mode`] almost certainly comes with fields describing it, and
 	/// preserving the discriminant without them would leave a relay republishing an entry nothing
 	/// can act on. Same reason [`Container`](crate::catalog::Container) keeps an unknown container
 	/// verbatim.
@@ -126,13 +132,13 @@ pub struct BinaryConfig {
 }
 
 impl BinaryConfig {
-	/// A config for a track read in `mode`, uncompressed and with no optional fields set.
+	/// A config for a track read in `mode`, with no optional fields set.
 	pub fn new(mode: Mode) -> Self {
 		Self {
 			broadcast: None,
 			track: None,
+			instance: None,
 			mode,
-			compression: None,
 			mime: None,
 			bitrate: None,
 			jitter: None,

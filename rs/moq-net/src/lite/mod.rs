@@ -4,24 +4,34 @@
 //!
 //! Specification: [<https://github.com/moq-dev/drafts>]
 
-// Private codec entry points remain testable when their session callers are absent.
-#![cfg_attr(not(feature = "async"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		dead_code,
+		unused_imports,
+		reason = "private codec entry points remain testable when their session callers are absent"
+	)
+)]
 
 mod announce;
 mod auth;
 mod compress;
 mod datagram;
-mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod goaway;
 mod group;
+pub(crate) mod ietf;
 mod info;
+mod instance;
 pub mod message;
 mod parameters;
+pub(crate) mod priority;
 mod probe;
 #[cfg(feature = "async")]
 mod publisher;
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub use publisher::CoverageBench;
 #[cfg(feature = "async")]
 mod replay;
 #[cfg(feature = "async")]
@@ -34,16 +44,14 @@ mod subscriber;
 #[cfg(all(test, feature = "async"))]
 pub(crate) mod test_transport;
 mod track;
+mod tracks;
 mod version;
 
 pub use announce::*;
 pub use auth::*;
 pub(crate) use compress::*;
-#[allow(unused_imports)]
 pub use datagram::*;
-#[allow(unused_imports)]
 pub use fetch::*;
-#[allow(unused_imports)]
 pub use goaway::*;
 pub use group::*;
 pub use info::*;
@@ -54,12 +62,17 @@ pub use probe::*;
 use publisher::*;
 #[cfg(feature = "async")]
 pub(super) use session::*;
-#[allow(unused_imports)]
 pub use setup::*;
 pub use stream::*;
 pub use subscribe::*;
 #[cfg(feature = "async")]
 use subscriber::*;
-#[allow(unused_imports)]
+// The fuzz harness drives a group stream's ingest directly.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) use subscriber::FrameIngest;
+// The range-count bench looks up a subscription's frame bounds directly.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) use publisher::FramesBench;
 pub use track::*;
+pub use tracks::*;
 pub use version::Version;

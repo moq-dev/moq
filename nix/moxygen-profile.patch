@@ -1,0 +1,116 @@
+--- a/moxygen/moqtest/MoQTestClient.cpp
++++ b/moxygen/moqtest/MoQTestClient.cpp
+@@ -554,6 +554,10 @@
+   XLOG(DBG1) << "MoQTest DEBUGGING: calling onObjectStatus";
+ 
+   ObjectHeader header = objHeader;
++  if (header.status == ObjectStatus::END_OF_TRACK) {
++    validateEndOfTrack(state, header);
++    return;
++  }
+   // Validate the received data
+   if (header.status != ObjectStatus::END_OF_GROUP) {
+     XLOG(ERR)
+@@ -594,6 +598,35 @@
+   }
+ }
+ 
++void MoQTestClient::validateEndOfTrack(
++    const ReceiveState& state,
++    const ObjectHeader& header) {
++  // A subscription that runs to the track's end may learn where it ended from
++  // an END_OF_TRACK placed directly after the last object, either inline or
++  // opening the next group. It carries no payload and ticks off nothing.
++  const AbsoluteLocation location{header.group, header.id};
++  const AbsoluteLocation inlineEnd{window_.last.group, window_.last.object + 1};
++  const AbsoluteLocation nextGroup{window_.last.group + 1, 0};
++  if (state.type != ReceivingType::SUBSCRIBE || !window_.endOfTrack ||
++      endOfTrackReceived_ ||
++      (location != inlineEnd && location != nextGroup)) {
++    recordSemanticsFailure(
++        folly::to<std::string>(
++            "Unexpected End of Track at group=",
++            header.group,
++            " id=",
++            header.id,
++            "  Expected group=",
++            nextGroup.group,
++            " id=0 or group=",
++            inlineEnd.group,
++            " id=",
++            inlineEnd.object));
++    return;
++  }
++  endOfTrackReceived_ = true;
++}
++
+ void MoQTestClient::onEndOfStream() {
+   XLOG(DBG1) << "MoQTest DEBUGGING: calling onEndOfStream";
+ }
+@@ -793,6 +826,16 @@
+   publishDoneReceived_ = true;
+ }
+ 
++namespace {
++// The origin alternates priority by group, but advertises the even-group value
++// as the track's publisher priority. A relay that ranks egress by track
++// priority forwards that value for every group; anything else still fails.
++bool priorityMatches(uint64_t groupID, uint8_t priority) {
++  return priority == publisherPriorityForGroup(groupID) ||
++      priority == kMoQTestPublisherPriority;
++}
++} // namespace
++
+ void MoQTestClient::validateSubgroupHeader(
+     const ReceiveState& state,
+     uint64_t groupID,
+@@ -811,8 +854,11 @@
+     return;
+   }
+ 
++  // A relay may end the track on a stream of its own, past the last group.
++  // No payload group exists there to end; onObjectStatus checks its contents.
++  const bool terminal = groupID > window_.last.group;
+   auto expectEndOfGroup = subgroupCarriesLastObject(params_, subgroupID);
+-  if (options.containsLastInGroup != expectEndOfGroup) {
++  if (!terminal && options.containsLastInGroup != expectEndOfGroup) {
+     recordSemanticsFailure(
+         folly::to<std::string>(
+             "End of Group Signal Mismatch for group=",
+@@ -839,7 +885,7 @@
+   // The publisher may elide the priority from the wire, but the value the
+   // subscriber ends up with must still be the one the publisher chose.
+   auto expectedPriority = publisherPriorityForGroup(groupID);
+-  if (priority != expectedPriority) {
++  if (!priorityMatches(groupID, priority)) {
+     recordSemanticsFailure(
+         folly::to<std::string>(
+             "Subgroup Priority Mismatch for group=",
+@@ -876,7 +922,7 @@
+   }
+ 
+   auto expectedPriority = publisherPriorityForGroup(header.group);
+-  if (header.priority != expectedPriority) {
++  if (!header.priority || !priorityMatches(header.group, *header.priority)) {
+     recordSemanticsFailure(
+         folly::to<std::string>(
+             "Datagram Priority Mismatch for group=",
+--- a/moxygen/moqtest/MoQTestClient.h
++++ b/moxygen/moqtest/MoQTestClient.h
+@@ -254,6 +254,7 @@
+       ReceiveState& state,
+       const std::optional<TrackAlias>& trackAlias,
+       const ObjectHeader& objHeader);
++  void validateEndOfTrack(const ReceiveState& state, const ObjectHeader& header);
+   void onEndOfStream();
+   void onError(ReceiveState& state, ResetStreamErrorCode);
+   void onPublishDone();
+@@ -318,6 +319,8 @@
+   // Last group the joining FETCH half covers; unset when there is no join.
+   std::optional<uint64_t> fetchHalfLastGroup_;
+   bool publishDoneReceived_{false};
++  // A track ends at most once.
++  bool endOfTrackReceived_{false};
+   // A datagram that arrives after its deadline is as good as dropped.
+   uint64_t datagramDrops_{0};
+ 

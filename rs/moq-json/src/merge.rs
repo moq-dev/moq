@@ -1,20 +1,16 @@
 //! Apply a JSON merge patch directly into the retained value.
 
+use std::cell::RefCell;
+
 use serde_json::{Map, Value};
+
+use crate::strict::{Key, Scratch};
 
 /// Validate the complete frame before changing the retained value, then apply its patch in place.
 /// Existing object keys and numeric values are reused instead of building a patch tree.
-pub(crate) fn apply_bytes(target: &mut Value, bytes: &[u8], scratch: &RefCell<CheckScratch>) -> serde_json::Result<()> {
-	check(bytes, scratch)?;
-	apply_generated_bytes(target, bytes)
-}
-
-/// Validate one JSON value's syntax, rejecting any object that repeats a key.
-pub(crate) fn check(bytes: &[u8], scratch: &RefCell<CheckScratch>) -> serde_json::Result<()> {
-	use serde::de::DeserializeSeed;
-	let mut decoder = serde_json::Deserializer::from_slice(bytes);
-	Check { scratch, depth: 0 }.deserialize(&mut decoder)?;
-	decoder.end()
+pub(crate) fn apply_bytes(target: &mut Value, bytes: &[u8], scratch: &RefCell<Scratch>) -> crate::Result<()> {
+	crate::strict::check(bytes, scratch)?;
+	Ok(apply_generated_bytes(target, bytes)?)
 }
 
 /// Apply a patch emitted by our serializer, whose keys and syntax were already checked.
@@ -27,137 +23,6 @@ pub(crate) fn apply_generated_bytes(target: &mut Value, bytes: &[u8]) -> serde_j
 	}
 	.deserialize(&mut decoder)?;
 	Ok(())
-}
-
-use std::cell::RefCell;
-
-#[derive(Default)]
-pub(crate) struct CheckScratch {
-	keys: Vec<Vec<String>>,
-}
-
-struct Check<'a> {
-	scratch: &'a RefCell<CheckScratch>,
-	depth: usize,
-}
-
-impl<'de> serde::de::DeserializeSeed<'de> for Check<'_> {
-	type Value = ();
-
-	fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<(), D::Error> {
-		decoder.deserialize_any(self)
-	}
-}
-
-impl<'de> serde::de::Visitor<'de> for Check<'_> {
-	type Value = ();
-
-	fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-		formatter.write_str("a JSON value")
-	}
-
-	fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
-		Ok(())
-	}
-	fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
-		Ok(())
-	}
-	fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
-		Ok(())
-	}
-	fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
-		Ok(())
-	}
-	fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
-		Ok(())
-	}
-	fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
-		Ok(())
-	}
-	fn visit_string<E: serde::de::Error>(self, _: String) -> Result<(), E> {
-		Ok(())
-	}
-
-	fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-		while seq
-			.next_element_seed(Check {
-				scratch: self.scratch,
-				depth: self.depth + 1,
-			})?
-			.is_some()
-		{}
-		Ok(())
-	}
-
-	fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-		let mut len = 0;
-		let mut ordered = true;
-		while let Some(Key(key)) = map.next_key::<Key<'de>>()? {
-			{
-				let mut scratch = self.scratch.borrow_mut();
-				if scratch.keys.len() <= self.depth {
-					scratch.keys.resize_with(self.depth + 1, Vec::new);
-				}
-				let keys = &mut scratch.keys[self.depth];
-				if len > 0 {
-					match keys[len - 1].as_str().cmp(&key) {
-						std::cmp::Ordering::Equal => return Err(serde::de::Error::custom("duplicate JSON object key")),
-						std::cmp::Ordering::Greater => ordered = false,
-						std::cmp::Ordering::Less => {}
-					}
-				}
-				if len == keys.len() {
-					keys.push(key.into_owned());
-				} else {
-					keys[len].clear();
-					keys[len].push_str(&key);
-				}
-				len += 1;
-			}
-			map.next_value_seed(Check {
-				scratch: self.scratch,
-				depth: self.depth + 1,
-			})?;
-		}
-		if len == 0 || ordered {
-			return Ok(());
-		}
-		let mut scratch = self.scratch.borrow_mut();
-		let keys = &mut scratch.keys[self.depth][..len];
-		keys.sort_unstable();
-		if keys.windows(2).any(|pair| pair[0] == pair[1]) {
-			return Err(serde::de::Error::custom("duplicate JSON object key"));
-		}
-		Ok(())
-	}
-}
-
-struct Key<'de>(std::borrow::Cow<'de, str>);
-
-impl<'de> serde::Deserialize<'de> for Key<'de> {
-	fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
-		struct KeyVisitor;
-		impl<'de> serde::de::Visitor<'de> for KeyVisitor {
-			type Value = Key<'de>;
-
-			fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-				formatter.write_str("a JSON object key")
-			}
-
-			fn visit_borrowed_str<E: serde::de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
-				Ok(Key(std::borrow::Cow::Borrowed(value)))
-			}
-
-			fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-				Ok(Key(std::borrow::Cow::Owned(value.to_owned())))
-			}
-
-			fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
-				Ok(Key(std::borrow::Cow::Owned(value)))
-			}
-		}
-		decoder.deserialize_str(KeyVisitor)
-	}
 }
 
 struct Patch<'a> {
@@ -281,7 +146,7 @@ mod test {
 			apply_bytes(
 				&mut target,
 				serde_json::to_string(&patch).unwrap().as_bytes(),
-				&RefCell::new(CheckScratch::default()),
+				&RefCell::new(Scratch::default()),
 			)
 			.unwrap();
 			assert_eq!(target, expected);
@@ -291,14 +156,14 @@ mod test {
 	#[test]
 	fn malformed_patch_does_not_change_the_baseline() {
 		let mut target = json!({"a": 1, "b": 2});
-		assert!(apply_bytes(&mut target, br#"{"a":3,"b":[]"#, &RefCell::new(CheckScratch::default())).is_err());
+		assert!(apply_bytes(&mut target, br#"{"a":3,"b":[]"#, &RefCell::new(Scratch::default())).is_err());
 		assert_eq!(target, json!({"a": 1, "b": 2}));
 	}
 
 	#[test]
 	fn empty_object_patch_does_not_panic() {
 		let mut target = json!({ "value": 1 });
-		apply_bytes(&mut target, br#"{"value":{}}"#, &RefCell::new(CheckScratch::default())).unwrap();
+		apply_bytes(&mut target, br#"{"value":{}}"#, &RefCell::new(Scratch::default())).unwrap();
 		assert_eq!(target, json!({ "value": {} }));
 	}
 
@@ -306,8 +171,8 @@ mod test {
 	fn duplicate_keys_are_rejected_before_mutating_the_baseline() {
 		let mut target = json!({ "outer": { "x": 1 }, "tail": 2 });
 		let patch = br#"{"tail":3,"outer":{"x":2,"x":4}}"#;
-		let err = apply_bytes(&mut target, patch, &RefCell::new(CheckScratch::default())).unwrap_err();
-		assert!(err.to_string().contains("duplicate JSON object key"));
+		let err = apply_bytes(&mut target, patch, &RefCell::new(Scratch::default())).unwrap_err();
+		assert!(matches!(err, crate::Error::DuplicateKey), "{err}");
 		assert_eq!(target, json!({ "outer": { "x": 1 }, "tail": 2 }));
 	}
 
@@ -317,7 +182,7 @@ mod test {
 		let patch = br#"{"escaped\"key":2,"array":[null,3]}"#;
 		let mut expected = target.clone();
 		json_patch::merge(&mut expected, &serde_json::from_slice(patch).unwrap());
-		apply_bytes(&mut target, patch, &RefCell::new(CheckScratch::default())).unwrap();
+		apply_bytes(&mut target, patch, &RefCell::new(Scratch::default())).unwrap();
 		assert_eq!(target, expected);
 	}
 }

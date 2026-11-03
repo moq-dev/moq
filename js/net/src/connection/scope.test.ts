@@ -10,7 +10,7 @@ import { withTimeout } from "../util/timeout.ts";
 import { accept } from "./accept.ts";
 import { connect } from "./connect.ts";
 
-for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
+for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 	test(`scoped origins discover multiple prefixes over ${protocol}`, async () => {
 		const pair = createMockTransportPair(protocol);
 		const url = new URL("https://localhost/test");
@@ -22,8 +22,9 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 			new Path.Patterns(["room/**", "other/**"].map(Path.Pattern.parse)),
 		);
 		const broadcasts = ["room/live", "room/.hidden", "other/live", "outside"].map((path) => {
-			const broadcast = publish.createBroadcast(Path.from(path));
-			broadcast.announce();
+			const broadcastPublication = publish.createBroadcast(Path.from(path));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			return broadcast;
 		});
 		const [client, server] = await Promise.all([

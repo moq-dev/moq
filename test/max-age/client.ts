@@ -14,9 +14,10 @@ if (!address || !protocol || !["publish", "subscribe"].includes(mode))
 const origin = new Producer();
 const ages = [undefined, Milli(0), Milli(30_000)];
 if (mode === "publish") {
-	const broadcast = origin.createBroadcast(Path.from("age"));
+	const broadcastPublication = origin.createBroadcast(Path.from("age"));
+	const broadcast = broadcastPublication.broadcast;
 	for (const [i, maxAge] of ages.entries()) broadcast.createTrack(String(i), { maxAge });
-	broadcast.announce();
+	broadcastPublication.announce();
 }
 const url = new URL(address);
 const transport = new Session(url, {

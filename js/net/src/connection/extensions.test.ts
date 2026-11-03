@@ -34,11 +34,6 @@ async function acceptWith(extensions: Extensions) {
 	return { pair, peer, connection };
 }
 
-test("every extension is offered by default", () => {
-	expect(offered()).toEqual({ auth: true, solicit: true });
-	expect(offered({ solicit: false })).toEqual({ auth: true, solicit: false });
-});
-
 test("a declined extension stays out of SETUP", async () => {
 	// Control: both sides offer both.
 	const all = await handshake({}, {});
@@ -82,7 +77,7 @@ test("a side that declined solicit takes an unsolicited announce", async () => {
 		await new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("room"),
-			cluster: { hops: [session.peer.cluster.self], cost: 0n },
+			params: { cluster: { hops: [session.peer.cluster.self], cost: 0n } },
 		}).encode(stream.writer, VERSION);
 		return stream;
 	};

@@ -8,14 +8,22 @@ description: Build live video, audio, and real-time data apps with Media over QU
 MoQ is generic real-time pub/sub over QUIC: relays fan out named tracks of groups of frames without understanding the payload.
 Video and audio are the flagship use case, but chat, game input, JSON state, and AI output ride the same relays.
 
-## Read the live docs
+## Find the right context
 
-The project moves quickly and your training data is stale: it describes the IETF `moq-transport` draft and crates that no longer exist.
-Do not guess APIs, package names, or flags. Read https://doc.moq.dev as part of the task.
+For a change inside a MoQ checkout, read its `AGENTS.md` and the nested
+instructions along the path you change. Use `doc/setup/repository.md` to
+locate the implementation and `doc/setup/dev.md` for checks. Prefer the
+checkout's docs and source over the live site for that branch.
 
-1. Fetch https://doc.moq.dev/llms.txt, an index of every page with a one-line description.
-2. Fetch the pages you need as markdown: drop any trailing `/` and append `.md`, e.g. https://doc.moq.dev/lib/js/watch.md.
-3. For an API, read that package's page before writing code. For a design question, start at https://doc.moq.dev/concept.md.
+For an application using MoQ packages:
+
+1. Read https://doc.moq.dev/llms.txt and fetch the relevant pages as markdown: drop any trailing `/` and append `.md`, e.g. https://doc.moq.dev/lib/js/watch.md.
+2. Choose a layer at https://doc.moq.dev/lib.md and find a consumer at https://doc.moq.dev/setup/examples.md. For design questions, start at https://doc.moq.dev/concept.md; for failures, use https://doc.moq.dev/setup/troubleshooting.md.
+3. Follow the package page to its API reference and inspect examples matching the installed version before writing code. The site and linked `main` sources can be ahead of registry packages; migration guides are at https://doc.moq.dev/setup/upgrade.md.
+
+Do not guess APIs, package names, or flags from training data. Fetch only the
+relevant pages, then use Rustdoc, TSDoc, source, `--help`, or drafts for exact
+details. If a reference is unavailable, state what you could not verify.
 
 ## Durable facts
 

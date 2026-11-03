@@ -1,4 +1,6 @@
 import { Milli } from "@moq/clock";
+import type { Established } from "./established.ts";
+import { transportOf } from "./transport.ts";
 /**
  * Connection statistics: what the local transport counts, and what the peer reports.
  *
@@ -12,8 +14,8 @@ import { Milli } from "@moq/clock";
  * a caller computing a rate wants to choose its own sampling instants. Snapshot twice
  * and divide by the interval you measured.
  *
- * Every field is optional. The qmux/WebSocket fallback implements no `getStats()` at
- * all and reports nothing; see {@link Probe} for what the peer measures.
+ * Every field is optional. The qmux/WebSocket fallback reports nothing; see
+ * {@link Probe} for what the peer measures.
  *
  * The field names match Rust's `moq_net::session::Stats` but the counters keep each
  * stack's own semantics rather than being normalized. Notably W3C excludes
@@ -96,7 +98,7 @@ export interface TransportStats {
 
 /**
  * Snapshot `quic` via `getStats()`, or an empty snapshot when the transport doesn't
- * implement it (the qmux/WebSocket fallback, older browsers) or the call fails.
+ * implement it (older browsers) or the call fails.
  *
  * @internal
  */
@@ -118,4 +120,33 @@ export async function transportStats(quic: WebTransport): Promise<Stats> {
 	} catch {
 		return {};
 	}
+}
+
+/**
+ * Whether `quic` can report a send-rate estimate: only a WebTransport session with
+ * `getStats()`. The WebSocket fallback's qmux session reports no counters, the WebRTC
+ * data channel's throws, and shipping Chromium and Safari implement none.
+ *
+ * @internal
+ */
+export function canEstimate(quic: WebTransport): boolean {
+	if (transportOf(quic) !== "webtransport") return false;
+	return typeof (quic as { getStats?: unknown }).getStats === "function";
+}
+
+// The sessions whose transport can report a send-rate estimate.
+const estimating = new WeakSet<Established>();
+
+/** Record whether `session`'s transport `quic` can report a send-rate estimate. @internal */
+export function detect(session: Established, quic: WebTransport): void {
+	if (canEstimate(quic)) estimating.add(session);
+}
+
+/**
+ * Whether `session` can report a send-rate estimate, so sampling it is worth a timer.
+ *
+ * @internal
+ */
+export function estimates(session: Established): boolean {
+	return estimating.has(session);
 }

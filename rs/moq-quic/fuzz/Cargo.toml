@@ -65,3 +65,6 @@ bench = false
 [dependencies]
 libfuzzer-sys = "0.4"
 moq-quic = { workspace = true, features = ["fuzz"] }
+
+[lints]
+workspace = true

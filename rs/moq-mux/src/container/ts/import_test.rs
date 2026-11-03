@@ -96,7 +96,7 @@ async fn public_container_preserves_loc_for_ts() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
+	let frame = kio::clock::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
@@ -254,7 +254,10 @@ async fn import_opus_frames() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -262,7 +265,7 @@ async fn import_opus_frames() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut frames = Vec::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await {
+	while let Ok(res) = kio::clock::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await {
 		let Some(frame) = res.unwrap() else { break };
 		frames.push(frame.payload);
 	}
@@ -480,7 +483,7 @@ async fn import_export_import_roundtrip() {
 		.with_delay(RECORDING_MAX_AGE)
 		.with_replay();
 	let mut out = BytesMut::new();
-	while let Ok(res) = tokio::time::timeout(DRAIN, exporter.next()).await {
+	while let Ok(res) = kio::clock::timeout(DRAIN, exporter.next()).await {
 		match res.expect("exporter error") {
 			Some(frame) => out.extend_from_slice(&frame.payload),
 			None => break,
@@ -533,7 +536,10 @@ async fn survives_midstream_join() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -541,8 +547,7 @@ async fn survives_midstream_join() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut frames = Vec::new();
-	while let Ok(Ok(Some(frame))) =
-		tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
+	while let Ok(Ok(Some(frame))) = kio::clock::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
 	{
 		frames.push(frame);
 	}
@@ -589,7 +594,10 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -597,8 +605,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut cues = Vec::new();
-	while let Ok(Ok(Some(frame))) =
-		tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
+	while let Ok(Ok(Some(frame))) = kio::clock::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
 	{
 		cues.push((frame.payload.to_vec(), frame.timestamp));
 	}
@@ -615,7 +622,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	assert_eq!(distinct.len(), 6, "six distinct cue sections");
 	assert!(
 		cues.iter().all(|(_, ts)| *ts != moq_net::Timestamp::ZERO),
-		"cues stamped with the video PTS, not zero"
+		"cues stamped with their PCR placement"
 	);
 }
 
@@ -703,7 +710,7 @@ struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	arrival: std::ops::RangeInclusive<kio::clock::Wall>,
 }
 
 /// Import `data` on a catalog with the default clock.
@@ -713,9 +720,9 @@ async fn import_stream(data: &[u8]) -> Imported {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
-	let before = std::time::SystemTime::now();
+	let before = kio::clock::wall();
 	import.decode(data).unwrap();
-	let after = std::time::SystemTime::now();
+	let after = kio::clock::wall();
 	import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -959,24 +966,44 @@ fn import_reports_a_silent_scte35_pid() {
 	assert_stalls(data, 0x14d, ".ts", 0x100, 2.5, 3.5);
 }
 
-/// Every elementary stream the importer carries reports a row, decoded, clock-only, and
-/// verbatim alike, and every row has delivered.
+/// Every PID reports a row: each elementary stream the importer carries, decoded, whole PES
+/// (MPEG-2 video among them) and sections alike, has delivered, and each PID no table claims
+/// (an ATSC capture's CAT, PSIP base PID and its private PIDs) counts what it dropped. An SI
+/// PID has a row only for the sections it sent before the program clock could place them, as
+/// ffmpeg leads with its SDT.
 #[test]
 fn import_reports_every_elementary_stream() {
 	for (data, rows) in [
 		(
 			&include_bytes!("test_data/kyrion_mpeg2av_ac3.ts")[..],
-			&[(0x100, ""), (0x101, ".ac3"), (0x102, ".mp2"), (0x14d, ".ts")][..],
+			&[
+				(0x0001, ""),
+				(0x100, ".ts"),
+				(0x101, ".ac3"),
+				(0x102, ".mp2"),
+				(0x14d, ".ts"),
+				(0x1fd0, ""),
+				(0x1fd1, ""),
+				(0x1ffb, ""),
+			][..],
 		),
 		(
 			&include_bytes!("test_data/scte35/bbb5s.ts")[..],
-			&[(0x21, ".ts"), (0x100, ".hev1"), (0x101, ".opus")][..],
+			&[(0x11, ".si"), (0x21, ".ts"), (0x100, ".hev1"), (0x101, ".opus")][..],
 		),
 	] {
-		let stats = sample(data, &[]).pop().unwrap();
+		let mut stats = sample(data, &[]).pop().unwrap();
 		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track.as_str())).collect();
 		assert_eq!(tracks, rows);
+		if let Some(sdt) = stats.streams.remove(&0x11) {
+			assert_eq!((sdt.units, sdt.unplaced), (0, 1), "{sdt:?}");
+		}
 		for (pid, stream) in &stats.streams {
+			if stream.track.is_empty() {
+				assert_eq!(stream.class, super::stats::Class::Data, "{pid:#x}: {stream:?}");
+				assert!(stream.refused > 0 && stream.units == 0, "{pid:#x}: {stream:?}");
+				continue;
+			}
 			assert!(stream.units > 0, "{pid:#x} delivered nothing: {stream:?}");
 			assert!(stream.quiet.is_some(), "{pid:#x} has no program clock: {stream:?}");
 		}

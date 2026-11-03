@@ -13,15 +13,15 @@ ECT(0) marking and ACK ECN counts are carried end to end, and BBR3's classic
 CE response, ported to `moq-quic` from
 [moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12) (see
 `rs/moq-quic/README.md`), is the baseline. `main` no longer depends on
-moq-noq; only upstream noq-proto remains, for iroh. This quest adds the
+moq-noq or upstream noq-proto. This quest adds the
 scalable policy separately. `moq-quic` has no ECN knob: `sending_ecn` starts
 on per path and validation failure or an ACK without counts turns it off, so
 both `off` and `ect1` need a `moq-quic` change.
 
 - In `moq-quic`: an `Ect1` marking option and the accounting to keep the two
   codepoints apart, so an L4S response (proportional to the CE fraction per
-  RTT, per RFC 9330 to 9332) can be tried as a `Controller` change without a
-  transport change. Off by default.
+  RTT, per RFC 9330 to 9332) can be tried as a `moq-congestion` controller
+  without a transport change; the controller chooses the codepoint. Off by default.
 - `moq-tokio`'s `[quic]` section gains `ecn = off | ect0 | ect1`, ect0 by
   default (today's behavior on tokio), and `doc/bin/relay/config.md`
   documents it in the same PR.
@@ -39,7 +39,3 @@ both `off` and `ect1` need a `moq-quic` change.
 
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - the
   provider verdict this quest acts on
-
-## Related
-
-- [noq#814](https://github.com/n0-computer/noq/issues/814) - the L4S proposal to n0

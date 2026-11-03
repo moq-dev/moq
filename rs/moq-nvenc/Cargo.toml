@@ -20,3 +20,9 @@ cudarc = { workspace = true }
 # dlopen libnvidia-encode at runtime (the two NVENC bootstrap symbols).
 libloading = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
+
+[lints]
+workspace = true

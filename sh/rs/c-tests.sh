@@ -6,6 +6,10 @@
 # Unix only.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 cd "$(git rev-parse --show-toplevel)"
 
 cc="${CC:-cc}"
@@ -14,14 +18,14 @@ if ! command -v "$cc" >/dev/null; then
     exit 1
 fi
 
-cargo build --locked -p moq-c
+cargo build --locked -p moq-c --features openh264
 
 # Ask cargo where it put the staticlib and the header rather than assuming
 # target/debug: CARGO_TARGET_DIR and a configured build target
 # (`target/<triple>/debug`) both move them, and guessing wrong would link a
 # stale copy or nothing. Replays the build above from cache, so it costs a
 # process, not a compile.
-log=$(cargo build --locked -p moq-c --message-format=json)
+log=$(cargo build --locked -p moq-c --features openh264 --message-format=json)
 lib=$(jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' <<<"$log" | tail -1)
 if [ -z "$lib" ]; then
     echo "cargo reported no libmoq.a for moq-c" >&2
@@ -32,7 +36,7 @@ profile=$(dirname "$lib")
 out_dir=$(jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/moq-c#")) | .out_dir' <<<"$log" | tail -1)
 include="$out_dir/include"
 if [ -z "$out_dir" ] || [ ! -f "$include/moq.h" ]; then
-    echo "$include/moq.h missing after 'cargo build --locked -p moq-c'" >&2
+    echo "$include/moq.h missing after 'cargo build --locked -p moq-c --features openh264'" >&2
     exit 1
 fi
 

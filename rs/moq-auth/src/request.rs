@@ -1,9 +1,10 @@
+use kio::clock::Wall;
 use serde::{Deserialize, Serialize};
 use serde_with::base64::{Base64, UrlSafe};
 use serde_with::formats::Unpadded;
-use serde_with::{DurationSecondsWithFrac, TimestampSeconds, serde_as};
+use serde_with::{DurationSecondsWithFrac, serde_as};
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crate::lease::Reason;
 
@@ -14,11 +15,14 @@ use crate::lease::Reason;
 /// query parameter is special and a credential can be whatever the server understands. The same shape carries
 /// every [`Event`]; an `end` adds what the session did.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct Request {
 	/// Random 128-bit hex, unique per session; the key every event for it shares.
 	pub id: String,
+
+	/// The attached credential this event concerns; absent for the connection itself.
+	pub auth: Option<String>,
 
 	/// Which lifecycle event this is, with what an `end` carries.
 	#[serde(flatten)]
@@ -36,7 +40,10 @@ pub struct Request {
 	/// The relay's socket address the session arrived on, absent likewise.
 	pub local: Option<SocketAddr>,
 
-	/// The SNI the client presented, when the transport carried TLS.
+	/// The SNI that selected the relay's certificate, absent without TLS or SNI.
+	///
+	/// The client picks it among the names the relay serves, so a hostname-scoped
+	/// server binds the tenant to the credential, not to this alone.
 	pub server_name: Option<String>,
 
 	/// The negotiated application protocol, including the moq version.
@@ -54,8 +61,34 @@ pub struct Request {
 	/// The direction the client declared at SETUP; absent means both.
 	pub role: Option<Role>,
 
+	/// The implementation the client declared at SETUP, as space-separated `name/version`
+	/// product tokens (`moq-net-js/0.4.2`). Client-chosen; absent when it declared none.
+	pub implementation: Option<String>,
+
 	/// The verified client certificate, when one was presented.
 	pub tls: Option<Peer>,
+}
+
+impl std::fmt::Debug for Request {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Request")
+			.field("id", &self.id)
+			.field("event", &self.event)
+			.field("node", &self.node)
+			.field("transport", &self.transport)
+			.field("remote", &self.remote)
+			.field("local", &self.local)
+			.field("server_name", &self.server_name)
+			.field("alpn", &self.alpn)
+			.field("path", &self.path)
+			// The contract permits credentials under any query key.
+			.field("query", &self.query.as_ref().map(|_| "..."))
+			.field("token", &self.token)
+			.field("role", &self.role)
+			.field("implementation", &self.implementation)
+			.field("tls", &self.tls)
+			.finish()
+	}
 }
 
 impl Request {
@@ -65,10 +98,11 @@ impl Request {
 	/// `#[non_exhaustive]`, so this stays the way to build one as fields are added.
 	pub fn new(node: impl Into<String>, transport: Transport, path: impl Into<String>) -> Self {
 		let mut bytes = [0u8; 16];
-		aws_lc_rs::rand::fill(&mut bytes).expect("failed to generate a session id");
+		rind::rand::fill(&mut bytes).expect("failed to generate a session id");
 		let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 		Self {
 			id,
+			auth: None,
 			event: Event::Connect,
 			node: node.into(),
 			transport,
@@ -80,6 +114,7 @@ impl Request {
 			query: None,
 			token: None,
 			role: None,
+			implementation: None,
 			tls: None,
 		}
 	}
@@ -87,13 +122,19 @@ impl Request {
 
 /// A credential from a moq-transport SETUP's `AUTHORIZATION TOKEN` option, unparsed.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Token {
 	/// The moq-transport Token Type, naming how [`value`](Self::value) is encoded.
 	pub kind: u64,
 	/// The token bytes, base64url without padding on the wire.
 	#[serde_as(as = "Base64<UrlSafe, Unpadded>")]
 	pub value: Vec<u8>,
+}
+
+impl std::fmt::Debug for Token {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "Token(kind={}, <{} bytes>)", self.kind, self.value.len())
+	}
 }
 
 impl Token {
@@ -122,6 +163,8 @@ pub enum Event {
 		/// What it moved.
 		bytes: Bytes,
 	},
+	/// Another credential asks to join the connection, identified by `auth`.
+	Attach,
 }
 
 /// How a session reached the relay, including QUIC, relay HTTP, and gateways.
@@ -146,7 +189,7 @@ pub enum Transport {
 	Rtmp,
 	/// An SRT gateway session.
 	Srt,
-	/// A WebRTC gateway session, including WHIP and WHEP.
+	/// A WebRTC session: a WHIP or WHEP gateway, or MoQ over a data channel.
 	WebRtc,
 	/// A WebTransport connection over HTTP/3.
 	WebTransport,
@@ -204,8 +247,8 @@ pub struct Peer {
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
 	/// The certificate's notAfter.
-	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
-	pub expires: Option<SystemTime>,
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	pub expires: Option<Wall>,
 	/// The issuer's distinguished name.
 	pub issuer: String,
 }
@@ -235,7 +278,7 @@ mod tests {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
-			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
+			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			issuer: "CN=cluster".into(),
 		});
 		request
@@ -306,6 +349,7 @@ mod tests {
 		request.id = "00ff".into();
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request.query = Some("jwt=abc".into());
+		request.implementation = Some("moq-net-js/0.4.2".into());
 		request.event = Event::End {
 			reason: Reason::Expired,
 			duration: Duration::from_millis(1500),
@@ -313,7 +357,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&request).unwrap(),
-			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
+			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
 		);
 
 		request.event = Event::End {
@@ -323,7 +367,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&request).unwrap(),
-			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
+			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}"#
 		);
 	}
 

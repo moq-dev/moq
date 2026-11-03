@@ -1,0 +1,59 @@
+# [M] qmux frames WebSocket itself
+
+## Goal
+
+qmux implements the RFC 6455 subset it uses, and tungstenite and
+tokio-tungstenite leave the dependency tree, but only if the stream
+transport bench (see the [epic](/quest/m2/perf/stream/README.md)) attributes a
+material share of WebSocket CPU to tungstenite now that qmux's `Driver`
+owns the socket. If the bench shows no such share, delete this quest.
+
+## Plan
+
+Gate: re-run the bench against the driver's numbers in the epic README. If the profile no longer
+shows tungstenite's read-buffer zero-fill, its `out_buffer` copy, or its
+memmove after a partial write as a real share, abandon the quest.
+
+Stopgap first (2026-10-31, from
+[moq-dev/moq#7086](https://github.com/moq-dev/moq/pull/7086)'s benchmark;
+moved here when [moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494)
+landed the driver and kept tungstenite): tungstenite's default read buffer
+dominates its share of the profile. Shrink
+`WebSocketConfig::read_buffer_size` to near qmux's maximum record size
+(about 16 KiB) in `qmux::ws` (`capped` in `rs/qmux/src/ws.rs`) and on the
+relay's axum `WebSocketUpgrade` (`rs/moq-relay/src/websocket.rs`) until this
+codec replaces tungstenite. That setting is the buffer tungstenite allocates
+up front, not a memory cap: a larger frame still grows past it, so the
+existing message and frame size limits stay the bound. The stopgap lowers
+the baseline allocation per connection and the zero-fill per read attempt.
+Land it as its own commit with a bench run that also reports retained
+memory, then run the gate above before deciding whether replacing
+tungstenite still pays.
+
+The subset to implement, from the 2026-10-22 audit:
+
+- **Frames.** 7-, 16-, and 64-bit lengths. Reject unmasked client frames and
+  non-zero RSV bits.
+- **Opcodes.** Binary is one qmux record. Continuation frames are reassembled
+  up to `max_record_size`. Ping gets a Pong. Close is echoed, then the session
+  shuts down. Text is a protocol violation. Control frames are at most 125
+  bytes and never fragmented.
+- **Inbound.** Unmask in place, then slice records straight out of the
+  transport's read buffer, as `transport::Stream` does for byte streams.
+- **Outbound.** Encode the frame header in front of each record in the
+  transport's write buffer. The client masks in place.
+- **Server handshake.** None: the relay keeps hyper's upgrade, so this covers
+  only the moq-tokio standalone listener (`Sec-WebSocket-Key` to SHA-1/base64
+  accept, `Version: 13`, subprotocol pick, 400 when nothing matches).
+- **Client handshake.** One GET with `Sec-WebSocket-Protocol`, then parse the
+  101 response.
+
+A maintained crate was weighed against this. The codec is small, sits on the
+hot path, and must write into the driver's buffers, so qmux owns it.
+
+Public API: the `tokio_tungstenite` and `tungstenite` re-exports and the
+`tungstenite` types in `Client::with_config`, `Client::with_connector`,
+`Upgraded`, and `Error::WebSocket` go away. The Impact bullet says how to
+migrate in `qmux` and `moq-tokio`. The existing qmux interop tests (the `qmux06`
+dev-dependency) and the browser path in `js/qmux` must keep passing
+unchanged.

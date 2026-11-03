@@ -36,11 +36,10 @@ Settled constraints either way:
 
 - `AudioContext` and the render worklet stay on main. The worklet's ring
   endpoint is handed to the worker so decoded PCM never transits main, and
-  the playhead reaches `Sync` the same way. With `SharedArrayBuffer` that is
-  the shared ring. Without it, main creates a `MessageChannel` and transfers
-  one port to the worker and the other to the worklet (over `node.port`); PCM
-  and playhead state then flow worker to worklet and back on that channel.
-  This keeps the non-isolated path immune to main-thread jank without
+  the playhead reaches `Sync` the same way. Main creates a `MessageChannel`
+  and transfers one port to the worker and the other to the worklet (over
+  `node.port`); PCM and playhead state then flow worker to worklet and back on
+  that channel. This keeps playback immune to main-thread jank without
   COOP/COEP. A transferred `ReadableStream` is not an alternative: it is
   postMessage underneath, and the worklet would still drain it into its ring.
 - `Sync` lives in the worker. Main-thread readers (captions, UI) observe it
@@ -58,9 +57,8 @@ Settled constraints either way:
 The harness drives a real browser, injects main-thread busy loops of varying
 length, and counts stalled or dropped video frames and audio underruns. The
 sweep runs N players over one relay and records CPU, memory, and delivery
-against N, per the fan-out rule. Follow the artifact conventions of
-[Browser benchmarks](/quest/m2/browser-benchmarks.md) and reuse the existing
-browser harness pieces instead of starting another.
+against N, per the fan-out rule. Extend `bench/browser` (`just bench-browser`, see `bench/README.md`) and its
+artifact conventions instead of starting another harness.
 
 The rewritten implementation quest names the chosen model, the public handle
 shape of `Player` and `<moq-watch>`, what happens to the composable classes,
@@ -74,5 +72,4 @@ follow-up wires the capture worklet to the encoder worker with a
 ## Related
 
 - [Watch worker](/quest/m2/watch-worker.md) - the implementation this rewrites
-- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - artifact conventions; may absorb the harness later
 - [A/V clock](/quest/m1/av-clock.md) - the `Sync` shape the implementation moves; the prototype can pace against today's

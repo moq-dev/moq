@@ -14,6 +14,11 @@ use criterion::{criterion_group, criterion_main};
 mod support;
 
 #[cfg(all(target_os = "linux", feature = "quic"))]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 mod linux {
 	use std::net::UdpSocket;
 	use std::time::Instant;
@@ -127,7 +132,7 @@ mod linux {
 			let client_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
 				.expect("client socket");
-			let mut dial = quic::client::Config::new(server_addr, "localhost");
+			let mut dial = quic::client::Config::default();
 			dial.alpn = vec![ALPN.to_string()];
 			dial.verify = false;
 
@@ -138,15 +143,15 @@ mod linux {
 					.expect("quic accept");
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(
-						std::time::Instant::now(),
-						moq_uring::transport::Session::new(
+					.accept(
+						moq_net::time::Instant::now(),
+						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
-						),
+							moq_net::transport::Address::Setup,
+						)),
 					)
 					.await
-					.expect("accept_lite");
+					.expect("accept");
 				let _ = server_handle.run(driver).await;
 				session.closed().await;
 			});
@@ -154,27 +159,30 @@ mod linux {
 			// Establish and subscribe once; iterations measure steady state.
 			let (_session, mut sub) = worker
 				.block_on(async {
-					let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
+					let conn = quic::client::connect(client_sock, &dial, server_addr, "localhost")
+						.await
+						.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
-						.connect_lite(
-							std::time::Instant::now(),
-							moq_uring::transport::Session::new(
+						.connect(
+							moq_net::time::Instant::now(),
+							moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 								quic::web::Session::raw(conn),
-								moq_net::transport::Binding::InBand,
-							),
+								moq_net::transport::Address::Setup,
+							)),
 						)
 						.await
-						.expect("connect_lite");
+						.expect("connect");
 					let task_handle = handle.clone();
 					handle.spawn(async move {
 						let _ = task_handle.run(driver).await;
 					});
 					let bc = {
 						let consumer = sub_origin.consume();
-						consumer.routed("bench").await.expect("broadcast announced");
 						consumer
-							.request_broadcast("bench", None)
+							.follow("bench", None)
+							.unwrap()
+							.available()
 							.await
 							.expect("broadcast resolves")
 					};

@@ -40,7 +40,7 @@ test("screen capture stays enabled while pending and resets after a live share e
 	const local = new Local({
 		connection: {
 			origin: new Signal(undefined),
-			bandwidth,
+			allocator: bandwidth,
 		} as never,
 		identity: Path.from("alice"),
 	});

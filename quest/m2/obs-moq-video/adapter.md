@@ -11,8 +11,5 @@ One opt-in Use MoQ encoders choice publishes OBS video and audio through moq-vid
 - Start with H.264 by default and HEVC where supported. Keep reordering disabled; resolve Annex-B headers/decoder configuration, DTS/PTS and drain semantics explicitly, since Rust encoded output carries only timestamp, payload, and keyframe flag. Do not advertise unsupported AV1 encoding.
 - Use the shared Low latency, Balanced, and Quality presets with bitrate separate, defaulting to Balanced: `moq_video::encode::Preset` in, `Applied` (the preset and controls that took effect) out for Stats. Neither reaches moq-ffi yet, so carry both through it and its bindings. Expose a single Use MoQ encoders option only once audio and video adapters both work. Retain the existing OBS encoder selection as an explicit alternative; do not silently switch back to OBS codecs after a MoQ codec failure.
 - Establish bounded submission/packet queues, explicit raw-frame drop behavior, thread confinement, cancellation, late completion, device loss, resize and color metadata. Never block OBS's graphics thread on network backpressure. The CPU path is a correctness/fallback baseline; platform quests establish accelerated input.
+- The audio side is the internal `moq_opus` encoder, whose settings are `bitrate` (kbps) and `preset` (`low_latency`, `balanced`, `quality`). Use MoQ encoders creates it in place of `ffmpeg_opus`; it is the only audio choice the combined mode offers until AAC encoding lands.
 - Test rejection, saturation, drain, stop during encode, delayed completion, and repeated start/stop. Validate real decoded pixels and audio continuity, matched timestamps, preset reporting, and frame-to-packet latency. Validate the new binding docs, feature combinations, package dependencies and native plugin linking.
-
-## Required
-
-- [Audio publishing](/quest/m2/obs-moq-video/audio-publish.md) - both adapters are needed for the combined opt-in UI

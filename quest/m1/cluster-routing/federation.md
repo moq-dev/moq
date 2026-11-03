@@ -15,11 +15,17 @@ admission exists; extend and prove those paths rather than creating a reverse
 connection protocol. Do not require an inbound connection to the local relay.
 
 Use authenticated, namespace-scoped admission: the CDN scopes the local
-relay's connection to a path prefix, and identities it forwards for its local
-publishers are filed under `hash(subject, id)`, keyed by the grant's
-credential subject, so a forger or a misconfigured
-uplink only affects its own scope (decided 2026-10-14; see
-[Routes and announces](/quest/m1/cluster-routing/routes.md)). A scoped
+relay's connection to a path prefix, and identities it sends, its own and its
+local publishers', are qualified, so a forger or a misconfigured uplink only
+affects its own scope (decided 2026-10-14; see
+[Routes and announces](/quest/m1/cluster-routing/routes.md)). Open: how
+those identities are keyed, owned by routes. Without a key, a scoped forger
+declaring a victim's id captures claims outside its scope
+(`forged_identity_hijacks_claims_outside_the_forgers_scope`). The scope
+itself (`hash(scope, id)`) was rejected 2026-10-15, and the grant's
+issuer-qualified subject (`hash(subject, id)`) was dropped 2026-11-02
+(maintainer). The key must survive token refresh and be shared by the local
+relay's two uplinks. A scoped
 connection cannot forward an already qualified identity, so nested scoped
 federation is out: a relay behind the local relay connects unscoped. The local relay
 marks its CDN links `upstream`, so CDN relays never shortcut through the
@@ -56,7 +62,6 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Required
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities for every session
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - identity, scoped claims, reachability, and export policy
 
 ## Related

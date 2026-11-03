@@ -33,8 +33,9 @@ pub enum Error {
 	#[error("unsupported OpusHead version {0}")]
 	UnsupportedVersion(u8),
 
-	/// The channel count is zero, or more than the channel mapping family allows:
-	/// family 0 covers mono/stereo and family 1 up to eight channels.
+	/// The channel count is zero, or one the channel mapping family does not allow:
+	/// family 0 covers mono/stereo, family 1 up to eight channels, and family 2 the
+	/// square counts of first order ambisonics and up.
 	#[error("channel mapping family does not allow {0} channels")]
 	UnsupportedChannelCount(u32),
 
@@ -49,11 +50,12 @@ pub enum Error {
 
 	/// A channel mapping family the operation cannot carry: family 0 given to
 	/// [`Mapping::new`], which has no table, or a container with no room for
-	/// the table.
+	/// the mapping, such as family 3's demixing matrix in an fMP4 `dOps`.
 	#[error("unsupported channel mapping family {0}")]
 	UnsupportedMappingFamily(u8),
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed Opus configuration mirroring the parsed fields of an OpusHead packet.
@@ -168,11 +170,10 @@ impl Config {
 
 /// Number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 §3.1).
 ///
-/// MPEG-TS aggregates several Opus packets into one PES, so the importer advances each
-/// packet's timestamp by this. Opus timing is always reckoned at 48 kHz regardless of the
-/// encoder's internal bandwidth. Returns `None` for an empty packet, a code-3 packet
-/// missing its frame-count byte, or a packet outside the 1 frame and 120 ms RFC 6716 allows.
-pub(crate) fn packet_samples(packet: &[u8]) -> Option<u32> {
+/// Opus timing is always reckoned at 48 kHz regardless of the encoder's internal bandwidth.
+/// Returns `None` for an empty packet, a code-3 packet missing its frame-count byte, or a
+/// packet outside the 1 frame and 120 ms RFC 6716 allows.
+pub fn packet_samples(packet: &[u8]) -> Option<u32> {
 	let toc = *packet.first()?;
 	let frames = match toc & 0b11 {
 		0 => 1,

@@ -17,7 +17,7 @@ pub(super) enum Kind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Track {
 	/// Resolved rather than as written, since several references name one broadcast.
-	broadcast: Option<hang::moq_net::PathOwned>,
+	broadcast: Option<hang::moq_net::Path>,
 	name: String,
 }
 
@@ -36,7 +36,7 @@ impl Track {
 #[derive(Default)]
 struct Half {
 	playing: bool,
-	/// The track this half is playing.
+	/// The track this half is playing, whose end is a finish. Cleared once retired.
 	track: Option<Track>,
 	/// The snapshot this half last read. A half reads a snapshot once, so a
 	/// track that ends with nothing newer on offer stays stopped rather than
@@ -120,6 +120,12 @@ impl Playback {
 		{
 			self.finished.insert(track);
 		}
+	}
+
+	/// The catalog moved this half's rendition off the track it plays, which it now
+	/// retires: that track ending is no finish, so a move back can play it again.
+	pub(super) fn retire(&mut self, kind: Kind) {
+		self.half_mut(kind).track = None;
 	}
 
 	/// Whether `track` already ended on its own.

@@ -34,10 +34,6 @@ saves no copy. Revisit only if NV12 camera capture lands.
 
 Refs #2481, #1837.
 
-## Closes
-
-- [#2819](https://github.com/moq-dev/moq/issues/2819) - close this issue when the quest finishes
-
 ## Related
 
 - [Capture multi-plane PipeWire cameras](/quest/m3/pipewire-camera-planes.md) - separate memory blocks from a camera, the capture offer rather than this import
