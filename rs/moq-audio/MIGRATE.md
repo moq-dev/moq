@@ -4,6 +4,39 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The bus routes sources into several mixes, advanced by a driver
+
+`Bus::new(config)?` returns `(Bus, Driver)`. The `Bus` stays the cloneable
+handle for adding sources; the one `Driver` belongs to whoever owns the audio
+clock. Replace `bus.read(&mut samples)` with `driver.advance(frames)`, and read
+the audio from a mix instead:
+
+```rust
+let (bus, mut driver) = moq_audio::bus::Bus::new(config)?;
+let program = bus.mix();
+program.route(&strip); // for each source the mix should carry
+let mut reader = program.reader();
+
+// The clock task: as many frames as the clock moved.
+driver.advance(frames);
+
+// The output task, which may run separately and fall behind on its own.
+while let Some(block) = reader.read().await {
+    let timestamp = epoch + block.position * 1_000_000 / sample_rate; // in µs
+    // encode block.data
+}
+```
+
+A source is in no mix until a mix routes its `Strip`; routing follows the
+strip, so it holds across a channel reopening with the same strip.
+`Bus::level()` is now `Mix::level()`, one meter per mix. `mix.minus(&strip)`
+is a mix-minus for that source's return feed, and `Strip::set_delay` delays
+a source in every mix it feeds.
+
+Each block carries its `position` in frames on the driver's clock. A reader
+more than 200 ms behind skips its oldest blocks, so stamp output from the
+position rather than counting frames read.
+
 ### Capture is one producer with independent consumers
 
 Open `capture::Producer::open(config).await?` once and create a consumer with
