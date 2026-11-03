@@ -4880,6 +4880,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-mux-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-mux",
+]
+
+[[package]]
 name = "moq-native"
 version = "0.20.0"
 dependencies = [
@@ -5133,6 +5141,14 @@ dependencies = [
  "tracing",
  "tracing-test",
  "workspace-hack",
+]
+
+[[package]]
+name = "moq-rtmp-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-rtmp",
 ]
 
 [[package]]

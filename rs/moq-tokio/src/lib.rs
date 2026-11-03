@@ -34,6 +34,9 @@ mod abort;
 pub mod accept;
 pub use moq_sock::bind;
 pub mod cli;
+/// The congestion-controller traits, for a [`quic::Controller`] of the application's own.
+#[cfg(feature = "driver")]
+pub use moq_congestion as congestion;
 #[cfg(feature = "net")]
 pub mod client;
 #[cfg(feature = "net")]
