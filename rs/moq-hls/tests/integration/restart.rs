@@ -14,9 +14,10 @@ const NEW: u8 = 2;
 /// What the replaced run's recording holds when the new instance takes over.
 #[derive(Clone, Copy, Debug)]
 enum Case {
-	/// A cached segment returned while the cursor's live SUBSCRIBE was still unanswered.
-	/// Without an epoch nothing says which instance answers it, so it is refused and the
-	/// recording loses the old run's last uncached GOP.
+	/// A cached segment returned while the cursor's live SUBSCRIBE was still unanswered. On
+	/// lite-07 it names the old run's instance, so the old run answers it and the recording
+	/// completes. An older wire names none, so the takeover refuses it and the recording loses
+	/// the old run's last uncached GOP.
 	Unanswered,
 	/// As [`Self::Unanswered`], while the replacement's own group of the same number is
 	/// still open, which the old cursor once waited on forever.
@@ -48,7 +49,7 @@ async fn takeover(version: &str, case: Case) {
 		assert_old(&app, uri).await;
 	}
 	// Read as a recorder does. A cached segment can return while the live feed is still opening.
-	let first = moq_clock::timeout(TIMEOUT, cursor.next())
+	let first = kio::clock::timeout(TIMEOUT, cursor.next())
 		.await
 		.expect("the first segment")
 		.expect("records")
@@ -60,22 +61,22 @@ async fn takeover(version: &str, case: Case) {
 	));
 	match case {
 		// Paused, the clock only moves once every task is idle, so the feed has its answer.
-		Case::Answered => moq_clock::sleep(Duration::from_millis(500)).await,
+		Case::Answered => kio::clock::sleep(Duration::from_millis(500)).await,
 		Case::FinishedFirst => old.finish(),
 		Case::Unanswered | Case::UnansweredUnfinished => {}
 	}
 
 	// The new instance numbers its groups and segments from zero again.
-	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let route = moq_net::origin::Route::default();
 	let mut new = Publisher::new(&pair.publisher, "live", route);
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	let current = loop {
 		let current = server.broadcaster("live").await.expect("announced");
-		if !std::sync::Arc::ptr_eq(&current, &replaced) {
+		if !current.is_clone(&replaced) {
 			break current;
 		}
-		assert!(moq_clock::now() < deadline, "the new instance never took over");
-		moq_clock::sleep(Duration::from_millis(50)).await;
+		assert!(kio::clock::now() < deadline, "the new instance never took over");
+		kio::clock::sleep(Duration::from_millis(50)).await;
 	};
 	current.set_generation(Some("run-2")).expect("generation");
 	new.write(0, 13, NEW);
@@ -113,14 +114,15 @@ async fn takeover(version: &str, case: Case) {
 	// The old recording reads only its own segments, and either completes or fails at the GOP
 	// it lost.
 	let (read, end) = drain_old(&mut cursor).await;
+	let pinned = version == "moq-lite-07-wip";
 	match case {
-		Case::Answered => {
+		_ if pinned || matches!(case, Case::Answered) => {
 			end.unwrap_or_else(|err| panic!("{case:?}: {err}"));
 			assert_eq!(read, [1, 2, 3], "{case:?}");
 			let playlist = rendition.media_playlist(None).expect("finished").expect("listed");
 			assert!(playlist.ends_with("#EXT-X-ENDLIST\n"), "{case:?}: {playlist}");
 		}
-		Case::Unanswered | Case::UnansweredUnfinished | Case::FinishedFirst => {
+		Case::Answered | Case::Unanswered | Case::UnansweredUnfinished | Case::FinishedFirst => {
 			assert!(
 				matches!(end, Err(moq_hls::Error::SegmentUnavailable { segment: 3 })),
 				"{case:?}: {end:?}"
@@ -164,7 +166,7 @@ async fn finished_first() {
 async fn drain_old(cursor: &mut segments::Consumer) -> (Vec<u64>, moq_hls::Result<()>) {
 	let mut read = Vec::new();
 	loop {
-		let next = moq_clock::timeout(TIMEOUT, cursor.next())
+		let next = kio::clock::timeout(TIMEOUT, cursor.next())
 			.await
 			.expect("the replaced run's cursor stalled");
 		let segment = match next {

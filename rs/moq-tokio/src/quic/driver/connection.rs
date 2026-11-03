@@ -1,7 +1,6 @@
 //! A single connection: its streams, datagrams, and why it ends.
 
 use std::{
-	any::Any,
 	fmt,
 	future::Future,
 	io,
@@ -30,8 +29,9 @@ use crate::quic::driver::{
 use moq_congestion::Controller;
 pub use moq_quic::connection::{Error, Stats};
 use moq_quic::{
-	EndpointEvent, StreamEvent, TransportError, TransportErrorCode,
+	EndpointEvent, StreamEvent, TransportError, TransportErrorCode, crypto,
 	endpoint::ConnectionHandle,
+	rustls::pki_types::CertificateDer,
 	stream::{Dir, Id as StreamId},
 };
 
@@ -56,7 +56,7 @@ impl Connecting {
 		endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 		conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 		slot: Arc<Slot>,
-		runtime: &tokio::runtime::Handle,
+		runtime: &crate::runtime::Spawner,
 	) -> Self {
 		let (on_handshake_data_send, on_handshake_data_recv) = oneshot::channel();
 		let shared = Shared {
@@ -81,7 +81,7 @@ impl Connecting {
 		let driver = ConnectionDriver::new(conn.clone());
 		runtime.spawn(
 			async {
-				if let Err(e) = driver.await {
+				if let Some(Err(e)) = crate::panic::isolate(driver).await {
 					tracing::error!("I/O error: {e}");
 				}
 			}
@@ -97,15 +97,10 @@ impl Connecting {
 
 	/// Parameters negotiated during the handshake
 	///
-	/// The dynamic type returned is determined by the configured
-	/// [`Session`](moq_quic::crypto::Session). For the default `rustls` session, the return value can
-	/// be [`downcast`](Box::downcast) to a
-	/// [`crypto::rustls::HandshakeData`](crate::quic::driver::crypto::rustls::HandshakeData).
-	///
 	/// Peer certificates are not available at this stage; see [`Connection::peer_identity()`].
 	///
 	/// This operation is cancel-safe.
-	pub async fn handshake_data(&mut self) -> Result<Box<dyn Any>, Error> {
+	pub async fn handshake_data(&mut self) -> Result<crypto::HandshakeData, Error> {
 		// Taking &mut self allows us to use a single oneshot channel rather than dealing with
 		// potentially many tasks waiting on the same event. It's a bit of a hack, but keeps things
 		// simple.
@@ -119,7 +114,6 @@ impl Connecting {
 		let inner = conn.state.lock();
 		inner
 			.inner
-			.crypto_session()
 			.handshake_data()
 			.ok_or_else(|| inner.error.clone().expect("spurious handshake data ready notification"))
 	}
@@ -130,6 +124,17 @@ impl Connecting {
 	pub fn remote_address(&self) -> SocketAddr {
 		let conn_ref: &ConnectionRef = self.conn.as_ref().expect("used after yielding Ready");
 		conn_ref.state.lock().inner.remote_address()
+	}
+
+	/// Panic while holding the state, as a driver bug would, then wake the driver into it.
+	#[cfg(test)]
+	pub(super) fn poison(&self) {
+		let conn = self.conn.as_ref().expect("used after yielding Ready");
+		let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let _guard = conn.state.lock();
+			panic!("injected");
+		}));
+		conn.state.poisoned().expect("the panic poisoned the state").wake();
 	}
 }
 
@@ -233,6 +238,20 @@ impl Future for ConnectionDriver {
 			unreachable!("drained connections always have an error");
 		}
 		Poll::Ready(Ok(()))
+	}
+}
+
+impl Drop for ConnectionDriver {
+	fn drop(&mut self) {
+		// A panic poisoned the state, and without a driver nothing will time the connection out:
+		// fail every waiter now, so it reaches the poisoned lock instead of hanging.
+		if let Some(mut conn) = self.conn.state.poisoned() {
+			let reason = TransportError::new(
+				TransportErrorCode::INTERNAL_ERROR,
+				"connection driver panicked".to_string(),
+			);
+			conn.terminate(Error::TransportError(reason), &self.conn.shared);
+		}
 	}
 }
 
@@ -503,6 +522,13 @@ impl Connection {
 		self.0.state.lock().inner.stats()
 	}
 
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	#[cfg(feature = "net")]
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let state = self.0.state.lock();
+		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
+	}
+
 	/// How many send streams the connection still holds state for
 	#[cfg(test)]
 	pub(crate) fn send_streams(&self) -> usize {
@@ -535,25 +561,18 @@ impl Connection {
 	/// Parameters negotiated during the handshake
 	///
 	/// Guaranteed to return `Some` on fully established connections or after
-	/// [`Connecting::handshake_data()`] succeeds. See that method's documentations for details on
-	/// the returned value.
-	///
-	/// [`Connection::handshake_data()`]: crate::quic::driver::connection::Connecting::handshake_data
-	pub fn handshake_data(&self) -> Option<Box<dyn Any>> {
-		self.0.state.lock().inner.crypto_session().handshake_data()
+	/// [`Connecting::handshake_data()`] succeeds.
+	pub fn handshake_data(&self) -> Option<crypto::HandshakeData> {
+		self.0.state.lock().inner.handshake_data()
 	}
 
-	/// Cryptographic identity of the peer
-	///
-	/// The dynamic type returned is determined by the configured
-	/// [`Session`](moq_quic::crypto::Session). For the default `rustls` session, the return value can
-	/// be [`downcast`](Box::downcast) to a <code>Vec<[rustls::pki_types::CertificateDer]></code>.
+	/// The certificate chain the peer presented, end entity first, if it presented one
 	///
 	/// For custom asynchronous validation (e.g. checking a certificate against an external
 	/// database), call this after awaiting [`Connecting`] and use [`close()`][Self::close] to
 	/// reject untrusted peers.
-	pub fn peer_identity(&self) -> Option<Box<dyn Any>> {
-		self.0.state.lock().inner.crypto_session().peer_identity()
+	pub fn peer_identity(&self) -> Option<Vec<CertificateDer<'static>>> {
+		self.0.state.lock().inner.peer_identity()
 	}
 
 	/// A stable identifier for this connection
@@ -562,29 +581,6 @@ impl Connection {
 	/// fixed for the lifetime of the connection.
 	pub fn stable_id(&self) -> usize {
 		self.0.stable_id()
-	}
-
-	/// Derive keying material from this connection's TLS session secrets.
-	///
-	/// When both peers call this method with the same `label` and `context`
-	/// arguments and `output` buffers of equal length, they will get the
-	/// same sequence of bytes in `output`. These bytes are cryptographically
-	/// strong and pseudorandom, and are suitable for use as keying material.
-	///
-	/// See [RFC5705](https://tools.ietf.org/html/rfc5705) for more information.
-	#[cfg(test)]
-	pub(super) fn export_keying_material(
-		&self,
-		output: &mut [u8],
-		label: &[u8],
-		context: &[u8],
-	) -> Result<(), moq_quic::crypto::ExportKeyingMaterialError> {
-		self.0
-			.state
-			.lock()
-			.inner
-			.crypto_session()
-			.export_keying_material(output, label, context)
 	}
 
 	/// See [`moq_quic::connection::Connection::set_limits`]
@@ -779,7 +775,9 @@ impl Drop for ConnectionRef {
 			return;
 		}
 
-		let conn = &mut *self.state.lock();
+		let Some(mut conn) = self.state.lock_for_drop() else {
+			return;
+		};
 
 		if !conn.inner.is_closed() {
 			// If the driver is alive, it's just it and us, so we'd better shut it down. If it's
@@ -832,7 +830,7 @@ pub(crate) struct State {
 	handle: ConnectionHandle,
 	on_handshake_data: Option<oneshot::Sender<()>>,
 	connected: bool,
-	timer: Option<moq_clock::Sleep>,
+	timer: Option<kio::clock::Sleep>,
 	timer_deadline: Option<Instant>,
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
@@ -1027,7 +1025,7 @@ impl State {
 				delay.reset(deadline);
 			}
 			None => {
-				self.timer = Some(moq_clock::sleep_until(deadline));
+				self.timer = Some(kio::clock::sleep_until(deadline));
 			}
 			_ => {}
 		}

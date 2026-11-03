@@ -15,13 +15,13 @@ mod jitter;
 /// Every track sends a frame a second as it decodes, for as many two-second steering steps as
 /// fill the rate window with `floors`, each step measuring every track heard.
 async fn steer(tracks: u16, floors: u64) -> u64 {
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 	buffer.expect(1..=tracks);
 	let waiter = kio::Waiter::noop();
 	for second in 0..floors * 2 {
 		let at = start + Duration::from_secs(second);
-		tokio::time::advance(at.saturating_duration_since(moq_clock::now())).await;
+		tokio::time::advance(at.saturating_duration_since(kio::clock::now())).await;
 		for track in 1..=tracks {
 			let arrival = jitter::Arrival {
 				arrived: at,
@@ -76,7 +76,7 @@ fn acquisition(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
 				b.iter(|| {
 					runtime.block_on(async {
-						let start = moq_clock::now();
+						let start = kio::clock::now();
 						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 						buffer.expect(1..=tracks);
 						for track in 1..=tracks {
@@ -123,7 +123,7 @@ fn handoff(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
 				b.iter(|| {
 					runtime.block_on(async {
-						let start = moq_clock::now();
+						let start = kio::clock::now();
 						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 						buffer.expect(1..=tracks);
 						for instance in 0..2 {
@@ -186,13 +186,13 @@ fn admission(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new(tracks.to_string(), backlog), |b| {
 				b.iter(|| {
 					runtime.block_on(async {
-						let start = moq_clock::now();
+						let start = kio::clock::now();
 						let delay = Duration::from_millis(500);
 						let mut buffer = jitter::Buffer::new(delay);
 						buffer.expect(1..=tracks);
 						let frame = |decode| jitter::Arrival {
 							arrived: start,
-							read: moq_clock::now(),
+							read: kio::clock::now(),
 							decode: Timestamp::from_millis(decode).unwrap().into(),
 							restart: 0,
 							sync: true,

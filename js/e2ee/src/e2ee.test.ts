@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Broadcast, Error as NetError, Group as NetGroup, Track as NetTrack, StreamCode, Time } from "@moq/net";
 import * as Protected from "./broadcast.ts";
@@ -40,7 +40,7 @@ function netTrack(name: string, timed = true): NetTrack.Producer {
 }
 
 function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {
-	return net.subscribe({ maxDelay: Milli(60_000) });
+	return net.subscribe({ delay: { max: Milli(60_000) } });
 }
 
 interface Pair {
@@ -236,7 +236,7 @@ test("a broadcast speaks semantic names and puts physical names on the wire", as
 	const consumer = await new Protected.Consumer(
 		net.consume(),
 		generation.credential.consume(generation.epoch),
-	).subscribe("video", { maxDelay: Milli(60_000) });
+	).subscribe("video", { delay: { max: Milli(60_000) } });
 	const group = video.appendGroup();
 	await group.writeFrame(ms(1), text("frame"));
 	group.finish();
@@ -901,13 +901,18 @@ test("a grouped failure skips opens queued behind it", async () => {
 test("a failed net write after encryption aborts the group", async () => {
 	const p = await pair("video");
 	const group = p.producer.appendGroup();
-	const writes: Promise<void>[] = [];
-	for (let i = 0; i < NetGroup.MAX_GROUP_FRAMES; i++) writes.push(group.writeFrame(ms(i), text("x")));
-	await Promise.all(writes);
-	// The net group refuses the frame only after it was encrypted, so the identity is spent
-	// and the group can no longer line its transport index up with the nonce.
-	await expect(group.writeFrame(ms(0), text("over"))).rejects.toThrow("group too large");
-	await expect(group.writeFrame(ms(0), text("after"))).rejects.toThrow("group too large");
+	await group.writeFrame(ms(0), text("first"));
+	const failure = new Error("net write failed");
+	const write = spyOn(NetGroup.Producer.prototype, "writeFrame").mockImplementation(() => {
+		throw failure;
+	});
+	try {
+		// Encryption spent the identity, so a failed net write must end this group.
+		await expect(group.writeFrame(ms(1), text("over"))).rejects.toThrow(failure);
+		await expect(group.writeFrame(ms(2), text("after"))).rejects.toThrow(failure);
+	} finally {
+		write.mockRestore();
+	}
 });
 
 test("a group read past the first frame opens at its transport index", async () => {

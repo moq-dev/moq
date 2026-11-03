@@ -1,6 +1,8 @@
-import { expect, test } from "bun:test";
-import { ProtocolViolation, SessionCode } from "../error.ts";
+import { expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
+import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import * as Varint from "../varint.ts";
 import { RequestError } from "./request.ts";
 import { namespaceUpdate, nextMessage, RequestStream, refuse } from "./request_stream.ts";
@@ -162,5 +164,35 @@ test("a refusal carries its reason", async () => {
 		expect(await r.u53()).toBe(RequestError.id);
 		const err = await RequestError.decode(r, version);
 		expect(err.reasonPhrase).toBe("no");
+	}
+});
+
+test("a request's deadline ends it through the request, so later ends do nothing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>(),
+			version: Version.DRAFT_18,
+		});
+		const aborts = spyOn(stream, "abort");
+		const session = { version: Version.DRAFT_18, client: true, openBi: () => stream } as unknown as Session;
+		const deadline = new Deadline();
+		const request = await RequestStream.open(session, deadline);
+		const answer = deadline.wait(new Promise<never>(() => {})).catch((e: unknown) => e);
+		await clock.advance(Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)));
+		const err = await answer;
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.ControlTimeout);
+		await request.ended;
+
+		// The caller's own cleanup after the deadline.
+		request.abort(new Error("abandoned"));
+		request.close();
+		expect(aborts).toHaveBeenCalledTimes(1);
+		expect(aborts.mock.calls[0]?.[0]).toBe(err as StreamError);
+	} finally {
+		installed.close();
 	}
 });

@@ -5,7 +5,6 @@ mod rpm
 mod moq-sh
 mod mbx
 mod nix
-mod token
 
 # Deploy all infra workers.
 deploy:
@@ -13,4 +12,3 @@ deploy:
     just rpm deploy
     just moq-sh deploy
     just nix deploy
-    just token deploy

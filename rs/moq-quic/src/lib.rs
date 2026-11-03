@@ -1,7 +1,7 @@
 //! Low-level protocol logic for the QUIC protocol
 //!
 //! moq-quic has no networking code: the caller supplies transport timestamps, and address
-//! validation reads the ambient `moq-clock` wall time. Most applications use the Tokio driver
+//! validation reads the ambient `kio::clock` wall time. Most applications use the Tokio driver
 //! in `moq_tokio::quic::driver` instead.
 //!
 //! Use `moq_tokio::quic::driver` for Tokio, or drive this state machine from another runtime.
@@ -13,6 +13,14 @@
 
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(dead_code, reason = "test builds compile helpers only some tests call"))]
+#![cfg_attr(
+	not(any(feature = "aws-lc-rs", feature = "ring")),
+	allow(
+		dead_code,
+		unused_imports,
+		reason = "without a crypto provider only the mux connection is reachable"
+	)
+)]
 
 use std::{
 	net::{IpAddr, SocketAddr},
@@ -29,9 +37,13 @@ mod entropy;
 #[doc(hidden)]
 pub mod fuzz;
 mod range_set;
+// Not part of the public API: the network path the crate's tests and simulated drivers share.
+#[cfg(any(test, feature = "sim"))]
+#[doc(hidden)]
+pub mod sim;
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 mod tests;
-pub mod transport_parameters;
+mod transport_parameters;
 mod varint;
 
 pub use varint::{VarInt, VarIntBoundsExceeded};
@@ -50,7 +62,7 @@ pub mod stream;
 pub use connection::mux;
 pub(crate) use stream::{Dir, Id as StreamId};
 
-#[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
+// The configs take and report rustls types, so callers name the same version.
 pub use rustls;
 
 mod config;
@@ -89,7 +101,7 @@ use token_memory_cache::TokenMemoryCache;
 
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
-pub(crate) use moq_clock::{Instant, Wall};
+pub(crate) use kio::clock::{Instant, Wall};
 pub(crate) use std::time::Duration;
 pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 
@@ -181,6 +193,9 @@ const MIN_INITIAL_SIZE: u16 = 1200;
 /// <https://www.rfc-editor.org/rfc/rfc9000.html#name-datagram-size>
 const INITIAL_MTU: u16 = 1200;
 const MAX_UDP_PAYLOAD: u16 = 65527;
+/// Bytes one IPv4 UDP send can carry, however many GSO segments split it: 65,535 minus the IP and
+/// UDP headers. Linux refuses a larger train with `EMSGSIZE`.
+const MAX_TRANSMIT_SIZE: usize = 65_507;
 const TIMER_GRANULARITY: Duration = Duration::from_millis(1);
 /// Maximum number of streams that can be uniquely identified by a stream ID
 const MAX_STREAM_COUNT: u64 = 1 << 60;

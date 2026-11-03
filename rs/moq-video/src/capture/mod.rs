@@ -357,6 +357,12 @@ impl Stream {
 		Ok(Some(Frame::new(surface, frame.timestamp)))
 	}
 
+	/// How many captured frames no [`read`](Self::read) returned, because a newer one replaced
+	/// them while the reader was busy.
+	pub(crate) fn skipped(&self) -> u64 {
+		self.chan.skipped()
+	}
+
 	/// Width of the captured frames in pixels.
 	pub fn width(&self) -> u32 {
 		self.width
@@ -413,7 +419,7 @@ impl Synthetic {
 	}
 
 	/// Deliver a frame acquired at `captured`.
-	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: moq_clock::Instant) {
+	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: kio::clock::Instant) {
 		self.chan.push_at(surface, captured);
 	}
 

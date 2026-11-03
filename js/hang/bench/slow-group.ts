@@ -9,10 +9,10 @@ import { Format } from "../src/container/legacy.ts";
 console.log("groups,warnings,bytes,catchup_ms");
 for (const count of [1, 16, 256, 1024]) {
 	const track = new Track.Producer("tone");
-	const maxDelay = new Signal(Milli(30_000));
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+	const delay = new Signal<Track.Delay>({ max: Milli(30_000) });
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 		format: new Format("data"),
-		maxDelay,
+		delay,
 	});
 	const write = (sequence: number) => {
 		const group = track.createGroup(sequence);
@@ -31,7 +31,7 @@ for (const count of [1, 16, 256, 1024]) {
 	try {
 		for (let i = 0; i < count; i++) write(i);
 		await buffered(count - 1);
-		maxDelay.set(Milli.zero);
+		delay.set({ max: Milli.zero });
 		const started = performance.now();
 		write(count);
 		await buffered(count);

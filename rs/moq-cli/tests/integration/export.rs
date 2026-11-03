@@ -10,12 +10,14 @@
 use std::io::Cursor;
 use std::os::fd::AsRawFd;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use hang::moq_net;
+use moq_mux::container::fmp4::mp4_atom;
 use moq_mux::container::ts;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -48,9 +50,9 @@ struct Export {
 impl Export {
 	/// Wait for output, retaining the child verdict and stderr on every timeout.
 	async fn output_past(&mut self, len: usize) {
-		let arrived = moq_clock::timeout(TIMEOUT, async {
+		let arrived = kio::clock::timeout(TIMEOUT, async {
 			while self.output.lock().unwrap().len() <= len {
-				moq_clock::sleep(Duration::from_millis(50)).await;
+				kio::clock::sleep(Duration::from_millis(50)).await;
 			}
 		})
 		.await;
@@ -64,7 +66,7 @@ impl Export {
 
 	/// Wait for the verdict and drain both pipes before inspecting their contents.
 	async fn wait(mut self) -> (std::process::ExitStatus, String) {
-		let status = match moq_clock::timeout(TIMEOUT, self.child.wait()).await {
+		let status = match kio::clock::timeout(TIMEOUT, self.child.wait()).await {
 			Ok(status) => status.expect("wait for export"),
 			Err(err) => {
 				let _ = self.child.kill().await;
@@ -87,7 +89,7 @@ struct Relay {
 }
 
 /// A public relay on ephemeral loopback ports that also accepts lite-07, the version that
-/// carries epochs, for a client that opts in with `--connect-version`. Its generated
+/// carries instances, for a client that opts in with `--connect-version`. Its generated
 /// certificate is trusted blindly, since nothing but loopback reaches it.
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
@@ -250,7 +252,7 @@ fn import(relay: &Relay) -> (Child, JoinHandle<ChildStdin>) {
 	import_with(relay, &[])
 }
 
-/// [`import`] with `global` flags, such as the session version or the epoch.
+/// [`import`] with `global` flags, such as the session version.
 fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>) {
 	import_as(relay, global, TS)
 }
@@ -272,7 +274,7 @@ fn feed(mut stdin: ChildStdin, format: Format) -> JoinHandle<ChildStdin> {
 	tokio::spawn(async move {
 		for chunk in format.clip.chunks(format.chunk) {
 			stdin.write_all(chunk).await.expect("write stdin");
-			moq_clock::sleep(Duration::from_millis(150)).await;
+			kio::clock::sleep(Duration::from_millis(150)).await;
 		}
 		stdin
 	})
@@ -293,7 +295,7 @@ async fn interrupt(mut child: Child, stdin: ChildStdin) {
 }
 
 async fn wait(child: &mut Child) -> std::process::ExitStatus {
-	moq_clock::timeout(TIMEOUT, child.wait())
+	kio::clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq never exited")
 		.expect("wait for moq")
@@ -425,13 +427,13 @@ async fn interrupted(export: &mut Export, publisher: (Child, JoinHandle<ChildStd
 	let stdin = feeding.await.unwrap();
 	export.output_past(0).await;
 	interrupt(publisher, stdin).await;
-	moq_clock::timeout(TIMEOUT, export.settled.take().expect("one interruption per export"))
+	kio::clock::timeout(TIMEOUT, export.settled.take().expect("one interruption per export"))
 		.await
 		.expect("export never drained into its follow")
 		.expect("export stopped before following");
 	let (fence, drained) = tokio::sync::oneshot::channel();
 	export.fence.send(fence).expect("stdout reader is still running");
-	let len = moq_clock::timeout(TIMEOUT, drained)
+	let len = kio::clock::timeout(TIMEOUT, drained)
 		.await
 		.expect("stdout reader never drained its queued tail")
 		.expect("stdout reader ended before its tail fence");
@@ -512,13 +514,13 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 	assert_eq!(unflagged(after), Vec::<u16>::new(), "every PID flags the break");
 }
 
-/// One publisher reconnects within the follow, continuing its capture under the same epoch
+/// One publisher reconnects within the follow, continuing its capture under the same instance
 /// and program before delivering a clean final finish.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn the_same_instance_within_the_follow_continues() {
 	let relay = relay().await;
-	let epoch = moq_net::Epoch::mint();
+	let instance = moq_net::Instance::random();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("demo").unwrap();
@@ -528,7 +530,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 		.unwrap();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
@@ -550,7 +552,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	// the publisher reconnects would make the rest late by the pause, and dropped. The
 	// interval bursts whatever a stall held back. The export joins after the catalog's
 	// PCR-rate window and writes a delay after that, so publish until it has written.
-	let mut pace = moq_clock::interval(Duration::from_millis(150));
+	let mut pace = kio::clock::interval(Duration::from_millis(150));
 	let mut chunks = LONG.chunks(188 * 40);
 	let mut split = 0;
 	while output.lock().unwrap().is_empty()
@@ -563,20 +565,20 @@ async fn the_same_instance_within_the_follow_continues() {
 	export.output_past(0).await;
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
 	let old = relay.origin.request("demo", None).await.unwrap();
-	assert_eq!(old.info().epoch.as_ref(), Some(&epoch));
+	assert_eq!(old.info().instance.as_ref(), Some(&instance));
 	let clock = catalog.snapshot().clock;
 	connection.abort(moq_net::Error::Cancel);
 	connection.closed().await.unwrap();
-	moq_clock::timeout(TIMEOUT, old.closed())
+	kio::clock::timeout(TIMEOUT, old.closed())
 		.await
 		.expect("the relay observes the lost publication");
 	let mark = output.lock().unwrap().len().next_multiple_of(188);
 	let connection = client.connect(url).established().await.unwrap();
-	let back = moq_clock::timeout(TIMEOUT, relay.origin.follow("demo", None).unwrap().available())
+	let back = kio::clock::timeout(TIMEOUT, relay.origin.follow("demo", None).unwrap().available())
 		.await
 		.expect("the relay observes the returning publication")
 		.unwrap();
-	assert_eq!(back.info().epoch.as_ref(), Some(&epoch));
+	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
 	for chunk in chunks {
 		pace.tick().await;
@@ -644,7 +646,7 @@ async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
 		.spawn()
 		.expect("spawn the standby");
 	let standby_stdin = standby.stdin.take().expect("stdin");
-	moq_clock::sleep(Duration::from_secs(2)).await;
+	kio::clock::sleep(Duration::from_secs(2)).await;
 	assert!(
 		first.child.try_wait().unwrap().is_none(),
 		"the first export survives the standby"
@@ -685,7 +687,7 @@ async fn a_standby_before_its_pmt_leaves_the_exports_running() {
 	a_standby_before_its_tracks(&[], TS).await;
 }
 
-/// lite-07 carries the epoch, so this is the version on which the relay queries the standby.
+/// lite-07 carries the instance, so this is the version on which the relay queries the standby.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_standby_before_its_pmt_leaves_the_exports_running_on_lite_07() {
@@ -713,7 +715,7 @@ async fn an_old_publisher_that_stays_up_keeps_the_export() {
 	let (mut new, replacing) = import_with(&relay, &lite07);
 	let old_stdin = feeding.await.unwrap();
 	let new_stdin = replacing.await.unwrap();
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	assert!(
 		export.child.try_wait().unwrap().is_none(),
 		"the export stays on the old publisher while it is up"
@@ -768,7 +770,7 @@ async fn import_announced(relay: &Relay, format: Format) -> (Child, JoinHandle<C
 		}
 		panic!("the import exited before announcing");
 	};
-	moq_clock::timeout(TIMEOUT, announced)
+	kio::clock::timeout(TIMEOUT, announced)
 		.await
 		.expect("the import never announced");
 	// Keep draining, so a full pipe never blocks the import.
@@ -841,7 +843,7 @@ fn redundant_feed() -> (tokio::sync::mpsc::UnboundedSender<ChildStdin>, JoinHand
 	let task = tokio::spawn(async move {
 		let source = redundant_source();
 		let mut inputs: Vec<ChildStdin> = Vec::new();
-		let mut pace = moq_clock::interval(Duration::from_micros(30_080));
+		let mut pace = kio::clock::interval(Duration::from_micros(30_080));
 		for chunk in source.chunks(8 * 188) {
 			pace.tick().await;
 			while let Ok(input) = added.try_recv() {
@@ -947,7 +949,7 @@ async fn redundant_failover(bufferbloat: bool) {
 	let mut second = redundant_import(&relay, &feed, &[]);
 	for version in 1..=3 {
 		for export in &mut exports {
-			moq_clock::timeout(TIMEOUT, async {
+			kio::clock::timeout(TIMEOUT, async {
 				loop {
 					if export.child.try_wait().unwrap().is_some() {
 						let errors = (&mut export.stderr).await.expect("collect exporter stderr");
@@ -959,7 +961,7 @@ async fn redundant_failover(bufferbloat: bool) {
 					{
 						break;
 					}
-					moq_clock::sleep(Duration::from_millis(20)).await;
+					kio::clock::sleep(Duration::from_millis(20)).await;
 				}
 			})
 			.await
@@ -1054,15 +1056,18 @@ async fn redundant_failover(bufferbloat: bool) {
 	}
 }
 
-/// The epoch of the next route announced for the path.
-async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epoch {
-	moq_clock::timeout(TIMEOUT, async {
+/// The instance of the next route announced for the path.
+async fn next_instance(announced: &mut moq_net::announce::Consumer) -> moq_net::Instance {
+	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
 				moq_net::announce::Event::Start(announce)
 				| moq_net::announce::Event::Restart(announce)
 				| moq_net::announce::Event::Takeover { announce, .. } => {
-					return announce.route.epoch.expect("a lite-07 importer announces its epoch");
+					return announce
+						.route
+						.instance
+						.expect("a lite-07 importer announces its instance");
 				}
 				_ => continue,
 			}
@@ -1073,7 +1078,7 @@ async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epo
 }
 
 /// `export ts --passthrough` follows no restart: it stays on the passthrough importer it
-/// resolved while a backup on its own epoch starts, and ends once that importer goes.
+/// resolved while a backup on its own instance starts, and ends once that importer goes.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
@@ -1082,15 +1087,15 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let mut announced = relay.origin.scope("", &demo).unwrap().announced();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
-	let incumbent = next_epoch(&mut announced).await;
+	let incumbent = next_instance(&mut announced).await;
 	let mut export = export_with(&relay, &["--connect-version", LITE_07], &["--passthrough"]);
 	export.output_past(0).await;
 
 	let mut second = redundant_import(&relay, &feed, &["--passthrough"]);
 	assert_ne!(
-		next_epoch(&mut announced).await,
+		next_instance(&mut announced).await,
 		incumbent,
-		"the backup mints its own epoch"
+		"the backup mints its own instance"
 	);
 	let mark = export.output.lock().unwrap().len();
 	export.output_past(mark).await;
@@ -1107,4 +1112,192 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	);
 	second.kill().await.unwrap();
 	feeding.abort();
+}
+
+/// `repair mp4` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
+/// it alone once finished.
+#[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
+async fn a_killed_mp4_recording_is_repaired() {
+	let relay = relay().await;
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	let mut recording = moq(&relay, &[])
+		.args(["export", "mp4", "--output"])
+		.arg(&path)
+		.spawn()
+		.expect("spawn export");
+	let (mut publisher, feeding) = import(&relay);
+
+	kio::clock::timeout(TIMEOUT, async {
+		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
+			kio::clock::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.expect("the recording never grew");
+	recording.kill().await.unwrap();
+	let killed = std::fs::read(&path).unwrap();
+	assert_eq!(
+		boxes(&killed)[1].kind().to_string(),
+		"free",
+		"the killed recording is unfinished"
+	);
+
+	let repair = || async {
+		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
+			.args(["repair", "mp4"])
+			.arg(&path)
+			.output();
+		let output = kio::clock::timeout(TIMEOUT, output)
+			.await
+			.expect("repair never exited")
+			.unwrap();
+		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+		std::fs::read(&path).unwrap()
+	};
+	let repaired = repair().await;
+	let boxes = boxes(&repaired);
+	let kinds: Vec<String> = boxes.iter().map(|atom| atom.kind().to_string()).collect();
+	assert_eq!(kinds, ["ftyp", "mdat", "moov"]);
+	let Some(mp4_atom::Any::Moov(moov)) = boxes.last() else {
+		unreachable!();
+	};
+	assert_eq!(moov.trak.len(), 2, "video and audio");
+	// Only the reserved box changed before the moov, which replaces any partial fragment.
+	let reserved = u32::from_be_bytes(killed[..4].try_into().unwrap()) as usize;
+	let media = reserved + u64::from_be_bytes(repaired[reserved + 8..reserved + 16].try_into().unwrap()) as usize;
+	assert!(media <= killed.len());
+	assert_eq!(repaired[..reserved], killed[..reserved]);
+	assert_eq!(repaired[reserved + 16..media], killed[reserved + 16..media]);
+
+	assert_eq!(repair().await, repaired, "a finished recording is left alone");
+
+	let stdin = feeding.await.unwrap();
+	drop(stdin);
+	assert!(wait(&mut publisher).await.success());
+}
+
+/// The top-level boxes of an MP4 file, by kind.
+fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
+	use mp4_atom::DecodeMaybe;
+	let mut cursor = Cursor::new(file);
+	let mut boxes = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode the recording") {
+		boxes.push(atom);
+	}
+	boxes
+}
+
+/// Count the frames the relay delivers on `demo`'s video track as they arrive. A GOP lasts two
+/// seconds, so subscribing during the first one counts them all.
+fn delivered(relay: &Relay) -> Arc<AtomicUsize> {
+	let count = Arc::<AtomicUsize>::default();
+	let counting = count.clone();
+	let origin = relay.origin.clone();
+	tokio::spawn(async move {
+		let broadcast = origin.follow("demo", None).unwrap().available().await.unwrap();
+		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
+		let name = loop {
+			let catalog = catalogs.next().await.unwrap().expect("the catalog ended");
+			if let Some(name) = catalog.video.renditions.keys().next() {
+				break name.clone();
+			}
+		};
+		let mut track = broadcast.track(&name).unwrap().subscribe(None).await.unwrap();
+		while let Some(mut group) = track.recv_group().await.unwrap() {
+			while group.read_frame().await.unwrap().is_some() {
+				counting.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+	});
+	count
+}
+
+/// How many samples the regular MP4 `moov` indexes for `handler`'s track.
+fn indexed(moov: &mp4_atom::Moov, handler: &[u8; 4]) -> usize {
+	let trak = moov
+		.trak
+		.iter()
+		.find(|trak| trak.mdia.hdlr.handler == handler.into())
+		.expect("a trak");
+	match &trak.mdia.minf.stbl.stsz.samples {
+		mp4_atom::StszSamples::Identical { count, .. } => *count as usize,
+		mp4_atom::StszSamples::Different { sizes } => sizes.len(),
+	}
+}
+
+/// SIGINT during `export mp4` finishes the recording as a regular MP4 with its moov at the end,
+/// keeping every frame received, the GOP it was still buffering included.
+#[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
+async fn an_interrupted_mp4_recording_is_finished() {
+	let relay = relay().await;
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	let video = delivered(&relay);
+	let mut recording = moq(&relay, &[])
+		.args(["export", "mp4", "--output"])
+		.arg(&path)
+		.stderr(Stdio::piped())
+		.spawn()
+		.expect("spawn export");
+	// Stop feeding partway into the second GOP, which then stays open.
+	let format = Format {
+		clip: &CLIP[..120_320],
+		..TS
+	};
+	let (mut publisher, feeding) = import_as(&relay, &[], format);
+	let stdin = feeding.await.unwrap();
+
+	// The relay delivers the export the same frames as the counter, so once it stops growing
+	// the export has received what it will before the signal.
+	let delivered = || video.load(Ordering::SeqCst);
+	kio::clock::timeout(TIMEOUT, async {
+		let mut last = delivered();
+		loop {
+			kio::clock::sleep(Duration::from_secs(1)).await;
+			let now = delivered();
+			if now == last && now > 0 {
+				break;
+			}
+			last = now;
+		}
+	})
+	.await
+	.expect("the relay kept delivering");
+	let pid = recording.id().expect("running").to_string();
+	let status = std::process::Command::new("kill")
+		.args(["-INT", &pid])
+		.status()
+		.expect("kill");
+	assert!(status.success());
+	let status = wait(&mut recording).await;
+	let mut errors = String::new();
+	recording
+		.stderr
+		.take()
+		.unwrap()
+		.read_to_string(&mut errors)
+		.await
+		.unwrap();
+	assert!(status.success(), "{errors}");
+
+	let file = std::fs::read(&path).unwrap();
+	let boxes = boxes(&file);
+	let kinds: Vec<String> = boxes.iter().map(|atom| atom.kind().to_string()).collect();
+	assert_eq!(kinds, ["ftyp", "mdat", "moov"], "{errors}");
+	let Some(mp4_atom::Any::Moov(moov)) = boxes.last() else {
+		unreachable!();
+	};
+	assert!(moov.mvex.is_none());
+	assert_eq!(moov.trak.len(), 2, "video and audio");
+	assert_eq!(
+		indexed(moov, b"vide"),
+		delivered(),
+		"every video frame delivered before the signal"
+	);
+
+	drop(stdin);
+	assert!(wait(&mut publisher).await.success());
 }

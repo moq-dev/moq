@@ -47,7 +47,7 @@ async fn listen(stage: &str, flags: &[&str]) -> Listening {
 		.unwrap();
 	let stdin = child.stdin.take().unwrap();
 	let mut stderr = BufReader::new(child.stderr.take().unwrap());
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		let mut output = String::new();
 		loop {
 			let mut line = String::new();
@@ -86,7 +86,7 @@ impl Listening {
 	}
 
 	async fn stopped(mut self) {
-		let status = moq_clock::timeout(TIMEOUT, self.child.wait())
+		let status = kio::clock::timeout(TIMEOUT, self.child.wait())
 			.await
 			.expect("listening CLI did not stop after its sessions left")
 			.unwrap();
@@ -108,7 +108,7 @@ async fn connects(listening: &Listening, stage: &str) -> (moq_tokio::Connection,
 	} else {
 		client.with_publisher(origin)
 	};
-	let connection = moq_clock::timeout(TIMEOUT, client.connect(listening.url.clone()).established())
+	let connection = kio::clock::timeout(TIMEOUT, client.connect(listening.url.clone()).established())
 		.await
 		.unwrap()
 		.unwrap();
@@ -120,7 +120,7 @@ async fn drains(stage: &str) {
 	let (connection, _origin) = connects(&listening, stage).await;
 	let draining = connection.draining().unwrap();
 	listening.signal();
-	let goaway = moq_clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("no GOAWAY after SIGTERM")
 		.expect("CLI closed the session without GOAWAY");
@@ -164,7 +164,7 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 		while demand.wanted_changed().await?.is_none() {}
 		moq_net::Result::Ok(())
 	};
-	moq_clock::timeout(TIMEOUT, wanted).await.unwrap().unwrap();
+	kio::clock::timeout(TIMEOUT, wanted).await.unwrap().unwrap();
 	let mut legacy = moq_tokio::connect::Config::default();
 	legacy.version = vec!["moq-lite-03".parse().unwrap()];
 	let legacy = legacy
@@ -176,14 +176,14 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 		.await
 		.unwrap();
 	let draining = publisher.draining().unwrap();
-	let signalled = moq_clock::now();
+	let signalled = kio::clock::now();
 	listening.signal();
-	moq_clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.unwrap()
 		.unwrap();
 	publisher.closed().await.unwrap();
-	moq_clock::timeout(TIMEOUT, legacy.closed())
+	kio::clock::timeout(TIMEOUT, legacy.closed())
 		.await
 		.unwrap()
 		.expect_err("legacy peer was force-closed");

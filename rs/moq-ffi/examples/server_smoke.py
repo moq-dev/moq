@@ -26,9 +26,7 @@ import moq
 
 
 async def main() -> int:
-    server = moq.MoqServer(
-        moq.MoqServerConfig(bind="127.0.0.1:0", tls=moq.MoqServerTls(generate=["localhost"]))
-    )
+    server = moq.MoqServer(moq.MoqServerConfig(bind="127.0.0.1:0", tls=moq.MoqServerTls(generate=["localhost"])))
 
     addr = await server.listen()
     print(f"server bound on {addr}")

@@ -48,7 +48,7 @@ async fn serve(case: Case) -> Server {
 	};
 
 	tokio::spawn(async move {
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			tokio::spawn(async move {
 				match case {
 					Case::Reject => {
@@ -81,7 +81,7 @@ async fn client_error(url: &str, websocket: bool) -> moq_tokio::Error {
 	let client = config.init(Default::default()).expect("failed to init client");
 
 	let connection = client.with_reconnect(false).connect(url.parse::<url::Url>().unwrap());
-	moq_clock::timeout(Duration::from_secs(10), async {
+	kio::clock::timeout(Duration::from_secs(10), async {
 		match connection.established().await {
 			Ok(connection) => connection.closed().await.expect_err("closed without an error"),
 			Err(err) => err,

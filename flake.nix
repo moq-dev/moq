@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/1ef2ca70053ed8bc4785ddaaafb2a6c445e87614";
+      url = "github:moq-dev/quest/5e66075d5acc397e400094ea4f53f7db45e351ce";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -158,6 +158,10 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
+            # The workspace-hack that gives every build one feature set per dependency.
+            cargo-hakari
+            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
+            cargo-mutants
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
@@ -287,14 +291,24 @@
         # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
-        lintDeps = with pkgs; [
-          shellcheck
-          shfmt
-          actionlint
-          zizmor
-          taplo
-          nixfmt
-        ];
+        lintDeps =
+          with pkgs;
+          [
+            shellcheck
+            shfmt
+            actionlint
+            zizmor
+            taplo
+            nixfmt
+            # Formats and lints every Python file; the same version uv.lock pins.
+            ruff
+          ]
+          # Apple's formatter, so `just swift check` checks formatting off macOS
+          # too. nixpkgs marks the Swift compiler it builds with broken on
+          # aarch64-linux, where the check skips instead.
+          ++ lib.optionals (!(stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isAarch64)) [
+            swift-format
+          ];
 
         # Kotlin wrapper (kt/) toolchain so `just kt check` actually compiles
         # the wrapper and runs :moq:jvmTest instead of silently skipping.
@@ -304,6 +318,8 @@
         ktDeps = with pkgs; [
           jdk17
           gradle_8
+          # `just kt check` fails on Kotlin it would reformat; `just kt fix` applies it.
+          ktfmt
         ];
 
         # uniffi-bindgen-go renders rs/moq-ffi into the generated half of
@@ -314,8 +330,9 @@
         # targets (v0.10.0-kixelated.1+v0.32.0 -> uniffi 0.32), and it only
         # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
-        # generator version and must be bumped together: the repo and revision
-        # in release-ffi.yml, and the `cargo install` line in
+        # generator version and must be bumped together: the commit the tag
+        # peels to in .github/actions/uniffi-bindgen, which CI jobs outside
+        # the dev shell build, and the `cargo install` line in
         # rs/moq-ffi/build.sh, go/ffi/README.md, sh/go/check.sh, and
         # sh/go/stage.sh.
         #
@@ -365,13 +382,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.6+v0.32.0";
+          version = "0.3.1-kixelated.7+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
+            hash = "sha256-uSApyCocEhADWu8Koj5vXIt0fMYQVjnBVKctDWQHqLM=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
@@ -399,10 +416,10 @@
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
-        # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
-        # and .github/workflows/release-shared-ffi.yml.
+        # bumped together: the commit the tag peels to in
+        # .github/actions/uniffi-bindgen, which CI jobs outside the dev shell
+        # (Windows among them) build, and the `cargo install` lines in
+        # rs/moq-ffi/build.sh and cpp/moq/README.md.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
@@ -502,6 +519,7 @@
             # too. Same 0.8.2 that obs-deps carries.
             simde
             qt6.qtbase
+            # clang-format, for the plugin and the c/ and cpp/moq packages.
             clang-tools
             gersemi
           ]
@@ -657,6 +675,14 @@
             if [ -x "$shim" ]; then
               export PATH="$(dirname "$shim"):$PATH"
             fi
+
+            # Each nested shell (direnv, then `nix develop`, then another
+            # inside a gate) prepends this shell's ~160 store paths again,
+            # about 10 KB. mbx copies PATH into two variables at ~3.6 times
+            # its size, and Linux rejects any one variable over 128 KiB, so
+            # four nested shells failed every Cargo launch with E2BIG. Keep
+            # each directory's first entry only: lookups resolve as before.
+            PATH=$(printf '%s' "$PATH" | awk -v RS=: '!seen[$0]++ { printf "%s%s", sep, $0; sep = ":" }')
           '';
 
           env = {

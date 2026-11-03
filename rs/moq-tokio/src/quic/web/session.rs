@@ -4,7 +4,7 @@ use std::{
 	io::Cursor,
 	ops::Deref,
 	pin::Pin,
-	sync::{Arc, Mutex, OnceLock},
+	sync::{Arc, Mutex},
 	task::{Context, Poll, Waker},
 	time::Duration,
 };
@@ -19,34 +19,6 @@ use crate::quic::web::{
 	ClientError, CloseReason, Connected, RecvStream, SendStream, SessionError, Settings, WebTransportError,
 	proto::{ConnectRequest, ConnectResponse, Frame, StreamUni, VarInt},
 };
-
-/// The ALPN the QUIC handshake negotiated, or `None` if there was none, the handshake
-/// has not completed, or it is not valid UTF-8.
-///
-/// The driver only exposes the ALPN via a downcast of the boxed handshake data, so the result
-/// is owned rather than borrowed from the connection.
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-fn negotiated_alpn(conn: &crate::quic::driver::connection::Connection) -> Option<String> {
-	let data = conn.handshake_data()?;
-	let data = data
-		.downcast::<crate::quic::driver::crypto::rustls::HandshakeData>()
-		.ok()?;
-
-	String::from_utf8(data.protocol?).ok()
-}
-
-/// `crate::quic::driver::crypto::rustls` only exists once a TLS backend is enabled, so there is no
-/// handshake data type to name here.
-///
-/// This crate's own builders are gated the same way, so normally there is no connection
-/// to read an ALPN from either. A caller that enables a provider on `moq-quic` directly and
-/// brings its own endpoint can still establish one, and [`Session::protocol`] reports
-/// `None` for those raw sessions. Enable this crate's `aws-lc-rs` or `ring` feature to
-/// get the ALPN.
-#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-fn negotiated_alpn(_conn: &crate::quic::driver::connection::Connection) -> Option<String> {
-	None
-}
 
 /// An established WebTransport session, acting like a full QUIC connection. See
 /// [`crate::quic::driver::connection::Connection`].
@@ -93,17 +65,10 @@ pub struct Session {
 	// The response sent by the server, or None for a raw QUIC session.
 	response: Option<ConnectResponse>,
 
-	// The ALPN negotiated by the QUIC handshake, for raw QUIC sessions. The driver only
-	// exposes it behind an allocating downcast, so `protocol()` has nothing in the
-	// connection to borrow from and needs somewhere to keep the result.
-	//
-	// Resolved on first read rather than at construction: `raw()` accepts any
-	// connection, including one whose handshake has not completed and so has no ALPN
-	// yet. Only a successful read is latched, so an early call cannot pin `None` for
-	// the life of the session. Shared across clones.
-	//
-	// Unused by HTTP/3 sessions, which read the subprotocol out of the response.
-	alpn: Arc<OnceLock<String>>,
+	// The ALPN the QUIC handshake negotiated, for raw QUIC sessions, copied out of the
+	// connection's lock so `protocol()` can borrow it. HTTP/3 sessions read the
+	// subprotocol out of the response instead.
+	alpn: Option<Arc<str>>,
 }
 
 impl Session {
@@ -145,12 +110,12 @@ impl Session {
 			close: close.clone(),
 			request: Some(connect.request.clone()),
 			response: Some(connect.response.clone()),
-			alpn: Default::default(),
+			alpn: None,
 		};
 
 		// Run a background task to read capsules from the CONNECT recv stream.
 		let conn2 = this.conn.clone();
-		crate::runtime::spawn(Self::run_recv(conn2, connect.recv, close));
+		crate::runtime::detach(crate::panic::isolate(Self::run_recv(conn2, connect.recv, close)));
 
 		this
 	}
@@ -450,9 +415,9 @@ impl Session {
 				// control and QPACK streams before the capsule is delivered, which a
 				// browser treats as a connection error, losing the code and reason.
 				let session = self.clone();
-				crate::runtime::spawn(async move {
+				crate::runtime::detach(crate::panic::isolate(async move {
 					session.close_with_capsule(send, capsule, code, timeout).await;
-				});
+				}));
 			}
 		} else {
 			// Raw QUIC mode: no capsule needed.
@@ -513,7 +478,7 @@ impl Session {
 		}
 
 		// Wait for the peer to close the CONNECT stream after receiving the capsule.
-		if moq_clock::timeout(timeout, self.conn.closed()).await.is_err() {
+		if kio::clock::timeout(timeout, self.conn.closed()).await.is_err() {
 			tracing::debug!("timeout waiting for peer to close; force-closing connection");
 			self.conn.close(http3_code, "");
 		}
@@ -560,7 +525,13 @@ impl Session {
 	/// return `None`. [`Self::protocol`] reports the ALPN negotiated by the QUIC
 	/// handshake, when one was negotiated.
 	pub fn raw(conn: crate::quic::driver::connection::Connection) -> Self {
+		// A connection exists only once its handshake completed, so the ALPN is settled.
+		let alpn = conn
+			.handshake_data()
+			.and_then(|data| String::from_utf8(data.alpn?).ok())
+			.map(Arc::from);
 		Self {
+			alpn,
 			conn,
 			session_id: None,
 			header_uni: Default::default(),
@@ -572,7 +543,6 @@ impl Session {
 			close: Arc::new(CloseReason::new(true)),
 			request: None,
 			response: None,
-			alpn: Default::default(),
 		}
 	}
 
@@ -592,21 +562,12 @@ impl Session {
 	///
 	/// For an HTTP/3 session this is the subprotocol the server selected via
 	/// `WT-Available-Protocols`; for a raw QUIC session it is the negotiated ALPN.
-	/// `None` if neither was negotiated, the ALPN is not valid UTF-8, or the raw
-	/// connection is still handshaking.
+	/// `None` if neither was negotiated or the ALPN is not valid UTF-8.
 	pub fn protocol(&self) -> Option<&str> {
-		if let Some(response) = &self.response {
-			return response.protocol.as_deref();
+		match &self.response {
+			Some(response) => response.protocol.as_deref(),
+			None => self.alpn.as_deref(),
 		}
-
-		if let Some(alpn) = self.alpn.get() {
-			return Some(alpn);
-		}
-
-		// Latch only a successful read, so a call made while the connection is still
-		// handshaking cannot pin `None` for the life of the session.
-		let alpn = negotiated_alpn(&self.conn)?;
-		Some(self.alpn.get_or_init(|| alpn))
 	}
 
 	/// Return connection-level statistics.
@@ -1447,7 +1408,7 @@ mod tests {
 			)
 		};
 		// Without the header the server never surfaces the streams, so bound the wait.
-		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), read).await.unwrap();
+		let (uni, bi) = kio::clock::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, crate::quic::web::ReadError::Reset(7)), "{uni:?}");
 		assert!(matches!(bi, crate::quic::web::ReadError::Reset(8)), "{bi:?}");
 	}
@@ -1485,7 +1446,7 @@ mod tests {
 			(uni, client_bi.read_chunk(usize::MAX).await)
 		};
 		// Without the header the server never surfaces the stream, so bound the wait.
-		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), read).await.unwrap();
+		let (uni, bi) = kio::clock::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, Err(crate::quic::web::ReadError::Reset(0))), "{uni:?}");
 		assert!(matches!(bi, Err(crate::quic::web::ReadError::Reset(0))), "{bi:?}");
 	}
@@ -1520,7 +1481,7 @@ mod tests {
 				}
 			}
 		};
-		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), async {
+		let (uni, bi) = kio::clock::timeout(Duration::from_secs(10), async {
 			tokio::join!(stopped(uni), stopped(bi))
 		})
 		.await

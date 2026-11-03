@@ -49,7 +49,7 @@ pub enum End {
 	/// The session's RTP timeline jumped, so its tracks finished before the jump.
 	///
 	/// Its timestamps no longer continue the broadcast's, so the caller finishes the
-	/// broadcast and restarts every session sharing it under a fresh epoch.
+	/// broadcast and restarts every session sharing it under a fresh instance.
 	Jumped,
 }
 
@@ -222,16 +222,16 @@ impl Client {
 		let result: Result<End> = async {
 			let mut session = self.within(session.play(play)).await??.demuxed()?;
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
-			let playing = moq_clock::now();
+			let playing = kio::clock::now();
 			// Measured from the last frame, so RTCP reports alone cannot keep a dead camera alive.
 			let mut deadline = playing + self.timeout;
-			while let Some(item) = moq_clock::timeout(deadline - moq_clock::now(), session.next())
+			while let Some(item) = kio::clock::timeout(deadline - kio::clock::now(), session.next())
 				.await
 				.map_err(|_| Error::Stalled(self.timeout))?
 			{
 				let item = item?;
 				if matches!(item, CodecItem::VideoFrame(_) | CodecItem::AudioFrame(_)) {
-					deadline = moq_clock::now() + self.timeout;
+					deadline = kio::clock::now() + self.timeout;
 				}
 				if ingest.push(item, session.streams())?.is_some() {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
@@ -261,7 +261,7 @@ impl Client {
 impl Client {
 	/// Fail `step` once it takes longer than the timeout.
 	async fn within<T>(&self, step: impl Future<Output = T>) -> Result<T> {
-		moq_clock::timeout(self.timeout, step)
+		kio::clock::timeout(self.timeout, step)
 			.await
 			.map_err(|_| Error::Stalled(self.timeout))
 	}
@@ -368,11 +368,11 @@ struct Stream {
 	track: Track,
 	/// The previous frame's timestamp, in the stream's clock units since the session start, and
 	/// when it arrived.
-	last: Option<(i64, moq_clock::Instant)>,
+	last: Option<(i64, kio::clock::Instant)>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
 	/// When a lost packet broke the video's reference chain, so it waits for a keyframe.
-	held: Option<moq_clock::Instant>,
+	held: Option<kio::clock::Instant>,
 	/// Whether retina's parameter sets still need inserting: until the splitter emits a keyframe
 	/// carrying them, after which it re-inserts them ahead of every keyframe itself.
 	fresh: bool,
@@ -416,7 +416,7 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
-				moq_clock::Instant::from_std(frame.end_ctx().received()),
+				kio::clock::Instant::from_std(frame.end_ctx().received()),
 				frame.loss(),
 			),
 			CodecItem::AudioFrame(frame) => (
@@ -424,7 +424,7 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				false,
-				moq_clock::Instant::from_std(frame.ctx().received()),
+				kio::clock::Instant::from_std(frame.ctx().received()),
 				// AAC packets decode alone, and the decoder conceals a lost one.
 				0,
 			),
@@ -467,7 +467,7 @@ impl Ingest {
 					// access unit is damaged too, even when it is a keyframe, so drop it.
 					if stream.started && stream.held.is_none() {
 						tracing::warn!(stream_id, loss, "RTP packets lost, waiting for the next keyframe");
-						stream.held = Some(moq_clock::now());
+						stream.held = Some(kio::clock::now());
 					}
 					video.reset();
 					return Ok(None);
@@ -511,7 +511,7 @@ impl Ingest {
 
 	/// Whether a video stream has waited longer than `timeout` for a keyframe: its first since
 	/// `playing`, or its next since a loss held it.
-	fn awaiting_keyframe(&self, playing: moq_clock::Instant, timeout: std::time::Duration) -> bool {
+	fn awaiting_keyframe(&self, playing: kio::clock::Instant, timeout: std::time::Duration) -> bool {
 		self.streams.iter().flatten().any(|stream| {
 			let since = match stream.held {
 				Some(held) => held,
@@ -563,8 +563,8 @@ mod tests {
 
 	/// Make the test runtime's clock one only the test moves, so a setup step on a loaded runner
 	/// never reaches a deadline. Call it before anything reads the clock.
-	fn manual() -> moq_clock::Installed {
-		moq_clock::Manual::new().install(&tokio::runtime::Handle::current())
+	fn manual() -> kio::clock::Installed {
+		kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
 	}
 
 	fn broadcast() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
@@ -596,7 +596,8 @@ mod tests {
 		broadcast: &moq_net::broadcast::Producer,
 		(name, container): (String, moq_mux::catalog::hang::Container),
 	) -> moq_mux::container::Consumer<moq_mux::catalog::hang::Container> {
-		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)));
 		let track = broadcast
 			.consume()
 			.track(&name)
@@ -841,7 +842,7 @@ mod tests {
 
 	/// Two sessions (a camera's SD and HD URLs) publish renditions of one broadcast. When one
 	/// session's timeline jumps, the caller ends the broadcast and restarts both under a fresh
-	/// epoch, each new broadcast with its own catalog.
+	/// instance, each new broadcast with its own catalog.
 	#[tokio::test]
 	async fn two_sessions_restart_together_on_a_jump() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -857,13 +858,15 @@ mod tests {
 			async move {
 				let mut ends = Vec::new();
 				for _ in 0..2 {
-					let epoch = moq_net::Epoch::mint();
-					let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
+					let instance = moq_net::Instance::random();
+					let route = moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 					let broadcast = origin.publish("camera", route).unwrap();
 					let mut catalog =
 						moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default())
 							.unwrap();
-					published_tx.send((epoch, broadcast.clone(), catalog.clone())).unwrap();
+					published_tx
+						.send((instance, broadcast.clone(), catalog.clone()))
+						.unwrap();
 					// The first session to return ends the run; dropping the other's pull
 					// finishes its tracks.
 					let end = tokio::select! {
@@ -878,10 +881,10 @@ mod tests {
 			}
 		});
 
-		let mut epochs = Vec::new();
+		let mut instances = Vec::new();
 		for run in 0..2 {
-			let (epoch, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
-			epochs.push(epoch);
+			let (instance, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
+			instances.push(instance);
 			let mut sd_session = within("SD PLAY", sd.accept(500)).await;
 			let mut hd_session = within("HD PLAY", hd.accept(9000)).await;
 			sd_session.video(0, 500, &[fake::H264_IDR]).await;
@@ -908,7 +911,7 @@ mod tests {
 		let ends = within("the caller", caller).await.unwrap();
 		assert_eq!(ends[0], End::Jumped);
 		assert_eq!(ends[1], End::Closed);
-		assert!(epochs[1] > epochs[0], "the restart mints a fresh epoch");
+		assert_ne!(instances[1], instances[0], "the restart mints a fresh instance");
 	}
 
 	/// Credentials come out of the URL, never reach a log, and still authenticate.
@@ -1027,7 +1030,7 @@ mod tests {
 				tokio::select! {
 					result = &mut pull => return result.unwrap().unwrap_err(),
 					// A driver turn, so the pull can read what was sent.
-					_ = moq_clock::sleep(Duration::ZERO) => {}
+					_ = kio::clock::sleep(Duration::ZERO) => {}
 				}
 			}
 			unreachable!()
@@ -1057,7 +1060,7 @@ mod tests {
 		let snapshot = catalog_with(&catalog, 1, 0).await;
 		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
 		// Half a second of silence, well past the 100ms allowance, then the matching timestamp.
-		moq_clock::sleep(Duration::from_millis(500)).await;
+		kio::clock::sleep(Duration::from_millis(500)).await;
 		session.video(0, 45_000, &[fake::H264_SLICE]).await;
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
@@ -1153,7 +1156,7 @@ mod tests {
 				tokio::select! {
 					result = &mut pull => return result.unwrap().unwrap_err(),
 					// A driver turn, so the pull can read what was sent.
-					_ = moq_clock::sleep(Duration::ZERO) => {}
+					_ = kio::clock::sleep(Duration::ZERO) => {}
 				}
 			}
 			unreachable!()

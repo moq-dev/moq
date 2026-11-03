@@ -16,19 +16,19 @@ features = ["rustls-aws-lc-rs", "ring"]
 
 [features]
 default = ["ring"]
-aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs?/aws-lc-sys", "aws-lc-rs?/prebuilt-nasm", "dep:rustls", "rustls/aws-lc-rs"]
+aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs?/aws-lc-sys", "aws-lc-rs?/prebuilt-nasm", "rustls/aws-lc-rs"]
 # Enable rustls with the aws-lc-rs crypto provider.
 rustls-aws-lc-rs = ["aws-lc-rs"]
-ring = ["dep:ring", "dep:rustls", "rustls/ring"]
+ring = ["dep:ring", "rustls/ring"]
 # Enable qlog support
 qlog = ["dep:qlog"]
 # The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
 # transport. Driven by the `qmux` crate.
 mux = []
-# Internal (PRIVATE!) features used to aid testing.
-# Don't rely on these whatsoever. They may disappear at any time.
-
-__rustls-post-quantum-test = []
+# The seeded, impaired network path (`sim::Link`) the tests run endpoints across, for a
+# driver that runs QUIC on kio's simulator. Hidden from the docs; meant for
+# dev-dependencies.
+sim = []
 
 # Exposes the `fuzz/` harness's target bodies, and the plaintext crypto the connection
 # target and the benches run on, through the hidden `fuzz` module. ring keys the endpoint's
@@ -41,17 +41,16 @@ aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
 fastbloom = { version = "0.17", default-features = false }
 indexmap = { workspace = true }
-# The waiter every `poll_*` wait registers, owned by the caller.
+# The waiter every `poll_*` wait registers, owned by the caller, and the clock
+# without the runtime, which is meant for dev-dependencies; a driver brings its own.
 kio = { workspace = true }
 lru-slab = "0.1.2"
-# Without the runtime, which is meant for dev-dependencies; a driver brings its own.
-moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-congestion = { workspace = true }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
 ring = { version = "0.17", optional = true }
 rustc-hash = { workspace = true }
-rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
+rustls = { version = "0.23.5", default-features = false, features = ["std"] }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tinyvec = { version = "1.1", features = ["alloc"] }
@@ -64,7 +63,7 @@ cpu-time = "1.0.0"
 criterion = { package = "bench-harness", path = "../bench-harness" }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
-moq-clock = { path = "../moq-clock", features = ["sim"] }
+kio = { path = "../kio", features = ["runtime", "sim"] }
 # The tests seed BBR3's probe phases.
 moq-congestion = { workspace = true, features = ["testing"] }
 # The mux module's tests run in the default merge gate.
@@ -73,6 +72,7 @@ proptest = { workspace = true }
 rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
+workspace-hack = { path = "../workspace-hack" }
 
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.
@@ -89,6 +89,11 @@ required-features = ["fuzz"]
 
 [[bench]]
 name = "receive"
+harness = false
+required-features = ["fuzz"]
+
+[[bench]]
+name = "receive_bursts"
 harness = false
 required-features = ["fuzz"]
 

@@ -5,7 +5,7 @@
 //! a push asks the lease to re-check now, and the server's reply is the verdict.
 //! One-shot HTTP and LAN peers are not sessions and stay out.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -98,7 +98,7 @@ impl Registry {
 			id.clone(),
 			Entry {
 				request,
-				started: moq_clock::wall(),
+				started: kio::clock::wall(),
 				handle: handle.clone(),
 			},
 		);
@@ -439,7 +439,7 @@ pub struct View {
 	/// The verified client certificate, when one was presented.
 	pub tls: Option<Peer>,
 	/// When the session was admitted, as unix seconds.
-	#[serde_as(as = "moq_clock::serde::UnixSeconds")]
+	#[serde_as(as = "kio::clock::serde::UnixSeconds")]
 	pub started: Wall,
 }
 
@@ -582,11 +582,11 @@ mod tests {
 		let reg = registry.register(request);
 		let ids = registry.revalidate(&Filter::from_query(Some("id=abc")).unwrap());
 		assert_eq!(ids, ["abc"]);
-		moq_clock::timeout(Duration::from_secs(1), reg.nudged())
+		kio::clock::timeout(Duration::from_secs(1), reg.nudged())
 			.await
 			.expect("the registration woke");
 		assert!(
-			moq_clock::timeout(std::time::Duration::from_millis(20), reg.nudged())
+			kio::clock::timeout(std::time::Duration::from_millis(20), reg.nudged())
 				.await
 				.is_err(),
 			"a single push wakes once"

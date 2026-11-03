@@ -11,10 +11,31 @@ use webm_iterable::matroska_spec::{Master, MatroskaSpec};
 
 use super::Error;
 use super::ebml::{self, Event, Header, id};
+use super::hvcc::HvccFilter;
 use crate::container::producer::Streamed;
 
 /// Default Matroska TimestampScale: 1 ms (in nanoseconds).
 const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
+
+/// The longest DocType or CodecID the importer supports, so a longer one is never read.
+const NAME_LEN: u64 = "V_MPEGH/ISO/HEVC".len() as u64;
+
+/// An `A_FLAC` CodecPrivate holding only STREAMINFO: the `fLaC` marker, the block header, and the
+/// 34-byte body (RFC 9639 §8.2).
+const FLAC_PRIVATE_LEN: u64 = 4 + 4 + 34;
+
+/// The largest OpusHead RFC 7845 §5.1 lays out: 21 bytes plus a 255-channel mapping table.
+const OPUS_HEAD_MAX_LEN: u64 = 21 + 255;
+
+/// The largest av1C whose configOBUs hold a sequence header, then HDR content light and mastering
+/// display metadata. Each OBU spends at most 2 header bytes and an 8-byte `leb128` size, and each
+/// metadata payload at most an 8-byte `leb128` type and a trailing byte.
+const AV1_PRIVATE_MAX_LEN: u64 = 4 + (10 + AV1_SEQUENCE_HEADER_MAX_LEN) + (10 + 8 + 4 + 1) + (10 + 8 + 24 + 1);
+
+/// The largest sequence header payload the AV1 spec's §5.5 syntax allows: 3139 bits with 32
+/// operating points, each with decoder model and display delay parameters, a conforming `uvlc`
+/// tick count (at most 63 bits), and every optional field present, plus a trailing one bit.
+const AV1_SEQUENCE_HEADER_MAX_LEN: u64 = (3139 + 1u64).div_ceil(8);
 
 /// Converts MKV/WebM (Matroska) files into MoQ broadcast streams.
 ///
@@ -39,6 +60,21 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// Laced blocks require a positive TrackEntry DefaultDuration to timestamp each frame.
 ///
 /// Unsupported track roles are skipped; malformed tracks and unsupported codecs fail the import.
+///
+/// ## Decoder configuration
+///
+/// A TrackEntry's `CodecID` must precede its `CodecPrivate`, so the codec decides how much of it
+/// is read before its bytes arrive. Codecs that do not use it skip it as it arrives. HEVC
+/// canonicalizes its hvcC as it arrives: the parameter sets are kept, at most one per id (16 VPS,
+/// 16 SPS, and 64 PPS), and SEI and other arrays are discarded unread. The others read it whole,
+/// refusing one larger than its supported configuration at its header:
+/// - AVC: an avcC, at most the 31 SPS, 255 PPS, and 255 SPS extensions its counts allow;
+/// - AAC: an AudioSpecificConfig whose every byte a field reads, with a GASpecificConfig and
+///   optional SBR and PS signaling;
+/// - FLAC: the `fLaC` marker and STREAMINFO alone, without other metadata blocks;
+/// - Opus: an OpusHead in the RFC 7845 layout, without a later minor version's extra fields;
+/// - AV1: an av1C whose `configOBUs` hold at most a sequence header first, then at most one each
+///   of the HDR content light and mastering display metadata.
 ///
 /// ## One pass
 ///
@@ -79,6 +115,8 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	referenced: bool,
 	/// The SimpleBlock or Block streaming in.
 	block: Option<Block>,
+	/// The hvcC CodecPrivate streaming in.
+	hvcc: Option<HvccFilter>,
 	/// A seek waiting for the streaming block to end, since its later frames continue its group.
 	seek: Option<u64>,
 	/// Whether `finish()` ended the input, even if it failed before the input drained.
@@ -200,6 +238,8 @@ enum Action {
 	Read,
 	/// Pass its body through: a block.
 	Stream,
+	/// Canonicalize its body as it arrives: an hvcC CodecPrivate.
+	Filter,
 	/// Discard its body as it arrives.
 	Skip,
 }
@@ -293,6 +333,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			numbers: HashSet::new(),
 			referenced: false,
 			block: None,
+			hvcc: None,
 			seek: None,
 			finished: false,
 			failed: None,
@@ -362,16 +403,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let action = match (parent, header.id) {
 			(None, EBML) => Action::Collect,
 			(None, SEGMENT) => Action::Descend,
-			(Some(EBML), DOC_TYPE) => Action::Read,
+			(Some(EBML), DOC_TYPE) => match header.size {
+				Some(size) if size <= NAME_LEN => Action::Read,
+				size => return Err(Error::UnsupportedDocType(format!("<{} bytes>", size.unwrap_or_default())).into()),
+			},
 			(Some(SEGMENT), INFO | CLUSTER) => Action::Descend,
 			// A second Tracks element would redeclare a published track set.
 			(Some(SEGMENT), TRACKS) if !self.tracks_seen => Action::Descend,
 			(Some(INFO), TIMESTAMP_SCALE) => Action::Read,
 			(Some(TRACKS), TRACK_ENTRY) => Action::Collect,
 			(Some(TRACK_ENTRY), VIDEO | AUDIO) => Action::Collect,
-			(Some(TRACK_ENTRY), TRACK_NUMBER | TRACK_TYPE | CODEC_ID | CODEC_PRIVATE | DEFAULT_DURATION) => {
-				Action::Read
-			}
+			(Some(TRACK_ENTRY), TRACK_NUMBER | TRACK_TYPE | DEFAULT_DURATION) => Action::Read,
+			// A longer CodecID is no supported codec, so it is skipped and recorded in `start`.
+			(Some(TRACK_ENTRY), CODEC_ID) if header.size.is_some_and(|size| size <= NAME_LEN) => Action::Read,
+			(Some(TRACK_ENTRY), CODEC_PRIVATE) => self.codec_private(header)?,
 			(Some(VIDEO), COLOUR | PROJECTION) => Action::Collect,
 			(
 				Some(VIDEO),
@@ -409,6 +454,35 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(action)
 	}
 
+	/// How the TrackEntry's codec consumes its CodecPrivate: skipped when the codec has no use for
+	/// it, otherwise read whole if it fits the codec's supported configuration.
+	fn codec_private(&self, header: &Header) -> Result<Action> {
+		let codec_id = self
+			.fields
+			.last()
+			.and_then(|fields| {
+				fields.iter().find_map(|field| match field {
+					MatroskaSpec::CodecID(id) => Some(id.as_str()),
+					_ => None,
+				})
+			})
+			.ok_or(Error::CodecPrivateBeforeCodecId)?;
+		let max = match codec_id {
+			"A_FLAC" => FLAC_PRIVATE_LEN,
+			"A_OPUS" => OPUS_HEAD_MAX_LEN,
+			"A_AAC" => crate::codec::aac::CONFIG_MAX_LEN as u64,
+			"V_AV1" => AV1_PRIVATE_MAX_LEN,
+			"V_MPEG4/ISO/AVC" => crate::codec::h264::AVCC_MAX_LEN as u64,
+			// Its SEI arrays are unbounded, so it is canonicalized as it arrives.
+			"V_MPEGH/ISO/HEVC" => return Ok(Action::Filter),
+			_ => return Ok(Action::Skip),
+		};
+		match header.size {
+			Some(size) if size <= max => Ok(Action::Read),
+			_ => Err(Error::UnsupportedCodecPrivate(codec_id.to_string()).into()),
+		}
+	}
+
 	fn start(&mut self, header: Header) -> Result<()> {
 		let parent = self.reader.parent();
 		match self.action(parent, &header)? {
@@ -430,6 +504,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					state: BlockState::Header(Vec::new()),
 				});
 			}
+			Action::Filter => {
+				self.reader.stream()?;
+				self.hvcc = Some(HvccFilter::new());
+			}
 			Action::Skip => {
 				self.reader.skip()?;
 				if parent == Some(id::BLOCK_GROUP) && header.id == id::REFERENCE_BLOCK {
@@ -441,6 +519,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					set(
 						self.fields.last_mut().expect("Projection is collected"),
 						MatroskaSpec::ProjectionPrivate(Vec::new()),
+					)?;
+				}
+				// A skipped track type accepts any codec, so a CodecID too long to support is
+				// recorded by its length and refused only by a track that needs its codec.
+				if parent == Some(id::TRACK_ENTRY) && header.id == id::CODEC_ID {
+					let size = header.size.unwrap_or_default();
+					set(
+						self.fields.last_mut().expect("TrackEntry is collected"),
+						MatroskaSpec::CodecID(format!("<{size} bytes>")),
 					)?;
 				}
 			}
@@ -501,6 +588,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 			}
 			id::SIMPLE_BLOCK | id::BLOCK => self.block_end()?,
+			id::CODEC_PRIVATE => {
+				let hvcc = self.hvcc.take().expect("only a filtered CodecPrivate is streamed");
+				set(
+					self.fields.last_mut().expect("TrackEntry is collected"),
+					MatroskaSpec::CodecPrivate(hvcc.finish()?),
+				)?;
+			}
 			_ => {}
 		}
 		Ok(())
@@ -607,6 +701,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Feed a chunk of the streaming block's body.
 	fn chunk(&mut self, chunk: &[u8]) -> Result<()> {
+		if let Some(hvcc) = &mut self.hvcc {
+			return hvcc.feed(chunk);
+		}
 		let Some(mut block) = self.block.take() else {
 			return Ok(());
 		};
@@ -834,22 +931,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	///
 	/// Input that ends inside an element other than an unknown-size Segment or Cluster is refused as
-	/// truncated.
+	/// truncated, but the tracks still end with what was accepted.
 	pub fn finish(&mut self) -> Result<()> {
 		self.finished = true;
-		if self.failed.is_none()
-			&& let Err(err) = self.drain_eof()
-		{
+		let mut result = match self.failed {
+			None => self.drain_eof(),
+			Some(_) => Ok(()),
+		};
+		if let Err(err) = &result {
 			// A frame cut short fails its group with the reason, rather than waiting for the rest.
 			self.abort_block(err.reason());
-			return Err(err);
 		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			track.track.finish()?;
+			// Finish every track even on refusal, keeping the first error.
+			result = result.and(track.track.finish());
 		}
-		Ok(())
+		result
 	}
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
@@ -923,8 +1022,11 @@ fn field(id: u32, data: Vec<u8>) -> Result<MatroskaSpec> {
 fn set(fields: &mut Vec<MatroskaSpec>, value: MatroskaSpec) -> Result<()> {
 	let id = value.get_id();
 	match fields.iter_mut().find(|field| field.get_id() == id) {
-		// A track declares one number; a second would make its blocks ambiguous.
-		Some(_) if matches!(value, MatroskaSpec::TrackNumber(_)) => return Err(moq_net::Error::Duplicate.into()),
+		// A track declares one number and one codec: a second number would make its blocks
+		// ambiguous, and a second codec would reinterpret a CodecPrivate read for the first.
+		Some(_) if matches!(value, MatroskaSpec::TrackNumber(_) | MatroskaSpec::CodecID(_)) => {
+			return Err(moq_net::Error::Duplicate.into());
+		}
 		Some(field) => *field = value,
 		None => fields.push(value),
 	}
@@ -1257,7 +1359,18 @@ fn build_audio_config(
 			// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever the
 			// informational input rate in the OpusHead or SamplingFrequency claims.
 			let mut config = match codec_private {
-				Some(head) => crate::codec::opus::config(head)?,
+				Some(head) => {
+					let config = crate::codec::opus::config(head)?;
+					// The parse checked the fixed fields, so only the mapping table may follow them.
+					let layout = match head[18] {
+						0 => 19,
+						_ => 21 + usize::from(head[9]),
+					};
+					if head.len() != layout {
+						return Err(Error::UnsupportedCodecPrivate(codec_id.to_string()).into());
+					}
+					config
+				}
 				None => crate::codec::opus::Config::new(48_000, 0).into(),
 			};
 			config.description = codec_private.cloned();
@@ -1268,8 +1381,7 @@ fn build_audio_config(
 				codec_id: "A_AAC",
 				purpose: "AudioSpecificConfig",
 			})?;
-			let mut cursor = priv_data.clone();
-			let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
+			let cfg = crate::codec::aac::Config::parse_exact(priv_data)?;
 			let mut config = AudioConfig::new(AAC { profile: cfg.profile }, cfg.sample_rate, cfg.channel_count);
 			config.description = Some(priv_data.clone());
 			config
@@ -1359,6 +1471,9 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	})?;
 	let mut cursor = Cursor::new(av1c_data.as_ref());
 	let av1c = mp4_atom::Av1c::decode_body(&mut cursor).map_err(|_| Error::InvalidAv1c)?;
+	if !crate::codec::av1::config_obus_supported(&av1c.config_obus) {
+		return Err(Error::UnsupportedCodecPrivate("V_AV1".to_string()).into());
+	}
 
 	let mut description = BytesMut::new();
 	av1c.encode_body(&mut description)?;
@@ -1609,7 +1724,7 @@ mod tests {
 		// The Legacy timestamp prefix and the first chunk are readable while the rest is in flight.
 		let mut read = Vec::new();
 		while read.len() < 1 + 1024 {
-			let chunk = moq_clock::timeout(WAIT, frame.read_chunk()).await.unwrap().unwrap();
+			let chunk = kio::clock::timeout(WAIT, frame.read_chunk()).await.unwrap().unwrap();
 			read.extend_from_slice(&chunk.expect("the frame is still open"));
 		}
 		assert_eq!(read, [&[0][..], &[1; 1024]].concat());
@@ -1618,7 +1733,7 @@ mod tests {
 			import.decode(&[1; 1024]).unwrap();
 			assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
 		}
-		while let Some(chunk) = moq_clock::timeout(WAIT, frame.read_chunk()).await.unwrap().unwrap() {
+		while let Some(chunk) = kio::clock::timeout(WAIT, frame.read_chunk()).await.unwrap().unwrap() {
 			read.extend_from_slice(&chunk);
 		}
 		assert_eq!(read.len(), 1 + SIZE);
@@ -1682,6 +1797,16 @@ mod tests {
 	/// A WebM prefix with an unknown-size Segment, then a Tracks holding one VP9 TrackEntry whose
 	/// last child is `field`'s header, so `size` body bytes of it remain.
 	fn entry_ending_in(field: &[u8], size: u64) -> Vec<u8> {
+		// TrackNumber 1, TrackType 1 (video), CodecID V_VP9.
+		let mut entry = vec![0xd7, 0x81, 0x01, 0x83, 0x81, 0x01, 0x86, 0x85];
+		entry.extend_from_slice(b"V_VP9");
+		entry.extend_from_slice(field);
+		fields_ending_in(entry, size)
+	}
+
+	/// A WebM prefix with an unknown-size Segment, then a Tracks holding one TrackEntry of `entry`,
+	/// whose last child is a header with `size` body bytes remaining.
+	fn fields_ending_in(entry: Vec<u8>, size: u64) -> Vec<u8> {
 		let mut data = Vec::new();
 		{
 			let mut writer = WebmWriter::new(&mut data);
@@ -1698,10 +1823,6 @@ mod tests {
 				.unwrap();
 			writer.flush().unwrap();
 		}
-		// TrackNumber 1, TrackType 1 (video), CodecID V_VP9.
-		let mut entry = vec![0xd7, 0x81, 0x01, 0x83, 0x81, 0x01, 0x86, 0x85];
-		entry.extend_from_slice(b"V_VP9");
-		entry.extend_from_slice(field);
 		let entry_size = entry.len() as u64 + size;
 		let mut tracks = header(&[0xae], entry_size);
 		tracks.extend(entry);
@@ -1765,6 +1886,207 @@ mod tests {
 		}
 	}
 
+	/// TrackNumber 1, TrackType `track_type`, then CodecID `codec` unless it is empty.
+	fn track_fields(track_type: u8, codec: &[u8]) -> Vec<u8> {
+		let mut fields = vec![0xd7, 0x81, 0x01, 0x83, 0x81, track_type];
+		if !codec.is_empty() {
+			fields.extend(header(&[0x86], codec.len() as u64));
+			fields.extend_from_slice(codec);
+		}
+		fields
+	}
+
+	#[test]
+	fn leaves_larger_than_supported_are_refused_at_their_header() {
+		const HUGE: u64 = 1 << 30;
+		let ebml = [
+			header(&[0x1a, 0x45, 0xdf, 0xa3], HUGE + 16),
+			header(&[0x42, 0x82], HUGE),
+		]
+		.concat();
+		let private = |track_type, codec: &[u8], size| {
+			fields_ending_in(
+				[track_fields(track_type, codec), header(&[0x63, 0xa2], size)].concat(),
+				size,
+			)
+		};
+		let mut twice = track_fields(1, b"V_VP9");
+		let codec = twice[6..].to_vec();
+		twice.extend(codec);
+		type Refused = fn(&crate::Error) -> bool;
+		let cases: [(Vec<u8>, Refused); 9] = [
+			(ebml, |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedDocType(_)))
+			}),
+			(private(2, b"", HUGE), |err| {
+				matches!(err, crate::Error::Mkv(Error::CodecPrivateBeforeCodecId))
+			}),
+			(private(2, b"A_FLAC", FLAC_PRIVATE_LEN + 1), |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
+			}),
+			(private(2, b"A_OPUS", OPUS_HEAD_MAX_LEN + 1), |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
+			}),
+			(private(1, b"V_AV1", AV1_PRIVATE_MAX_LEN + 1), |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
+			}),
+			(private(1, b"V_AV1", HUGE), |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
+			}),
+			(
+				private(1, b"V_MPEG4/ISO/AVC", crate::codec::h264::AVCC_MAX_LEN as u64 + 1),
+				|err| matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_))),
+			),
+			(
+				private(2, b"A_AAC", crate::codec::aac::CONFIG_MAX_LEN as u64 + 1),
+				|err| matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_))),
+			),
+			(fields_ending_in(twice, 0), |err| {
+				matches!(err, crate::Error::Moq(moq_net::Error::Duplicate))
+			}),
+		];
+		for (data, expected) in cases {
+			for chunk in [1, 7, 64] {
+				let (mut import, _catalog, _consumer) = import();
+				let err = data
+					.chunks(chunk)
+					.find_map(|chunk| import.decode(chunk).err())
+					.expect("refused");
+				assert!(expected(&err), "{err:?}");
+				assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
+			}
+		}
+	}
+
+	/// An hvcC of the fixtures' parameter sets, and the same record with `arrays` (each its header
+	/// and NAL units) inserted before and after them.
+	fn hvcc_around(arrays: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+		use crate::codec::h265::fixtures;
+		let canonical = crate::codec::h265::build_hvcc(
+			&[Bytes::from_static(fixtures::VPS)],
+			&[Bytes::from_static(fixtures::SPS_NVENC)],
+			&[Bytes::from_static(fixtures::PPS)],
+		)
+		.unwrap()
+		.to_vec();
+		let mut record = canonical[..23].to_vec();
+		record[22] += 2 * arrays.len() as u8;
+		record.extend(arrays.concat());
+		record.extend_from_slice(&canonical[23..]);
+		record.extend(arrays.concat());
+		(canonical, record)
+	}
+
+	/// An hvcC array of `kind` holding `nalus` NAL units of `len` bytes.
+	fn hvcc_array(kind: u8, nalus: u16, len: u16) -> Vec<u8> {
+		let mut array = vec![kind];
+		array.extend(nalus.to_be_bytes());
+		for _ in 0..nalus {
+			array.extend(len.to_be_bytes());
+			// A NAL unit header of the array's type, then filler.
+			array.extend([kind << 1, 1]);
+			array.resize(array.len() + usize::from(len) - 2, b'a');
+		}
+		array
+	}
+
+	/// A TrackEntry of HEVC video whose CodecPrivate is `hvcc`.
+	fn hevc_entry(hvcc: &[u8]) -> Vec<u8> {
+		let entry = [
+			track_fields(1, b"V_MPEGH/ISO/HEVC"),
+			header(&[0x63, 0xa2], hvcc.len() as u64),
+			hvcc.to_vec(),
+		]
+		.concat();
+		fields_ending_in(entry, 0)
+	}
+
+	#[test]
+	fn hvcc_sei_is_discarded_as_it_arrives() {
+		// Like x265's encoder settings: prefix SEI (39) arrays, here of NAL units at the 64 KiB limit.
+		let sei = hvcc_array(39, 2, u16::MAX);
+		let (canonical, record) = hvcc_around(&[sei.clone(), sei]);
+		let data = hevc_entry(&record);
+		for chunk in [1, 7, 64] {
+			let (mut import, catalog, _consumer) = import();
+			for chunk in data.chunks(chunk) {
+				import.decode(chunk).unwrap();
+				if let Some(hvcc) = &import.hvcc {
+					assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
+					assert!(hvcc.retained() <= 2 * canonical.len(), "{}", hvcc.retained());
+				}
+			}
+			let config = catalog.snapshot().video.renditions.into_values().next().unwrap();
+			assert_eq!(config.description.as_deref(), Some(canonical.as_slice()));
+		}
+	}
+
+	#[test]
+	fn hvcc_past_its_parameter_sets_or_framing_is_refused() {
+		let (_, record) = hvcc_around(&[]);
+		let unsupported = [
+			// One more VPS, SPS, or PPS than there are ids, counted across arrays.
+			hvcc_around(&[hvcc_array(32, 8, 3)]).1,
+			hvcc_around(&[hvcc_array(33, 8, 3)]).1,
+			hvcc_around(&[hvcc_array(34, 32, 3)]).1,
+		];
+		let invalid = [
+			[record.as_slice(), &[0]].concat(),
+			record[..record.len() - 1].to_vec(),
+			record[..22].to_vec(),
+		];
+		for (data, invalid) in unsupported
+			.map(|r| (r, false))
+			.into_iter()
+			.chain(invalid.map(|r| (r, true)))
+		{
+			let data = hevc_entry(&data);
+			for chunk in [1, 7, 64] {
+				let (mut import, _catalog, _consumer) = import();
+				let err = data
+					.chunks(chunk)
+					.find_map(|chunk| import.decode(chunk).err())
+					.expect("refused");
+				match invalid {
+					true => assert!(matches!(err, crate::Error::Mkv(Error::InvalidHvcc)), "{err:?}"),
+					false => assert!(
+						matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_))),
+						"{err:?}"
+					),
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn unused_codec_fields_are_discarded_as_they_arrive() {
+		const SIZE: u64 = 1024 * 1024;
+		// A CodecID longer than any supported one fails only a track that needs its codec.
+		for (track_type, supported) in [(3, true), (1, false)] {
+			let (mut import, _catalog, _consumer) = import();
+			let entry = [track_fields(track_type, b""), header(&[0x86], SIZE)].concat();
+			import.decode(&fields_ending_in(entry, SIZE)).unwrap();
+			let result = feed_unretained(&mut import, SIZE);
+			match supported {
+				true => result.unwrap(),
+				false => assert!(
+					matches!(result, Err(crate::Error::Mkv(Error::UnsupportedVideoCodec(_)))),
+					"{result:?}"
+				),
+			}
+			assert!(import.tracks.is_empty());
+		}
+
+		// VP9 has no use for its CodecPrivate.
+		let (mut import, _catalog, _consumer) = import();
+		import
+			.decode(&entry_ending_in(&header(&[0x63, 0xa2], SIZE), SIZE))
+			.unwrap();
+		feed_unretained(&mut import, SIZE).unwrap();
+		assert_eq!(import.tracks.len(), 1);
+		import.finish().unwrap();
+	}
+
 	#[tokio::test]
 	async fn skipped_and_unknown_track_payloads_are_discarded_as_they_arrive() {
 		let (mut import, catalog, consumer) = import();
@@ -1801,17 +2123,87 @@ mod tests {
 		import.finish().unwrap();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn truncation_fails_the_frame_cut_short() {
+		use futures::FutureExt;
+
 		let (mut import, catalog, consumer) = import();
 		import.decode(&live(vec![entry(1, 1, "V_VP9")])).unwrap();
 		import.decode(&simple_block(1, 1024)).unwrap();
 		import.decode(&[4; 512]).unwrap();
 		let mut frame = first_frame(&catalog, &consumer).await;
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+		let err = import.finish().unwrap_err();
+		assert!(matches!(err, crate::Error::Mkv(Error::Truncated)));
 		// The importer is still owned, and the frame fails rather than waiting on it.
-		let read = moq_clock::timeout(WAIT, frame.read_all()).await.unwrap();
-		assert!(read.is_err(), "a truncated frame must not read as complete: {read:?}");
+		let read = frame.read_all().now_or_never().expect("the cut-short frame must fail");
+		assert!(matches!(
+			read,
+			Err(moq_net::Error::Stream(moq_net::StreamError::Internal))
+		));
+		drop(import);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn truncated_finish_ends_tracks_with_accepted_content() {
+		use futures::FutureExt;
+
+		let data = include_bytes!("test_data/opus.webm");
+		// The last packet is followed by 10 bytes of BlockGroup metadata: cut inside its payload,
+		// or inside the metadata after all six packets were accepted.
+		for (missing, expected) in [(11, 5), (1, 6)] {
+			let data = &data[..data.len() - missing];
+			for chunk in [1, 7, 64, data.len()] {
+				let (mut import, catalog, consumer) = import();
+				for piece in data.chunks(chunk) {
+					import.decode(piece).unwrap();
+				}
+				assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+				let snapshot = catalog.snapshot();
+				let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
+				let subscription = moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1)));
+				let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
+				let mut reader =
+					crate::container::Consumer::new(track, crate::catalog::hang::Container::try_from(config).unwrap());
+				let mut frames = 0;
+				while reader
+					.read_frame()
+					.now_or_never()
+					.expect("finish must end the track while the importer is held")
+					.unwrap()
+					.is_some()
+				{
+					frames += 1;
+				}
+				assert_eq!(frames, expected, "chunk {chunk}");
+				drop(import);
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn truncated_finish_publishes_and_ends_empty_tracks() {
+		let (mut import, catalog, consumer) = import();
+		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+		import
+			.decode(&live(vec![entry(1, 1, "V_VP9"), entry(2, 1, "V_VP8")]))
+			.unwrap();
+		import.decode(&[0xec, 0x81]).unwrap();
+		assert!(clocks.drain().is_empty(), "no block has anchored the catalog yet");
+		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+		assert!(
+			!clocks.drain().is_empty(),
+			"finish must release the initial catalog reservation"
+		);
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.video.renditions.len(), 2);
+		for name in snapshot.video.renditions.keys() {
+			let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+			assert!(matches!(
+				track.poll_recv_group(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Ok(None))
+			));
+		}
 		drop(import);
 	}
 
@@ -1827,7 +2219,7 @@ mod tests {
 				true => std::mem::drop(import),
 				false => import.abort(moq_net::Error::Cancel),
 			}
-			let read = moq_clock::timeout(WAIT, frame.read_all()).await.unwrap();
+			let read = kio::clock::timeout(WAIT, frame.read_all()).await.unwrap();
 			assert!(read.is_err(), "a frame cut short must not read as complete: {read:?}");
 		}
 	}

@@ -19,7 +19,9 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 Publish JSON tracks with `TrackInfo(compress = true)`; a `dev.moq.json` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 `dev.moq.json` consumers' `values()` emits `Value` (`value`, `timestamp`) and `valuesAs<T>()` emits `Timed<T>`;
-a snapshot consumer yields each state in order, and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
+a snapshot consumer yields each state in order, and `latest()` skips to the newest.
+A `Timestamp(value, scale)` is exact and reads back at the track's timescale, so a 90 kHz tick republishes unchanged.
+`Duration.toTimestamp()` is exact at nanosecond scale; `Timestamp.toDuration()` rounds down to a whole nanosecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
 `MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
@@ -59,7 +61,7 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
             is AnnounceEventTakeover -> event.announce
             else -> return@collect // Update or End
         }
-        // Prefixes stay origin-relative; captures reports what each wildcard matched.
+        // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
         println(announce.captures)
         val broadcast = moq.request(announce.prefix)
         println(catalog(broadcast))
@@ -74,7 +76,7 @@ Moq.connect("https://relay.example.com").use { moq ->
     val publication = moq.createBroadcast("my-stream.hang")
     val broadcast = publication.broadcast()
     val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusInit))
-    audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
+    audio.writeFrame(Frame(payload = packet, timestamp = Timestamp(960u, 48_000u)))
     audio.cut() // audio has no keyframes, so this is what gives it groups
 
     val video = dev.moq.video.Producer(
@@ -82,8 +84,8 @@ Moq.connect("https://relay.example.com").use { moq ->
         dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = dev.moq.video.FrameRate(30000u, 1001u)),
         output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, gop = null, kind = autoEncoder), track = "camera"),
     )
-    video.write(VideoFrame(timestampUs = pts, data = rgba))
-    publication.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
+    video.write(VideoFrame(timestamp = pts, data = rgba))
+    publication.announce(AnnounceRoute()) // the broadcast mints its own instance
     audio.finish()
     video.finish()
     broadcast.end()
@@ -92,7 +94,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded video track takes `lower` in its `VideoInit` too, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `setEnabled(false)` after a `discontinuity()`, and `setEnabled(true)` on the keyframe that resumes it.
 
 ## Things to know
 
@@ -105,7 +107,7 @@ shows which module holds each.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `dev.moq.media.TrackConsumer`, `dev.moq.audio.Consumer`, and `dev.moq.video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start = DecodeStart.LATEST` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `close()` each frame from a `dev.moq.video.Consumer` promptly (or `use { }` it), or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
-- **Closing.** `moq.shutdown()` requests a drain immediately; suspending `moq.session.closed()` waits up to one second and reports its result. `Moq.close()`, and so `use { }`, cancels at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+- **Closing.** `moq.shutdown()` requests a drain immediately; suspending `moq.session.closed()` waits up to one second and reports its result. `Moq.close()`, and so `use { }`, cancels at once. Finish or abort live tracks first. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.end()` takes it offline. How long to keep it up is yours to decide. A track still open at the end, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
 - **Stats.** `session.stats()` reports `rtt`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe first-dial failures and reconnects. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ClientConfig(versions = ...)`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), collect `moq.grants().updates()` for the `Grant` the relay sent back and each change, `null` until it answers and while a client session reconnects. Ending the collection cancels the consumer.
@@ -113,7 +115,7 @@ shows which module holds each.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Subscription defaults.** `Subscription.default()` returns moq-net's defaults, whose zero `maxDelay` skips a superseded group at once; passing no subscription means the same. `copy` it to change a field; building a `Subscription(...)` must name `maxDelay`, where null sets no subscriber limit.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one.
 
 ## Runtime
 

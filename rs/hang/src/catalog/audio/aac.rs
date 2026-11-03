@@ -27,7 +27,7 @@ impl std::str::FromStr for AAC {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let remain = s.strip_prefix("mp4a.40.").ok_or(Error::InvalidCodec)?;
 		Ok(Self {
-			profile: u8::from_str(remain)?,
+			profile: crate::catalog::codec_number(remain, 10)?,
 		})
 	}
 }

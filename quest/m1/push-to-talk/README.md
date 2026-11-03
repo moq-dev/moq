@@ -1,4 +1,4 @@
-# Push-to-talk loses no speech
+# [M] Push-to-talk loses no speech
 
 ## Goal
 
@@ -29,9 +29,10 @@ Decided 2026-10-28 (maintainer):
   rendition.
 - **The publisher keeps its probe result across a disable**, and the
   element's `muted` and `invisible` leave capture open.
-- **Encoding no longer waits for demand**
-  ([always-on encoding](/quest/m1/eager-encode/README.md)). A listener who
-  subscribes after the unmute still gets the start within its `maxDelay`. This
+- **Encoding no longer waits for demand**, in every first-party publisher
+  (finished by [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)).
+  A listener who
+  subscribes after the unmute still gets the start within its `delay.max`. This
   replaces a publisher head buffer, which was considered and dropped as the
   same idea special-cased.
 
@@ -52,14 +53,6 @@ encoder. Capture now stays open, so only a device swap, a settings change or a
 new `source` recovers one. Decide whether re-enabling should retry a failed
 encoder, and record why.
 
-## Required
-
-- [Watch caches audio codec support](/quest/m1/push-to-talk/audio-support-cache.md) - an unmute resumes audio without waiting on a support check
-
 ## Closes
 
 - [#7101](https://github.com/moq-dev/moq/issues/7101) - a disabled audio rendition is deselected, so the start of the next utterance is lost
-
-## Related
-
-- [Always-on encoding](/quest/m1/eager-encode/README.md) - encoders run while enabled, so a late subscriber can fetch the start

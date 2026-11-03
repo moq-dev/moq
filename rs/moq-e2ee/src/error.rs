@@ -12,7 +12,7 @@ pub enum Error {
 	#[error("exhausted")]
 	Exhausted,
 
-	/// Encrypting at a sequence this generation already allocated, or producing a track it already claimed.
+	/// Encrypting at a sequence this generation already allocated for the track's name.
 	#[error("reuse")]
 	Reuse,
 

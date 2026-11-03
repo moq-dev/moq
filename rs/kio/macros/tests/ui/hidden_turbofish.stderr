@@ -1,0 +1,5 @@
+error: this statement runs once, so it cannot return `Poll::Pending`: wait with `let x: T = wait!(Step => poll)?;`
+  --> tests/ui/hidden_turbofish.rs:16:17
+   |
+16 |             return Poll::Pending::<Result<u64, kio::Closed>>;
+   |                          ^^^^^^^

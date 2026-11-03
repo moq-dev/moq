@@ -28,6 +28,7 @@ pub struct Stream {
 
 impl Stream {
 	pub(crate) fn new(shared: Shared, id: stream::Id) -> Self {
+		shared.hold();
 		Self {
 			shared,
 			id,
@@ -210,11 +211,18 @@ impl Stream {
 	///
 	/// Yields `Some` with the reset error code when the stream is reset by the peer, and `None`
 	/// once every byte the peer finished it with has been read, after which it is no longer
-	/// meaningful for the stream to be reset.
+	/// meaningful for the stream to be reset. Fails with [`Error::Evicted`] once the stream was
+	/// evicted to free a stuck receive window, until it is stopped.
 	///
 	/// Cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		poll_fn(|cx| self.parked(cx, Self::wait_received_reset)).await
+		poll_fn(|cx| self.poll_received_reset(cx)).await
+	}
+
+	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
+	/// left as it was.
+	pub(crate) fn poll_received_reset(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+		self.parked(cx, Self::wait_received_reset)
 	}
 
 	fn wait_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
@@ -223,6 +231,8 @@ impl Stream {
 		}
 		let reset = self.shared.conn.borrow_mut().recv_stream(self.id).received_reset();
 		match reset {
+			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
+			Err(moq_quic::recv::Error::Evicted) => Poll::Ready(Err(Error::Evicted)),
 			Err(_) => Poll::Ready(Ok(None)),
 			Ok(Some(code)) => {
 				// The stream's state was just freed, so the peer may be owed stream credit, and
@@ -359,12 +369,12 @@ fn fill(chunks: &mut Chunks<'_>, buf: &mut impl BufMut) -> ReadStatus<usize> {
 impl Drop for Stream {
 	fn drop(&mut self) {
 		self.shared.forget_recv(self.id);
-		if self.all_data_read || self.shared.closed().is_some() {
-			return;
+		if !self.all_data_read && self.shared.closed().is_none() {
+			// Fails harmlessly once the stream is gone.
+			let _ = self.shared.conn.borrow_mut().recv_stream(self.id).stop(self.drop_stop);
+			self.shared.kick();
 		}
-		// Fails harmlessly once the stream is gone.
-		let _ = self.shared.conn.borrow_mut().recv_stream(self.id).stop(self.drop_stop);
-		self.shared.kick();
+		self.shared.release();
 	}
 }
 
