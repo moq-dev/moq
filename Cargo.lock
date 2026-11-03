@@ -4508,6 +4508,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "kio 0.6.4",
+ "libc",
  "loom",
  "moq-pattern",
  "num_enum",

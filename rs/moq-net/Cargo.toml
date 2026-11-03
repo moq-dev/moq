@@ -39,8 +39,9 @@ web-transport-trait = { workspace = true }
 criterion = { workspace = true }
 serde_json = { workspace = true }
 # test-util (tokio::time::pause/advance) is test-only and is NOT supported on
-# wasm, so it must not leak into the normal dependency feature set.
-tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }
+# wasm, so it must not leak into the normal dependency feature set. The session
+# fanout bench runs across worker threads.
+tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt", "rt-multi-thread"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 # Model checks for the kio-backed model layer (tests/loom.rs). `cfg(loom)` is only
@@ -55,6 +56,10 @@ loom = { workspace = true }
 getrandom = { workspace = true }
 # Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
 wasm-bindgen-test = "=0.3.77"
+
+# Process CPU timing in the session benchmark.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
