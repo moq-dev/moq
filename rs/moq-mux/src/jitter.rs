@@ -2263,6 +2263,81 @@ mod tests {
 		assert_eq!(buffer.dropped(), 0);
 	}
 
+	/// Once the old horizon has drained, a restart still preserves the lead of a track it
+	/// has not heard yet, so that track keeps the delay when it crosses later.
+	#[tokio::test(start_paused = true)]
+	async fn a_restart_without_an_old_tail_keeps_an_unheard_tracks_delay() {
+		let start = kio::clock::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1, 2]);
+		buffer.push(1, arrival(start, 300, "v300")).unwrap();
+		buffer.push(2, arrival(start, 0, "a0")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("a0", 0)]);
+		tokio::time::advance(Duration::from_millis(300)).await;
+		assert_eq!(released(&mut buffer), [("v300", 0)]);
+		assert!(buffer.is_empty());
+
+		let resume = start + Duration::from_secs(1);
+		tokio::time::advance(resume - kio::clock::now()).await;
+		buffer.push(1, after(1, arrival(resume, 5_000, "v5000"))).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert!(due(&mut buffer).is_empty(), "video must wait for the later-sent audio");
+		tokio::time::advance(Duration::from_millis(200)).await;
+		let now = kio::clock::now();
+		assert_eq!(
+			buffer.push(2, after(1, arrival(now, 5_000, "a5000"))).unwrap(),
+			Push::Queued
+		);
+		assert!(due(&mut buffer).is_empty());
+		tokio::time::advance(DELAY - Duration::from_nanos(1)).await;
+		assert!(due(&mut buffer).is_empty());
+		tokio::time::advance(Duration::from_nanos(1)).await;
+		assert_eq!(released(&mut buffer), [("v5000", 1), ("a5000", 1)]);
+		assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 0));
+	}
+
+	/// Hearing every expected track removes the unheard lag, but the new clock must still
+	/// follow deadlines already queued on the old generation, including its future tail.
+	#[tokio::test(start_paused = true)]
+	async fn a_restart_hearing_every_track_keeps_deadlines_after_the_old_tail() {
+		let start = kio::clock::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1, 2]);
+		buffer.push(1, arrival(start, 300, "v300")).unwrap();
+		buffer.push(2, arrival(start, 0, "a0")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("a0", 0)]);
+		let now = kio::clock::now();
+		buffer.push(1, arrival(now, 400, "v400")).unwrap();
+		assert!(
+			!buffer.full(&1, &kio::Waiter::noop()),
+			"the video's lead admits the restart"
+		);
+		for (track, item) in [(1, "v5000"), (2, "a5000")] {
+			buffer.push(track, after(1, arrival(now, 5_000, item))).unwrap();
+		}
+		tokio::time::advance(DELAY).await;
+		assert!(due(&mut buffer).is_empty());
+		let tail = start + Duration::from_millis(500);
+		assert_eq!(
+			buffer.at(1, ms(5_000)),
+			Some(tail),
+			"the export clock follows the queued tail"
+		);
+		tokio::time::advance(Duration::from_millis(200)).await;
+		assert_eq!(released(&mut buffer), [("v300", 0)]);
+		tokio::time::advance(DELAY - Duration::from_nanos(1)).await;
+		assert!(due(&mut buffer).is_empty());
+		tokio::time::advance(Duration::from_nanos(1)).await;
+		let mut out = Vec::new();
+		while let Poll::Ready(ready) = buffer.poll_next(&kio::Waiter::noop()) {
+			out.push((ready.item, ready.generation, ready.deadline));
+		}
+		assert_eq!(out, [("v400", 0, tail), ("v5000", 1, tail), ("a5000", 1, tail)]);
+		assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 0));
+	}
+
 	/// Two tracks every 100 ms of decode time for `steps` frames, the audio sent more than two
 	/// delays behind the video and running `tail` frames past it, then a restart onto a
 	/// timeline 15 seconds on: each released frame's generation, and how many were dropped.
@@ -3051,6 +3126,42 @@ mod tests {
 		assert_eq!(due(&mut buffer), ["v280"]);
 		assert_eq!(buffer.dropped(), 0, "trimming the join is not a loss");
 		assert_eq!(buffer.trimmed(), 6);
+	}
+
+	/// Arrival before the deadline does not rescue an acquisition frame read after it.
+	/// Reading exactly at the deadline still keeps it.
+	#[tokio::test(start_paused = true)]
+	async fn acquisition_drops_timely_arrivals_only_when_read_past_their_deadline() {
+		for decode in [99, 100, 101] {
+			let start = kio::clock::now();
+			let mut buffer = Buffer::new(DELAY);
+			tokio::time::advance(DELAY).await;
+			let read = kio::clock::now();
+			buffer
+				.push(
+					1,
+					Arrival {
+						read,
+						..arrival(start, decode, "cached")
+					},
+				)
+				.unwrap();
+			// This freshest frame puts the cached frame's deadline at start + decode ms.
+			buffer.push(1, arrival(read, 200, "fresh")).unwrap();
+			tokio::time::advance(DELAY).await;
+			let expected = if decode < 100 {
+				vec!["fresh"]
+			} else {
+				vec!["cached", "fresh"]
+			};
+			assert_eq!(
+				due(&mut buffer),
+				expected,
+				"cached deadline at {decode} ms, read at 100 ms"
+			);
+			assert_eq!((buffer.dropped(), buffer.trimmed()), (0, u64::from(decode < 100)));
+			assert!(buffer.is_empty());
+		}
 	}
 
 	/// A start group its source cuts short before anything of it went out still goes out, from
