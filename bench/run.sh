@@ -923,7 +923,8 @@ run_instructions() {
     done
     labels+=(current)
     checkouts+=("$ROOT")
-    targets+=("$TARGET/revisions/$(git rev-parse HEAD)/profile")
+    # The working tree changes under one target; Cargo's fingerprints track it.
+    targets+=("$TARGET/revisions/current/profile")
     LOAD_BIN=${targets[-1]}/profiling/moq-bench
     HOST_BIN=${targets[-1]}/profiling/moq-bench-host
 
