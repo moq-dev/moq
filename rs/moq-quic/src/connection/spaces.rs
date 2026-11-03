@@ -168,9 +168,15 @@ impl PacketSpace {
 		x
 	}
 
-	pub(super) fn can_send(&self, streams: &StreamsState) -> SendableFrames {
+	pub(super) fn can_send(&mut self, streams: &StreamsState) -> SendableFrames {
 		let acks = self.pending_acks.can_send();
-		let other = !self.pending.is_empty(streams) || self.ping_pending || self.immediate_ack_pending;
+		let pending = !self.pending.is_empty(streams);
+		if !pending {
+			// Drop both drained queue capacity and obsolete per-stream credit updates. Merely
+			// testing them as unsendable would retain their slots until more traffic arrives.
+			self.pending = Retransmits::default();
+		}
+		let other = pending || self.ping_pending || self.immediate_ack_pending;
 
 		SendableFrames { acks, other }
 	}
