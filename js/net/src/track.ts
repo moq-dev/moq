@@ -2085,6 +2085,9 @@ export class Subscriber {
 	// refills cannot evict each other without bound. Mirrors the Rust `Misses`.
 	#asked: Run[] = [];
 	#refilled: Run[] = [];
+	// The last read waited on a fill, so the staleness deadline it armed wakes the next one: a
+	// fill that never answers cannot pin a reader in either order.
+	#fillWait = false;
 
 	#drift(): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
@@ -2307,6 +2310,10 @@ export class Subscriber {
 		this.#skipped.delete(sequence);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
 		else this.#forgetPastBudget(this.#delivered);
+		// What it hands out, and forgets below it, it no longer wants from a fill: tell the fills
+		// it joined, as a move of its bounds does, so their handlers stop serving it.
+		const producer = this.#state.producer;
+		if (this.#state.asker && producer) fillsOf(producer).moved(this.#state.asker);
 	}
 
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
@@ -2550,7 +2557,9 @@ export class Subscriber {
 		// a stale run gives way to a later one the budget still wants.
 		for (const run of fills.covered(start, end, asker)) {
 			drift ??= this.#drift();
-			if (!this.#staleAt(run.end - 1n, drift, true)) return run.start;
+			if (this.#staleAt(run.end - 1n, drift, true)) continue;
+			this.#fillWait = true;
+			return run.start;
 		}
 		return undefined;
 	}
@@ -3134,6 +3143,7 @@ export class Subscriber {
 		if (this.#resume) return this.#tryResumed(false, dispositions);
 		const refused = this.#settle();
 		if (refused) return { kind: "error", error: refused };
+		this.#fillWait = false;
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
 		const old = () => new StreamError(StreamCode.Old, { message: "group is past the budget" });
@@ -3294,8 +3304,9 @@ export class Subscriber {
 				// A datagram shares the sequence namespace, so it can fill the owed hole.
 				this.#state.datagrams.changed(fn),
 			);
-		// A bounded window ends once the feed stops owing its last hole, which only time decides.
-		else if (this.#window.end() !== undefined) dispose.push(this.#wall.revision.changed(fn));
+		// A bounded window ends once the feed stops owing its last hole, which only time decides,
+		// and a fill's hole stops holding a read once the budget convicts it.
+		else if (this.#window.end() !== undefined || this.#fillWait) dispose.push(this.#wall.revision.changed(fn));
 		return () => {
 			for (const close of dispose) close();
 		};
@@ -3463,6 +3474,7 @@ export class Subscriber {
 		const refused = this.#settle();
 		if (refused) return { kind: "error", error: refused };
 		this.#state.waitingOrdered = false;
+		this.#fillWait = false;
 		const groups = this.#state.groups.peek();
 		const cursor = this.#cursor.peek();
 		let start = max(cursor.start, this.#nextSequence);

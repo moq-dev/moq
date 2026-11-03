@@ -385,6 +385,65 @@ test("fill: an ordered reader stops waiting on an unanswered fill once its budge
 	}
 });
 
+test("fill: an arrival-order reader stops waiting on an unanswered fill once its budget convicts the hole", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { broadcast, track } = resumed(5n);
+		track.finish();
+		const requests = track.requests();
+		const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(1000) } });
+		expect((await reader.recvGroup())?.sequence).toBe(5n);
+		const next = reader.recvGroup();
+		const fill = await requests.requestedFill();
+		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
+
+		// The fill never answers; the holes go past the budget, and the finished track ends the read.
+		await clock.advance(Nano.fromMilli(Milli(1001)));
+		expect(await next).toBeUndefined();
+
+		fill?.close();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
+test("fill: a handler hears that a reader stopped wanting what it handed out past", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { broadcast, track } = resumed(5n);
+		const requests = track.requests();
+		const reader = track.subscribe({
+			ranges: [{ start: { absolute: 0n } }],
+			delay: { max: Milli(1000) },
+			order: "ascending",
+		});
+		const next = reader.ordered().nextGroup();
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		expect(await fill.wantedChanged()).toBe(0n);
+		const changed = fill.wantedChanged();
+		const unwanted = fill.unwanted(0n);
+
+		// Past the budget the reader takes group 5, leaving the holes below it for good.
+		await clock.advance(Nano.fromMilli(Milli(1001)));
+		expect((await next)?.sequence).toBe(5n);
+		expect(await changed).toBeUndefined();
+		await unwanted;
+		expect(fill.isWanted(0n)).toBe(false);
+
+		fill.close();
+		reader.close();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
 test("fill: a bounded reader keeps waiting on a fresh fill once an older one goes stale", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
