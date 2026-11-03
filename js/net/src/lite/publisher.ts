@@ -130,8 +130,8 @@ function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage 
 	return new TrackInfoMessage({
 		priority: info.priority,
 		refresh: info.refresh,
-		// Publisher Max Age: the publisher's retention bound, advertised so relays re-serve
-		// with the same window.
+		// Publisher Max Age: the publisher's staleness bound, advertised so relays re-serve
+		// with the same bound.
 		maxAge: info.maxAge,
 		// `#serveGroup` emits each frame converted to it.
 		timescale: info.timescale ?? undefined,

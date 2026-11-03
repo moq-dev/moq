@@ -31,11 +31,11 @@ A loop that read a bounded range until a timeout now ends on its own; one that w
 ### Ordered subscriptions wait for owed groups
 
 An ordered reader on a subscribed track now waits at a missing group while the feed may still deliver it, up to `delay.max` by media time or wall clock. Local tracks still skip gaps, and the zero default waits for nothing.
-With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. Publisher retention still bounds the budget.
+With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. The publisher's `Track.Info.maxAge` still bounds the budget.
 
 ### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
 
-A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
+A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` allows, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
 
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
@@ -47,11 +47,11 @@ A moq-transport namespace whose escaped path would exceed it is refused when dec
 `Path.from` throws on a component with a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling, and `Path.decode` refuses one off the wire. A moq-transport namespace field ending in `/`, which escapes to an empty segment, is refused too.
 Pass canonical components: `Path.from("room/cam")` or `Path.from(prefix, "cam")`, where an empty component is the root, rather than ``Path.from(`${prefix}/cam`)`` or `Path.from("room/")`.
 
-### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+### moq-transport drafts 14 through 17, 19, and 21 are removed ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753), [moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754))
 
-The `"moq-transport-14"` through `"moq-transport-17"` version names now throw a `TypeError`, and a peer offering only those versions fails the handshake.
+A peer offering only removed drafts fails the handshake.
 The moql SETUP (no ALPN, or `moql`) negotiates only moq-lite versions.
-Peers must speak moq-transport draft 18 or later, or moq-lite.
+Peers must speak moq-transport draft 18, 20, or 22, or moq-lite.
 
 ### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
@@ -253,10 +253,10 @@ A write whose timedness does not match its track throws `Error.TimestampMismatch
 
 ### Subscriber staleness is `maxDelay`
 
-`Track.Subscription`'s `maxAge` is `maxDelay`; `maxAge` stays the publisher's retention on `Track.Info`.
+`Track.Subscription`'s `maxAge` is `maxDelay`; `maxAge` stays the publisher's staleness bound on `Track.Info`.
 A `maxAge` key in subscription options throws a `TypeError`, even when `undefined` or beside `maxDelay`.
 
-### Publisher retention is optional (#4242)
+### `Track.Info.maxAge` is optional (#4242)
 
 `Track.Info.maxAge` is optional, absent meaning no publisher limit, and `DEFAULT_MAX_AGE_MS` is gone.
 Pass an explicit value such as `Milli(30_000)` where you used the constant.

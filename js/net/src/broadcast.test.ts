@@ -641,7 +641,7 @@ test("a fetch waits for a group still to come", async () => {
 	broadcast.close();
 });
 
-test("fetch maxDelay tightens publisher retention without changing omission", async () => {
+test("fetch maxDelay tightens the publisher's maxAge without changing omission", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(2000) });
 

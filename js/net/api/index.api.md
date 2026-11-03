@@ -388,10 +388,13 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export type Cost = bigint;
+	export interface FollowOptions {
+		instance?: Instance.Valid;
+	}
 	export class Following {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
 		close(): void;
@@ -414,7 +417,7 @@ export namespace Origin {
 		consume(): Origin.Consumer;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
@@ -435,7 +438,7 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly discovery: Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
+		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export class Request {
