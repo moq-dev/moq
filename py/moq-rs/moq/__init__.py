@@ -11,7 +11,6 @@ from . import audio as audio
 from . import json as json
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
-from .epoch import mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
@@ -72,6 +71,7 @@ from .types import (
     Range,
     Route,
     Subscription,
+    Timestamp,
     TrackInfo,
     VideoCodec,
     VideoDecodedFrame,
@@ -137,6 +137,7 @@ __all__ = [
     "Server",
     "Session",
     "Subscription",
+    "Timestamp",
     "Tokens",
     "TrackConsumer",
     "TrackDemand",
@@ -156,7 +157,6 @@ __all__ = [
     "is_auth",
     "is_shutdown",
     "log_level",
-    "mint_epoch",
     "protocol_error",
     "qlog_supported",
     "versions",

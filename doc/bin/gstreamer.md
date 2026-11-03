@@ -96,9 +96,9 @@ comma-separated list, matching the CLI's repeatable `--connect-version`;
 unknown versions fail startup. QUIC durations are milliseconds. Zero disables the local idle timeout; a zero
 or unset keep-alive derives from the idle timeout and reads back as zero.
 Each run from `READY` publishes under a fresh
-[publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
-or moq-transport, viewers switch to a restarted pipeline at once instead of stalling on the old
-one; reconnects within a run keep it. The first catalog waits for a timed buffer
+[instance](/concept/moq-lite#publisher-instances), so viewers switch to a
+restarted pipeline at once instead of stalling on the old one; reconnects
+within a run keep it. The first catalog waits for a timed buffer
 to place the shared wall clock and for every requested pad to negotiate its
 rendition, including any codec config carried in its first buffers. A linked pad
 that never negotiates holds back the whole catalog until
@@ -168,9 +168,14 @@ on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
-`broadcast`, `connect-version` (comma-separated protocol versions to offer, most
+`broadcast`, `max-delay`, `connect-version` (comma-separated protocol versions to offer, most
 preferred first; every stable version by default), `tls-disable-verify`,
 `quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.
+
+`max-delay` is how many milliseconds (default 1000) a group may trail the live
+edge before every pad skips it. Raise it to ride out a stalled pipeline or a
+congested link without gaps, at the cost of falling further behind live first. The
+publisher's max-age caps it.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 To decrypt a capture, set `quic-keylog=true` on either element along with

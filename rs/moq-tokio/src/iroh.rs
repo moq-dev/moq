@@ -557,7 +557,7 @@ mod tests {
 	async fn bind_refuses_a_custom_controller() {
 		let quic = crate::quic::Config {
 			controller: Some(crate::quic::Controller(std::sync::Arc::new(
-				moq_congestion::Bbr3Config::default(),
+				moq_congestion::bbr3::Config::default(),
 			))),
 			..Default::default()
 		};

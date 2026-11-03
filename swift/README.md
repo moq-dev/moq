@@ -45,7 +45,7 @@ for try await event in announced {
     }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
-    print("captures \(announcement.captures ?? [])")
+    print("captures \(announcement.captures)")
 
     let broadcast = try await session.consume.request(path: announcement.prefix)
     let catalog = try await Media.CatalogConsumer.subscribe(broadcast: broadcast)
@@ -78,8 +78,8 @@ Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` wor
 
 Incoming server `Request` values expose the query-free `path` before acceptance. It is consistent across transports and is empty for the root or missing path. The encoded `query` may contain credentials.
 
-Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestampUs:)`
-returns the assigned sequence number (`insertDatagram(_:sequence:timestampUs:)` takes the
+Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestamp:)`
+returns the assigned sequence number (`insertDatagram(_:sequence:timestamp:)` takes the
 caller's own), `TrackConsumer.recvDatagram()` receives one datagram,
 and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
 Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;

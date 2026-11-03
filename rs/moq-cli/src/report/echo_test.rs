@@ -40,6 +40,7 @@ async fn export_echo_reports_where_the_import_solicits() {
 		fragment_duration: None,
 		mux_rate: None,
 		passthrough: false,
+		output: None,
 		catalog: None,
 		select: SelectArgs::default(),
 	};

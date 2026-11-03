@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Smaller default windows, which qmux shares ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`quic::DEFAULT_RECEIVE_WINDOW` is 4 MiB, `DEFAULT_STREAM_RECEIVE_WINDOW` 1 MiB, and `DEFAULT_SEND_WINDOW` 4 MiB, down from 128 MiB, 4 MiB, and 16 MiB. `Error::ReceiveWindowTooSmall` now refuses only a `receive_window` below 1 MiB.
+Set `[quic]` windows explicitly to keep the old behavior, such as for a path whose bandwidth-delay product exceeds them.
+Every qmux session (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC) starts at the `[quic]` windows and stream count, which a client's or server's `[quic]` overrides, and leases receive credit, so a stream can now fail as evicted.
+A `Server` applies its `[quic]` to every qmux listener and to `tls_acceptor`. `websocket::accept` reads it from the new `websocket::Options::quic`, which defaults to the `[quic]` defaults, so set it to your config's `quic.resolve()`; `tcp::Listener::with_quic` and `websocket::Listener::with_quic` set it on a listener built outside a `Server`.
+`server::Request::with_quic_limits` also widens a qmux session at `ok()`, except a WebRTC session's receive window, which sizes its read queue; one refusing them, such as a rate cap, which qmux cannot pace, fails `ok()` with the new `Error::QmuxLimits`.
+`quic::driver::recv::Stream::received_reset`, and so `quic::web::RecvStream::poll_reset`, fail with `Evicted` for a stream evicted to free a stuck window.
+`quic::web::RecvStream::received_reset` now fails with a `ReadError`, `ReadError::SessionError` for what was its `SessionError` or `ReadError::Evicted`, rather than panicking on an eviction.
+
+### `listen::LoadBalancer` has a `forward` field ([#7539](https://github.com/moq-dev/moq/pull/7539))
+
+`listen::LoadBalancer` gained `forward: listen::Forward`, the `[listen.lb.forward]` settings that forward QUIC packets to the server their connection ID names.
+The struct is not `#[non_exhaustive]`, so add `..Default::default()` to a `LoadBalancer { id, nonce }` literal, which leaves forwarding off.
+An exhaustive destructure, such as a QUIC runtime mapping the resolved listener settings, must name `forward`: honor it, or ignore it with `forward: _` only where `lb.id` is already refused.
+
 ### `tls://` listeners verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
 
 A `listen.tcp.tls` listener serves the listen policy's client-certificate verifier, so `--listen-tls-root` and pinned `tls.peers` apply to it as they do to QUIC, and a stream-only server with that listener accepts them instead of returning `Error::MtlsUnsupported`.

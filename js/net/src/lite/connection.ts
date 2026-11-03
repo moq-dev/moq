@@ -1,5 +1,5 @@
 import { Milli, Nano } from "@moq/clock";
-import { Effect, type Getter, Once, Signal } from "@moq/signals";
+import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
@@ -232,7 +232,6 @@ export class Connection implements Established {
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
-			goaway: this.#goaway,
 			exclusive: false,
 			auth: this.#auth,
 		});
@@ -249,7 +248,7 @@ export class Connection implements Established {
 	 * Withdraw announcements and finish the requests this session serves, waiting up to one
 	 * second for delivery before closing.
 	 *
-	 * A served subscription first delivers its remaining group streams, and on lite-07 also
+	 * A served subscription first delivers its remaining group streams, and from lite-05 also
 	 * waits for the subscriber's FIN, which says it read the tail. A live track never ends on
 	 * its own, so it holds the close until the deadline.
 	 */
@@ -286,7 +285,8 @@ export class Connection implements Established {
 	}
 
 	async #run(): Promise<void> {
-		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), this.#runUnis()];
+		const unis = this.#runUnis();
+		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), unis];
 
 		if (hasSetupStream(this.#version)) {
 			tasks.push(this.#sendSetup());
@@ -328,6 +328,8 @@ export class Connection implements Established {
 			this.#closeTransport();
 			// The peer's close can overtake the group streams and SUBSCRIBE FIN it sent first.
 			// Read what already arrived, so a track its publisher ended finishes rather than aborts.
+			// Accepting yields to the host, so take the streams still queued before draining.
+			await unis.catch(() => {});
 			await Promise.all([...this.#unis, this.#subscriber.drain()]);
 			// The session ended under every track it was receiving, so they end with its
 			// error: a clean close from either side reads as a cancelled session.
@@ -510,6 +512,11 @@ export class Connection implements Established {
 	/** Snapshot the transport's counters; see {@link Established.stats}. */
 	async stats(): Promise<Stats> {
 		return transportStats(this.#quic);
+	}
+
+	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	get draining(): GetPromise<Drain> {
+		return this.#goaway;
 	}
 
 	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */

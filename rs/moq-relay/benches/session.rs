@@ -43,7 +43,8 @@ impl Backend for Relay {
 		options.config.id = Some(id);
 		// The shared sweeps include more announcements than a default ordinary client.
 		options.session.announces = options.peer.announces;
-		let cluster = cluster::Cluster::new(options.with_cache(cache)).unwrap();
+		let (cluster, driver) = cluster::Cluster::new(options.with_cache(cache)).unwrap();
+		tokio::spawn(driver.run());
 		let mut stats = stats::Config::default();
 		stats.enabled = true;
 		stats.node = Some(id.to_string());
@@ -127,6 +128,7 @@ criterion_group!(
 	benches,
 	session::session::<Relay>,
 	session::group_cost::<Relay>,
+	session::datagram::<Relay>,
 	session::fetch_frames::<Relay>,
 	session::fetch_range::<Relay>,
 	session::withdrawal::<Relay>

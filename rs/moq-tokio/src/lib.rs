@@ -92,16 +92,33 @@ pub mod webrtc;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
-/// Session settings for every qmux transport (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC).
+/// Session settings for every qmux transport (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC),
+/// with `quic`'s windows and stream count.
 ///
-/// moq-lite holds a stream open per subscription, so a qmux session grants the same
-/// stream count as QUIC rather than qmux's default of 100, past which a peer's opens
-/// wait on credit forever.
+/// A qmux session leases receive credit as QUIC does, so it takes the same per-session
+/// numbers rather than qmux's own defaults. moq-lite holds a stream open per subscription,
+/// past qmux's default of 100, where a peer's opens would wait on credit forever.
 #[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
-fn qmux_config() -> qmux::Config {
+fn qmux_config(quic: &quic::Resolved) -> qmux::Config {
 	let mut config = qmux::Config::default();
-	config.limits.max_streams = std::num::NonZeroU64::new(quic::DEFAULT_MAX_STREAMS);
+	config.limits = quic.limits();
 	config
+}
+
+/// [`qmux_config`] at the `[quic]` defaults, for a server's qmux sessions, which widen once
+/// admitted (see [`server::Request::with_quic_limits`]).
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+fn qmux_default() -> qmux::Config {
+	qmux_config(&quic::Resolved::default())
+}
+
+/// Run a qmux session's driver on the runtime, handing back the session.
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+fn spawn_qmux<T: qmux::transport::Transport + Send + 'static>(
+	(session, driver): (qmux::Session, qmux::Driver<T>),
+) -> qmux::Session {
+	runtime::spawn(driver);
+	session
 }
 
 // Enumerated rather than globbed, so the root surface is a deliberate list and a

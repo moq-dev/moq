@@ -4,9 +4,9 @@
 //! dependencies again, so add new integration tests here as a module.
 
 mod auth_serve;
-mod epochs;
 mod export;
 mod import;
+mod instances;
 mod listen;
 mod report;
 mod rtsp;

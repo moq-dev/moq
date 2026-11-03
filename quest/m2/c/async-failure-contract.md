@@ -4,7 +4,9 @@
 
 Every async call in the generated C API has a callback contract a C caller can rely on for freeing `user_data`: the call returns a task, never NULL, and its callback runs exactly once, with the result or, when the task was freed first, with `cancelled` set.
 
-[moq-dev/rust2#169](https://github.com/moq-dev/rust2/pull/169) implements it in rust2's C generator. Waiting on [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) to move the C generator pin: `c/moq` adopts the new callback shape then, along with the CamelCase names, and `c/moq/test/probe.c`'s callbacks take `cancelled` and release `user_data` there. Delete this quest with that PR.
+[moq-dev/rust2#169](https://github.com/moq-dev/rust2/pull/169) implements it in rust2's C generator. Waiting on [Switch to rust2's exporter](/quest/m2/ffi-exporter.md) to move the C generator pin: `c/moq` adopts the new callback shape then, along with the CamelCase names, and `c/moq/test/probe.c`'s callbacks take `cancelled` and release `user_data` there. Delete this quest with that PR.
+
+Decided 2026-11-02 (maintainer, /quest-unblock): moq switches to rust2's exporter, not the UniFFI fork, so this contract must hold for the exporter's C ABI futures; rust2#169's fork implementation is the reference.
 
 ## Plan
 
