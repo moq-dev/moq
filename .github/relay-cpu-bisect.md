@@ -79,7 +79,7 @@ At 512 subscribers, in instructions per delivered group, the model path cost 4,2
 | Public ingest, [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111) | 5,816 | 6,016 | +200 |
 | The m0 simplification audit, [moq-dev/moq#6108](https://github.com/moq-dev/moq/pull/6108) | 6,017 | 6,017 | 0 |
 
-In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)) and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) are QUIC-level, which neither scenario reaches; their relay counts on the quiet test host are below. The model path barely moved before [e84ffb3de3](https://github.com/moq-dev/moq/commit/e84ffb3de3139f7245bed5697754fd6add9a022e) (5,840) and then grew in a few large steps, each against its parent (run.TmGdFy, one build profile throughout):
+In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)) and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) are QUIC-level, which neither scenario reaches. A relay run pairing each with its parent on the quiet test host got one round (qmux 116k to 122k, leases 130k to 132k per frame) before other agents started fuzzing and compiling there, so neither is attributed yet. The model path barely moved before [e84ffb3de3](https://github.com/moq-dev/moq/commit/e84ffb3de3139f7245bed5697754fd6add9a022e) (5,840) and then grew in a few large steps, each against its parent (run.TmGdFy, one build profile throughout):
 
 | Commit | Model | Session |
 | --- | ---: | ---: |
@@ -104,6 +104,8 @@ Each is its own commit, counted in one run (run.s6IjbN in the evidence) at 512 s
 | A live reader's probe skips the fills while it misses nothing | 10,477 (-2,823) | 114,139 (-6,809) |
 | A window with one set of runs reads without growing across two | 10,126 (-351) | 113,133 (-1,007) |
 | This branch | 10,126 (-23.9%) | 113,133 (-6.5%) |
+
+Against `main` at [619df6e1b3](https://github.com/moq-dev/moq/commit/619df6e1b3) (run.evL1wx), after merging it: model 13,368 to 10,119 (-24.3%), session 121,114 to 113,143 (-6.6%).
 
 `Cursor::probe` is the relay's check for groups a reader has missed. Each time a subscriber asks for its next group, the probe looks at what arrived on the track since its last look and decides whether any group the reader still wants has left the cache without the live feed delivering it (evicted, skipped, or from before the feed started), and asks upstream to fill those. A live reader that takes each group as it arrives never has such a gap, yet it paid for the whole check on every group: locking the subscription and the track's shared state, cloning the track's fills, walking the arrival ledger, checking each new group for holes, and running the ask-and-answer loop. Each time the cache aged out an old group, the eviction also landed with every reader, all of which had already taken it, and forced each one to re-run the full check. The fast path judges a group the arrival walk serves without the hole, backfill, and ledger passes, skips the subscription, fills, and answers when nothing is asked or owed, and starts each reader's eviction inbox above what it handed out. It recovers most of [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)'s and [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)'s cost.
 
