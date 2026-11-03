@@ -206,17 +206,15 @@ struct Before {
 	stats: stats::Snapshot,
 	errors: health::Errors,
 	health: Health,
-	now: Option<u64>,
 }
 
 impl Before {
 	fn of(import: &Import<Ext>) -> Self {
-		let (health, now) = import.timing();
+		let health = import.timing();
 		Self {
 			stats: import.stats(),
 			errors: import.errors().clone(),
 			health: health.clone(),
-			now,
 		}
 	}
 }
@@ -342,7 +340,7 @@ impl Programs {
 			self.health_deadline = None;
 			for program in &mut self.programs {
 				program.import.arrived(arrival);
-				if let Some(deadline) = program.import.timing().0.deadline() {
+				if let Some(deadline) = program.import.timing().deadline() {
 					self.health_deadline = Some(self.health_deadline.map_or(deadline, |at| at.min(deadline)));
 				}
 			}
@@ -373,7 +371,7 @@ impl Programs {
 				let before = (self.pmt_pids[usize::from(packet.pid)] && import.pmt_pid() == Some(packet.pid))
 					.then(|| Before::of(import));
 				import.packet(&packet)?;
-				if let Some(deadline) = import.timing().0.deadline() {
+				if let Some(deadline) = import.timing().deadline() {
 					self.health_deadline = Some(self.health_deadline.map_or(deadline, |at| at.min(deadline)));
 				}
 				self.clock.offer(index, import);
@@ -821,7 +819,7 @@ impl Programs {
 			return;
 		};
 		match before.filter(|_| current == index) {
-			Some(before) => (self.programs[next].import).take_over(read.0, (&before.health, before.now)),
+			Some(before) => (self.programs[next].import).take_over(read.0, &before.health),
 			None => {
 				let [from, to] = self
 					.programs
@@ -1281,6 +1279,46 @@ mod test {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn a_shared_pts_timer_keeps_its_age_when_clocks_are_sampled_apart() {
+		let mut programs = Programs::new(
+			crate::source::produce_origin(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
+		let mut mux = Mux::default();
+		let both = [(1, 0x100), (2, 0x200)];
+		mux.pat(&both[..1]).pmt(0x100, 1, 0x1ff, &[(MP2, 0x61)], 0);
+		mux.packet(0x1ff, Flags::pcr(27_000_000));
+		mux.out.extend(mp2_pes(0x61, 0, 90_000, [0x61; 2]));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		mux.pat(&both).pmt(0x200, 2, 0x1f2, &[(MP2, 0x61)], 0);
+		mux.packet(0x1f2, Flags::pcr(27_000_000));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(19)).await;
+		mux.packet(0x1f2, Flags::pcr(27_000_000 + 20 * MS));
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(30)).await;
+		mux.pmt_at(1, 0x100, 1, 0x1ff, &[(MP2, 0x62, &[])], 0);
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(450)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 0, "exactly 700 ms is on time");
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(
+			programs.stats().pts_error,
+			1,
+			"701 ms since the PTS, across the handover"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn a_missing_shared_pcr_counts_once_across_a_late_handover() {
 		let mut programs = Programs::new(
 			crate::source::produce_origin(),
@@ -1306,6 +1344,16 @@ mod test {
 			programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 			assert_eq!(programs.stats().pcr_repetition_error, 1, "the same outage still runs");
 		}
+		// The PTS was seen at t=0. Rebasing against a stale destination clock must
+		// not turn its exact 700 ms boundary into an early PTS error.
+		tokio::time::advance(std::time::Duration::from_millis(150)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 0);
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		mux.packet(0x1fff, Flags::default());
+		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert_eq!(programs.stats().pts_error, 1);
 		programs.finish().unwrap();
 	}
 

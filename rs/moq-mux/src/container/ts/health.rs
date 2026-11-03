@@ -219,7 +219,7 @@ pub(super) struct Health {
 	clock: Clock,
 	/// Last advancing PCR, or when its PID was declared, on the running health clock.
 	progress: Option<i64>,
-	/// Missing PCR counts once until its value advances or a discontinuity resets it.
+	/// Missing PCR counts once until its value advances or a flagged PCR resets it.
 	missing: bool,
 	/// Earliest arrival that can expire an interval. Resets may leave it conservatively early.
 	deadline: Option<Instant>,
@@ -296,10 +296,13 @@ impl Health {
 		let value = pcr(pkt);
 		if discontinuity_indicator(pkt) {
 			self.pcr = value;
-			self.clock.pcr(0, true);
-			self.progress = self.now().map(ticks);
-			self.missing = false;
-			return true;
+			if value.is_some() {
+				self.clock.pcr(0, true);
+				self.progress = self.now().map(ticks);
+				self.missing = false;
+				return true;
+			}
+			return false;
 		}
 		let Some(value) = value else {
 			return false;
@@ -409,12 +412,19 @@ impl Health {
 	/// counts `pid` from here on, where `to` has not timed it yet: the PAT's interval on PID 0,
 	/// the PMT's on a PMT PID `to` reads, and the PTS cadence when `to` grades one there. So an
 	/// interval running across the handover counts once, from where it began, even from before
-	/// `to`'s clock started. `now` and `then` are this checker's clock and `to`'s; nothing
-	/// carries over before both run.
-	pub(super) fn hand_over(&self, pid: u16, to: &mut Self, pts: bool, now: Option<u64>, then: Option<u64>) {
-		let (Some(now), Some(then)) = (now, then) else {
+	/// `to`'s clock started. Align both clocks to the latest sampled arrival before translating
+	/// the interval; either program may have last read an unrelated packet. Nothing carries
+	/// over before both run.
+	pub(super) fn hand_over(&self, pid: u16, to: &mut Self, pts: bool) {
+		let (Some(from_at), Some(to_at)) = (self.clock.arrival, to.clock.arrival) else {
 			return;
 		};
+		let at = from_at.max(to_at);
+		let mut clock = self.clock.clone();
+		clock.arrived(at);
+		to.arrived(at);
+		let now = clock.now.expect("the source clock runs");
+		let then = to.now().expect("the destination clock runs");
 		let carry = |timer: &Timer, theirs: &mut Timer| {
 			if theirs.last.is_none() {
 				theirs.last = timer.last.map(|last| last + ticks(then) - ticks(now));
@@ -997,6 +1007,26 @@ mod test {
 				assert_eq!(stats.pts_error, 2 * u64::from(!continuing), "{stats:?}");
 			}
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn discontinuity_without_pcr_does_not_hide_its_absence() {
+		let start = kio::clock::Instant::now();
+		let mut health = super::Health::default();
+		health.arrived(start);
+		health.pcr_pid(Some(VIDEO));
+		let mut feed = Feed::default();
+		let mut flag = feed.header(VIDEO, false, true, false);
+		flag.extend_from_slice(&[183, 0x80]);
+		feed.push(flag);
+		for ms in [50, 100, 150, 201] {
+			health.arrived(start + std::time::Duration::from_millis(ms));
+			health.packet((&*feed.last_packet()).try_into().unwrap(), super::Continuation::Broken);
+		}
+		assert_eq!(
+			health.errors.pids.get(&VIDEO).map_or(0, |pid| pid.pcr_repetition_error),
+			1
+		);
 	}
 
 	#[tokio::test(start_paused = true)]

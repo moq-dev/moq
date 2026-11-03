@@ -101,8 +101,8 @@ pub struct Snapshot {
 	/// advancing PCR for over 100 ms of health clock, counted once until PCR returns.
 	/// The health clock advances by the larger of bounded PCR progression and arrival time,
 	/// sampled per input chunk and at EOF without a timer. Arrival includes upstream delays;
-	/// offline input needs ingestion time to expose a stalled PCR. A signalled discontinuity
-	/// resets the outage, and its PCR value difference is not graded.
+	/// offline input needs ingestion time to expose a stalled PCR. A PCR-bearing signalled
+	/// discontinuity resets the outage, and its PCR value difference is not graded.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub pcr_repetition_error: u64,
 	/// 2.3b `PCR_discontinuity_indicator_error`: consecutive PCR values outside 0 to 100 ms
