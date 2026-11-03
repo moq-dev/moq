@@ -83,7 +83,7 @@ for (const [name, protocol, routed, timed] of transports) {
 
 		const received = await consumer.recvGroup();
 		if (!received) throw new Error("expected a group");
-		expect(received.sequence).toBe(0);
+		expect(received.sequence).toBe(0n);
 		const first = await received.readFrame();
 		expect(decoder.decode(first?.plaintext)).toBe("keyframe");
 		expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(timed ? 1 : undefined);
@@ -99,7 +99,7 @@ for (const [name, protocol, routed, timed] of transports) {
 		await next.writeFrame(ms(4), encoder.encode("next"));
 		next.finish();
 		const second = await consumer.recvGroup();
-		expect(second?.sequence).toBe(1);
+		expect(second?.sequence).toBe(1n);
 		expect(decoder.decode((await second?.readFrame())?.plaintext)).toBe("next");
 
 		consumer.close();
@@ -140,11 +140,11 @@ for (const [name, protocol] of [
 
 		// Sequences continue past the group, preserved hop to hop by insertDatagram.
 		const sequence = await audio.appendDatagram(ms(20), encoder.encode("opus"));
-		expect(sequence).toBe(1);
+		expect(sequence).toBe(1n);
 		const event = await consumer.recvDatagram();
 		expect(event?.kind).toBe("datagram");
 		if (event?.kind !== "datagram") return;
-		expect(event.datagram.sequence).toBe(1);
+		expect(event.datagram.sequence).toBe(1n);
 		expect(event.datagram.timestamp?.as(Time.Timescale.MILLI)).toBe(20);
 		expect(decoder.decode(event.datagram.plaintext)).toBe("opus");
 

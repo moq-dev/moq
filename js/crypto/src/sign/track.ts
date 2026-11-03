@@ -11,7 +11,7 @@ import type { Scope } from "./scope.ts";
 
 /** The lowest group sequence an instance has not signed on a track, shared with the track's replacements. @internal */
 export interface Sequences {
-	next: number;
+	next: bigint;
 }
 
 /**
@@ -73,11 +73,11 @@ export class Producer {
 	 * Throws if this instance already signed the sequence or a later one, even in a group since
 	 * aborted or evicted, or the net error if the track refuses it.
 	 */
-	createGroup(sequence: number): Group.Producer {
+	createGroup(sequence: bigint): Group.Producer {
 		this.#writable();
 		if (sequence < this.#sequences.next) throw new Error(`duplicate group: sequence=${sequence}`);
 		const inner = this.#inner.createGroup(sequence);
-		this.#sequences.next = sequence + 1;
+		this.#sequences.next = sequence + 1n;
 		return Group.Producer.make(inner, this.#writer);
 	}
 

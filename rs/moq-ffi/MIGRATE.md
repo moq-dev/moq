@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqTransport::Iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+moq-tokio no longer accepts iroh sessions, so `MoqTransport` loses its `Iroh` variant and the later variants renumber; Go loses `TransportIroh`.
+Drop the match arm, and regenerate the bindings and rebuild the matching native library together.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `MoqAnnounce.captures` is `Vec<String>` instead of `Option<Vec<String>>`. Remove optional checks and pass an empty list when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild the matching native library together.

@@ -7,7 +7,7 @@ import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import { Pump } from "../pump.ts";
 import { onTrack } from "../timestamp.ts";
 import type { Event } from "./datagram.ts";
-import { checkU53 } from "./derive.ts";
+import { checkGroup } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import * as Group from "./group.ts";
 import type { Keys, Reader, Writer } from "./internal.ts";
@@ -30,7 +30,7 @@ export class Producer {
 	#inner: NetTrack.Producer;
 	#writer: Writer;
 	#datagramKey: TrackKey;
-	#next = 0;
+	#next = 0n;
 	#finished = false;
 
 	private constructor(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys) {
@@ -61,16 +61,16 @@ export class Producer {
 	 * Throws {@link Failure} `reuse` if `sequence` was already allocated, `identity` if it
 	 * exceeds `2^53-1`, or a net error.
 	 */
-	createGroup(sequence: number): Group.Producer {
+	createGroup(sequence: bigint): Group.Producer {
 		this.#writable();
 		this.#reserve(sequence);
-		this.#next = sequence + 1;
+		this.#next = sequence + 1n;
 		const inner = this.#inner.createGroup(sequence);
 		return Group.Producer.make(inner, this.#writer);
 	}
 
 	/** Encrypt `plaintext` at the next sequence and insert the datagram, resolving to that sequence. */
-	async appendDatagram(timestamp: Time.Timestamp | undefined, plaintext: Uint8Array): Promise<number> {
+	async appendDatagram(timestamp: Time.Timestamp | undefined, plaintext: Uint8Array): Promise<bigint> {
 		const sequence = this.#next;
 		await this.insertDatagram(sequence, timestamp, plaintext);
 		return sequence;
@@ -85,7 +85,7 @@ export class Producer {
 	 * Rejects with {@link Failure} `reuse`, `identity`, `exhausted`, or `oversize`, or a net error.
 	 */
 	async insertDatagram(
-		sequence: number,
+		sequence: bigint,
 		timestamp: Time.Timestamp | undefined,
 		plaintext: Uint8Array,
 	): Promise<void> {
@@ -93,7 +93,7 @@ export class Producer {
 		this.#reserve(sequence);
 		const at = onTrack(timestamp, this.#writer.timescale);
 		const iv = this.#datagramKey.admitSeal(sequence, 0, plaintext.byteLength, MAX_DATAGRAM_PAYLOAD);
-		this.#next = sequence + 1;
+		this.#next = sequence + 1n;
 		const owned = plaintext.slice();
 		return this.#writer.pump.run(async () => {
 			if (this.#writer.aborted) throw this.#writer.aborted;
@@ -140,8 +140,8 @@ export class Producer {
 	}
 
 	// Refuse a sequence this track already allocated or cannot represent.
-	#reserve(sequence: number): void {
-		checkU53(sequence);
+	#reserve(sequence: bigint): void {
+		checkGroup(sequence);
 		if (sequence < this.#next) throw new Failure("reuse");
 	}
 }

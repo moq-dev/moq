@@ -3,7 +3,7 @@
  * A single writer loop owns the socket. Frames are written in priority order:
  * control frames (flow control, resets, pings, close) always preempt stream
  * data, and among stream data the highest `sendOrder` wins (W3C WebTransport
- * convention — larger value is sent first), with round-robin among equal
+ * convention - larger value is sent first), with round-robin among equal
  * priorities. Prioritization only bites under backpressure; when the sink has
  * room every frame is written as soon as it's queued.
  *
@@ -18,7 +18,7 @@ export interface SendSink {
 	 *  high-water mark. Rejects if the socket is closed/errored. */
 	ready(): Promise<void>;
 	/** Write bytes to the socket, resolving once the write is accepted. Rejects
-	 *  if the write fails — the scheduler must observe this rather than resolve
+	 *  if the write fails - the scheduler must observe this rather than resolve
 	 *  the frame's promise as if it succeeded. */
 	write(bytes: Uint8Array): Promise<void>;
 	/** Synchronous backpressure probe: true when the sink can take a write now
@@ -29,7 +29,7 @@ export interface SendSink {
 }
 
 /** Backpressure-aware sink over a `WebSocketStream` writable. The writable's
- *  `writer.ready` is the backpressure signal — native `WebSocketStream` ties it
+ *  `writer.ready` is the backpressure signal - native `WebSocketStream` ties it
  *  to the real send buffer, while the `WebSocketStream` ponyfill drives
  *  it from `bufferedAmount` against a (resizable) high-water mark. */
 export class WritableStreamSink implements SendSink {
@@ -103,7 +103,7 @@ export class SendScheduler {
 	#latest = new Map<string, Uint8Array>();
 
 	// Datagrams: serviced after control, ahead of stream data. Bounded and lossy
-	// (unlike #control) since unreliable datagrams are meant to be droppable —
+	// (unlike #control) since unreliable datagrams are meant to be droppable -
 	// shed on transport backpressure or a full lane.
 	#datagrams: Uint8Array[] = [];
 
@@ -124,7 +124,7 @@ export class SendScheduler {
 		this.#sink = sink;
 		this.#onActivity = options?.onActivity ?? (() => {});
 		this.#onFail = options?.onFail ?? (() => {});
-		// Start the writer loop. It never rejects — failures are captured by #fail.
+		// Start the writer loop. It never rejects - failures are captured by #fail.
 		void this.#run(options?.first);
 	}
 
@@ -143,10 +143,10 @@ export class SendScheduler {
 		this.#signal();
 	}
 
-	/** Queue a datagram frame — best-effort, serviced after control but ahead of
+	/** Queue a datagram frame - best-effort, serviced after control but ahead of
 	 *  stream data. Dropped (rather than queued) when:
 	 *   - the scheduler is closed;
-	 *   - the transport is backpressured — the socket is already queuing stream/
+	 *   - the transport is backpressured - the socket is already queuing stream/
 	 *     control data, so a datagram behind it would arrive stale; or
 	 *   - the datagram lane is full, bounding a synchronous burst that outruns the
 	 *     writer loop even while the transport has room.
@@ -154,7 +154,7 @@ export class SendScheduler {
 	 *  applying backpressure to the caller. */
 	enqueueDatagram(bytes: Uint8Array): void {
 		if (this.#closed) return;
-		if (!this.#sink.wantsMore()) return; // transport is queuing — drop, don't delay
+		if (!this.#sink.wantsMore()) return; // transport is queuing - drop, don't delay
 		if (this.#datagrams.length >= DATAGRAM_QUEUE_LIMIT) return; // burst cap
 		this.#datagrams.push(bytes);
 		this.#signal();
@@ -266,7 +266,7 @@ export class SendScheduler {
 					continue;
 				}
 
-				// Block until the socket can take a write, THEN pick — so a frame
+				// Block until the socket can take a write, THEN pick - so a frame
 				// that arrives during backpressure is considered before we commit.
 				await this.#sink.ready();
 

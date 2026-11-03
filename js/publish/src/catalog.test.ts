@@ -87,7 +87,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	const subscriber = track.subscribe().ordered();
 
 	const first = await subscriber.nextGroup();
-	expect(first?.sequence).toBe(0);
+	expect(first?.sequence).toBe(0n);
 	expect(await first?.readJson()).toEqual({ clock: expect.anything(), video: { renditions: {} } });
 	expect(first?.done).toBe(true);
 
@@ -96,7 +96,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	});
 
 	const second = await subscriber.nextGroup();
-	expect(second?.sequence).toBe(1);
+	expect(second?.sequence).toBe(1n);
 	expect(await second?.readJson()).toEqual({
 		clock: expect.anything(),
 		video: { renditions: {} },
@@ -358,7 +358,7 @@ describe("estimate publication window", () => {
 				catalog.video.renditions.v.jitter = Catalog.u53(jitter);
 			});
 		// The newest catalog group published so far, followed through the live largest stream.
-		let newest: number | undefined;
+		let newest: bigint | undefined;
 		const observer = track.subscribe();
 		void (async () => {
 			for (let largest = await observer.largest(); largest; largest = await observer.largest()) {
@@ -458,7 +458,7 @@ describe("estimate publication window", () => {
 		const leading = await sent();
 		await advance(990);
 		expect((await consumer.latest())?.value.video?.renditions.v.delay).toBe(Catalog.u53(7));
-		expect(await sent()).toBe((leading ?? 0) + 1);
+		expect(await sent()).toBe((leading ?? 0n) + 1n);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
 			catalog.video.renditions.other = { codec: "avc1.640028", container: { kind: "legacy" } };

@@ -34,7 +34,7 @@ for (const { track, group, timescale, frames } of input.rust) {
 	const scale = timescale == null ? undefined : Time.Timescale(timescale);
 	const net = new Broadcast.Producer().createTrack(track, { timescale: scale });
 	const consumer = Track.Consumer.make(net.subscribe(), key.public, new Scope(path, instance, track));
-	const writer = net.createGroup(group);
+	const writer = net.createGroup(BigInt(group));
 	for (const { body, timestamp } of frames) {
 		const at = scale === undefined || timestamp == null ? undefined : new Time.Timestamp(timestamp, scale);
 		writer.writeFrame({ payload: unhex(body), timestamp: at });
@@ -79,7 +79,7 @@ for (const { track, timescale, frames } of input.js) {
 	for (let frame = await raw.readFrame(); frame; frame = await raw.readFrame()) {
 		bodies.push({ body: hex(frame.payload), timestamp: frame.timestamp?.value });
 	}
-	js.push({ track, group: raw.sequence, timescale, frames: bodies });
+	js.push({ track, group: Number(raw.sequence), timescale, frames: bodies });
 }
 
 process.stdout.write(JSON.stringify({ public: key.public.toString(), verified, instance: signed.instance, js }));

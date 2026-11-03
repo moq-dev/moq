@@ -74,7 +74,11 @@ function generationFrom(row: Row) {
 	return credential.consume(epochFrom(row));
 }
 
-// Group inputs are decimal strings; frame inputs are numbers or non-finite names.
+// Group inputs are decimal strings or numbers; frame inputs are numbers or non-finite names.
+function group(value: unknown): bigint {
+	return BigInt(value as string | number);
+}
+
 function identity(value: unknown): number {
 	return typeof value === "string" ? Number(value) : (value as number);
 }
@@ -161,16 +165,16 @@ async function payloadRow(row: Row) {
 	expect(name).toBe(String(row.physical_name) as typeof name);
 	const domain = row.domain as Domain;
 	expect(hex(await keyBytes(generation.credential, generation.epoch, semantic, domain))).toBe(String(row.key));
-	const group = row.group as number;
+	const sequence = group(row.group);
 	const frame = row.frame as number;
-	expect(hex(nonce(group, frame))).toBe(String(row.nonce));
+	expect(hex(nonce(sequence, frame))).toBe(String(row.nonce));
 
 	const plaintext = unhex(row.plaintext);
 	const limit = row.payload_limit as number;
 	const key = trackKey(generation.credential, generation.epoch, semantic, domain);
-	const payload = await key.encrypt(key.admitSeal(group, frame, plaintext.byteLength, limit), plaintext);
+	const payload = await key.encrypt(key.admitSeal(sequence, frame, plaintext.byteLength, limit), plaintext);
 	expect(hex(payload)).toBe(String(row.payload));
-	const opened = await key.decrypt(key.admitOpen(group, frame, payload.byteLength, limit), payload);
+	const opened = await key.decrypt(key.admitOpen(sequence, frame, payload.byteLength, limit), payload);
 	expect(hex(opened)).toBe(String(row.plaintext));
 }
 
@@ -198,19 +202,19 @@ test("negative vectors", async () => {
 				expect(hex(await keyBytes(source.credential, source.epoch, semantic, domain))).toBe(String(row.key));
 				const key = trackKey(source.credential, source.epoch, semantic, domain);
 				const payload = unhex(row.payload);
-				const group = row.group as number;
+				const sequence = group(row.group);
 				const frame = row.frame as number;
 				got = await rejection(
 					(async () =>
 						key.decrypt(
-							key.admitOpen(group, frame, payload.byteLength, row.payload_limit as number),
+							key.admitOpen(sequence, frame, payload.byteLength, row.payload_limit as number),
 							payload,
 						))(),
 				);
 				break;
 			}
 			case "identity":
-				got = code(() => nonce(identity(row.group), identity(row.frame)));
+				got = code(() => nonce(group(row.group), identity(row.frame)));
 				break;
 			case "generation":
 				got = code(() => generationFrom(row.generation as Row));
@@ -250,7 +254,7 @@ test("negative vectors", async () => {
 				const key = new TrackKey(Promise.reject(new Error("never derived")));
 				const length = row.plaintext_len as number;
 				got = code(() =>
-					key.admitSeal(row.group as number, row.frame as number, length, row.payload_limit as number),
+					key.admitSeal(group(row.group), row.frame as number, length, row.payload_limit as number),
 				);
 				expect(key.invocations).toBe(0);
 				break;
