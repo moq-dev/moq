@@ -25,6 +25,7 @@ const TEN_SECONDS: moq_delay = moq_delay {
 	min_us: 0,
 	max_us: 10_000_000,
 	max_unlimited: false,
+	min_unstated: false,
 };
 
 /// Convert a positive `i32` return value to `u32`, panicking on error.
@@ -1766,8 +1767,10 @@ fn publish_track_invalid_broadcast() {
 
 	let subscription = moq_subscription {
 		priority: 1,
-		max_delay_us: 0,
-		max_delay_present: false,
+		delay: moq_delay {
+			max_unlimited: true,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1990,8 +1993,10 @@ fn raw_track_publish_consume() {
 	// finish draining if the second becomes visible while the callback runs.
 	let subscription = moq_subscription {
 		priority: 0,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -2224,8 +2229,10 @@ fn raw_track_subscription_options_and_update() {
 	];
 	let subscription = moq_subscription {
 		priority: 5,
-		max_delay_us: 25_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 25_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2335,8 +2342,10 @@ fn raw_track_time_anchor() {
 	}];
 	let subscription = moq_subscription {
 		priority: 5,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2433,8 +2442,10 @@ fn raw_track_update_refuses_time_on_untimed() {
 	}];
 	let update = moq_subscription {
 		priority: 3,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2490,8 +2501,10 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	};
 	let subscribe = |ranges: &[moq_range]| moq_subscription {
 		priority: 0,
-		max_delay_us: 60_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 60_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -3247,8 +3260,10 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 0,
-		max_delay_us: 0,
-		max_delay_present: false,
+		delay: moq_delay {
+			max_unlimited: true,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -6504,16 +6519,27 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.quic.resolve().keylog.is_none());
 }
 
-/// `moq_subscription_defaults` reads back as moq-net's defaults, while a zeroed struct
-/// sets no subscriber limit.
+/// `moq_subscription_defaults` and a zeroed struct both read back as moq-net's defaults, and
+/// the flags reach the unstated minimum and the unlimited max.
 #[test]
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = unsafe { crate::api::parse_subscription(&moq_subscription_defaults()) }.unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
 
-	let zeroed: moq_subscription = unsafe { std::mem::zeroed() };
-	let zeroed = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
-	assert_eq!(zeroed.delay.max, None);
+	let mut zeroed: moq_subscription = unsafe { std::mem::zeroed() };
+	assert_eq!(
+		unsafe { crate::api::parse_subscription(&zeroed) }.unwrap(),
+		moq_net::track::Subscription::default()
+	);
+
+	zeroed.delay = moq_delay {
+		min_us: 5,
+		max_us: 5,
+		max_unlimited: true,
+		min_unstated: true,
+	};
+	let flagged = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
+	assert_eq!(flagged.delay, moq_net::track::Delay { min: None, max: None });
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,

@@ -16,27 +16,59 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 	}
 }
 
+/// How far behind the live edge a subscriber plays, mirroring [`moq_net::track::Delay`]: where
+/// it starts, and how late it may fall.
+///
+/// [`moq_subscription_defaults`] carries moq-net's default, zero for both. Uniffi can't default
+/// a duration, so Kotlin and Swift name both fields; the wrappers for the other bindings make
+/// an omitted field zero.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct MoqDelay {
+	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
+	/// where a cold join starts, or null to leave it unstated. A media consumer plays an
+	/// unstated minimum as zero, while the subscription keeps it unstated, so it never pulls
+	/// the aggregate across subscribers to zero. moq-lite-07 sends it upstream. A `min` past
+	/// `max` starts at `max`, since the publisher serves nothing older.
+	pub min: Option<Duration>,
+	/// How far a non-latest group may fall behind the live edge before it is skipped, or null
+	/// for no subscriber limit, leaving the publisher's max age alone to bound it. `0` skips
+	/// immediately; a larger value tolerates that much reordering. It bounds lateness only,
+	/// never the start.
+	///
+	/// Enforced both by the publisher's cache (sent on the wire) and by any local buffering,
+	/// such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
+	pub max: Option<Duration>,
+}
+
+impl From<MoqDelay> for moq_net::track::Delay {
+	fn from(delay: MoqDelay) -> Self {
+		Self::default().with_min(delay.min).with_max(delay.max)
+	}
+}
+
+impl From<moq_net::track::Delay> for MoqDelay {
+	fn from(delay: moq_net::track::Delay) -> Self {
+		Self {
+			min: delay.min,
+			max: delay.max,
+		}
+	}
+}
+
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
-/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a `max_delay`
-/// of 0, everything still fresh, newest first) and change the fields you care about. Kotlin and
-/// Swift make a record built field by field name `max_delay`; Dart, Go, and C can still omit it,
-/// which means no subscriber limit.
+/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a zero
+/// `delay`, everything still fresh, newest first) and change the fields you care about.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before it is skipped.
-	/// `0` skips immediately; a larger value tolerates that much reordering; null sets no
-	/// subscriber limit and leaves the publisher's max age alone to bound it. Required,
-	/// since uniffi can't default a duration to `0`.
-	///
-	/// Enforced both by the publisher's cache (sent on the wire) and by any local
-	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	pub max_delay: Option<Duration>,
-	/// The spans of the track to deliver, or null for everything `max_delay` still
+	/// How far behind the live edge this subscriber plays: where a cold join starts, and how
+	/// late a non-latest group may fall before it is skipped.
+	pub delay: MoqDelay,
+	/// The spans of the track to deliver, or null for everything `delay.max` still
 	/// considers fresh. An empty list asks for nothing.
 	///
 	/// A request to the publisher, aggregated across every subscriber, and this
@@ -48,7 +80,8 @@ pub struct MoqSubscription {
 	pub order: Option<MoqOrder>,
 }
 
-/// A subscription with moq-net's defaults, which skips a superseded group at once.
+/// A subscription with moq-net's defaults, which starts at the newest group and skips a
+/// superseded group at once.
 ///
 /// A null subscription argument means the same; build from this one to change a field.
 #[uniffi::export]
@@ -56,7 +89,7 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 	let defaults = moq_net::track::Subscription::default();
 	MoqSubscription {
 		priority: defaults.priority,
-		max_delay: defaults.delay.max,
+		delay: defaults.delay.into(),
 		ranges: None,
 		order: None,
 	}
@@ -174,7 +207,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
 		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_delay(moq_net::track::Delay::default().with_max(s.max_delay));
+			.with_delay(s.delay.into());
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges
@@ -575,7 +608,7 @@ impl MoqTrackConsumer {
 	///
 	/// Groups are returned as they arrive on the wire, which may be out of sequence
 	/// order (e.g. if a later group lands before an earlier one on a separate stream).
-	/// One that drifts further behind the live edge than the subscription's `max_delay`
+	/// One that drifts further behind the live edge than the subscription's `delay.max`
 	/// is skipped, or ends its pending read if already returned; raise it to keep stalled groups.
 	///
 	/// The first call commits this track to arrival order: sequence-order reads
