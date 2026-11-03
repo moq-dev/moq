@@ -14,7 +14,8 @@ enough evidence to reproduce it deterministically.
   deterministic cause. Advance it by running `just test media --media-cases
   replacement --media-engines chromium` with
   `RUST_LOG=moq_net=debug,moq_relay=debug`, and read any failure here with its
-  relay and browser logs.
+  relay and browser logs. Record host load during playback; clean runs do not
+  clear this wait, even when the host is busy.
 
 ## Plan
 
@@ -51,27 +52,40 @@ NAMESPACE and closing only at teardown after grading. Neither failure
 recurred. None of these runs recreated the original host load of 30 to 70, so
 they are a baseline, not evidence that either failure is fixed.
 
-Two more focused runs on 2026-11-02 (2026-11-03 UTC), at
-[622d7bc0c5](https://github.com/moq-dev/moq/commit/622d7bc0c5), passed all three
-versions with Chromium 156.0.8078.4. They used the same debug filter, with
-`HARNESS_KEEP=1 HARNESS_RUNS="$PWD/.tmp/runs"`, in the Nix dev shell through
+The latest two focused runs, on 2026-11-02 (2026-11-03 UTC) at
+[622d7bc0c5](https://github.com/moq-dev/moq/commit/622d7bc0c5), also passed all
+three versions with Chromium 156.0.8078.4. They used the debug filter above,
+`HARNESS_KEEP=1 HARNESS_RUNS="$PWD/.tmp/runs"`, and the Nix dev shell through
 `quest gate`. IETF22 replaced in 168 and 169 ms and fell back in 929 and
-408 ms. The browser graded both fallbacks at 30.0 fps, synchronized audio, and no
-reconnect warning. Relay connection 9 sent the fallback NAMESPACE at
-04:15:15.293658Z, accepted fresh catalog/audio/video subscriptions at
-04:15:15.337120Z, 04:15:15.364698Z, and 04:15:15.371115Z, and closed with
-`cancelled` at 04:15:20.224340Z, after playback grading. There was only one
-IETF22 viewer connection in each run; the browser's namespace-stream close
-message appeared only at teardown.
+408 ms. Both fallbacks graded at 30.0 fps with synchronized audio. Each run
+had one IETF22 viewer session, no reconnect warning, and a close only after
+grading, at teardown.
 
-The one-minute host load was 30.97 near the end of the first build, before
-media playback; the second invocation began at 20.16 and ended at 14.83.
-These spot samples do not establish sustained load of 30 to 70 during playback.
+The first run's **929 ms fallback had only 110 ms of headroom**. Its relay
+connection 9 logged these events on 2026-11-03 (shared prefix and broadcast
+name omitted):
 
-Both runs retain their relay and browser logs in the implementation checkout's
-`.tmp/runs/interop-h9Ciuig2/` and `.tmp/runs/interop-6BlHQ6Mj/`. The browser log
-in each is `media-chromium--media-cases--replacement.log`; the relay log is
-`relay.log`. Neither recorded failure recurred, so the cause remains unknown
-and no production or test change is justified.
+```text
+04:15:15.293658Z namespace broadcast=replacement-moq-transport-22-2960283.hang
+04:15:15.337120Z subscribe started id=16 track=catalog.json
+04:15:15.364698Z subscribe started id=18 track=audio
+04:15:15.371115Z subscribe started id=20 track=video
+04:15:15.397449Z serving group subscribe=18 track=audio sequence=58
+04:15:20.224340Z connection closed id=9 err=cancelled
+```
+
+All three resubscriptions began within 78 ms of the fallback NAMESPACE, and
+audio serving began within 104 ms. The browser logged skipping missing/slow
+audio groups through sequence 499 before its successful fallback grade. These
+logs do not isolate the remaining delay among delivery, decoding, and playout;
+the near-bound sample warrants investigation, not a claim that either original
+failure is fixed. The second run's connection 9 sent fallback NAMESPACE at
+04:16:47.151856Z and began audio/video subscriptions at 04:16:47.162606Z and
+04:16:47.163028Z, closing only at 04:16:51.571821Z after grading.
+
+The one-minute load was 30.97 before the first run's media playback, and 20.16
+before the second invocation and 14.83 after it. These spot samples do not
+establish sustained load of 30 to 70 during playback. The six clean focused
+runs recorded here remain baseline evidence; neither original failure recurred.
 
 Public API: none expected. Wire: none expected.
