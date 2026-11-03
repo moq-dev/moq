@@ -62,7 +62,11 @@ spike assumed no consumer; teleoperation uplinks are one):
   `scream` integration tests over the real presets. Its estimate is a window
   over the RTT rather than a delivery rate: under application-limited media,
   each keyframe's burst raises it past the path's capacity, which matters
-  for re-enabling a rung.
+  for re-enabling a rung. Its frame p95 on the sim rose under #7606's
+  corrected pacer, from 853 to 1327 ms on `cellular-step` and from 300 to
+  1361 ms on `cellular-deep`: its keyframes (5x a delta frame) no longer
+  overshoot its pacing of 1.5x the target rate, and the draft's media-queue
+  terms that would answer that sender backlog were left out.
 
 The shared pacer's low-rate correction and BBR3's one-datagram minimum send
 quantum are implemented together in [moq-dev/moq#7606](https://github.com/moq-dev/moq/pull/7606).
