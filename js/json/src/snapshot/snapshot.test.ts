@@ -153,7 +153,7 @@ test("latest abandons a held group when a newer snapshot group rolls", async () 
 test("latest stays inside the reader's range", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: false });
-	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).withRange({ end: { excluded: 2 } });
+	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).withRange({ end: { excluded: 2n } });
 	const consumer = new Consumer<Value>({ track: subscriber });
 
 	for (let n = 0; n < 4; n++) producer.update({ value: { a: n } });
@@ -543,8 +543,8 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 
 	// Two groups, a self-contained snapshot each, rather than one whose frame 0 was evicted.
 	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
-	expect((await subscriber.nextGroup())?.sequence).toBe(0);
-	expect((await subscriber.nextGroup())?.sequence).toBe(1);
+	expect((await subscriber.nextGroup())?.sequence).toBe(0n);
+	expect((await subscriber.nextGroup())?.sequence).toBe(1n);
 	expect(await subscriber.nextGroup()).toBeUndefined();
 
 	// The newest value is readable with no earlier frame to apply it to.

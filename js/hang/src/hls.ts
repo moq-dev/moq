@@ -62,8 +62,8 @@ const RecordSchema = z.looseObject({
 	duration: z.optional(u53Schema),
 });
 
-/** A record with its times converted to microseconds. */
-export type Entry = Omit<Record, "pts" | "duration"> & { pts: Micro; duration?: Micro };
+/** A record with its times converted to microseconds and its group as a group sequence. */
+export type Entry = Omit<Record, "group" | "pts" | "duration"> & { group: bigint; pts: Micro; duration?: Micro };
 
 /** One change to the visible record window. */
 export type Event = { push: { index: number; entry: Entry } } | { pop: Json.Window.Span } | { skip: Json.Window.Span };
@@ -92,7 +92,7 @@ export class Consumer implements AsyncIterable<Event> {
 			const { index } = event.push;
 			const value = RecordSchema.parse(event.push.value);
 			if (value.sequence !== index) throw new Error("HLS record sequence differs from its index");
-			const entry: Entry = { sequence: value.sequence, group: value.group, pts: micros(value.pts) };
+			const entry: Entry = { sequence: value.sequence, group: BigInt(value.group), pts: micros(value.pts) };
 			if (value.duration !== undefined) entry.duration = micros(value.duration);
 			return { push: { index, entry } };
 		}
@@ -146,6 +146,12 @@ function wire(pts: Micro): number {
 	return Math.floor(pts / 1000);
 }
 
+// A record carries its group as a JSON number, which holds a group sequence exactly only below 2^53.
+function wireGroup(group: bigint): number {
+	if (group > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`HLS record group overflow: ${group}`);
+	return Number(group);
+}
+
 /**
  * Builds one track's records from reports of the frames it published.
  *
@@ -167,7 +173,7 @@ export class Segmenter {
 	// The grid cell of the open segment's newest group.
 	#cell = 0;
 	// The newest reported group.
-	#last?: number;
+	#last?: bigint;
 	// The newest reported content time in the open segment.
 	#frontier?: Micro;
 	#ready: Record[] = [];
@@ -199,7 +205,7 @@ export class Segmenter {
 	 * Throws when `group` precedes the previous report's: segments hold whole groups in order, so that
 	 * frame could never be listed.
 	 */
-	frame(group: number, pts: Micro): void {
+	frame(group: bigint, pts: Micro): void {
 		if (this.#closed) return;
 		if (this.#last !== undefined) {
 			if (group < this.#last) throw new Error(`HLS report for group ${group} after group ${this.#last}`);
@@ -212,16 +218,16 @@ export class Segmenter {
 	}
 
 	// Group `group` starts at `pts`, after group `last`.
-	#group(group: number, last: number, pts: Micro): void {
+	#group(group: bigint, last: bigint, pts: Micro): void {
 		const start = this.#open;
 		if (start === undefined) {
 			this.#begin(group, pts);
 			return;
 		}
-		if (group !== last + 1) {
+		if (group !== last + 1n) {
 			// A skipped sequence stops the segment where its content reached, so the skipped time is
 			// not absorbed into it and the reader never has to guess what lies between.
-			this.#stopAt(last + 1);
+			this.#stopAt(last + 1n);
 			this.#begin(group, pts);
 			return;
 		}
@@ -237,11 +243,11 @@ export class Segmenter {
 	}
 
 	// Start a segment with group `group` at `pts`.
-	#begin(group: number, pts: Micro): void {
+	#begin(group: bigint, pts: Micro): void {
 		this.#open = pts;
 		this.#frontier = pts;
 		this.#cell = this.#cellOf(pts);
-		this.#ready.push({ sequence: this.#sequence++, group, pts: wire(pts) });
+		this.#ready.push({ sequence: this.#sequence++, group: wireGroup(group), pts: wire(pts) });
 	}
 
 	/**
@@ -264,11 +270,11 @@ export class Segmenter {
 	 *
 	 * The next group starts a new segment. Nothing happens while no segment is open.
 	 */
-	stop(group: number): void {
+	stop(group: bigint): void {
 		if (!this.#closed) this.#stopAt(group);
 	}
 
-	#stopAt(group: number): void {
+	#stopAt(group: bigint): void {
 		const start = this.#open;
 		if (start === undefined) return;
 		this.#open = undefined;
@@ -276,13 +282,13 @@ export class Segmenter {
 		this.#declared ??= this.#grid;
 		const end = this.#frontier ?? start;
 		this.#frontier = undefined;
-		this.#ready.push({ sequence: this.#sequence++, group, pts: wire(end), duration: 0 });
+		this.#ready.push({ sequence: this.#sequence++, group: wireGroup(group), pts: wire(end), duration: 0 });
 	}
 
 	/** Stop after the newest group, then ignore every later report. */
 	close(): void {
 		if (this.#closed) return;
-		if (this.#last !== undefined) this.#stopAt(this.#last + 1);
+		if (this.#last !== undefined) this.#stopAt(this.#last + 1n);
 		this.#closed = true;
 	}
 
@@ -334,7 +340,7 @@ export class Recorder {
 	}
 
 	/** Report a frame of group `group`, presented at `pts`; see {@link Segmenter.frame}. */
-	frame(group: number, pts: Micro): void {
+	frame(group: bigint, pts: Micro): void {
 		if (this.#done) return;
 		try {
 			this.#segmenter.frame(group, pts);
@@ -352,7 +358,7 @@ export class Recorder {
 	}
 
 	/** Report that content stopped before group `group`; see {@link Segmenter.stop}. */
-	stop(group: number): void {
+	stop(group: bigint): void {
 		this.#segmenter.stop(group);
 		this.#publish();
 	}
