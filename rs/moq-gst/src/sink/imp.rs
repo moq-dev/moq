@@ -1906,7 +1906,10 @@ mod tests {
 			.session
 			.replace_bandwidth(moq_net::bandwidth::Allocator::new(estimate.consume()));
 
-		assert!(negotiate(&video, &h264_caps()));
+		// VP8 first: its rendition can be listed at CAPS, while H.264 byte-stream owes its SPS, so the
+		// replacement below stays unlisted until its keyframe.
+		let vp8 = gst::Caps::builder("video/x-vp8").build();
+		assert!(negotiate(&video, &vp8));
 		let broadcast = run
 			.0
 			.imp()
@@ -1919,17 +1922,16 @@ mod tests {
 			.broadcast
 			.consume();
 		let _old_reader = broadcast.track("camera").unwrap().subscribe(None);
-		video_frame(&video);
+		frame(&video, VP8_KEYFRAME);
 		assert_eq!(listed_demand(&video).get::<bool>("wanted"), Ok(true));
 
-		let vp8 = gst::Caps::builder("video/x-vp8").build();
-		assert!(video.send_event(gst::event::Caps::new(&vp8)));
+		assert!(video.send_event(gst::event::Caps::new(&h264_caps())));
 		let _new_reader = broadcast.track("camera/1").unwrap().subscribe(None);
 		assert!(
 			demand(&video).is_none(),
 			"a replacement reports nothing until a catalog lists camera/1, even to a direct subscriber"
 		);
-		frame(&video, VP8_KEYFRAME);
+		video_frame(&video);
 		let rebound = listed_demand(&video);
 		assert_eq!(rebound.get::<bool>("wanted"), Ok(true));
 		assert_eq!(rebound.get::<u64>("grant-bps"), Ok(4_000_000));
