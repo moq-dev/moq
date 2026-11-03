@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.11](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.10...moq-relay-v0.17.11) - 2026-11-03
+
+### Fixed
+
+- *(auth)* backport dot-segment and redirect refusals
+- *(tokio)* refuse SETUP paths on URI bindings and keep iroh keys private on release
+
+### Other
+
+- Merge remote-tracking branch 'origin/release' into backport/dot-segment-auth-redirect
+- Merge remote-tracking branch 'origin/release' into backport/outbound-trust
+
 ## [0.17.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.9...moq-relay-v0.17.10) - 2026-10-30
 
 ### Added
