@@ -774,12 +774,12 @@ impl TrackStream {
 		match (enabled, self.gate.state) {
 			(false, GateState::Open) => {
 				let published = self.gate.published;
-				stream!(&mut self.kind, split, import => {
+				// The splitter keeps its partial NAL, since the next chunk may continue it. The
+				// access unit in flight completes behind the gate, which drops it unless it is
+				// a keyframe that resumes the rendition.
+				stream!(&mut self.kind, _, import => {
 					import.set_enabled(false)?;
 					if published {
-						// The partial access unit belongs before the break, and would otherwise
-						// complete with the first bytes after it.
-						split.reset();
 						import.discontinuity()?;
 					}
 				});
@@ -1648,13 +1648,16 @@ mod tests {
 			import.decode(bytes).unwrap();
 			kio::clock::sleep(Duration::from_millis(33)).await;
 		}
-		for bytes in [&keyframe, &delta, &delta, &delta] {
+		for bytes in [&keyframe, &delta, &delta] {
 			write(&mut import, bytes).await;
 		}
+		// A chunk may end mid-NAL, and the next one continue it across the disable.
+		let (head, tail) = delta.split_at(6);
+		write(&mut import, head).await;
 
 		import.set_enabled(false).unwrap();
 		assert!(!enabled());
-		for bytes in [&delta, &keyframe, &delta, &delta] {
+		for bytes in [tail, &keyframe, &delta, &delta] {
 			write(&mut import, bytes).await;
 		}
 
