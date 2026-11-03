@@ -997,7 +997,9 @@ impl Misses {
 		let Some(inbox) = &self.inbox else {
 			return false;
 		};
-		let low = state.live_floor.unwrap_or(0).max(key.0);
+		// The reader's floor, as the whole judgement takes it: a resumed copy's live floor
+		// can sit above history the reader still reads.
+		let low = key.0;
 		let top = newest.min(u64::MAX - 1);
 		let first = judged_to.saturating_add(1).max(low);
 		let mut fresh = RangeSet::new();
