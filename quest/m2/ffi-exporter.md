@@ -94,6 +94,16 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
 - Update the quests that name a `kixelated/uniffi-*` fork
   ([Generated C bindings](/quest/m2/c/README.md)) to point at rust2, then
   archive the three forks.
+- Cancelled Go results (2026-10-31, from
+  [moq-dev/moq#7397](https://github.com/moq-dev/moq/pull/7397), open): the
+  Go generator's fix that destroys a cancelled async call's result lives on
+  `kixelated/uniffi-bindgen-go`'s `cancelled-result` branch and tag
+  `v0.10.0-kixelated.2+v0.32.0`, not on the fork's `main`, like the earlier
+  fork tags. The exporter's Go generator must destroy that result too: port
+  the fork's `destroy` fixture tests to it before archiving the fork. It
+  should also destroy the error value of a cancelled call that completed
+  with an error, which the fork still leaks (moq-ffi's errors hold no
+  handles today).
 
 Public API: moq-ffi's dependency names change, generated C type names become
 CamelCase, and the generated record `MoqAudioEncoderFinished` becomes
