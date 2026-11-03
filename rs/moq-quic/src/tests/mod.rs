@@ -5350,6 +5350,90 @@ fn handshake_with_initial_mtu_above_initial_window() {
 	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), MTU);
 }
 
+/// A peer `max_udp_payload_size` below the initial MTU reaches the congestion controller, which
+/// sizes its minimum window and pacing burst by the path MTU.
+#[test]
+fn peer_max_udp_payload_size_reaches_controller() {
+	let _guard = subscribe();
+	const INITIAL_MTU: u16 = 1452;
+	const PEER_MAX: u16 = 1280;
+
+	/// Records the MTU the controller starts at and every update after.
+	#[derive(Clone)]
+	struct MtuRecorder(Arc<Mutex<Vec<u16>>>);
+
+	impl Controller for MtuRecorder {
+		fn on_sent(&mut self, _sent: congestion::Sent) -> congestion::Packet {
+			Default::default()
+		}
+
+		fn on_ack(&mut self, _ack: congestion::Ack<'_>) {}
+
+		fn on_loss(&mut self, _loss: congestion::Loss<'_>) {}
+
+		fn on_ce(&mut self, _ce: congestion::Ce) {}
+
+		fn on_mtu_update(&mut self, new_mtu: u16) {
+			self.0.lock().unwrap().push(new_mtu);
+		}
+
+		fn window(&self) -> u64 {
+			u64::MAX / 2
+		}
+
+		fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+			None
+		}
+
+		fn metrics(&self) -> Metrics {
+			Metrics::default()
+		}
+
+		fn clone_box(&self) -> Box<dyn Controller> {
+			Box::new(self.clone())
+		}
+	}
+
+	#[derive(Default)]
+	struct MtuRecorderFactory(Arc<Mutex<Vec<u16>>>);
+
+	impl Factory for MtuRecorderFactory {
+		fn build(self: Arc<Self>, init: congestion::Init) -> Box<dyn Controller> {
+			self.0.lock().unwrap().push(init.mtu);
+			Box::new(MtuRecorder(self.0.clone()))
+		}
+	}
+
+	let factory = Arc::new(MtuRecorderFactory::default());
+	let mut config = server_config();
+	config.transport = transport::Config {
+		min_mtu: INITIAL_MTU,
+		mtu: None,
+		congestion: factory.clone(),
+		..transport::Config::default()
+	};
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(config),
+			..endpoint::Config::default()
+		},
+		true,
+	)
+	.unwrap();
+	let client = Endpoint::new(
+		endpoint::Config {
+			max_udp_payload_size: PEER_MAX,
+			..endpoint::Config::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(client, server);
+	let (_, server_ch) = pair.connect_with(client_config());
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+	assert_eq!(*factory.0.lock().unwrap(), [INITIAL_MTU, PEER_MAX]);
+}
+
 /// Verify that UDP datagrams are padded to MTU if specified in the transport config.
 #[test]
 fn pad_to_mtu() {

@@ -3840,9 +3840,15 @@ impl Connection {
 			)
 		});
 		self.peer_params = params;
+		let mtu = self.path.mtud.current_mtu();
 		self.path.mtud.on_peer_max_udp_payload_size_received(
 			u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX),
 		);
+		// A peer limit below the initial MTU shrinks the datagrams the controller sizes its
+		// minimum window and pacing burst by
+		if self.path.mtud.current_mtu() != mtu {
+			self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
+		}
 	}
 
 	fn decrypt_packet(&mut self, now: Instant, packet: &mut Packet) -> Result<Option<u64>, Option<TransportError>> {
