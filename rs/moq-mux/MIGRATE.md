@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared playout timing
+
+Native players can use `timeline::Producer` and its read-only `Consumer` instead
+of building their own audio/video clock. Feed the speaker's buffered position
+and caller-selected jitter target to the producer; the consumer selects the
+newest due video frame without waiting. `moq play` now uses the same API. No
+existing public API or wire format changes.
+
 ### fMP4 decode errors are terminal
 
 After `container::fmp4::Import::decode` fails, later decodes, cuts, seeks and discontinuities return that error without reading input or changing tracks, including through `import::Container`.

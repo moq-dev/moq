@@ -502,7 +502,7 @@ codspeed:
         --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
         --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
-        --bench parameter_sets --bench ts_programs --bench ts_schedule --bench ts_video \
+        --bench parameter_sets --bench timeline --bench ts_programs --bench ts_schedule --bench ts_video \
         --bench announce --bench auth --bench bandwidth --bench canonical --bench frame --bench interests \
         --bench priority --bench retirement --bench schedule --bench stats --bench synced --bench tail \
         --bench tracks --bench varint --bench viewers --bench matching \

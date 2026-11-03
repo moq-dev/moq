@@ -16,9 +16,10 @@ use kio::clock::Instant;
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, Track, joined};
-use super::timeline::{AudioTimeline, Presentation, Role, Transition, fit, timestamp};
+use super::timeline::{AudioTimeline, fit, timestamp};
 use super::video::{Refresh, Video};
 use super::window::Event;
+use moq_mux::timeline::{Producer as Presentation, Transition};
 
 /// What a frame that starts a new decoded timeline crossed.
 enum Crossing {
@@ -56,7 +57,7 @@ pub(super) struct Media<O: Output> {
 	pub(super) broadcast: String,
 	pub(super) args: Args,
 	pub(super) video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
-	pub(super) presentation: Arc<Mutex<Presentation>>,
+	pub(super) presentation: Presentation,
 	pub(super) drained: Arc<tokio::sync::Notify>,
 	pub(super) output: O,
 }
@@ -102,7 +103,7 @@ impl<O: Output> Media<O> {
 
 					// Another instance's timeline is its own, so nothing of the old one carries over.
 					drop(playing.take());
-					*self.presentation.lock().unwrap() = Presentation::new(self.args.video_delay());
+					self.presentation.reset(self.args.video_delay());
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
@@ -165,7 +166,7 @@ impl<O: Output> Media<O> {
 								// The tail still sounds, so the speaker keeps the anchor, but a
 								// replacement is a track boundary whose timestamps need not
 								// continue this one: its first frame re-pins.
-								self.presentation.lock().unwrap().restarted();
+								self.presentation.audio_restarted();
 							}
 							// The retired sink still holds a delay of audio, and a replacement
 							// holds its own before its first sample sounds. Played one after
@@ -227,7 +228,7 @@ impl<O: Output> Media<O> {
 			// The last sink went quiet: nothing holds playback to the speaker's
 			// cadence any more, and video takes the anchor back.
 			if !playback.playing(Kind::Audio) && tails.is_empty() && speaker.take().is_some() {
-				self.presentation.lock().unwrap().stopped();
+				self.presentation.audio_stopped();
 				self.drained.notify_one();
 			}
 
@@ -534,7 +535,7 @@ impl std::error::Error for Unplayable {}
 struct AudioPlayback<O: Output> {
 	changed: Arc<tokio::sync::Notify>,
 	speaker: O::Speaker,
-	presentation: Arc<Mutex<Presentation>>,
+	presentation: Presentation,
 	/// The depth the sink opens on, which also sizes its ring.
 	latency: Duration,
 	output: O,
@@ -563,7 +564,7 @@ async fn play_audio<O: Output>(
 	// until the old sink drains. The window
 	// schedules video against where the speaker actually is, which keeps the two
 	// together whatever the target does.
-	let role = Role::new(presentation.clone(), Kind::Audio);
+	let role = presentation.track(Kind::Audio);
 	let received = Mutex::new(VecDeque::new());
 	let arrived = tokio::sync::Notify::new();
 	let popped = tokio::sync::Notify::new();
@@ -715,11 +716,9 @@ async fn play_audio<O: Output>(
 							// A declared boundary preserves the old sink, unlike an undeclared hole.
 							drain(sink).await;
 							let first = lead(delay, &frame);
-							let mapping = role.resume(transition, frame.timestamp, Some(first)).await?;
+							let mapping = role.resume(transition, frame.timestamp, Some(first)).ready().await?;
 							role.apply(transition, mapping);
 							let at = presentation
-								.lock()
-								.unwrap()
 								.due(role.map(frame.timestamp)?)
 								.and_then(|at| at.checked_sub(first));
 							if let Some(at) = at {
@@ -781,7 +780,7 @@ async fn play_audio<O: Output>(
 			if timing.reset_sink {
 				sequential = false;
 				drop(sink);
-				presentation.lock().unwrap().restarted();
+				presentation.audio_restarted();
 				sink = speaker.sink(input.clone())?;
 				dry = true;
 			}
@@ -791,8 +790,6 @@ async fn play_audio<O: Output>(
 			// The lead follows the current target so jitter can still deepen the sink.
 			if sequential {
 				let at = presentation
-					.lock()
-					.unwrap()
 					.due(mapped)
 					.and_then(|at| at.checked_sub(lead(delay, &frame)));
 				if let Some(at) = at {
@@ -837,11 +834,14 @@ async fn play_audio<O: Output>(
 			// is the only half of the pipeline that cannot skip ahead. A move has to
 			// wake the window: it is asleep on a deadline computed from the old anchor,
 			// and every queued frame is due earlier now.
-			let moved = {
-				let mut presentation = presentation.lock().unwrap();
-				presentation.hold(held);
-				presentation.audio(timing.end, sink.buffered(), Instant::now())
-			};
+			let moved = presentation.audio(
+				moq_mux::timeline::Audio {
+					end: timing.end,
+					buffered: sink.buffered(),
+					target: held,
+				},
+				Instant::now(),
+			);
 			if moved {
 				changed.notify_one();
 				output.send(Event::Wake);
@@ -896,7 +896,7 @@ mod tests {
 		let playback = AudioPlayback {
 			changed: Default::default(),
 			speaker: recorder.clone(),
-			presentation: Arc::new(Mutex::new(Presentation::new(AUDIO_BUFFER_MIN))),
+			presentation: Presentation::new(AUDIO_BUFFER_MIN),
 			latency: AUDIO_BUFFER_MIN,
 			output: recorder,
 		};
@@ -931,7 +931,7 @@ mod tests {
 		let playback = AudioPlayback {
 			changed: Default::default(),
 			speaker: recorder.clone(),
-			presentation: Arc::new(Mutex::new(Presentation::new(delay))),
+			presentation: Presentation::new(delay),
 			latency: delay,
 			output: recorder.clone(),
 		};
@@ -1199,7 +1199,7 @@ mod tests {
 		let playback = AudioPlayback {
 			changed: Default::default(),
 			speaker: recorder.clone(),
-			presentation: Arc::new(Mutex::new(Presentation::new(delay))),
+			presentation: Presentation::new(delay),
 			latency: delay,
 			output: recorder.clone(),
 		};
@@ -1285,7 +1285,7 @@ mod tests {
 		let playback = AudioPlayback {
 			changed: Default::default(),
 			speaker: recorder.clone(),
-			presentation: Arc::new(Mutex::new(Presentation::new(delay))),
+			presentation: Presentation::new(delay),
 			latency: delay,
 			output: recorder.clone(),
 		};
@@ -1336,7 +1336,7 @@ mod tests {
 		.await
 		.unwrap();
 		let recorder = Recorder::default();
-		let presentation = Arc::new(Mutex::new(Presentation::new(delay)));
+		let presentation = Presentation::new(delay);
 		let changed = Arc::new(tokio::sync::Notify::new());
 		let playback = AudioPlayback {
 			changed: changed.clone(),
@@ -1357,7 +1357,7 @@ mod tests {
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		// Video declares an end two seconds out, holding the audio replacement back.
-		let video = Role::new(presentation.clone(), Kind::Video);
+		let video = presentation.track(Kind::Video);
 		video.declare();
 		video.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
 		producer.discontinuity().unwrap();
@@ -1466,8 +1466,11 @@ mod tests {
 			.unwrap();
 		catalog
 			.audio(
-				track,
-				Container::Legacy(moq_mux::container::Kind::Audio),
+				moq_mux::timeline::Audio {
+					end: track,
+					buffered: Container::Legacy(moq_mux::container::Kind::Audio),
+					target: Container::Legacy(moq_mux::container::Kind::Audio),
+				},
 				AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1),
 			)
 			.unwrap()
@@ -1498,7 +1501,7 @@ mod tests {
 				select: Default::default(),
 			},
 			video: Default::default(),
-			presentation: Arc::new(Mutex::new(Presentation::new(delay))),
+			presentation: Presentation::new(delay),
 			drained: Default::default(),
 			output,
 		}
@@ -2199,13 +2202,11 @@ mod tests {
 		);
 		loop {
 			tokio::task::yield_now().await;
-			if media.video.lock().unwrap().len() == 30
-				|| media.presentation.lock().unwrap().due(last) == Some(now + delay)
-			{
+			if media.video.lock().unwrap().len() == 30 || media.presentation.due(last) == Some(now + delay) {
 				break;
 			}
 		}
-		let due = media.presentation.lock().unwrap().due(last);
+		let due = media.presentation.due(last);
 		task.abort();
 		let _ = task.await;
 		assert_eq!(due, Some(now + delay), "the decoder did not observe the live edge");
