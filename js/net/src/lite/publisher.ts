@@ -1298,13 +1298,6 @@ export class Publisher {
 			if (end instanceof Error) throw end;
 			return end === done;
 		};
-		// Every group stream finished or reset, whether or not the subscriber FINned meanwhile;
-		// a reset of the Subscribe Stream throws.
-		const drainedFinished = async (): Promise<void> => {
-			const reset = controls.ended.then((end) => (end instanceof Error ? end : new Promise<never>(() => {})));
-			const end = await race([Promise.all(groups).then(() => undefined), reset]);
-			if (end instanceof Error) throw end;
-		};
 		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
 		// early could let the subscriber settle before the reset arrives. A subscription capped
 		// short of the end is owed no error, so its boundary goes out.
@@ -1541,10 +1534,14 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						// On lite-07 the subscriber FINs once it read the finished track's tail, which
-						// still lets every group stream finish; only a reset cuts them.
-						if (keepsSubscribeOpen(this.version)) await drainedFinished();
-						else if (!(await drained())) return false;
+						if (!(await drained())) {
+							if (!keepsSubscribeOpen(this.version)) return false;
+							// A lite-07 subscriber FINs once it read the finished track's tail, or once
+							// it wants nothing more: cancel the groups still waiting for a stream slot,
+							// and let every opened stream finish, which its reader ends either way.
+							unsubscribe();
+							await Promise.all(groups);
+						}
 						if (pendingDrops.length > 0) continue;
 						// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: an update may still ask
 						// for the ended track's history, and the subscriber FINs once it wants nothing

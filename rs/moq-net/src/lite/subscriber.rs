@@ -5576,7 +5576,6 @@ mod tests {
 				serving.mode = ServeMode::Tail {
 					settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
 					requested_end: None,
-					responses: false,
 				};
 				assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 			}
@@ -8826,6 +8825,9 @@ struct ServeLoop {
 	/// The TRACK stream that answered, until a SUBSCRIBE has a response or nobody holds
 	/// the copy.
 	held: Option<HeldTrack>,
+	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_FINISH: once it
+	/// settles the copy finishes and FINs, while demand and responses keep flowing meanwhile.
+	finishing: Option<Settle>,
 	/// A pipelined subscription whose group streams stay parked until the responses that
 	/// beat the accept are read, as they would have been without the wait: a
 	/// SUBSCRIBE_START says where the feed starts before its first group does.
@@ -8842,16 +8844,14 @@ enum ServeMode {
 	/// Driving an upstream SUBSCRIBE open. The demand arms wait meanwhile,
 	/// exactly like the old inline await.
 	Establish(Establish),
-	/// The publisher ended the track (SUBSCRIBE_FINISH on lite-07, its FIN before), but
-	/// QUIC does not order streams: keep the subscription routable until every owed group
-	/// is accounted for. The grace bounds an unaccounted sequence, such as a lost datagram.
+	/// The publisher FINned once the track ended, as before lite-07, but QUIC does not order
+	/// streams: keep the subscription routable until every owed group is accounted for. The
+	/// grace bounds an unaccounted sequence, such as a lost datagram. Lite-07 keeps serving
+	/// instead, settling its tail in [`ServeLoop::finishing`].
 	Tail {
 		settle: Settle,
 		/// The demand's end when the tail started, which bounds the groups owed.
 		requested_end: Option<u64>,
-		/// Whether responses may still arrive: lite-07 keeps the stream open past
-		/// SUBSCRIBE_FINISH, and drops for the groups below it can follow.
-		responses: bool,
 	},
 	/// The upstream subscription failed with `err`. Every group stream whose header arrived
 	/// before it, parked on the accept or not, is read to its end first, as a group ends on
@@ -9108,6 +9108,7 @@ impl ServeLoop {
 			mode: ServeMode::Select,
 			linger: crate::time::Deadline::new(&serve.subscriber.runtime),
 			held: None,
+			finishing: None,
 			parked: None,
 		}
 	}
@@ -9190,9 +9191,9 @@ impl ServeLoop {
 				}
 				active.end = Some(end.clone());
 				// Lite-07 keeps the stream open past it, so its tail starts now rather
-				// than at a FIN.
+				// than at a FIN, while demand and responses keep flowing.
 				if serve.subscriber.version.keeps_subscribe_open() {
-					self.mode = Self::tail(serve, &self.serving, active, true);
+					self.finishing = Some(Self::settle(serve, &self.serving, active));
 				}
 			}
 			// SUBSCRIBE_START names where each range's delivery starts,
@@ -9269,25 +9270,37 @@ impl ServeLoop {
 		Ok(())
 	}
 
-	/// Wait out `active`'s tail once the publisher ended the track. The effective max delay
-	/// is the stopgap grace: the wrong clock (it bounds presentation-time drift), but it is
-	/// how long the subscriber was willing to wait for a late group anyway.
-	fn tail(serve: &TrackServe, serving: &track::Producer, active: &SubStream, responses: bool) -> ServeMode {
-		let subscription = serving.subscription();
-		let requested_end = subscription.as_ref().and_then(|sub| sub.end());
+	/// Start waiting out `active`'s tail once the publisher ended the track. The effective
+	/// max delay is the stopgap grace: the wrong clock (it bounds presentation-time drift),
+	/// but it is how long the subscriber was willing to wait for a late group anyway.
+	fn settle(serve: &TrackServe, serving: &track::Producer, active: &SubStream) -> Settle {
+		let budget = serving.subscription().map(|sub| sub.budget());
 		if let Ok(mut tail) = active.tail.write() {
 			// Lite-05+ declared the end with SUBSCRIBE_FINISH instead.
 			if !serve.subscriber.version.has_track_stream() {
 				tail.end();
 			}
-			tail.set_grace(serving.tail_grace(subscription.map(|sub| sub.budget()).unwrap_or_default()));
+			tail.set_grace(serving.tail_grace(budget.unwrap_or_default()));
 			tail.expire(serve.subscriber.runtime.now());
 		}
-		ServeMode::Tail {
-			settle: Settle::new(&serve.subscriber.runtime, active.tail.consume()),
-			requested_end,
-			responses,
-		}
+		Settle::new(&serve.subscriber.runtime, active.tail.consume())
+	}
+
+	/// Whether the tail of a lite-07 subscription the publisher finished has settled, so the
+	/// copy can FIN it: every owed group accounted for, or the grace passed.
+	fn poll_finishing(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let (Some(settle), Sub::Active(active)) = (&mut self.finishing, &self.sub) else {
+			return Poll::Pending;
+		};
+		// Nothing says which groups are owed until SUBSCRIBE_START says where delivery starts,
+		// so until then only the grace settles.
+		let owed = match active.awaits_start() {
+			true => None,
+			false => active.owed(self.serving.subscription().and_then(|sub| sub.end())),
+		};
+		settle.poll(waiter, |tail| {
+			owed.as_ref().is_some_and(|owed| tail.covers(owed.clone()))
+		})
 	}
 
 	fn poll(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Poll<ServeEnd> {
@@ -9342,57 +9355,14 @@ impl ServeLoop {
 					};
 					return Poll::Ready(ServeEnd::GiveBack(err));
 				}
-				ServeMode::Tail { responses, .. } => {
+				ServeMode::Tail { settle, requested_end } => {
 					// The tail waits for groups, parked ones included.
 					if let Some(id) = self.parked.take() {
 						serve.accept_pipelined(id, &self.serving);
 					}
-					// Lite-07 keeps the stream open past SUBSCRIBE_FINISH, so drops for the
-					// groups below it can still follow.
-					if *responses
-						&& let Sub::Active(active) = &mut self.sub
-						&& let Poll::Ready(res) = active
-							.stream
-							.reader
-							.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
-					{
-						match res {
-							Ok(Some(msg)) => {
-								if let Err(err) = self.apply_response(serve, msg) {
-									return Poll::Ready(ServeEnd::GiveBack(err));
-								}
-								ready!(budget.poll_yield(waiter));
-							}
-							// A publisher may still FIN once its groups finished, as before
-							// lite-07.
-							Ok(None) => {
-								if let ServeMode::Tail { responses, .. } = &mut self.mode {
-									*responses = false;
-								}
-							}
-							Err(err) => {
-								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								self.mode = ServeMode::Failed {
-									err,
-									tail: active.tail.consume(),
-								};
-							}
-						}
-						continue;
-					}
-					let ServeMode::Tail {
-						settle,
-						requested_end,
-						responses,
-					} = &mut self.mode
-					else {
-						unreachable!()
-					};
-					// `None` when nothing says which groups are owed, so only the grace settles:
-					// on lite-07, until SUBSCRIBE_START says where delivery starts.
 					let owed = match &self.sub {
-						Sub::Active(active) if !(*responses && active.awaits_start()) => active.owed(*requested_end),
-						_ => None,
+						Sub::Active(active) => active.owed(*requested_end),
+						Sub::None => None,
 					};
 					let _ = self.fetches.poll(waiter);
 					self.feed_fetches
@@ -9518,6 +9488,11 @@ impl ServeLoop {
 					self.feed_fetches
 						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
 
+					// A lite-07 track the publisher finished ends once its tail settles.
+					if self.poll_finishing(waiter).is_ready() {
+						return Poll::Ready(ServeEnd::Finished);
+					}
+
 					// (3) Nobody holds this copy anymore. Its upstream subscription already
 					// went with the last subscriber, so it lingers, cache and all, for a
 					// reader or fetch that asks again soon, then is dropped. In-flight
@@ -9573,7 +9548,10 @@ impl ServeLoop {
 								// (bounded demand alone never FINs; the publisher parks, since
 								// a cap can be raised). Those streams can still be in flight,
 								// so wait for the tail before finishing.
-								self.mode = Self::tail(serve, &self.serving, active, false);
+								self.mode = ServeMode::Tail {
+									settle: Self::settle(serve, &self.serving, active),
+									requested_end: self.serving.subscription().and_then(|sub| sub.end()),
+								};
 								continue;
 							}
 							Err(err) => {
