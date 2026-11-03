@@ -66,14 +66,6 @@ pub enum KeyError {
 	/// The JWT header has no `kid` to select a key with.
 	#[error("missing kid in JWT header")]
 	MissingKid,
-
-	/// An EC key has no x coordinate.
-	#[error("missing x() point in EC key")]
-	MissingEcX,
-
-	/// An EC key has no y coordinate.
-	#[error("missing y() point in EC key")]
-	MissingEcY,
 }
 
 /// Top-level error type for moq-auth.
@@ -219,6 +211,10 @@ pub enum Error {
 	/// The mesh coordinator's state file could not be read, parsed, or written.
 	#[error("mesh state: {0}")]
 	MeshState(String),
+
+	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
+	#[error("unsupported CPU: {0}")]
+	UnsupportedCpu(String),
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's
@@ -240,10 +236,18 @@ from_message! {
 	serde_json::Error => Json,
 	base64::DecodeError => Base64,
 	jsonwebtoken::errors::Error => Jwt,
-	p256::elliptic_curve::pkcs8::Error => Crypto,
-	p256::elliptic_curve::Error => Crypto,
-	aws_lc_rs::error::Unspecified => Crypto,
-	aws_lc_rs::error::KeyRejected => Crypto,
+}
+
+impl Error {
+	/// A crypto backend's error, converted by hand so its crate stays out of this crate's API.
+	pub(crate) fn crypto(err: impl std::error::Error) -> Self {
+		Self::Crypto(message(err))
+	}
+
+	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
+	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
+		Self::UnsupportedCpu(err.to_string())
+	}
 }
 
 #[cfg(feature = "client")]

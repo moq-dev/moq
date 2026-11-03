@@ -63,7 +63,7 @@ async function tick(n = 1): Promise<void> {
 	}
 }
 
-/** Wait until `fn()` is true, throwing if it never becomes true within budget —
+/** Wait until `fn()` is true, throwing if it never becomes true within budget -
  *  so a scheduler regression fails the test instead of silently proceeding. */
 async function until(fn: () => boolean, tries = 200): Promise<void> {
 	for (let i = 0; i < tries && !fn(); i++) {
@@ -177,7 +177,7 @@ describe("SendScheduler", () => {
 		const sched = new SendScheduler(sink);
 
 		// Give the transport room first, so the datagram is admitted (a datagram
-		// enqueued under backpressure would be dropped — see the next test).
+		// enqueued under backpressure would be dropped - see the next test).
 		sink.release(3);
 		sched.setSendOrder(1n, 0);
 		void sched.enqueueStream(1n, frame(10));

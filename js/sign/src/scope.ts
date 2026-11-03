@@ -36,7 +36,7 @@ export class Scope {
 	 * timescale can be. A fractional value, which no hop carries, never verifies.
 	 */
 	message(
-		group: number,
+		group: bigint,
 		frame: number,
 		timestamp: Time.Timestamp | undefined,
 		payload: Uint8Array,
@@ -46,7 +46,9 @@ export class Scope {
 		const view = new DataView(out.buffer);
 		out.set(this.#prefix);
 		let offset = this.#prefix.byteLength;
-		for (const field of [group, frame, timestamp?.scale ?? 0, timestamp?.value ?? 0]) {
+		view.setBigUint64(offset, group);
+		offset += 8;
+		for (const field of [frame, timestamp?.scale ?? 0, timestamp?.value ?? 0]) {
 			view.setBigUint64(offset, BigInt(field));
 			offset += 8;
 		}
@@ -57,7 +59,7 @@ export class Scope {
 	/** The frame body: `payload` followed by its signature. */
 	async sign(
 		key: SecretKey,
-		group: number,
+		group: bigint,
 		frame: number,
 		timestamp: Time.Timestamp | undefined,
 		payload: Uint8Array,
@@ -72,7 +74,7 @@ export class Scope {
 	/** The payload of a frame body whose signature verifies, as a view into `body`; throws {@link Failure} `signature`. */
 	async verify(
 		key: PublicKey,
-		group: number,
+		group: bigint,
 		frame: number,
 		timestamp: Time.Timestamp | undefined,
 		body: Uint8Array,

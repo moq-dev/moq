@@ -14,6 +14,22 @@ Gate: re-run the bench against the driver's numbers in the epic README. If the p
 shows tungstenite's read-buffer zero-fill, its `out_buffer` copy, or its
 memmove after a partial write as a real share, abandon the quest.
 
+Stopgap first (2026-10-31, from
+[moq-dev/moq#7086](https://github.com/moq-dev/moq/pull/7086)'s benchmark;
+moved here when [moq-dev/moq#7494](https://github.com/moq-dev/moq/pull/7494)
+landed the driver and kept tungstenite): tungstenite's default read buffer
+dominates its share of the profile. Shrink
+`WebSocketConfig::read_buffer_size` to near qmux's maximum record size
+(about 16 KiB) in `qmux::ws` (`capped` in `rs/qmux/src/ws.rs`) and on the
+relay's axum `WebSocketUpgrade` (`rs/moq-relay/src/websocket.rs`) until this
+codec replaces tungstenite. That setting is the buffer tungstenite allocates
+up front, not a memory cap: a larger frame still grows past it, so the
+existing message and frame size limits stay the bound. The stopgap lowers
+the baseline allocation per connection and the zero-fill per read attempt.
+Land it as its own commit with a bench run that also reports retained
+memory, then run the gate above before deciding whether replacing
+tungstenite still pays.
+
 The subset to implement, from the 2026-10-22 audit:
 
 - **Frames.** 7-, 16-, and 64-bit lengths. Reject unmasked client frames and

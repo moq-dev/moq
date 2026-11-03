@@ -25,7 +25,7 @@ export interface Broadcast {
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
 	largest(name: string): track.Position | undefined;
 	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
-	fetchGroup?(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
+	fetchGroup?(name: string, sequence: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 	/** List the broadcast's tracks for `owner`, ending its older listing of this broadcast with CANCELLED. */
