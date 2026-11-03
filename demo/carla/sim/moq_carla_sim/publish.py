@@ -342,7 +342,7 @@ async def _follow_driver(
     path: str,
     commands: asyncio.Queue[Command],
 ) -> None:
-    """Pump each run of one driver in turn, ending a run once another takes over."""
+    """Pump each run of one driver in turn, ending a run once another takes over or it goes offline."""
     run: asyncio.Task[None] | None = None
     try:
         async with client.follow(path) as following:
@@ -350,6 +350,9 @@ async def _follow_driver(
                 broadcast = await following.available()
                 if run is not None:
                     run.cancel()
+                    run = None
+                if broadcast is None:
+                    continue
                 instance = str(next(_runs))
                 run = asyncio.create_task(
                     _pump_driver(driver_id, instance, broadcast, commands),

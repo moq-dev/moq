@@ -38,8 +38,9 @@ internal constructor(
      * Follow exactly [path], resolving each stream that serves it.
      *
      * Unlike [request] this waits indefinitely for a future announcement, and each later
-     * `available()` waits for the next stream, such as a restarted publisher. Pass an [instance] to
-     * follow only that stream. Cancel the returned handle to stop waiting.
+     * `available()` waits for the next stream, such as a restarted publisher, or returns null once
+     * the path goes offline. Pass an [instance] to follow only that stream; another one taking over
+     * also returns null. Cancel the returned handle to stop waiting.
      */
     fun follow(path: String, instance: String? = null): Following =
         session.consume().follow(path, instance)

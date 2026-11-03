@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following.available()` returns nil once the path goes offline
+
+`try await following.available()` returns `BroadcastConsumer?`.
+After the first call, it returns nil once the followed path goes offline, or, for a `follow(path:instance:)` pinned to an instance, once another instance takes it over; the next call returns whatever serves the path next. The first call never returns nil.
+Drop what you read from the previous broadcast either way. A caller that only waits for the first broadcast can take it with `!`.
+
 ### Announcements are a listing
 
 `AnnounceConsumer` yields `.present` when a path becomes present and `.absent` when it goes, each carrying an `Announce`.
@@ -14,7 +20,8 @@ Where you requested the path again on a restart, hold `follow(path:)` instead; e
 ```swift
 let following = try session.consume.follow(path: "live/camera")
 while true {
-    play(try await following.available())
+    guard let broadcast = try await following.available() else { continue } // offline until the next instance
+    play(broadcast)
 }
 ```
 

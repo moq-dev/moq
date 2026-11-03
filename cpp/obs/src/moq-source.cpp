@@ -439,7 +439,8 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	moq_source_next_broadcast(ctx, conn);
 }
 
-// Waits for the next publisher instance: the first one announced, then each that takes over.
+// Waits for the next publisher instance: the first one announced, then each that takes over
+// or returns after the broadcast went offline.
 static void moq_source_next_broadcast(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
 {
 	conn->available_call = conn->announced->available().then(
@@ -454,6 +455,14 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 		LOG_ERROR("Failed to resolve broadcast '%s': %s", conn->broadcast.c_str(),
 			  result.error().to_string().c_str());
 		moq_source_fail_locked(ctx);
+		return;
+	}
+
+	// The offline instance's tracks end on their own once its route dies, holding the last
+	// frame, so only wait for whatever serves the path next.
+	if (!*result) {
+		LOG_INFO("Broadcast went offline: %s", conn->broadcast.c_str());
+		moq_source_next_broadcast(ctx, conn);
 		return;
 	}
 

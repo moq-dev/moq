@@ -294,10 +294,12 @@ final class SmokeTests: XCTestCase {
             return XCTFail("expected an announcement")
         }
         XCTAssertFalse(present.route.instance.isEmpty)
-        _ = try await following.available()
+        let first = try await following.available()
+        XCTAssertNotNil(first)
 
         try publication.announce(route: AnnounceRoute(instance: "camera", epoch: 1))
-        _ = try await following.available()
+        let takeover = try await following.available()
+        XCTAssertNotNil(takeover)
 
         // The takeover was not listed, so the next event is the path going absent.
         try publication.unannounce()
@@ -311,6 +313,25 @@ final class SmokeTests: XCTestCase {
                 return XCTFail("expected InvalidInstance, got \(error)")
             }
         }
+        following.cancel()
+    }
+
+    func testFollowerReportsOfflineAndTheNextBroadcast() async throws {
+        let origin = OriginProducer()
+        let following = try origin.consume().follow(path: "offline")
+        let publication = try origin.createBroadcast(path: "offline")
+
+        try publication.announce(route: AnnounceRoute())
+        let first = try await following.available()
+        XCTAssertNotNil(first)
+
+        try publication.unannounce()
+        let offline = try await following.available()
+        XCTAssertNil(offline)
+
+        try publication.announce(route: AnnounceRoute())
+        let returned = try await following.available()
+        XCTAssertNotNil(returned)
         following.cancel()
     }
 

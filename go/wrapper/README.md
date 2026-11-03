@@ -62,7 +62,8 @@ for event, err := range announced.All(ctx) {
 
 The listing reports only whether each path is present. A restarted publisher or another
 instance taking the path over keeps it present: to read the broadcast across them, hold
-`client.Follow(path, nil)` and read each new instance from `Available`.
+`client.Follow(path, nil)` and read each new instance from `Available`, which returns nil
+while the path is offline.
 
 ## Common APIs
 

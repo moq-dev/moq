@@ -60,7 +60,7 @@ moq
     .updates()
     .listen((event) {
   // A path stays present across publisher restarts: hold moq.follow(path) to be handed
-  // each new run.
+  // each new run, or null once it goes offline.
   switch (event) {
     case AnnounceEventPresent(:final announce):
       print(announce.prefix);
@@ -69,8 +69,9 @@ moq
     case AnnounceEventAbsent():
   }
 });
-// Wait for a publisher at one path; call available() again for the next one.
-final broadcast = await moq.follow('live/camera').available();
+// Wait for a publisher at one path. The first call never returns null; call available()
+// again for the next one, or null once the path goes offline.
+final broadcast = (await moq.follow('live/camera').available())!;
 final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
 print(await catalog.next());
 ```
@@ -105,7 +106,7 @@ encoder.finish();
 // Decode a subscribed rendition. Dispose each frame promptly.
 import 'package:moq/video.dart' as video;
 
-final remote = await moq.follow('live/camera').available();
+final remote = (await moq.follow('live/camera').available())!;
 final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
 final decoder = await video.Consumer.subscribe(
   broadcast: remote,

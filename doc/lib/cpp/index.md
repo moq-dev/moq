@@ -94,7 +94,7 @@ void ok(moq::expected<void> result) {
 auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes every default
 auto session = ok(client->connect("https://relay.example.com").get());
 auto announced = ok(session->consume()->follow("my-stream.hang", std::nullopt));
-auto broadcast = ok(announced->available().get());
+auto broadcast = ok(announced->available().get());   // the first call is never null
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[id, video] : catalog->video) {
@@ -111,8 +111,9 @@ The config is generated, so nothing names this package for you: set
 after any product tokens of your own, and moq-ffi appends its own.
 
 Call `available()` again to wait for the next publisher instance at that path, such as a
-restarted publisher, and drop what was read from the previous one then: its tracks end
-when its session does.
+restarted publisher. It returns null once the path goes offline, then the next
+broadcast when something serves it again. Drop what was read from the previous instance
+on either: its tracks end when its session does.
 
 `MediaTrackConsumer` reads `MediaRead` records in decode order: `kFrame`, `kGap`, or
 `kEnd`, like the audio and video decoders. Match the variant before taking its frame.

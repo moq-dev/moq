@@ -1722,6 +1722,77 @@ func TestInstanceChangeReachesFollowers(t *testing.T) {
 	}
 }
 
+// A follower reports the path going offline as nil, then the next broadcast once it returns.
+func TestFollowReportsOffline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	following, err := origin.Consume().Follow("offline", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer following.Cancel()
+
+	publication, err := origin.CreateBroadcast("offline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+		t.Fatal(err)
+	}
+	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
+		t.Fatalf("first Available = %v, %v; want a broadcast", broadcast, err)
+	}
+
+	if err := publication.Unannounce(); err != nil {
+		t.Fatal(err)
+	}
+	if broadcast, err := following.Available(ctx); err != nil || broadcast != nil {
+		t.Fatalf("Available after unannounce = %v, %v; want nil", broadcast, err)
+	}
+
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
+		t.Fatal(err)
+	}
+	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
+		t.Fatalf("Available after re-announce = %v, %v; want a broadcast", broadcast, err)
+	}
+}
+
+// A follower pinned to an instance reports another instance taking over as nil.
+func TestPinnedFollowReportsTakeoverOffline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	pinned := "cam"
+	following, err := origin.Consume().Follow("pinned", &pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer following.Cancel()
+
+	publication, err := origin.CreateBroadcast("pinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publication.Announce(moq.AnnounceRoute{Instance: &pinned}); err != nil {
+		t.Fatal(err)
+	}
+	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
+		t.Fatalf("first Available = %v, %v; want a broadcast", broadcast, err)
+	}
+
+	other := "other"
+	if err := publication.Announce(moq.AnnounceRoute{Instance: &other, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if broadcast, err := following.Available(ctx); err != nil || broadcast != nil {
+		t.Fatalf("Available after takeover = %v, %v; want nil", broadcast, err)
+	}
+}
+
 // nextRoute returns the next announce event.
 func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.AnnounceEvent {
 	t.Helper()

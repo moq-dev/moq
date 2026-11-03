@@ -8085,31 +8085,13 @@ class FfiConverterMoqAnnounceEvent {
     final subview = Uint8List.view(buf.buffer, buf.offsetInBytes + 4);
     switch (index) {
       case 1:
-        final lifted = StartMoqAnnounceEvent.read(subview);
+        final lifted = PresentMoqAnnounceEvent.read(subview);
         return LiftRetVal<MoqAnnounceEvent>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 2:
-        final lifted = UpdateMoqAnnounceEvent.read(subview);
-        return LiftRetVal<MoqAnnounceEvent>(
-          lifted.value,
-          lifted.bytesRead - subview.offsetInBytes + 4,
-        );
-      case 3:
-        final lifted = EndMoqAnnounceEvent.read(subview);
-        return LiftRetVal<MoqAnnounceEvent>(
-          lifted.value,
-          lifted.bytesRead - subview.offsetInBytes + 4,
-        );
-      case 4:
-        final lifted = RestartMoqAnnounceEvent.read(subview);
-        return LiftRetVal<MoqAnnounceEvent>(
-          lifted.value,
-          lifted.bytesRead - subview.offsetInBytes + 4,
-        );
-      case 5:
-        final lifted = TakeoverMoqAnnounceEvent.read(subview);
+        final lifted = AbsentMoqAnnounceEvent.read(subview);
         return LiftRetVal<MoqAnnounceEvent>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
@@ -8135,18 +8117,18 @@ class FfiConverterMoqAnnounceEvent {
   }
 }
 
-class StartMoqAnnounceEvent extends MoqAnnounceEvent {
+class PresentMoqAnnounceEvent extends MoqAnnounceEvent {
   final MoqAnnounce announce;
-  StartMoqAnnounceEvent(MoqAnnounce this.announce);
-  StartMoqAnnounceEvent._(MoqAnnounce this.announce);
-  static LiftRetVal<StartMoqAnnounceEvent> read(Uint8List buf) {
+  PresentMoqAnnounceEvent(MoqAnnounce this.announce);
+  PresentMoqAnnounceEvent._(MoqAnnounce this.announce);
+  static LiftRetVal<PresentMoqAnnounceEvent> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final announce_lifted = FfiConverterMoqAnnounce.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final announce = announce_lifted.value;
     new_offset += announce_lifted.bytesRead;
-    return LiftRetVal(StartMoqAnnounceEvent._(announce), new_offset);
+    return LiftRetVal(PresentMoqAnnounceEvent._(announce), new_offset);
   }
 
   @override
@@ -8173,18 +8155,18 @@ class StartMoqAnnounceEvent extends MoqAnnounceEvent {
   }
 }
 
-class UpdateMoqAnnounceEvent extends MoqAnnounceEvent {
+class AbsentMoqAnnounceEvent extends MoqAnnounceEvent {
   final MoqAnnounce announce;
-  UpdateMoqAnnounceEvent(MoqAnnounce this.announce);
-  UpdateMoqAnnounceEvent._(MoqAnnounce this.announce);
-  static LiftRetVal<UpdateMoqAnnounceEvent> read(Uint8List buf) {
+  AbsentMoqAnnounceEvent(MoqAnnounce this.announce);
+  AbsentMoqAnnounceEvent._(MoqAnnounce this.announce);
+  static LiftRetVal<AbsentMoqAnnounceEvent> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final announce_lifted = FfiConverterMoqAnnounce.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final announce = announce_lifted.value;
     new_offset += announce_lifted.bytesRead;
-    return LiftRetVal(UpdateMoqAnnounceEvent._(announce), new_offset);
+    return LiftRetVal(AbsentMoqAnnounceEvent._(announce), new_offset);
   }
 
   @override
@@ -8205,141 +8187,6 @@ class UpdateMoqAnnounceEvent extends MoqAnnounceEvent {
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterMoqAnnounce.write(
       announce,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    return new_offset;
-  }
-}
-
-class EndMoqAnnounceEvent extends MoqAnnounceEvent {
-  final MoqAnnounce announce;
-  EndMoqAnnounceEvent(MoqAnnounce this.announce);
-  EndMoqAnnounceEvent._(MoqAnnounce this.announce);
-  static LiftRetVal<EndMoqAnnounceEvent> read(Uint8List buf) {
-    int new_offset = buf.offsetInBytes;
-    final announce_lifted = FfiConverterMoqAnnounce.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final announce = announce_lifted.value;
-    new_offset += announce_lifted.bytesRead;
-    return LiftRetVal(EndMoqAnnounceEvent._(announce), new_offset);
-  }
-
-  @override
-  RustBuffer lower() {
-    final buf = Uint8List(allocationSize());
-    write(buf);
-    return toRustBuffer(buf);
-  }
-
-  @override
-  int allocationSize() {
-    return FfiConverterMoqAnnounce.allocationSize(announce) + 4;
-  }
-
-  @override
-  int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 3);
-    int new_offset = buf.offsetInBytes + 4;
-    new_offset += FfiConverterMoqAnnounce.write(
-      announce,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    return new_offset;
-  }
-}
-
-class RestartMoqAnnounceEvent extends MoqAnnounceEvent {
-  final MoqAnnounce announce;
-  RestartMoqAnnounceEvent(MoqAnnounce this.announce);
-  RestartMoqAnnounceEvent._(MoqAnnounce this.announce);
-  static LiftRetVal<RestartMoqAnnounceEvent> read(Uint8List buf) {
-    int new_offset = buf.offsetInBytes;
-    final announce_lifted = FfiConverterMoqAnnounce.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final announce = announce_lifted.value;
-    new_offset += announce_lifted.bytesRead;
-    return LiftRetVal(RestartMoqAnnounceEvent._(announce), new_offset);
-  }
-
-  @override
-  RustBuffer lower() {
-    final buf = Uint8List(allocationSize());
-    write(buf);
-    return toRustBuffer(buf);
-  }
-
-  @override
-  int allocationSize() {
-    return FfiConverterMoqAnnounce.allocationSize(announce) + 4;
-  }
-
-  @override
-  int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 4);
-    int new_offset = buf.offsetInBytes + 4;
-    new_offset += FfiConverterMoqAnnounce.write(
-      announce,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    return new_offset;
-  }
-}
-
-class TakeoverMoqAnnounceEvent extends MoqAnnounceEvent {
-  final MoqAnnounce announce;
-  final String predecessor;
-  TakeoverMoqAnnounceEvent({
-    required MoqAnnounce this.announce,
-    required String this.predecessor,
-  });
-  TakeoverMoqAnnounceEvent._(
-    MoqAnnounce this.announce,
-    String this.predecessor,
-  );
-  static LiftRetVal<TakeoverMoqAnnounceEvent> read(Uint8List buf) {
-    int new_offset = buf.offsetInBytes;
-    final announce_lifted = FfiConverterMoqAnnounce.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final announce = announce_lifted.value;
-    new_offset += announce_lifted.bytesRead;
-    final predecessor_lifted = FfiConverterString.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final predecessor = predecessor_lifted.value;
-    new_offset += predecessor_lifted.bytesRead;
-    return LiftRetVal(
-      TakeoverMoqAnnounceEvent._(announce, predecessor),
-      new_offset,
-    );
-  }
-
-  @override
-  RustBuffer lower() {
-    final buf = Uint8List(allocationSize());
-    write(buf);
-    return toRustBuffer(buf);
-  }
-
-  @override
-  int allocationSize() {
-    return FfiConverterMoqAnnounce.allocationSize(announce) +
-        FfiConverterString.allocationSize(predecessor) +
-        4;
-  }
-
-  @override
-  int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 5);
-    int new_offset = buf.offsetInBytes + 4;
-    new_offset += FfiConverterMoqAnnounce.write(
-      announce,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    new_offset += FfiConverterString.write(
-      predecessor,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
@@ -12541,7 +12388,7 @@ class FfiConverterMoqBroadcastRequest {
 }
 
 abstract class MoqFollowingInterface {
-  UniffiRustFuture<MoqBroadcastConsumer> available();
+  UniffiRustFuture<MoqBroadcastConsumer?> available();
   void cancel();
 }
 
@@ -12582,16 +12429,15 @@ class MoqFollowing implements MoqFollowingInterface {
     }
   }
 
-  UniffiRustFuture<MoqBroadcastConsumer> available() {
+  UniffiRustFuture<MoqBroadcastConsumer?> available() {
     return uniffiRustCallAsync(
       () =>
           uniffi_moq_ffi_fn_method_moqfollowing_available(uniffiClonePointer()),
-      ffi_moq_ffi_rust_future_poll_u64,
-      ffi_moq_ffi_rust_future_complete_u64,
-      ffi_moq_ffi_rust_future_cancel_u64,
-      ffi_moq_ffi_rust_future_free_u64,
-      (ptr) =>
-          FfiConverterMoqBroadcastConsumer.lift(Pointer<Void>.fromAddress(ptr)),
+      ffi_moq_ffi_rust_future_poll_rust_buffer,
+      ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_cancel_rust_buffer,
+      ffi_moq_ffi_rust_future_free_rust_buffer,
+      FfiConverterOptionalMoqBroadcastConsumer.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -15944,6 +15790,58 @@ class FfiConverterOptionalMoqBandwidthConsumer {
     }
     buf[0] = 1;
     return FfiConverterMoqBandwidthConsumer.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
+class FfiConverterOptionalMoqBroadcastConsumer {
+  static MoqBroadcastConsumer? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqBroadcastConsumer.read(
+      buf.asUint8List(),
+    ).value;
+  }
+
+  static LiftRetVal<MoqBroadcastConsumer?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqBroadcastConsumer.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqBroadcastConsumer?>(
+      result.value,
+      result.bytesRead + 1,
+    );
+  }
+
+  static int allocationSize([MoqBroadcastConsumer? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqBroadcastConsumer.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqBroadcastConsumer? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqBroadcastConsumer.allocationSize(value),
+    );
+    FfiConverterOptionalMoqBroadcastConsumer.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqBroadcastConsumer? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqBroadcastConsumer.write(
           value,
           Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
         ) +
@@ -22103,7 +22001,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject() != 9727) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqfollowing_available() != 39867) {
+  if (uniffi_moq_ffi_checksum_method_moqfollowing_available() != 26337) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqfollowing_cancel() != 37387) {
@@ -22112,7 +22010,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_announced() != 35661) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_follow() != 34533) {
+  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_follow() != 55889) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_request() != 40910) {

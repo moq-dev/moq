@@ -36,7 +36,8 @@ let session = try await client.connect(to: "https://relay.example.com")
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
 for try await event in announced {
     // The listing reports each path once while it stays present, even as its publisher
-    // restarts; `session.consume.follow(path:)` hands out each new run.
+    // restarts; `session.consume.follow(path:)` hands out each new run, or nil once it
+    // goes offline.
     guard case .present(let announcement) = event else { continue }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")

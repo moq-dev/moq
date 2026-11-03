@@ -416,13 +416,13 @@ async def test_following_restarts_on_a_new_instance():
     assert isinstance(present, moq.AnnounceEventPresent)
     minted = present.announce.route.instance
     assert minted
-    await asyncio.wait_for(following.available(), timeout=5.0)
+    assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
 
     # Another instance is another stream: followers restart onto it, while the path
     # stays present, so neither the re-price nor the restart is listed.
     publication.announce(moq.AnnounceRoute(cost=1))
     publication.announce(moq.AnnounceRoute(instance="cam", epoch=1))
-    await asyncio.wait_for(following.available(), timeout=5.0)
+    assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
     publication.unannounce()
     absent = await next_route(announced)
     assert isinstance(absent, moq.AnnounceEventAbsent)
@@ -431,6 +431,20 @@ async def test_following_restarts_on_a_new_instance():
     with pytest.raises(moq.Error.InvalidInstance):
         publication.announce(moq.AnnounceRoute(instance=""))
     following.cancel()
+    publication.broadcast.close()
+
+
+async def test_following_reports_the_path_offline_until_it_returns():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    publication = origin.create_broadcast("live")
+    publication.announce()
+    async with consumer.follow("live") as following:
+        assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
+        publication.unannounce()
+        assert await asyncio.wait_for(following.available(), timeout=5.0) is None
+        publication.announce()
+        assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
     publication.broadcast.close()
 
 
@@ -1665,7 +1679,10 @@ async def test_an_instance_pins_request_and_follow():
     with pytest.raises(moq.Error.InvalidInstance):
         consumer.follow("live", instance="")
     async with consumer.follow("live", instance="cam") as following:
-        await asyncio.wait_for(following.available(), timeout=5.0)
+        assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
+        # Another instance taking the path over ends the pinned stream.
+        publication.announce(moq.AnnounceRoute(instance="other"))
+        assert await asyncio.wait_for(following.available(), timeout=5.0) is None
     publication.broadcast.close()
 
 

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following.Available` reports the path going offline
+
+After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an instance, once another instance takes it over.
+The next call returns whatever serves the path next. The first call is never nil.
+Check for nil before using the broadcast, and drop what was read from the previous instance either way.
+
 ### Announcements are a listing
 
 `AnnounceConsumer` yields only `AnnounceEventPresent`, when a route now covers a path that was absent, and `AnnounceEventAbsent`, when none does any more.
@@ -21,6 +27,9 @@ for {
 	broadcast, err := following.Available(ctx)
 	if err != nil {
 		return err
+	}
+	if broadcast == nil {
+		continue // offline until the next instance
 	}
 	play(broadcast)
 }

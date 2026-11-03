@@ -10,6 +10,12 @@ How to update your code for each breaking change, newest first.
 `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are removed: read `AnnounceEventStart` as `AnnounceEventPresent` and `AnnounceEventEnd` as `AnnounceEventAbsent`, and drop the `Update` branch, since a re-priced route is no longer reported.
 Another publisher instance taking a path over keeps it present and is not listed. Where you requested the path again on `AnnounceEventRestart`, hold `follow(path)` instead and read each `BroadcastConsumer` that `await following.available()` returns, dropping what you read from the previous one.
 
+### `Following.available()` returns `None` once the path goes offline
+
+`await following.available()` (or `await following`) returns `BroadcastConsumer | None`.
+Later calls return `None` when the path goes offline, or, when following an `instance`, when another instance takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
+Stop reading the previous broadcast on `None` and call `available()` again. A caller that only awaits the first broadcast can assert it is not `None`.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `list[str]` instead of `list[str] | None`. Remove `None` checks and pass `captures=[]` when constructing an announcement for a filter without wildcards. Rebuild with the matching generated bindings and native library.

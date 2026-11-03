@@ -219,7 +219,7 @@ class Announcements(Scripted):
 
 
 class Following(Scripted):
-    """A scripted follow of one path: each `run` hands out another instance."""
+    """A scripted follow of one path: each `run` hands out another instance, and `offline` a `None`."""
 
     async def __aenter__(self):
         return self
@@ -242,6 +242,9 @@ class Following(Scripted):
             return control()
 
         await self.send(SimpleNamespace(subscribe_track=subscribe_track))
+
+    async def offline(self) -> None:
+        await self.send(None)
 
 
 class Drivers:
@@ -298,6 +301,25 @@ def test_a_driver_whose_broadcast_goes_absent_loses_the_lease() -> None:
         left = await next_command(commands, gate)
         assert (left.kind, left.instance) == ("driver_left", command.instance)
         assert gate.driver is None
+
+    asyncio.run(watching(scenario))
+
+
+def test_a_driver_whose_run_goes_offline_loses_the_lease_until_it_returns() -> None:
+    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        await relay.announcements.present(DRIVER)
+        await relay.following(DRIVER).run(1)
+        first = await next_command(commands, gate)
+
+        await relay.following(DRIVER).offline()
+        left = await next_command(commands, gate)
+        assert (left.kind, left.instance) == ("driver_left", first.instance)
+        assert gate.driver is None
+
+        await relay.following(DRIVER).run(2)
+        second = await next_command(commands, gate)
+        assert second.kind == "drive" and second.instance != first.instance
+        assert gate.driver == "abc"
 
     asyncio.run(watching(scenario))
 

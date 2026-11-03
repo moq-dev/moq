@@ -54,7 +54,7 @@ import dev.moq.media.*
 Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = listOf("ca.pem")))).use { moq ->
     moq.announced(AnnounceConfig(prefix = "live/", filter = "*/camera")).updates().collect { event ->
         // A path stays present across publisher restarts: hold moq.follow(path) to be handed
-        // each new run.
+        // each new run, or null once it goes offline.
         val announce = when (event) {
             is AnnounceEventPresent -> event.announce
             is AnnounceEventAbsent -> return@collect

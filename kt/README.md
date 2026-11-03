@@ -32,7 +32,7 @@ import kotlinx.coroutines.flow.collect
 Moq.connect("https://relay.example.com").use { moq ->
     moq.announced(AnnounceConfig(prefix = "demos/", filter = "*/camera")).updates().collect { event ->
         // The listing reports each path once while it stays present, even as its publisher
-        // restarts; `moq.follow(path)` hands out each new run.
+        // restarts; `moq.follow(path)` hands out each new run, or null once it goes offline.
         val announce = when (event) {
             is AnnounceEventPresent -> event.announce
             is AnnounceEventAbsent -> return@collect

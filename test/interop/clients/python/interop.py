@@ -188,6 +188,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
     async with client.announced(broadcast) as announcements:
         async with client.follow(broadcast) as following:
             consumer = await following
+            assert consumer is not None
             async with await moq.media.CatalogConsumer.subscribe(consumer) as catalogs:
                 async for catalog in catalogs:
                     if catalog.video:
@@ -229,6 +230,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
 
     async with client.follow(f"{broadcast}.health") as announced_health:
         health = await announced_health
+        assert health is not None
         async with await health.subscribe_track("live") as live:
             seen = False
             async for group in live:
@@ -305,6 +307,7 @@ async def subscribe(
             return
         assert audio_out is not None and audio_ms is not None
         consumer = await asyncio.wait_for(client.follow(broadcast), timeout)
+        assert consumer is not None
         catalog = await asyncio.wait_for(_catalog_with_media(consumer), timeout)
 
         id, video = next(iter(catalog.video.items()))

@@ -271,6 +271,9 @@ static void start_audio(ctx_t *c, int32_t catalog) {
 // is all this client reads, so a later instance's handle is freed unread.
 static void on_broadcast(void *ud, int32_t broadcast) {
     ctx_t *c = (ctx_t *)ud;
+    // Going offline is how a finished broadcast withdraws, and the stored handle's
+    // tracks report their own end, so there is nothing to do here.
+    if (broadcast == MOQ_FOLLOW_OFFLINE) return;
     if (broadcast <= 0) { // 0 = ended, negative = error
         if (c->finish.enabled) {
             if (broadcast < 0) fprintf(stderr, "finish broadcast error: %d %s\n", broadcast, moq_error());
@@ -398,6 +401,14 @@ static void on_finish_health_frame(void *ud, int32_t frame) {
 
 static void on_finish_health(void *ud, int32_t broadcast) {
     ctx_t *c = ud;
+    // The session that finished the broadcast must keep serving its health broadcast.
+    if (broadcast == MOQ_FOLLOW_OFFLINE) {
+        pthread_mutex_lock(&c->mu);
+        c->finish.failed = 1;
+        pthread_cond_broadcast(&c->cv);
+        pthread_mutex_unlock(&c->mu);
+        return;
+    }
     if (broadcast <= 0) {
         if (broadcast < 0) fprintf(stderr, "finish health broadcast error: %d %s\n", broadcast, moq_error());
         pthread_mutex_lock(&c->mu);

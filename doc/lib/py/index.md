@@ -48,7 +48,7 @@ async def main():
         # The filter is relative to the literal prefix; prefixes stay origin-relative.
         async for event in client.announced("live/", filter="*/camera"):
             # A path stays present across publisher restarts: hold client.follow(path) to
-            # be handed each new run.
+            # be handed each new run, or None once it goes offline.
             if not isinstance(event, moq.AnnounceEventPresent):
                 continue  # AnnounceEventAbsent
             announcement = event.announce

@@ -526,10 +526,10 @@ void main() {
     publication.announce(route: AnnounceRoute());
     final present = await nextRoute(announced) as AnnounceEventPresent;
     expect(present.announce.route.instance, isNotEmpty);
-    (await following.available().timeout(timeout)).dispose();
+    (await following.available().timeout(timeout))!.dispose();
 
     publication.announce(route: AnnounceRoute(instance: 'camera', epoch: 1));
-    (await following.available().timeout(timeout)).dispose();
+    (await following.available().timeout(timeout))!.dispose();
 
     // The takeover was not listed, so the next event is the path going absent.
     publication.unannounce();
@@ -545,6 +545,27 @@ void main() {
     announced.cancel();
     announced.dispose();
   });
+
+  test(
+    'a follower reports the path going offline and the next broadcast',
+    () async {
+      final origin = MoqOriginProducer(config: MoqOriginConfig());
+      final following = origin.consume().follow(path: 'offline');
+      final publication = origin.createBroadcast(path: 'offline');
+
+      publication.announce(route: AnnounceRoute());
+      (await following.available().timeout(timeout))!.dispose();
+
+      publication.unannounce();
+      expect(await following.available().timeout(timeout), isNull);
+
+      publication.announce(route: AnnounceRoute());
+      (await following.available().timeout(timeout))!.dispose();
+
+      following.cancel();
+      following.dispose();
+    },
+  );
 
   test('announced pattern reports captures', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());

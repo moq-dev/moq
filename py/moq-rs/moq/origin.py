@@ -69,8 +69,8 @@ class Following:
     """Follows a specific path across the publisher instances that serve it.
 
     ``await`` it (or call :meth:`available`) to get the :class:`BroadcastConsumer`
-    once the broadcast becomes available, and again for each instance that takes over.
-    Usable as an async context manager.
+    once the broadcast becomes available, again for each instance that takes over,
+    and ``None`` while the path is offline. Usable as an async context manager.
     """
 
     def __init__(self, inner: MoqFollowing) -> None:
@@ -82,15 +82,18 @@ class Following:
     async def __aexit__(self, *exc) -> None:
         self.cancel()
 
-    async def available(self) -> BroadcastConsumer:
-        """Await the next publisher instance serving the path and return its consumer.
+    async def available(self) -> BroadcastConsumer | None:
+        """Await the next change to the publisher instance serving the path.
 
-        The first call resolves the instance serving the path once one is announced. Each
-        later call waits for another to take over (a restarted publisher, or a replacement
-        session) or for the broadcast to return after it went offline. Drop what was read
-        from the previous instance then: its tracks end when its session does.
+        The first call resolves the instance serving the path once one is announced, and
+        never returns ``None``. Each later call returns another instance taking over (a
+        restarted publisher, or a replacement session), or ``None`` once the path goes
+        offline (or, when following an ``instance``, another one takes it over), then
+        whatever serves it next. Drop what was read from the previous instance then: its
+        tracks end when its session does.
         """
-        return BroadcastConsumer(await self._inner.available())
+        broadcast = await self._inner.available()
+        return BroadcastConsumer(broadcast) if broadcast is not None else None
 
     def __await__(self):
         return self.available().__await__()
@@ -212,8 +215,8 @@ class OriginConsumer:
 
         A broadcast created on this origin resolves once it is announced, like a
         remote one. Pass an ``instance`` to follow only that stream: another one
-        taking over is never handed out, and the stream is handed out again if it
-        returns after an end.
+        taking over reads as ``None`` and is never handed out, and the stream is
+        handed out again if it returns.
         """
         return Following(self._inner.follow(path, instance))
 

@@ -210,14 +210,15 @@ public final class Following: Sendable {
         self.ffi = ffi
     }
 
-    /// Suspend until the next publisher instance serves the path, then resolve it.
-    /// The first call resolves the instance serving the path once one is announced.
-    /// Each later call waits for another to take over (a restarted publisher, or a
-    /// replacement session) or for the broadcast to return after it went offline.
+    /// Suspend until the publisher instance serving the path changes.
+    /// The first call resolves the instance serving the path once one is announced, and
+    /// never returns nil. Each later call returns another instance taking over (a
+    /// restarted publisher, or a replacement session), or nil once the path goes offline
+    /// (or, with an `instance`, another one takes it over), then whatever serves it next.
     /// Drop what was read from the previous instance then: its tracks end when its
     /// session does. Throws `Closed` if cancelled or the origin closes first.
-    public func available() async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.available())
+    public func available() async throws -> BroadcastConsumer? {
+        (try await ffi.available()).map(BroadcastConsumer.init)
     }
 
     /// Cancel all current and future `available()` calls.

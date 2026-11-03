@@ -67,7 +67,7 @@ for event, err := range announced.All(ctx) {
         log.Fatal(err)
     }
     // A path stays present across publisher restarts: hold client.Follow(path, nil) to be
-    // handed each new run.
+    // handed each new run, with Available returning nil while the path is offline.
     present, ok := event.(moq.AnnounceEventPresent)
     if !ok {
         continue // AnnounceEventAbsent

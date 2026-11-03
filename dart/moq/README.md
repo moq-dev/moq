@@ -11,7 +11,8 @@ final announced = connection.announced(
 );
 await for (final event in announced.updates()) {
   // The listing reports each path once while it stays present, even as its
-  // publisher restarts; `connection.follow(path)` hands out each new run.
+  // publisher restarts; `connection.follow(path)` hands out each new run, or
+  // null once it goes offline.
   switch (event) {
     case AnnounceEventPresent(:final announce):
       // Prefix stays origin-relative; captures reports wildcard matches.

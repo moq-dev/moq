@@ -764,10 +764,10 @@ class SmokeTest {
                 publication.announce(AnnounceRoute())
                 val present = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertTrue(present.announce.route.instance.isNotEmpty())
-                following.available().close()
+                assertNotNull(following.available()).close()
 
                 publication.announce(AnnounceRoute(instance = "camera", epoch = 1uL))
-                following.available().close()
+                assertNotNull(following.available()).close()
 
                 // The takeover was not listed, so the next event is the path going absent.
                 publication.unannounce()
@@ -777,6 +777,24 @@ class SmokeTest {
                 assertFailsWith<MoqException.InvalidInstance> {
                     publication.announce(AnnounceRoute(instance = ""))
                 }
+            }
+            following.cancel()
+        }
+    }
+
+    @Test
+    fun `a follower reports the path going offline and the next broadcast`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            val following = origin.consume().follow("offline", null)
+            origin.createBroadcast("offline").use { publication ->
+                publication.announce(AnnounceRoute())
+                assertNotNull(following.available()).close()
+
+                publication.unannounce()
+                assertNull(following.available())
+
+                publication.announce(AnnounceRoute())
+                assertNotNull(following.available()).close()
             }
             following.cancel()
         }

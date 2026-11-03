@@ -83,7 +83,9 @@ if (moq_publication_announce((uint32_t)publication, &route) < 0)
 A route carries only a cost and the stream's instance; relays add the hops. Each
 publication mints a fresh instance and keeps it across re-announcing, so a restarted
 publisher is a new stream that `moq_origin_follow` hands viewers instead of a stalled
-broadcast; the path stays `MOQ_ANNOUNCE_KIND_PRESENT` throughout. Set `instance` only for a publisher that continues its group sequences
+broadcast; the path stays `MOQ_ANNOUNCE_KIND_PRESENT` throughout. The follow callback
+receives `MOQ_FOLLOW_OFFLINE` once the path goes offline, which is positive but never a
+handle. Set `instance` only for a publisher that continues its group sequences
 across restarts, and raise `epoch` on each: readers stitch every route of one instance
 together, so restarting the sequences under an old instance splices unrelated groups into
 their tracks.

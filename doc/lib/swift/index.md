@@ -55,7 +55,7 @@ let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
     // A path stays present across publisher restarts: hold follow(path:) to be handed each
-    // new run.
+    // new run, or nil once it goes offline.
     guard case .present(let announcement) = event else { continue }
     // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
     print(announcement.captures)

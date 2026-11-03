@@ -232,8 +232,9 @@ final class Moq {
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next instance serving it, such as a restarted publisher. Pass an
-  /// [instance] to follow only that stream.
+  /// next instance serving it, such as a restarted publisher, or null once the
+  /// path goes offline. Pass an [instance] to follow only that stream; another
+  /// one taking over also resolves null.
   Following follow(String path, {String? instance}) =>
       session.consume().follow(path: path, instance: instance);
 

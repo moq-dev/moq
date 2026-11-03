@@ -126,7 +126,9 @@ out nothing. Start on each broadcast, drop all decoder and buffer state when the
 next one arrives, and wait while the path is offline. Rust uses
 `consumer.follow(path, None)`, whose `available()` returns `None` once the path
 goes offline; JavaScript `origin.follow(path)`, whose `active` is undefined
-between instances; and the moq-ffi bindings `follow(path)` with `available()`.
+between instances; the moq-ffi bindings `follow(path)`, whose `available()`
+returns null once the path goes offline; and C `moq_origin_follow`, whose
+callback receives `MOQ_FOLLOW_OFFLINE`.
 An announcement listing (`announced()`) only reports a path becoming present or
 absent: an instance change keeps it present, so a reader that needs one holds a
 follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, and

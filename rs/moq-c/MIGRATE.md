@@ -9,6 +9,8 @@ How to update your code for each breaking change, newest first.
 `moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.
 Another instance taking a path over keeps it present, and a route's cost changing is not reported.
 Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
+
+`moq_origin_follow`'s callback also receives `MOQ_FOLLOW_OFFLINE` (`INT32_MAX`) once the path goes offline, or, for a follow pinned to an instance, once another instance takes it over. It is positive and not terminal, and no handle ever takes that value: check for it before treating a positive code as a broadcast handle.
 Recompile callers against the regenerated `moq.h`.
 
 ### JSON window edits take an optional timestamp

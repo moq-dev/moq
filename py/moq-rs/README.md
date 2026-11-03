@@ -261,7 +261,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent` or `AnnounceEventAbsent`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
-  - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then each stream that takes over; an `instance` follows only that stream)
+  - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then returns each stream that takes over, or `None` once the path goes offline; an `instance` follows only that stream)
   - `.request(path, instance=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one stream, or raises once synced without a route; an `instance` refuses any other stream)
 
 ### Types

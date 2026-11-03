@@ -313,7 +313,9 @@ int main()
 
 	// Subscriber: resolve the announced broadcast and subscribe to its track.
 	auto announced = ok(session->consume()->follow("probe", std::nullopt), "follow");
+	// The first available() is never offline.
 	auto remote = ok(announced->available().get(), "available");
+	CHECK(remote);
 	auto consumer = ok(remote->subscribe_track("data", std::nullopt).get(), "subscribe_track");
 
 	// Cancel a read that has nothing to deliver yet.

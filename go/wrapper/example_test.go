@@ -39,6 +39,42 @@ func ExampleClient_Announced() {
 	}
 }
 
+// Read a broadcast across publisher restarts, noticing when it goes offline.
+func ExampleClient_Follow() {
+	ctx := context.Background()
+
+	client, err := moq.Dial(ctx, "https://relay.example.com", moq.ClientConfig{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
+
+	following, err := client.Follow("demos/bbb", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer following.Cancel()
+
+	for {
+		broadcast, err := following.Available(ctx)
+		if err != nil {
+			if moq.IsShutdown(err) {
+				break
+			}
+			log.Fatal(err)
+		}
+		if broadcast == nil {
+			fmt.Println("offline")
+			continue
+		}
+		catalog, err := moqmedia.CatalogSnapshot(ctx, broadcast)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("online: %+v\n", catalog)
+	}
+}
+
 // Publish a media track to a relay.
 func ExampleClient_CreateBroadcast() {
 	ctx := context.Background()

@@ -201,9 +201,9 @@ func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, 
 	return &AnnounceConsumer{inner: inner}, nil
 }
 
-// Follow follows an exact path, resolving each stream that serves it. A non-nil
-// instance follows only that stream: another one taking over is never handed out,
-// and the stream is handed out again if it returns after an end.
+// Follow follows an exact path, resolving each stream that serves it and reporting
+// when it goes offline. A non-nil instance follows only that stream: another one
+// taking over reads as offline, and the stream is handed out again if it returns.
 func (o *OriginConsumer) Follow(path string, instance *string) (*Following, error) {
 	inner, err := o.inner.Follow(path, instance)
 	if err != nil {
@@ -256,15 +256,22 @@ type Following struct {
 	inner *ffi.MoqFollowing
 }
 
-// Available blocks until the next publisher instance serves the broadcast and
-// returns its consumer. The first call resolves the instance serving the path once
-// one is announced. Each later call waits for another to take over (a restarted
-// publisher, or a replacement session) or for the broadcast to return after it went
-// offline. Drop what was read from the previous instance then: its tracks end when
-// its session does.
+// Available blocks until the publisher instance serving the broadcast changes and
+// returns its consumer, or (nil, nil) once the path goes offline. The first call
+// resolves the instance serving the path once one is announced, and is never nil.
+// Each later call returns another instance taking over (a restarted publisher, or a
+// replacement session), nil once the path goes offline (or, when following a pinned
+// instance, once another instance takes it over), then whatever serves it next. Drop
+// what was read from the previous instance then: its tracks end when its route does.
 func (a *Following) Available(ctx context.Context) (*BroadcastConsumer, error) {
-	inner, err := bridge.CallHandle(ctx, a.inner.Cancel, a.inner.Available)
-	if err != nil {
+	inner, err := bridge.CallHandle(ctx, a.inner.Cancel, func(ctx context.Context) (*ffi.MoqBroadcastConsumer, error) {
+		res, err := a.inner.Available(ctx)
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
+	})
+	if err != nil || inner == nil {
 		return nil, err
 	}
 	return &BroadcastConsumer{inner: inner}, nil

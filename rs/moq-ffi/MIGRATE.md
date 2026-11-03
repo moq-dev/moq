@@ -10,6 +10,8 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 `MoqAnnounceEvent` is `Present { announce }` or `Absent { announce }`. `Start`, `Update`, `End`, `Restart` and `Takeover` (with its `predecessor`) are gone: another instance taking a path over keeps it present, and a route's cost changing is not reported.
 Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Where you requested the path again on `Restart`, hold `MoqOriginConsumer::follow(path)` and await `available()` for each new instance.
 
+`MoqFollowing::available()` returns `Option<Arc<MoqBroadcastConsumer>>`: `None` once the path goes offline (or, for a follow pinned to an `instance`, once another instance takes it over), then the next broadcast when something serves the path again. The first call never returns `None`. Handle `None` as offline: drop what you read from the last broadcast and call `available()` again.
+
 ### `MoqTransport::Iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 moq-tokio no longer accepts iroh sessions, so `MoqTransport` loses its `Iroh` variant and the later variants renumber; Go loses `TransportIroh`.

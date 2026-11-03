@@ -12,6 +12,8 @@ The hand-written crate never published as moq-c: a libmoq 0.6 user applies these
 Another instance taking a path over keeps it present, and a route's cost changing is not reported.
 Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
 
+`moq_origin_follow`'s callback also receives `MOQ_FOLLOW_OFFLINE` (`INT32_MAX`) once the path goes offline, or, for a follow pinned to an instance, once another instance takes it over. It is positive and not terminal, and no handle ever takes that value: check for it before treating a positive code as a broadcast handle.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
