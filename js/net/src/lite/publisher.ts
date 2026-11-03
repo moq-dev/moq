@@ -37,8 +37,9 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
+import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
-import { type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
@@ -81,6 +82,7 @@ import {
 	hasSkip,
 	hasSynced,
 	hasTrackStream,
+	keepsSubscribeOpen,
 	resolvesStart,
 	Version,
 	waitsForSubscriberFin,
@@ -115,21 +117,25 @@ interface Stamp {
 	/** The wire timescale TRACK_INFO declared (see `wireTimescale`). */
 	timescale: Timescale;
 	/**
-	 * Whether each frame's own timestamp goes out. Lite-05/06 cannot encode an untimed track, so
-	 * an untimed one carries its send time instead.
+	 * The timed track whose frames' own timestamps go out, at its timescale, which the wire's
+	 * equals. Lite-05/06 cannot encode an untimed track, so an untimed one carries its send time
+	 * instead.
 	 */
-	timed: boolean;
+	timed?: Pick<track.Info, "timescale">;
 }
 
-/** How `version` stamps a track with `timescale`, or undefined when it carries none. */
-function stamping(version: Version, timescale: Timescale | undefined): Stamp | undefined {
+/** How `version` stamps a track with `info`, or undefined when it carries no timestamps. */
+function stamping(version: Version, info: Pick<track.Info, "timescale">): Stamp | undefined {
+	const timescale = info.timescale ?? undefined;
 	const wire = wireTimescale(version, timescale);
-	return wire === undefined ? undefined : { timescale: wire, timed: timescale !== undefined };
+	if (wire === undefined) return undefined;
+	return timescale === undefined ? { timescale: wire } : { timescale: wire, timed: info };
 }
 
 /** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out untimed. */
 function wireTime(timestamp: Timestamp | undefined, stamp: Stamp): number {
-	return Math.round(((stamp.timed ? timestamp : undefined) ?? Timestamp.now()).as(stamp.timescale));
+	const own = stamp.timed && rescale(stamp.timed, timestamp);
+	return own ? own.value : floorAt(Timestamp.now(), stamp.timescale);
 }
 
 /**
@@ -314,6 +320,11 @@ class SubscriptionControls {
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
 	}
 
+	/** Whether {@link take} has a control to answer with now. */
+	pending(): boolean {
+		return this.#update !== undefined || this.#end !== undefined;
+	}
+
 	/** Calls `fn` once {@link take} may answer differently. */
 	changed(fn: () => void): Dispose {
 		return this.#changed.changed(fn);
@@ -404,6 +415,16 @@ function waitForSubscription(
 		};
 		dispose.push(controls.changed(wake), hooks.groupChanged(subscriber, wake));
 		dispose.push(drops.changed(wake));
+	});
+}
+
+/** Resolves once the subscriber's next control (an update, its FIN, or a failure) arrives. */
+function waitForControl(controls: SubscriptionControls): Promise<void> {
+	return new Promise((resolve) => {
+		const dispose = controls.changed(() => {
+			dispose();
+			resolve();
+		});
 	});
 }
 
@@ -1005,7 +1026,7 @@ export class Publisher {
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
 				// they always agree.
-				stamp = stamping(this.version, info.timescale ?? undefined);
+				stamp = stamping(this.version, info);
 				compress = hasCompression(this.version) && !!info.compress;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
@@ -1181,7 +1202,7 @@ export class Publisher {
 					return;
 				}
 				await this.#runFetchGroup(group, stream.writer, {
-					stamp: stamping(this.version, info.timescale),
+					stamp: stamping(this.version, info),
 					compress: info.compress,
 					start: msg.startFrame,
 					end: msg.endFrame,
@@ -1361,11 +1382,15 @@ export class Publisher {
 					switch (control.kind) {
 						case "done":
 							// The subscriber left. Its queued groups are pointless now, which
-							// the finally below acts on since `finished` stays false.
-							return false;
+							// the finally below acts on since `finished` stays false. On lite-07 it
+							// also FINs once it read a finished track's tail, which ends the
+							// subscription as finished.
+							return finished;
 						case "error":
 							throw control.error;
 						case "update": {
+							// An update may reach the finished track's history, so it is served again.
+							finished = false;
 							const update = control.update;
 							terms = update.terms;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
@@ -1480,21 +1505,29 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						// Lite-07 ends a subscription whose every range has an end once it accounted for
-						// each group in them, without SUBSCRIBE_END: the FIN ends the subscription, not the
-						// track. What lies below SUBSCRIBE_START was accounted for by it.
-						if (hasRanges(this.version) && served && startSequence !== undefined) {
+						// Lite-07 keeps a covered subscription open for an update. One none of whose groups
+						// can be served has no group to resolve its start: answer it now, as the Rust
+						// publisher does, and the loop then names what it held back.
+						if (keepsSubscribeOpen(this.version) && !startSent) {
 							const end = hooks.servingEnd(track);
-							const covered =
-								end !== undefined &&
-								hooks
-									.servingRuns(track, startSequence, end)
-									.every((run) => runGaps(served, run.start, run.end).length === 0);
-							if (covered) {
-								if (!(await drained())) return false;
-								if (pendingDrops.length > 0) continue;
-								finished = true;
-								return true;
+							const runs = end === undefined ? [] : hooks.servingRuns(track, 0n, end);
+							const given: Run[] = [];
+							for (const range of skipped) insertRun(given, range.start, range.end);
+							if (
+								runs.length > 0 &&
+								runs.every((run) => runGaps(given, run.start, run.end).length === 0)
+							) {
+								startSent = true;
+								startSequence = runs[0].start;
+								const start = new SubscribeStart(
+									rangeStarts(this.version, track, startSequence),
+									largest,
+								);
+								if (
+									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
+								)
+									return false;
+								continue;
 							}
 						}
 						await waitForSubscription(controls, track, drops);
@@ -1516,6 +1549,17 @@ export class Publisher {
 							(bounds.endGroup === undefined || bounds.endGroup + 1n >= boundary())
 						)
 							throw endError;
+						// Lite-07 sends no FIN to say nothing was served, so a track that ended before
+						// any group resolved the start still says where delivery starts; the loop then
+						// names what it held back, and the drops below account for the rest.
+						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
+							startSent = true;
+							startSequence = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
+							const start = new SubscribeStart(rangeStarts(this.version, track, startSequence), largest);
+							if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version))))
+								return false;
+							continue;
+						}
 						// Name every sequence from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startSequence !== undefined) {
@@ -1533,8 +1577,25 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						if (!(await drained())) return false;
+						if (!(await drained())) {
+							// A lite-07 subscriber FINs once it read the finished track's tail, or once
+							// it wants nothing more. Either way the reply FIN goes out now and the groups
+							// still waiting for a slot are cancelled, but an opened stream may be a final
+							// group whose FIN is still being acknowledged, so a draining close still
+							// waits for it; a reader that wants none of it resets it.
+							if (keepsSubscribeOpen(this.version))
+								void this.owe(Promise.allSettled(groups).then(() => undefined));
+							return false;
+						}
 						if (pendingDrops.length > 0) continue;
+						// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: an update may still ask
+						// for the ended track's history, and the subscriber FINs once it wants nothing
+						// more.
+						if (keepsSubscribeOpen(this.version)) {
+							finished = true;
+							if (!controls.pending()) await waitForControl(controls);
+							continue;
+						}
 						finished = true;
 						return true;
 					}

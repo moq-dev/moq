@@ -485,7 +485,7 @@ fn encode_frame_bounds(
 /// Publisher's acknowledgement on the Subscribe Stream for drafts 01-04.
 ///
 /// Lite05+ replaced this with implicit acceptance plus
-/// [`SubscribeStart`]/[`SubscribeEnd`]; the immutable timescale/cache moved
+/// [`SubscribeStart`]/[`SubscribeFinish`]; the immutable timescale/cache moved
 /// to [`super::TrackInfo`].
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {
@@ -617,18 +617,21 @@ impl<'a> Message<'a> for SubscribeStart {
 	}
 }
 
-/// Signals the exclusive end of a Lite05+ subscription.
+/// SUBSCRIBE_FINISH (SUBSCRIBE_END before lite-07): the exclusive end of a Lite05+
+/// subscription's track.
 ///
-/// No group at or after `group` will be produced. `0` means the track ended
+/// No group at or after `group` will be produced. Before lite-07 the publisher FINs the
+/// Subscribe Stream after it; lite-07 leaves the stream open for updates, so the
+/// subscriber FINs once it wants nothing more. `0` means the track ended
 /// before producing any groups.
 #[derive(Clone, Debug)]
-pub struct SubscribeEnd {
+pub struct SubscribeFinish {
 	pub group: u64,
 	/// The error the track ended with, if it did not end cleanly. Lite-07 and later.
 	pub error: Option<StreamError>,
 }
 
-impl<'a> Message<'a> for SubscribeEnd {
+impl<'a> Message<'a> for SubscribeFinish {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
@@ -902,14 +905,15 @@ impl<'a> Message<'a> for SubscribeSkip {
 ///
 /// The discriminator is version-dependent:
 /// - Lite03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
-/// - Lite05+: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
+/// - Lite05+: `0x0` SUBSCRIBE_START (SUBSCRIBE_OK on lite-07), `0x1` SUBSCRIBE_FINISH
+///   (SUBSCRIBE_END before lite-07), `0x2` SUBSCRIBE_DROP
 ///   (SUBSCRIBE_OK was removed; acceptance is implicit).
 /// - Lite07+: also `0x3` SUBSCRIBE_SKIP.
 #[derive(Clone, Debug)]
 pub enum SubscribeResponse {
 	Ok(SubscribeOk),
 	Start(SubscribeStart),
-	End(SubscribeEnd),
+	Finish(SubscribeFinish),
 	Drop(SubscribeDrop),
 	Skip(SubscribeSkip),
 }
@@ -940,7 +944,7 @@ impl Encode<Version> for SubscribeResponse {
 			// Lite05+: SUBSCRIBE_OK is gone; START/END/DROP carry the resolved range.
 			_ => match self {
 				Self::Start(start) => encode_typed(w, 0, start, version)?,
-				Self::End(end) => encode_typed(w, 1, end, version)?,
+				Self::Finish(end) => encode_typed(w, 1, end, version)?,
 				Self::Drop(drop) => encode_typed(w, 2, drop, version)?,
 				Self::Skip(skip) => encode_typed(w, 3, skip, version)?,
 				Self::Ok(_) => return Err(EncodeError::Version),
@@ -967,7 +971,7 @@ impl<'a> Decode<'a, Version> for SubscribeResponse {
 				let typ = buf.varint()?;
 				match typ {
 					0 => Ok(Self::Start(SubscribeStart::decode(buf, version)?)),
-					1 => Ok(Self::End(SubscribeEnd::decode(buf, version)?)),
+					1 => Ok(Self::Finish(SubscribeFinish::decode(buf, version)?)),
 					2 => Ok(Self::Drop(SubscribeDrop::decode(buf, version)?)),
 					3 if version.has_skip() => Ok(Self::Skip(SubscribeSkip::decode(buf, version)?)),
 					_ => Err(DecodeError::InvalidMessage(typ)),
@@ -1078,7 +1082,7 @@ mod test {
 
 	#[test]
 	fn subscribe_end_roundtrips_on_lite05() {
-		let resp = SubscribeResponse::End(SubscribeEnd { group: 7, error: None });
+		let resp = SubscribeResponse::Finish(SubscribeFinish { group: 7, error: None });
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
@@ -1086,7 +1090,7 @@ mod test {
 		assert_eq!(buf, [1, 1, 7]);
 		let mut slice = buf.as_slice();
 		match crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
-			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
+			SubscribeResponse::Finish(end) => assert_eq!(end.group, 7),
 			other => panic!("expected End, got {other:?}"),
 		}
 	}
@@ -1094,7 +1098,7 @@ mod test {
 	#[test]
 	fn subscribe_end_carries_its_error_on_lite07() {
 		let encode = |error: Option<StreamError>| {
-			let resp = SubscribeResponse::End(SubscribeEnd { group: 7, error });
+			let resp = SubscribeResponse::Finish(SubscribeFinish { group: 7, error });
 			let mut buf = Vec::new();
 			resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 				.unwrap();
@@ -1105,7 +1109,7 @@ mod test {
 			match crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| SubscribeResponse::decode(r, v))
 				.unwrap()
 			{
-				SubscribeResponse::End(end) => (end.group, end.error),
+				SubscribeResponse::Finish(end) => (end.group, end.error),
 				other => panic!("expected End, got {other:?}"),
 			}
 		};
@@ -1118,7 +1122,7 @@ mod test {
 		assert_eq!(decode(&errored), (7, Some(StreamError::App(7))));
 
 		// An older version has nowhere to carry it.
-		let resp = SubscribeResponse::End(SubscribeEnd {
+		let resp = SubscribeResponse::Finish(SubscribeFinish {
 			group: 7,
 			error: Some(StreamError::App(7)),
 		});

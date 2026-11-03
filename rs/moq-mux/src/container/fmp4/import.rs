@@ -351,10 +351,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// `default_base_moof`. Forward gaps and interleaved tracks are supported.
 	///
 	/// Media samples stream into their frames as bytes arrive. What must be held whole is
-	/// bounded: a `moov` or `moof` body, or a text sample, larger than
-	/// [`MAX_HELD_BYTES`](super::MAX_HELD_BYTES), or a `moof` declaring more than
-	/// [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples, is refused before it is
-	/// held.
+	/// bounded: a `moov` or `moof` body larger than
+	/// [`MAX_METADATA_BYTES`](super::MAX_METADATA_BYTES), or a text sample larger than
+	/// [`MAX_HELD_BYTES`](super::MAX_HELD_BYTES), is refused before it is held. A `moof` declaring
+	/// more than [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples is refused before
+	/// they are planned, and a `moov` declaring more than [`MAX_TRACKS`](super::MAX_TRACKS)
+	/// tracks before any is created.
 	///
 	/// A decode error is terminal: later decodes, cuts, seeks and discontinuities return the same
 	/// error without reading input or changing the tracks.
@@ -490,7 +492,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::DuplicateMoof.into());
 		}
 		let size = size.ok_or(mp4_atom::Error::InvalidSize)?;
-		if size > super::MAX_HELD_BYTES {
+		if size > super::MAX_METADATA_BYTES {
 			return Err(Error::MetadataTooLarge { kind, size }.into());
 		}
 		Ok(Body::Metadata {
@@ -511,12 +513,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let moof = Moof::decode_body(&mut body.as_ref())?;
 		// Planning resolves every sample, and a run without per-sample fields declares its count
 		// in four bytes, so the byte bound alone does not limit what planning would hold.
-		let samples: u64 = moof
-			.traf
-			.iter()
-			.flat_map(|traf| &traf.trun)
-			.map(|trun| trun.samples.len() as u64)
-			.sum();
+		let samples: u64 = moof.traf.iter().map(sample::count).sum();
 		if samples > super::MAX_FRAGMENT_SAMPLES {
 			return Err(Error::TooManySamples(samples).into());
 		}
@@ -529,6 +526,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// A second moov would re-declare a track set the catalog already advertises.
 		if self.moov.is_some() {
 			return Err(Error::DuplicateMoov.into());
+		}
+		if moov.trak.len() > super::MAX_TRACKS {
+			return Err(Error::TooManyTracks(moov.trak.len()).into());
 		}
 		// Only `finish()` releases the reservation before a moov, since a fragment needs one.
 		let reserved = self.initial_reservation.clone().ok_or(Error::MoovAfterFinish)?;
@@ -1101,11 +1101,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		let mut resolver = sample::Resolver::new(self.moof_span, len.unwrap_or(usize::MAX));
 		resolver.streaming();
+		// `end_metadata` bounded the count, so the plan is sized once instead of growing.
+		let samples = moof.traf.iter().map(sample::count).sum::<u64>() as usize;
 		let mut mdat = Mdat {
 			remaining: len,
 			position: 0,
 			tracks: Vec::new(),
-			chunks: std::collections::VecDeque::new(),
+			text: Vec::new(),
+			staged: BytesMut::new(),
+			chunks: std::collections::VecDeque::with_capacity(samples),
 		};
 		// Validate every track before opening any payload writer. Otherwise a later traf's
 		// backwards run or reused bytes could fail after earlier tracks published data.
@@ -1113,15 +1117,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for traf in &moof.traf {
 			let id = traf.tfhd.track_id;
 			if let Some(track) = self.text.get_mut(&id) {
-				for sample in track.prepare(traf, &mut resolver, &mut self.timebase)? {
+				let samples = track.prepare(traf, &mut resolver, &mut self.timebase)?;
+				mdat.text.reserve(samples.len());
+				for sample in samples {
 					mdat.chunks.push_back(Chunk {
 						range: sample.range.clone(),
-						output: ChunkOutput::Text {
-							id,
-							sample,
-							data: BytesMut::new(),
-						},
+						output: ChunkOutput::Text(mdat.text.len()),
 					});
+					mdat.text.push((id, sample));
 				}
 				anchored = true;
 				continue;
@@ -1190,17 +1193,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let count = (chunk.range.end - mdat.position).min(data.len());
 			let complete = mdat.position + count == chunk.range.end;
 			match &mut chunk.output {
-				ChunkOutput::Text {
-					id,
-					sample,
-					data: buffer,
-				} => {
-					buffer.extend_from_slice(&data[..count]);
+				ChunkOutput::Text(index) => {
+					mdat.staged.extend_from_slice(&data[..count]);
 					if complete {
+						let (id, sample) = &mdat.text[*index];
+						let staged = std::mem::take(&mut mdat.staged);
 						self.text
 							.get_mut(id)
 							.expect("planned text track")
-							.write(sample, buffer)?;
+							.write(sample, &staged)?;
 					}
 				}
 				ChunkOutput::Media {
@@ -1284,6 +1285,11 @@ struct Mdat {
 	remaining: Option<usize>,
 	position: usize,
 	tracks: Vec<PendingTrack>,
+	/// Each planned text sample and the track it belongs to.
+	text: Vec<(u32, super::text::Sample)>,
+	/// The bytes of the text sample arriving now, which is rewritten once whole.
+	staged: BytesMut,
+	/// Every planned sample in `mdat` order, kept small since a fragment may plan many.
 	chunks: std::collections::VecDeque<Chunk>,
 }
 
@@ -1335,15 +1341,10 @@ struct Chunk {
 }
 
 enum ChunkOutput {
-	Media {
-		track: usize,
-		sample: usize,
-	},
-	Text {
-		id: u32,
-		sample: super::text::Sample,
-		data: BytesMut,
-	},
+	/// A sample of `Mdat::tracks[track]`.
+	Media { track: usize, sample: usize },
+	/// The sample at this index of `Mdat::text`.
+	Text(usize),
 }
 
 /// Where a fragment lands on its track.
@@ -1391,7 +1392,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 
 		let mut earliest = None;
 		let mut end = None;
-		let mut samples = Vec::new();
+		let mut samples = Vec::with_capacity(sample::count(traf) as usize);
 		let mut dropped = false;
 		for resolved in resolver.resolve(traf, self.defaults)? {
 			let sample::Resolved { sample, cts, range } = resolved?;
@@ -2027,7 +2028,7 @@ mod tests {
 	#[test]
 	fn oversized_metadata_is_refused_at_its_header() {
 		for kind in [b"moov", b"moof"] {
-			for size in [super::super::MAX_HELD_BYTES + 1, 1usize << 62] {
+			for size in [super::super::MAX_METADATA_BYTES + 1, 1usize << 62] {
 				let mut import = importer();
 				let header = box_header(kind, Some(size));
 				let (last, prefix) = header.split_last().unwrap();
@@ -2050,15 +2051,15 @@ mod tests {
 	fn metadata_at_the_bound_holds_only_what_arrived() {
 		let mut import = importer();
 		import
-			.decode(&box_header(b"moof", Some(super::super::MAX_HELD_BYTES)))
+			.decode(&box_header(b"moof", Some(super::super::MAX_METADATA_BYTES)))
 			.unwrap();
 		import.decode(&[0xA5; 1024]).unwrap();
 		assert!(matches!(import.body, Some(Body::Metadata { .. })));
 		assert_eq!(import.buffer.len(), 1024);
 	}
 
-	// A moof whose runs carry no per-sample fields, each declaring `count` samples in a few bytes.
-	fn inherited_moof(id: u32, counts: &[u32]) -> Vec<u8> {
+	// A moof of one traf on track `id` carrying `trun`, whose samples are a byte and 1024 ticks each.
+	fn runs_moof(id: u32, trun: Vec<mp4_atom::Trun>) -> Vec<u8> {
 		let moof = Moof {
 			mfhd: Default::default(),
 			traf: vec![mp4_atom::Traf {
@@ -2071,22 +2072,28 @@ mod tests {
 				tfdt: Some(mp4_atom::Tfdt {
 					base_media_decode_time: 0,
 				}),
-				trun: counts
-					.iter()
-					.map(|&count| mp4_atom::Trun {
-						data_offset: None,
-						samples: mp4_atom::TrunSamples::Inherited {
-							count,
-							first_flags: None,
-						},
-					})
-					.collect(),
+				trun,
 				..Default::default()
 			}],
 		};
 		let mut data = Vec::new();
 		moof.encode(&mut data).unwrap();
 		data
+	}
+
+	// A moof whose runs carry no per-sample fields, each declaring `count` samples in a few bytes.
+	fn inherited_moof(id: u32, counts: &[u32]) -> Vec<u8> {
+		let trun = counts
+			.iter()
+			.map(|&count| mp4_atom::Trun {
+				data_offset: None,
+				samples: mp4_atom::TrunSamples::Inherited {
+					count,
+					first_flags: None,
+				},
+			})
+			.collect();
+		runs_moof(id, trun)
 	}
 
 	#[test]
@@ -2116,6 +2123,150 @@ mod tests {
 		let (mut import, id, _) = initialized(false);
 		import.decode(&inherited_moof(id, &[half, half])).unwrap();
 		assert!(import.moof.is_some());
+	}
+
+	/// A fragment within the bounds plans within [`MAX_HELD_BYTES`](super::super::MAX_HELD_BYTES)
+	/// however its runs declare their samples, and a `moof` at the byte bound that declares too
+	/// many parses within it before it is refused.
+	#[test]
+	fn fragment_plans_within_the_held_bound() {
+		use super::super::{MAX_FRAGMENT_SAMPLES, MAX_HELD_BYTES, MAX_METADATA_BYTES};
+		let entries = |count: usize, entry: mp4_atom::TrunEntry| {
+			vec![mp4_atom::Trun {
+				data_offset: None,
+				samples: vec![entry; count].into(),
+			}]
+		};
+		// Parsing expands a 4-byte entry most; all four fields are the most a real run carries.
+		let small = mp4_atom::TrunEntry {
+			size: Some(1),
+			..Default::default()
+		};
+		let full = mp4_atom::TrunEntry {
+			duration: Some(1024),
+			size: Some(1),
+			flags: Some(0),
+			cts: Some(0),
+		};
+		// Room for the boxes around the runs.
+		let room = MAX_METADATA_BYTES - 1024;
+		let (_, id, _) = initialized(false);
+		// One sample per run, each a byte past the last, so no two samples' bytes are adjacent.
+		let gapped = |start: usize| {
+			(0..room / 20)
+				.map(|index| mp4_atom::Trun {
+					data_offset: Some((start + 2 * index) as i32),
+					samples: mp4_atom::TrunSamples::Inherited {
+						count: 1,
+						first_flags: None,
+					},
+				})
+				.collect()
+		};
+		let start = runs_moof(id, gapped(0)).len() + 8;
+		let inputs = [
+			(
+				"field-less runs",
+				inherited_moof(id, &[MAX_FRAGMENT_SAMPLES as u32]),
+				None,
+			),
+			("full entries", runs_moof(id, entries(room / 16, full)), None),
+			(
+				"4-byte entries",
+				runs_moof(id, entries(room / 4, small)),
+				Some(room / 4),
+			),
+			("one-sample runs", runs_moof(id, gapped(start)), None),
+		];
+		for passthrough in [false, true] {
+			for (name, moof, refused) in &inputs {
+				let (mut import, _, _) = initialized(passthrough);
+				let mut data = moof.clone();
+				assert!(data.len() <= MAX_METADATA_BYTES + 8, "{name}: {} bytes", data.len());
+				data.extend_from_slice(&box_header(b"mdat", None));
+				let (result, usage) = crate::allocation::measure(|| import.decode(&data));
+				match refused {
+					None => result.unwrap(),
+					Some(count) => assert!(
+						matches!(result, Err(crate::Error::Cmaf(Error::TooManySamples(refused))) if refused == *count as u64),
+						"{name}: {result:?}"
+					),
+				}
+				assert!(
+					usage.peak <= MAX_HELD_BYTES,
+					"{name}, passthrough {passthrough}: held {} bytes",
+					usage.peak
+				);
+			}
+		}
+	}
+
+	// A moov of bbb.mp4's audio track, repeated `count` times under fresh ids.
+	fn tracks_moov(count: usize) -> Vec<u8> {
+		use mp4_atom::Decode;
+		let mut data = include_bytes!("test_data/bbb.mp4").as_slice();
+		mp4_atom::Ftyp::decode(&mut data).unwrap();
+		let mut moov = Moov::decode(&mut data).unwrap();
+		let audio = moov
+			.trak
+			.iter()
+			.find(|trak| trak.mdia.hdlr.handler.as_ref() == b"soun")
+			.unwrap()
+			.clone();
+		moov.mvex = None;
+		moov.trak = (1..=count as u32)
+			.map(|id| {
+				let mut trak = audio.clone();
+				trak.tkhd.track_id = id;
+				trak
+			})
+			.collect();
+		let mut data = Vec::new();
+		moov.encode(&mut data).unwrap();
+		data
+	}
+
+	/// Each track a moov declares costs the same, whatever came before it, and a moov declaring
+	/// more than [`MAX_TRACKS`](super::super::MAX_TRACKS) creates none, even at the byte bound.
+	#[test]
+	fn moov_tracks_are_bounded() {
+		use super::super::{MAX_HELD_BYTES, MAX_METADATA_BYTES, MAX_TRACKS};
+		let decode = |count: usize| {
+			let mut import = importer();
+			let data = tracks_moov(count);
+			let (result, usage) = crate::allocation::measure(|| import.decode(&data));
+			(import, data.len(), result, usage)
+		};
+
+		let (import, _, result, half) = decode(MAX_TRACKS / 2);
+		result.unwrap();
+		assert_eq!(import.tracks.len(), MAX_TRACKS / 2);
+		let (import, _, result, all) = decode(MAX_TRACKS);
+		result.unwrap();
+		assert_eq!(import.tracks.len(), MAX_TRACKS);
+		// Twice the tracks; a step revisiting every earlier track would cost about four times.
+		assert!(
+			all.allocated < 3 * half.allocated,
+			"{} tracks allocated {}, {} allocated {}",
+			MAX_TRACKS / 2,
+			half.allocated,
+			MAX_TRACKS,
+			all.allocated
+		);
+		assert!(all.peak <= MAX_HELD_BYTES, "held {} bytes", all.peak);
+
+		let per_track = tracks_moov(2).len() - tracks_moov(1).len();
+		let fill = (MAX_METADATA_BYTES - 1024) / per_track;
+		for count in [MAX_TRACKS + 1, fill] {
+			let (import, len, result, usage) = decode(count);
+			assert!(len <= MAX_METADATA_BYTES + 8);
+			assert!(
+				matches!(result, Err(crate::Error::Cmaf(Error::TooManyTracks(refused))) if refused == count),
+				"{count}: {result:?}"
+			);
+			assert!(import.tracks.is_empty() && import.text.is_empty());
+			assert!(usage.peak <= MAX_HELD_BYTES, "{count} tracks held {} bytes", usage.peak);
+		}
 	}
 
 	#[test]

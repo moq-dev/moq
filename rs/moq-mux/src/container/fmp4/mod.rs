@@ -24,21 +24,39 @@ pub use muxer::*;
 /// A major version bump of `mp4_atom` is a breaking change for moq-mux.
 pub use mp4_atom;
 
-/// The most input [`Import`] holds whole: a `moov` or `moof` body, or one text sample.
+/// The largest text sample [`Import`] holds whole.
 ///
-/// Metadata parses and text rewrites only once their last byte arrives, so a larger declaration
-/// is refused at its header rather than retaining later input (across HLS segments, too) until
-/// it completes. It matches the transport's per-group bound,
-/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES). Real fMP4 metadata is kilobytes. Media
-/// samples stream into their frames and have no such bound.
+/// A text sample is rewritten only once its last byte arrives, so a larger one is refused before
+/// any of it is staged. It matches the transport's per-group bound,
+/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), which the rewritten sample must fit.
+/// Media samples stream into their frames and have no such bound.
 pub const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+
+/// The largest `moov` or `moof` body [`Import`] parses.
+///
+/// Metadata parses only once its last byte arrives, so a larger declaration is refused at its
+/// header rather than retaining later input (across HLS segments, too) until it completes.
+/// Parsing expands a body up to tenfold (a 4-byte `trun` entry becomes a 40-byte
+/// [`TrunEntry`](mp4_atom::TrunEntry)), so this keeps a parse within [`MAX_HELD_BYTES`]. The
+/// exception is a box whose entries cost no input, such as a version 0 `sgpd` in mp4-atom 0.17.0,
+/// which parses past it until mp4-atom bounds the count
+/// ([kixelated/mp4-atom#264](https://github.com/kixelated/mp4-atom/pull/264)). Real fMP4 metadata
+/// is kilobytes.
+pub const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
 
 /// The most samples [`Import`] plans for one `moof`.
 ///
-/// Every sample's byte range is resolved before any of the fragment publishes. A `moof` at
-/// [`MAX_HELD_BYTES`] holds this many 16-byte `trun` entries; a run without per-sample fields
+/// Every sample's byte range is resolved before any of the fragment publishes, at about 200 bytes
+/// a sample, so a fragment at this bound plans within [`MAX_HELD_BYTES`]. A `moof` at
+/// [`MAX_METADATA_BYTES`] holds this many 16-byte `trun` entries; a run without per-sample fields
 /// could otherwise declare billions of samples in a few bytes.
-pub const MAX_FRAGMENT_SAMPLES: u64 = (MAX_HELD_BYTES / 16) as u64;
+pub const MAX_FRAGMENT_SAMPLES: u64 = (MAX_METADATA_BYTES / 16) as u64;
+
+/// The most tracks [`Import`] accepts from one `moov`, refused before any is created.
+///
+/// Each track costs about 16 KiB to parse and set up, and keeps its catalog entry and output
+/// state for as long as the import runs. Real files declare a handful.
+pub const MAX_TRACKS: usize = 256;
 
 #[cfg(test)]
 mod export_test;
@@ -212,8 +230,8 @@ pub enum Error {
 	BackwardsDataOffset,
 
 	/// A `moov` or `moof` must be held whole before it parses, so one declaring more than
-	/// [`MAX_HELD_BYTES`] is refused at its header, before any of its body is buffered.
-	#[error("{kind} declares {size} bytes, more than the {MAX_HELD_BYTES} an importer holds")]
+	/// [`MAX_METADATA_BYTES`] is refused at its header, before any of its body is buffered.
+	#[error("{kind} declares {size} bytes, more than the {MAX_METADATA_BYTES} an importer parses")]
 	MetadataTooLarge {
 		/// The box type.
 		kind: mp4_atom::FourCC,
@@ -231,6 +249,10 @@ pub enum Error {
 	/// count in four bytes, so the byte bound alone does not limit it.
 	#[error("moof declares {0} samples, more than the {MAX_FRAGMENT_SAMPLES} an importer plans")]
 	TooManySamples(u64),
+
+	/// A `moov` declaring more than [`MAX_TRACKS`] tracks is refused before any is created.
+	#[error("moov declares {0} tracks, more than the {MAX_TRACKS} an importer accepts")]
+	TooManyTracks(usize),
 
 	/// Absolute file offsets cannot be resolved in a standalone fragment.
 	#[error("absolute base_data_offset is unsupported; use moof-relative offsets")]
