@@ -110,8 +110,12 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	// An on-time audio rendition shares the broadcast, writing each capture as it happens.
 	const audio = new Estimator();
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();

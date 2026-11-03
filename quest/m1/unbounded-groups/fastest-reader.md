@@ -12,6 +12,14 @@ otherwise refreshes or ends with `Error::Evicted`. A byte stream over MoQ then
 loses nothing to a reader that keeps up, and each hop keeps its own congestion
 control and retransmissions.
 
+The paced hops include qmux sessions (WebSocket, `tcp://`, `tls://`,
+`unix://`, and WebRTC): they lease receive credit natively, so incomplete
+messages are bounded by the session's receive window and the lowest-priority
+holder is evicted when it is stuck, as on native QUIC. The per-session memory
+a peer can make us hold is one deliberate, documented number across native
+QUIC and qmux. The browser and JS keep reading unpaced; their pacing is
+[JS fastest-reader pacing](/quest/m2/js-fastest-reader.md), in m2.
+
 ## Plan
 
 Decided 2026-10-25 (maintainer, mesh planning interview), reopening the
@@ -64,6 +72,26 @@ Decided 2026-10-28 (maintainer, after an audit of the plan):
   (`CloseKind::Evicted`), which could reset the very byte stream pacing keeps
   lossless. Bring the mechanism to the maintainer before coding, and align it
   with the [receive pool](/quest/m2/receive-pool.md).
+- Folded in 2026-11-01 (maintainer, follow-up of
+  [moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328)): the same cap
+  covers streams parked waiting for TRACK_INFO. Group data that a SUBSCRIBE
+  sent alongside TRACK, or a FETCH, leaves unread until TRACK_INFO arrives
+  must not use up the connection receive window, or TRACK_INFO itself can't
+  arrive. TRACK_INFO and other control messages always get connection
+  credit, in Rust and JS. Test it: enough parked groups to fill the
+  connection window, with TRACK_INFO still arriving and the groups then read.
+
+Decided 2026-10-30 (maintainer, in the
+[moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) iteration):
+
+- moq-net caps the receive credit paused groups hold per session at about half
+  the connection window, read live from the transport
+  (`poll::Session::receive_window`). A group that would push the total past
+  the cap keeps reading and shedding instead of pausing. This stands until the
+  [receive pool](/quest/m2/receive-pool.md) folds paused credit into its
+  per-worker budget.
+- The readiness future is `group::Producer::poll_ready` and `async fn ready()`,
+  pending until a reader exists and the 16 MB window has room.
 
 Prior art splits the same way (2026-10-28 survey): Varnish streaming, ATS
 read-while-writer, and WHATWG `tee()` fan out at the writer's pace and buffer
@@ -72,15 +100,121 @@ control pace a single client; Node `pipe()` to several destinations paces the
 slowest. This is `tee()` with a bounded buffer that drops the branch that
 falls off it ([whatwg/streams#1235](https://github.com/whatwg/streams/issues/1235)).
 
-Open, for the implementer to measure and record: the readiness API's shape,
-which is an API decision to bring to the maintainer before coding. qmux transports carry the same rule through their
-own stream credit ([qmux receive lease](/quest/m2/qmux-receive-lease.md)).
+Landed in [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) (Rust,
+session ingest only): readers report the byte end of each frame they take
+(`Pace` in `rs/moq-net/src/model/pace.rs`), and the shared transport reader's
+payload loop (`coding::Reader::poll_read_frame`) waits on
+`group::Producer::poll_paced` before taking more, and admits a frame only once
+its declared size fits the window (`coding::Reader::poll_admit`), so moq-lite
+and moq-transport ingest both pause past the 16 MB window. A reader that took every
+committed frame counts as waiting on the writer, so a frame larger than the
+window never stalls it. A paused stream is not read, so it is watched for a
+reset instead (`poll::RecvStream::poll_reset`, which moq-quic answers through
+moq-tokio and moq-uring without taking bytes). Tests cover one hop on lite-06,
+lite-07-wip, and moq-transport-22: an idle reader holds the relay copy near the
+window and then receives every frame, a slow reader ends `Evicted` while the
+fast one keeps up, a session past its credit cap reads on, and a publisher's
+reset ends a paused relay copy. The same PR landed the credit
+cap (each paused stream reserves its stream window from a per-session budget
+in `rs/moq-net/src/transport/boxed.rs`; moq-quic reports its windows through
+moq-tokio and moq-uring, and a transport that reports none never pauses) and
+the public readiness future.
 
-Tests: a relay chain where a fast reader paces a publisher that writes faster
-than the link, with memory held near the window; a second, slower reader ending
-`Evicted` without slowing the fast one; a track with no readers never blocking
-its publisher; Rust and JS parity. Benchmark the hot path in `group.rs` and
-record any regression.
+Decided 2026-11-02 (maintainer, /quest-grill interview on
+[moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624)):
 
-Docs: the moq-lite concept page's congestion section and the relay cache docs
-change inline.
+- Native only: finish the moq-quic path (tokio, io_uring, and qmux on its
+  mux). Browser parity waits on a real receive-credit contract for
+  WebTransport, since `Reader.closed` watches resets but nothing says how much
+  credit a paused stream holds; guessed window constants would move memory
+  outside flow control. Rejected: a browser read-ahead cap, and dropping the
+  browser from scope.
+- qmux is handled here, absorbing the m2 qmux receive-lease quest: qmux's
+  `RecvStream` leases natively on moq-quic's mux instead of through
+  `poll::Buffered`, evicts by priority, and so closes the 2026-10-27 audit's
+  NET-3 gap (`Buffered` bounded each stream's incomplete message by the largest
+  message, and nothing bounded them in aggregate). Rejected: deferring qmux to
+  that quest, and adding hooks here while keeping leases in m2.
+- The lease floor is one 1 MiB segment for every transport and version: the
+  lite-01/02 `ANNOUNCE_INIT` cap drops from 64 MiB to a segment less its 16
+  bytes of prefixes, so `moq_net::transport::MIN_RECEIVE_WINDOW` is 1 MiB. A
+  legacy origin whose initial set exceeds it fails its announce loudly, on
+  both ends. Rejected: a 4 MiB cap, and keeping 64 MiB with a per-version
+  floor.
+- Window defaults are one per-session number across native QUIC and qmux:
+  clients get a 4 MiB connection and a 1 MiB stream receive window, and qmux
+  takes the same client/peer split as native QUIC. The cluster peer windows
+  (`[limits.peer.quic]`, 640 MiB) and the client `send_window` (16 MiB) are
+  re-derived from measured bandwidth-delay needs, with the maintainer
+  suggesting about 16 MiB for peers. Rejected for clients: 16, 32, or 128 MiB
+  connection windows, and a 4 MiB stream window.
+- Local readiness takes the next frame's `frame::Info`
+  (`group::Producer::poll_ready(waiter, &info)` and `ready(&info)`), reusing
+  ingest's admission semantics, including its whole-frame deadlock exception.
+  Rejected: a bare size on the same methods.
+- Whole-batch fills move to [flights](/quest/m1/unbounded-groups/flights.md),
+  since the failure crosses groups while this mechanism paces one group copy.
+
+The adapter inventory this plan once listed is stale: moq-tokio has no Quinn
+backend, and moq-ffi drives sessions through moq-tokio rather than a
+transport of its own, so neither needs an adapter. Iroh, which returns credit
+as it reads, leaves with its removal
+([moq-dev/moq#7345](https://github.com/moq-dev/moq/pull/7345)); until then its
+ingest never pauses.
+
+Decided 2026-11-02 (maintainer, settling the open items of
+[moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624)):
+
+- Peer windows stay at 16 MiB receive and send in `[limits.peer.quic]`, with
+  the 1 MiB stream window from `[quic]`. Rejected: 32 MiB, and a separate
+  per-stream peer window.
+- The client `send_window` is 4 MiB, matching its receive window. Rejected:
+  keeping 16 MiB.
+- A GROUP stream waiting unread for its TRACK_INFO reserves nothing from the
+  paused budget: it waits at the lowest receive priority, so a full window
+  evicts it before control streams, and TRACK_INFO still gets credit. This
+  replaces the 2026-11-01 wording that the paused cap covers such streams.
+  Rejected: stopping it once the budget is full.
+- Every qmux session a server accepts takes the configured `[quic]` windows,
+  including the relay's own WebSocket listener. Rejected: leaving them at the
+  defaults until admission.
+- Split: this PR lands the windows, the floor, qmux leases, sized readiness,
+  TRACK_INFO priority, and the accept paths, and the rest stays here.
+  Rejected: finishing everything in one PR.
+
+Landed in [moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624):
+sized local readiness; the one-segment floor; 4 MiB, 1 MiB, and 4 MiB client
+receive, stream, and send windows in moq-tokio, moq-uring, and qmux; 16 MiB
+cluster peer windows; native qmux leases with eviction, window reporting, and
+`poll_reset`; qmux sessions starting at the server's `[quic]` windows on every
+accept path and widening to `[limits.peer.quic]` for peers; and a Bun sender
+exhausting a qmux receiver over WebSocket (`just test receive-credit`). At the
+client defaults a session pauses two group streams (half the window, a stream
+window each), and a peer link eight; past that, groups read and shed as
+before pacing. The same PR ranks streams waiting on TRACK_INFO (lite GROUP
+streams and FETCH answers, and ietf data streams waiting on their alias)
+below every other stream, and they watch `poll_reset`, which now reports an
+eviction, so an evicted stream is stopped and eviction resumes.
+
+What remains:
+
+- A two-relay chain test with memory measured near the window.
+- Per-session retained bytes and throughput across many qmux sessions at the
+  chosen window, in the
+  [transport x version benches](/quest/m2/bench-transport-sweep.md).
+- A quiet-host comparison against the base of `group_read_frames`,
+  `group_contended`, and `group_relay_frames`, plus `group_paced` (a writer
+  parked at the window, over 1, 8, and 64 readers), which the first slice
+  added. The cursor's report is one relaxed load per frame or batch, and a
+  `fetch_max` only for the fastest reader. On the busy host that landed it,
+  runs swung by up to 50% either way between repeats.
+- A relay-level test that the operator's `[quic]` windows reach WebSocket
+  sessions end to end through the relay's own `serve_ws` path. Today it is
+  covered only at `websocket::accept` level, because an accepted session's
+  window is not visible outside moq-tokio.
+
+Decided 2026-11-02 (maintainer, follow-up planning after the 2026-11-02
+/quest-complete run): JS parity moves to
+[JS fastest-reader pacing](/quest/m2/js-fastest-reader.md) in m2, which waits
+on [browser receive credit](/quest/m2/browser-receive-credit.md), so the m1
+cut does not wait on browsers.

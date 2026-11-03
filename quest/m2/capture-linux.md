@@ -25,7 +25,7 @@ unimplemented, because xdg-desktop-portal owns source selection:
   exposed, so a new `moq` run always shows the picker. Decided 2026-10-26
   (maintainer): the token becomes persistable (API plus CLI), so a
   previously-approved source is reused without the picker.
-  [Wayland studio sources](/quest/m3/studio/wayland-sources.md) consume it.
+  [Wayland studio sources](https://github.com/moq-dev/studio/blob/main/quest/m0/wayland-sources.md) in moq-dev/studio consume it.
 - **System audio** needs a PipeWire monitor node.
   `moq_audio::capture::Source::System` exists but is macOS-only and returns
   `Unsupported` elsewhere. This is independent of the screencast portal.

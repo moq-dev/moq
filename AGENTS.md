@@ -82,7 +82,7 @@ The boundary between packages is extremely important to keep things modular and 
 # Development
 
 PRs target `main`, the trunk, where breaking API changes are allowed.
-`release` is what ships; touch it only to cut a release or backport a fix (see `CONTRIBUTING.md`).
+`release` is what ships; touch it only to cut a release, backport a fix, or backport benchmarks (see `CONTRIBUTING.md`).
 Wire changes should be backwards compatible for any *published* drafts/versions.
 Between our own builds only moq-lite compatibility is guarded, since our implementations always prefer it; moq-transport compatibility matters against third-party implementations.
 An unpublished `-wip` version changes freely, so never defer a better wire design to keep it compatible.
@@ -115,7 +115,6 @@ The `quest` binary comes from the moq-dev/quest flake input and serves the quest
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
-| `rs/moq-scene`, `rs/moq-studio` | `doc/bin/studio.md` |
 | `rs/moq-c` C ABI (`moq.h`) | `doc/lib/c` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 

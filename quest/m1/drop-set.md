@@ -14,10 +14,9 @@ narrower budget is served after a widening, as a cold relay would.
 
 ## Plan
 
-Decided 2026-10-27 (maintainer): this runs after
-[Range count cost](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
-`given_up` in `rs/moq-net/src/model/track/miss.rs` (made a `Required` entry
-2026-10-30, in [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)), and before
+Decided 2026-10-27 (maintainer): this runs after the range count cost work,
+which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
+since both edit `given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
 [Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
 because runs keyed by group sequence convert mechanically to starts.
 
@@ -312,10 +311,6 @@ a lite-07 copy with no media time asks a fill below the start even for a reader
 whose budget the publisher already exceeded, and that fill ends empty. If the
 extra FETCH shows up in relay traffic, bound it here, where a run below the
 start can carry the budget it was resolved under.
-
-## Required
-
-- [Range count cost](/quest/m1/subscribe-ranges/fill-linear.md) - the remaining range-count walks stop growing per poll; both edit `miss.rs`
 
 ## Related
 

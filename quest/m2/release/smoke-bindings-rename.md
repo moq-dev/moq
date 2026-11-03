@@ -2,11 +2,15 @@
 
 ## Goal
 
-Condition: a binding release ships the `request` and `follow` names from
-[moq-dev/moq#7193](https://github.com/moq-dev/moq/pull/7193). Check each
-registry's latest moq-ffi-based package (Go, Python, Kotlin, Swift) for
-`request`/`follow`. Then move `test/smoke/clients/{go,python,kotlin,swift}`
-off `request_broadcast` and `announced_broadcast`, and delete this quest.
+`test/smoke/clients/{go,python,kotlin,swift}` call `request` and `follow`
+instead of `request_broadcast` and `announced_broadcast`.
+
+## Waiting
+
+- moq-dev/moq: a binding release ships the `request` and `follow` names from
+  [moq-dev/moq#7193](https://github.com/moq-dev/moq/pull/7193). Check each
+  registry's latest moq-ffi-based package (Go, Python, Kotlin, Swift) for
+  `request`/`follow`.
 
 ## Plan
 

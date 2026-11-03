@@ -21,10 +21,6 @@ Added 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest
 
 Public API: none. Wire: none; as on main, a withdrawal resets a partially written request without waiting for peer credit.
 
-## Required
-
-- [Tenant matrix](/quest/m2/tenant-matrix.md) - its PR, #7366, lands the dot-segment refusal on main
-
 ## Related
 
 - [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - the earlier backport in the same patch release

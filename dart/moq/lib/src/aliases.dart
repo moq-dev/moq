@@ -64,10 +64,10 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// How a broadcast advertises its exact path: its static production cost and publisher epoch.
+/// How a broadcast advertises its exact path: its static production cost and stream instance.
 typedef AnnounceRoute = MoqAnnounceRoute;
 
-/// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
+/// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventStart],
@@ -130,6 +130,9 @@ typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.
 typedef Frame = MoqFrame;
+
+/// An exact media time: `value` units at `scale` units per second.
+typedef Timestamp = MoqTimestamp;
 
 /// Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering.
 typedef Subscription = MoqSubscription;

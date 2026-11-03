@@ -184,7 +184,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		.track("video")
 		.unwrap()
 		// A budget spanning the run, so recovery has to deliver every group, however late.
-		.subscribe(track::Subscription::default().with_max_delay(TIMEOUT))
+		.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(TIMEOUT)))
 		.await
 		.unwrap();
 
@@ -230,7 +230,7 @@ fn endpoint(seed: u64, host: u8) -> driver::endpoint::Config {
 
 /// The default transport, with BBR3's probe phases drawn from `seed`
 fn transport(seed: u64) -> driver::transport::Config {
-	let mut bbr = moq_congestion::Bbr3Config::default();
+	let mut bbr = moq_congestion::bbr3::Config::default();
 	let mut probe = [0; 16];
 	probe[..8].copy_from_slice(&seed.to_le_bytes());
 	bbr.probe_rng_seed(probe);

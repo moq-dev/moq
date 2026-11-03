@@ -173,6 +173,18 @@ impl Import {
 		Ok(())
 	}
 
+	/// Report frames the encoder feeding this track skipped. See
+	/// [`Producer::report_skipped`](crate::container::Producer::report_skipped).
+	pub fn report_skipped(&self, frames: u64) {
+		self.track.report_skipped(frames);
+	}
+
+	/// Report the target bitrate of the encoder feeding this track. See
+	/// [`Producer::report_bitrate`](crate::container::Producer::report_bitrate).
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		self.track.report_bitrate(bitrate);
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
@@ -714,7 +726,7 @@ mod tests {
 		];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		// recovery-point SEI (payload type 6), then a non-IDR I-slice (type 1).
-		let sei: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+		let sei: &[u8] = &[0x06, 0x06, 0x01, 0x84, 0x80];
 		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
 
 		let mut annexb = BytesMut::new();
