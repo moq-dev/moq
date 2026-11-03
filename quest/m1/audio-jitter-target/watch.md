@@ -24,54 +24,67 @@ The harness's `js/watch/src/audio/replay.ts` replays the version 3 traces in
 the ring on a simulated clock. Each arrival carries an encoded duration
 from container metadata, the Opus TOC, or the codec's fixed sample count.
 Replay never infers a frame's duration from timestamp spacing. The AAC-LC
-fixtures retain their original arrivals with exact 1024-sample durations;
-`relay-mic` was re-recorded with Chromium's fake capture device because the
-old recording retained no payloads from which to recover Opus durations.
-
-Re-measured on 2026-11-02 at `84a0c1ede6`, after
-[moq-dev/moq#6484](https://github.com/moq-dev/moq/pull/6484),
-[moq-dev/moq#6609](https://github.com/moq-dev/moq/pull/6609), and
-[moq-dev/moq#6595](https://github.com/moq-dev/moq/pull/6595): the four
-replay rows match the 2026-10-22 numbers exactly, all with zero underruns. The
-manual run still re-measures the live path (decided 2026-10-27, maintainer).
-`relay-mic` has zero skips, stalls, or silence, a 60 ms p95 target, and 3.5 s
-convergence, over a 2 ms minimum RTT. It is a fake-device recording, so that
-result proves neither an improvement on the old path nor the manual goal. The
-AAC recordings still refill: worst stalled share is 1.7% (`relay-bbb`), with
-`local-aac` skipping about twice a minute while converging over 15.5 s.
+fixtures retain their original arrivals with exact 1024-sample durations.
+`relay-mic` was re-recorded on 2026-11-03 from a real microphone (Chrome 156 on
+a MacBook Air, built-in microphone, `--mic-broadcast`): zero underruns, skips,
+or stalls, an 80 ms p95 target, and 3.5 s convergence, over a 2 ms recorder
+RTT. Its replay ceilings were re-measured to match. The AAC recordings still
+refill: worst stalled share is 1.7% (`relay-bbb`), with `local-aac` skipping
+about twice a minute while converging over 15.5 s.
 
 The nightly browser rows are not clean in steady state either. On the four
 whose artifacts were still kept on 2026-11-02 (2026-10-30 to 11-02), AAC
 `wide` (40 ms one way, 40 ms sigma) ran its ring dry one to four times a minute
 after converging at a 323 ms target, most gaps 100 to 340 ms. Opus `wide`
-did so on two nights (once after its target fell from 200 to 180 ms) and Opus
-`mild` on one. These synthetic Gaussian paths are harsher than a real 40 ms
-RTT, so they are evidence for the manual run to compare against, not a cause.
+did so on two nights and Opus `mild` on one.
 
-What remains is one manual run by a person on Apple hardware; nothing
-deterministic is left to automate. Decided 2026-10-22:
+### The 2026-11-03 run
 
-- Run against the public relay on Chrome and Safari, the two rows the
-  issue measured, with a real microphone and 40 ms or more of added RTT. Watch
-  the stats panel's audio underrun counter and the latency tab's auto readout.
-  Re-record the `relay-mic` trace in the same run: publish the microphone from
-  the demo's publish page to `https://cdn.moq.dev/anon`, then
-  `just test audio-quality-record --lanes relay-mic --mic-broadcast <name>`;
-  the checked-in one used Chromium's fake capture device and proves nothing
-  here.
-- Keep the production refill policy until that run's measurements exist. A
-  ring that runs dry re-stalls and refills to the target; change that only if
-  the run shows a cause and a justified alternative beats it. The
-  deterministic replay ceilings match the recorded durations. Tighten browser
-  rows only from nightly runner measurements, re-measured as
-  `test/audio-quality/budgets.json`'s note describes.
-- Measure the publisher's audio encoder input-to-output lag in the same run
-  using the reporter's instrumented harness; #3518 fixed the known cause, so
-  the 7.35 s lag and the 88 to 275 ms/s drift the issue reported stand
-  unconfirmed. If drift survives, the suspects are `writeFrame` opening a
-  group per audio frame under WebTransport stream credit and the main-thread
-  task queue delivering encoder output. Audio now defaults `groupDuration` to
-  20 ms. A/B that default against a group of 100 ms or so in the same run.
+Run by an agent on the maintainer's MacBook Air (macOS 26.6.2) at `84a0c1ede6`
+plus this branch, against `cdn.moq.dev/anon`, with the built-in microphone
+published by `<moq-publish>` in Chrome 156 and played by the harness page
+(`index.html`) in a separate Chrome 156 profile and in Safari 26.6.2. The
+added RTT was a userspace UDP relay on the laptop holding each packet 20 ms
+each way, reached through Chrome's `--host-resolver-rules`, so TLS still
+validated against the real relay. Safari cannot be redirected that way and
+negotiated WebSocket, so its rows ran on the direct path; the laptop has no
+Network Link Conditioner and no passwordless sudo. "Underruns" are the stats
+panel's counter, which counts each re-stall and each short quantum, after the
+first 30 s; "auto delay" is the latency tab's readout over the same window.
+
+| Row | Transport | RTT min | Underruns after 30 s | Skip-aheads after 30 s | Auto delay p50 / max |
+| --- | --- | --- | --- | --- | --- |
+| Chrome, direct, 20 ms groups | WebTransport | 5 ms | 9 in 88 s (6.1/min) | 0 | 40 / 60 ms |
+| Chrome, +40 ms, 20 ms groups | WebTransport | 47 ms | 26 in 149 s (10.5/min) | 1 (43 ms) | 100 / 120 ms |
+| Chrome, +40 ms, 100 ms groups | WebTransport | 47 ms | 9 in 149 s (3.6/min) | 0 | 100 / 120 ms |
+| Safari, direct, 20 ms groups | WebSocket | 5 ms | 5 in 118 s (2.5/min) | 0 | 120 / 140 ms |
+| Safari, direct, 100 ms groups | WebSocket | 5 ms | 12 in 119 s (6.1/min) | 0 | 120 / 140 ms |
+
+The Goal is not met: every row underruns in steady state, though skip-aheads
+are nearly gone. The cause is the estimator's quantile, not the browser.
+Converted to traces by the README's recipe and replayed, each row's
+arrivals reproduce its live re-stalls and short quanta almost exactly
+(Chrome +40 ms: 22 and 11 live, 22 and 11 replayed). In the replay the ring sits
+at the target less one frame, and each run-dry is one frame arriving later
+than that cushion: the target is the 95th percentile of each 500 ms
+interval's worst delay, so about 5% of intervals, some six a minute, hold
+such a frame. With no concealment or time stretch each one is an underrun.
+Raising `QUANTILE` in a replay sweep of the five rows cuts the rate but not
+to zero: 0.99 gives 1.0 to 3.5 a minute at a 60 to 200 ms p50 target, 0.995
+gives 0 to 3.0 at the same targets, against 5.6 to 13.2 at 40 to 120 ms
+today. The run found no defect in the player to fix here.
+
+Publisher, measured with `AudioEncoder` wrapped in the publishing page:
+input-to-output lag on live input is p50 0.9 ms and p99 1.1 ms, with drift
+under 0.04 ms/s at both group sizes, across five demand sessions of 2.5 to 3
+minutes. The 7.35 s lag and 88 to 275 ms/s drift of
+[moq-dev/moq#3477](https://github.com/moq-dev/moq/issues/3477) did not recur.
+The only large lags, 260 to 360 ms, are each session's first frames: with no
+subscriber the publisher retains up to 30 s of captured audio
+(`js/publish/src/audio/backlog.ts`) and encodes it as history when demand
+arrives, which the watcher discards. The 100 ms groups halved Chrome's rate
+at +40 ms but more than doubled Safari's on the direct path, so the run gives
+no reason to change the 20 ms default.
 
 Decided 2026-10-15: keep this proof in m1 with the existing playback and
 A/V clock work. The estimator defaults on; deferring watch-worker does not
@@ -79,13 +92,20 @@ defer validation of the current player.
 
 ## Waiting
 
-- Maintainer: the manual run above, on Apple hardware with Chrome and Safari,
-  a real microphone, and 40 ms or more of added RTT against the public relay.
-  It is done when the PR records, per browser, the stats panel's audio
-  underrun count after convergence, any skip-aheads in steady state, and the
-  latency tab's auto target; checks in the re-recorded `relay-mic` trace with
-  its replay budgets re-measured; and records the encoder lag and drift with
-  the 20 ms and 100 ms `groupDuration` A/B.
+- Maintainer: decide the Goal, since zero underruns after convergence is not
+  reachable at `QUANTILE = 0.95` without concealment. Options: (a) restate the
+  Goal as the rate the quantile implies (about six re-stalls a minute at most,
+  no steady-state skip-aheads), and leave zero to [Time
+  stretch](/quest/m2/watch-audio-time-stretch.md); (b) raise `QUANTILE` in
+  `doc/concept/audio-jitter.md`, both implementations, and the corpus, for
+  2 to 4 times fewer underruns at 20 to 80 ms more latency, still not zero;
+  (c) pull time stretch into m1 as this quest's fix. Recommended: (a), then
+  delete this quest once Safari is measured with added RTT.
+- Maintainer: Safari with 40 ms or more of added RTT. On the MacBook Air,
+  install Network Link Conditioner (Additional Tools for Xcode) or allow
+  `sudo dnctl`/`pfctl`, then play `cdn.moq.dev/anon` in Safari with the stats
+  panel open for two minutes and record its audio Underruns after 30 s and
+  the latency tab's auto delay.
 
 ## Related
 

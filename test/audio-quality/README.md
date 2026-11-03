@@ -130,7 +130,7 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 | --- | --- |
 | `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured |
 | `local-aac` | this harness's AAC publisher through a local relay: the shallow control |
-| `relay-mic` | `<moq-publish>` through the public relay: headless Chromium's fake capture device, or with `--mic-broadcast`, a real browser and microphone publishing by hand |
+| `relay-mic` | `<moq-publish>` through the public relay: a real microphone with `--mic-broadcast` (the checked-in one is Chrome on a MacBook Air, its built-in microphone), otherwise headless Chromium's fake capture device |
 | `bursty-aac` | a nightly `bursty` AAC row's capture: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
@@ -167,8 +167,8 @@ the trace's `source` before checking it in.
 
 Version 3 adds per-frame durations. The AAC-LC recordings made before that field existed retain
 their arrival clocks and use the codec's fixed 1024 samples per frame. The Opus `relay-mic` recording
-was replaced with a new fake-device capture because its old payloads, and therefore its packet
-durations, were not retained. It still does not prove real-microphone behavior or added RTT.
+is a real microphone captured with `--mic-broadcast`, with its packet durations retained. The
+recorder's own path had a 2 ms round trip, so it carries no added RTT.
 
 Recording is by hand: the public relay and a browser publisher are not something a nightly run
 should depend on. Re-measure the replay budgets after re-recording. The recorder asks the relay for
@@ -304,5 +304,5 @@ the profiles now include the fork's batch, step, and order-preserving jitter tre
 ## Not covered
 
 Safari and Firefox, native playback on macOS and Windows, video, and perceptual scoring: the grade
-is glitches and latency, not an opinion about how it sounds. The `relay-mic` trace captures Chromium's fake device rather than a real
-microphone, so it carries a browser publisher's encode and send cadence but not a sound card's.
+is glitches and latency, not an opinion about how it sounds. A real microphone is covered
+only by the hand-recorded `relay-mic` trace, not by any live row.
