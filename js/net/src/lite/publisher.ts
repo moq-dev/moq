@@ -30,7 +30,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
-import { untilGivenUp } from "../util/given_up.ts";
+import { GivenUp } from "../util/given_up.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -58,6 +58,7 @@ import {
 	hasCompression,
 	hasDatagrams,
 	hasEndError,
+	hasInstance,
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
@@ -155,6 +156,8 @@ interface RunGroup {
 
 	/** The group to serve. */
 	group: group.Consumer;
+	/** Why to stop writing {@link group}, watched while it is served. */
+	givenUp: GivenUp;
 
 	/** How every frame is stamped, or undefined to send no timestamps. */
 	stamp: Stamp | undefined;
@@ -335,7 +338,7 @@ class SubscriptionControls {
 
 	async #decode({ reader, version, apply, quic }: SubscriptionControlOptions) {
 		try {
-			// Runs until the peer's half ends, even past our own FIN: a lite-07 publisher waits
+			// Runs until the peer's half ends, even past our own FIN: a lite-05+ publisher waits
 			// for that end, and every other teardown stops the reader.
 			for (;;) {
 				const update = await SubscribeUpdate.decodeMaybe(reader, version);
@@ -553,12 +556,25 @@ export class Publisher {
 			auth: undefined,
 		});
 
+		// Another instance is another stream, and a newer epoch of the same one is no new
+		// stream but must still be ranked by the peer, so lite-07 restarts in place for either.
+		const restarted = (prev: Advertised, next: Advertised): boolean =>
+			!sameInstance(prev, next) ||
+			(hasInstance(this.version) && (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n));
+
 		const announce = async (suffix: Path.Valid, route: Route) => {
-			console.debug(`announce: broadcast=${suffix} active=true epoch=${route.epoch}`);
+			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "active", suffix, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
+				{
+					status: "active",
+					suffix,
+					instance: route.instance,
+					epoch: route.epoch,
+					hops: wireHops(route),
+					cost: route.cost,
+				},
 				this.version,
 			);
 		};
@@ -582,7 +598,7 @@ export class Publisher {
 			);
 		};
 
-		// Another publisher instance: ANNOUNCE_RESTART on lite-07, an end and a start before it.
+		// Another instance or epoch: ANNOUNCE_RESTART on lite-07, an end and a start before it.
 		const restart = async (suffix: Path.Valid, route: Route) => {
 			const id = announceIds.get(suffix);
 			if (id === undefined || !hasAnnounceRestart(this.version)) {
@@ -590,10 +606,17 @@ export class Publisher {
 				await announce(suffix, route);
 				return;
 			}
-			console.debug(`announce: broadcast=${suffix} restart=true epoch=${route.epoch}`);
+			console.debug(`announce: broadcast=${suffix} restart=true instance=${route.instance} epoch=${route.epoch}`);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "restart", id, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
+				{
+					status: "restart",
+					id,
+					instance: route.instance,
+					epoch: route.epoch,
+					hops: wireHops(route),
+					cost: route.cost,
+				},
 				this.version,
 			);
 		};
@@ -675,7 +698,7 @@ export class Publisher {
 						if (
 							queued?.end ||
 							!prev ||
-							!sameInstance(prev, snap) ||
+							restarted(prev, snap) ||
 							!routesEqual(onWire(prev.route), onWire(snap.route))
 						) {
 							pending.set(suffix, { end: queued?.end ?? false, next: snap });
@@ -722,7 +745,7 @@ export class Publisher {
 						const prev = active.get(suffix);
 						active.set(suffix, entry.next);
 						if (!prev) await announce(suffix, entry.next.route);
-						else if (!sameInstance(prev, entry.next)) await restart(suffix, entry.next.route);
+						else if (restarted(prev, entry.next)) await restart(suffix, entry.next.route);
 						else await update(suffix, entry.next.route);
 					}
 					if (remaining !== undefined) remaining -= 1;
@@ -791,7 +814,7 @@ export class Publisher {
 					const prev = active.get(suffix);
 					if (!prev) {
 						await announce(suffix, snap.route);
-					} else if (!sameInstance(prev, snap)) {
+					} else if (restarted(prev, snap)) {
 						await restart(suffix, snap.route);
 					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
 						await update(suffix, snap.route);
@@ -867,8 +890,8 @@ export class Publisher {
 		try {
 			front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, left.signal)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.instance) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.instance, left.signal)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -885,7 +908,10 @@ export class Publisher {
 		const track = front.track(msg.track).subscribe({
 			priority: msg.priority,
 			order: msg.order,
-			maxDelay: Milli(servingMaxDelay(this.version, msg.maxDelay)),
+			delay: {
+				max: Milli(servingMaxDelay(this.version, msg.maxDelay)),
+				min: msg.minDelay === undefined ? null : Milli(msg.minDelay),
+			},
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
@@ -995,7 +1021,10 @@ export class Publisher {
 					track.update({
 						priority: update.priority,
 						order: update.order,
-						maxDelay: Milli(servingMaxDelay(this.version, update.maxDelay)),
+						delay: {
+							max: Milli(servingMaxDelay(this.version, update.maxDelay)),
+							min: update.minDelay === undefined ? null : Milli(update.minDelay),
+						},
 						groups: {
 							start: update.startGroup === undefined ? undefined : { included: update.startGroup },
 							end: end === undefined ? undefined : { excluded: end },
@@ -1016,8 +1045,9 @@ export class Publisher {
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
-			// A lite-07 subscriber FINs once it has read the tail, so leave its half open and
-			// wait for that. Older versions stop it here, which ends the decoder.
+			// A lite-05+ subscriber FINs once it has read the tail, so leave its half open and
+			// wait for that: a receiver may drop unread bytes on close. Older versions stop it
+			// here, which ends the decoder.
 			if (waitsForSubscriberFin(this.version)) stream.writer.close();
 			else stream.close();
 			// Ends the datagram loop.
@@ -1086,8 +1116,8 @@ export class Publisher {
 			try {
 				front =
 					this.#publish &&
-					(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, holding)));
+					(wireOf(this.#publish).local(msg.broadcast, msg.instance) ??
+						(await wireOf(this.#publish).demand(msg.broadcast, msg.instance, holding)));
 			} catch (err: unknown) {
 				stream.writer.reset(error(err));
 				return;
@@ -1482,6 +1512,7 @@ export class Publisher {
 				const options: RunGroup = {
 					sub,
 					group,
+					givenUp: new GivenUp(group),
 					stamp,
 					compress,
 					priority,
@@ -1499,7 +1530,10 @@ export class Publisher {
 					}
 				});
 				groups.add(task);
-				void task.finally(() => groups.delete(task));
+				void task.finally(() => {
+					options.givenUp.close();
+					groups.delete(task);
+				});
 			}
 		} finally {
 			if (!finished) unsubscribe();
@@ -1546,8 +1580,8 @@ export class Publisher {
 		try {
 			const front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.instance) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.instance, hold.signal)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
@@ -1601,8 +1635,8 @@ export class Publisher {
 			const origin = this.#publish && wireOf(this.#publish);
 			const front =
 				origin &&
-				(origin.local(msg.broadcast, msg.epoch) ??
-					(await origin.demand(msg.broadcast, msg.epoch, cancel.signal)));
+				(origin.local(msg.broadcast, msg.instance) ??
+					(await origin.demand(msg.broadcast, msg.instance, cancel.signal)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			tracks = wireOf(front).tracks(this);
@@ -1785,7 +1819,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #openGroup(options: RunGroup): Promise<Writer | Error> {
-		const { group, priority, unsubscribed, start } = options;
+		const { group, givenUp, priority, unsubscribed, start } = options;
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
@@ -1798,9 +1832,11 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
-				failure = stop;
-			});
+			const abandoned = givenUp
+				.write(() => opened.promise)
+				.then((stop) => {
+					failure = stop;
+				});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1831,13 +1867,13 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, stamp, compress, priority, start: startFrame, end: endFrame } = options;
+		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame } = options;
 		// The header names the requested position, so a copy missing it must be refused.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const write = async (op: () => Promise<unknown>) => {
-			const stop = await untilGivenUp(group, op);
+			const stop = await givenUp.write(op);
 			if (stop) throw stop;
 		};
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
@@ -1885,10 +1921,14 @@ export class Publisher {
 				}
 
 				const header = frameHeader(stream.version, delta, read.inflated, readSize(read));
-				await write(() => stream.write(header));
 				const chunks = read.chunks;
-				if (chunks) await write(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
-				else if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
+				const payload = chunks ? undefined : read.frame.payload;
+				// One budget race covers the frame's header and payload.
+				await write(async () => {
+					await stream.write(header);
+					if (chunks) await sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed);
+					else if (payload && payload.length > 0) await stream.write(payload);
+				});
 			}
 
 			stream.close();

@@ -8,6 +8,7 @@
 //! spelling of both an omitted floor and group 0; the draft says that 0 is group 0.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -120,7 +121,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 		.expect("broadcast resolves");
 
 	let subscription = Subscription::default()
-		.with_max_delay(BUDGET)
+		.with_delay(Delay::default().with_max(BUDGET))
 		.with_ranges([floored(start)]);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
@@ -164,7 +165,7 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 		)
 		.unwrap();
 	let subscription = Subscription::default()
-		.with_max_delay(BUDGET)
+		.with_delay(Delay::default().with_max(BUDGET))
 		.with_ranges([floored(start)]);
 	let mut sub = track.subscribe(subscription);
 	let reader = kio::clock::sim::spawn(async move { read_all(&mut sub).await });
@@ -239,7 +240,9 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let subscribe = |range: Range| {
 		let track = remote.track("late").unwrap();
 		async move {
-			let subscription = Subscription::default().with_max_delay(BUDGET).with_ranges([range]);
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(BUDGET))
+				.with_ranges([range]);
 			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await
 				.expect("subscribe timeout")

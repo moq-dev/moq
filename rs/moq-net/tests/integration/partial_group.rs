@@ -5,6 +5,7 @@
 //! not cache the frames it already has as the whole group.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -49,7 +50,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		remote
 			.track("data")
 			.unwrap()
-			.subscribe(Subscription::default().with_max_delay(BUDGET)),
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(BUDGET))),
 	)
 	.await
 	.expect("subscribe timeout")
@@ -85,7 +86,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		TIMEOUT,
 		remote.track("data").unwrap().subscribe(
 			Subscription::default()
-				.with_max_delay(Duration::from_secs(3600))
+				.with_delay(Delay::default().with_max(Duration::from_secs(3600)))
 				.with_range(0..),
 		),
 	)

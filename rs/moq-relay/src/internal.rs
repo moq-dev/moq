@@ -103,6 +103,8 @@ pub struct Internal {
 	uring: Vec<UringWorker>,
 	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
+	#[cfg(feature = "_quic")]
+	demux: Option<moq_tokio::quic::demux::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
 	addr: Option<net::SocketAddr>,
@@ -118,6 +120,8 @@ struct InternalState {
 	uring: Vec<UringWorker>,
 	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
+	#[cfg(feature = "_quic")]
+	demux: Option<moq_tokio::quic::demux::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
 
@@ -147,6 +151,8 @@ impl Internal {
 			uring: Vec::new(),
 			#[cfg(any(feature = "stun", test))]
 			stun: None,
+			#[cfg(feature = "_quic")]
+			demux: None,
 			shutdown: None,
 			listener: None,
 			addr: None,
@@ -156,6 +162,12 @@ impl Internal {
 	#[cfg(feature = "stun")]
 	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
 		self.stun = counters;
+		self
+	}
+
+	#[cfg(feature = "_quic")]
+	pub(crate) fn with_demux(mut self, counters: Option<moq_tokio::quic::demux::Counters>) -> Self {
+		self.demux = counters;
 		self
 	}
 
@@ -276,6 +288,8 @@ impl Internal {
 				uring: self.uring.clone(),
 				#[cfg(any(feature = "stun", test))]
 				stun: self.stun.clone(),
+				#[cfg(feature = "_quic")]
+				demux: self.demux.clone(),
 				shutdown: self.shutdown.clone(),
 			})
 	}
@@ -445,6 +459,10 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	{
 		scrape.stun = state.stun;
 	}
+	#[cfg(feature = "_quic")]
+	{
+		scrape.demux = state.demux;
+	}
 	scrape.draining = state.shutdown.map(|shutdown| shutdown.tally().draining);
 	scrape.refusals = state.refusals.map(|refusals| refusals.snapshot());
 	(
@@ -600,9 +618,26 @@ struct Scrape {
 	uring: Vec<UringWorker>,
 	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
+	#[cfg(feature = "_quic")]
+	demux: Option<moq_tokio::quic::demux::Counters>,
 	draining: Option<usize>,
 	refusals: Option<moq_net::stats::Refusals>,
 	panics: u64,
+}
+
+/// Datagrams the QUIC port dropped instead of handing to QUIC or the WebRTC feed,
+/// one row per reason from zero. `unclaimed` is WebRTC traffic while no embedder
+/// takes the feed, which is every WebRTC datagram on a bare relay.
+#[cfg(feature = "_quic")]
+fn encode_demux(encoder: &mut DescriptorEncoder, counters: &moq_tokio::quic::demux::Counters) -> std::fmt::Result {
+	counter(
+		encoder,
+		"moq_relay_demux_dropped",
+		"Datagrams the QUIC port dropped, by reason.",
+		moq_tokio::quic::demux::Discard::ALL
+			.into_iter()
+			.map(|reason| ([("reason", Label(reason.as_str()))], counters.get(reason))),
+	)
 }
 
 impl Scrape {
@@ -613,6 +648,8 @@ impl Scrape {
 			uring: uring.to_vec(),
 			#[cfg(any(feature = "stun", test))]
 			stun: None,
+			#[cfg(feature = "_quic")]
+			demux: None,
 			draining: None,
 			refusals: None,
 			panics: moq_tokio::panic::count(),
@@ -631,6 +668,10 @@ impl Scrape {
 		#[cfg(any(feature = "stun", test))]
 		if let Some(stun) = &self.stun {
 			stun.encode(encoder)?;
+		}
+		#[cfg(feature = "_quic")]
+		if let Some(demux) = &self.demux {
+			encode_demux(encoder, demux)?;
 		}
 
 		// The sessions a shutdown drain is still waiting on: 0 until the drain
@@ -868,8 +909,8 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 	)
 }
 
-/// The io_uring runtime's per-worker counters, one `worker` label per bound
-/// worker.
+/// The io_uring runtime's per-worker counters and gauges, one `worker` label
+/// per bound worker.
 ///
 /// These describe the runtime rather than the traffic: how well the receive
 /// pool, the batching mechanisms, and the ring itself are holding up on each
@@ -882,7 +923,9 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 /// The ratios are what to watch, not the raw counts: `rx_datagrams / rx_receives`
 /// is the GRO coalescing actually achieved, `tx_datagrams / tx_sends` the GSO
 /// batching, and datagrams over `enters` the syscall amortization the runtime
-/// exists for.
+/// exists for. The pool gauges are the buffer space each worker has allocated,
+/// which stays at its high-water mark after a burst; only the pages datagrams
+/// have touched count toward RSS.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std::fmt::Result {
 	use moq_uring::metrics::Snapshot;
@@ -955,6 +998,11 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 			|snap| snap.turns,
 		),
 		(
+			"moq_relay_uring_passes",
+			"Worker passes over its woken tasks; over turns, the passes a turn takes to settle.",
+			|snap| snap.passes,
+		),
+		(
 			"moq_relay_uring_sq_full_enters",
 			"io_uring_enter calls forced by a full submission queue.",
 			|snap| snap.sq_full_enters,
@@ -993,6 +1041,30 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 		"Timers currently in a worker's heap.",
 		rows(Snapshot::timers_active),
 	)?;
+	for (name, help, field) in [
+		(
+			"moq_relay_uring_rx_pool_bytes",
+			"Receive buffer bytes a worker's sockets have allocated; pools grow under load and never shrink; reserved, not resident.",
+			(|snap: &Snapshot| snap.rx_pool_bytes) as fn(&Snapshot) -> u64,
+		),
+		(
+			"moq_relay_uring_rx_pool_in_use_bytes",
+			"Receive buffer bytes holding a packet the relay has not consumed yet.",
+			|snap| snap.rx_pool_in_use_bytes,
+		),
+		(
+			"moq_relay_uring_tx_pool_bytes",
+			"Send buffer bytes a worker's sockets have allocated; pools grow under load and never shrink; reserved, not resident.",
+			|snap| snap.tx_pool_bytes,
+		),
+		(
+			"moq_relay_uring_tx_pool_in_use_bytes",
+			"Send buffer bytes being filled or in flight to the kernel.",
+			|snap| snap.tx_pool_in_use_bytes,
+		),
+	] {
+		gauge(encoder, name, help, rows(field))?;
+	}
 
 	for (name, help, field) in [
 		(
@@ -1225,6 +1297,8 @@ mod tests {
 				listeners: Vec::new(),
 				uring: Vec::new(),
 				stun,
+				#[cfg(feature = "_quic")]
+				demux: None,
 				shutdown: None,
 			};
 			let response = serve_metrics(State(state)).await;
@@ -1232,6 +1306,45 @@ mod tests {
 			let body = std::str::from_utf8(&body).unwrap();
 			assert_eq!(body.contains("moq_relay_stun_replies_total"), configured);
 			assert_eq!(body.contains("moq_relay_stun_dropped_total"), configured);
+		}
+	}
+
+	/// Every drop reason renders from zero, and only for a relay whose QUIC port
+	/// runs the demux.
+	#[cfg(feature = "_quic")]
+	#[tokio::test]
+	async fn demux_metrics_list_every_reason_from_zero() {
+		use moq_tokio::quic::demux::{Counters, Discard};
+
+		for demux in [None, Some(Counters::default())] {
+			let configured = demux.clone();
+			if let Some(counters) = &demux {
+				counters.discard(Discard::Stun);
+			}
+			let state = InternalState {
+				stats: moq_net::stats::Registry::disabled(),
+				nodes: None,
+				refusals: None,
+				sessions: crate::session::Registry::new(),
+				listeners: Vec::new(),
+				uring: Vec::new(),
+				stun: None,
+				demux,
+				shutdown: None,
+			};
+			let response = serve_metrics(State(state)).await;
+			let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+			let body = std::str::from_utf8(&body).unwrap();
+			match configured {
+				None => assert!(!body.contains("moq_relay_demux_dropped_total")),
+				Some(_) => {
+					assert!(body.contains("moq_relay_demux_dropped_total{reason=\"stun\"} 1"));
+					for reason in Discard::ALL {
+						let row = format!("moq_relay_demux_dropped_total{{reason=\"{}\"}}", reason.as_str());
+						assert!(body.contains(&row), "{row} missing");
+					}
+				}
+			}
 		}
 	}
 
@@ -1373,8 +1486,8 @@ mod tests {
 			&internal.uring,
 		);
 
-		// Every counter the module documents, for every worker, plus the derived
-		// gauge. A name that drifts out of the renderer silently deletes a
+		// Every counter the module documents, for every worker, plus the
+		// gauges. A name that drifts out of the renderer silently deletes a
 		// dashboard, so the list is spelled out rather than derived from it.
 		let counters = [
 			"rx_datagrams",
@@ -1388,6 +1501,7 @@ mod tests {
 			"completions",
 			"enters",
 			"turns",
+			"passes",
 			"sq_full_enters",
 			"parks",
 			"wakes",
@@ -1419,8 +1533,23 @@ mod tests {
 				assert!(body.contains(&format!("{name}_sum{{worker=\"{worker}\"}} 0.0")));
 			}
 		}
-		assert!(body.contains("# TYPE moq_relay_uring_timers_active gauge"));
-		assert!(body.contains("moq_relay_uring_timers_active{worker=\"1\"} 0"));
+		for gauge in [
+			"timers_active",
+			"rx_pool_bytes",
+			"rx_pool_in_use_bytes",
+			"tx_pool_bytes",
+			"tx_pool_in_use_bytes",
+		] {
+			let name = format!("moq_relay_uring_{gauge}");
+			assert!(
+				body.contains(&format!("# TYPE {name} gauge")),
+				"missing type for {name}"
+			);
+			for worker in 0..2 {
+				let line = format!("{name}{{worker=\"{worker}\"}} 0");
+				assert!(body.contains(&line), "missing {line} in:\n{body}");
+			}
+		}
 	}
 
 	/// A worker's cumulative buckets come out cumulative again, not summed twice.
@@ -1523,6 +1652,8 @@ mod tests {
 			uring: Vec::new(),
 			#[cfg(any(feature = "stun", test))]
 			stun: None,
+			#[cfg(feature = "_quic")]
+			demux: None,
 			shutdown: None,
 		};
 
@@ -1543,6 +1674,8 @@ mod tests {
 			uring: Vec::new(),
 			#[cfg(any(feature = "stun", test))]
 			stun: None,
+			#[cfg(feature = "_quic")]
+			demux: None,
 			shutdown: None,
 		};
 
@@ -1913,6 +2046,8 @@ mod tests {
 			#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 			uring: Vec::new(),
 			stun: Some(crate::stun::Counters::default()),
+			#[cfg(feature = "_quic")]
+			demux: Some(moq_tokio::quic::demux::Counters::default()),
 			shutdown: Some(shutdown),
 		};
 		let response = serve_metrics(State(state)).await;
@@ -1930,6 +2065,8 @@ mod tests {
 		let mut expected: Vec<String> = EXPECTED_SERIES.trim().lines().map(str::to_string).collect();
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		expected.extend(EXPECTED_URING_SERIES.trim().lines().map(str::to_string));
+		#[cfg(feature = "_quic")]
+		expected.extend(EXPECTED_DEMUX_SERIES.trim().lines().map(str::to_string));
 		expected.sort();
 		assert_eq!(actual, expected, "{body}");
 	}
@@ -2034,9 +2171,12 @@ gauge moq_relay_draining_sessions{} 0
 # TYPE moq_relay_uring_cqes_per_enter histogram
 # TYPE moq_relay_uring_enters_total counter
 # TYPE moq_relay_uring_parks_total counter
+# TYPE moq_relay_uring_passes_total counter
 # TYPE moq_relay_uring_rx_datagrams_total counter
 # TYPE moq_relay_uring_rx_enobufs_total counter
 # TYPE moq_relay_uring_rx_exhausted_total counter
+# TYPE moq_relay_uring_rx_pool_bytes gauge
+# TYPE moq_relay_uring_rx_pool_in_use_bytes gauge
 # TYPE moq_relay_uring_rx_receives_total counter
 # TYPE moq_relay_uring_sq_full_enters_total counter
 # TYPE moq_relay_uring_sqes_per_enter histogram
@@ -2047,12 +2187,15 @@ gauge moq_relay_draining_sessions{} 0
 # TYPE moq_relay_uring_timers_fired_total counter
 # TYPE moq_relay_uring_turns_total counter
 # TYPE moq_relay_uring_tx_datagrams_total counter
+# TYPE moq_relay_uring_tx_pool_bytes gauge
+# TYPE moq_relay_uring_tx_pool_in_use_bytes gauge
 # TYPE moq_relay_uring_tx_sends_total counter
 # TYPE moq_relay_uring_tx_stalls_total counter
 # TYPE moq_relay_uring_wakes_total counter
 counter moq_relay_uring_completions_total{worker="0"} 0
 counter moq_relay_uring_enters_total{worker="0"} 0
 counter moq_relay_uring_parks_total{worker="0"} 0
+counter moq_relay_uring_passes_total{worker="0"} 0
 counter moq_relay_uring_rx_datagrams_total{worker="0"} 0
 counter moq_relay_uring_rx_enobufs_total{worker="0"} 0
 counter moq_relay_uring_rx_exhausted_total{worker="0"} 0
@@ -2067,7 +2210,11 @@ counter moq_relay_uring_tx_datagrams_total{worker="0"} 0
 counter moq_relay_uring_tx_sends_total{worker="0"} 0
 counter moq_relay_uring_tx_stalls_total{worker="0"} 0
 counter moq_relay_uring_wakes_total{worker="0"} 0
+gauge moq_relay_uring_rx_pool_bytes{worker="0"} 0
+gauge moq_relay_uring_rx_pool_in_use_bytes{worker="0"} 0
 gauge moq_relay_uring_timers_active{worker="0"} 0
+gauge moq_relay_uring_tx_pool_bytes{worker="0"} 0
+gauge moq_relay_uring_tx_pool_in_use_bytes{worker="0"} 0
 histogram moq_relay_uring_cqes_per_enter_bucket{le="0",worker="0"} 0
 histogram moq_relay_uring_cqes_per_enter_bucket{le="1",worker="0"} 0
 histogram moq_relay_uring_cqes_per_enter_bucket{le="128",worker="0"} 0
@@ -2094,5 +2241,14 @@ histogram moq_relay_uring_sqes_per_enter_bucket{le="8",worker="0"} 0
 histogram moq_relay_uring_sqes_per_enter_bucket{le="inf",worker="0"} 0
 histogram moq_relay_uring_sqes_per_enter_count{worker="0"} 0
 histogram moq_relay_uring_sqes_per_enter_sum{worker="0"} 0
+"#;
+
+	#[cfg(feature = "_quic")]
+	const EXPECTED_DEMUX_SERIES: &str = r#"
+# TYPE moq_relay_demux_dropped_total counter
+counter moq_relay_demux_dropped_total{reason="overflow"} 0
+counter moq_relay_demux_dropped_total{reason="stun"} 0
+counter moq_relay_demux_dropped_total{reason="unclaimed"} 0
+counter moq_relay_demux_dropped_total{reason="unknown"} 0
 "#;
 }

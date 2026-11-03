@@ -91,6 +91,7 @@ export namespace Audio {
 		track: Audio.StreamTrack;
 	}
 	export interface Stats {
+		bitrate?: number;
 		bytes: number;
 		frames: number;
 	}
@@ -117,6 +118,7 @@ export namespace Audio {
 export class Broadcast {
 	constructor(props?: Signals.Inputs<BroadcastInput>);
 	static readonly CATALOG_TRACK: "catalog.json";
+	static readonly STATS_TRACK: "stats.json";
 	audio(name: string): Rendition<Hang.Catalog.Audio.AudioConfig>;
 	readonly catalog: CatalogProducer;
 	close(): void;
@@ -132,13 +134,17 @@ export type BroadcastInput = {
 		height: number;
 		width: number;
 	} | undefined>;
+	echo: Signals.Getter<Net.Path.Relative | undefined>;
 	enabled: Signals.Getter<boolean>;
 	flip: Signals.Getter<boolean>;
+	hls: Signals.Getter<boolean>;
 	maxAge: Signals.Getter<Clock.Milli | undefined>;
 	name: Signals.Getter<Net.Path.Valid>;
 	onDemand: Signals.Getter<boolean | undefined>;
 	origin: Signals.Getter<Net.Origin.Table | undefined>;
+	probe: Signals.Getter<Net.Connection.Probe | undefined>;
 	rotation: Signals.Getter<number>;
+	stats: Signals.Getter<boolean>;
 };
 
 export class CatalogProducer {
@@ -213,9 +219,20 @@ export namespace Preview {
 export class Rendition<Config> {
 	close(): void;
 	readonly config: Signals.Signal<Config | undefined>;
+	hls(track: Net.Track.Producer): Hang.Hls.Recorder | undefined;
+	readonly hlsHint: Signals.Signal<Clock.Micro | undefined>;
 	readonly kind: Kind;
 	readonly name: string;
+	readonly stats: Signals.Signal<RenditionStats | undefined>;
 	readonly track: Signals.Getter<Net.Track.Producer | undefined>;
+}
+
+export interface RenditionStats {
+	bitrate?: number;
+	bytes?: number;
+	frames?: number;
+	keyframes?: number;
+	skipped?: number;
 }
 
 export * as Signals from "@moq/signals";
@@ -394,9 +411,11 @@ export namespace Video {
 		track: Video.StreamTrack;
 	}
 	export interface Stats {
+		bitrate?: number;
 		bytes: number;
 		frames: number;
 		keyframes: number;
+		skipped: number;
 	}
 	export interface StreamTrack extends MediaStreamTrack {
 		clone(): Video.StreamTrack;

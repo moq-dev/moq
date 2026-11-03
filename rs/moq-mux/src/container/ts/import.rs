@@ -4182,6 +4182,8 @@ fn mapped(channels: u32, family: u8, streams: u8, coupled: u8, table: &[u8]) -> 
 /// are refused. Retrying with gstreamer's widths could misread a descriptor written to
 /// the draft, so there is no fallback.
 fn explicit_layout(data: &[u8]) -> anyhow::Result<opus::Config> {
+	use bitstream_io::BitRead;
+
 	let (&channel_count, rest) = data.split_first().context("truncated Opus channel configuration")?;
 	let (&family, rest) = rest.split_first().context("truncated Opus channel configuration")?;
 	anyhow::ensure!(channel_count > 0, "Opus channel_count is zero");
@@ -4197,13 +4199,13 @@ fn explicit_layout(data: &[u8]) -> anyhow::Result<opus::Config> {
 		return Ok(opus::Config::new(48_000, u32::from(channel_count)));
 	}
 
-	let mut bits = Bits::new(rest);
-	let stream_count = bits.read(ceil_log2(u32::from(channel_count)))? + 1;
+	let mut bits = bitstream_io::BitReader::endian(rest, bitstream_io::BigEndian);
+	let stream_count = read_bits(&mut bits, ceil_log2(u32::from(channel_count)))? + 1;
 	anyhow::ensure!(
 		stream_count <= u32::from(channel_count),
 		"Opus stream_count {stream_count} exceeds channel_count {channel_count}"
 	);
-	let coupled = bits.read(ceil_log2(stream_count + 1))?;
+	let coupled = read_bits(&mut bits, ceil_log2(stream_count + 1))?;
 	anyhow::ensure!(
 		coupled <= stream_count,
 		"Opus coupled_stream_count {coupled} exceeds stream_count {stream_count}"
@@ -4217,15 +4219,17 @@ fn explicit_layout(data: &[u8]) -> anyhow::Result<opus::Config> {
 	let silence = (1u32 << width) - 1;
 	let mut table = Vec::with_capacity(channel_count as usize);
 	for _ in 0..channel_count {
-		let entry = bits.read(width)?;
+		let entry = read_bits(&mut bits, width)?;
 		table.push(if entry == silence { 255 } else { entry as u8 });
 	}
-	let pad = (8 - (bits.taken % 8)) % 8;
-	if pad > 0 {
-		let reserved = bits.read(pad as u8)?;
+	while !bits.byte_aligned() {
+		let reserved = read_bits(&mut bits, 1)?;
 		anyhow::ensure!(reserved == 0, "nonzero reserved bits in Opus channel configuration");
 	}
-	bits.finish()?;
+	anyhow::ensure!(
+		bits.into_reader().is_empty(),
+		"trailing bytes in Opus channel configuration"
+	);
 
 	mapped(
 		u32::from(channel_count),
@@ -4242,53 +4246,10 @@ fn ceil_log2(n: u32) -> u8 {
 	(u32::BITS - (n - 1).leading_zeros()) as u8
 }
 
-/// MSB-first reader over the bit-packed tail of an explicit Opus channel configuration.
-struct Bits<'a> {
-	data: &'a [u8],
-	index: usize,
-	current: u8,
-	left: u8,
-	/// Bits returned so far, padding included, so the caller can byte-align.
-	taken: u32,
-}
-
-impl Bits<'_> {
-	fn new(data: &[u8]) -> Bits<'_> {
-		Bits {
-			data,
-			index: 0,
-			current: 0,
-			left: 0,
-			taken: 0,
-		}
-	}
-
-	fn read(&mut self, n: u8) -> anyhow::Result<u32> {
-		let mut value = 0u32;
-		for _ in 0..n {
-			if self.left == 0 {
-				self.current = *self
-					.data
-					.get(self.index)
-					.context("truncated Opus channel configuration")?;
-				self.index += 1;
-				self.left = 8;
-			}
-			self.left -= 1;
-			value = (value << 1) | u32::from((self.current >> self.left) & 1);
-		}
-		self.taken += u32::from(n);
-		Ok(value)
-	}
-
-	/// The descriptor ended on the byte the layout consumed, with nothing after it.
-	fn finish(self) -> anyhow::Result<()> {
-		anyhow::ensure!(
-			self.left == 0 && self.index == self.data.len(),
-			"trailing bytes in Opus channel configuration"
-		);
-		Ok(())
-	}
+/// Read an `n`-bit field, MSB-first, from the bit-packed tail of an explicit Opus channel
+/// configuration. A zero-width field reads 0.
+fn read_bits(bits: &mut impl bitstream_io::BitRead, n: u8) -> anyhow::Result<u32> {
+	bits.read_var(n.into()).context("truncated Opus channel configuration")
 }
 
 /// Validate the complete PES before exposing any of its declared Opus units.
@@ -5372,7 +5333,10 @@ pub(super) mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			)
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
@@ -6073,7 +6037,10 @@ pub(super) mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			)
 			.await
 			.unwrap();
 		let mut reader = crate::container::Consumer::new(
@@ -7075,7 +7042,10 @@ pub(super) mod test {
 		let track = consumer
 			.track(hang::catalog::Catalog::DEFAULT_NAME)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			)
 			.await
 			.unwrap();
 		let mut reader = crate::container::Consumer::new(
@@ -7469,7 +7439,10 @@ pub(super) mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			)
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
@@ -7762,7 +7735,8 @@ pub(super) mod test {
 		// A generous max delay: the default of zero would shed every non-latest group, the
 		// declared breaks among them, and the subscribe start is resolved from it too, so
 		// it has to reach back past a 30 s leap to the first frame.
-		let subscription = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
@@ -9009,7 +8983,8 @@ pub(super) mod test {
 		name: &str,
 		kind: crate::container::Kind,
 	) -> Vec<crate::container::Frame> {
-		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
@@ -9845,7 +9820,8 @@ pub(super) mod test {
 
 		// Each group as published, its empty end marker included.
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Some(mut group) = track.recv_group().await.unwrap() {
@@ -10977,7 +10953,10 @@ pub(super) mod test {
 			let track = consumer
 				.track(&name)
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				)
 				.await
 				.unwrap();
 			let mut reader = crate::container::Consumer::new(

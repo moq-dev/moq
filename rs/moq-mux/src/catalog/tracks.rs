@@ -652,10 +652,20 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// the rendition existed (a dirty start or a B-frame reorder). Only the authoritative ones reach
 	/// the MSF catalog. A caller who wants to pre-empt detection sets the field on the config, or (for
 	/// a config an importer builds out of the bitstream) hands the importer a hint like [`VideoHint`].
+	/// Unset jitter and delay keep the published floor across reconfiguration.
 	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
-		let resolved = Self::resolved(&supplied, &self.detected);
-		self.check_decrease(&resolved)?;
+		let mut resolved = Self::resolved(&supplied, &self.detected);
+		if self.present {
+			let published = self.config()?.estimate();
+			if supplied.jitter.is_none() {
+				resolved.jitter = resolved.jitter.max(published.jitter);
+			}
+			if supplied.delay.is_none() {
+				resolved.delay = resolved.delay.max(published.delay);
+			}
+			Self::check_decrease(&published, &resolved)?;
+		}
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
@@ -758,11 +768,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	}
 
 	/// Refuse a config that lowers the jitter or delay already advertised to subscribers.
-	fn check_decrease(&self, next: &Estimate) -> crate::Result<()> {
-		if !self.present {
-			return Ok(());
-		}
-		let previous = self.config()?.estimate();
+	fn check_decrease(previous: &Estimate, next: &Estimate) -> crate::Result<()> {
 		if next.jitter < previous.jitter {
 			return Err(crate::Error::JitterDecreased);
 		}
@@ -808,7 +814,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
-		self.check_decrease(&config.estimate())?;
+		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
 		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
 		config.insert(&mut next, &self.name);
@@ -1009,6 +1015,53 @@ mod tests {
 	}
 
 	#[test]
+	fn reconfigure_floors_only_unsupplied_fields() {
+		let ms = Duration::from_millis;
+		for supplied_jitter in [false, true] {
+			for supplied_delay in [false, true] {
+				let (_broadcast, catalog, mut rendition) = video_track();
+				rendition.set(config(None, None)).unwrap();
+				rendition
+					.estimate(Estimate::default().with_jitter(ms(100)).with_delay(ms(200)))
+					.unwrap();
+				// The most recent reading can be below what was already advertised.
+				rendition
+					.estimate(Estimate::default().with_jitter(ms(50)).with_delay(ms(100)))
+					.unwrap();
+				let mut next = config(Some(500_000), supplied_jitter.then_some(ms(150)));
+				next.delay = supplied_delay.then_some(ms(250));
+				next.coded_width = Some(1920);
+				next.coded_height = Some(1080);
+				next.framerate = Some(30.0);
+				rendition.set(next.clone()).unwrap();
+				let expected_jitter = Some(ms(if supplied_jitter { 150 } else { 100 }));
+				let expected_delay = Some(ms(if supplied_delay { 250 } else { 200 }));
+				next.jitter = expected_jitter;
+				next.delay = expected_delay;
+				assert_eq!(catalog.snapshot().video.renditions["v"], next);
+
+				// A floor does not turn an unsupplied field into a supplied hint.
+				rendition
+					.estimate(Estimate::default().with_jitter(ms(300)).with_delay(ms(400)))
+					.unwrap();
+				let current = rendition.config().unwrap();
+				assert_eq!(
+					current.jitter,
+					if supplied_jitter {
+						expected_jitter
+					} else {
+						Some(ms(300))
+					}
+				);
+				assert_eq!(
+					current.delay,
+					if supplied_delay { expected_delay } else { Some(ms(400)) }
+				);
+			}
+		}
+	}
+
+	#[test]
 	fn published_delay_never_decreases() {
 		let (_broadcast, catalog, mut rendition) = video_track();
 		let delayed = |delay| {
@@ -1017,16 +1070,17 @@ mod tests {
 			config
 		};
 		rendition.set(delayed(Some(Duration::from_millis(200)))).unwrap();
+		assert!(matches!(
+			rendition.set(delayed(Some(Duration::from_millis(100)))),
+			Err(crate::Error::DelayDecreased)
+		));
 		for smaller in [Some(Duration::from_millis(100)), None] {
-			assert!(matches!(
-				rendition.set(delayed(smaller)),
-				Err(crate::Error::DelayDecreased)
-			));
 			assert!(matches!(
 				rendition.replace(delayed(smaller)),
 				Err(crate::Error::DelayDecreased)
 			));
 		}
+		rendition.set(delayed(None)).unwrap();
 		assert_eq!(
 			catalog.snapshot().video.renditions["v"].delay,
 			Some(Duration::from_millis(200))
@@ -1088,12 +1142,11 @@ mod tests {
 			config
 		};
 		rendition.set(text(Some(Duration::from_millis(100)))).unwrap();
-		for smaller in [Some(Duration::from_millis(50)), None] {
-			assert!(matches!(
-				rendition.set(text(smaller)),
-				Err(crate::Error::JitterDecreased)
-			));
-		}
+		assert!(matches!(
+			rendition.set(text(Some(Duration::from_millis(50)))),
+			Err(crate::Error::JitterDecreased)
+		));
+		rendition.set(text(None)).unwrap();
 		assert_eq!(
 			catalog.snapshot().text.renditions["t"].jitter,
 			Some(Duration::from_millis(100))

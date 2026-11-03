@@ -17,6 +17,7 @@ set working-directory := '.'
 qmux_examples := absolute_path(env("CARGO_TARGET_DIR", source_directory() / ".." / "target")) / "debug" / "examples"
 
 harness_browser_tests := '''
+    ./capture-idle.browser.ts
     ./capture-channel-count.browser.ts
     ./encoded-preview.browser.ts
     ./harness.browser.ts
