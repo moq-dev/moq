@@ -1075,9 +1075,6 @@ mod tests {
 	type Rendition = Producer<Container, hang::catalog::VideoConfig>;
 
 	/// Video renditions sharing one catalog, each opened with a keyframe at 0.
-	///
-	/// The openers are history, so they take no place in the write order: one at 0 trails nothing,
-	/// which would clear the least trail a test means to measure.
 	fn renditions(names: &[&str]) -> (moq_net::broadcast::Producer, crate::catalog::Producer, Vec<Rendition>) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -1090,7 +1087,6 @@ mod tests {
 			let mut track = catalog
 				.video(net, Container::Legacy(crate::container::Kind::Video), config)
 				.unwrap();
-			track.history(Timestamp::ZERO);
 			track.write(frame(0, true)).unwrap();
 			tracks.push(track);
 		}
@@ -1101,8 +1097,9 @@ mod tests {
 	fn catalog_write_order_measures_delay_across_renditions() {
 		let (_broadcast, catalog, mut tracks) = renditions(&["fast", "slow"]);
 
-		// The slow rendition writes each frame after the fast one has written 200ms past it.
-		for i in 1..10u64 {
+		// The slow rendition writes each frame after the fast one has written 200ms past it, for longer
+		// than the window delay is measured over.
+		for i in 1..40u64 {
 			tracks[0].write(frame(i * 40_000 + 200_000, true)).unwrap();
 			tracks[1].write(frame(i * 40_000, true)).unwrap();
 		}
@@ -1129,9 +1126,11 @@ mod tests {
 			config.coded_height = Some(360);
 			slow.reconfigure(config.clone()).unwrap();
 			let name = slow.name().to_string();
-			tracks[0].write(frame(240_000, true)).unwrap();
 			tracks[1].reorder(Timestamp::from_millis(100).unwrap());
-			tracks[1].write(frame(40_000, true)).unwrap();
+			for i in 1..40u64 {
+				tracks[0].write(frame(i * 40_000 + 200_000, true)).unwrap();
+				tracks[1].write(frame(i * 40_000, true)).unwrap();
+			}
 			tracks[1].cut(None).unwrap();
 			let measured = catalog.snapshot().video.renditions[&name].clone();
 			assert_eq!((measured.jitter, measured.delay), (Some(ms(100)), Some(ms(200))));
@@ -1185,8 +1184,11 @@ mod tests {
 		tracks[1].cut(None).unwrap();
 		assert_eq!(catalog.snapshot().video.renditions["replay"].delay, None);
 
-		// A live frame past the history that still trails the other rendition is a late write.
-		tracks[1].write(frame(1_980_000, true)).unwrap();
+		// Live frames past the history that still trail the other rendition are late writes.
+		for i in 0..40u64 {
+			tracks[0].write(frame(2_040_000 + i * 40_000, true)).unwrap();
+			tracks[1].write(frame(2_020_000 + i * 40_000, true)).unwrap();
+		}
 		tracks[1].cut(None).unwrap();
 		assert_eq!(tracks[1].estimate().delay, Some(std::time::Duration::from_millis(20)));
 	}

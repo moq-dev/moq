@@ -729,9 +729,9 @@ mod test {
 	}
 
 	/// An unchanged snapshot value writes no frame, so its capture time must not measure a write
-	/// that never happened.
-	#[test]
-	fn an_unchanged_snapshot_measures_nothing() {
+	/// that never happened. Delay is measured over a second of writes, so each half runs longer.
+	#[tokio::test(start_paused = true)]
+	async fn an_unchanged_snapshot_measures_nothing() {
 		let (mut broadcast, catalog) = catalog();
 		let mut gps = catalog
 			.json_stream::<Value>(timed_track(&mut broadcast, "gps"), Config::default())
@@ -743,20 +743,33 @@ mod test {
 				Options::default(),
 			)
 			.unwrap();
-		let now = catalog.clock().now();
+		let second = moq_net::Timestamp::from_micros(1_000_000).unwrap();
 		let value = serde_json::json!({ "armed": true });
-		status.update(Timed::from(&value).at(now)).unwrap();
-		gps.append(Timed::from(&serde_json::json!({ "lat": 0 })).at(now))
-			.unwrap();
-		let stale = now
-			.checked_sub(moq_net::Timestamp::from_micros(1_000_000).unwrap())
-			.unwrap();
-		status.update(Timed::from(&value).at(stale)).unwrap();
+		status.update(Timed::from(&value).at(catalog.clock().now())).unwrap();
+
+		// The same value again, captured a second behind gps: nothing is written.
+		for _ in 0..60 {
+			tokio::time::advance(std::time::Duration::from_millis(40)).await;
+			let now = catalog.clock().now();
+			gps.append(Timed::from(&serde_json::json!({ "lat": 0 })).at(now))
+				.unwrap();
+			status
+				.update(Timed::from(&value).at(now.checked_sub(second).unwrap()))
+				.unwrap();
+		}
 		assert_eq!(entry(&catalog, "status").delay, None);
 
-		// The same stale capture on a changed value is written behind gps.
-		let changed = serde_json::json!({ "armed": false });
-		status.update(Timed::from(&changed).at(stale)).unwrap();
+		// The same stale captures on changing values are written behind gps.
+		for i in 0..60 {
+			tokio::time::advance(std::time::Duration::from_millis(40)).await;
+			let now = catalog.clock().now();
+			gps.append(Timed::from(&serde_json::json!({ "lat": 0 })).at(now))
+				.unwrap();
+			let changed = serde_json::json!({ "armed": i % 2 == 0 });
+			status
+				.update(Timed::from(&changed).at(now.checked_sub(second).unwrap()))
+				.unwrap();
+		}
 		let delay = entry(&catalog, "status").delay.expect("a capture behind gps is delay");
 		assert!(delay >= std::time::Duration::from_secs(1), "{delay:?}");
 	}

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use moq_net::Timestamp;
 
-/// The window over which bitrate and framerate are averaged before they are reported.
+/// The window over which bitrate, framerate, and delay are measured before they are reported.
 const RATE_WINDOW: Duration = Duration::from_secs(1);
 
 /// The frame rates a measurement snaps to. Anything else (a variable-rate source's average)
@@ -39,10 +39,11 @@ pub struct Estimate {
 	pub jitter: Option<Duration>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// The least a frame's timestamp has trailed the highest one another track had already
-	/// written: the constant offset of a track that reaches the transport behind the others.
-	/// Lateness only some frames have, such as B-frames written after a later reference picture,
-	/// is variable and left to `jitter` and the receiver's own measurement.
+	/// How far the track reaches the transport behind the others: the least a frame's timestamp
+	/// trailed the highest one another track had already written, over a window of a second or
+	/// more, and the largest of those windows. Lateness only some frames have, such as B-frames
+	/// written after a later reference picture, is variable and left to `jitter` and the
+	/// receiver's own measurement.
 	pub delay: Option<Duration>,
 	/// The maximum frame rate in frames per second, when it is a standard one.
 	pub framerate: Option<f64>,
@@ -117,12 +118,10 @@ impl Estimate {
 pub struct Estimator {
 	jitter: Jitter,
 	bitrate: Bitrate,
-	framerate: Framerate,
+	/// The framerate and delay, measured over the same windows.
+	window: Window,
 	/// This track's place in the write order of every track sharing it.
 	seat: Seat,
-	/// The least a written timestamp has trailed the highest one another track had written, once
-	/// any other track has written.
-	delay: Option<Duration>,
 }
 
 impl Estimator {
@@ -150,19 +149,19 @@ impl Estimator {
 	pub(crate) fn rate(&mut self, timestamp: Timestamp, bytes: usize) {
 		let timestamp = nanos(timestamp);
 		self.bitrate.write(timestamp, bytes);
-		self.framerate.write(timestamp);
+		self.window.write(timestamp);
 	}
 
 	/// Place a frame stamped `timestamp` in the write order. It trails by how far the highest
 	/// timestamp another track has already written is ahead of it: a frame the transport carries
 	/// after later media from another track has to be waited for by a consumer playing both.
 	///
-	/// The delay is the least of those trails, so one frame that trails nothing clears it. Only a
-	/// track every frame of which trails keeps one; the rest of the lateness varies from frame to
-	/// frame, which the receiver measures and `jitter` floors.
+	/// A window's delay is the least of those trails, so one frame that trails nothing clears it.
+	/// Only a track every frame of which trails keeps one; the rest of the lateness varies from
+	/// frame to frame, which the receiver measures and `jitter` floors.
 	pub(crate) fn order(&mut self, timestamp: Timestamp) {
 		if let Some(behind) = self.seat.write(nanos(timestamp)) {
-			self.delay = Some(self.delay.map_or(behind, |delay| delay.min(behind)));
+			self.window.trail(behind);
 		}
 	}
 
@@ -172,22 +171,25 @@ impl Estimator {
 	/// Bitrate is averaged over whole spans so a lone keyframe is never reported as the track
 	/// bitrate on its own. A boundary with no usable duration (an unbounded cut, a span holding one
 	/// frame) leaves the span open to fold into the next one, so nothing is lost by cutting often.
+	///
+	/// Framerate and delay are measured over windows that open and close here, a window closing
+	/// at the first cut once the highest timestamp has advanced a second past where it opened.
+	/// Nothing is reported for either before then.
 	pub fn cut(&mut self, end: Option<Timestamp>) {
 		self.bitrate.cut(end.map(nanos));
-		self.framerate.cut();
+		self.window.cut();
 	}
 
 	/// Discard the open bitrate span and this track's place in the write order, so nothing is
 	/// measured across a break in the timeline. See
 	/// [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
 	///
-	/// The track may resume at another offset from the others, so the least trail is measured
-	/// afresh; a delay already in the catalog stays there.
+	/// The track may resume at another offset from the others, so its delay is measured afresh in
+	/// the next window; the delay already measured stays.
 	pub fn discontinuity(&mut self) {
 		self.bitrate.discontinuity();
-		self.framerate.discontinuity();
+		self.window.discontinuity();
 		self.seat.discontinuity();
-		self.delay = None;
 	}
 
 	/// Observe a frame's reorder delay (`PTS - DTS`), which raises the jitter to the decode buffer a
@@ -206,7 +208,7 @@ impl Estimator {
 	pub(crate) fn reading(&self) -> Reading {
 		Reading {
 			estimate: self.estimate(),
-			period: self.framerate.shortest,
+			period: self.window.shortest,
 		}
 	}
 
@@ -218,8 +220,8 @@ impl Estimator {
 		Estimate {
 			jitter: self.jitter.current(),
 			bitrate: self.bitrate.current(),
-			delay: self.delay.filter(|delay| !delay.is_zero()),
-			framerate: self.framerate.max,
+			delay: self.window.delay.filter(|delay| !delay.is_zero()),
+			framerate: self.window.framerate,
 		}
 	}
 }
@@ -326,34 +328,53 @@ impl Bitrate {
 	}
 }
 
-/// Tracks the maximum framerate: frames written per second of advance in the highest timestamp,
-/// snapped to one of [`FRAMERATES`].
+/// Tracks the maximum framerate and delay, measured over the same windows of at least
+/// [`RATE_WINDOW`] of advance in the highest timestamp, so they publish together.
 ///
+/// The framerate is frames written per second of that advance, snapped to one of [`FRAMERATES`].
 /// Not per span like [`Bitrate`]: a reordered group spans more than its own frames (an open GOP's
 /// leading pictures present before its keyframe), while the highest timestamp advances one period
 /// per frame whatever the order. Sampled at cuts, so every window starts and ends at the same point
 /// of the group structure.
+///
+/// The delay is the least trail behind the other tracks within a window, and the largest of those
+/// across windows. A constant offset is in every window, so it shows; lateness only some frames
+/// have, such as B-frame reorder, has a frame trailing nothing in every window, so it never does.
+/// Taking the least over a whole window, rather than over everything written so far, is what lets
+/// it only rise: a track that starts measuring on a frame that trails (a late join, a
+/// demand-driven start, a discontinuity) closes no window until a frame trailing less has had its
+/// chance.
 #[derive(Default)]
-struct Framerate {
+struct Window {
 	/// The highest timestamp written, in scale-free nanoseconds.
 	high: Option<u128>,
 	/// The highest timestamp when the window opened.
 	open: Option<u128>,
 	/// Frames written since the window opened.
 	frames: u64,
-	max: Option<f64>,
+	/// The least trail behind the other tracks since the window opened, if any was measured.
+	trail: Option<Duration>,
+	framerate: Option<f64>,
+	delay: Option<Duration>,
 	/// The shortest advance of the highest timestamp: a frame's duration, or a reordered group's
 	/// span of them.
 	shortest: Option<Duration>,
 }
 
-impl Framerate {
+impl Window {
 	fn write(&mut self, ts: u128) {
 		if let Some(advance) = self.high.and_then(|high| elapsed(high, ts)) {
 			self.shortest = Some(self.shortest.map_or(advance, |shortest| shortest.min(advance)));
 		}
 		self.high = Some(self.high.map_or(ts, |high| high.max(ts)));
 		self.frames += 1;
+	}
+
+	/// Count a frame's trail behind the other tracks toward the open window.
+	fn trail(&mut self, behind: Duration) {
+		if self.open.is_some() {
+			self.trail = Some(self.trail.map_or(behind, |trail| trail.min(behind)));
+		}
 	}
 
 	fn cut(&mut self) {
@@ -363,8 +384,7 @@ impl Framerate {
 		// The first window opens at a cut too, not at the first frame, which may be a join that
 		// starts partway into the group structure.
 		let Some(open) = self.open else {
-			self.open = Some(high);
-			self.frames = 0;
+			self.reopen(high);
 			return;
 		};
 		let Some(duration) = elapsed(open, high).filter(|duration| *duration >= RATE_WINDOW) else {
@@ -378,18 +398,25 @@ impl Framerate {
 			.min_by(|a, b| a.1.total_cmp(&b.1))
 			.map(|(rate, _)| rate);
 		if let Some(framerate) = snapped
-			&& self.max.is_none_or(|max| framerate > max)
+			&& self.framerate.is_none_or(|max| framerate > max)
 		{
-			self.max = Some(framerate);
+			self.framerate = Some(framerate);
 		}
+		self.delay = self.delay.max(self.trail);
+		self.reopen(high);
+	}
+
+	fn reopen(&mut self, high: u128) {
 		self.open = Some(high);
 		self.frames = 0;
+		self.trail = None;
 	}
 
 	/// Time nothing across a break in the timeline.
 	fn discontinuity(&mut self) {
 		*self = Self {
-			max: self.max,
+			framerate: self.framerate,
+			delay: self.delay,
 			shortest: self.shortest,
 			..Self::default()
 		};
@@ -604,25 +631,33 @@ mod tests {
 		Duration::from_millis(value)
 	}
 
-	/// Video at 20 ms and audio at 15 ms, written `v0 v20 a0 a15 v40 a30 v60 a45 a60`: audio
-	/// trails video by anything from nothing to 20 ms, which varies frame to frame and so is no
-	/// constant offset.
+	/// Write a frame at `millis` and close a group on it, as audio cut after every packet is.
+	/// Delay is measured over windows closed at cuts, so a test that never cuts measures none.
+	fn send(estimator: &mut Estimator, millis: u64) {
+		estimator.write(micros(millis * 1_000), 1);
+		estimator.cut(None);
+	}
+
+	/// Video at 20 ms and audio at 15 ms, interleaved `v0 v20 a0 a15 v40 a30 v60 a45 a60` and on
+	/// for two seconds: audio trails video by anything from nothing to 20 ms, which varies frame to
+	/// frame and so is no constant offset.
 	#[test]
 	fn an_interleave_is_not_delay() {
 		let [mut video, mut audio] = tracks();
-		for (video_frame, pts) in [
-			(true, 0),
-			(true, 20),
-			(false, 0),
-			(false, 15),
-			(true, 40),
-			(false, 30),
-			(true, 60),
-			(false, 45),
-			(false, 60),
-		] {
-			let track = if video_frame { &mut video } else { &mut audio };
-			track.write(micros(pts * 1_000), 1);
+		for cycle in 0..34u64 {
+			let base = cycle * 60;
+			for (video_frame, pts) in [
+				(true, 0),
+				(true, 20),
+				(false, 0),
+				(false, 15),
+				(true, 40),
+				(false, 30),
+				(false, 45),
+			] {
+				let track = if video_frame { &mut video } else { &mut audio };
+				send(track, base + pts);
+			}
 		}
 		assert_eq!(audio.estimate().delay, None);
 		assert_eq!(video.estimate().delay, None);
@@ -633,38 +668,62 @@ mod tests {
 	#[test]
 	fn a_constant_offset_is_delay() {
 		let [mut video, mut audio] = tracks();
-		for i in 0..50u64 {
-			video.write(micros(100_000 + i * 20_000), 1);
+		for i in 0..100u64 {
+			send(&mut video, 100 + i * 20);
 			// Every third frame trails a further 10 ms on top of the 100 ms offset.
-			let late = if i % 3 == 1 { 10_000 } else { 0 };
-			audio.write(micros(i * 20_000 - late), 1);
+			let late = if i % 3 == 1 { 10 } else { 0 };
+			send(&mut audio, i * 20 - late);
 		}
 		assert_eq!(audio.estimate().delay, Some(ms(100)));
 		assert_eq!(video.estimate().delay, None);
 	}
 
+	/// The offset is measured over a whole window before it is reported, never from the first
+	/// frames alone.
+	#[test]
+	fn delay_waits_for_the_window() {
+		let [mut video, mut audio] = tracks();
+		for i in 0..40u64 {
+			send(&mut video, 100 + i * 20);
+			send(&mut audio, i * 20);
+		}
+		assert_eq!(audio.estimate().delay, None, "under a second measured");
+		for i in 40..60u64 {
+			send(&mut video, 100 + i * 20);
+			send(&mut audio, i * 20);
+		}
+		assert_eq!(audio.estimate().delay, Some(ms(100)));
+	}
+
 	/// Two renditions of one 50 fps source with two B-frames (I0 P60 B20 B40 P120 B80 B100 …) and
-	/// audio, written in lockstep in decode order: one frame of each track per 20 ms.
+	/// audio, written in lockstep in decode order for three seconds: one frame of each track per
+	/// 20 ms. Tracks listed in `late` start writing at the third frame, as after a late join or a
+	/// discontinuity, so their first frame is a B-frame or audio trailing one.
 	///
-	/// From [moq-dev/moq#7579](https://github.com/moq-dev/moq/issues/7579).
-	fn lockstep(declare_reorder: bool) -> [Estimate; 3] {
-		let [mut hevc, mut avc, mut audio] = tracks();
+	/// From [moq-dev/moq#7579](https://github.com/moq-dev/moq/issues/7579). Every estimate along
+	/// the way is checked, since a catalog never lowers a `delay` it has published.
+	fn lockstep(declare_reorder: bool, late: &[usize]) -> [Estimate; 3] {
+		let mut tracks: [Estimator; 3] = tracks();
 		if declare_reorder {
 			// What the MPEG-TS and fMP4 importers report for this GOP: its largest PTS - DTS, with
 			// decoding starting one frame before the first PTS.
-			hevc.reorder(micros(60_000));
-			avc.reorder(micros(60_000));
+			tracks[0].reorder(micros(60_000));
+			tracks[1].reorder(micros(60_000));
 		}
-		let decode_order = [0, 60, 20, 40].into_iter().chain((1..10u64).flat_map(|gop| {
+		let decode_order = [0, 60, 20, 40].into_iter().chain((1..50u64).flat_map(|gop| {
 			let base = gop * 60;
 			[base + 60, base + 20, base + 40]
 		}));
 		for (tick, pts) in decode_order.enumerate() {
-			hevc.write(micros(pts * 1_000), 1);
-			avc.write(micros(pts * 1_000), 1);
-			audio.write(micros(tick as u64 * 20_000), 1);
+			for (index, pts) in [pts, pts, tick as u64 * 20].into_iter().enumerate() {
+				if tick < 2 && late.contains(&index) {
+					continue;
+				}
+				send(&mut tracks[index], pts);
+				assert_eq!(tracks[index].estimate().delay, None, "track {index} at tick {tick}");
+			}
 		}
-		[hevc.estimate(), avc.estimate(), audio.estimate()]
+		tracks.each_ref().map(Estimator::estimate)
 	}
 
 	/// B-frame reorder is never `delay`: not on the B-frame tracks, and not on the audio beside
@@ -672,35 +731,50 @@ mod tests {
 	/// already measures; counting it as `delay` too would buffer it twice.
 	#[test]
 	fn bframe_reorder_is_not_delay() {
-		let [hevc, avc, audio] = lockstep(false);
+		let [hevc, avc, audio] = lockstep(false, &[]);
 		assert_eq!((hevc.jitter, hevc.delay), (None, None));
 		assert_eq!((avc.jitter, avc.delay), (None, None));
 		assert_eq!((audio.jitter, audio.delay), (None, None));
 
 		// A declared reorder is the video's jitter, and still nobody's delay.
-		let [hevc, avc, audio] = lockstep(true);
+		let [hevc, avc, audio] = lockstep(true, &[]);
 		assert_eq!((hevc.jitter, hevc.delay), (Some(ms(60)), None));
 		assert_eq!((avc.jitter, avc.delay), (Some(ms(60)), None));
 		assert_eq!((audio.jitter, audio.delay), (None, None));
+	}
+
+	/// A track whose first measured frame trails, by the reorder only, never reports it.
+	#[test]
+	fn a_late_start_measures_no_reorder_delay() {
+		for late in [&[0, 2][..], &[2], &[0]] {
+			for declare_reorder in [false, true] {
+				let estimates = lockstep(declare_reorder, late);
+				assert!(estimates.iter().all(|estimate| estimate.delay.is_none()), "{late:?}");
+			}
+		}
 	}
 
 	#[test]
 	fn a_lone_track_never_measures_a_delay() {
 		let [mut video] = tracks();
 		// Decode order with B-frames: each trails a reference picture written before it.
-		for pts in [0, 120_000, 40_000, 80_000] {
-			video.write(micros(pts), 1);
+		for gop in 0..10u64 {
+			for pts in [0, 120, 40, 80] {
+				send(&mut video, gop * 160 + pts);
+			}
 		}
-		assert_eq!(video.estimate(), Estimate::default());
+		assert_eq!(video.estimate().delay, None);
 	}
 
 	/// A B-frame trailing its own track is reorder jitter, not a delay behind the other tracks.
 	#[test]
 	fn reorder_within_a_track_is_not_delay() {
 		let [mut video, mut audio] = tracks();
-		audio.write(micros(0), 1);
-		for pts in [0, 120_000, 40_000, 80_000] {
-			video.write(micros(pts), 1);
+		for gop in 0..10u64 {
+			send(&mut audio, gop * 160);
+			for pts in [0, 120, 40, 80] {
+				send(&mut video, gop * 160 + pts);
+			}
 		}
 		assert_eq!(video.estimate().delay, None);
 	}
@@ -710,10 +784,12 @@ mod tests {
 	#[test]
 	fn a_discontinuity_drops_the_tracks_high() {
 		let [mut ahead, mut steady] = tracks();
-		ahead.write(micros(10_000_000), 1);
+		send(&mut ahead, 10_000);
 		ahead.discontinuity();
-		ahead.write(micros(1_000_000), 1);
-		steady.write(micros(1_000_000), 1);
+		for i in 0..60u64 {
+			send(&mut ahead, 1_000 + i * 20);
+			send(&mut steady, 1_000 + i * 20);
+		}
 		assert_eq!(steady.estimate().delay, None);
 	}
 
@@ -722,12 +798,15 @@ mod tests {
 	#[test]
 	fn a_discontinuity_measures_the_new_offset() {
 		let [mut video, mut audio] = tracks();
-		video.write(micros(0), 1);
-		audio.write(micros(0), 1);
+		for i in 0..60u64 {
+			send(&mut video, i * 20);
+			send(&mut audio, i * 20);
+		}
+		assert_eq!(audio.estimate().delay, None);
 		audio.discontinuity();
-		for i in 1..10u64 {
-			video.write(micros(1_000_000 + i * 20_000), 1);
-			audio.write(micros(800_000 + i * 20_000), 1);
+		for i in 0..60u64 {
+			send(&mut video, 2_000 + i * 20);
+			send(&mut audio, 1_800 + i * 20);
 		}
 		assert_eq!(audio.estimate().delay, Some(ms(200)));
 	}
@@ -736,13 +815,15 @@ mod tests {
 	fn a_dropped_track_stops_holding_others_back() {
 		let order = Order::default();
 		let mut ahead = Estimator::with_order(order.clone());
-		ahead.write(micros(10_000_000), 1);
+		send(&mut ahead, 10_000);
 		drop(ahead);
 
 		let mut steady = Estimator::with_order(order.clone());
 		let mut other = Estimator::with_order(order);
-		other.write(micros(1_000_000), 1);
-		steady.write(micros(1_000_000), 1);
+		for i in 0..60u64 {
+			send(&mut other, 1_000 + i * 20);
+			send(&mut steady, 1_000 + i * 20);
+		}
 		assert_eq!(steady.estimate().delay, None);
 	}
 

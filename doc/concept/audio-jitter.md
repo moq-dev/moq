@@ -348,12 +348,14 @@ flushes 200 ms behind the audio encoder produces the same video target as one
 that does not, and its frames would all arrive 200 ms late for the shared clock.
 
 The catalog `delay` field carries that offset: the least a rendition's
-timestamps have trailed those the broadcast's other renditions already wrote,
-measured by the publisher and never lowered once published. It is an addend, not
-a floor, because nothing on this page contains it. Lateness only some frames
-have is left out, since `measured` already contains it: a B-frame written after
-a later reference picture trails that picture and another rendition's, and the
-audio written beside it trails them too, but the reference pictures do not. The shared playout is the largest requirement among the
+timestamps trailed those the broadcast's other renditions already wrote, over a
+window of a second of its media, and the largest of those windows. It is
+measured by the publisher, reported only once a window closes, and never
+lowered. It is an addend, not a floor, because nothing on this page contains
+it. Lateness only some frames have is left out, since `measured` already
+contains it: a B-frame written after a later reference picture trails that
+picture and another rendition's, and the audio written beside it trails them
+too, but the reference pictures do not, and every window holds one. The shared playout is the largest requirement among the
 renditions actually subscribed:
 
 ```

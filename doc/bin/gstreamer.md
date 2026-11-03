@@ -128,8 +128,8 @@ the same instant, so their difference is 1 while connected. Unlike `status`, a
 drop you did not poll still moves both counters.
 
 The catalog `delay` of each pad is the least its buffers' timestamps trail ones
-the other pads already pushed, so players buffer for an encoder that delivers
-behind the others. Lateness only some buffers have, such as B-frame reorder, is
+the other pads already pushed over a second of media, so players buffer for an
+encoder that delivers behind the others. Lateness only some buffers have, such as B-frame reorder, is
 left to the player's own measurement. Arrival time is never measured, so file,
 demuxed, and network media advertise the same values as a live encoder.
 
