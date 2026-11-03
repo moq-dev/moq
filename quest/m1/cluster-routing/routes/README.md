@@ -1,4 +1,4 @@
-# [XL] Routes and announces
+# Routes and announces
 
 ## Goal
 
@@ -13,79 +13,46 @@ claim whose withdrawal is already known.
 
 ## Plan
 
+The route layer's core landed in
+[moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676): a
+crate-private, sans-IO `Router` in `rs/moq-net/src/route/`, generic over the
+neighbor key and the claim attributes, with every holding rule of the
+contract below. Each message recomputes only the identity it names. The
+handoff fixtures, both sweeps, and the route-layer fixtures of the contract
+run against it in `route/tests/`; the forwarding and first-hop selection
+fixtures still run only on the reference model in
+`rs/moq-net/tests/integration/routing_contracts/`. Nothing drives the router
+on the wire yet. The children below carry the rest, in order, and land in
+one release: lite-07 carries the route layer as a whole
+([lite-07 finalize](/quest/m1/lite07-finalize.md) waits on this epic). This
+README holds the routing contract every child implements.
+
+Decided 2026-11-03 (maintainer, on
+[moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676)): land the core
+and split the quest into this epic. Options were: ✅ land the core and split;
+one PR; the core plus the Rust wire there, with JS as a child.
+
+Settled by the core, for review:
+
+- Every lite-07 claim covers its own path and everything below it, so the
+  model's exact-versus-wildcard distinction is gone: a claim above an
+  interest overlaps it (`a_claim_above_an_interest_overlaps_it`).
+- Letting go of a region keeps the proof's rule: keep every still-certified
+  region, or rebuild them all if a lost floor is newer than a kept one, a
+  collection whose replay is bounded like any other.
+- A rotated identity ends the old one with ROUTE_END on every stream rather
+  than closing sessions, since the own identity is no longer proven per
+  session.
+
 Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
 2026-10-13 [decisions](/quest/m1/cluster-routing/README.md) and the routing
-contract below. The routing contract's fixtures live in
+contract below. The routing contract's remaining model fixtures live in
 `rs/moq-net/tests/integration/routing_contracts/` and run against a small reference model;
 port each topology to the implementation as acceptance, then delete the model.
 The handoff contract below, decided 2026-10-16, settles claim freshness:
 
-- Wire sketch, flexible in detail. ROUTE_START carries the node id, a seqno,
-  the metric, and the down-only bit (below), and implicitly takes the next
-  stream-local Route ID, as ANNOUNCE_START takes the next Announce ID today.
-  ROUTE_UPDATE (Route ID, seqno, metric, down-only) and ROUTE_END (Route
-  ID) reference it; the bit rides UPDATE so a route moving between a
-  mesh path and a CDN fallback changes it without retracting its announces.
-  ANNOUNCE_START carries the prefix (keeping today's Path Base/Keep
-  compression), a Route ID, the origin's cost for that prefix, and the epoch,
-  and lite-07's restart message from
-  Restart keeps its meaning. On a
-  route without an epoch, the source is the origin node and its ANNOUNCE: a
-  new one at the same path is a restart. This is routing provenance, not
-  permission to stitch. A concrete serving-route change without an epoch
-  remains Restart even when the origin node is unchanged; only a matching
-  explicit epoch or the separately proven Takeover operation preserves an
-  instance (superseded 2026-10-30: a shared route `instance` preserves it, per
-  [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)). Test a same-origin next-hop change with no epoch.
-  ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END withdraws this origin's claim
-  while the route stays up. A wildcard claim is capability, not an inventory
-  of broadcasts; another origin may still serve the same epoch. An announce
-  never changes its Route ID: another origin
-  serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
-  Route ID is a protocol violation. A ROUTE_UPDATE with an infinite metric
-  (2^64-1, the largest lite-07 varint; a sum reaching it is unreachable)
-  means held: the sender has no usable route but still holds the origin's
-  announcements while it recovers. ROUTE_END means the sender let go of the
-  origin on this stream; neither is proof that the origin withdrew its
-  claims (see the handoff contract). Each batch of ANNOUNCEs for a route
-  closes with one ANNOUNCE_FLOOR listing every region the sender certifies
-  for that route: a count, then per region a suffix of the stream's interest
-  prefix (empty for the whole interest) and the origin revision as of which
-  the stream's set for that route in that region is complete. The list
-  replaces the previous one, so a region left out is no longer certified,
-  and a count of zero answers a stream whose interest none of the sender's
-  regions meets.
-  ROUTE_REQUEST (node id, seqno) travels
-  the other way on the same stream, toward the neighbour that sent the route,
-  and so does the echo of every ROUTE_END: the receiver sends the same
-  ROUTE_END (Route ID) back once it has dropped the route, which tells the
-  sender no neighbour still holds its advertisement (see the handoff
-  contract). Every receiver echoes, clients included; a closed session
-  counts as the echo.
-  The hop list leaves lite-07, and with it the
-  `Hop Base`/`Hop Keep` compression; `cluster.max_hops` then stops applying
-  to lite-07. Most of the 62% saving measured in
-  [moq-dev/moq#4196](https://github.com/moq-dev/moq/pull/4196) came from hop
-  chains, so rerun its announce bench on path-less ANNOUNCE and drop
-  `Path Base`/`Path Keep` too unless it still pays for its rules.
+The wire sketch is in [wire](/quest/m1/cluster-routing/routes/wire.md); the bullets below are the contract it carries.
 
-  ```text
-  ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
-  ANNOUNCE_START prefix=transcode/ route=0 cost=10    -> announce 0
-  ANNOUNCE_START prefix=transcode/foobar route=0 cost=1 -> announce 1
-  ANNOUNCE_FLOOR route=0 count=1 ""@7           # complete as of revision 7
-  ROUTE_UPDATE route=0 seqno=42 metric=15
-  ANNOUNCE_END announce=1                       # this origin withdraws a claim
-  ANNOUNCE_FLOOR route=0 count=1 ""@8
-  ANNOUNCE_FLOOR route=1 count=2 "live/a/"@3 "live/b/"@5  # a scoped key
-  ANNOUNCE_FLOOR route=1 count=1 "live/b/"@6    # live/a/ is no longer certified
-  ROUTE_UPDATE route=0 seqno=42 metric=inf      # held: unusable, still recovering
-  ROUTE_END    route=0                          # let go: forget it on this stream
-  ROUTE_END    route=0                          # <- the receiver echoes it back
-  ```
-- Scope route state to interested origins, not the CDN's whole node table.
-  Send a route before any announcement referencing it. The handoff contract
-  defines held routes, letting go, and collection.
 - The announce cost is the origin's per-prefix seed (`transcode/**` at 10 and
   `transcode/foobar` at 1 from one node, decided 2026-10-01) and nobody
   changes it in transit; a path's cost through a route is that seed plus the
@@ -162,30 +129,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   claim no longer decides transit trust. Legitimate scoped delivery survives
   losing one of two uplinks under one key
   (`scoped_delivery_through_two_uplinks_reaches_one_key`).
-- Open: how a scoped peer's routing identities are keyed. The key must
-  survive token refresh, be shared by one operator's two uplinks, and leave
-  a forger unable to capture claims outside its scope; each claim is still
-  checked against the current pattern union. Rejected 2026-10-15: the
-  connection's publish scope (`hash(scope, id)`), since a publish grant is
-  a union of patterns that refresh and withdrawal change, so neither the
-  whole union nor one matching pattern is a key that survives refresh and
-  that two uplinks share; and the connection root, too coarse since two
-  scoped peers under one root would share keys. Dropped 2026-11-02
-  (maintainer): the grant's issuer-qualified credential subject
-  (`hash(subject, id)`, decided 2026-10-15), along with refusing scoped
-  tokens without a subject and tokens whose subject differs from the
-  session's; the implementation is in
-  [moq-dev/moq@453e1ec](https://github.com/moq-dev/moq/commit/453e1ece7c5435ee19541cfc2e9bbe0b6fbc430e).
-  The answer also covers sessions allowed to publish part of the tree with
-  no token (public rules, mTLS certificates, or a third-party auth server).
-  Whatever the key, add multi-pattern, overlapping-pattern, and refresh
-  fixtures. "Scope" means only a grant's pattern union.
-- ✅ Decided 2026-10-15 (maintainer): retract and re-file when a session's
-  grant union crosses the scoped boundary in either direction (a `**` token
-  added, or its expiry). Every forwarded route the session delivered is
-  retracted, and its current advertisements are re-filed under the new key,
-  so no route, feasibility distance, or alias stays under the old one.
-  Expiry cannot be refused, so refusing the transition was not an option.
+- Open: how a scoped peer's routing identities are keyed, owned by
+  [session integration](/quest/m1/cluster-routing/routes/session.md). The router takes the key from the caller (`Scope::qualify`).
 - Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
   and a scoped connection forwarding an already qualified identity has that
   route refused, with no wire change. Otherwise a key sent down through a
@@ -242,32 +187,6 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   exchange, though not its latency.
 - Claim freshness follows the handoff contract below, independently of the
   requested path's forwarding choice.
-- Only the first hop selects the origin. It keeps `route_order`'s shape over
-  the origin nodes announcing the path: longest prefix, newest epoch (within
-  one instance only, per [Instance and epoch](https://github.com/moq-dev/moq/pull/7489),
-  decided 2026-10-30), the link's priority (`origin::Producer::with_preference`), seed plus route
-  metric, then a rendezvous hash of the path and the identity, and the newest
-  connection only for an otherwise identical route. The hash drops the hop
-  chain, which differs per node, so every node agrees on a pool member
-  (`pool_ties_agree_only_on_a_path_and_identity_hash`). The request then names
-  that identity, and every later hop follows its own route to it, so
-  forwarding needs a route but not the claim.
-- Reselecting the origin at every hop loops although each origin's routes are
-  loop-free (RFC 8966 s2.7): a ring of same-epoch origins whose relays
-  prioritize different links, and nested wildcards where a relay has not
-  heard the specific claim, both cycle past requester exclusion; joining
-  another relay's subscription by path or epoch deadlocks; and without an
-  epoch a later hop splices another publisher under the requester's
-  announcement with no Restart (`local_priorities_loop_path_only_requests`,
-  `overlapping_wildcards_loop_where_specific_claims_are_unheard`,
-  `aggregation_cycles_starve_without_a_forwarding_constraint`,
-  `epochless_reselection_splices_another_publisher`,
-  `sweep_forwarding_progress`). A relay therefore joins a forwarded request
-  only to a subscription following its route to the same identity. When that
-  identity becomes unreachable the forwarded request ends, and the first hop
-  re-resolves, resuming only on a matching epoch. A request carrying a cost
-  bound instead also never loops, but stalls where a transit hop has not
-  heard the claim and still splices epochless sources.
 - Decided 2026-10-13: preserve application priority among feasible transit
   routes, then compare additive cost. Feasibility always takes precedence:
   a preferred longer route can remain ineligible after a shorter route was
@@ -305,8 +224,6 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   backbone addresses, but are not themselves authorization. A client
   advertises nothing it receives, so it holds no feasibility distance and
   falls back from P2P to the CDN at once. It still echoes every ROUTE_END.
-- Mixed versions: a lite-06 peer keeps today's path vector, translated at the
-  relay that speaks both, for the rollout window only.
 
 Handoff contract, proven 2026-10-15 by the fixtures in `handoff.rs` against
 next-hop authority and a snapshot barrier alone. A next-hop change adopts the
@@ -537,13 +454,6 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    meaning and costs a floor per dropped region; and an end-of-batch marker,
    a message for what one floor frames.
 
-Open, for this quest's implementation: any further wire detail of the region
-list, such as its order, is settled there with Rust and JS interop, not in
-the proof. So is whether letting go of a region keeps each still-certified
-region's knowledge independently: the proof keeps them all or, if any lost
-floor is newer than a kept one, rebuilds them all, a collection whose replay
-is bounded like any other.
-
 Why not a hold-down: [moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644) retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
 relay, dropping subscribers for about a second while the relay kept serving;
@@ -582,109 +492,13 @@ benchmarks.
   subscriptions through the radio mesh and the split refuses, and after a
   partition each island reaches the other through its uplink.
 
-Open, for the implementer to settle and record:
+## Required
 
-- The earlier simulator persisted seqnos across restart. Re-run with the
-  settled fresh routing incarnation and the stale-state rules above; do not
-  carry the old assumption into acceptance.
-- How much of today's route trie, fronts, and `route_order` survives intact.
-
-The counterexamples from #4349 (closed; this quest still owns the fix) are the `residual_*` tests in
-`rs/moq-net/tests/integration/mesh_withdraw.rs`. They pin today's hunting on lite-06:
-a stale path outlasting the 300 ms hold, a revival the quarantine misses,
-and 179 hunting relays (3 reviving) over 200 seeded meshes. Turn each into a
-single retraction everywhere, and keep `cross_node_close_retracts_once`
-passing. On `main` an epochless switch to a stale path is a Restart, which a
-lite-06 client sees as a retraction and an announcement; the release sent an
-in-place update.
-
-Publishing toggles too, decided 2026-10-13: add a time-mocked fixture where,
-on some rings, a longer path arrives first and the better route then replaces
-it as a Restart, so a lite-06 client sees `Start, End, Start` while the
-broadcast stays live. Pin today's sequence beside the `residual_*` tests;
-the epochless Restart rule above decides what it becomes.
-
-Tests, time mocked: the handoff fixtures and sweep in `handoff.rs`;
-[moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644)'s live-graph withdrawal and failover tests (the PR closed and
-its branch is gone; fetch `refs/pull/4644/head`) as acceptance, run on the wip version; a
-link flap with many broadcasts behind one origin costs one ROUTE change per
-link; a ring of three where a stale neighbour cannot revive an ended
-broadcast; a two-uplink mesh that never carries CDN routes back to the CDN;
-an island reached through the CDN after a partition; an unknown Route ID
-refused; a five-node ring whose preferred origin link fails recovers its
-longer backup through a seqno request, duplicates suppressed, while that
-backup never loses its session; a ring where a node's own preferred route
-points back at the requester forwards the request to it, which carries it
-on along its own route, and an unanswerable request stops once no usable
-route is left. Failover is measured
-on broadcast liveness while the next hop changes, including a new next hop
-whose ROUTE arrives before its ANNOUNCE set, and reports per-path
-retractions and re-announcements beside the ROUTE budget; eventual route
-recovery alone does not show it is seamless.
-
-Tiered-cluster and partition/healing end-to-end checks belong in this quest,
-not after lite-07 can be finalized: two regions with redundant cores, publish,
-claim withdrawal, core loss, and matching-epoch failover reaching a far edge;
-a two-uplink mesh reached through CDN during partition. Include overlapping
-wildcards, a hidden exportable alternative under one selection, epochless Restart, and a
-grant union crossing the scoped boundary each way (a `**` token added, then expiring). Fixtures are
-public and time-mocked, wired into CI alongside Rust/JS interop.
-
-Benchmark origins, broadcasts per origin, neighbors, active tracks/fronts,
-and announce cursors independently. A route update must not expand back into
-per-broadcast table rewrites or poll unrelated fronts. Measure messages, bytes,
-wakes/select calls, CPU, replay work, and retained state. One broadcast per
-origin is an explicit case. Coordinate with Route wakes and Announce replay;
-benchmark smoke alone does not enforce complexity, so add operation-count
-regressions. Bound pending requests and freshness state under same-clock churn.
-
-Wire: `drafts/draft-lcurley-moq-lite.md` in the same PR, and `js/net`
-encodes, decodes, and resolves it. Requests forwarded between routing nodes
-name the serving identity (decided 2026-10-13). ROUTE carries one down-only
-bit and no export metric. Browsers remain non-transit; P2P reuses this model
-rather than adding a browser forwarding engine. Public API: the route-change
-surface on `broadcast::Route` and its bindings will likely change, `Hops`
-and saturating `Cost` go, zero-cost links are refused, a per-connection
-`proxy` preference is added, and `cluster.id`/`--cluster-id` is removed
-rather than kept as an unused label (decided 2026-10-13). Announcements
-expose availability, and a let-go is reported as offline rather than END
-(decided 2026-10-16). `Preference`
-continues to rank feasible transit routes; report it. This may
-split at start (Rust and draft, then JS), as long as both land in one
-release.
-
-Decided 2026-10-27 (maintainer): this quest deletes the epochless instance
-machinery in `rs/moq-net/src/model/origin.rs`: `Instance::Route(generation)`
-and its renewals, `restarted_since`, the held-restart Release for epochless
-routes, and Selection retirement, leaving Follow's same-epoch
-Update/Restart split as the only takeover rule. Once each origin is its own
-ANNOUNCE and the first hop pins the request to its identity, the first hop's
-route is the instance, so the per-hop renewal has nothing left to protect.
-An epochless change of serving route stays a Restart, including the
-same-origin next-hop change in the wire sketch above, and the routing
-contract's epochless fixtures keep passing. Minting an epoch for every route
-instead was tried and rejected
-([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)): each relay
-mints at its own time, so mint order outranks cost, preference, and the
-local-broadcast tie and relays disagree on a pool path's winner, while
-ranking a minted epoch last keeps the renewal it was meant to delete.
-
-Moved 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)):
-[Instance and epoch](https://github.com/moq-dev/moq/pull/7489) now deletes that
-epochless machinery, so this quest no longer does. A session mints
-an `instance` (`~` plus random bits) for any route that
-arrives without one, and newest-wins compares epochs only within one
-instance, so mint order no longer outranks cost or preference. The rest of
-the 2026-10-27 decision stands. The broadcast epoch fields here become that
-publisher instance and its per-instance epoch, in place of the UUIDv7
-epoch. The route layer's own origin-node identity, with its seqno and
-revision, stays separate ("keep administrative identity and broadcast epoch
-separate", above).
-
-Decided 2026-10-27 (maintainer), from
-[moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
-`origin.ts` a detached request stays on its own route instead of following
-the cheapest one; fix it with the route-selection rework here.
+- [lite-07 route wire](/quest/m1/cluster-routing/routes/wire.md) - lite-07 and the draft carry ROUTE, ANNOUNCE_FLOOR, ROUTE_REQUEST, and path-less ANNOUNCE
+- [Route session integration](/quest/m1/cluster-routing/routes/session.md) - one router per origin node drives the origin and every lite-07 announce stream
+- [Announcement availability](/quest/m1/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
+- [js/net route layer](/quest/m1/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
+- [Route layer acceptance](/quest/m1/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
 
 ## Related
 

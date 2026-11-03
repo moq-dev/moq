@@ -144,7 +144,6 @@ per-frame CPU growth since #5926.
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
-- [JSON writes take a broadcast-clock timestamp](/quest/m1/json-required-timestamp.md) - every binding's JSON write requires one, moq-c's NULL fails, and C gains `moq_publish_catalog_now()`, so C media stops advertising an 8 s delay
 - [Catalog delay is the least a track trails](/quest/m1/catalog-delay-min.md) - the estimator keeps the minimum trail, so B-frame reorder never becomes `delay`
 - [Byte-stream renditions form a ladder](/quest/m1/stream-ladder.md) - moq-ffi stream producers link as `lower` and disable unfundable rungs like frame producers
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
@@ -156,7 +155,6 @@ per-frame CPU growth since #5926.
 - [release carries the fanout-threads bench](/quest/m1/release-fanout-bench.md) - a bench-only port of session_fanout_threads for the pre-cut pairing
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
-- [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [@moq/net holds every unbounded u62 as bigint](/quest/m1/js-bigint-audit.md) - u62 wire values a peer can push past 2^53 move to `bigint`, with round-trip tests
 - [moq-crypto replaces moq-sign and moq-e2ee](/quest/m1/moq-crypto.md) - one Rust crate and one JS package hold signing and end-to-end encryption, sharing moq-net's timestamp check

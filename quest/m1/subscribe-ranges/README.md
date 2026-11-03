@@ -2,14 +2,16 @@
 
 ## Goal
 
-A moq-lite-07 SUBSCRIBE replaces FETCH. One subscription asks for any number
+A moq-lite-07 SUBSCRIBE replaces FETCH for anything wider than one group. One subscription asks for any number
 of group ranges, past or live, bounded by group or by time, in ascending or
 descending order, and the
 publisher serves their union from one cursor without sending a group twice.
 Every sequence in range either arrives or is named by a SUBSCRIBE_DROP, so
 nothing blocks on a cache miss. Relays fill misses upstream with ranges, not
 one request per group, including over moq-transport where group numbers may be
-sparse. Lite FETCH is removed from lite-07.
+sparse. Lite-07 FETCH is single-group only: one group, or a slice within one
+group, which SUBSCRIBE cannot express (maintainer, 2026-11-03, replacing the
+earlier removal).
 
 ## Plan
 
@@ -26,8 +28,8 @@ relay bounds a sparse FETCH only if the model can request ranges:
   historical requests also obey that cap and publisher max-age. An omitted
   FETCH budget means publisher max-age alone; translation to a range must
   not accidentally give it the live SUBSCRIBE zero-delay default. SUBSCRIBE_UPDATE
-  replaces the list. Lite FETCH is removed from
-  lite-07; published versions keep it, answered through the same model.
+  replaces the list. Lite-07 FETCH is single-group only (decided 2026-11-03,
+  replacing its removal); published versions keep it, answered through the same model.
 - **Holes.** SUBSCRIBE_DROP (restored in lite-07) names every sequence in the
   requested ranges the publisher won't deliver: never existed, expired, or
   refused upstream. On lite-01..06 datagram groups are always dropped in a past range (#4982); on lite-07 ranges never cover datagrams ([Datagram tracks](/quest/m1/datagram-tracks/README.md)). The
@@ -99,7 +101,7 @@ every sequence delivered or dropped.
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net`'s on-demand request surface and `fetchGroup` as a range
 - [JS received copies fill what they missed](/quest/m1/subscribe-ranges/js-fills.md) - a JS subscriber session asks upstream for its copy's misses, with Rust's below-start and head-fill rules
-- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - FETCH removed from lite-07 in Rust, JS, and the draft
+- [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups, in Rust, JS, and the draft
 - [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - what each lite cursor is owed and dropped lives in the model, and `TrackRun` only translates it per version
 
 ## Related

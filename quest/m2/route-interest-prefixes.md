@@ -16,7 +16,7 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 - m1
 - ✅ m2
 
-Split out of [Routes and announces](/quest/m1/cluster-routing/routes.md) by
+Split out of [Routes and announces](/quest/m1/cluster-routing/routes/README.md) by
 [moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676), which lands
 the route layer's core with a single interest prefix per stream (its
 regions are suffixes of that prefix) and leaves this as a separate m2 quest.
@@ -33,4 +33,4 @@ interest and ANNOUNCE_FLOOR regions on the next unpublished lite version.
 
 ## Related
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the single-prefix route layer this extends
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the single-prefix route layer this extends

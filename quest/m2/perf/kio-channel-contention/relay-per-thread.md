@@ -27,7 +27,7 @@ routes. The epic README holds both spikes' numbers.
   announce delay at 1 to 16 workers (the cluster spike's `spike_announce`
   table), plus the data-plane shapes (chat, fanout, video-heavy).
 - Settle how other relays' routes reach every worker without re-announce,
-  for example through [Routes and announces](/quest/m1/cluster-routing/routes.md)'
+  for example through [Routes and announces](/quest/m1/cluster-routing/routes/README.md)'
   per-connection `proxy` preference turned off on worker links.
 - Compare against the replica spike
   ([moq-dev/moq#7533](https://github.com/moq-dev/moq/pull/7533)): replicate

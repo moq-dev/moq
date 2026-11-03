@@ -21,7 +21,8 @@ Media timestamps are exact `Timestamp` records, `value` units at `scale` units p
 (a write at another scale rounds down to it). On macOS 13+ and iOS, `try Timestamp(duration)` converts a `Duration` exactly,
 and `try timestamp.duration` rounds down to a whole attosecond.
 Publish JSON tracks with `TrackInfo(compress: true)`; a `Json` consumer reads one with no option of its own.
-A missing data timestamp stays untimed; the library never substitutes zero or now.
+A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
+`Json.SnapshotProducer.update`, `Json.StreamProducer.append`, and `Json.WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `Json` consumers yield `Json.Timed` (`value`, `timestamp`); a snapshot consumer yields each state in order,
 and `latest()` skips to the newest.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.

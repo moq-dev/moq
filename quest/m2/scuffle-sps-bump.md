@@ -40,5 +40,4 @@ Wire: none.
 
 ## Related
 
-- [SPS fields cannot overflow](/quest/m1/fuzz-findings/sps-overflow.md) - added the walk
 - [moq-video shares moq-mux's bounded H.265 SPS walk](/quest/m0/video-sps-walk.md) - the second user of the walk

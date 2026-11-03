@@ -6,7 +6,7 @@ A hostile publisher's H.265 SPS can't panic a subscriber's decoder.
 moq-video's VUI read (`rs/moq-video/src/decode/vui.rs:102`) stops
 calling `scuffle_h265::SpsNALUnit::parse` directly and go through moq-mux's
 bounded walk, `sps::parse_full` from
-[moq-dev/moq#7685](https://github.com/moq-dev/moq/pull/7685), which refuses an
+[moq-dev/moq#7685](https://github.com/moq-dev/moq/pull/7685) (merged), which refuses an
 SPS that would reach scuffle-h265's overflowing lines. The regression inputs
 from #7685 pass through moq-video's decode path too.
 
@@ -33,10 +33,6 @@ parses the same SPS unchecked: scuffle-h265 itself overflows inside
   panics without the fix.
 
 Public API: additive in moq-mux (the shared SPS walk). Wire: none.
-
-## Required
-
-- [SPS fields cannot overflow](/quest/m1/fuzz-findings/sps-overflow.md) - lands `sps::parse_full` in moq-mux (moq-dev/moq#7685)
 
 ## Related
 
