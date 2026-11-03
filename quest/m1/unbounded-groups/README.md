@@ -114,6 +114,10 @@ Decided 2026-10-16 (maintainer interview):
   advancing the base (`rs/kio/src/log.rs`). A ring buffer was rejected: an
   uncapped group has no size to give it. Numbers are in #6782 and the
   [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md).
+  Accepted 2026-11-03 (maintainer), from the lock profiles in
+  [moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742): no
+  lock-contention regression attributable to #6782. The pre-epoch run shows
+  the same `GroupState` wait stack at a similar wait (709 vs 599 µs).
 - Readers pin nothing: reads refresh recency as today. Within a group,
   victims go front to back.
 - Whole cold groups are still evicted first. A group loses part of itself
@@ -153,6 +157,5 @@ covered only at the model layer (maintainer, 2026-10-30).
 - [Flights](/quest/m1/unbounded-groups/flights.md) - a reader at a shed frame replays through a separate paced copy that hands over to the copy ahead
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
 - [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way
-- [Log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md) - a lock profile on a perf host confirms the epoch-based `kio::log` cut `GroupState` contention
 - [Compressed frames have no size cap and inflate as a bounded stream](/quest/m1/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one
 - [FETCH egress and ingest stream large frames without buffering](/quest/m1/unbounded-groups/fetch-stream.md) - `@moq/net` serves a moq-transport FETCH object by object as it reads them, never collecting a requested group slice whole, so a FETCH of a group with large frames holds no more than the group tail
