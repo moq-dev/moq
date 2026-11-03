@@ -88,7 +88,10 @@ async fn import_onto(
 
 	let mut track = consumer
 		.track(&name)?
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY)),
+		)
 		.await?;
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();

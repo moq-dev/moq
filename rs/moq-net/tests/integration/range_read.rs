@@ -8,7 +8,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Order, Subscription};
+use moq_net::track::{Delay, Order, Subscription};
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -102,7 +102,7 @@ async fn fixture(
 fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 	Subscription::default()
 		.with_range(groups)
-		.with_max_delay(None)
+		.with_delay(Delay::default().with_max(None))
 		.with_order(Order::Ascending)
 }
 

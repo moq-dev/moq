@@ -58,7 +58,9 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
 				let ts = |ms| Timestamp::from_millis(ms).unwrap();
-				let prefs = || track::Subscription::default().with_max_delay(Duration::from_secs(10));
+				let prefs = || {
+					track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)))
+				};
 
 				let mut group = track.append_group().unwrap();
 				group.write_frame(ts(0), b"a0".as_ref()).unwrap();
@@ -207,7 +209,8 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 			let consumer = relay.consume();
 			let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
-			let prefs = || track::Subscription::default().with_max_delay(Duration::from_secs(10));
+			let prefs =
+				|| track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
 
 			// Held for fetches only: it keeps the relay's copy without subscribing.
 			let _held = remote.track("video").unwrap();

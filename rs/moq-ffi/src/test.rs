@@ -6474,7 +6474,7 @@ async fn server_new_validates_the_config() {
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
-	assert_eq!(defaults.max_delay, Some(Duration::ZERO));
+	assert_eq!(defaults.delay.max, Some(Duration::ZERO));
 }
 
 /// A settings UI shows these, so each must be what an unset knob actually dials with.

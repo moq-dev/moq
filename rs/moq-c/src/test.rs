@@ -4194,7 +4194,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 
 	let ascending = |start, end| {
 		moq_net::track::Subscription::default()
-			.with_max_delay(None)
+			.with_delay(moq_net::track::Delay::default().with_max(None))
 			.with_range(start..end)
 			.with_order(moq_net::track::Order::Ascending)
 	};
@@ -4260,7 +4260,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 	}
 	let subscribe = || {
 		let subscription = moq_net::track::Subscription::default()
-			.with_max_delay(None)
+			.with_delay(moq_net::track::Delay::default().with_max(None))
 			.with_range(6..7);
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
@@ -6366,7 +6366,7 @@ fn subscription_defaults_are_moq_net_defaults() {
 
 	let zeroed: moq_subscription = unsafe { std::mem::zeroed() };
 	let zeroed = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
-	assert_eq!(zeroed.max_delay, None);
+	assert_eq!(zeroed.delay.max, None);
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,

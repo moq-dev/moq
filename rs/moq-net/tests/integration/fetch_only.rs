@@ -496,7 +496,7 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 		let copy = remote.track("video").unwrap();
 		let subscription = moq_net::track::Subscription::default()
 			.with_order(moq_net::track::Order::Ascending)
-			.with_max_delay(None)
+			.with_delay(moq_net::track::Delay::default().with_max(None))
 			.with_range(1..3);
 		let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
 			.await
@@ -553,7 +553,7 @@ async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
 
 		// Past the edge the live read learned, so it subscribes; the answer names group 3.
 		let subscription = moq_net::track::Subscription::default()
-			.with_max_delay(None)
+			.with_delay(moq_net::track::Delay::default().with_max(None))
 			.with_range(0..1);
 		let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
 			.await

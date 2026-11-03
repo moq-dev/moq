@@ -6,11 +6,17 @@ The stream, datagram, close, and accept waits in `moq_tokio::quic::driver`
 and moq-uring's driver have public `poll_*` forms taking `&self,
 &kio::Waiter`: `Connection::poll_open_uni`, `poll_open_bi`,
 `poll_accept_uni`, `poll_accept_bi`, `poll_recv_datagram` and `poll_closed`,
-`send::Stream::poll_closed` (today's `stopped`), and `Endpoint::poll_accept`.
+`send::Stream::poll_closed` and `send::Finished::poll_closed` (today's
+`stopped`, which both share), and `Endpoint::poll_accept`.
 `send::Stream::poll_acked`, which [poll_acked](/quest/m2/quic-ack-hook.md)
 adds, takes the same shape. The async methods are thin `kio::wait` wrappers,
-and `send::Finished` implements `Future`, resolving when every byte is
-acknowledged or the peer stops the stream. No `tokio::sync::Notify` is left
+and `send::Finished` implements `Future` over its `poll_closed`, resolving
+as `stopped()` does today: `Ok(None)` once the peer acknowledges the FIN and
+every byte, or after a local reset, `Ok(Some(code))` if the peer stopped it first, and `Err` if the
+connection is lost.
+moq-tokio's WebTransport `SendStream` needs the poll form, not just the
+`Future`: once finished, it answers moq-net's waiter-based `poll_closed` and
+still reports the peer's stop code. No `tokio::sync::Notify` is left
 in the driver.
 
 ## Plan
@@ -47,6 +53,9 @@ impl Connection {
 impl send::Stream {
     pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, send::Error>>;
 }
+impl send::Finished {
+    pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, send::Error>>;
+}
 ```
 
 Keep the existing guarantees, such as draining accepted streams and
@@ -54,7 +63,8 @@ datagrams from a closed connection before its error (moq-quic's waits carry
 that now). The `Connecting` handshake, `Endpoint::wait_idle`, and
 `Endpoint::wait_all_draining` move off `Notify` too, but get no poll form
 until a caller needs one. Report the public API:
-new poll methods on `Connection`, `send::Stream` and `Endpoint`, with the
+new poll methods on `Connection`, `send::Stream`, `send::Finished` and
+`Endpoint`, with the
 async forms unchanged.
 
 Added 2026-11-01 (maintainer, follow-up planning after the 2026-11-01

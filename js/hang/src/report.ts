@@ -5,7 +5,7 @@
 
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import type * as z from "@zod/mini";
+import type * as z from "zod/mini";
 
 /** How often a reporter writes, in milliseconds: about once a second, as the hang draft asks. */
 export const INTERVAL = 1000;

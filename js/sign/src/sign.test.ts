@@ -14,7 +14,7 @@ import * as Track from "./track.ts";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const url = new URL("https://localhost:4443/test");
-const subscription = { maxDelay: Milli(60_000) };
+const subscription = { delay: { max: Milli(60_000) } };
 
 async function session() {
 	const pair = createMockTransportPair("moq-lite-07-wip");

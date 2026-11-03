@@ -534,6 +534,11 @@ class DecoderTrack {
 
 	// How far past the shared clock's budgets this decoder reaches.
 	#warmup: Getter<Milli>;
+	// The playout delay is where a cold join starts, and the shared max delay how late it may fall.
+	// The max-delay decoder adds the warmup to both, so it starts at the group before and keeps
+	// it, as Rust's does, rather than passing the consumer a `warmup` that would reach further.
+	// Its subscription and its consumer take the same delay.
+	#delay: Getter<Moq.Track.Delay>;
 	// Whether this decoder drives the shared clock: only the min-delay one reports arrivals and
 	// restarts the timeline.
 	#drives: boolean;
@@ -579,6 +584,10 @@ class DecoderTrack {
 		this.tally = props.tally;
 		this.key = props.key;
 		this.#warmup = props.warmup ?? getter(Milli.zero);
+		this.#delay = new Derived([this.sync.out.delay, this.sync.out.maxDelay, this.#warmup], (min, max, warmup) => ({
+			min: Milli(min + warmup),
+			max: Milli(max + warmup),
+		}));
 		this.#drives = props.warmup === undefined;
 		this.#refresh = props.refresh ?? getter(false);
 		this.#predecessor = props.predecessor;
@@ -614,16 +623,9 @@ class DecoderTrack {
 	// Reorders groups and frames up to the shared max delay. A rendition switch is not a cold start:
 	// the path's arrivals are what they were, so the estimate continues from whatever read before.
 	#consume(effect: Effect, sub: Moq.Track.Subscriber, format: Container.Format): Container.Consumer {
-		// The playout delay is where a cold join starts, and the shared max delay how late it may fall.
-		// The max-delay decoder adds the warmup to both, so it starts at the group before and keeps
-		// it, as Rust's does, rather than passing the consumer a `warmup` that would reach further.
-		const delay = new Derived([this.sync.out.delay, this.sync.out.maxDelay, this.#warmup], (min, max, warmup) => ({
-			min: Milli(min + warmup),
-			max: Milli(max + warmup),
-		}));
 		const consumer = new Container.Consumer(sub, {
 			format,
-			delay,
+			delay: this.#delay,
 			predecessor: this.consumer ?? this.#predecessor,
 		});
 		effect.cleanup(() => consumer.close());
@@ -637,8 +639,9 @@ class DecoderTrack {
 			broadcast: this.broadcast,
 			track: this.name,
 			priority: Catalog.PRIORITY.video,
-			// js/net merges both decoders' subscriptions into one request at the larger max delay.
-			maxDelay: new Derived([this.sync.out.maxDelay, this.#warmup], (max, warmup) => Milli(max + warmup)),
+			// js/net merges both decoders' subscriptions into one request at the smaller stated min delay
+			// and the larger max delay.
+			delay: this.#delay,
 		});
 		if (!sub) return;
 

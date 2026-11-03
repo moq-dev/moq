@@ -78,7 +78,7 @@ for (const [name, protocol, routed, timed] of transports) {
 		expect(Epoch.of(remote)).toBe(routed ? generation.epoch : undefined);
 		const epoch = Epoch.of(remote) ?? generation.epoch;
 		const consumer = await new Protected.Consumer(remote, cred.consume(epoch)).subscribe("video", {
-			maxDelay: Milli(60_000),
+			delay: { max: Milli(60_000) },
 		});
 
 		const received = await consumer.recvGroup();
@@ -135,7 +135,7 @@ for (const [name, protocol] of [
 		const consumer = await new Protected.Consumer(
 			remote,
 			cred.consume(Epoch.of(remote) ?? generation.epoch),
-		).subscribe("audio", { maxDelay: Milli(60_000) });
+		).subscribe("audio", { delay: { max: Milli(60_000) } });
 		expect(decoder.decode((await (await consumer.recvGroup())?.readFrame())?.plaintext)).toBe("init");
 
 		// Sequences continue past the group, preserved hop to hop by insertDatagram.

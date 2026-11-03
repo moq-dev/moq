@@ -860,7 +860,8 @@ for (const kind of [2, 3]) {
 			test(`lite-07 refuses anchor ${kind} at ${end ? "end" : "start"} in ${update ? "UPDATE" : "SUBSCRIBE"}`, async () => {
 				const version = Version.DRAFT_07;
 				const anchor = end ? [0, kind, 0] : [kind, 0, 0];
-				const bytes = new Uint8Array([8, 128, 0, 0, 1, ...anchor, 0]);
+				// Priority, order, max delay, an unstated min delay, one range, then the wanted group.
+				const bytes = new Uint8Array([9, 128, 0, 0, 0, 1, ...anchor, 0]);
 				const decoded = await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version);
 				const sub = await servedSubscription({ version, ranges: update ? undefined : decoded.ranges });
 				try {
@@ -1666,7 +1667,8 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
-			maxDelay: TEST_MAX_DELAY_MS,
+			// Lite-06 cannot state a minimum.
+			delay: { min: null, max: TEST_MAX_DELAY_MS },
 			order: "descending",
 			groups: { start: undefined, end: { excluded: 6 } },
 		});
@@ -2495,7 +2497,7 @@ test("a version without the latency field serves a non-dropping budget", async (
 		try {
 			// These drafts decode the absent field as zero. The publisher must not turn
 			// that into a live-edge request the peer never made.
-			expect(sub.track.subscription.peek()?.maxDelay).toBe(Milli(Number.MAX_SAFE_INTEGER));
+			expect(sub.track.subscription.peek()?.delay?.max).toBe(Milli(Number.MAX_SAFE_INTEGER));
 		} finally {
 			await sub.close();
 		}

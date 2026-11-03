@@ -494,7 +494,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		delay: moq_mux::container::Delay,
+		delay: moq_net::track::Delay,
 		on_read: OnStatus,
 	) -> Result<Id, Error>
 	where
@@ -526,7 +526,9 @@ impl Consume {
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(C::PRIORITY)
-									.with_max_delay(delay.max),
+									// The whole delay, as the container keeps it, so the first request
+									// already states the min.
+									.with_delay(delay),
 							)
 							.await?;
 						let track = moq_mux::container::Consumer::new(track, container).with_delay(delay);
@@ -1158,7 +1160,10 @@ mod read_tests {
 			.unwrap();
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let consumer = moq_mux::container::Consumer::new(
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(std::time::Duration::ZERO)),
+			track.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::ZERO)),
+			),
 			format(),
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();

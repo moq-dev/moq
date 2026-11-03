@@ -2523,7 +2523,7 @@ mod test {
 	use futures::FutureExt;
 
 	use super::*;
-	use crate::{SessionError, Timestamp, broadcast};
+	use crate::{SessionError, Timestamp, broadcast, track::Delay};
 
 	/// A route's copy of the track.
 	fn copy() -> track::Producer {
@@ -2542,7 +2542,7 @@ mod test {
 	}
 
 	fn subscribe(logical: &track::Producer, max_delay: Duration) -> track::Subscriber {
-		let subscription = Subscription::default().with_max_delay(max_delay);
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(max_delay));
 		logical
 			.consume()
 			.subscribe(subscription)
@@ -3059,7 +3059,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let subscription = Subscription::default()
-			.with_max_delay(HOUR)
+			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([track::Range::groups(0..1), track::Range::groups(2..3)]);
 		let mut sub = logical
 			.consume()
@@ -3896,7 +3896,9 @@ mod test {
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let subscription = Subscription::default().with_max_delay(HOUR).with_range(8..);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_range(8..);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -4159,7 +4161,9 @@ mod test {
 				let logical = logical(&routes);
 				let a = copy();
 				routes.serve(a.consume());
-				let subscription = Subscription::default().with_max_delay(HOUR).with_range(0..1);
+				let subscription = Subscription::default()
+					.with_delay(Delay::default().with_max(HOUR))
+					.with_range(0..1);
 				let mut sub = logical
 					.consume()
 					.subscribe(subscription)
@@ -4184,8 +4188,12 @@ mod test {
 				);
 				// The replaced copy was kept, so a widening still reads what only it has.
 				write(&a, 1);
-				sub.update(Subscription::default().with_max_delay(HOUR).with_range(0..2))
-					.unwrap();
+				sub.update(
+					Subscription::default()
+						.with_delay(Delay::default().with_max(HOUR))
+						.with_range(0..2),
+				)
+				.unwrap();
 				assert_eq!(drain(&mut sub, ordered), [1], "{case}");
 			}
 		}
@@ -4975,7 +4983,7 @@ mod test {
 			},
 		];
 		let subscription = Subscription::default()
-			.with_max_delay(Duration::from_secs(30))
+			.with_delay(Delay::default().with_max(Duration::from_secs(30)))
 			.with_ranges(ranges);
 		let mut sub = logical
 			.consume()
@@ -5084,10 +5092,12 @@ mod test {
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let subscription = Subscription::default().with_max_delay(HOUR).with_ranges([track::Range {
-			start: track::Anchor::Absolute(5),
-			end: None,
-		}]);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: track::Anchor::Absolute(5),
+				end: None,
+			}]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -5132,10 +5142,12 @@ mod test {
 		// The latest group, past the range's end at 11, which it resolves without handing out.
 		write(&a, 1001);
 		routes.serve(a.consume());
-		let subscription = Subscription::default().with_max_delay(HOUR).with_ranges([track::Range {
-			start: track::Anchor::Absolute(0),
-			end: Some(track::Anchor::Relative(990)),
-		}]);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: track::Anchor::Absolute(0),
+				end: Some(track::Anchor::Relative(990)),
+			}]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -5292,7 +5304,7 @@ mod test {
 			end: Some(track::Anchor::Time(ts(3500))),
 		};
 		let subscription = Subscription::default()
-			.with_max_delay(Duration::from_secs(30))
+			.with_delay(Delay::default().with_max(Duration::from_secs(30)))
 			.with_ranges([range]);
 		let sub = routes.consume().subscribe(kio::Producer::new(subscription).into());
 		let mut reader = sub.reader.lock().unwrap();
@@ -5541,7 +5553,9 @@ mod test {
 		write(&a, 10);
 		assert_eq!(recv(&mut first).sequence, 10);
 		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(5));
-		let pending = front.consume().subscribe(Subscription::default().with_max_delay(HOUR));
+		let pending = front
+			.consume()
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(HOUR)));
 		assert_eq!(routes.subscription(front.subscription().unwrap(), 3).start(), None);
 		drop(pending);
 		drop(second);
@@ -6634,7 +6648,7 @@ mod test {
 		write(&a, 4);
 		write(&a, 5);
 		let subscription = Subscription::default()
-			.with_max_delay(Duration::from_secs(10))
+			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([track::Range {
 				start: Anchor::Relative(1),
 				end: None,
@@ -6691,7 +6705,7 @@ mod test {
 		}
 
 		let subscription = Subscription::default()
-			.with_max_delay(Duration::from_secs(10))
+			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([
 				track::Range::groups(0..1),
 				track::Range {
@@ -6719,10 +6733,12 @@ mod test {
 			let a = copy();
 			write(&a, 0);
 			routes.serve(a.consume());
-			let subscription = Subscription::default().with_max_delay(HOUR).with_ranges([track::Range {
-				start,
-				end: Some(Anchor::Time(ts(1))),
-			}]);
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges([track::Range {
+					start,
+					end: Some(Anchor::Time(ts(1))),
+				}]);
 			let mut sub = logical
 				.consume()
 				.subscribe(subscription)
@@ -6749,7 +6765,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let subscription = Subscription::default()
-			.with_max_delay(Duration::from_secs(10))
+			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([track::Range::groups(0..1), track::Range::groups(10..11)]);
 		let mut sub = logical
 			.consume()
@@ -6910,7 +6926,7 @@ mod test {
 						.update(
 							Subscription::default()
 								.with_priority(7)
-								.with_max_delay(Duration::from_secs(if widen { 10 } else { 2 })),
+								.with_delay(Delay::default().with_max(Duration::from_secs(if widen { 10 } else { 2 }))),
 						)
 						.unwrap();
 					assert!(
@@ -6942,7 +6958,7 @@ mod test {
 							.update(
 								Subscription::default()
 									.with_priority(8)
-									.with_max_delay(Duration::from_secs(10)),
+									.with_delay(Delay::default().with_max(Duration::from_secs(10))),
 							)
 							.unwrap();
 						assert!(
@@ -7036,7 +7052,7 @@ mod test {
 						.update(
 							Subscription::default()
 								.with_priority(7)
-								.with_max_delay(Duration::from_secs(2)),
+								.with_delay(Delay::default().with_max(Duration::from_secs(2))),
 						)
 						.unwrap(),
 					Event::Cancel => {
@@ -7062,7 +7078,7 @@ mod test {
 			);
 			let demand = copies[0].subscription().expect("surviving reader");
 			assert_eq!(demand.priority, 7, "{events:?}");
-			assert_eq!(demand.max_delay, Some(Duration::from_secs(2)), "{events:?}");
+			assert_eq!(demand.delay.max, Some(Duration::from_secs(2)), "{events:?}");
 			drop(groups);
 			drop(subscriptions);
 			drop(control);

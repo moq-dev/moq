@@ -270,7 +270,7 @@ impl<O: Output> Media<O> {
 					// doubles as the staleness budget on the wire.
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					// A decoder and its subscription, starting `lookback` groups before the live edge.
-					let open = async |delay: moq_mux::container::Delay, lookback: u64| {
+					let open = async |delay: moq_net::track::Delay, lookback: u64| {
 						// The window's renderer refuses a GPU surface it cannot import, so
 						// the decoder downloads those instead, all of them on a device
 						// that imports none.
@@ -282,7 +282,9 @@ impl<O: Output> Media<O> {
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(hang::catalog::PRIORITY.video)
-									.with_max_delay(delay.max),
+									// The whole delay from the first request, so a cold join never
+									// states a zero minimum before the container's update.
+									.with_delay(delay),
 							)
 							.await?;
 						// Start at the live edge without asking the shared publisher
@@ -293,14 +295,13 @@ impl<O: Output> Media<O> {
 							subscriber = subscriber.with_range(largest.group.saturating_sub(lookback)..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
-						// The playout delay is the target latency; the floor above bounds how far
-						// back the start can wait, but the consumer still learns both bounds.
+						// The playout delay is the target latency, and the max how late a group may be.
 						let track = moq_mux::container::Consumer::new(subscriber, format).with_delay(delay);
 						Ok::<_, anyhow::Error>((track, decoder))
 					};
 					let opened = async {
-						let delay = moq_mux::container::Delay {
-							min: self.args.video_delay(),
+						let delay = moq_net::track::Delay {
+							min: Some(self.args.video_delay()),
 							max: Some(max_delay),
 						};
 						let (track, decoder) = open(delay, 0).await?;
@@ -313,8 +314,8 @@ impl<O: Output> Media<O> {
 						} else {
 							// The min-delay decoder's delay plus one sweep, as in
 							// `moq_video::decode::Consumer`.
-							let delay = moq_mux::container::Delay {
-								min: delay.min.saturating_add(warmup),
+							let delay = moq_net::track::Delay {
+								min: delay.min.map(|min| min.saturating_add(warmup)),
 								max: Some(max_delay.saturating_add(warmup)),
 							};
 							let (track, decoder) = open(delay, 1).await?;
@@ -403,7 +404,7 @@ impl<O: Output> Media<O> {
 					// still have reached, and would size the hole fill below to a playhead
 					// that does not exist.
 					decode.delay = moq_audio::decode::Delay {
-						min: self.args.fixed_delay().unwrap_or_default(),
+						min: Some(self.args.fixed_delay().unwrap_or_default()),
 						max: Some(self.args.max_delay().max(AUDIO_BUFFER_MIN)),
 					};
 					decode.estimate = self.args.fixed_delay().is_none();
@@ -913,7 +914,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1012,14 +1013,16 @@ mod tests {
 			.unwrap();
 		let subscriber = video
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let mut audio = moq_mux::container::Producer::new(audio, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut video = moq_mux::container::Producer::new(video, Container::Legacy(moq_mux::container::Kind::Video));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1178,7 +1181,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1264,7 +1267,7 @@ mod tests {
 		// Joins at the end marker: the stopped encoder's media is already behind it.
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1319,7 +1322,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1400,7 +1403,10 @@ mod tests {
 		// The network keeps every group; only the player's age budget evicts.
 		let subscriber = video
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+			)
 			.await
 			.unwrap();
 		let mut video = moq_mux::container::Producer::new(video, Container::Legacy(moq_mux::container::Kind::Video));
@@ -2171,7 +2177,9 @@ mod tests {
 			.consume()
 			.track("video")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let track = moq_mux::container::Consumer::new(subscriber, Container::try_from(&catalog).unwrap());

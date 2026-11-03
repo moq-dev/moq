@@ -85,7 +85,7 @@ impl TimeEnds {
 		land(&track, 0, 0);
 		// Each range starts and ends far past the live edge, at a time of its own.
 		let subscription = track::Subscription::default()
-			.with_max_delay(BUDGET)
+			.with_delay(track::Delay::default().with_max(BUDGET))
 			.with_ranges((0..ranges).map(|i| track::Range {
 				start: track::Anchor::Time(millis(LIVE + i * 2)),
 				end: Some(track::Anchor::Time(millis(LIVE + i * 2 + 1))),
@@ -121,13 +121,15 @@ impl TimeCap {
 		let track = broadcast.create_track("bench", timed()).unwrap();
 		land(&track, 0, 0);
 		// The time end, then disjoint groups far past anything the run lands.
-		let subscription = track::Subscription::default().with_max_delay(BUDGET).with_ranges(
-			std::iter::once(track::Range {
-				start: track::Anchor::Time(millis(0)),
-				end: Some(track::Anchor::Time(millis(LIVE))),
-			})
-			.chain((1..ranges).map(|i| track::Range::groups(LIVE + i * 2..LIVE + i * 2 + 1))),
-		);
+		let subscription = track::Subscription::default()
+			.with_delay(track::Delay::default().with_max(BUDGET))
+			.with_ranges(
+				std::iter::once(track::Range {
+					start: track::Anchor::Time(millis(0)),
+					end: Some(track::Anchor::Time(millis(LIVE))),
+				})
+				.chain((1..ranges).map(|i| track::Range::groups(LIVE + i * 2..LIVE + i * 2 + 1))),
+			);
 		let mut reader = track.subscribe(subscription);
 		drain(&mut reader);
 		Self {
@@ -169,11 +171,13 @@ impl FillsOut {
 		let start = ranges * 2;
 		track.start_at(start).unwrap();
 		land(&track, start, start);
-		let subscription = track::Subscription::default().with_max_delay(BUDGET).with_ranges(
-			(0..ranges)
-				.map(|i| track::Range::groups(i * 2..i * 2 + 1))
-				.chain([track::Range::groups(start..)]),
-		);
+		let subscription = track::Subscription::default()
+			.with_delay(track::Delay::default().with_max(BUDGET))
+			.with_ranges(
+				(0..ranges)
+					.map(|i| track::Range::groups(i * 2..i * 2 + 1))
+					.chain([track::Range::groups(start..)]),
+			);
 		let mut reader = track.subscribe(subscription);
 		drain(&mut reader);
 		Self {
@@ -212,10 +216,12 @@ impl Sparse {
 		for i in 0..=ranges {
 			land(&track, i * STRIDE, i);
 		}
-		let subscription = track::Subscription::default().with_max_delay(BUDGET).with_ranges(
-			std::iter::once(track::Range::groups(0..1))
-				.chain((1..=ranges).map(|i| track::Range::groups(i * STRIDE + 1..i * STRIDE + 2))),
-		);
+		let subscription = track::Subscription::default()
+			.with_delay(track::Delay::default().with_max(BUDGET))
+			.with_ranges(
+				std::iter::once(track::Range::groups(0..1))
+					.chain((1..=ranges).map(|i| track::Range::groups(i * STRIDE + 1..i * STRIDE + 2))),
+			);
 		let mut reader = track.subscribe(subscription);
 		assert_eq!(drain(&mut reader), 1, "group 0 is the one in range");
 		Self {
@@ -259,14 +265,16 @@ impl TimeGaps {
 			start: track::Anchor::Time(millis(ranges * 10)),
 			end: Some(track::Anchor::Time(millis(LIVE))),
 		};
-		let subscription = track::Subscription::default().with_max_delay(BUDGET).with_ranges(
-			(0..ranges)
-				.map(|i| track::Range {
-					start: track::Anchor::Time(millis(i * 10 + 1)),
-					end: Some(track::Anchor::Time(millis(i * 10 + 5))),
-				})
-				.chain([live]),
-		);
+		let subscription = track::Subscription::default()
+			.with_delay(track::Delay::default().with_max(BUDGET))
+			.with_ranges(
+				(0..ranges)
+					.map(|i| track::Range {
+						start: track::Anchor::Time(millis(i * 10 + 1)),
+						end: Some(track::Anchor::Time(millis(i * 10 + 5))),
+					})
+					.chain([live]),
+			);
 		let mut reader = track.subscribe(subscription);
 		let groups = usize::try_from(ranges).unwrap() + 1;
 		assert_eq!(drain(&mut reader), groups, "each range's own group, and the live edge");
@@ -307,7 +315,7 @@ impl Datagrams {
 		// Each range presents from a time of its own through group 0, which every datagram
 		// after the first passes.
 		let subscription = track::Subscription::default()
-			.with_max_delay(BUDGET)
+			.with_delay(track::Delay::default().with_max(BUDGET))
 			.with_ranges((0..ranges).map(|i| track::Range {
 				start: track::Anchor::Time(millis(i)),
 				end: Some(track::Anchor::Absolute(1)),

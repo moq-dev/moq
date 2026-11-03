@@ -1318,7 +1318,7 @@ fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
 
 #[cfg(test)]
 mod tests {
-	use super::super::{Servable, Subscription};
+	use super::super::{Delay, Servable, Subscription};
 	use super::*;
 
 	#[kio::test]
@@ -1328,7 +1328,7 @@ mod tests {
 			.create_track("recreated", crate::track::Info::default())
 			.unwrap();
 		let budget = Duration::from_secs(5);
-		let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in [0, 4] {
 			track
 				.create_group(crate::group::Info { sequence })
@@ -1470,7 +1470,7 @@ mod tests {
 			.create_track("aborted", crate::track::Info::default())
 			.unwrap();
 		let budget = Duration::from_secs(5);
-		let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in [0, 4] {
 			track
 				.create_group(crate::group::Info { sequence })
@@ -1544,7 +1544,7 @@ mod tests {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("sparse", crate::track::Info::default()).unwrap();
 		let budget = Duration::from_secs(5);
-		let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in [0, 2, 4] {
 			track
 				.create_group(crate::group::Info { sequence })
@@ -1647,7 +1647,7 @@ mod tests {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
 		let budget = Duration::from_secs(5);
-		let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in 0..3 {
 			track
 				.create_group(crate::group::Info { sequence })
@@ -1685,7 +1685,7 @@ mod tests {
 		drop(state);
 
 		let wider = Duration::from_secs(20);
-		let _wide = track.subscribe(Subscription::default().with_max_delay(wider));
+		let _wide = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(wider)));
 		let state = track.state.read();
 		assert_eq!(state.arrival_grace(), wider);
 		assert!(
@@ -1906,7 +1906,7 @@ mod tests {
 			let broadcast = crate::broadcast::Info::default().produce();
 			let mut track = broadcast.create_track("moved", crate::track::Info::default()).unwrap();
 			let budget = Duration::from_secs(5);
-			let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+			let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 			// A feed with holes, some of them under where it starts.
 			for sequence in 0..SEQUENCES {
 				if next(3) > 0 {
@@ -2017,7 +2017,7 @@ mod tests {
 		let ranges = [0..1, 2..3, 4..5, 6..7].map(crate::track::Range::groups);
 		let mut reader = track.subscribe(
 			Subscription::default()
-				.with_max_delay(Duration::from_secs(60))
+				.with_delay(Delay::default().with_max(Duration::from_secs(60)))
 				.with_ranges(ranges.into_iter().chain([crate::track::Range::groups(8..)])),
 		);
 		let (first, second) = (Arc::new(Count::default()), Arc::new(Count::default()));
