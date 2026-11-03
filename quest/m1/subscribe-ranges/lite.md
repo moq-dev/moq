@@ -87,8 +87,16 @@ SUBSCRIBE_UPDATE edits the live Ranges rather than restating them, with
 assigned or already retired is a PROTOCOL_VIOLATION, and the live Ranges must
 stay non-empty and fit in one SUBSCRIBE. SUBSCRIBE_OK's Range Starts answer the
 Ranges live when it is sent, in Range ID order. A Range an update adds after
-SUBSCRIBE_OK still needs its start reported; see `## Waiting`. Rust and JS
+SUBSCRIBE_OK has its start reported by SUBSCRIBE_STARTED, below. Rust and JS
 change together, with draft text and codec, publisher, and subscriber tests.
+
+Decided 2026-11-03 (maintainer, on
+[moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675)): ✅ a new
+**SUBSCRIBE_STARTED** message (type 0x3) carrying `Range ID` and
+`Range Start`, sent when an added Range's start resolves. Options: ✅ new
+SUBSCRIBE_STARTED; repeat SUBSCRIBE_OK. `Range Start` is encoded as in
+SUBSCRIBE_OK (the Group plus one, 0 for none), and the subscriber owes the
+added Range's groups from it as it does a SUBSCRIBE_OK Range Start.
 
 ### Range fill through the subscription
 
@@ -223,16 +231,6 @@ including that a subscriber fills missing groups through its ranges, and
 recovers a dropped group with a one-group SUBSCRIBE. Run
 `just drafts check` and `just test interop --all`, and the `moq-net-tests`
 `restart::retired_fetch_lite07` and `moq-relay` suites.
-
-## Waiting
-
-- Maintainer: how a Range a SUBSCRIBE_UPDATE adds after SUBSCRIBE_OK learns its
-  start, which #7207 never defined. Options: (a) a new SUBSCRIBE_STARTED
-  message (type 0x3) carrying `Range ID` and `Range Start`, sent once that
-  Range's start resolves; (b) let SUBSCRIBE_OK repeat, each one answering the
-  Ranges added since the last. Recommended: (a), since SUBSCRIBE_OK also
-  carries the largest position and is the stream's first answer, and a per-Range
-  message keeps each start tied to its ID.
 
 ## Related
 
