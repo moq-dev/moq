@@ -36,3 +36,23 @@ Milestone: ✅ m1. Not chosen: m2.
   [moq-dev/moq#7261](https://github.com/moq-dev/moq/pull/7261) (merged), not this quest.
 
 Public API: none expected. Wire: none.
+
+## Waiting
+
+- Maintainer: reconcile this quest's retained history after terminal failure
+  with [moq-dev/moq#7706](https://github.com/moq-dev/moq/pull/7706), reviewed at
+  `accf99b66e5e346af50a53415cf5f337eeeded7b`. That change makes a source failure
+  end `encode::Driver::run`, abort the media track, and require a new
+  publication to recover. This quest requires that track to keep serving
+  retained PCM on later demand. Options: (1) preserve retained serving after
+  failure, deciding how the driver reports the source error and when it
+  returns (recommended, to retain this quest's settled goal); (2) keep the
+  immediate terminal contract and explicitly remove terminal failures from
+  this quest's Goal. Resolve the driver completion contract before changing
+  Rust; do not restore automatic source retries.
+- moq-dev/moq: land or otherwise settle
+  [moq-dev/moq#7706](https://github.com/moq-dev/moq/pull/7706) before resuming
+  Rust implementation. It replaces the driver, removes `idle`/`failed` and
+  their test fixtures, and changes capture inputs to consumers. Recheck its
+  final head and the failure decision above rather than porting changes to
+  the removed supervisor.
