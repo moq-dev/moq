@@ -1,17 +1,31 @@
-# [M] Switch moq's bindings to rust2's UniFFI fork
+# [L] Switch moq's bindings to rust2's exporter
 
 ## Goal
 
-moq-ffi depends on the UniFFI fork's renamed crates from crates.io, and every
-generator moq uses (Kotlin, Swift, Python, Go, Dart, C++, and C) comes from
-[moq-dev/rust2](https://github.com/moq-dev/rust2) through one pinned flake
-input. `rs/uniffi-bindgen`, `nix/uniffi-dart-*`, and the per-generator pins are
-deleted, and the three `kixelated/uniffi-*` generator forks are archived.
-Generated bindings are unchanged by the switch
-itself, except C's type names and the one record rename the C name rule
-undoes.
+moq's bindings (Kotlin, Swift, Python, Go, Dart, C++, and C) come from
+[rust2's exporter](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-export/README.md)
+(`rust2-ffi`), which exports moq's crates' `pub` API as a C ABI with no
+attributes. moq-ffi shrinks to the remainder that is genuinely new API.
+`rs/uniffi-bindgen`, `nix/uniffi-dart-*`, the per-generator pins, and the
+UniFFI dependency are deleted, and the three `kixelated/uniffi-*` generator
+forks are archived. Wrapper APIs do not change except where a decision below
+says so.
 
 ## Plan
+
+Decided 2026-11-02 (maintainer, /quest-unblock): moq skips rust2's UniFFI fork and switches straight to the
+exporter. rust2 decided on 2026-10-25, from
+[moq-dev/rust2#41](https://github.com/moq-dev/rust2/pull/41), that the exporter
+replaces the fork, which stays in maintenance; publishing `rust2-uniffi` to
+crates.io would commit permanent names to code already slated for
+retirement, and switching moq to it would be churn on the way to the
+exporter. Until the switch, moq keeps building from its pinned
+`kixelated/uniffi-*` forks ([UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md)).
+Not chosen: publish the fork and switch to it first; decide later.
+
+Carried over from the fork plan, where they still apply to the exporter's
+generators (each needs re-checking against the exporter's design):
+
 
 Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
@@ -83,7 +97,7 @@ none.
 
 ## Required
 
-- [rust2 publishes its UniFFI fork](/quest/m2/rust2-uniffi.md) - the crates and generators this switches to
+- [rust2's exporter is ready for moq](/quest/m2/rust2-exporter.md) - the exporter generates every language moq ships and moq can pin it
 
 ## Related
 
