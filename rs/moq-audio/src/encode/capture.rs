@@ -129,6 +129,8 @@ pub struct Control {
 	level: kio::Consumer<Level>,
 	observed: u64,
 	track_name: Arc<str>,
+	/// The track's fixed PCM input, which every replacement must convert into.
+	input: Input,
 }
 
 impl Clone for Control {
@@ -139,6 +141,7 @@ impl Clone for Control {
 			level: self.level.clone(),
 			observed: self.state.read().revision,
 			track_name: self.track_name.clone(),
+			input: self.input.clone(),
 		}
 	}
 }
@@ -164,11 +167,13 @@ impl Control {
 		let producer = Producer::new(&mut broadcast, catalog, input.clone(), &options.encode)?;
 		let track_name: Arc<str> = producer.track_name().into();
 		let reservation = options.encode.bandwidth.reserve(&producer.demand(), producer.bitrate());
+		let source = options.capture.source().clone();
+		let device = options.capture.device().cloned();
 		let initial = PublishedState {
 			state: State {
 				status: Status::Starting,
-				source: options.capture.source().clone(),
-				device: options.capture.device().cloned(),
+				source: source.clone(),
+				device: device.clone(),
 				failure: None,
 			},
 			revision: 0,
@@ -186,12 +191,15 @@ impl Control {
 			level: level.consume(),
 			observed: 0,
 			track_name,
+			input: input.clone(),
 		};
 		let driver = Driver {
 			_broadcast: broadcast,
 			_reservation: reservation,
 			producer: Some(producer),
 			input,
+			source,
+			device,
 			on_demand: options.on_demand,
 			clock,
 			desired: desired.consume(),
@@ -223,12 +231,18 @@ impl Control {
 
 	/// Replace the selected input without changing the MoQ track identity.
 	///
-	/// The new reader starts at live capture on the next [`start`](Self::start).
-	/// A capture failure ends the driver; create a new publication to recover.
-	pub fn replace(&self, capture: capture::Consumer) {
-		let Ok(mut desired) = self.desired.write() else { return };
+	/// The new reader starts at live capture, immediately if started or on the next
+	/// [`start`](Self::start). A consumer whose layout cannot be converted into the
+	/// track's fixed input is rejected, leaving the current one selected. A capture
+	/// failure ends the driver; create a new publication to recover.
+	pub fn replace(&self, capture: capture::Consumer) -> Result<(), Error> {
+		Converter::new(capture.input(), &self.input)?;
+		let Ok(mut desired) = self.desired.write() else {
+			return Err(moq_net::Error::Closed.into());
+		};
 		desired.capture = capture;
 		desired.revision = desired.revision.wrapping_add(1);
+		Ok(())
 	}
 
 	/// The stable track name registered for this publication.
@@ -281,6 +295,10 @@ pub struct Driver {
 	_reservation: moq_net::bandwidth::Reservation,
 	producer: Option<Producer>,
 	input: Input,
+	/// The selected consumer's source and device, so a terminal state names the
+	/// reader that ended rather than a replacement that has not been read yet.
+	source: capture::Source,
+	device: Option<capture::Device>,
 	on_demand: bool,
 	clock: moq_mux::Clock,
 	desired: kio::Consumer<Desired>,
@@ -323,6 +341,8 @@ impl Driver {
 		let track = self.producer.as_ref().unwrap().track().clone();
 		loop {
 			let desired = self.desired.read().clone();
+			self.source = desired.capture.source().clone();
+			self.device = desired.capture.device().cloned();
 			if !desired.enabled {
 				self.update(Status::Stopped, None);
 				if let Ok(mut level) = self.level.write() {
@@ -339,23 +359,14 @@ impl Driver {
 				continue;
 			}
 			let capture = desired.capture;
-			let mut converter = Converter::new(
-				capture::Layout {
-					sample_rate: capture.input().sample_rate,
-					channels: capture.input().layout.channels(),
-				},
-				capture::Layout {
-					sample_rate: self.input.sample_rate,
-					channels: self.input.layout.channels(),
-				},
-			)?;
+			let mut converter = Converter::new(capture.input(), &self.input)?;
 			let mut output = EncoderOutput {
 				producer: self.producer.as_mut().unwrap(),
 				demand: track.demand(),
 				on_demand: self.on_demand,
 				clock: &self.clock,
-				source: capture.source(),
-				device: capture.device().cloned(),
+				source: &self.source,
+				device: self.device.clone(),
 				state: &self.state,
 				level: &self.level,
 			};
@@ -370,7 +381,13 @@ impl Driver {
 				tokio::select! {
 					biased;
 					changed = desired_changed(&self.desired, desired.revision) => {
-						if changed.is_none() { return Ok(()); }
+						if changed.is_none() {
+							// The track finishes after this, so its source must too.
+							if let Some((samples, timestamp)) = converter.drain()? {
+								output.write(&samples, timestamp)?;
+							}
+							return Ok(());
+						}
 						break;
 					}
 					_ = track.closed() => return Ok(()),
@@ -379,7 +396,7 @@ impl Driver {
 						if samples.gap { output.producer.reanchor(); }
 						let timestamp = output.stamp(samples.captured)?;
 						if let Some((samples, timestamp)) = converter.process(samples, timestamp)? {
-							output.write(samples, timestamp)?;
+							output.write(&samples, timestamp)?;
 						}
 					}
 					changed = output.changed() => changed?,
@@ -389,14 +406,7 @@ impl Driver {
 	}
 
 	fn update(&self, status: Status, failure: Option<Error>) {
-		let desired = self.desired.read();
-		publish_state(
-			&self.state,
-			desired.capture.source(),
-			status,
-			desired.capture.device().cloned(),
-			failure,
-		);
+		publish_state(&self.state, &self.source, status, self.device.clone(), failure);
 	}
 }
 
@@ -504,10 +514,10 @@ impl EncoderOutput<'_> {
 		Ok(timestamp.as_micros() as u64)
 	}
 
-	fn write(&mut self, samples: capture::Buffer, timestamp_us: u64) -> Result<(), Error> {
-		self.publish_level(Level::measure(&samples.data));
+	fn write(&mut self, samples: &[f32], timestamp_us: u64) -> Result<(), Error> {
+		self.publish_level(Level::measure(samples));
 		self.refresh()?;
-		self.producer.write(&frame(&samples.data, timestamp_us)?)
+		self.producer.write(&frame(samples, timestamp_us)?)
 	}
 
 	async fn changed(&mut self) -> Result<(), Error> {
@@ -553,22 +563,23 @@ impl EncoderOutput<'_> {
 	}
 }
 
+/// Converted samples plus the timestamp of the first input they carry.
+type Converted = (Arc<[f32]>, u64);
+
 /// Converts a replacement consumer into the track's fixed PCM layout.
 struct Converter {
 	remix: Option<Remix>,
 	resampler: Option<Resampler>,
+	/// The timestamp of the first input not yet reflected in any output.
 	anchor_us: Option<u64>,
+	/// The timestamp of the most recent input, for output with no pending anchor.
+	last_us: u64,
 }
 
 impl Converter {
-	fn new(input: capture::Layout, output: capture::Layout) -> Result<Self, Error> {
-		let remix = (input.channels != output.channels)
-			.then(|| {
-				Remix::new(
-					capture::device_layout(input.channels)?,
-					capture::device_layout(output.channels)?,
-				)
-			})
+	fn new(input: &Input, output: &Input) -> Result<Self, Error> {
+		let remix = (input.layout != output.layout)
+			.then(|| Remix::new(input.layout, output.layout))
 			.transpose()?;
 
 		let resampler = if input.sample_rate == output.sample_rate {
@@ -580,7 +591,7 @@ impl Converter {
 			Some(Resampler::new(
 				input.sample_rate,
 				output.sample_rate,
-				input.channels,
+				input.layout.channels(),
 				chunk_frames,
 			)?)
 		};
@@ -589,6 +600,7 @@ impl Converter {
 			remix,
 			resampler,
 			anchor_us: None,
+			last_us: 0,
 		})
 	}
 
@@ -601,31 +613,41 @@ impl Converter {
 
 	/// Return converted samples plus the timestamp of the first input buffered
 	/// into them. The timestamp preserves the anchor when resampling spans reads.
-	fn process(
-		&mut self,
-		mut samples: capture::Buffer,
-		timestamp_us: u64,
-	) -> Result<Option<(capture::Buffer, u64)>, Error> {
+	fn process(&mut self, samples: capture::Buffer, timestamp_us: u64) -> Result<Option<Converted>, Error> {
 		if samples.gap {
 			self.reset();
 		}
 		if self.anchor_us.is_none() && !samples.data.is_empty() {
 			self.anchor_us = Some(timestamp_us);
 		}
+		self.last_us = timestamp_us;
 
+		let mut data = samples.data;
 		if let Some(resampler) = self.resampler.as_mut() {
-			let data = resampler.process(&samples.data, moq_net::Timestamp::from_micros(timestamp_us)?)?;
-			samples.data = data.into();
+			data = resampler
+				.process(&data, moq_net::Timestamp::from_micros(timestamp_us)?)?
+				.into();
 		}
+		self.output(data)
+	}
+
+	/// Return what the resampler still holds once this reader's stream ends.
+	fn drain(&mut self) -> Result<Option<Converted>, Error> {
+		let Some(resampler) = self.resampler.as_mut() else {
+			return Ok(None);
+		};
+		let data = resampler.drain()?.into();
+		self.output(data)
+	}
+
+	fn output(&mut self, mut data: Arc<[f32]>) -> Result<Option<Converted>, Error> {
 		if let Some(remix) = &self.remix {
-			let data = remix.process(&samples.data);
-			samples.data = data.into();
+			data = remix.process(&data).into();
 		}
-		if samples.data.is_empty() {
+		if data.is_empty() {
 			return Ok(None);
 		}
-
-		Ok(Some((samples, self.anchor_us.take().unwrap_or(timestamp_us))))
+		Ok(Some((data, self.anchor_us.take().unwrap_or(self.last_us))))
 	}
 }
 
@@ -872,6 +894,85 @@ mod tests {
 			})
 			.await;
 	}
+	#[tokio::test(start_paused = true)]
+	async fn replace_rejects_a_consumer_the_track_cannot_convert() {
+		tokio::task::LocalSet::new()
+			.run_until(async {
+				let Fixture {
+					capture,
+					samples,
+					control,
+					driver,
+					broadcast,
+					catalog: _catalog,
+					epoch,
+				} = fixture(false);
+				let (array, _array_samples) = capture::test_source_with(48_000, 3);
+				assert!(control.replace(array.consume()).is_err());
+				let mut observer = capture.consume();
+				let capture_task = tokio::task::spawn_local(capture.run());
+				let encode_task = tokio::spawn(driver.run());
+				let mut track = subscribe(&broadcast).await;
+				// The original consumer is still selected and encoding.
+				let mut block = Samples::plain(vec![0.25; 1920], false);
+				block.captured = Some(epoch + Duration::from_millis(100));
+				samples.try_push(Ok(block)).unwrap();
+				observer.read().await.unwrap();
+				assert_eq!(packet(&mut track).await.timestamp.as_micros(), 100_000);
+				drop(control);
+				encode_task.await.unwrap().unwrap();
+				capture_task.abort();
+				assert!(capture_task.await.unwrap_err().is_cancelled());
+			})
+			.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_resampled_replacement_is_drained_when_the_track_finishes() {
+		tokio::task::LocalSet::new()
+			.run_until(async {
+				let Fixture {
+					capture: _original,
+					mut control,
+					driver,
+					broadcast,
+					catalog: _catalog,
+					epoch,
+					..
+				} = fixture(false);
+				let (replacement, samples) = capture::test_source_with(44_100, 1);
+				control.replace(replacement.consume()).unwrap();
+				let mut observer = replacement.consume();
+				let capture_task = tokio::task::spawn_local(replacement.run());
+				let encode_task = tokio::spawn(driver.run());
+				let mut track = subscribe(&broadcast).await;
+				// The replacement starts at live capture, so let the driver select it first.
+				status(&mut control, Status::Live).await;
+				// Ten whole 10 ms resampler chunks plus a partial one.
+				let frames = 4_410 + 200;
+				let mut block = Samples::plain(vec![0.25; frames], false);
+				block.captured = Some(epoch + Duration::from_millis(100));
+				samples.try_push(Ok(block)).unwrap();
+				observer.read().await.unwrap();
+				packet(&mut track).await;
+				drop(control);
+				encode_task.await.unwrap().unwrap();
+				let end = loop {
+					match track.read().await.unwrap() {
+						Some(Read::End { end, .. }) => break end,
+						Some(_) => continue,
+						None => panic!("the track finished without its end"),
+					}
+				};
+				// The track ends where its source did, including the partial chunk and filter tail.
+				let resampled = (frames * 48_000 + 22_050) / 44_100;
+				assert_eq!(end.as_micros(), 100_000 + (resampled * 1_000_000 / 48_000) as u128);
+				capture_task.abort();
+				assert!(capture_task.await.unwrap_err().is_cancelled());
+			})
+			.await;
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn opus_uses_the_shared_capture_clock_including_gaps_and_clamping() {
 		tokio::task::LocalSet::new()

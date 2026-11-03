@@ -155,7 +155,7 @@ impl Reserved {
 	/// Build the encoder for `input` and register the rendition describing it.
 	///
 	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
-	/// codec rejects leaves the reservation intact for another input.
+	/// codec rejects leaves the track intact to abort with that error.
 	fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
 		let remix = (input.layout != options.config.layout)
 			.then(|| Remix::new(input.layout, options.config.layout))
@@ -245,8 +245,14 @@ impl Producer {
 		options: &Options,
 	) -> Result<Self, Error> {
 		let mut reserved = Reserved::new(broadcast, catalog, options)?;
-		let registered = reserved.register(input, options)?;
-		Ok(reserved.encode(registered))
+		match reserved.register(input, options) {
+			Ok(registered) => Ok(reserved.encode(registered)),
+			Err(err) => {
+				// A subscriber may already be waiting on the track; give it the real cause.
+				reserved.track.abort(moq_net::Error::Transport(err.to_string()));
+				Err(err)
+			}
+		}
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.

@@ -322,7 +322,7 @@ fn assert_capture_send(config: Config, producer: Producer) {
 }
 
 /// A channel count alone cannot identify the speakers of a microphone array.
-pub(crate) fn device_layout(channels: u32) -> Result<crate::Layout, Error> {
+fn device_layout(channels: u32) -> Result<crate::Layout, Error> {
 	match channels {
 		0..=2 => crate::Layout::from_channels(channels),
 		channels => Ok(crate::Layout::Discrete(channels)),
@@ -813,13 +813,15 @@ fn capture_err(err: impl std::fmt::Display) -> Error {
 
 #[cfg(test)]
 pub(crate) fn test_source() -> (Producer, kio::Queue<Result<Samples, Error>>) {
+	test_source_with(48_000, 2)
+}
+
+#[cfg(test)]
+pub(crate) fn test_source_with(sample_rate: u32, channels: u32) -> (Producer, kio::Queue<Result<Samples, Error>>) {
 	let samples = kio::Queue::new();
 	let producer = Producer::from_stream(
 		Stream::Test {
-			layout: Layout {
-				sample_rate: 48_000,
-				channels: 2,
-			},
+			layout: Layout { sample_rate, channels },
 			samples: samples.clone(),
 		},
 		Source::default(),

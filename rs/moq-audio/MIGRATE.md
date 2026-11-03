@@ -15,7 +15,9 @@ and its `capture: Config` field are gone. The audio rendition is registered
 only after the capture has opened and its actual input format is known.
 
 `encode::Control::start` and `stop` control only that encoder, and `replace`
-takes another capture consumer. They never open or release the device. A capture
+takes another capture consumer and returns an error, keeping the current one, when
+its layout cannot be converted into the track's input. They never open or release
+the device. A capture
 failure ends the driver with `Status::Failed`; recovery requires a new capture
 and publication. There is no automatic device reopen. Dropping the capture
 producer stops every consumer; dropping one consumer leaves the others running.
@@ -26,7 +28,11 @@ Device channel counts above stereo are now consistently `Layout::Discrete`:
 a microphone array does not declare surround-speaker positions. A stereo bus
 refuses those inputs instead of guessing a surround downmix. Request mono or
 stereo through `capture::Config::channels` when the device supports it, or map
-the known channels explicitly before writing a `Bus::channel`.
+the known channels explicitly before writing a `Bus::channel`. The encoder refuses
+them too: `encode::Control::new` fails for such a consumer, since its default
+stereo config (and Opus in any config) cannot take a discrete layout. Publish a
+microphone array only when it delivers mono or stereo, or with an
+`encode.config.layout` set to that same `Layout::Discrete` for a codec that carries it.
 
 ### `decode::Options` takes a `Delay` and `estimate` ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
 
