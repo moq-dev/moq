@@ -2771,9 +2771,9 @@ test("LARGEST_OBJECT is the live edge", async () => {
  * INCLUDE_PROPERTIES=0 opts the response out of Track Properties, which also opts the track
  * out of timestamps: with no declared Timescale there are no units to read one in.
  */
-test("draft-22: an opt-out peer gets no track properties", async () => {
+test.each([Version.DRAFT_20, Version.DRAFT_22])("draft-%i: an opt-out peer gets no track properties", async (version) => {
 	for (const propertiesWanted of [true, false]) {
-		const fx = fixture();
+		const fx = fixture(version);
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 		const { client, ok } = await runSubscribe(
@@ -2796,8 +2796,8 @@ test("draft-22: an opt-out peer gets no track properties", async () => {
 
 		const served = await nextUni(fx.uni);
 		if (!served) throw new Error("the group was never served");
-		const reader = new Reader(served, undefined, V22);
-		const header = await GroupMessage.decode(reader, V22);
+		const reader = new Reader(served, undefined, version);
+		const header = await GroupMessage.decode(reader, version);
 		expect(header.flags.hasExtensions).toBe(propertiesWanted);
 
 		await reader.u53(); // object id delta
