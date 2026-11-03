@@ -132,10 +132,13 @@ curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?id=00ff'
 
 ### GET /nodes
 
-The peers this relay dialed and holds a session with: each node's URL, without
-its query, and the connections to it, with the same `conn` id the logs use.
+Configured outbound peers, including those still connecting or retrying. Each
+URL omits credentials. Live connections include transport and the `conn` ID
+used in logs; the last successful connect age survives disconnects and failed
+attempts. Null means the dial has never connected. Removing the dial removes
+its history.
 Peers that dialed this relay are not listed, since they declare no URL.
 
 ```json
-{ "nodes": [{ "node": "https://us-east.example.com/", "connections": [{ "id": 3 }] }] }
+{ "nodes": [{ "node": "https://us-east.example.com/", "connections": [{ "id": 3, "transport": "webtransport" }], "last_connected_seconds_ago": 12.5 }] }
 ```

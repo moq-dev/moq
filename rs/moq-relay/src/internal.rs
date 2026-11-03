@@ -475,7 +475,7 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 		.into_response()
 }
 
-/// Cluster peers this relay dialed and currently holds a session with. Accepted
+/// Configured outbound cluster peers, their live sessions and connection history. Accepted
 /// peer sessions are omitted, since a peer declares no URL to list it under.
 async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::Snapshot> {
 	Json(state.nodes.map(|nodes| nodes.snapshot()).unwrap_or_default())
@@ -1664,7 +1664,7 @@ mod tests {
 	#[tokio::test]
 	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
 		let nodes = crate::nodes::Nodes::default();
-		let _connection = nodes.connect_outbound(0, "https://relay-b.example/");
+		let _connection = nodes.dial(0, "https://relay-b.example/");
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),

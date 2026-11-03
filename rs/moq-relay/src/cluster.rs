@@ -2070,11 +2070,13 @@ impl Cluster {
 		// turn into a tight reconnect loop.
 		let stable_threshold = std::time::Duration::from_secs(10);
 
+		let dial = self.nodes.dial(self.next_connection_id(), &target.key);
 		let mut redial = Redial::default();
 
 		loop {
 			let started = kio::clock::now();
-			let result = self.run_remote_once(&addrs, target).await;
+			let result = self.run_remote_once(&addrs, target, &dial).await;
+			dial.disconnected();
 			let elapsed = started.elapsed();
 
 			match result {
@@ -2089,18 +2091,29 @@ impl Cluster {
 	}
 
 	/// One session to `target` over `addrs`, which carry any credential.
-	async fn run_remote_once(&self, addrs: &moq_tokio::Addrs, target: &DialTarget) -> anyhow::Result<()> {
+	async fn run_remote_once(
+		&self,
+		addrs: &moq_tokio::Addrs,
+		target: &DialTarget,
+		dial: &crate::nodes::Dial,
+	) -> anyhow::Result<()> {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
 		// A panic fails this attempt like any other error, so the peer is redialed.
-		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target))
+		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target, dial))
 			.instrument(tracing::info_span!("conn", id))
 			.await
 			.context("cluster peer session panicked")?
 	}
 
-	async fn run_remote_session(&self, id: u64, addrs: &moq_tokio::Addrs, target: &DialTarget) -> anyhow::Result<()> {
+	async fn run_remote_session(
+		&self,
+		id: u64,
+		addrs: &moq_tokio::Addrs,
+		target: &DialTarget,
+		dial: &crate::nodes::Dial,
+	) -> anyhow::Result<()> {
 		// The peer URL may carry the cluster JWT in its query, so neither the log
 		// line nor the node label below may show the raw URL.
 		let first = addrs.as_slice().first().expect("Addrs is non-empty").url();
@@ -2160,20 +2173,15 @@ impl Cluster {
 		// and replay both announce tables there for the rest of its window. Its
 		// routes are already re-priced to the maximum, so the session serves on
 		// until the node closes it, and the redial after that finds the replacement.
-		let mut reconnect = client
+		let reconnect = client
 			.with_reconnect(true)
 			.with_restart(moq_tokio::Restart::Wait)
 			.connect(addrs.clone());
-		let mut connection = None;
+		let monitor = reconnect.monitor();
+		let mut observation = monitor.state();
 		loop {
-			match reconnect.status().await? {
-				moq_tokio::Status::Connected if connection.is_none() => {
-					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
-				}
-				moq_tokio::Status::Disconnected => connection = None,
-				moq_tokio::Status::Migrating => {}
-				_ => {}
-			}
+			dial.observe(id, &observation);
+			observation = monitor.state_changed(observation.revision).await?;
 		}
 	}
 
