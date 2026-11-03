@@ -9699,7 +9699,10 @@ mod tests {
 				let consumer = producer.consume();
 
 				let broadcast = producer
-					.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
+					.publish(
+						"room/alice",
+						Route::default().with_instance(crate::Instance::random(), 0),
+					)
 					.unwrap();
 				let mut dynamic = broadcast.requests();
 				let resolved = consumer.request("room/alice", None).await.expect("resolves");
@@ -9714,7 +9717,9 @@ mod tests {
 					producer
 						.requests_route(
 							"room/alice",
-							Route::default().with_epoch(crate::Epoch::mint()).with_hops(hops(&[10])),
+							Route::default()
+								.with_instance(crate::Instance::random(), 0)
+								.with_hops(hops(&[10])),
 							None,
 						)
 						.unwrap()
