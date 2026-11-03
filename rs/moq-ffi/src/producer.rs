@@ -41,7 +41,7 @@ pub struct MoqTrackInfo {
 	pub priority: i8,
 	/// Maximum age of a non-latest group before the publisher evicts it. Null imposes no
 	/// publisher age limit. This is the publisher-side half of
-	/// [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay).
+	/// [`MoqDelay::max`](crate::consumer::MoqDelay::max).
 	#[uniffi(default = None)]
 	pub max_age: Option<std::time::Duration>,
 	/// How many times its first frame a group's later bytes may grow before a joining

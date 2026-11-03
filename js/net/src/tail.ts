@@ -43,10 +43,10 @@ export class Tail {
 	 * Record a group stream whose header arrived. Returns the call that marks it read to
 	 * its end, which is idempotent.
 	 */
-	open(sequence: number): () => void {
+	open(sequence: bigint): () => void {
 		this.#streams += 1;
 		this.#active += 1;
-		this.#account(sequence, sequence + 1);
+		this.#account(sequence, sequence + 1n);
 
 		let closed = false;
 		return () => {
@@ -95,17 +95,17 @@ export class Tail {
 	}
 
 	/** Record sequences `[start, end)` as accounted for without a stream: dropped, or a datagram. */
-	account(start: number, end: number): void {
+	account(start: bigint, end: bigint): void {
 		this.#account(start, end);
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
-	demand(start: number, end: number): void {
+	demand(start: bigint, end: bigint): void {
 		this.#ledger.demand(start, end, now());
 	}
 
 	/** Whether every sequence in `[start, end)` is accounted for. */
-	covers(start: number, end: number): boolean {
+	covers(start: bigint, end: bigint): boolean {
 		return this.#ledger.covers(start, end);
 	}
 
@@ -140,7 +140,7 @@ export class Tail {
 		}
 	}
 
-	#account(start: number, end: number): void {
+	#account(start: bigint, end: bigint): void {
 		if (start >= end) return;
 		const at = now();
 		this.#ledger.account(start, end, at);

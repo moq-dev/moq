@@ -290,7 +290,11 @@ moq ... import capture --audio on                        # encode audio continuo
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera and microphone stay open while publishing, so a late
+backends. An audio device that fails or stops ends the import with its source
+error; restart the command after the device is available again. Audio appears
+in the catalog once its device opens; a microphone permission prompt leaves
+other media available. The camera and
+microphone stay open while publishing, so a late
 subscriber can fetch the recent past. Choose each medium with
 `--video <on|demand|off>` (default `on`) and `--audio <on|demand|off>`
 (default `demand`). `on` encodes for the whole publish, and `off` publishes no
@@ -406,6 +410,10 @@ reachable. A recording still being made is followed, checked every `--refresh`
 (default 1 s), until `export archive` marks it complete; one whose export
 stopped early stays live. It refuses a prefix with no recording, or with keys
 `export archive` does not write.
+
+Instances are percent-encoded as one key segment. When passing a stored key in an
+import URL, URL-encode its literal `%` characters too: instance `a/b` records under
+`event/@a%2Fb`, which the import URL names as `s3://recordings/event/@a%252Fb`.
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the
