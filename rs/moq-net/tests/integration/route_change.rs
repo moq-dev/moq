@@ -328,6 +328,52 @@ async fn route_flaps(version: &str) {
 	assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
 }
 
+/// A wire without instances: the subscription stays on `A` while `B` stands by, and
+/// ends when `A`'s route goes instead of resuming through `B`. A re-request then
+/// lands on `B`.
+async fn route_dies_without_instances(version: &str, trigger: Trigger) {
+	let version: Version = version.parse().unwrap();
+	let (mut topology, sub) = Topology::new(version).await;
+	let mut rx = read(sub);
+	topology.standby().await;
+
+	let mut group = topology.track.append_group().unwrap();
+	for frame in 0..FRAMES {
+		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
+		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
+	}
+	group.finish().unwrap();
+
+	topology.trigger(trigger).await;
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
+	settle().await;
+	match kio::clock::timeout(Duration::from_secs(10), rx.next())
+		.await
+		.expect("reader hung")
+	{
+		None | Some((_, Err(_))) => {}
+		Some((group, Ok((_, frame)))) => panic!(
+			"{version} {trigger:?}: resumed through another route at {group}:{}",
+			String::from_utf8_lossy(&frame)
+		),
+	}
+
+	let remote = topology
+		.subscriber
+		.consume()
+		.request("live", None)
+		.await
+		.expect("B serves a re-request");
+	let sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+	let mut rx = read(sub);
+	group.write_frame(Timestamp::ZERO, payload(1, 1)).unwrap();
+	group.finish().unwrap();
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(2, 0)).unwrap();
+	while next(&mut rx).await != (2, payload(2, 0)) {}
+}
+
 /// `P1 -> A -> R` serves `live`, while `P2 -> B -> R` stands by under another
 /// instance. A follower on `D`, one wire hop beyond `R`, sees the version's restart
 /// when `A`'s session dies or it withdraws the route after losing `P1`. Its old
@@ -552,6 +598,21 @@ macro_rules! pinned_tests {
 				#[kio::test]
 				async fn unannounce_restarts_another_instance() {
 					run(Trigger::Unannounce).await;
+				}
+
+				/// Two routes to one publication are still different instances on these wires.
+				#[kio::test]
+				async fn disconnect_ends_the_subscription() {
+					kio::clock::timeout(TEST_TIMEOUT, route_dies_without_instances($version, Trigger::Disconnect))
+						.await
+						.expect("timed out");
+				}
+
+				#[kio::test]
+				async fn unannounce_ends_the_subscription() {
+					kio::clock::timeout(TEST_TIMEOUT, route_dies_without_instances($version, Trigger::Unannounce))
+						.await
+						.expect("timed out");
 				}
 
 				/// A better route under another instance wins new requests and announces as a
