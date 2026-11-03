@@ -273,7 +273,7 @@ fn table() {
 	let kib = |bytes: isize| bytes / 1024;
 	for mode in Mode::ALL {
 		for conns in [1, 4] {
-			for streams in [16, 256, 1024] {
+			for streams in [1, 16, 256, 1024] {
 				for packets in [1, 16, 256, 2048] {
 					if conns * streams * packets > BURST_PACKETS {
 						continue;
@@ -322,8 +322,8 @@ fn table() {
 fn bench_bursts(c: &mut Criterion<ThreadCpu>) {
 	let mut group = c.benchmark_group("receive_bursts");
 	for mode in Mode::ALL {
-		for streams in [16, 256] {
-			for packets in [16, 256] {
+		for streams in [1, 16, 256] {
+			for packets in [1, 16, 256] {
 				let mut pair = None;
 				group.throughput(Throughput::Bytes((streams * packets * PACKET) as u64));
 				group.bench_function(
