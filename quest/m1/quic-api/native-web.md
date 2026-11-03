@@ -14,56 +14,32 @@ tests.
 
 ## Plan
 
-Moved from drop web-transport-trait (maintainer, 2026-10-23): the adapter
-exists because quinn's driver was async-only, so it goes with the rest of
-quinn's shape before the cut.
+The native trait migration is implemented on this quest's branch. Finish its
+validation before removing this quest:
 
-What it deletes, from the 2026-10-23 consumer audit (about 400 lines):
-moq-tokio's `transport.rs` QUIC paths (a boxed future per operation, a
-`Bytes::copy_from_slice` per write and datagram, `finish` and `reset`
-deferred until an in-flight operation settles, an emulated `closed()`),
-`grouped.rs`, the QUIC glue in `transport.rs` and `owned.rs` (the `Lease`
-impl and `close_kind` downcasting through `web::ReadError`), the
-`web_transport_trait` impls in `web/session.rs`, `web/send.rs`, and
-`web/recv.rs`, the `i32` priority clamp, and the `futures::stream::unfold`
-around `accept_uni`. `session.rs`'s `finish()` then `stopped().await` becomes
-awaiting `send::Finished`.
+- Run local checks and the cross-runtime stream, FIN, send-group and receive-credit
+  tests on the final committed head. The empty-FIN close watch fails on the
+  driver-poll base and must pass on both stacks.
+- Run the io_uring `web_headers` pending × ready sweep. It covers uni and bi
+  headers, later fragmented completion, preserved payloads and FIN, and stream
+  credit returning after consumption. The classifier polls only woken entries;
+  three HTTP/3 critical-stream slots replace the old retained-stream cap.
+- Measure relay CPU per Gbps and allocations per stream before and after, with
+  the same workload and disclosed host load. `fanout` also measures the native
+  poll interface directly with allocation counters (`NATIVE_ALLOCS=1`).
+- Review the checked head locally and address findings before readiness.
 
-Align the two stacks while each gets its impl:
+The supported common API uses `web::send::Stream`, `web::recv::Stream`, their
+role-local errors, consuming terminal methods, and `send::Finished` futures.
+Sessions implement moq-net's poll traits directly with real send groups;
+io_uring retains only `transport::Local` for moq-net's thread bound.
+Both handshakes use `proto::ConnectResponse` and HTTP status codes. Connection
+access is explicit, rather than through the Tokio session's `Deref`.
 
-- moq-tokio's `quic::web::Session` derefs to `quic::driver::Connection`, so
-  it has two `send_datagram`s with different framing: its own prefixes the
-  WebTransport session id, the driver's does not. Drop the `Deref`.
-- The session id is chained onto each datagram with `send(impl Buf)`
-  ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)) instead of allocated and copied
-  per datagram (quinn-rs/quinn#1724).
-- `quic::web` is supported API in both crates (maintainer, 2026-10-23): a
-  WebTransport-over-moq-quic library usable without MoQ, documented, no
-  longer `#[doc(hidden)]`, with the same names and signatures in moq-tokio
-  and moq-uring and the driver's `send::`/`recv::` shapes and errors.
-- moq-uring's header classification (`classify_uni`, `classify_bi` in
-  `web.rs`) re-polls every pending stream and rebuilds the pending `Vec`
-  whenever any stream arrives or wakes, so a peer that opens N streams with
-  partial headers costs O(N²) CPU, with N up to its stream limit. moq-tokio
-  keeps them in a `FuturesUnordered`, which polls only the woken ones. Bring
-  uring to the same shape. Test with pending × ready headers and fragmented
-  arrival, preserving FIN handling, the held control streams, and stream
-  credit (2026-10-27 audit, maintainer).
-- A cleanly finished stream ends `closed()`: today moq-tokio's adapter waits
-  only for a reset, so a peer's clean FIN never returns it
-  ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950) fixed the same
-  bug in moq-uring). Test a FIN on both stacks (maintainer, 2026-10-30).
-- `transport::poll_op` and `OpSlot` go with moq-tokio's adapter, their last
-  user.
-- moq-relay's io_uring server and its tests call the uring session through
-  `web_transport_trait` (`uring.rs`, `tests/integration/runtime_uring.rs`);
-  move them to the new impls.
-- Report the public API impact per crate: deleted `Grouped`/`GroupedSend`,
-  `web_transport_trait` impls, and generic `transport::Session<S>` adapters,
-  and new `poll::Session` impls.
-
-Measure relay CPU per Gbps and allocations per stream before and after on
-the same workload.
+The shared strict-flake runner failure writing `/proc/self/uid_map` is an
+existing environment limitation. Preserve the probe/skip policy for ordinary
+checks and the intentional failure under strict CI, and record base/head
+failures without changing the harness to pass.
 
 ## Related
 
