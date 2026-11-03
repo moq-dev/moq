@@ -13,9 +13,9 @@ The implementation in [moq-dev/moq#7713](https://github.com/moq-dev/moq/pull/771
 adds the derived trybuild-edge guard and excludes `pipewire`, `libspa`, and
 `clang-sys` from the workspace-hack's final output. Other transitive features
 remain unified. Linux x86_64 and ARM test graphs of `moq-json` no longer reach
-PipeWire or libclang; an uncached x86_64 nextest run passes with native media
-pkg-config probes refused and an invalid libclang path. The original manifests
-fail under the same restriction.
+PipeWire or libclang. An x86_64 nextest run with shared compiler caching
+bypassed passes with native media pkg-config probes refused and an invalid
+libclang path. The original manifests fail under the same restriction.
 
 Local Cargo 1.98.1 unit graphs for `moq-json`, `moq-video --features pipewire`,
 and `moq-audio --features pipewire`, each built with `--tests`, have 531 distinct
@@ -37,7 +37,8 @@ Its 12 mbx object-cache summaries total 986 hits, 721 misses, 323 not
 looked up, 8 bypassed, and 11 remote failures. The conditional hit rate is
 57.76% (`986 / (986 + 721)`); this excludes not-looked-up and bypassed units.
 The summaries report estimated compiler time avoided, not measured CPU totals.
-The remote failures and mixed build phases limit attribution. Replace this
+The 5 GiB download budget was exhausted during the first build; remote
+failures and mixed build phases limit attribution. Replace this
 candidate if a later scheduled run precedes this PR's merge.
 
 Public API: none. Wire: none.
