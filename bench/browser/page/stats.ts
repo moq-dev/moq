@@ -210,7 +210,7 @@ async function originOf(connection: Moq.Connection): Promise<Moq.Origin.Table> {
 	}
 }
 
-async function active(request: Moq.Origin.Requesting): Promise<Moq.Broadcast.Consumer> {
+async function active(request: Moq.Origin.Following): Promise<Moq.Broadcast.Consumer> {
 	for (;;) {
 		const broadcast = request.active.peek();
 		if (broadcast) return broadcast;
