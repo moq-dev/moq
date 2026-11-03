@@ -1,7 +1,9 @@
 use bytes::{BufMut, Bytes};
 
 use super::*;
-use crate::{StreamId, TransportErrorCode, coding::BufMutExt, frame::FrameType, recv, send};
+use crate::{
+	StreamId, TransportErrorCode, coding::BufMutExt, connection::waits::Counter, frame::FrameType, recv, send,
+};
 
 /// Two connections joined by an in-memory transport, on a clock the test advances
 struct Pair {
@@ -30,11 +32,11 @@ impl Pair {
 	fn drive(&mut self) {
 		loop {
 			let mut idle = true;
-			while let Some(record) = self.client.poll_transmit(self.now) {
+			while let Some(record) = self.client.transmit(self.now) {
 				self.server.handle_record(record, self.now);
 				idle = false;
 			}
-			while let Some(record) = self.server.poll_transmit(self.now) {
+			while let Some(record) = self.server.transmit(self.now) {
 				self.client.handle_record(record, self.now);
 				idle = false;
 			}
@@ -56,10 +58,6 @@ fn config(version: Version) -> Config {
 		version,
 		..Config::default()
 	}
-}
-
-fn events(conn: &mut Connection) -> Vec<Event> {
-	std::iter::from_fn(|| conn.poll()).collect()
 }
 
 /// Read every byte currently available on `id`
@@ -84,10 +82,7 @@ fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool) {
 }
 
 fn lost(conn: &mut Connection) -> Option<ConnectionError> {
-	events(conn).into_iter().find_map(|event| match event {
-		Event::ConnectionLost { reason } => Some(reason),
-		_ => None,
-	})
+	conn.error().cloned()
 }
 
 #[test]
@@ -96,8 +91,10 @@ fn handshake() {
 		let mut pair = Pair::new(config(version));
 		assert!(pair.client.is_established(), "{version:?}");
 		assert!(pair.server.is_established(), "{version:?}");
-		assert!(matches!(events(&mut pair.client)[..], [Event::Connected]));
-		assert!(matches!(events(&mut pair.server)[..], [Event::Connected]));
+		for conn in [&mut pair.client, &mut pair.server] {
+			assert_eq!(conn.poll_connected(&kio::Waiter::noop()), Poll::Ready(Ok(())));
+			assert!(conn.error().is_none());
+		}
 	}
 }
 
@@ -113,6 +110,8 @@ fn streams_carry_data_and_fin() {
 			pair.drive();
 		}
 		pair.client.send_stream(id).finish().unwrap();
+		let end = Counter::new();
+		assert!(pair.client.send_stream(id).poll_end(&end).is_pending());
 		pair.drive();
 
 		assert_eq!(pair.server.streams().accept(Dir::Bi), Some(id));
@@ -127,10 +126,10 @@ fn streams_carry_data_and_fin() {
 		}
 		assert_eq!(received, payload, "{version:?}");
 		// Serializing the FIN acknowledged it
-		assert!(
-			events(&mut pair.client)
-				.iter()
-				.any(|e| matches!(e, Event::Stream(StreamEvent::Finished { id: done }) if *done == id))
+		assert_eq!(end.wakes(), 1);
+		assert_eq!(
+			pair.client.send_stream(id).poll_end(&end),
+			Poll::Ready(Ok(send::End::Finished))
 		);
 	}
 }
@@ -202,7 +201,7 @@ fn close_delivers_application_close() {
 /// A record carrying the peer's parameters, then `frame`
 fn after_params(version: Version, frame: &[u8]) -> Bytes {
 	let mut peer = Connection::new(config(version), Side::Client, Instant::now());
-	let mut record = peer.poll_transmit(Instant::now()).unwrap().to_vec();
+	let mut record = peer.transmit(Instant::now()).unwrap().to_vec();
 	record.extend_from_slice(frame);
 	record.into()
 }
@@ -225,7 +224,7 @@ fn rejects_prohibited_frames() {
 		let err = transport_error(&mut server);
 		assert_eq!(err.code, TransportErrorCode::PROTOCOL_VIOLATION, "{frame:?}");
 		// The violation goes out as a CONNECTION_CLOSE after our parameters
-		let record = server.poll_transmit(now).unwrap();
+		let record = server.transmit(now).unwrap();
 		let mut rest = record.clone();
 		assert!(matches!(
 			wire::next_frame(&mut rest).unwrap(),
@@ -259,7 +258,7 @@ fn draft02_requires_params_first() {
 	for &version in Version::ALL {
 		let mut pair = Pair::new(config(version));
 		let mut repeat = Connection::new(config(version), Side::Client, now);
-		let params = repeat.poll_transmit(now).unwrap();
+		let params = repeat.transmit(now).unwrap();
 		pair.server.handle_record(params, pair.now);
 		assert_eq!(
 			transport_error(&mut pair.server).code,
@@ -330,7 +329,7 @@ fn rejects_oversized_records() {
 		let mut server = Connection::new(config(version), Side::Server, now);
 		server.handle_oversized();
 		assert_eq!(transport_error(&mut server).code, code);
-		assert!(server.poll_transmit(now).is_some(), "CONNECTION_CLOSE");
+		assert!(server.transmit(now).is_some(), "CONNECTION_CLOSE");
 	}
 }
 
@@ -341,7 +340,7 @@ fn records_stay_under_the_stream_ceiling() {
 	let mut pair = Pair::new(cfg);
 	let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
 	pair.client.send_stream(id).write(&mut &[0; 100_000][..]).unwrap();
-	while let Some(record) = pair.client.poll_transmit(pair.now) {
+	while let Some(record) = pair.client.transmit(pair.now) {
 		assert!(record.len() <= MAX_RECORD_BUDGET);
 		pair.server.handle_record(record, pair.now);
 	}
@@ -352,14 +351,14 @@ fn draft00_sends_one_length_prefixed_frame_per_message() {
 	let now = Instant::now();
 	let mut client = Connection::new(config(Version::QMux00), Side::Client, now);
 	let mut server = Connection::new(config(Version::QMux00), Side::Server, now);
-	while let Some(frame) = server.poll_transmit(now) {
+	while let Some(frame) = server.transmit(now) {
 		client.handle_record(frame, now);
 	}
 	let id = client.streams().open(Dir::Uni, send::Options::default()).unwrap();
 	client.send_stream(id).write(&mut &[3; 40_000][..]).unwrap();
 	client.send_stream(id).finish().unwrap();
 	let mut messages = 0;
-	while let Some(message) = client.poll_transmit(now) {
+	while let Some(message) = client.transmit(now) {
 		assert!(message.len() <= MAX_FRAME_SIZE);
 		let ty = message[0];
 		if (0x08..=0x0f).contains(&ty) {
@@ -472,16 +471,14 @@ fn datagrams() {
 	let mut pair = Pair::new(config(Version::QMux02));
 	let max = pair.client.datagrams().max_size().unwrap();
 	assert!(max > 16_000);
+	let waiter = Counter::new();
+	assert!(pair.server.datagrams().poll_recv(&waiter).is_pending());
 	pair.client
 		.datagrams()
 		.send(Bytes::from_static(b"hello"), send::Options::default())
 		.unwrap();
 	pair.drive();
-	assert!(
-		events(&mut pair.server)
-			.iter()
-			.any(|e| matches!(e, Event::DatagramReceived))
-	);
+	assert_eq!(waiter.wakes(), 1);
 	assert_eq!(pair.server.datagrams().recv().unwrap(), &b"hello"[..]);
 
 	// Draft-00 has none
@@ -600,8 +597,8 @@ fn idle_timeout_reclaims_a_silent_peer() {
 	// The server never hears back: its keep-alives go out, nothing answers
 	for _ in 0..10 {
 		pair.advance(Duration::from_secs(5));
-		while pair.server.poll_transmit(pair.now).is_some() {}
-		while pair.client.poll_transmit(pair.now).is_some() {}
+		while pair.server.transmit(pair.now).is_some() {}
+		while pair.client.transmit(pair.now).is_some() {}
 	}
 	assert!(matches!(lost(&mut pair.server), Some(ConnectionError::TimedOut)));
 }
@@ -662,7 +659,7 @@ fn golden_transport_parameters() {
 	];
 	for (version, hex) in expected {
 		let mut client = Connection::new(config(version), Side::Client, Instant::now());
-		let record = client.poll_transmit(Instant::now()).unwrap();
+		let record = client.transmit(Instant::now()).unwrap();
 		let actual: String = record.iter().map(|b| format!("{b:02x}")).collect();
 		assert_eq!(actual, hex, "{version:?}");
 	}
@@ -676,8 +673,8 @@ fn golden_records() {
 	for &version in Version::ALL {
 		let mut pair = Pair::new(config(version));
 		let record = |conn: &mut Connection, now| {
-			let record = conn.poll_transmit(now).unwrap();
-			assert!(conn.poll_transmit(now).is_none());
+			let record = conn.transmit(now).unwrap();
+			assert!(conn.transmit(now).is_none());
 			record.iter().map(|b| format!("{b:02x}")).collect::<String>()
 		};
 
@@ -707,7 +704,7 @@ fn golden_records() {
 /// The client's STREAM bytes in the order its records carry them, as `(stream, bytes)` runs
 fn stream_order(pair: &mut Pair) -> Vec<(u64, usize)> {
 	let mut order: Vec<(u64, usize)> = Vec::new();
-	while let Some(record) = pair.client.poll_transmit(pair.now) {
+	while let Some(record) = pair.client.transmit(pair.now) {
 		let mut rest = record.clone();
 		while let Some(frame) = wire::next_frame(&mut rest).unwrap() {
 			let (wire::Frame::Quic(frame::Frame::Stream(stream)) | wire::Frame::Continue(stream)) = frame else {
