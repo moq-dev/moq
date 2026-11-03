@@ -225,22 +225,7 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			if frame.keyframe {
-				let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
-					nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
-				});
-				// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
-				// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
-				// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
-				let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
-				// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
-				// first, so a keyframe that also configures publishes once.
-				let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
-				self.catalog.hdr(&mut self.track, hdr, sequence)?;
-				if let Some(sps) = sps {
-					self.configure_from_sps(&sps)?;
-				}
-			}
+			self.configure(&frame)?;
 
 			// A keyframe we still can't configure (no SPS) is undecodable.
 			if frame.keyframe && !self.catalog.configured() {
@@ -250,6 +235,28 @@ impl Import {
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
 			self.track.write(frame)?;
+		}
+		Ok(())
+	}
+
+	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
+	pub(crate) fn configure(&mut self, frame: &Frame) -> Result<()> {
+		if !frame.keyframe {
+			return Ok(());
+		}
+		let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
+			nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
+		});
+		// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
+		// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
+		// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
+		let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+		// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
+		// first, so a keyframe that also configures publishes once.
+		let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+		self.catalog.hdr(&mut self.track, hdr, sequence)?;
+		if let Some(sps) = sps {
+			self.configure_from_sps(&sps)?;
 		}
 		Ok(())
 	}

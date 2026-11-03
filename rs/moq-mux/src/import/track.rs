@@ -617,30 +617,41 @@ enum GateState {
 }
 
 impl Gate {
-	/// The access units of `frames` to publish, and whether the first of them resumes the
-	/// rendition, so the catalog enables it again.
-	fn admit(&mut self, mut frames: Vec<Frame>) -> (Vec<Frame>, bool) {
-		let resumed = match self.state {
-			GateState::Open => false,
-			GateState::Closed => {
-				frames.clear();
-				false
-			}
+	/// Split `frames` into the access units dropped and those to publish, and report whether
+	/// the first published one resumes the rendition, so the catalog enables it again.
+	fn admit(&mut self, mut frames: Vec<Frame>) -> (Vec<Frame>, Vec<Frame>, bool) {
+		let (kept, resumed) = match self.state {
+			GateState::Open => (0, false),
+			GateState::Closed => (frames.len(), false),
 			GateState::Resuming => match frames.iter().position(|frame| frame.keyframe) {
 				Some(keyframe) => {
-					frames.drain(..keyframe);
 					self.state = GateState::Open;
-					true
+					(keyframe, true)
 				}
-				None => {
-					frames.clear();
-					false
-				}
+				None => (frames.len(), false),
 			},
 		};
-		self.published |= !frames.is_empty();
-		(frames, resumed)
+		let publish = frames.split_off(kept);
+		self.published |= !publish.is_empty();
+		(frames, publish, resumed)
 	}
+}
+
+/// Publish split `frames` through a [`TrackStream`]'s gate.
+///
+/// A dropped keyframe still configures the importer: a stream may carry its config only in
+/// band (an AV1 sequence header), and the keyframe that resumes need not repeat it.
+macro_rules! publish {
+	($gate:expr, $import:expr, $frames:expr) => {{
+		let (dropped, frames, resumed) = $gate.admit($frames);
+		for frame in &dropped {
+			$import.configure(frame)?;
+		}
+		if resumed {
+			$import.set_enabled(true)?;
+		}
+		$import.decode(frames)
+	}};
 }
 
 impl TrackStream {
@@ -696,22 +707,14 @@ impl TrackStream {
 				ref mut import,
 			} => {
 				import.initialize(data)?;
-				let (frames, resumed) = self.gate.admit(split.decode(data, None)?);
-				if resumed {
-					import.set_enabled(true)?;
-				}
-				import.decode(frames)?;
+				publish!(self.gate, import, split.decode(data, None)?)?;
 			}
 			TrackStreamKind::Hev1 {
 				ref mut split,
 				ref mut import,
 			} => {
 				import.initialize(data)?;
-				let (frames, resumed) = self.gate.admit(split.decode(data, None)?);
-				if resumed {
-					import.set_enabled(true)?;
-				}
-				import.decode(frames)?;
+				publish!(self.gate, import, split.decode(data, None)?)?;
 			}
 			TrackStreamKind::Av01 {
 				ref mut split,
@@ -725,11 +728,7 @@ impl TrackStream {
 				} else {
 					split.decode(data, None)?
 				};
-				let (frames, resumed) = self.gate.admit(frames);
-				if resumed {
-					import.set_enabled(true)?;
-				}
-				import.decode(frames)?;
+				publish!(self.gate, import, frames)?;
 			}
 		}
 
@@ -739,11 +738,7 @@ impl TrackStream {
 	/// Decode a chunk of the byte stream.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		stream!(&mut self.kind, split, import => {
-			let (frames, resumed) = self.gate.admit(split.decode(data, None)?);
-			if resumed {
-				import.set_enabled(true)?;
-			}
-			import.decode(frames)
+			publish!(self.gate, import, split.decode(data, None)?)
 		})
 	}
 
@@ -752,11 +747,7 @@ impl TrackStream {
 		// The splitter is taken out to flush, so its input storage ends with the input. The import
 		// stays, keeping the finished track and its rendition published.
 		stream!(&mut self.kind, split, import => {
-			let (tail, resumed) = self.gate.admit(std::mem::take(split).flush(None)?);
-			if resumed {
-				import.set_enabled(true)?;
-			}
-			import.decode(tail)?;
+			publish!(self.gate, import, std::mem::take(split).flush(None)?)?;
 			import.finish()
 		})
 	}
@@ -768,8 +759,9 @@ impl TrackStream {
 	/// [`rate::Target::Disabled`](crate::rate::Target::Disabled)). Once anything was published,
 	/// that marks a [`discontinuity`](crate::container::Producer::discontinuity). Every access
 	/// unit decoded until it is enabled again is dropped, so the caller may keep writing the
-	/// stream. Enabled again, it drops access units until the next keyframe and advertises
-	/// itself enabled with that keyframe.
+	/// stream, though a dropped keyframe still updates the codec config. Enabled again, it
+	/// drops access units until the next keyframe and advertises itself enabled with that
+	/// keyframe.
 	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
 		match (enabled, self.gate.state) {
 			(false, GateState::Open) => {
@@ -1674,5 +1666,39 @@ mod tests {
 		// marker breaks the timeline, and the resumed group opens on the keyframe: three
 		// access units and the end marker `finish` bounds the last one with.
 		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 4]);
+	}
+
+	/// A keyframe dropped while disabled still configures the importer: an AV1 stream may send
+	/// its sequence header once, and the keyframe that resumes need not repeat it.
+	#[tokio::test(start_paused = true)]
+	async fn track_stream_configures_from_a_dropped_keyframe() {
+		let (_, with_header) = av1_init_and_keyframe();
+		// A temporal delimiter and a key frame, with no sequence header.
+		let bare = [0x12, 0x00, 0x32, 0x01, 0x10];
+
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut import = TrackStream::video(
+			request,
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Av01, Vec::new()),
+		)
+		.unwrap();
+
+		import.set_enabled(false).unwrap();
+		// The next temporal delimiter completes the one carrying the sequence header.
+		import.decode(&with_header).unwrap();
+		kio::clock::sleep(Duration::from_millis(33)).await;
+		import.decode(&bare).unwrap();
+		kio::clock::sleep(Duration::from_millis(33)).await;
+
+		import.set_enabled(true).unwrap();
+		import.decode(&bare).unwrap();
+		import.finish().unwrap();
+
+		assert!(catalog.snapshot().video.renditions["video"].enabled);
+		let frame = first_frame(&consumer, "video").await;
+		assert!(frame.keyframe, "the resumed group opens on a keyframe");
 	}
 }

@@ -233,19 +233,7 @@ impl Import {
 	/// keyframe's inline sequence header and refining the catalog jitter.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			if frame.keyframe {
-				let seq = find_sequence_header(&frame.payload);
-				// A new sequence header starts a coded sequence whose HDR metadata replaces the last
-				// one's. It goes first, so a keyframe that also configures publishes once.
-				// The first header after an av1C is the record's own sequence, which sync samples repeat.
-				let sequence = seq
-					.as_ref()
-					.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
-				self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
-				if let Some(seq) = seq {
-					self.configure_from_seq(&seq)?;
-				}
-			}
+			self.configure(&frame)?;
 
 			// A keyframe we couldn't configure (no sequence header) is undecodable.
 			if frame.keyframe && !self.catalog.configured() {
@@ -255,6 +243,25 @@ impl Import {
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which a caller joining mid-stream skips.
 			self.track.write(frame)?;
+		}
+		Ok(())
+	}
+
+	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
+	pub(crate) fn configure(&mut self, frame: &Frame) -> Result<()> {
+		if !frame.keyframe {
+			return Ok(());
+		}
+		let seq = find_sequence_header(&frame.payload);
+		// A new sequence header starts a coded sequence whose HDR metadata replaces the last
+		// one's. It goes first, so a keyframe that also configures publishes once.
+		// The first header after an av1C is the record's own sequence, which sync samples repeat.
+		let sequence = seq
+			.as_ref()
+			.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
+		self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
+		if let Some(seq) = seq {
+			self.configure_from_seq(&seq)?;
 		}
 		Ok(())
 	}
