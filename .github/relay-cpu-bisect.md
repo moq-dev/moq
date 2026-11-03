@@ -61,9 +61,56 @@ Medians of four rounds, min-max in brackets; every cell delivered its workload's
 
 The rows are self cost under the named function, including the std and libc leaves below it; they add to more than the net growth because other paths shrank. `Cursor::probe` reads the subscription, takes the track's shared state lock to judge misses, clones the track's fills, and runs the ask and resolve loop on every peek, even for a live reader that took every group as it arrived and never misses one. That work pays for relay backfill of missed groups, but the chat workload never needs it.
 
-## Decisions
+## Exact counts by commit
 
-No feature cost is accepted in the [release-perf epic](../quest/m1/release-perf/README.md) yet; that is the maintainer's call, recorded in [the PR](https://github.com/moq-dev/moq/pull/7605).
+Relay counts move 5-20% with host load, so a step of a few thousand instructions can't be pinned to one commit from them. `just bench-fanout` (see `bench/README.md`) counts the chat fan-out on one pinned thread instead, against a run of zero cycles, so repeated counts agree within a few instructions per group:
+
+- `model`: one finished group a cycle through the track model, which every subscriber takes. It builds against every revision back to [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+- `session`: a publisher session into a relay origin and a viewer session out of it per subscriber, over the in-memory transport. It counts publisher, relay, and viewers together, without QUIC, and builds back to [moq-dev/moq#7027](https://github.com/moq-dev/moq/pull/7027)'s `kio::clock` (2026-11-01).
+
+At 512 subscribers, in instructions per delivered group, the model path cost 4,285 at the old endpoint and 13,300 on `main`, 3.1x; its growth is about 9k of the relay's per-frame growth on chat. The features the maintainer asked about, each against its parent (model, built with frame pointers):
+
+| Feature | Parent | Merge | Change |
+| --- | ---: | ---: | ---: |
+| Per-reader ranges and time anchors, [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) | 4,411 | 5,313 | +902 |
+| Compressed tracks, [moq-dev/moq#5928](https://github.com/moq-dev/moq/pull/5928) | 5,579 | 5,612 | +33 |
+| A subscriber reads only its ranges' frames, [moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129) | 5,604 | 5,787 | +183 |
+| Signed priorities, [moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142) | 5,888 | 5,816 | -72 |
+| Public ingest, [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111) | 5,816 | 6,016 | +200 |
+| The m0 simplification audit, [moq-dev/moq#6108](https://github.com/moq-dev/moq/pull/6108) | 6,017 | 6,017 | 0 |
+
+In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)) and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) are QUIC-level, which neither scenario reaches; their relay counts on the quiet test host are below. The model path barely moved before [e84ffb3de3](https://github.com/moq-dev/moq/commit/e84ffb3de3139f7245bed5697754fd6add9a022e) (5,840) and then grew in a few large steps, each against its parent (run.TmGdFy, one build profile throughout):
+
+| Commit | Model | Session |
+| --- | ---: | ---: |
+| Dynamic tracks serve fills for misses, [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171) | +4,264 | |
+| Refill groups evicted before a reader took them, [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339) | +1,154 | |
+| Lite-07 frame bounds, timed datagram admission, layered windows, [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) | +876 | +3,054 |
+| Fill linearly in range count and span, [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995) | +558 | +3,290 |
+| Close the relay demand gaps, [moq-dev/moq#7052](https://github.com/moq-dev/moq/pull/7052) | +365 | |
+| Bounded reads end through routes, [c68c931025](https://github.com/moq-dev/moq/commit/c68c931025) | +275 | +450 |
+| An idle track read parks without walking the read path, [3c0dd8a2af](https://github.com/moq-dev/moq/commit/3c0dd8a2af) | +213 | -3,142 |
+| Take a reserved group without asking its cursor again, [68fb455bac](https://github.com/moq-dev/moq/commit/68fb455bac) | +204 | -455 |
+
+The session column starts at the 2026-11-01 harness; blank cells predate it. [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)'s session cost is the probe's walk of the live groups (`TrackState::live`, +4.0k inclusive) on both the reader's cursor and its forward-drop cursor.
+
+## Fixes in this PR
+
+Each is its own commit, counted in one run (run.s6IjbN in the evidence) at 512 subscribers per delivered group, each row on top of the one above:
+
+| Change | Model | Session |
+| --- | ---: | ---: |
+| `main` | 13,300 | 120,948 |
+| A live reader's probe skips the fills while it misses nothing | 10,477 (-2,823) | 114,139 (-6,809) |
+| A window with one set of runs reads without growing across two | 10,126 (-351) | 113,133 (-1,007) |
+| A kio waiter remembers 16 lists, not 8 | 10,189 (+63) | 108,709 (-4,424) |
+| This branch | 10,189 (-23.4%) | 108,709 (-10.1%) |
+
+`Cursor::probe` is the relay's check for groups a reader has missed. Each time a subscriber asks for its next group, the probe looks at what arrived on the track since its last look and decides whether any group the reader still wants has left the cache without the live feed delivering it (evicted, skipped, or from before the feed started), and asks upstream to fill those. A live reader that takes each group as it arrives never has such a gap, yet it paid for the whole check on every group: locking the subscription and the track's shared state, cloning the track's fills, walking the arrival ledger, checking each new group for holes, and running the ask-and-answer loop. Each time the cache aged out an old group, the eviction also landed with every reader, all of which had already taken it, and forced each one to re-run the full check. The fast path judges a group the arrival walk serves without the hole, backfill, and ledger passes, skips the subscription, fills, and answers when nothing is asked or owed, and starts each reader's eviction inbox above what it handed out. It recovers most of [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)'s and [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)'s cost.
+
+kio's `WaiterList::register` was the largest self cost in the session path: a relay session's control and serving tasks park on more than the 8 lists a waiter remembered, so every list past the eighth took a duplicate entry on every poll. 16 measured best; 12 and 32 cost 1.1-1.7% more. Its commit message also claims 2.3% on the model, measured with frame pointers forced; in the build measured here the model moves +0.6%, and the change pays off in the session.
+
+On the quiet test host (run.we4umM, one-minute load at most 4.7), chat over io\_uring went from 154.5k \[154.1-155.0] instructions per frame on `main` to 148.9k \[148.3-150.8] with the probe and window changes (-3.6%), four rounds each, every cell at 20,000 frames/s with no loss. The relay's QUIC, crypto, and syscalls are most of its cost, so the model's -23% shows as a few percent there.
 
 ## Validation
 
