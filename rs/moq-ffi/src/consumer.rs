@@ -433,14 +433,14 @@ struct TrackInner {
 	datagrams: Datagrams,
 }
 
-/// The datagram track of a subscribed track's name, opened on the first datagram read so a
-/// reader that never asks for datagrams never subscribes to them.
+/// The datagram track of a track's name. A subscribed track opens it on the first datagram
+/// read, so a reader that never asks for datagrams never subscribes to them.
 pub(crate) enum Datagrams {
 	/// Not opened yet; opened from the broadcast the track was subscribed through.
 	Remote(moq_net::broadcast::Consumer),
-	/// Not opened yet; opened from the local broadcast while it is still open.
-	Local(std::sync::Weak<moq_net::broadcast::Producer>),
 	Open(moq_net::datagram::Consumer),
+	/// Read from a track that had already finished, so it has no datagrams to come.
+	Ended,
 }
 
 impl TrackInner {
@@ -538,31 +538,28 @@ impl TrackInner {
 		}
 	}
 
-	/// The datagram consumer, opened now if this is the first datagram read.
-	fn datagrams(&mut self, control: &moq_net::track::Control) -> Result<&mut moq_net::datagram::Consumer, MoqError> {
+	/// The datagram consumer, opened now if this is the first datagram read, or `None` once
+	/// there are none to come.
+	fn datagrams(
+		&mut self,
+		control: &moq_net::track::Control,
+	) -> Result<Option<&mut moq_net::datagram::Consumer>, MoqError> {
 		let name = match &self.track {
 			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.name(),
 			Cursor::Ordered(ordered) => ordered.track.name(),
 			// Poisoned mid-conversion; see `arrival`.
 			Cursor::Converting => return Err(MoqError::Closed),
 		};
-		let opened = match &self.datagrams {
-			Datagrams::Open(_) => None,
-			Datagrams::Remote(broadcast) => Some(broadcast.datagrams(name)?),
-			// Without a handle keeping it open, the broadcast has ended.
-			Datagrams::Local(broadcast) => {
-				let broadcast = broadcast.upgrade().ok_or(moq_net::Error::Unroutable)?;
-				Some(broadcast.consume().datagrams(name)?)
-			}
-		};
-		if let Some(mut opened) = opened {
+		if let Datagrams::Remote(broadcast) = &self.datagrams {
+			let mut opened = broadcast.datagrams(name)?;
 			opened.set_priority(control.subscription().priority);
 			self.datagrams = Datagrams::Open(opened);
 		}
-		let Datagrams::Open(datagrams) = &mut self.datagrams else {
-			unreachable!("opened above");
-		};
-		Ok(datagrams)
+		match &mut self.datagrams {
+			Datagrams::Open(datagrams) => Ok(Some(datagrams)),
+			Datagrams::Ended => Ok(None),
+			Datagrams::Remote(_) => unreachable!("opened above"),
+		}
 	}
 
 	fn poll_recv_datagram(
@@ -571,7 +568,8 @@ impl TrackInner {
 		control: &moq_net::track::Control,
 	) -> Poll<Result<Option<MoqDatagram>, MoqError>> {
 		let datagrams = match self.datagrams(control) {
-			Ok(datagrams) => datagrams,
+			Ok(Some(datagrams)) => datagrams,
+			Ok(None) => return Poll::Ready(Ok(None)),
 			Err(err) => return Poll::Ready(Err(err)),
 		};
 		let datagram = match ready!(datagrams.poll_recv(waiter)) {
@@ -688,8 +686,10 @@ impl MoqTrackConsumer {
 
 	/// Receive the next best-effort datagram in arrival order.
 	///
-	/// The first call subscribes to the track's datagrams, which arrive from then on, so
-	/// start reading before the ones you want are sent. Returns `None` when the track ends.
+	/// A consumer from [`MoqTrackProducer::consume`](crate::producer::MoqTrackProducer::consume)
+	/// receives the datagrams sent after it was created. One from a subscription subscribes to
+	/// the track's datagrams on its first call, receiving those sent from then on, so start
+	/// reading before the ones you want are sent. Returns `None` when the track ends.
 	/// Datagram delivery is unavailable over pre-lite-05 moq-lite, moq-transport, and
 	/// stream-only transports. Datagrams are separate from groups, so this works alongside
 	/// either group order, never commits the track to one, and progresses while a group

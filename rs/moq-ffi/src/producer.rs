@@ -670,8 +670,6 @@ pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<Raw>>,
 	// Taken by the first finish, so repeating it keeps the track only once.
 	keep: std::sync::Mutex<Option<Children>>,
-	/// Where [`Self::consume`] opens the datagram track from.
-	broadcast: std::sync::Weak<moq_net::broadcast::Producer>,
 }
 
 /// A raw track and the datagram track of the same name that carries its datagrams.
@@ -731,7 +729,6 @@ impl MoqTrackProducer {
 		children.adopt(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(raw)),
 			keep: std::sync::Mutex::new(Some(children.clone())),
-			broadcast: children.broadcast.clone(),
 		}))
 	}
 
@@ -803,11 +800,17 @@ impl MoqTrackProducer {
 		let guard = self.inner.lock().unwrap();
 		let raw = guard.as_ref().ok_or(MoqError::Closed)?;
 		let subscription = subscription.map(moq_net::track::Subscription::try_from).transpose()?;
-		Ok(Arc::new(MoqTrackConsumer::new(
-			raw.track.subscribe(subscription),
-			Datagrams::Local(self.broadcast.clone()),
-			Background::default(),
-		)))
+		let track = raw.track.subscribe(subscription);
+		// Opened now: a local reader costs no subscription, and reads what is sent from here on.
+		let datagrams = match &raw.datagrams {
+			Some(datagrams) => {
+				let mut datagrams = datagrams.consume();
+				datagrams.set_priority(track.control().subscription().priority);
+				Datagrams::Open(datagrams)
+			}
+			None => Datagrams::Ended,
+		};
+		Ok(Arc::new(MoqTrackConsumer::new(track, datagrams, Background::default())))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.
@@ -853,9 +856,10 @@ impl MoqTrackProducer {
 
 	/// Send `frame` as a best-effort datagram, returning the sequence number assigned to it.
 	///
-	/// Datagrams are numbered on their own, apart from groups. A reader receives those sent
-	/// after its first [`recv_datagram`](crate::consumer::MoqTrackConsumer::recv_datagram). The
-	/// payload must be at most 1200 bytes. Datagrams are only delivered on transports and wire
+	/// Datagrams are numbered on their own, apart from groups. A reader receives only those
+	/// sent after it subscribed to datagrams; see
+	/// [`recv_datagram`](crate::consumer::MoqTrackConsumer::recv_datagram). The payload must be
+	/// at most 1200 bytes. Datagrams are only delivered on transports and wire
 	/// versions with a datagram channel; there is no stream fallback. Like a frame, its
 	/// timestamp must match the track's timedness.
 	pub fn append_datagram(&self, frame: MoqFrame) -> Result<u64, MoqError> {

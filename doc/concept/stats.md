@@ -363,7 +363,7 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
     "inflated": 0,
-    "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
+    "stale": { "bytes": 0, "frames": 0, "groups": 0 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
     "subscriptions": 6, "subscriptions_closed": 2
@@ -378,10 +378,10 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
 | `broadcasts_started` / `broadcasts_ended` | On egress (`publisher`), a session's first subscription to the broadcast and its last one closing. Started minus ended is the viewer count. Ingress (`subscriber`) leaves both at zero: it does not count viewers. |
 | `subscriptions_started` / `subscriptions_ended` | Track subscriptions opened and closed. |
 | `fetches` | One-shot group fetches requested, including ones that found nothing. Their payload counts in `bytes`, `frames`, and `groups`. |
-| `bytes` / `frames` / `groups` | Payload delivered. |
-| `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
-| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy, plus received compressed datagrams, which inflate on arrival. Not part of `bytes`, which counts payload as stored or sent. |
-| `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
+| `bytes` / `frames` / `groups` | Payload delivered. `bytes` includes datagram payloads. |
+| `datagrams` | Datagrams of datagram tracks delivered. A datagram belongs to no group, so it counts in neither `groups` nor `frames`. |
+| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy. Not part of `bytes`, which counts payload as stored or sent. |
+| `stale` | Payload skipped because it aged past a subscriber's latency budget, with `bytes`, `frames`, and `groups`. Disjoint from the top-level payload counters. |
 
 The last six fields are legacy spellings of the `*_started` and `*_ended`
 counters, still written so an older consumer reads a newer relay. A reader

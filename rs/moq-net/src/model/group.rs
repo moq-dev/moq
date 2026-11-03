@@ -1020,7 +1020,6 @@ impl GroupState {
 			bytes: self.cache + self.unwritten(),
 			frames: self.next_index.saturating_sub(self.held()) as u64,
 			groups: 1,
-			datagrams: 0,
 		}
 	}
 
@@ -1048,7 +1047,6 @@ impl GroupState {
 			bytes,
 			frames: (end - start) as u64,
 			groups: 0,
-			datagrams: 0,
 		}
 	}
 

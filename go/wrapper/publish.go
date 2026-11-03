@@ -221,7 +221,7 @@ func (t *TrackProducer) InsertDatagram(sequence uint64, frame Frame) error {
 	return t.inner.InsertDatagram(sequence, frame)
 }
 
-// Largest reports the newest group or datagram written, at its newest frame, or nil
+// Largest reports the newest group written, at its newest frame, or nil
 // before any.
 func (t *TrackProducer) Largest() (*Position, error) {
 	return t.inner.Largest()

@@ -96,8 +96,8 @@ where
 	handle
 }
 
-/// The datagram `send` writes, read by a `recv_datagram` started first: a reader receives
-/// only datagrams sent after its first read.
+/// The datagram `send` writes, read by a `recv_datagram` started first: a subscription
+/// receives only datagrams sent after its first read.
 async fn datagram_sent_by<T>(consumer: &Arc<MoqTrackConsumer>, send: impl FnOnce() -> T) -> (T, MoqDatagram) {
 	let read = {
 		let consumer = consumer.clone();
@@ -1261,22 +1261,18 @@ async fn raw_track_datagram_roundtrip() {
 	let consumer = track.consume(None).unwrap();
 	let payload = b"hello datagram".to_vec();
 
-	// Sent before the reader asked for datagrams, so never delivered to it.
-	track
+	// A local reader receives what is sent after it was created, before its first read.
+	let sequence = track
 		.append_datagram(MoqFrame {
-			payload: b"early".to_vec(),
-			timestamp: Some(us(0)),
+			payload: payload.clone(),
+			timestamp: Some(us(123_456)),
 		})
 		.unwrap();
-	let (sequence, datagram) = datagram_sent_by(&consumer, || {
-		track
-			.append_datagram(MoqFrame {
-				payload: payload.clone(),
-				timestamp: Some(us(123_456)),
-			})
-			.unwrap()
-	})
-	.await;
+	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram")
+		.unwrap()
+		.expect("expected a datagram");
 
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.timestamp.map(micros), Some(123_456));
@@ -2135,6 +2131,9 @@ async fn raw_untimed_frames_and_datagrams_roundtrip() {
 	assert_eq!(datagram.payload, b"datagram");
 	assert_eq!(datagram.timestamp, None);
 	track.finish().unwrap();
+	// The datagrams end with the track, for readers from before and after the finish.
+	assert!(consumer.recv_datagram().await.unwrap().is_none());
+	assert!(track.consume(None).unwrap().recv_datagram().await.unwrap().is_none());
 }
 
 /// An explicitly timed raw track refuses frames and datagrams without a timestamp.
@@ -5194,6 +5193,14 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.expect("expected a group");
 	assert_eq!(group.sequence(), 1);
 
+	// A subscription subscribes to datagrams on its first read, so one sent before is not
+	// delivered.
+	track
+		.append_datagram(MoqFrame {
+			payload: b"early".to_vec(),
+			timestamp: Some(us(0)),
+		})
+		.unwrap();
 	// Datagrams never commit and keep working after a commitment.
 	let (sequence, datagram) = datagram_sent_by(&consumer, || {
 		track

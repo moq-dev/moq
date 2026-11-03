@@ -5,6 +5,16 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Datagrams are a track of their own
+
+A raw track's datagrams travel on a separate datagram track of the same name, so the API is unchanged but some results differ:
+
+- `append_datagram` numbers datagrams on their own, apart from groups, and `MoqDatagram.sequence` is that number. Don't compare it with group sequences.
+- `MoqTrackProducer::largest` reports groups only: a datagram never moves it.
+- `insert_datagram` ignores a `finish_at` boundary.
+- A `MoqTrackConsumer` from `subscribe_track` subscribes to datagrams on its first `recv_datagram` and receives only those sent from then on, so start reading before the datagrams you need are sent. One from `MoqTrackProducer::consume` receives those sent after it was created.
+- `recv_datagram` fails with `NotFound` on a track with no datagram track, such as a media or JSON track, and over moq-transport, which carries no datagrams. Every raw track has one.
+
 ### Subscriptions take a `MoqDelay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `MoqSubscription.max_delay` is `delay: MoqDelay`, the record the decoder outputs take: set `delay.max` to the old `max_delay`.

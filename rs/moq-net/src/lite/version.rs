@@ -270,7 +270,7 @@ impl Version {
 	}
 
 	/// Whether TRACK_INFO carries the compression flag, and a compressed Track's FRAME
-	/// and datagram its inflated size. Added in lite-07; an earlier peer receives the
+	/// its inflated size. Added in lite-07; an earlier peer receives the
 	/// frames inflated.
 	pub(crate) fn has_compression(self) -> bool {
 		!matches!(
@@ -379,7 +379,7 @@ impl Version {
 	}
 
 	/// The timescale the wire carries for a track with `timescale`, or `None` when its
-	/// frames and datagrams carry no timestamp.
+	/// frames or datagrams carry no timestamp.
 	///
 	/// Lite05 and Lite06 always carry one, so an untimed track declares milliseconds there
 	/// and its payloads carry their send times instead.

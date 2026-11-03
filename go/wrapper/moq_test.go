@@ -551,10 +551,6 @@ func TestInsertDatagramAndLargest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if largest, err := track.Largest(); err != nil || largest != nil {
-		t.Fatalf("empty track: largest %v, err %v", largest, err)
-	}
-
 	if err := track.InsertDatagram(7, moq.Frame{Payload: []byte("seven"), Timestamp: ts(0)}); err != nil {
 		t.Fatal(err)
 	}
@@ -565,15 +561,12 @@ func TestInsertDatagramAndLargest(t *testing.T) {
 	if datagram == nil || datagram.Sequence != 7 || string(datagram.Payload) != "seven" {
 		t.Fatalf("got datagram %+v", datagram)
 	}
-	largest, err := track.Largest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if largest == nil || *largest != (moq.Position{Group: 7, Frame: 0}) {
-		t.Fatalf("largest %+v", largest)
-	}
 	if next, err := track.AppendDatagram(moq.Frame{Payload: []byte("next"), Timestamp: ts(0)}); err != nil || next != 8 {
 		t.Fatalf("appended at %d, err %v", next, err)
+	}
+	// Datagrams are numbered apart from groups, so they never move Largest.
+	if largest, err := track.Largest(); err != nil || largest != nil {
+		t.Fatalf("largest %v, err %v", largest, err)
 	}
 }
 

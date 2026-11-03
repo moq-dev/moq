@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Datagrams are a track of their own
+
+A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
+
+- `moq_publish_track_datagram` numbers datagrams on their own, apart from groups, and `moq_datagram.sequence` is that number. Don't compare it with group sequences.
+- `moq_consume_datagrams` receives only datagrams sent after the call, and joins at once instead of waiting for a subscription. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
+- moq-transport carries no datagrams.
+
 ### Subscriptions take a `moq_delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `moq_subscription.max_delay_us` and `max_delay_present` are `moq_delay delay`. A zeroed `moq_subscription` is moq-net's defaults again, the same as `moq_subscription_defaults()` and a NULL pointer: set `delay.max_us` to the old `max_delay_us`, and `delay.max_unlimited` where `max_delay_present` was false.

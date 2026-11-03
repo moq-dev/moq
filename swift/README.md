@@ -82,7 +82,7 @@ Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:ti
 returns the assigned sequence number (`insertDatagram(_:sequence:timestamp:)` takes the
 caller's own), `TrackConsumer.recvDatagram()` receives one datagram,
 and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
-Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;
+Datagrams require a datagram-capable transport and lite-05 or newer moq-lite; moq-transport,
 pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
 JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
