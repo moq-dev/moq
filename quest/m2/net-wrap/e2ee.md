@@ -20,9 +20,10 @@ the reverse (decided 2026-10-20, maintainer):
 - `moq_e2ee::Error` converts into `moq_net::Error`, keeping the draft's
   typed codes (such as an authentication failure) distinguishable rather
   than collapsing into `Error::Dropped`.
-- Datagrams: `append_datagram`, `insert_datagram`, and `recv_datagram`
-  match moq-net's signatures, so the trait read yields only authenticated
-  datagrams. A datagram that fails authentication, or a duplicate, is
+- Datagrams: the wrapper's datagram producer and consumer match the
+  separate datagram types of
+  [Datagram tracks](/quest/m1/datagram-tracks/README.md), so the trait read
+  yields only authenticated datagrams. A datagram that fails authentication, or a duplicate, is
   dropped there and the track continues. The draft's `authentication`
   event stays on moq-e2ee's own consumer, outside the trait, for callers
   that hold the concrete type. A trait read can't carry it without

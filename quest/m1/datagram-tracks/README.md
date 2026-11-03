@@ -90,3 +90,5 @@ The draft's own Datagrams section changes with the
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - ranges no longer cover datagrams
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - stream tracks address by start; datagram tracks keep a sequence
+- [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - the traits mirror the separate datagram types
+- [moq-lite session tails count drops](/quest/m2/lite-tail-drop-count.md) - datagram holes matter only on lite-05/06
