@@ -66,6 +66,23 @@ test("B-frame reorder is never delay, even from a late start", () => {
 	}
 });
 
+// Frames written before another rendition joins trail nothing, so the window they share with the
+// first frames after it holds no trail.
+test("a window spanning a join measures no delay", () => {
+	const order = new Order();
+	const audio = new Estimator();
+	const video = new Estimator();
+	for (let i = 0; i < 50; i++) audio.write(i * 20 * 1000, order);
+	// A joining video's reference picture lands ahead of the next audio frame.
+	video.write(1_040_000, order);
+	expect(audio.write(1_000_000, order)).toBe(false);
+	for (let i = 51; i < 150; i++) {
+		video.write(i * 20 * 1000, order);
+		expect(audio.write(i * 20 * 1000, order)).toBe(false);
+	}
+	expect(audio.estimate.delay).toBeUndefined();
+});
+
 test("a lone rendition never measures a delay", () => {
 	const order = new Order();
 	const video = new Estimator();

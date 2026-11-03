@@ -159,10 +159,12 @@ impl Estimator {
 	/// A window's delay is the least of those trails, so one frame that trails nothing clears it.
 	/// Only a track every frame of which trails keeps one; the rest of the lateness varies from
 	/// frame to frame, which the receiver measures and `jitter` floors.
+	///
+	/// A frame with no other track to trail trails nothing, so a window holding frames from before
+	/// another track joined never reports the trail of the few after it.
 	pub(crate) fn order(&mut self, timestamp: Timestamp) {
-		if let Some(behind) = self.seat.write(nanos(timestamp)) {
-			self.window.trail(behind);
-		}
+		let behind = self.seat.write(nanos(timestamp)).unwrap_or_default();
+		self.window.trail(behind);
 	}
 
 	/// Close the current span at `end`, as [`container::Producer::cut`](crate::container::Producer::cut)
@@ -352,7 +354,7 @@ struct Window {
 	open: Option<u128>,
 	/// Frames written since the window opened.
 	frames: u64,
-	/// The least trail behind the other tracks since the window opened, if any was measured.
+	/// The least trail behind the other tracks since the window opened, if any frame was ordered.
 	trail: Option<Duration>,
 	framerate: Option<f64>,
 	delay: Option<Duration>,
@@ -504,8 +506,7 @@ impl Highs {
 		self.seats.len() - 1
 	}
 
-	/// Raise `index`'s high to `timestamp` and return how far `timestamp` trails the others'
-	/// highest, zero when it trails none, or `None` when no other track has a high to trail.
+	/// Raise `index`'s high to `timestamp` and return how far `timestamp` trails the others' highest.
 	fn write(&mut self, index: usize, timestamp: u128) -> Option<Duration> {
 		let others = match self.first {
 			Some((first, _)) if first == index => self.second,
@@ -533,7 +534,7 @@ impl Highs {
 		}
 
 		let (_, others) = others?;
-		Some(elapsed(timestamp, others).unwrap_or_default())
+		elapsed(timestamp, others)
 	}
 
 	/// Forget `index`'s high, freeing its seat when `leave` is set.
@@ -754,6 +755,25 @@ mod tests {
 		}
 	}
 
+	/// Frames written before another track joins trail nothing, so the window they share with the
+	/// first frames after it holds no trail; the next window, with both tracks aligned, holds none
+	/// either.
+	#[test]
+	fn a_window_spanning_a_join_measures_no_delay() {
+		let [mut audio, mut video] = tracks();
+		for i in 0..50u64 {
+			send(&mut audio, i * 20);
+		}
+		// A joining video's reference picture lands ahead of the next audio frame.
+		send(&mut video, 1_040);
+		send(&mut audio, 1_000);
+		for i in 51..150u64 {
+			send(&mut video, i * 20);
+			send(&mut audio, i * 20);
+		}
+		assert_eq!(audio.estimate().delay, None);
+	}
+
 	#[test]
 	fn a_lone_track_never_measures_a_delay() {
 		let [mut video] = tracks();
@@ -857,7 +877,7 @@ mod tests {
 						.filter(|seat| **seat != index)
 						.filter_map(|seat| highs.seats[*seat].flatten())
 						.max();
-					let expected = others.map(|others| elapsed(timestamp, others).unwrap_or_default());
+					let expected = others.and_then(|others| elapsed(timestamp, others));
 					assert_eq!(highs.write(index, timestamp), expected, "step {step}");
 				}
 				_ => live.push(highs.join()),
