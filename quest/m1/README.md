@@ -193,7 +193,6 @@ per-frame CPU growth since #5926.
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
-- [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - a resumed read gets every group or a drop on every wire version
 - [Stats name the route instance's epoch with a type](/quest/m1/stats-epoch-type.md) - `GroupFrame::epoch` gets a dedicated type and tests stop mislabelling the instance
 
 ## Related
