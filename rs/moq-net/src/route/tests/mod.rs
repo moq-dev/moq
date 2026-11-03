@@ -128,6 +128,8 @@ pub(super) struct Stats {
 	pub requests: usize,
 	/// Requests a node sent the same neighbor again for the same seqno.
 	pub repeated_requests: usize,
+	/// Messages and echoes delivered.
+	pub delivered: usize,
 }
 
 struct Change {
@@ -390,6 +392,7 @@ impl Sim {
 			} => router.batch(from, id, changes, floors, interest),
 			Msg::Request { id, seqno } => router.request(from, id, seqno),
 		}
+		self.stats.delivered += 1;
 		self.flush();
 		true
 	}
@@ -400,6 +403,7 @@ impl Sim {
 			return false;
 		};
 		self.nodes[to].echo(from, id);
+		self.stats.delivered += 1;
 		self.flush();
 		true
 	}
@@ -535,6 +539,11 @@ impl Sim {
 				});
 			}
 		}
+	}
+
+	/// Identities recomputed across every node.
+	pub fn touched(&self) -> usize {
+		self.nodes.iter().map(Router::touched).sum()
 	}
 
 	pub fn route(&self, node: Node, id: Id) -> Option<Selected<Node>> {

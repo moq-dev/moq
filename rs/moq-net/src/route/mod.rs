@@ -50,6 +50,22 @@ pub(crate) type Rev = u64;
 /// advertised seqno leaves room for the successor a request names.
 pub(crate) const MAX: u64 = u64::MAX;
 
+/// A neighbor key, bounded so per-identity state can be read as one range.
+pub(crate) trait Key: Copy + Ord + fmt::Debug {
+	const MIN: Self;
+	const MAX: Self;
+}
+
+impl Key for usize {
+	const MIN: Self = usize::MIN;
+	const MAX: Self = usize::MAX;
+}
+
+impl Key for u64 {
+	const MIN: Self = u64::MIN;
+	const MAX: Self = u64::MAX;
+}
+
 /// One side's configuration of a link to a neighbor.
 #[derive(Clone)]
 pub(crate) struct Link {
@@ -215,7 +231,7 @@ struct Heard<A> {
 	interest: u32,
 }
 
-struct Neighbor {
+struct Peer {
 	link: Link,
 	/// The neighbor sent GOAWAY: rank it below every other eligible route.
 	draining: bool,
@@ -245,18 +261,20 @@ pub(crate) struct Retained {
 }
 
 pub(crate) struct Router<N, A> {
-	neighbors: BTreeMap<N, Neighbor>,
+	neighbors: BTreeMap<N, Peer>,
 	origins: BTreeMap<Id, Origin<A>>,
 	rx: BTreeMap<Id, BTreeMap<N, Entry>>,
+	// Per-identity state is keyed identity first, so one identity's state is
+	// one range and a message costs only the identity it names.
 	/// For a key this node qualified, the identity the neighbor named.
-	filed: BTreeMap<(N, Id), Id>,
+	filed: BTreeMap<(Id, N), Id>,
 	/// Babel's feasibility distance per identity.
 	fd: BTreeMap<Id, (Seqno, Metric)>,
-	sent: BTreeMap<(N, Id), Reach>,
+	sent: BTreeMap<(Id, N), Reach>,
 	/// ROUTE_ENDs sent to each neighbor and not yet echoed back. Until they all
 	/// return, a neighbor may still hold this node's advertisement, so the
 	/// feasibility distance stays.
-	unacked: BTreeMap<(N, Id), u32>,
+	unacked: BTreeMap<(Id, N), u32>,
 	pending: BTreeMap<Id, Pending<N>>,
 	/// The prefix this node asks its neighbors for announcements under.
 	watch: Path,
@@ -268,14 +286,17 @@ pub(crate) struct Router<N, A> {
 	/// the old interest, plus what each batch answering the new one certified.
 	/// The rest is hidden until certified.
 	current: BTreeMap<Id, Vec<Path>>,
-	heard: BTreeMap<(N, Id), Heard<A>>,
-	sent_views: BTreeMap<(N, Id), View<A>>,
+	heard: BTreeMap<(Id, N), Heard<A>>,
+	sent_views: BTreeMap<(Id, N), View<A>>,
 	shown: BTreeMap<(Id, Path), Shown<A>>,
 	/// Mints a fresh identity on rotation.
 	rng: u64,
 	/// Per claim this node has shown, how many times it forgot that claim.
 	#[cfg(test)]
 	forgot: BTreeMap<(Id, Path), u32>,
+	/// Identities recomputed, so fixtures can bound the work per message.
+	#[cfg(test)]
+	touched: usize,
 	out: Vec<Out<N, A>>,
 	events: Vec<Event<A>>,
 }
@@ -291,7 +312,7 @@ pub(crate) enum Error {
 	NoIdentity,
 }
 
-impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
+impl<N: Key, A: Clone + Eq> Router<N, A> {
 	/// A node with no sessions, minting rotated identities from `seed`.
 	pub fn new(seed: u64) -> Self {
 		Self {
@@ -313,6 +334,8 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 			rng: seed | 1,
 			#[cfg(test)]
 			forgot: BTreeMap::new(),
+			#[cfg(test)]
+			touched: 0,
 			out: Vec::new(),
 			events: Vec::new(),
 		}
@@ -337,13 +360,13 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 		}
 		self.neighbors.insert(
 			neighbor,
-			Neighbor {
+			Peer {
 				link,
 				draining: false,
 				watch: None,
 			},
 		);
-		self.advertise();
+		// Nothing is sent or learned until a stream opens.
 		Ok(())
 	}
 
@@ -353,19 +376,31 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 		if self.neighbors.remove(&neighbor).is_none() {
 			return;
 		}
-		for routes in self.rx.values_mut() {
-			routes.remove(&neighbor);
+		let mut ids = BTreeSet::new();
+		for (id, routes) in self.rx.iter_mut() {
+			if routes.remove(&neighbor).is_some() {
+				ids.insert(*id);
+			}
 		}
 		self.rx.retain(|_, routes| !routes.is_empty());
-		self.filed.retain(|(from, _), _| *from != neighbor);
-		self.heard.retain(|(from, _), _| *from != neighbor);
-		for pending in self.pending.values_mut() {
-			pending.from.remove(&neighbor);
+		for (id, pending) in self.pending.iter_mut() {
+			if pending.from.remove(&neighbor) {
+				ids.insert(*id);
+			}
 		}
-		self.unacked.retain(|(to, _), _| *to != neighbor);
-		self.sent.retain(|(to, _), _| *to != neighbor);
-		self.sent_views.retain(|(to, _), _| *to != neighbor);
-		self.advertise();
+		let mut on = |(id, n): &(Id, N)| {
+			let on = *n == neighbor;
+			if on {
+				ids.insert(*id);
+			}
+			!on
+		};
+		self.filed.retain(|key, _| on(key));
+		self.heard.retain(|key, _| on(key));
+		self.unacked.retain(|key, _| on(key));
+		self.sent.retain(|key, _| on(key));
+		self.sent_views.retain(|key, _| on(key));
+		self.update(ids);
 	}
 
 	/// `neighbor` opened a stream asking for announcements under `prefix`: it
@@ -373,8 +408,8 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 	pub fn peer_interest(&mut self, neighbor: N, prefix: Path) -> Result<(), Error> {
 		let peer = self.neighbors.get_mut(&neighbor).ok_or(Error::UnknownNeighbor)?;
 		peer.watch = Some(prefix);
-		self.sent_views.retain(|(to, _), _| *to != neighbor);
-		self.advertise();
+		self.sent_views.retain(|(_, to), _| *to != neighbor);
+		self.update_all();
 		Ok(())
 	}
 
@@ -384,7 +419,13 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 		if let Some(peer) = self.neighbors.get_mut(&neighbor) {
 			peer.draining = true;
 		}
-		self.advertise();
+		let ids: Vec<Id> = self
+			.rx
+			.iter()
+			.filter(|(_, routes)| routes.contains_key(&neighbor))
+			.map(|(id, _)| *id)
+			.collect();
+		self.update(ids);
 	}
 
 	/// Ask every neighbor for announcements under `prefix` instead, returning
@@ -401,7 +442,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 			.retain(|_, regions| !regions.iter().any(|region| within(&prefix, region)));
 		self.watch = prefix;
 		self.interest += 1;
-		self.advertise();
+		self.update_all();
 		self.interest
 	}
 
@@ -425,7 +466,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 				view,
 			},
 		);
-		self.advertise();
+		self.update([id]);
 	}
 
 	/// Advertise `id` as if serving it, with no claims: what a forwarder that
@@ -440,7 +481,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 				view: View::default(),
 			},
 		);
-		self.advertise();
+		self.update([id]);
 	}
 
 	/// The identity this node declares.
@@ -470,7 +511,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 			self.rotate(id);
 		} else {
 			self.origins.get_mut(&id).expect("declared").seqno = seqno + 1;
-			self.advertise();
+			self.update([id]);
 		}
 		Ok(())
 	}
@@ -498,7 +539,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 			Some(item) => view.items.insert(claim, item),
 			None => view.items.remove(&claim),
 		};
-		self.advertise();
+		self.update([id]);
 		Ok(())
 	}
 
@@ -536,7 +577,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 				view,
 			},
 		);
-		self.advertise();
+		self.update([old, id]);
 	}
 
 	// --- Received messages ---
@@ -555,8 +596,8 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 		};
 		if id != named {
 			match reach {
-				Some(_) => self.filed.insert((from, id), named),
-				None => self.filed.remove(&(from, id)),
+				Some(_) => self.filed.insert((id, from), named),
+				None => self.filed.remove(&(id, from)),
 			};
 		}
 		let routes = self.rx.entry(id).or_default();
@@ -576,7 +617,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 		if routes.is_empty() {
 			self.rx.remove(&id);
 		}
-		self.advertise();
+		self.update([id]);
 	}
 
 	/// A batch of announcement changes for `named` from `from`, closed by its
@@ -600,7 +641,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 			return;
 		};
 		let scope = peer.link.scope.as_ref().map(|scope| scope.regions.clone());
-		let heard = self.heard.entry((from, id)).or_insert_with(|| Heard {
+		let heard = self.heard.entry((id, from)).or_insert_with(|| Heard {
 			raw: View::default(),
 			view: View::default(),
 			interest,
@@ -640,7 +681,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 				self.forgot_outside(id, &watch);
 			}
 		}
-		self.advertise();
+		self.update([id]);
 	}
 
 	/// ROUTE_REQUEST from `from` for `id`, as this node advertised it.
@@ -656,8 +697,8 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 				}
 			} else {
 				origin.seqno = origin.seqno.max(seqno);
+				self.update([id]);
 			}
-			self.advertise();
 			return;
 		}
 		if self.selected(id).is_some_and(|route| route.seqno >= seqno) {
@@ -674,33 +715,39 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 			pending.asked = None;
 		}
 		pending.from.insert(from);
-		self.advertise();
+		self.update([id]);
 	}
 
 	/// The echo of a ROUTE_END this node sent `from` for `id`.
 	pub fn echo(&mut self, from: N, id: Id) {
-		let Some(left) = self.unacked.get_mut(&(from, id)) else {
+		let Some(left) = self.unacked.get_mut(&(id, from)) else {
 			// Unsolicited: nothing of ours to drain.
 			return;
 		};
 		*left -= 1;
 		if *left == 0 {
-			self.unacked.remove(&(from, id));
+			self.unacked.remove(&(id, from));
 		}
-		self.advertise();
+		self.update([id]);
 	}
 
 	/// Forget `id`'s routes and announcements. The feasibility distance goes on
 	/// its own once drained.
 	pub fn collect(&mut self, id: Id) {
 		self.rx.remove(&id);
-		self.filed.retain(|(_, key), _| *key != id);
+		let filed: Vec<_> = Self::of(&self.filed, id).map(|(key, _)| *key).collect();
+		for key in filed {
+			self.filed.remove(&key);
+		}
 		self.views.remove(&id);
 		self.current.remove(&id);
-		self.heard.retain(|(_, key), _| *key != id);
+		let heard: Vec<_> = Self::of(&self.heard, id).map(|(key, _)| *key).collect();
+		for key in heard {
+			self.heard.remove(&key);
+		}
 		self.pending.remove(&id);
 		self.forgot_outside(id, &[]);
-		self.advertise();
+		self.update([id]);
 	}
 
 	// --- Queries ---
@@ -798,6 +845,12 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 			.map(|(id, view)| (*id, view))
 	}
 
+	/// How many identities this node has recomputed.
+	#[cfg(test)]
+	pub fn touched(&self) -> usize {
+		self.touched
+	}
+
 	/// What this node's reader sees.
 	pub fn shown(&self) -> &BTreeMap<(Id, Path), Shown<A>> {
 		&self.shown
@@ -847,7 +900,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 	/// The identity this node names for `id` in a request to `next`: the one
 	/// `next` advertised, if this node qualified it.
 	fn name(&self, next: N, id: Id) -> Id {
-		self.filed.get(&(next, id)).copied().unwrap_or(id)
+		self.filed.get(&(id, next)).copied().unwrap_or(id)
 	}
 
 	/// Babel's feasibility condition against this node's feasibility distance.
@@ -916,7 +969,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 		for next in self.certifiers(id) {
 			let heard = self
 				.heard
-				.get(&(next, id))
+				.get(&(id, next))
 				.filter(|heard| heard.interest == self.interest)?;
 			if held || !routes[&next].held {
 				regions.extend(heard.view.floors.keys().cloned());
@@ -957,7 +1010,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 		} else {
 			let mut rebuilt = View::default();
 			for next in self.certifiers(id) {
-				rebuilt.merge(&self.heard[&(next, id)].view);
+				rebuilt.merge(&self.heard[&(id, next)].view);
 			}
 			(rebuilt, Vec::new())
 		};
@@ -986,184 +1039,205 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 
 	/// Whether this node sends `id` to `neighbor` at all: its own identities to
 	/// everyone, learned ones only to a proxied neighbor.
-	fn serves(&self, neighbor: &Neighbor, id: Id) -> bool {
+	fn serves(&self, neighbor: &Peer, id: Id) -> bool {
 		neighbor.link.proxy || self.origins.contains_key(&id)
 	}
 
-	/// Recompute every selection, record feasibility distances for what this
-	/// node advertises, and queue any change for each neighbor.
-	fn advertise(&mut self) {
-		let ids: Vec<Id> = self.views.keys().copied().collect();
-		for id in ids {
-			self.prune(id);
-		}
+	/// One identity's entries in a map keyed identity first.
+	fn of<V>(map: &BTreeMap<(Id, N), V>, id: Id) -> impl Iterator<Item = (&(Id, N), &V)> {
+		map.range((id, N::MIN)..=(id, N::MAX))
+	}
+
+	/// Every identity this node keeps any state for.
+	fn ids(&self) -> BTreeSet<Id> {
 		let mut ids: BTreeSet<Id> = self.rx.keys().copied().collect();
 		ids.extend(self.origins.keys());
-		ids.extend(self.sent.keys().map(|(_, id)| *id));
+		ids.extend(self.fd.keys());
+		ids.extend(self.views.keys());
+		ids.extend(self.pending.keys());
+		ids.extend(self.sent.keys().map(|(id, _)| *id));
+		ids.extend(self.unacked.keys().map(|(id, _)| *id));
+		ids.extend(self.heard.keys().map(|(id, _)| *id));
+		ids.extend(self.shown.keys().map(|(id, _)| *id));
+		ids
+	}
+
+	/// Recompute every identity: for a change that touches them all, such as a
+	/// new interest.
+	fn update_all(&mut self) {
+		let ids = self.ids();
+		self.update(ids);
+	}
+
+	/// Recompute each of `ids`: its selection, the feasibility distance for what
+	/// this node advertises, what each neighbor is sent, its seqno request, and
+	/// what the reader sees.
+	fn update(&mut self, ids: impl IntoIterator<Item = Id>) {
 		let peers: Vec<N> = self
 			.neighbors
 			.iter()
 			.filter(|(_, peer)| peer.watch.is_some())
 			.map(|(n, _)| *n)
 			.collect();
-
+		let ids: BTreeSet<Id> = ids.into_iter().collect();
+		#[cfg(test)]
+		{
+			self.touched += ids.len();
+		}
 		for id in ids {
-			let selected = self.selected(id);
-			// The feasibility distance tracks finite updates actually sent (RFC 8966 s3.7.3).
-			if let Some(selected) = selected
-				&& peers.iter().any(|peer| {
-					let peer = &self.neighbors[peer];
-					self.serves(peer, id) && !(peer.link.upstream && selected.down_only)
-				}) {
-				self.record(id, selected);
+			self.prune(id);
+			self.advertise(id, &peers);
+			// Drop a feasibility distance once nothing here routes or advertises
+			// the identity and every neighbor echoed its ROUTE_END: no node then
+			// holds an advertisement from this one, so no older one can return as
+			// a loop.
+			if !self.rx.contains_key(&id)
+				&& !self.origins.contains_key(&id)
+				&& Self::of(&self.sent, id).next().is_none()
+				&& Self::of(&self.unacked, id).next().is_none()
+			{
+				self.fd.remove(&id);
 			}
-			// Recording may have tightened the feasibility distance: select again.
-			let route = self.selected(id);
-			let live = self.live(id, route);
-			let adopted = self.adopted(id, route).cloned();
-			// A sender that certifies anything answers every stream, even one
-			// whose interest none of its regions meets, so the receiver knows it
-			// certifies nothing there.
-			let answers = adopted.as_ref().is_some_and(|view| !view.floors.is_empty());
-			let mut restricted: Vec<(Path, View<A>)> = Vec::new();
+			self.requests(id);
+			self.show(id);
+		}
+	}
 
-			for &to in &peers {
-				let peer = &self.neighbors[&to];
-				let serves = self.serves(peer, id);
-				let was = self.sent.get(&(to, id)).copied();
-				if !serves && was.is_none() {
-					continue;
-				}
-				let reach = match selected {
-					Some(route) if serves && !(peer.link.upstream && route.down_only) => Some(Reach::Finite(Advert {
-						seqno: route.seqno,
-						metric: route.metric,
-						down_only: route.down_only,
-					})),
-					None if serves && live && was.is_some() => Some(Reach::Held),
-					_ => None,
-				};
-				let watch = peer.watch.clone().expect("a watching peer");
-				if was != reach {
-					match reach {
-						Some(reach) => self.sent.insert((to, id), reach),
-						None => {
-							*self.unacked.entry((to, id)).or_default() += 1;
-							self.sent.remove(&(to, id))
-						}
-					};
-					self.out.push(Out::Route { to, id, reach });
-				}
-				// Announcements ride on the route and end with it.
-				if reach.is_none() {
-					self.sent_views.remove(&(to, id));
-					continue;
-				}
-				// Peers mostly share an interest, so restrict once per interest.
-				let index = match restricted.iter().position(|(interest, _)| *interest == watch) {
-					Some(index) => index,
+	/// Queue any change to what each watching neighbor is sent for `id`.
+	fn advertise(&mut self, id: Id, peers: &[N]) {
+		let selected = self.selected(id);
+		// The feasibility distance tracks finite updates actually sent (RFC 8966 s3.7.3).
+		if let Some(selected) = selected
+			&& peers.iter().any(|peer| {
+				let peer = &self.neighbors[peer];
+				self.serves(peer, id) && !(peer.link.upstream && selected.down_only)
+			}) {
+			self.record(id, selected);
+		}
+		// Recording may have tightened the feasibility distance: select again.
+		let route = self.selected(id);
+		let live = self.live(id, route);
+		let adopted = self.adopted(id, route).cloned();
+		// A sender that certifies anything answers every stream, even one whose
+		// interest none of its regions meets, so the receiver knows it certifies
+		// nothing there.
+		let answers = adopted.as_ref().is_some_and(|view| !view.floors.is_empty());
+		let mut restricted: Vec<(Path, View<A>)> = Vec::new();
+
+		for &to in peers {
+			let peer = &self.neighbors[&to];
+			let serves = self.serves(peer, id);
+			let was = self.sent.get(&(id, to)).copied();
+			if !serves && was.is_none() {
+				continue;
+			}
+			let reach = match selected {
+				Some(route) if serves && !(peer.link.upstream && route.down_only) => Some(Reach::Finite(Advert {
+					seqno: route.seqno,
+					metric: route.metric,
+					down_only: route.down_only,
+				})),
+				None if serves && live && was.is_some() => Some(Reach::Held),
+				_ => None,
+			};
+			let watch = peer.watch.clone().expect("a watching peer");
+			if was != reach {
+				match reach {
+					Some(reach) => self.sent.insert((id, to), reach),
 					None => {
-						let view = adopted
-							.as_ref()
-							.map_or_else(View::default, |view| view.restrict(&watch));
-						restricted.push((watch, view));
-						restricted.len() - 1
+						*self.unacked.entry((id, to)).or_default() += 1;
+						self.sent.remove(&(id, to))
 					}
 				};
-				let view = &restricted[index].1;
-				let changes = match self.sent_views.get(&(to, id)) {
-					Some(sent) if sent == view => continue,
-					Some(sent) => view.diff(sent),
-					None if !answers => continue,
-					None => view.diff(&View::default()),
-				};
-				self.sent_views.insert((to, id), view.clone());
-				self.out.push(Out::Batch {
-					to,
-					id,
-					changes,
-					floors: view.floors.clone(),
-				});
+				self.out.push(Out::Route { to, id, reach });
 			}
-		}
-		// Drop a feasibility distance once nothing here routes or advertises the
-		// identity and every neighbor echoed its ROUTE_END: no node then holds an
-		// advertisement from this one, so no older one can return as a loop.
-		let (rx, origins, sent, unacked) = (&self.rx, &self.origins, &self.sent, &self.unacked);
-		self.fd.retain(|id, _| {
-			rx.contains_key(id)
-				|| origins.contains_key(id)
-				|| sent.keys().any(|(_, sent)| sent == id)
-				|| unacked.keys().any(|(_, unacked)| unacked == id)
-		});
-		self.requests();
-		self.show();
-	}
-
-	/// Start, resend, or clear this node's seqno requests.
-	fn requests(&mut self) {
-		let mut ids: BTreeSet<Id> = self.pending.keys().copied().collect();
-		ids.extend(self.rx.keys());
-		for id in ids {
-			if self.origins.contains_key(&id) {
-				self.pending.remove(&id);
+			// Announcements ride on the route and end with it.
+			if reach.is_none() {
+				self.sent_views.remove(&(id, to));
 				continue;
 			}
-			let route = self.selected(id);
-			let starved = route.is_none() && self.infeasible(id).next().is_some();
-			if starved {
-				let want = self.fd[&id].0 + 1;
-				let pending = self.pending.entry(id).or_insert(Pending {
-					seqno: want,
-					from: BTreeSet::new(),
-					asked: None,
-				});
-				if pending.seqno < want {
-					pending.seqno = want;
-					pending.asked = None;
+			// Peers mostly share an interest, so restrict once per interest.
+			let index = match restricted.iter().position(|(interest, _)| *interest == watch) {
+				Some(index) => index,
+				None => {
+					let view = adopted
+						.as_ref()
+						.map_or_else(View::default, |view| view.restrict(&watch));
+					restricted.push((watch, view));
+					restricted.len() - 1
 				}
-			}
-			let Some(pending) = self.pending.get(&id) else {
-				continue;
 			};
-			let answered = route.is_some_and(|route| route.seqno >= pending.seqno);
-			if answered || (pending.from.is_empty() && !starved) {
-				self.pending.remove(&id);
-				continue;
-			}
-			// A request follows the next hop even back through a requester: next
-			// hops form no loop, one pending request per hop stops a bounce, and
-			// no requester ever cancels, so excluding one can strand a request
-			// while every route still runs through it.
-			let Some(target) = self.target(id) else {
-				self.pending.remove(&id);
-				continue;
+			let view = &restricted[index].1;
+			let changes = match self.sent_views.get(&(id, to)) {
+				Some(sent) if sent == view => continue,
+				Some(sent) => view.diff(sent),
+				None if !answers => continue,
+				None => view.diff(&View::default()),
 			};
-			let pending = self.pending.get_mut(&id).expect("pending");
-			if pending.asked != Some(target) {
-				pending.asked = Some(target);
-				let seqno = pending.seqno;
-				let named = self.name(target, id);
-				self.out.push(Out::Request {
-					to: target,
-					id: named,
-					seqno,
-				});
-			}
+			self.sent_views.insert((id, to), view.clone());
+			self.out.push(Out::Batch {
+				to,
+				id,
+				changes,
+				floors: view.floors.clone(),
+			});
 		}
 	}
 
-	/// Recompute what this node's reader sees and log each change.
-	fn show(&mut self) {
-		let mut ids: BTreeSet<Id> = self.views.keys().copied().collect();
-		ids.extend(self.origins.keys());
-		ids.extend(self.heard.keys().map(|(_, id)| *id));
+	/// Start, resend, or clear this node's seqno request for `id`.
+	fn requests(&mut self, id: Id) {
+		if self.origins.contains_key(&id) {
+			self.pending.remove(&id);
+			return;
+		}
+		let route = self.selected(id);
+		let starved = route.is_none() && self.infeasible(id).next().is_some();
+		if starved {
+			let want = self.fd[&id].0 + 1;
+			let pending = self.pending.entry(id).or_insert(Pending {
+				seqno: want,
+				from: BTreeSet::new(),
+				asked: None,
+			});
+			if pending.seqno < want {
+				pending.seqno = want;
+				pending.asked = None;
+			}
+		}
+		let Some(pending) = self.pending.get(&id) else {
+			return;
+		};
+		let answered = route.is_some_and(|route| route.seqno >= pending.seqno);
+		if answered || (pending.from.is_empty() && !starved) {
+			self.pending.remove(&id);
+			return;
+		}
+		// A request follows the next hop even back through a requester: next hops
+		// form no loop, one pending request per hop stops a bounce, and no
+		// requester ever cancels, so excluding one can strand a request while every
+		// route still runs through it.
+		let Some(target) = self.target(id) else {
+			self.pending.remove(&id);
+			return;
+		};
+		let pending = self.pending.get_mut(&id).expect("pending");
+		if pending.asked != Some(target) {
+			pending.asked = Some(target);
+			let seqno = pending.seqno;
+			let named = self.name(target, id);
+			self.out.push(Out::Request {
+				to: target,
+				id: named,
+				seqno,
+			});
+		}
+	}
+
+	/// Recompute what this node's reader sees of `id` and log each change.
+	fn show(&mut self, id: Id) {
 		let mut shown = BTreeMap::new();
-		for id in ids {
-			let route = self.selected(id);
-			let Some(view) = self.adopted(id, route) else {
-				continue;
-			};
+		let route = self.selected(id);
+		if let Some(view) = self.adopted(id, route) {
 			let usable = route.is_some();
 			let own = self.origins.contains_key(&id);
 			// A claim is available only through a certifier that is not held:
@@ -1181,7 +1255,7 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 						.is_none_or(|regions| regions.iter().any(|region| overlaps(claim, region)));
 				if overlaps(claim, &self.watch) && certified {
 					shown.insert(
-						(id, claim.clone()),
+						claim.clone(),
 						Shown {
 							item: item.clone(),
 							available,
@@ -1190,42 +1264,49 @@ impl<N: Copy + Ord + fmt::Debug, A: Clone + Eq> Router<N, A> {
 				}
 			}
 		}
-		let old = std::mem::take(&mut self.shown);
-		for ((id, claim), now) in &shown {
-			match old.get(&(*id, claim.clone())) {
-				None => self.log(*id, claim, Kind::Start, &now.item),
-				Some(was) => {
+		let old: Vec<(Path, Shown<A>)> = self
+			.shown
+			.range((id, Path::empty())..)
+			.take_while(|((key, _), _)| *key == id)
+			.map(|((_, claim), shown)| (claim.clone(), shown.clone()))
+			.collect();
+		for (claim, was) in &old {
+			match shown.get(claim) {
+				Some(now) => {
 					if was.item != now.item {
-						self.log(*id, claim, Kind::Update, &now.item);
+						self.log(id, claim, Kind::Update, &now.item);
 					}
 					if was.available != now.available {
 						let kind = match now.available {
 							true => Kind::Available,
 							false => Kind::Unavailable,
 						};
-						self.log(*id, claim, kind, &now.item);
+						self.log(id, claim, kind, &now.item);
 					}
+				}
+				None => {
+					// A claim no routed neighbor's region covers was let go, not ended.
+					let uncertified = self
+						.certified(id, true)
+						.is_some_and(|regions| !regions.iter().any(|region| overlaps(claim, region)));
+					let kind = if !overlaps(claim, &self.watch) {
+						Kind::Unwatched
+					} else if self.live(id, route) && !uncertified {
+						Kind::End
+					} else {
+						Kind::Offline
+					};
+					self.log(id, claim, kind, &was.item);
+					self.shown.remove(&(id, claim.clone()));
 				}
 			}
 		}
-		for ((id, claim), was) in &old {
-			if shown.contains_key(&(*id, claim.clone())) {
-				continue;
+		for (claim, now) in shown {
+			if !old.iter().any(|(known, _)| *known == claim) {
+				self.log(id, &claim, Kind::Start, &now.item);
 			}
-			// A claim no routed neighbor's region covers was let go, not ended.
-			let uncertified = self
-				.certified(*id, true)
-				.is_some_and(|regions| !regions.iter().any(|region| overlaps(claim, region)));
-			let kind = if !overlaps(claim, &self.watch) {
-				Kind::Unwatched
-			} else if self.live(*id, self.selected(*id)) && !uncertified {
-				Kind::End
-			} else {
-				Kind::Offline
-			};
-			self.log(*id, claim, kind, &was.item);
+			self.shown.insert((id, claim), now);
 		}
-		self.shown = shown;
 	}
 
 	fn log(&mut self, id: Id, claim: &Path, kind: Kind, item: &A) {

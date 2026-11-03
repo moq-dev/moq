@@ -750,3 +750,33 @@ fn an_unanswerable_request_stops() {
 	}
 	assert_eq!(sim.retained().pending, 0);
 }
+
+/// Each message recomputes only the identity it names, so the work a message
+/// costs does not grow with how many other origins a node routes to.
+#[test]
+fn a_message_recomputes_only_its_identity() {
+	for origins in [1, 50] {
+		let (a, b, client) = (0, 1, 2);
+		let mut sim = Sim::new(3 + origins);
+		sim.join(a, b, 1);
+		sim.leaf(client);
+		sim.join(client, b, 1);
+		for origin in 3..3 + origins {
+			sim.leaf(origin);
+			sim.join(origin, a, 1);
+			sim.originate(origin, origin as Id, 0);
+			sim.announce(origin, &format!("live/{origin}"), 0, None);
+		}
+		assert!(sim.run());
+		assert_eq!(sim.shown(client).len(), origins);
+
+		let (touched, delivered) = (sim.touched(), sim.stats.delivered);
+		sim.announce(3, "live/extra", 0, None);
+		assert!(sim.run());
+		assert_eq!(
+			sim.touched() - touched,
+			sim.stats.delivered - delivered + 1,
+			"one identity per message, plus the origin's own change"
+		);
+	}
+}

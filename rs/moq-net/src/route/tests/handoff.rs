@@ -1244,3 +1244,53 @@ fn settled(sim: &mut Sim, label: &str) {
 	}
 	assert_eq!(sim.retained().pending, 0, "{label}");
 }
+
+/// A link flap with many broadcasts behind one origin costs ROUTE changes
+/// only: while the link is down no session re-sends a claim and the client
+/// sees no claim end or restart, and reopening the link costs one snapshot per
+/// direction of that session.
+#[test]
+fn a_link_flap_costs_routes_not_broadcasts() {
+	const CLAIMS: usize = 100;
+	let (origin, a, b, c, client) = (0, 1, 2, 3, 4);
+	let mut sim = Sim::new(5);
+	sim.leaf(origin);
+	sim.leaf(client);
+	sim.join(origin, a, 1);
+	sim.join(a, b, 1);
+	sim.join(a, c, 1);
+	sim.join(b, c, 1);
+	sim.join(client, c, 1);
+	sim.originate(origin, 7, 0);
+	for claim in 0..CLAIMS {
+		sim.announce(origin, &format!("live/{claim}"), 0, None);
+	}
+	assert!(sim.run());
+	assert_eq!(sim.shown(client).len(), CLAIMS);
+
+	let (stats, events) = (sim.stats, sim.events.len());
+	sim.disconnect(a, c);
+	assert!(sim.run());
+	assert_eq!(next_hop(&sim, c), Some(b));
+	assert!(sim.stats.route_msgs > stats.route_msgs);
+	assert_eq!(sim.stats.claim_items, stats.claim_items, "no claim travels again");
+	let churn = sim.events[events..]
+		.iter()
+		.filter(|event| event.node == client && !matches!(event.kind, Kind::Available | Kind::Unavailable))
+		.count();
+	assert_eq!(churn, 0, "the client keeps every claim");
+	assert!(sim.shown(client).values().all(|shown| shown.available));
+
+	let stats = sim.stats;
+	sim.connect(a, c);
+	assert!(sim.run());
+	assert_eq!(
+		sim.stats.claim_items - stats.claim_items,
+		2 * CLAIMS,
+		"one snapshot each way"
+	);
+}
+
+fn next_hop(sim: &Sim, node: Node) -> Option<Node> {
+	sim.route(node, 7).and_then(|route| route.next)
+}
