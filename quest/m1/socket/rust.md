@@ -10,7 +10,7 @@ specifies the convention, so other languages can implement it from the page.
 
 ## Plan
 
-The [epic](/quest/m2/socket/README.md) records the decisions: the
+The [epic](/quest/m1/socket/README.md) records the decisions: the
 `L/.dial/<id>` and `L/.accept/<id>` layout, a dialer-chosen id with a pinned
 epoch, tracks as streams discovered through the Tracks stream, and lazy,
 unbounded accept.
