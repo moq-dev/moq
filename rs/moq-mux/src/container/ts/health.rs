@@ -577,6 +577,11 @@ fn is_duplicate(last: &[u8; 188], pkt: &[u8; 188]) -> bool {
 }
 
 impl Continuity {
+	/// The last payload counter, to continue a program map across an import restart.
+	pub(super) fn counter(&self) -> Option<u8> {
+		self.last_cc
+	}
+
 	/// Classify one 188-byte packet, recording what the next call needs.
 	pub(super) fn observe(&mut self, pkt: &[u8; 188]) -> Continuation {
 		// transport_error_indicator: the demodulator flagged this packet as corrupt, so its

@@ -358,8 +358,9 @@ pub struct Publish {
 
 /// A broadcast's announcement, held until its catalog first goes out.
 ///
-/// The catalog withholds its first snapshot until the input names at least one servable track. A
-/// relay queries a broadcast's tracks the moment it is announced, so a standby
+/// The catalog withholds its first snapshot until every reserved stream's config is known and
+/// at least one track is servable. A relay queries a broadcast's tracks the moment it is
+/// announced, so a standby
 /// announced any sooner can receive requests for tracks it cannot serve yet.
 struct Pending {
 	broadcast: moq_net::origin::Publication,
@@ -2336,6 +2337,104 @@ pub(crate) mod tests {
 		assert_eq!(group.sequence, 0, "the new instance's first group");
 		drop(stdin);
 		import.await.unwrap();
+	}
+
+	/// An unflagged rewind puts its leading PAT/PMT before the step. A live stitched export
+	/// still receives the replacement's first picture, rather than waiting for its next GOP.
+	#[tokio::test(start_paused = true)]
+	async fn a_stitched_republish_starts_with_its_first_picture() {
+		use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
+		use mpeg2ts::ts::TsPacketReader;
+		use std::task::Poll;
+
+		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
+		let origin = moq_tokio::origin::spawn();
+		let mut publish = Publish::stdin(
+			&origin,
+			"demo",
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+		)
+		.unwrap();
+		publish.announce(moq_net::Instance::random()).unwrap();
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(irrefutable_let_patterns, reason = "capture is disabled")
+		)]
+		let Source::Stream { decoder, catalog } = publish.source else {
+			panic!("a stream source");
+		};
+		let control = publish.publication.unwrap();
+		let mut instance = Instance {
+			decoder,
+			catalog,
+			pending: Some(Pending::new(control.clone(), publish.route.unwrap()).unwrap()),
+			control: Some(control),
+			broadcast: Some(publish.broadcast),
+			report: None,
+		};
+		let republish = publish.republish.unwrap();
+		let mut log = ts::stats::Log::default();
+		let mut follower = None;
+		let mut output = [Vec::new(), Vec::new()];
+		for chunk in CLIP.iter().chain(CLIP).copied().collect::<Vec<_>>().chunks(8 * 188) {
+			if let Some(restart) = feed(&mut instance.decoder, &mut instance.pending, chunk).unwrap() {
+				instance.restart(&republish, restart, &mut log).unwrap();
+			}
+			if follower.is_none() && instance.pending.is_none() {
+				let export = open_export(resolved(&origin, "demo").await, CatalogFormat::Hang)
+					.await
+					.unwrap()
+					.with_delay(Duration::from_secs(1));
+				follower = Some(
+					ts::Follower::new(export)
+						.unwrap()
+						.with_follow(Duration::from_secs(30))
+						.with_stitch(true),
+				);
+			}
+			if let Some(follower) = &mut follower {
+				loop {
+					match follower.poll_next(&kio::Waiter::noop()) {
+						Poll::Ready(Ok(Some(frame))) => {
+							output[follower.export().discontinuity() as usize].extend_from_slice(&frame.payload)
+						}
+						Poll::Ready(end) => panic!("a live feed ended: {end:?}"),
+						Poll::Pending => break,
+					}
+				}
+			}
+			tokio::time::advance(Duration::from_micros(30_080)).await;
+		}
+		instance.decoder.finish().unwrap();
+		instance.catalog.finish().unwrap();
+		drop(instance);
+		let mut follower = follower.unwrap();
+		while let Some(frame) = follower.next().await.unwrap() {
+			output[follower.export().discontinuity() as usize].extend_from_slice(&frame.payload);
+		}
+		assert_eq!(follower.export().discontinuity(), 1, "one program switch");
+		let video_pts = |bytes: &[u8]| {
+			let mut reader = PesPacketReader::new(TsPacketReader::new(std::io::Cursor::new(bytes)));
+			let mut pts = Vec::new();
+			while let Some(pes) = reader.read_pes_packet().unwrap() {
+				if pes.header.stream_id.is_video() {
+					pts.push(pes.header.pts.unwrap().as_u64());
+				}
+			}
+			pts
+		};
+		let source = video_pts(CLIP);
+		assert_eq!(
+			video_pts(&output[1]).first(),
+			source.first(),
+			"the replacement's first GOP goes out"
+		);
+		assert_eq!(
+			video_pts(&output[0]).iter().max(),
+			source.iter().max(),
+			"the old program drains through the cut"
+		);
 	}
 
 	/// Input that ends before declaring any track fails, rather than announcing a broadcast

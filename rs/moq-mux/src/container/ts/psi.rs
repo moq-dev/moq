@@ -136,6 +136,8 @@ pub(super) struct Association {
 pub(super) struct Pat {
 	pub transport_stream_id: u16,
 	pub programs: Vec<Association>,
+	/// Complete source sections, retained for a replacement import's program-map context.
+	pub sections: std::sync::Arc<[bytes::Bytes]>,
 }
 
 /// Collects PAT sections until every section of one version has arrived.
@@ -146,7 +148,7 @@ pub(super) struct Pat {
 pub(super) struct PatAssembler {
 	/// The version, transport_stream_id, and last_section_number being collected.
 	table: Option<(u8, u16, u8)>,
-	sections: BTreeMap<u8, Vec<Association>>,
+	sections: BTreeMap<u8, (Vec<Association>, bytes::Bytes)>,
 }
 
 impl PatAssembler {
@@ -174,14 +176,39 @@ impl PatAssembler {
 			self.table = Some(table);
 			self.sections.clear();
 		}
-		self.sections.insert(header.number, programs);
+		self.sections
+			.insert(header.number, (programs, bytes::Bytes::copy_from_slice(section)));
 		if self.sections.len() <= usize::from(header.last) {
 			return None;
 		}
 		Some(Pat {
 			transport_stream_id: header.extension,
-			programs: self.sections.values().flatten().copied().collect(),
+			programs: self
+				.sections
+				.values()
+				.flat_map(|(programs, _)| programs)
+				.copied()
+				.collect(),
+			sections: self.sections.values().map(|(_, section)| section.clone()).collect(),
 		})
+	}
+}
+
+/// Packetize source sections, ending at the PID's last counter so the unread input continues it.
+pub(super) fn packets(out: &mut Vec<u8>, (pid, last): (u16, Option<u8>), sections: &[bytes::Bytes]) {
+	let count: usize = sections.iter().map(|section| (1 + section.len()).div_ceil(184)).sum();
+	let mut cc = last.unwrap_or(15).wrapping_add(1).wrapping_sub((count % 16) as u8) & 15;
+	for section in sections {
+		let mut payload = Vec::with_capacity(1 + section.len());
+		payload.push(0); // pointer_field: the section starts here.
+		payload.extend_from_slice(section);
+		for (i, chunk) in payload.chunks(184).enumerate() {
+			let end = out.len() + 188;
+			out.extend_from_slice(&[0x47, u8::from(i == 0) << 6 | (pid >> 8) as u8, pid as u8, 0x10 | cc]);
+			out.extend_from_slice(chunk);
+			out.resize(end, 0xff);
+			cc = (cc + 1) & 15;
+		}
 	}
 }
 

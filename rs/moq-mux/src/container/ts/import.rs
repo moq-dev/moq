@@ -148,6 +148,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// The PMT PID the latest PAT names for the imported program, with its reassembler.
 	/// Several programs' PMTs may share one.
 	pmt: Option<(Pid, SectionReassembler)>,
+	/// The last complete source PAT and selected PMT, so a replacement can route the input
+	/// from the step even when those tables already routed before it. Codec configs stay fresh.
+	pat_sections: Arc<[bytes::Bytes]>,
+	pmt_section: Option<bytes::Bytes>,
 	/// PMT sections dropped for a CRC mismatch, keyed by PID.
 	crc_errors: BTreeMap<u16, u64>,
 	/// Per elementary-stream-PID codec routing.
@@ -282,6 +286,8 @@ impl<E: catalog::Catalog> Import<E> {
 			restarts: Vec::new(),
 			claims_changed: false,
 			pmt: None,
+			pat_sections: Arc::default(),
+			pmt_section: None,
 			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
@@ -406,8 +412,9 @@ impl<E: catalog::Catalog> Import<E> {
 	/// without `discontinuity_indicator`, forward by more than 10 s or back, or the streams
 	/// stepping back after a flagged break. Until the streams have spoken, which a cadenced one
 	/// does within 0.7 s, the input after a suspected step is held rather than published, up to
-	/// half a group's bytes. Every later call repeats the restart; [`finish`](Self::finish) ends
-	/// the instance before the step.
+	/// half a group's bytes. The restart's input carries the current PAT/PMT ahead of the unread
+	/// packets, so a new importer can route their first keyframe. Every later call repeats the
+	/// restart; [`finish`](Self::finish) ends the instance before the step.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
@@ -440,7 +447,7 @@ impl<E: catalog::Catalog> Import<E> {
 				super::step::Verdict::Route => {}
 				super::step::Verdict::Hold => break,
 				super::step::Verdict::Restart(step) => {
-					let remainder = demux.remainder();
+					let remainder = self.restart_input(demux);
 					demux.drain();
 					self.flush_batch()?;
 					return Err(super::Restart { step, remainder }.into());
@@ -451,6 +458,21 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		demux.drain();
 		self.flush_batch()
+	}
+
+	/// Seed the unread input with its current program map, which may precede the step.
+	fn restart_input(&self, demux: &Demux) -> bytes::Bytes {
+		let mut input = Vec::new();
+		psi::packets(&mut input, (Pid::PAT, demux.pat_counter()), &self.pat_sections);
+		if let (Some((pid, reassembler)), Some(section)) = (&self.pmt, &self.pmt_section) {
+			psi::packets(
+				&mut input,
+				(pid.as_u16(), reassembler.continuity.counter()),
+				std::slice::from_ref(section),
+			);
+		}
+		input.extend_from_slice(&demux.remainder());
+		input.into()
 	}
 
 	/// Cut the snapshot groups for whatever SI committed since the last call, and flush the
@@ -684,7 +706,11 @@ impl<E: catalog::Catalog> Import<E> {
 				continue;
 			}
 			if let Some(pmt) = Pmt::parse(&section) {
+				if self.program.is_some_and(|program| program != pmt.program_number) {
+					continue;
+				}
 				self.handle_pmt(pmt)?;
+				self.pmt_section = Some(section.into());
 				self.seed_clock(packet)?;
 			}
 		}
@@ -1789,6 +1815,7 @@ impl<E: catalog::Catalog> Import<E> {
 				identity.1
 			);
 		}
+		self.pat_sections.clone_from(&pat.sections);
 		let first = self.identity.replace(identity).is_none();
 		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
 		let moved = self.pmt.as_ref().is_none_or(|(pid, _)| *pid != entry.pmt_pid);
@@ -2958,6 +2985,11 @@ pub(super) struct PatReader {
 }
 
 impl PatReader {
+	/// The last payload counter, to continue a program map across an import restart.
+	pub(super) fn counter(&self) -> Option<u8> {
+		self.sections.continuity.counter()
+	}
+
 	/// Consume one packet on PID 0, counting each section dropped for a bad CRC into
 	/// `crc_error`. Returns the whole PAT if this packet completed one.
 	pub(super) fn push(&mut self, pkt: &[u8; TsPacket::SIZE], crc_error: &mut u64) -> Option<psi::Pat> {
@@ -11156,6 +11188,7 @@ pub(super) mod test {
 				program_number,
 				pmt_pid: Pid::new(0x20).unwrap(),
 			}],
+			sections: Default::default(),
 		};
 		for (selected, transport_stream_id, program_number) in [(None, 2, 1), (None, 1, 2), (Some(1), 2, 1)] {
 			let (_catalog, import) = psi_import();

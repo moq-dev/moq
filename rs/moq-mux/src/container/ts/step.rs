@@ -42,7 +42,8 @@ const PTS_WRAP: u64 = 1 << 33;
 pub struct Restart {
 	/// How the clock stepped.
 	pub step: Step,
-	/// The input from the step on, which this import did not read.
+	/// The current PAT/PMT followed by the input from the step on, which this import did not read.
+	/// The tables let a new importer route media whose map already arrived before the step.
 	pub remainder: Bytes,
 }
 
