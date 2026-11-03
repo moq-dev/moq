@@ -88,7 +88,10 @@ try {
 	await page.waitForTimeout(5000);
 	const result: ReturnType<typeof measurement.result> = await page.evaluate(() => globalThis.ptt.result());
 	const state = await page.evaluate(() => globalThis.ptt.state());
-	await Bun.write(join(out, "presses.json"), JSON.stringify({ browser: browser.version(), ...result, state, errors }));
+	await Bun.write(
+		join(out, "presses.json"),
+		JSON.stringify({ browser: browser.version(), ...result, state, errors }),
+	);
 	if (errors.length || result.errors.length || result.captureError || state.error)
 		throw new Error("measurement failed; see presses.json");
 } finally {
