@@ -72,6 +72,36 @@ class Instructions(unittest.TestCase):
                 ):
                     instructions.settings("1")
 
+    def test_summary_reports_each_revision_across_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            for label, values in [("base-0123", [12, 10, 11]), ("current", [20, 21])]:
+                for round, value in enumerate(values, 1):
+                    cell = run / "relay" / label / f"round-{round}" / "instructions-4" / "chat"
+                    (cell / "instructions").mkdir(parents=True)
+                    (cell / "instructions" / "instructions.json").write_text(
+                        json.dumps(
+                            dict(
+                                instructions_per_frame=value,
+                                cycles_per_frame=value * 2,
+                                recv_fps=1000,
+                                window_start_ms=1250,
+                                window_end_ms=2250,
+                            )
+                        )
+                    )
+                    rows = [dict(timestamp_ms=t, groups_lost=lost) for t, lost in [(1000, 1), (1500, 2), (2500, round)]]
+                    (cell / "load.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            with patch("builtins.print"):
+                instructions.summarize(run, ["base-0123", "current"])
+            summary = json.loads((run / "instructions-summary.json").read_text())
+            self.assertEqual(summary["base-0123"]["instructions_per_frame"], dict(median=11, min=10, max=12))
+            self.assertEqual(summary["current"]["instructions_per_frame"]["median"], 20.5)
+            # Loss counts between the reports bracketing the window, not over the lifetime.
+            self.assertEqual([cell["groups_lost"] for cell in summary["base-0123"]["cells"]], [0, 1, 2])
+            with self.assertRaisesRegex(ValueError, "no instruction cells"):
+                instructions.summarize(run, ["missing"])
+
     def test_lost_or_throttled_samples_refuse_attribution(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "perf.data"

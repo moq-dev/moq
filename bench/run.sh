@@ -24,6 +24,8 @@ ROUNDS=$((10#$ROUNDS))
 # the performance cores it may already use. The kernel only lists them on Intel
 # hybrid parts.
 PINNED=
+# Builds don't affect what a benchmark measures, so instructions mode compiles on every allowed CPU.
+ALLOWED_CPUS=$(python3 -c 'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0)))))')
 if [[ -r /sys/devices/cpu_core/cpus ]]; then
     PINNED=$(
         python3 - "$$" <<'EOF'
@@ -178,7 +180,6 @@ fi
 RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
 printf 'Benchmark evidence: %s\n' "$RUN"
 WORKTREE=
-WORKTREES=()
 RELAY_PID=
 HOST_PID=
 LOAD_PID=
@@ -204,11 +205,10 @@ cleanup() {
         kill "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
     fi
-    local worktree
-    for worktree in ${WORKTREE:+"$WORKTREE"} ${WORKTREES[@]+"${WORKTREES[@]}"}; do
-        git -C "$ROOT" worktree remove --force "$worktree" >/dev/null 2>&1 || true
-        rmdir "$worktree" 2>/dev/null || true
-    done
+    if [[ -n $WORKTREE ]]; then
+        git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
+        rmdir "$WORKTREE" 2>/dev/null || true
+    fi
     # Close both pipe writers before waiting for the owned log copiers.
     if [[ -n $STDOUT_PID ]]; then
         exec 1>&3 2>&4
@@ -238,8 +238,8 @@ export CRITERION_HOME=$RUN/criterion
 
 checkout_base() {
     # Cargo merges every ancestor's .cargo/config.toml. A nested worktree would
-    # inherit this checkout's settings unless the caller loads only its own config.
-    WORKTREE=$(mktemp -d "${2:-${TMPDIR:-/tmp}}/moq-bench-base.XXXXXX")
+    # inherit this checkout's settings instead of measuring the base in isolation.
+    WORKTREE=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench-base.XXXXXX")
     git worktree add --detach "$WORKTREE" "$1" >/dev/null
 }
 
@@ -902,30 +902,47 @@ run_profiles() {
 # generator and sampler drive every relay, including old bases whose own harness
 # cannot select the io_uring runtime.
 run_instructions() {
-    local label sha target round index next worktree
-    local -a labels=() targets=()
-    # Each revision keeps its own target, so a later bisect step reuses its build.
-    build_workers "$ROOT" "$TARGET/revisions/$(git rev-parse HEAD)/profile" profiling instructions
-    LOAD_BIN=$TARGET/revisions/$(git rev-parse HEAD)/profile/profiling/moq-bench
-    HOST_BIN=$TARGET/revisions/$(git rev-parse HEAD)/profile/profiling/moq-bench-host
+    local label sha target round index next checkout
+    local -a labels=() targets=() checkouts=() builds=()
     for sha in ${BASES[@]+"${BASES[@]}"}; do
         label=base
         if ((${#BASES[@]} > 1)); then label=base-${sha:0:12}; fi
-        # Nested in the checkout's ignored scratch space, loading only its own Cargo config.
-        mkdir -p "$ROOT/.tmp"
-        checkout_base "$sha" "$ROOT/.tmp"
-        worktree=$WORKTREE
-        WORKTREES+=("$worktree")
-        WORKTREE=
+        # A checkout that stays put keeps Cargo's fingerprints, so a later bisect step
+        # reuses this revision's build. It loads only its own Cargo configuration.
+        checkout=$TARGET/revisions/$sha/checkout
+        if [[ $(git -C "$checkout" rev-parse HEAD 2>/dev/null) != "$sha" ]]; then
+            rm -rf "$checkout"
+            git worktree prune
+            git worktree add --detach "$checkout" "$sha" >/dev/null
+        fi
         mkdir -p "$RUN/base-context/$label"
-        (cd "$worktree" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
-        target=$TARGET/revisions/$sha/profile
-        build_workers "$worktree" "$target" profiling instructions
+        (cd "$checkout" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
         labels+=("$label")
-        targets+=("$target")
+        checkouts+=("$checkout")
+        targets+=("$TARGET/revisions/$sha/profile")
     done
     labels+=(current)
+    checkouts+=("$ROOT")
     targets+=("$TARGET/revisions/$(git rev-parse HEAD)/profile")
+    LOAD_BIN=${targets[-1]}/profiling/moq-bench
+    HOST_BIN=${targets[-1]}/profiling/moq-bench-host
+
+    # Fat LTO links on one thread, so revisions build side by side.
+    for ((index = 0; index < ${#labels[@]}; index++)); do
+        mkdir -p "$RUN/build"
+        taskset -c "$ALLOWED_CPUS" bash -c "$(declare -f build_workers); build_workers \"\$@\"" _ \
+            "${checkouts[$index]}" "${targets[$index]}" profiling instructions \
+            >"$RUN/build/${labels[$index]}.log" 2>&1 &
+        builds+=($!)
+    done
+    for ((index = 0; index < ${#labels[@]}; index++)); do
+        if ! wait "${builds[$index]}"; then
+            printf 'build failed for %s:\n' "${labels[$index]}" >&2
+            tail -n 40 "$RUN/build/${labels[$index]}.log" >&2
+            return 1
+        fi
+        tail -n 1 "$RUN/build/${labels[$index]}.log"
+    done
     if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
         for target in "${targets[@]}"; do
             check_uring "$target/profiling"

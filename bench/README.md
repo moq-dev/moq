@@ -289,13 +289,23 @@ BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_RUNTIME_ROUNDS=5 \
   nix develop --command just bench-profile instructions chat 4 io-uring-workers cdff3c8f95
 BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 \
   nix develop --command just bench-profile instructions video 4 tokio-workers cdff3c8f95
+# A bisect step: every listed base and the current tree, rotated in each round.
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 \
+  nix develop --command just bench-profile instructions chat 4 io-uring-workers "fe722cec9f 2d73eea67d e84ffb3de3"
 ```
 
 Choose disjoint allowed CPU sets, with at least one relay CPU per worker.
 Hybrid CPUs require performance cores, and count their `cpu_core` events.
-The relay and generator keep these affinities in both the control and measured
-runs. Builds stay in separate targets per revision. Base/current pairs alternate
-order across `BENCH_RUNTIME_ROUNDS` (default 3); the current generator drives both.
+The relay and generator keep these affinities for every revision. Instructions
+mode runs alone. Each base keeps a detached worktree and target under
+`target/bench/revisions/<sha>`, so later runs reuse its build; delete them with
+`git worktree remove`. The revisions build side by side on every allowed CPU,
+since fat LTO links on one thread. Every round measures each base and the current tree back
+to back, rotating which goes first, for `BENCH_RUNTIME_ROUNDS` rounds (default
+3); the current generator drives them all. The revisions are each other's
+control, so there is no unprofiled run per revision. The run ends with each
+revision's median and range in `instructions-summary.json`, including the groups
+the generator confirmed lost between the reports bracketing each counter window.
 
 After seven seconds of warmup, acknowledged perf enable/disable commands bound
 five seconds of relay counters. `instructions/instructions.json` records both
@@ -318,9 +328,9 @@ use `instructions.json` for instruction comparisons.
 The fixed-period recording encloses the counter window; `instructions.folded`
 weights each stack by that period. `perf.data`, raw `stat.json`, `perf.log`,
 thread names, CPU sets, and delivery reports remain with the evidence. Both
-counters and samples cover only the relay. Compare equivalent delivery and loss,
-and retain controls to expose sampling overhead. Instructions reduce frequency
-and scheduling noise; pinning does not remove interference from other host work.
+counters and samples cover only the relay. Compare equivalent delivery and loss.
+Instructions reduce frequency and scheduling noise; pinning does not remove
+interference from other host work.
 
 ### Heap
 

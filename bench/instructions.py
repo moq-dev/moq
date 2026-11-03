@@ -299,20 +299,18 @@ def summarize(run, labels):
             )
         if not cells:
             raise ValueError(f"no instruction cells for {label}")
-        result[label] = dict(
-            cells=cells,
-            **{
-                key: dict(median=median(c[key] for c in cells), min=min(c[key] for c in cells), max=max(c[key] for c in cells))
-                for key in ("instructions_per_frame", "cycles_per_frame", "recv_fps", "groups_lost")
-            },
-        )
+        result[label] = dict(cells=cells)
+        for key in ("instructions_per_frame", "cycles_per_frame", "recv_fps", "groups_lost"):
+            values = [cell[key] for cell in cells]
+            result[label][key] = dict(median=median(values), min=min(values), max=max(values))
     (run / "instructions-summary.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(f"\n{'revision':<20} {'kinstr/frame [min-max]':>26} {'kcycles/frame':>14} {'recv fps [min-max]':>24} {'lost':>5}")
+    print(f"\n{'revision':<20} {'kinstr/frame [min-max]':>26} {'kcycles/frame':>14} {'fps [min-max]':>24} {'lost':>5}")
     for label, row in result.items():
         i, c, f = row["instructions_per_frame"], row["cycles_per_frame"], row["recv_fps"]
         print(
             f"{label:<20} {i['median'] / 1e3:>9.1f} [{i['min'] / 1e3:.1f}-{i['max'] / 1e3:.1f}] "
-            f"{c['median'] / 1e3:>14.1f} {f['median']:>9.0f} [{f['min']:.0f}-{f['max']:.0f}] {row['groups_lost']['max']:>5}"
+            f"{c['median'] / 1e3:>14.1f} {f['median']:>9.0f} [{f['min']:.0f}-{f['max']:.0f}] "
+            f"{row['groups_lost']['max']:>5}"
         )
 
 
