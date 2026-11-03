@@ -22,14 +22,9 @@ is one runtime-owned driver task that holds every `Background` as `kio::Tasks`
 children. Rejected: having each handle's calls poll its `Background`, which
 fails for an origin with no reader, since nobody would poll its driver.
 
-[moq-dev/moq#7497](https://github.com/moq-dev/moq/pull/7497) replaces
-`ffi::Task` with `ffi::Polled` and changes `Background` and shutdown in
-`ffi.rs`, keeping demand waits `detached` for now. Build on it: converting
-before it lands would conflict on almost every line. Recount the sites above
-once it merges.
+[moq-dev/moq#7497](https://github.com/moq-dev/moq/pull/7497) replaced
+`ffi::Task` with `ffi::Polled` for kio-backed reads and changed `Background`
+and shutdown in `ffi.rs`, keeping demand waits `detached`. Recount the sites
+above against it before converting.
 
 Public API: no binding signature changes. Wire: none.
-
-## Required
-
-- [Poll-native async in moq-ffi](/quest/m2/ffi-poll-migrate.md) - its PR rewrites the `Task` and `Background` plumbing this changes

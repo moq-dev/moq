@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aws_lc_rs::signature::Ed25519KeyPair;
+use rind::signature::Ed25519KeyPair;
 
 use super::*;
 use crate::{Algorithm, Error, Key, KeyId};
@@ -292,7 +292,10 @@ fn a_failed_save_spends_nothing() {
 async fn a_malformed_body_is_an_oauth_error() {
 	let mesh = Mesh::new().await;
 	let url = format!("{}/enroll", mesh.base);
-	let response = reqwest::Client::new()
+	let response = reqwest::Client::builder()
+		.use_preconfigured_tls(crate::crypto::tls().unwrap())
+		.build()
+		.unwrap()
 		.post(url)
 		.header("content-type", "application/json")
 		.body("{}")

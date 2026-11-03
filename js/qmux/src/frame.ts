@@ -26,7 +26,7 @@ const VARINT_MAX = [63n, 16383n, 1073741823n, 4611686018427387903n];
  *
  * The length varint's width depends on the payload it describes, so this is a
  * fixed point rather than a subtraction: at `available = 16384`, reserving four
- * bytes (the width of 16384 itself) yields 16380, but 16382 fits — its length
+ * bytes (the width of 16384 itself) yields 16380, but 16382 fits - its length
  * still encodes in two. Solve it by asking, for each width, what the largest
  * payload that width can describe *and* leave room for is, then take the best. */
 function maxLengthPrefixedPayload(available: bigint): bigint {
@@ -45,8 +45,8 @@ function maxLengthPrefixedPayload(available: bigint): bigint {
 
 /** Largest STREAM payload that keeps the encoded frame within `budget` bytes.
  *
- * The budget is what the peer accepts for one frame — its `max_record_size` on
- * the record-framed drafts, {@link MAX_FRAME_SIZE} otherwise — so the frame's own
+ * The budget is what the peer accepts for one frame - its `max_record_size` on
+ * the record-framed drafts, {@link MAX_FRAME_SIZE} otherwise - so the frame's own
  * header comes out of it: the type, the stream ID, the offset and
  * the length varint. Header widths are the ones this frame actually encodes, not
  * a worst-case reservation. The session applies any send-only compatibility
@@ -106,7 +106,7 @@ export interface ConnectionClose {
  *  application code/reason. The receiver *fulfills* `closed`. Per RFC 9000 §19.19
  *  the application variant omits the Frame Type field.
  *
- *  The close subtype, not the code, carries the fulfill/reject distinction —
+ *  The close subtype, not the code, carries the fulfill/reject distinction -
  *  codes are application-defined, so a graceful close may use any value. */
 export interface ApplicationClose {
 	type: "application_close";
@@ -259,7 +259,7 @@ export function encode(frame: Any, _version: WireFormat): Uint8Array {
 
 /** Returns true if the version uses the QMux Record framing layer and the
  * features introduced alongside it (QX_PING keep-alive, PADDING, datagrams,
- * max_record_size) — draft-01 and later. */
+ * max_record_size) - draft-01 and later. */
 export function usesRecords(version: WireFormat): boolean {
 	return version === "qmux-01" || version === "qmux-02";
 }
@@ -468,7 +468,7 @@ function encodeQMux(frame: Any): Uint8Array {
 		case "datagram": {
 			// Length-prefixed form (0x31). Datagrams are only sent on QMux01, where
 			// the record (WS message) boundary would already delimit a lone 0x30
-			// datagram — but we emit 0x31 so it stays self-delimiting even if a
+			// datagram - but we emit 0x31 so it stays self-delimiting even if a
 			// record ever carries a frame after it. The length costs 1-2 bytes.
 			const lengthVi = VarInt.from(frame.data.length);
 			let buffer = new Uint8Array(new ArrayBuffer(8 + 8 + frame.data.length), 0, 0);
@@ -838,7 +838,7 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 		return [{ type: "ping_response", sequence: v.value }, buffer];
 	}
 
-	// DATAGRAM without length — payload runs to the end of the record
+	// DATAGRAM without length - payload runs to the end of the record
 	if (frameType === 0x30n) {
 		const [data, rest] = take(buffer, buffer.byteLength);
 		return [{ type: "datagram", data: own(data), lengthPrefixed: false }, rest];

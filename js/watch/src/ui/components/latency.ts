@@ -45,7 +45,7 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	// Numeric readout: the resolved delay.
 	const readout = DOM.create("div", { className: "latency-readout" });
 	const delayStat = DOM.create("div", { className: "latency-stat" });
-	const delayVal = DOM.create("span", { className: "latency-stat-value" }, "—");
+	const delayVal = DOM.create("span", { className: "latency-stat-value" }, "-");
 	delayStat.append(DOM.create("span", { className: "latency-stat-label" }, "Delay"), delayVal);
 	readout.append(delayStat);
 
