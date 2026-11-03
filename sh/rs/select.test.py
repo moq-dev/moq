@@ -53,7 +53,8 @@ class SelectTest(unittest.TestCase):
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
                 with self.subTest(action=action, github_actions=github_actions):
-                    suffix = f" --benches --examples --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
+                    suffix = " --benches --examples" if action == "test" else ""
+                    suffix += f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
                     suffix += " moq-relay/io-uring" if LINUX and action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
                     self.assertIn(
