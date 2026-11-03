@@ -152,6 +152,15 @@ class LocalGate(unittest.TestCase):
             self.assertIn(f"quest host-test at {quest}", result.stderr)
             pin = json.loads((ROOT / "flake.lock").read_text())["nodes"]["quest"]["locked"]["rev"]
             self.assertIn(f"repository pin: {pin} (build identity unverified)", result.stderr)
+            quest.unlink()
+            result = subprocess.run(
+                [BASH, str(ROOT / "sh/quest.sh"), "check"],
+                env=self.env(PATH=directory, ALLOW_HOST_TOOLCHAIN="1"),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 127, result.stderr)
+            self.assertIn(f"quest not found on PATH for the host toolchain; repository pin: {pin}", result.stderr)
 
     def test_external_admission_keeps_descendant_supervision(self):
         with tempfile.TemporaryDirectory() as directory:
