@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Mesh endpoints use the signing public key
+
+Replace `moq_auth::mesh::EndpointId` with `moq_sign::PublicKey` and
+`mesh::InvalidEndpoint` with `moq_sign::InvalidKey`.
+`Proof`, `Member`, `Device`, `Signer::endpoint`, and `Coordinator::revoke_device`
+use that type directly; byte access and canonical z-base-32 text are unchanged.
+Build the publish pattern with `Pattern::subtree(&format!("mesh/{endpoint}"))`
+instead of `endpoint.publish()`.
+For raw proof verification, use `Proof::verify`; callers verifying other messages
+can pass `endpoint.as_bytes()` to their Ed25519 verifier.
+Enrollment JSON, stored device IDs, tokens, and signed content keep their formats.
+
 ### Crypto runs on rind (#7570)
 
 Signing, verifying, key generation, and the HTTP clients' TLS run on [rind](https://github.com/moq-dev/rind), a pure-Rust library, instead of aws-lc-rs, `p256`, and `p384`.

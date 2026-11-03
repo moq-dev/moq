@@ -54,6 +54,13 @@ fn vector_keys() {
 			"{id}"
 		);
 		assert_eq!(endpoint.to_string(), row["endpoint"].as_str().unwrap(), "{id}");
+		assert_eq!(endpoint.as_bytes().as_slice(), hex(&row["public"]), "{id}");
+		assert_eq!(serde_json::to_value(endpoint).unwrap(), row["endpoint"], "{id}");
+		assert_eq!(
+			serde_json::from_value::<PublicKey>(row["endpoint"].clone()).unwrap(),
+			endpoint,
+			"{id}"
+		);
 		if !row["seed"].is_null() {
 			assert_eq!(seed(&row["seed"]).public(), endpoint, "{id}");
 		}
@@ -96,6 +103,11 @@ fn vector_invalid_ids() {
 	for row in vectors()["invalid_ids"].as_array().unwrap() {
 		assert!(
 			row["text"].as_str().unwrap().parse::<PublicKey>().is_err(),
+			"{}",
+			row["id"]
+		);
+		assert!(
+			serde_json::from_value::<PublicKey>(row["text"].clone()).is_err(),
 			"{}",
 			row["id"]
 		);

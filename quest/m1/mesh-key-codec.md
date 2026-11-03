@@ -29,9 +29,10 @@ is related.
   moq-sign for it, or the type moves to a small shared crate if the
   dependency direction is wrong; say which in the PR). Keep the shared
   vectors in `drafts/moq-sign-00.json` as the single source of test vectors.
-- Both copies are still on `main` at be39188000:
-  `rs/moq-auth/src/mesh/mod.rs:52` (the specification) and `:65`
-  (`EndpointId`), beside `rs/moq-sign/src/key.rs:18`.
+- The implementation in [moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733)
+  uses `moq_sign::PublicKey` directly in auth, moves byte access and string serde
+  onto it, and removes auth's codec. Auth still verifies proofs on rind. Rust
+  auth/signing and JS signing consume `drafts/moq-sign-00.json`.
 - [moq-crypto replaces moq-sign](/quest/m1/moq-crypto.md) renames
   `moq-sign`/`@moq/sign` to `moq-crypto`/`@moq/crypto`. If it lands first,
   merge `EndpointId` into its public key type and use its JS codec instead.
@@ -41,6 +42,20 @@ is related.
 
 Public API: breaking for moq-auth (`mesh::EndpointId` becomes
 `moq_sign::PublicKey` or a re-export). Wire: none.
+
+## Waiting
+
+- Maintainer: settle the extra methods on the removed `EndpointId` before
+  completing [moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733).
+  It exposed `publish()` and raw `verify(message, signature)`, while signing's
+  `PublicKey::verify` is private and takes a fixed-size signature. Option 1
+  (recommended, implemented in the draft): keep mesh policy and rind proof
+  verification in auth, use `Pattern::subtree(&format!("mesh/{endpoint}"))` for
+  paths, and use `Proof::verify` or a verifier over `PublicKey::as_bytes()` for
+  signatures. This adds no new public helper or verification API. Option 2:
+  preserve those conveniences with a public mesh path helper and public raw
+  `PublicKey` verification, settling their names and verification contract.
+  A maintainer comment on the PR choosing the migration clears this wait.
 
 ## Related
 

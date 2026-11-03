@@ -259,6 +259,7 @@ jobs:
               - "rs/moq-rtmp/**"
               - "rs/moq-rtsp/**"
               - "rs/moq-shaper/**"
+              - "rs/moq-sign/**"
               - "rs/moq-sock/**"
               - "rs/moq-srt/**"
               - "rs/moq-stats/**"

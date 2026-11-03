@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::scope::SIGNATURE_LEN;
@@ -31,9 +32,14 @@ static ZBASE32: std::sync::LazyLock<data_encoding::Encoding> = std::sync::LazyLo
 pub struct PublicKey([u8; KEY_LEN]);
 
 impl PublicKey {
-	#[cfg(test)]
-	pub(crate) fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
+	/// The ID of the raw 32-byte Ed25519 public key.
+	pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
 		Self(bytes)
+	}
+
+	/// The raw 32-byte Ed25519 public key.
+	pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
+		&self.0
 	}
 
 	/// Whether `signature` is this key's Ed25519 signature over `message`.
@@ -67,6 +73,19 @@ impl fmt::Display for PublicKey {
 impl fmt::Debug for PublicKey {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_tuple("PublicKey").field(&format_args!("{self}")).finish()
+	}
+}
+
+impl Serialize for PublicKey {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.collect_str(self)
+	}
+}
+
+impl<'de> Deserialize<'de> for PublicKey {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+		text.parse().map_err(serde::de::Error::custom)
 	}
 }
 

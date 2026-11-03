@@ -19,6 +19,7 @@ bytes = { workspace = true }
 data-encoding = { workspace = true }
 kio = { workspace = true }
 moq-net = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 

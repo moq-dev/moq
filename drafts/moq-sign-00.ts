@@ -12,6 +12,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ZBase32 from "../js/sign/src/zbase32.ts";
 
 export const PROFILE = "moq-sign-00";
 export const LABEL = utf8(PROFILE);
@@ -41,9 +42,6 @@ export type Identity = {
 	timestamp: bigint;
 };
 
-// z-base-32: most significant bit first, no padding, trailing bits must be zero.
-const ZBASE32 = "ybndrfg8ejkmcpqxot1uwisza345h769";
-
 function utf8(text: string): Uint8Array<ArrayBuffer> {
 	return new TextEncoder().encode(text);
 }
@@ -54,23 +52,6 @@ function hex(text: string): Uint8Array<ArrayBuffer> {
 
 function toHex(bytes: Uint8Array): string {
 	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function zbase32(bytes: Uint8Array): string {
-	let out = "";
-	let buffer = 0;
-	let bits = 0;
-	for (const byte of bytes) {
-		buffer = (buffer << 8) | byte;
-		bits += 8;
-		while (bits >= 5) {
-			bits -= 5;
-			out += ZBASE32[(buffer >> bits) & 31];
-		}
-		buffer &= (1 << bits) - 1;
-	}
-	if (bits > 0) out += ZBASE32[(buffer << (5 - bits)) & 31];
-	return out;
 }
 
 function concat(...parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
@@ -111,29 +92,14 @@ export function message(identity: Identity, payload: Uint8Array): Uint8Array<Arr
 
 /** The endpoint ID of a 32-byte public key: its 52-character z-base-32. */
 export function endpointId(key: Uint8Array): string {
-	return zbase32(key);
+	return ZBase32.encode(key);
 }
 
 /** Parse an endpoint ID: exactly 52 z-base-32 characters with zero trailing bits. */
 export function parseKey(text: string): Uint8Array<ArrayBuffer> {
-	if (text.length !== 52) throw new ProfileError("key");
-	const out = new Uint8Array(KEY_LEN);
-	let buffer = 0;
-	let bits = 0;
-	let offset = 0;
-	for (const char of text) {
-		const value = ZBASE32.indexOf(char);
-		if (value < 0) throw new ProfileError("key");
-		buffer = (buffer << 5) | value;
-		bits += 5;
-		if (bits >= 8) {
-			bits -= 8;
-			out[offset++] = (buffer >> bits) & 0xff;
-		}
-		buffer &= (1 << bits) - 1;
-	}
-	if (buffer !== 0) throw new ProfileError("key");
-	return out;
+	const key = ZBase32.decode(text, KEY_LEN);
+	if (!key) throw new ProfileError("key");
+	return key;
 }
 
 async function privateKey(seed: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
@@ -267,6 +233,7 @@ async function generate() {
 			{ id: "other", seed: OTHER_SEED, public: toHex(await publicKey(hex(OTHER_SEED))), endpoint: otherKey },
 			// Every bit set: the last character carries one key bit and four zero bits.
 			{ id: "ones", public: "ff".repeat(KEY_LEN), endpoint: endpointId(new Uint8Array(KEY_LEN).fill(0xff)) },
+			{ id: "zeros", public: "00".repeat(KEY_LEN), endpoint: endpointId(new Uint8Array(KEY_LEN)) },
 		],
 		frames: [
 			await frameVector("base", SEED, base, payload),
@@ -315,6 +282,11 @@ async function generate() {
 			{ id: "trailing-bits", text: `${key.slice(0, 51)}b` },
 			{ id: "hex", text: toHex(keyBytes) },
 			{ id: "empty", text: "" },
+			{ id: "ones-trailing-bits", text: "9".repeat(52) },
+			{ id: "padding", text: `${key}====` },
+			{ id: "leading-whitespace", text: ` ${key}` },
+			{ id: "trailing-newline", text: `${key}\n` },
+			{ id: "base64url", text: Buffer.from(keyBytes).toString("base64url") },
 		],
 	};
 }
