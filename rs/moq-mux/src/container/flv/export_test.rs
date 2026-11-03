@@ -26,8 +26,8 @@ async fn open_export(source: crate::Source) -> Export<crate::catalog::Consumer> 
 
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests write or import a whole broadcast
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests write or import a whole broadcast
 /// and only then export it, which the
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.

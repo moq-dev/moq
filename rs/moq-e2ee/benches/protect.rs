@@ -21,7 +21,7 @@ fn credential() -> Credential {
 
 /// Each producer is its own publisher instance, so it gets its own epoch.
 fn produce(credential: &Credential, semantic: &str) -> moq_e2ee::track::Producer {
-	// Advancing timestamps plus a zero max age keep only the newest group cached.
+	// Advancing timestamps plus a zero max age leave only the newest group fresh.
 	let info = moq_net::track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_max_age(Duration::ZERO);

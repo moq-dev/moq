@@ -3630,7 +3630,7 @@ fn final_sequence(end: track::Position) -> u64 {
 /// Groups are served in arrival order (`poll_recv_group`), not sequence order: on a relay, a
 /// burst can be ingested micro-reordered by the upstream leg, and a sequence cursor would then
 /// permanently skip the older group even though it is cached and in demand. Staleness is
-/// governed by the max age window (cache expiry), not arrival raciness.
+/// governed by max age and the subscriber's max delay, not arrival raciness.
 ///
 /// Without `groups` the cursor hands out none, leaving them in the cache, so it never reports
 /// [`Recv::Finished`] either.

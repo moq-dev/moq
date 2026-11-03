@@ -8896,8 +8896,8 @@ impl TrackInfoFetch {
 			}
 		})?;
 
-		// Publisher Max Age rides on the wire, so the local retention
-		// window matches what the upstream advertises (relays re-serve with
+		// Publisher Max Age rides on the wire, so the local freshness
+		// bound matches what the upstream advertises (relays re-serve with
 		// the same bound). `broadcast` is left at its default here;
 		// `track::Request::accept` stamps the track's real broadcast.
 		let mut info: track::Info = track::Info::from(info);

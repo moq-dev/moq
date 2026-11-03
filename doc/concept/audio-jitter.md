@@ -429,7 +429,7 @@ the declared number, so the browser decodes at most 500 ms of any target and
 holds the rest as the encoded frames it actually received.
 
 Policy limits sit above the algorithm. A receiver's own configured maximum and
-the track's retention window both cap what it may hold, and neither is the
+the track's max age both cap what it may hold, and neither is the
 estimator's business.
 
 ## Idle intervals
@@ -468,7 +468,7 @@ target = delay
 ```
 
 An impossible fixed target is refused, not silently adjusted. A negative delay,
-or one beyond the track's retention window, is an error at configuration time.
+or one beyond the track's max age, is an error at configuration time.
 Supported or refused, not warned about and continued.
 
 In the browser this is the numeric `delay` setting; natively it is

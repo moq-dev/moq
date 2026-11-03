@@ -2066,7 +2066,7 @@ pub(super) struct Recover {
 	/// The reader it was handed out to, followed onto each new route; `None` for a fetch.
 	reader: Option<Weak<Mutex<Reader>>>,
 	/// A fetch's own age budget, asked of each route and judged while waiting on one.
-	/// `None` leaves the publisher's retention alone; unused for a reader.
+	/// `None` leaves the publisher's max age alone; unused for a reader.
 	max_delay: Option<std::time::Duration>,
 	/// The route, watched for [`Self::wants`]: every read of the group that parks asks it
 	/// whether the route moved past [`Self::generation`]. Moving that generation any other
@@ -2353,7 +2353,7 @@ impl Recover {
 	}
 
 	/// The budget for a late group: the reader's current one, or a fetch's own, which is
-	/// unbounded when it named none so that only the publisher's retention applies.
+	/// unbounded when it named none so that only the publisher's max age applies.
 	pub(super) fn poll_budget(&self, waiter: &kio::Waiter) -> Option<std::time::Duration> {
 		let Some(reader) = &self.reader else {
 			return Some(self.max_delay.unwrap_or(std::time::Duration::MAX));

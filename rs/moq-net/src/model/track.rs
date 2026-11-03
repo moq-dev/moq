@@ -1462,8 +1462,9 @@ impl TrackState {
 		self.lookup.get(&sequence)?.copies().find(|group| group.covers(frames))
 	}
 
-	/// The local retention bound, or `None` when unknown or unlimited: how long a reader
-	/// may wait for a late group, without changing the publisher's metadata.
+	/// The local freshness bound, or `None` when unknown or unlimited: the publisher's max
+	/// age under the local ceiling, how long a reader may wait for a late group, without
+	/// changing the publisher's metadata.
 	fn max_age_bound(&self) -> Option<Duration> {
 		let published = self.info.as_ref()?.max_age;
 		match published {
@@ -1879,8 +1880,8 @@ impl TrackState {
 	/// Expire groups idle past the pool's wall-clock LRU window, never the latest.
 	///
 	/// The window is the pool's [`expiry`](cache::Pool::expiry), not the track's
-	/// [`max_age`](Info::max_age): retention is a media-timestamp promise, while this
-	/// is the cache's own guard against unread content pinning RAM, shared by every
+	/// [`max_age`](Info::max_age): max age only bounds how long a superseded group stays
+	/// fresh and frees nothing, while this is the cache's own guard against unread content pinning RAM, shared by every
 	/// track in the pool.
 	///
 	/// One bounded, rotating scan over the eviction order, which holds every cached
@@ -4432,8 +4433,8 @@ fn snapshot_subscription(subs: &kio::Lock<Subscriptions>, bound: Option<Duration
 	clamp_combined(subs.lock().combined(), bound)
 }
 
-/// Clamp a drift budget to a retention window: nobody can wait for a late group longer
-/// than it is kept around.
+/// Clamp a drift budget to a max age: nobody can wait for a late group longer than it
+/// stays fresh.
 ///
 /// The single clamp point. Subscribers hold their preferences verbatim, so what they asked
 /// for stays readable, and it is applied here on both sides of the aggregate: to the
@@ -5174,7 +5175,7 @@ impl Consumer {
 		}
 	}
 
-	/// Poll for group `sequence` falling a full `budget`, clamped to this track's retention,
+	/// Poll for group `sequence` falling a full `budget`, clamped to this track's max age,
 	/// behind its live edge, as a reader would judge it, whether the track holds it or not;
 	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
 	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
@@ -11266,7 +11267,7 @@ mod test {
 		}
 	}
 
-	/// A group whose frames outlive `max_age` is aged out when the next group starts, but
+	/// A group whose frames outlive the pool's LRU window is aged out when the next group starts, but
 	/// a subscriber that already drained it must still see the clean end of group. Otherwise a
 	/// track with long groups (a per-minute rollup, say) fails its readers at every boundary.
 	#[kio::test]
@@ -12114,8 +12115,8 @@ mod test {
 		assert_eq!(producer.subscription().unwrap().delay.max, Some(Duration::ZERO));
 	}
 
-	/// Mint a track under an origin whose retention ceiling is `cap`, so the
-	/// local delivery budget is capped without rewriting the publisher's window.
+	/// Mint a track under an origin whose max age ceiling is `cap`, so the
+	/// local delivery budget is capped without rewriting the publisher's max age.
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
 		Producer::new(
 			Arc::new(broadcast::Info {

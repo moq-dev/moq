@@ -996,10 +996,10 @@ pub struct Options {
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
 
-	/// Shared group pool and per-track retention ceiling.
+	/// Shared group pool and per-track max age ceiling.
 	///
 	/// `None` uses an unbounded pool with the standard LRU window and no
-	/// media-timestamp ceiling.
+	/// max age ceiling.
 	pub cache: Option<crate::cache::Cache>,
 }
 

@@ -4,8 +4,8 @@ use mp4_atom::{Atom, Decode, Encode};
 
 /// A drift budget no test timeline comes close to, so every group is read.
 ///
-/// The media track's full retention window, so a reader started after publishing can
-/// still read every retained group. These tests write every group up front, which the
+/// The media track's full max age, so a reader started after publishing can
+/// still read every fresh group. These tests write every group up front, which the
 /// default [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 /// edge: completeness has to be asked for.
 const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);

@@ -502,8 +502,8 @@ See [Authentication](/bin/relay/auth).
 
 ## Retention and latency
 
-`import --max-age` (default 30 s) tells relays how long to keep old groups
-fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export mp4`,
+`import --max-age` (default 30 s) tells relays how long a superseded group stays
+fresh and fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export mp4`,
 `export h264`, and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.

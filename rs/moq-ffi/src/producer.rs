@@ -990,7 +990,7 @@ mod metadata_tests {
 
 	/// C and C++ abort on a duration past `i64::MAX` nanoseconds, so a peer's longer age saturates.
 	#[test]
-	fn oversized_retention_saturates_for_the_bindings() {
+	fn oversized_max_age_saturates_for_the_bindings() {
 		let model = moq_net::track::Info::default().with_max_age(std::time::Duration::MAX);
 		let max_age = MoqTrackInfo::from(&model).max_age.unwrap();
 		assert_eq!(max_age, std::time::Duration::from_nanos(i64::MAX as u64));

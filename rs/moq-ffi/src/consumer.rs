@@ -186,7 +186,7 @@ pub struct MoqFetchGroupOptions {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age behind the live edge; null uses publisher retention alone.
+	/// Maximum age behind the live edge; null uses the publisher's max age alone.
 	#[uniffi(default = None)]
 	pub max_delay: Option<Duration>,
 }

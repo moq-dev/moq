@@ -2551,10 +2551,10 @@ mod tests {
 		assert!(err.to_string().contains("--latency-max -> --delay"), "{}", err);
 	}
 
-	/// A publisher's retention is `--max-age` on `import`; a subscriber's staleness budget is
+	/// A publisher's freshness bound is `--max-age` on `import`; a subscriber's staleness budget is
 	/// `--max-delay` for immediate exports and `--delay` for buffered exports.
 	#[test]
-	fn export_staleness_is_max_delay_and_import_retention_is_max_age() {
+	fn export_staleness_is_max_delay_and_import_freshness_is_max_age() {
 		let export = |args: &[&str]| {
 			let mut argv = vec!["moq", "export", "--broadcast", "b"];
 			argv.extend_from_slice(args);

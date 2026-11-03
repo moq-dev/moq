@@ -831,7 +831,10 @@ fn spawn_import(
 			}
 			ImportSource::Archive(args) => {
 				// A replay advertises no max age: the archive's retention bounds what it serves.
-				anyhow::ensure!(import.max_age.is_none(), "`--max-age` does not apply to `import archive`");
+				anyhow::ensure!(
+					import.max_age.is_none(),
+					"`--max-age` does not apply to `import archive`"
+				);
 				tasks.spawn(archive::import(origin.clone(), name, args, instance));
 			}
 			#[cfg(feature = "capture")]

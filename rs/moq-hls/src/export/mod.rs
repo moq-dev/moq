@@ -76,8 +76,8 @@ const CATALOG_RETRY_MAX: Duration = Duration::from_secs(5);
 pub struct Config {
 	/// Minimum duration of media listed in each rendition's playlist window. Older segments are
 	/// evicted once the remaining ones still cover this span. Past 256 segments they are evicted
-	/// however short they are. Keep it within the relay's group-cache retention, since segments
-	/// are fetched from there on request. It also caps segment `Cache-Control: max-age`.
+	/// however short they are. Keep it within the media's max age and the relay's group-cache
+	/// retention, since segments are fetched from there on request. It also caps segment `Cache-Control: max-age`.
 	///
 	/// Durable records get the same window: a live playlist stays bounded however much its store
 	/// retains.

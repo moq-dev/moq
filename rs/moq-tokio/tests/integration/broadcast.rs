@@ -1594,7 +1594,7 @@ async fn broadcast_negotiate_client_all_server_transport_18() {
 	broadcast_test("moqt", None, Some("moq-transport-18")).await;
 }
 
-// ── Retention window (track::Info::max_age) ─────────────────────
+// ── Freshness bound (track::Info::max_age) ──────────────────────
 
 async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Duration> {
 	let version: moq_net::Version = version.parse().expect("invalid version");

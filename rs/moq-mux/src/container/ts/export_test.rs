@@ -84,8 +84,8 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// paused time) or the stream ends.
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
-/// The media track's full retention window, so an exporter started after publishing
-/// can still read every retained group. These tests write a whole broadcast up front
+/// The media track's full max age, so an exporter started after publishing
+/// can still read every fresh group. These tests write a whole broadcast up front
 /// and only then export it, which the
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.

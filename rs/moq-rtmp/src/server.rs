@@ -2192,10 +2192,10 @@ mod tests {
 		}
 	}
 
-	/// The retention a publish declares has to reach the media tracks the FLV importer
+	/// The max age a publish declares has to reach the media tracks the FLV importer
 	/// mints, not stop at the catalog producer it was set on.
 	#[tokio::test]
-	async fn publisher_declares_the_configured_retention() {
+	async fn publisher_declares_the_configured_max_age() {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);

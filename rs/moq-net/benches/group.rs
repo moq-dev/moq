@@ -70,7 +70,7 @@ const PAYLOAD: usize = 64;
 const COUNTS: [usize; 7] = [4, 5, 32, 33, 512, 2_048, 8_192];
 
 /// Cached group counts to sweep for the track-level delivery benchmarks. A track
-/// publishing one group per frame at the default 5s retention sits in the hundreds,
+/// publishing one group per frame inside the default 30s cache expiry sits in the hundreds,
 /// so the top end is deliberately past anything realistic: a per-delivery scan over
 /// the cache shows up as a slope here, while a seek stays flat.
 const DEPTHS: [usize; 3] = [64, 512, 4_096];

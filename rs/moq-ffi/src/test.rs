@@ -794,7 +794,7 @@ async fn audio_raw_publish_from_many_threads() {
 		"tone".into(),
 		snapshot.audio["tone"].clone(),
 		MoqAudioDecoderOutput {
-			// The track's whole retention: reading starts only after finish, and the budget
+			// The track's whole max age: reading starts only after finish, and the budget
 			// ages groups by wall clock, so a stalled host would otherwise skip the start.
 			delay: Some(MoqDelay {
 				min: Some(Duration::ZERO),
@@ -4304,7 +4304,7 @@ async fn video_decode_start() {
 			rendition.clone(),
 			MoqVideoDecoderOutput {
 				start,
-				// The track's whole retention, so a slow host does not skip the first group.
+				// The track's whole max age, so a slow host does not skip the first group.
 				delay: Some(MoqDelay {
 					min: Some(Duration::ZERO),
 					max: Some(Duration::from_secs(30)),

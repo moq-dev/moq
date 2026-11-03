@@ -27,11 +27,11 @@ use crate::{
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
 
-/// Preserve retained groups when the subscriber supplies no age budget.
+/// Leave only the publisher's max age when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// No Max Age is the publisher's retention alone, whatever it turns out to be, and
+		// No Max Age leaves the publisher's max age alone, whatever it turns out to be, and
 		// moq-transport has no field for a minimum.
 		delay: crate::track::Delay { min: None, max: None },
 		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
@@ -7273,10 +7273,10 @@ mod subscribe_cursor_test {
 	use super::*;
 	use crate::lite::test_transport::{Log, SinkSession};
 
-	/// A group retention gives up on while a FETCH reads it is refused as too old, rather
+	/// A group that goes stale while a FETCH reads it is refused as too old, rather
 	/// than answered with the prefix read so far.
 	#[kio::test]
-	async fn a_fetch_past_retention_is_refused_not_truncated() {
+	async fn a_fetch_past_max_age_is_refused_not_truncated() {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
@@ -15778,7 +15778,8 @@ mod tests {
 		slot
 	}
 
-	/// An absent max age preserves everything the producer still retains.
+	/// An absent subscriber Max Age serves every cached group the publisher's max age still
+	/// leaves fresh.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
 		let producer = track::Producer::new(
@@ -15797,7 +15798,7 @@ mod tests {
 		let subscription = serving_subscription(128);
 		assert_eq!(
 			subscription.delay.max, None,
-			"no Max Age is the publisher's retention alone"
+			"no Max Age leaves the publisher's max age alone"
 		);
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {

@@ -510,7 +510,7 @@ pub enum Error {
 	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
 	/// messages spent its receive window. Also a read of a frame the group shed from its
 	/// front, past its live tail or under that debt. Unlike [`Self::Old`], the group was
-	/// still within the publisher's window; it can be re-fetched.
+	/// still fresh under the publisher's max age; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 

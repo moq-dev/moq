@@ -1138,7 +1138,7 @@ impl GroupState {
 	/// Resolve the group's terminal state for a reader positioned at `index`.
 	///
 	/// A finished group is still aborted once its frames are released to free memory
-	/// (aged out of the track's max age window, or evicted by the cache pool). A reader
+	/// (idle past the cache pool's expiry window, or evicted under its byte target). A reader
 	/// that already consumed every frame is missing nothing, so it gets the clean end of
 	/// group; one that fell short sees the abort rather than a silently truncated stream.
 	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
@@ -4306,7 +4306,7 @@ pub struct Fetch {
 
 	/// Maximum age behind the live edge this caller accepts.
 	///
-	/// `None` applies only the publisher's retention bound. An explicit value can
+	/// `None` applies only the publisher's max age. An explicit value can
 	/// tighten, but never relax, that bound.
 	pub max_delay: Option<std::time::Duration>,
 
@@ -5461,7 +5461,7 @@ mod test {
 	}
 
 	/// A finished group is still aborted once its frames are released to free memory (the
-	/// track's max age window, or the cache pool). A reader that already drained every frame
+	/// cache pool's expiry window or byte target). A reader that already drained every frame
 	/// is missing nothing, so it must see the clean end of group rather than the abort.
 	#[test]
 	#[cfg(feature = "async")]
