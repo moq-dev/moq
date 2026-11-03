@@ -55,6 +55,15 @@ application could pause a stream, or grant it an explicit
 window. Paused streams would then hold no credit beyond that window, replacing
 moq-net's per-session cap on paused credit.
 
+Until then, the pool must keep that cap honest (noted 2026-10-31 from
+[moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388), moved here when
+[moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624) finished the qmux
+receive lease): each paused stream reserves its window from a budget of about
+half the connection window when it pauses (`Shared::reserve` in
+`rs/moq-net/src/transport/boxed.rs`), and nothing re-checks it. No caller
+shrinks a live receive window today; if the pool's fair share can shrink
+one, re-balance the paused reservations when it does.
+
 Lessons from other stacks: QUICHE frees 8 KiB blocks as they are consumed, msquic
 never advertises credit it could not back, and quinn and lsquic both let a slice
 pin its packet buffer. #5878 already handles the last with compaction.

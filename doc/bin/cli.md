@@ -407,6 +407,10 @@ reachable. A recording still being made is followed, checked every `--refresh`
 stopped early stays live. It refuses a prefix with no recording, or with keys
 `export archive` does not write.
 
+Instances are percent-encoded as one key segment. When passing a stored key in an
+import URL, URL-encode its literal `%` characters too: instance `a/b` records under
+`event/@a%2Fb`, which the import URL names as `s3://recordings/event/@a%252Fb`.
+
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the
 usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables.

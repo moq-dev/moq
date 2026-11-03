@@ -19,6 +19,7 @@
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use super::flate;
+use super::idle::Idle;
 use super::pace::Pace;
 mod content;
 use crate::cache;
@@ -1756,7 +1757,10 @@ impl Producer {
 			arrived: super::clock::now(),
 		};
 		let mut entry = Entry::plain(frame, inflated);
-		if let Err(err) = state.canonicalize(state.next_index, &mut entry) {
+		// Checked here too, so a group without shared content skips the call.
+		if state.content.is_some()
+			&& let Err(err) = state.canonicalize(state.next_index, &mut entry)
+		{
 			return Err(self.abort_conflict(state, err));
 		}
 		let now = state.commit(entry);
@@ -1934,15 +1938,14 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn create_object(mut self, frame: frame::Header) -> Result<frame::Producer> {
 		let meter = self.chunk_meter(frame.inflated);
-		let (info, buf) = match self.open_frame(frame) {
+		let (info, buf, admission) = match self.open_frame(frame) {
 			Ok(opened) => opened,
 			Err(err) => {
 				let _ = self.handle.abort(err.clone());
 				return Err(err);
 			}
 		};
-		let reserved = buf.admit(self.handle.cache.frames());
-		Ok(frame::Producer::new(self, buf, info, reserved).with_meter(meter))
+		Ok(frame::Producer::new(self, buf, info, admission).with_meter(meter))
 	}
 
 	/// The meter a streamed frame's chunks bump: none for a plain frame a compressed group
@@ -1959,7 +1962,7 @@ impl Producer {
 	///
 	/// Its bytes are charged to the cache as they are written, not here: the declared
 	/// size is only a promise until they arrive.
-	fn open_frame(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf)> {
+	fn open_frame(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf, Option<frame::Admission>)> {
 		let frame = header.info;
 		let timestamp = on_track(frame.timestamp, self.handle.track.timescale)?;
 		if frame.size > MAX_CACHE_BYTES || header.inflated.is_some_and(|inflated| inflated > MAX_CACHE_BYTES) {
@@ -1994,7 +1997,7 @@ impl Producer {
 		if !state.trim(frame.size.saturating_add(metadata_bytes)) {
 			return Err(self.abort_too_large(state));
 		}
-		let buf = match state.content.as_ref().filter(|_| !scratch) {
+		let (buf, admission) = match state.content.as_ref().filter(|_| !scratch) {
 			Some(content) => {
 				let key = Content::key(state.next_index, header.fields.as_deref(), state.wire().is_some());
 				let row = content.row(
@@ -2009,9 +2012,10 @@ impl Producer {
 				)?;
 				let buf = row.fork();
 				buf.bill_view(state.charge.extra());
-				buf
+				let admission = buf.admit(self.handle.cache.frames());
+				(buf, admission)
 			}
-			None => FrameBuf::new(frame.size as usize),
+			None => FrameBuf::admitted(frame.size as usize, self.handle.cache.frames()),
 		};
 		let now = state.charge.record_write();
 		state.partial = Some(Partial {
@@ -2067,6 +2071,7 @@ impl Producer {
 				timestamp,
 			},
 			buf,
+			admission,
 		))
 	}
 
@@ -2131,7 +2136,7 @@ impl Producer {
 			inflated,
 			end: 0,
 		};
-		if !owned {
+		if !owned && state.content.is_some() {
 			state.canonicalize(state.next_index - 1, &mut entry)?;
 		}
 		// The slot was reserved and charged by `charge_partial` above.
@@ -2899,6 +2904,8 @@ impl Handle {
 			adopted: false,
 			stale_counted: Arc::default(),
 			recover: None,
+			idle: None,
+			parked: false,
 			arrived: self.alive.arrived,
 		}
 	}
@@ -3340,6 +3347,11 @@ pub struct Consumer {
 	// Handed out from a front's logical track: carries the read across route changes.
 	// Boxed: it is the rare case.
 	recover: Option<Box<super::resume::Recover>>,
+	// The frame read that last parked, answered again without the read path until something
+	// it parked on fires, once a read parks twice in a row; see [`Self::poll_read_as`].
+	idle: Option<Box<Idle<()>>>,
+	// The last frame read parked with no gate set up yet.
+	parked: bool,
 	// When the group was created here. Kept across an adopted replacement copy, which the
 	// group arrived before.
 	arrived: crate::time::Instant,
@@ -3428,6 +3440,9 @@ impl Clone for Consumer {
 			adopted: self.adopted,
 			stale_counted: self.stale_counted.clone(),
 			recover: self.recover.clone(),
+			// A clone reads in parallel, so it parks for itself.
+			idle: None,
+			parked: false,
 			arrived: self.arrived,
 		}
 	}
@@ -3461,6 +3476,7 @@ impl Consumer {
 	/// [`frame::Consumer::inflated`]), for egress that carries compression. A no-op on a
 	/// plain group.
 	pub(crate) fn compressed(mut self) -> Self {
+		Idle::disarm(&mut self.idle);
 		self.cursor.raw = true;
 		self.cursor.prefetch = Prefetch::default();
 		self
@@ -3512,6 +3528,7 @@ impl Consumer {
 
 	/// Keep applying this subscription's drift budget while the group is read.
 	pub(super) fn with_expiry(mut self, expiry: Arc<dyn Expiry>) -> Self {
+		Idle::disarm(&mut self.idle);
 		self.expiry = Some(expiry);
 		self
 	}
@@ -3534,6 +3551,7 @@ impl Consumer {
 
 	/// Carry this group across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover) -> Self {
+		Idle::disarm(&mut self.idle);
 		self.recover = Some(Box::new(recover));
 		self
 	}
@@ -3613,6 +3631,9 @@ impl Consumer {
 			// Same frames by index, so only the channel changes; read progress and the
 			// cap stay this cursor's.
 			let (index, end, raw) = (self.cursor.index, self.cursor.end, self.cursor.raw);
+			// Another read, such as `poll_finished`, may move the cursor while a frame read
+			// is parked on the old copy.
+			Idle::disarm(&mut self.idle);
 			recover.adopt(&replacement);
 			self.expiry = self.expiry.as_ref().map(|expiry| expiry.for_track(&replacement.copy));
 			self.cursor = replacement.group.cursor;
@@ -3669,6 +3690,8 @@ impl Consumer {
 				expiry.is_expired(budget, waiter)
 			}) {
 			self.expired = true;
+			// Another read, such as `poll_expired`, may judge a frame read parked before it.
+			Idle::disarm(&mut self.idle);
 			if !self.stale_counted.swap(true, Ordering::Relaxed) {
 				self.stats.stale(self.cursor.unread_content());
 			}
@@ -3733,6 +3756,7 @@ impl Consumer {
 	/// reads past it end cleanly (`None`), as if the group finished there, and an omitted
 	/// end removes the cap. Raising the cap re-offers frames that are still cached.
 	pub fn with_range(mut self, frames: impl RangeBounds<u64>) -> Self {
+		Idle::disarm(&mut self.idle);
 		let (start, end) = super::subscription::sequence_bounds(frames);
 		self.cursor.start_at(start);
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
@@ -3742,6 +3766,7 @@ impl Consumer {
 	/// Cap reads before frame `end`, or remove the cap with `None`, without moving the
 	/// start, which [`Self::with_range`] would clamp up to the first available frame.
 	pub(crate) fn with_end(mut self, end: impl Into<Option<u64>>) -> Self {
+		Idle::disarm(&mut self.idle);
 		self.cursor.end = end.into().map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 		self
 	}
@@ -3752,6 +3777,7 @@ impl Consumer {
 	/// never held. A [`Producer::start_at`] floor above `index` still surfaces as
 	/// [`Error::Lagged`].
 	pub fn skip_to(&mut self, index: u64) {
+		Idle::disarm(&mut self.idle);
 		self.cursor.skip_to(index);
 	}
 
@@ -3773,18 +3799,25 @@ impl Consumer {
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::with_range`] cap.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		if self.recover.is_none() {
-			let res = self.poll_next_frame_once(waiter);
-			return self.ended_on(res);
+		let res = match self.recover.is_none() {
+			true => {
+				let res = self.poll_next_frame_once(waiter);
+				self.ended_on(res)
+			}
+			false => match (self.poll_resumed(waiter, Self::poll_next_frame_once), &self.recover) {
+				// A frame read from a copy that may fail too carries on the same way.
+				(Poll::Ready(Ok(Some(frame))), Some(recover)) => Poll::Ready(Ok(Some(
+					frame.with_recover((**recover).clone(), self.cursor.index as u64 - 1),
+				))),
+				(res, _) => self.ended_on(res),
+			},
+		};
+		// The cursor moved past a frame that may still be arriving, which a whole-frame read
+		// parked on it waits out: that read never hears of the move.
+		if let Poll::Ready(Ok(Some(_))) = &res {
+			Idle::disarm(&mut self.idle);
 		}
-		let res = self.poll_resumed(waiter, Self::poll_next_frame_once);
-		match (res, &self.recover) {
-			// A frame read from a copy that may fail too carries on the same way.
-			(Poll::Ready(Ok(Some(frame))), Some(recover)) => Poll::Ready(Ok(Some(
-				frame.with_recover((**recover).clone(), self.cursor.index as u64 - 1),
-			))),
-			(res, _) => self.ended_on(res),
-		}
+		res
 	}
 
 	/// Pass a read through, releasing the track demand once it reached the group's end,
@@ -3837,16 +3870,54 @@ impl Consumer {
 	}
 
 	/// Read the next frame through the prefetch with `take`, which picks its form.
+	///
+	/// A read that parked is answered again with `Pending` until something it parked on
+	/// fires: the group, its expiry, the reader's subscription, or the route. A read parks
+	/// only with its prefetch drained, so `take` does not change that answer.
+	///
+	/// The gate is set up once a read parks twice in a row, as it does for a task that polls
+	/// it whenever another reader wakes, and arms on the read after: a group read whose next
+	/// poll is its own wake, as one task per group has it, never pays for one.
 	fn poll_read_as<T>(
 		&mut self,
 		waiter: &kio::Waiter,
 		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
 	) -> Poll<Result<Option<T>>> {
-		let res = match self.recover.is_none() {
-			true => self.poll_read_frame_once(waiter, take),
-			false => self.poll_resumed(waiter, |this, waiter| this.poll_read_frame_once(waiter, take)),
+		if Idle::parked(&self.idle, (), waiter) {
+			return Poll::Pending;
+		}
+		let res = match self.idle.is_some() {
+			true => {
+				let mut idle = Idle::start(&mut self.idle, waiter);
+				let res = self.poll_read_frame_through(idle.waiter(), take);
+				idle.finish(&mut self.idle, (), res.is_pending());
+				res
+			}
+			false => {
+				let res = self.poll_read_frame_through(waiter, take);
+				let parked = res.is_pending();
+				if parked && self.parked {
+					// Parked twice in a row: the next read parks through a gate. Unarmed, since
+					// this read registered on the task's own waiter, not the gate's.
+					Idle::start(&mut self.idle, waiter).finish(&mut self.idle, (), false);
+				}
+				self.parked = parked;
+				res
+			}
 		};
 		self.ended_on(res)
+	}
+
+	/// Read the next frame, carried across route changes when the group came from a front.
+	fn poll_read_frame_through<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
+	) -> Poll<Result<Option<T>>> {
+		match self.recover.is_none() {
+			true => self.poll_read_frame_once(waiter, take),
+			false => self.poll_resumed(waiter, |this, waiter| this.poll_read_frame_once(waiter, take)),
+		}
 	}
 
 	/// Read the next frame with its relay metadata, for wire egress.
@@ -6577,16 +6648,26 @@ mod test {
 		assert!(matches!(res, Err(Error::ProtocolViolation)));
 	}
 
-	/// A budget that gives up exactly when the test says so.
-	struct Switch(Arc<AtomicBool>);
+	/// A budget that gives up exactly when the test says so, waking the reads it judged as
+	/// a real budget does.
+	#[derive(Clone, Default)]
+	struct Switch(Arc<(AtomicBool, Mutex<kio::WaiterList>)>);
+
+	impl Switch {
+		fn set(&self, expired: bool) {
+			self.0.0.store(expired, Ordering::Relaxed);
+			self.0.1.lock().unwrap().wake();
+		}
+	}
 
 	impl Expiry for Switch {
-		fn is_expired(&self, _: Option<std::time::Duration>, _: &kio::Waiter) -> bool {
-			self.0.load(Ordering::Relaxed)
+		fn is_expired(&self, _: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool {
+			waiter.register(&mut self.0.1.lock().unwrap());
+			self.0.0.load(Ordering::Relaxed)
 		}
 
 		fn for_track(&self, _: &track::Consumer) -> Arc<dyn Expiry> {
-			Arc::new(Switch(self.0.clone()))
+			Arc::new(self.clone())
 		}
 	}
 
@@ -6600,13 +6681,14 @@ mod test {
 			.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"a"))
 			.unwrap();
 
-		let expired = Arc::new(AtomicBool::new(false));
-		let mut group = producer.consume().with_expiry(Arc::new(Switch(expired.clone())));
+		let expired = Switch::default();
+		let mut group = producer.consume().with_expiry(Arc::new(expired.clone()));
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(group.poll_read_frame(&waiter).is_pending(), "parked at the tail");
+		assert!(group.poll_read_frame(&waiter).is_pending(), "and parks again");
 
-		expired.store(true, Ordering::Relaxed);
+		expired.set(true);
 		let mut next = group.clone();
 		let mut finished = group.clone();
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Err(Error::Old))));
@@ -6616,6 +6698,92 @@ mod test {
 		);
 		assert!(matches!(next.poll_next_frame(&waiter), Poll::Ready(Err(Error::Old))));
 		assert!(matches!(finished.poll_finished(&waiter), Poll::Ready(Err(Error::Old))));
+	}
+
+	/// Records a wake.
+	#[derive(Default)]
+	struct Woken(AtomicBool);
+
+	impl std::task::Wake for Woken {
+		fn wake(self: Arc<Self>) {
+			self.0.store(true, Ordering::Relaxed);
+		}
+	}
+
+	impl Woken {
+		fn take(&self) -> bool {
+			self.0.swap(false, Ordering::Relaxed)
+		}
+	}
+
+	/// A frame read that found nothing parks again at once until the group changes, but
+	/// parks anew for another task, which the next frame then wakes instead.
+	#[test]
+	fn an_idle_frame_read_parks_for_the_task_polling_it() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"a"))
+			.unwrap();
+		let mut group = producer.consume();
+		let first = Arc::new(Woken::default());
+		let waiter = kio::Waiter::new(first.clone().into());
+		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		for _ in 0..3 {
+			assert!(group.poll_read_frame(&waiter).is_pending(), "nothing fired");
+		}
+		assert!(!first.take());
+
+		let other = Arc::new(Woken::default());
+		let moved = kio::Waiter::new(other.clone().into());
+		assert!(group.poll_read_frame(&moved).is_pending());
+		producer
+			.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"b"))
+			.unwrap();
+		assert!(other.take(), "the next frame wakes the task that polled last");
+		assert!(matches!(group.poll_read_frame(&moved), Poll::Ready(Ok(Some(_)))));
+	}
+
+	/// A read that parks once and is then woken by its next frame never sets up a gate.
+	#[test]
+	fn a_read_woken_by_its_frame_takes_no_gate() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let mut group = producer.consume();
+		let waiter = kio::Waiter::new(Arc::new(Woken::default()).into());
+		for payload in [b"a", b"b", b"c"] {
+			assert!(group.poll_read_frame(&waiter).is_pending());
+			producer
+				.write_frame(crate::Timestamp::ZERO, Bytes::from_static(payload))
+				.unwrap();
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		}
+		assert!(group.idle.is_none(), "a reader its own wake polls paid for a gate");
+	}
+
+	/// A chunked read that takes the frame a whole-frame read parked on moves the cursor, so
+	/// that read looks again rather than waiting out a frame it no longer reads.
+	#[test]
+	fn a_chunked_read_moves_a_parked_frame_read_on() {
+		let producer = Info { sequence: 0 }.produce();
+		let mut group = producer.consume().with_range(0..1);
+		let mut frame = producer
+			.create_frame(frame::Info {
+				size: 6,
+				timestamp: Some(Timestamp::ZERO),
+			})
+			.unwrap();
+		frame.write(Bytes::from_static(b"foo")).unwrap();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..3 {
+			assert!(
+				group.poll_read_frame(&waiter).is_pending(),
+				"the frame is still arriving"
+			);
+		}
+		assert!(matches!(group.poll_next_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
+			"past the cap"
+		);
 	}
 
 	/// A reader capped by its range finishes there cleanly whatever becomes of the frames past
@@ -6651,8 +6819,8 @@ mod test {
 			.unwrap();
 		producer.finish().unwrap();
 
-		let expired = Arc::new(AtomicBool::new(false));
-		let mut group = producer.consume().with_expiry(Arc::new(Switch(expired.clone())));
+		let expired = Switch::default();
+		let mut group = producer.consume().with_expiry(Arc::new(expired.clone()));
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(
@@ -6661,9 +6829,9 @@ mod test {
 		);
 		assert!(!group.poll_expired(&waiter));
 
-		expired.store(true, Ordering::Relaxed);
+		expired.set(true);
 		assert!(group.poll_expired(&waiter), "the writer abandons its stream");
-		expired.store(false, Ordering::Relaxed);
+		expired.set(false);
 		assert!(group.poll_expired(&waiter), "and the verdict stands");
 	}
 	/// A captured job owns its release guard independently of the cached delivery.
