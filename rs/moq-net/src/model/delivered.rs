@@ -109,6 +109,15 @@ impl Delivered {
 		gaps
 	}
 
+	/// The parts of `groups` none of `taken` handed out, in order.
+	pub fn gaps_in_all(taken: &[&Self], groups: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
+		let mut gaps = Vec::from([groups]);
+		for taken in taken {
+			gaps = gaps.into_iter().flat_map(|gap| taken.gaps(gap)).collect();
+		}
+		gaps
+	}
+
 	/// Count every sequence below `floor` as handed out.
 	pub fn forget_below(&mut self, floor: u64) {
 		let Some(below) = floor.checked_sub(1) else {

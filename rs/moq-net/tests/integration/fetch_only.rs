@@ -247,11 +247,9 @@ async fn bounded_direct(version: &str) {
 
 	let remote = resolve(&client).await;
 	let copy = remote.track("video").unwrap();
-	copy.info().await.expect("TRACK_STATUS resolves the track");
-	// A front's bounded read still parks past its end, as each copy's reader does, so this
-	// reads the group and stops there.
 	let mut sub = subscribe_history(&copy).await;
 	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{version}");
+	assert_eq!(next_frames(&mut sub).await, None, "{version}: the read ends");
 	assert!(
 		!subscribed.load(Ordering::SeqCst),
 		"{version}: the bounded read subscribed"
@@ -260,8 +258,9 @@ async fn bounded_direct(version: &str) {
 	drop((sub, copy, remote, pair, broadcast, client, publisher));
 }
 
-/// A copy the session holds no subscription for is unfed: a bounded read of the history
-/// below the publisher's Largest Object fetches its holes at once, never subscribing.
+/// A bounded read learns the track from TRACK_STATUS, and of the history below the
+/// publisher's Largest Object, which a finished track's SUBSCRIBE would refuse, fetches its
+/// holes at once, never subscribing.
 #[kio::test]
 async fn a_bounded_read_of_history_fetches_without_subscribing() {
 	let mut failures = Vec::new();
@@ -405,13 +404,19 @@ async fn fetched_copy(upstream_version: Version, version: Version) -> FetchedCop
 
 async fn history_through_fetched_copy(upstream: Version, version: Version) {
 	let copy = fetched_copy(upstream, version).await;
-	// A front's bounded read parks past its end, so this reads the group and stops there.
+	// The fresh session asks TRACK_STATUS first, which the relay answers without an edge,
+	// so the read SUBSCRIBEs once that answer arrives, after `subscribe` returns.
 	let mut sub = subscribe_history(&copy.fresh).await;
+	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{upstream} to {version}");
+	assert_eq!(
+		next_frames(&mut sub).await,
+		None,
+		"{upstream} to {version}: the read ends"
+	);
 	assert!(
 		copy.track.subscription().is_some(),
 		"{upstream} to {version}: answered without subscribing upstream"
 	);
-	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{upstream} to {version}");
 	// The copy still serves its other reader.
 	assert_eq!(
 		fetch(&copy.fetched, 0).await.expect("fetch after the SUBSCRIBE"),
