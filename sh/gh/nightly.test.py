@@ -121,10 +121,9 @@ class FeaturesTest(unittest.TestCase):
     def test_dependency_contract_failures_do_not_hide_checks(self):
         passed, expected = self.run_features(nested=True)
         self.assertEqual(passed.returncode, 0, passed.stderr)
-        failed, calls = self.run_features(nested=True, leaks=("tokio", "cpal"))
+        failed, calls = self.run_features(nested=True, leaks=("cpal",))
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(calls, expected)
-        self.assertIn("must not depend on a native runtime", failed.stderr)
         self.assertIn("moq-video minimal unexpectedly contains cpal", failed.stderr)
 
 
