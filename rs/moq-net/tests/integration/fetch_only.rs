@@ -569,7 +569,7 @@ async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
 				.await
 				.expect("subscribe timed out")
 				.expect("subscribe");
-			assert_eq!(next_frames(&mut sub).await, Some(frames(0)));
+			assert_eq!(next_frames(&mut sub).await, Some(frames(0)), "{version}");
 
 			drop((sub, copy, remote, pair, track, broadcast, client, publisher));
 		})

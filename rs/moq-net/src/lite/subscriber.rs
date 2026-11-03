@@ -9536,7 +9536,15 @@ impl ServeLoop {
 										let served = start.starts.iter().flatten().min().copied();
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
-											self.serving.set_live(start.largest, served);
+											// A bounded feed may never deliver Largest. Its START resolves
+											// what it owes; the range and arrival ledger wait for those
+											// groups, rather than an edge outside the requested history.
+											match start.largest {
+												Some(largest) if bounded(&active.ranges) => {
+													self.serving.set_live_ahead(largest, served)
+												}
+												largest => self.serving.set_live(largest, served),
+											}
 											if let Some(largest) = start.largest {
 												self.serving.report_largest(largest);
 											}
