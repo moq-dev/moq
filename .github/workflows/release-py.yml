@@ -20,6 +20,8 @@ on:
       - "py/moq-rs/**"
       - ".github/workflows/release-py.yml"
       - "sh/gh/release.sh"
+  # Retry a wrapper publish after its FFI reaches PyPI. Only release is admitted.
+  workflow_dispatch:
   # Publishes only a protected release tag at the run's commit; see
   # "Require a release tag at the run's commit".
   workflow_run: # zizmor: ignore[dangerous-triggers]
@@ -42,8 +44,10 @@ jobs:
     # successful upstream tag-push run from the expected release workflow.
     if: >-
       github.repository_owner == 'moq-dev' &&
-      (github.event_name == 'push' ||
-       (github.event.workflow_run.conclusion == 'success' &&
+      (((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+        github.ref == 'refs/heads/release') ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.event == 'push' &&
         startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')))
     outputs:
@@ -96,23 +100,23 @@ jobs:
       # workflow_run is chained after Release Py FFI, so its tag is published.
       - name: Gate on published FFI
         id: ffi-gate
-        if: github.event_name == 'push'
+        if: github.event_name != 'workflow_run'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: just gh release ffi-unreleased "$FFI_VERSION"
 
       - name: Check FFI on PyPI
         id: ffi-pypi
-        if: github.event_name == 'push' && steps.ffi-gate.outputs.unreleased != 'true'
+        if: github.event_name != 'workflow_run' && steps.ffi-gate.outputs.unreleased != 'true'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: just gh release pypi-exists moq-ffi "$FFI_VERSION"
 
       - name: Unpublished FFI notice
-        if: github.event_name == 'push' && steps.ffi-gate.outputs.unreleased != 'true' && steps.ffi-pypi.outputs.exists != 'true'
+        if: github.event_name != 'workflow_run' && steps.ffi-gate.outputs.unreleased != 'true' && steps.ffi-pypi.outputs.exists != 'true'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
-        run: echo "::warning::moq-ffi ${FFI_VERSION} is not on PyPI; deferring to the Release Py FFI chain."
+        run: echo "::warning::moq-ffi ${FFI_VERSION} is not on PyPI; Release Py FFI must publish it before this wrapper can publish."
 
       # The release gate: skip publishing a version that's already on PyPI
       # (re-uploads are rejected anyway, but this keeps the run green and makes

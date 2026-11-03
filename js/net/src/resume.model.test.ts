@@ -190,7 +190,7 @@ class Upstream extends BroadcastConsumer {
 		const local = wireOf(this).fetchGroup;
 		if (!local) throw new Error("a produced broadcast always fetches");
 		overrideBroadcastWire(this, {
-			fetchGroup: (name, sequence, options) => fill(sequence, () => local(name, sequence, options)),
+			fetchGroup: (name, sequence, options) => fill(Number(sequence), () => local(name, sequence, options)),
 		});
 		this.#fill = fill;
 	}
@@ -309,13 +309,13 @@ function observed(reader: Reader): string {
 }
 
 function groups(range: Range): track.Groups {
-	return range ? { start: { included: range[0] }, end: { excluded: range[1] } } : {};
+	return range ? { start: { included: BigInt(range[0]) }, end: { excluded: BigInt(range[1]) } } : {};
 }
 
 function subscription(budget: Budget, range: Range): track.Subscription {
 	return {
 		delay: { max: budget === "hour" ? HOUR : SHORT },
-		ranges: range ? [{ start: { absolute: range[0] }, end: { absolute: range[1] } }] : undefined,
+		ranges: range ? [{ start: { absolute: BigInt(range[0]) }, end: { absolute: BigInt(range[1]) } }] : undefined,
 	};
 }
 
@@ -391,7 +391,7 @@ class Model {
 					entry.writer.abort(giveUp());
 					entry.writer = undefined;
 				} else if (!entry) {
-					hooks.dropTrackGroups(copy.track, op.group, op.group + 1, giveUp());
+					hooks.dropTrackGroups(copy.track, BigInt(op.group), BigInt(op.group + 1), giveUp());
 				}
 				instance.givenUp.add(op.group);
 				break;
@@ -478,7 +478,7 @@ class Model {
 		}
 		if (entry.written === 0 && !entry.writer) {
 			try {
-				entry.writer = copy.track.createGroup(group);
+				entry.writer = copy.track.createGroup(BigInt(group));
 			} catch {
 				return;
 			}
@@ -522,7 +522,7 @@ class Model {
 		if (copy.groups.has(sequence)) return local();
 		const written = publisher.written.get(sequence) ?? 0;
 		if (sequence >= GROUPS || written === 0) throw new NotFound(`group ${sequence}`);
-		const writer = copy.track.createGroup(sequence);
+		const writer = copy.track.createGroup(BigInt(sequence));
 		copy.groups.set(sequence, { written: 0, writer });
 		const group = writer.consume();
 		this.write(instance, slot, sequence, written);
@@ -639,7 +639,7 @@ class Model {
 			}
 			if (recv.kind === "group") {
 				const group = recv.group;
-				const sequence = group.sequence;
+				const sequence = Number(group.sequence);
 				if (reader.reading.has(sequence)) {
 					throw fail(index, `group ${sequence} handed out twice: ${reader.handed}`);
 				}
@@ -671,14 +671,15 @@ class Model {
 		if (reader.spec.drops && !reader.spec.ordered) {
 			for (let drop = hooks.tryDrop(reader.sub); drop; drop = hooks.tryDrop(reader.sub)) {
 				for (let group = drop.start; group < drop.end; group++) {
-					if (reader.reading.has(group)) {
+					if (reader.reading.has(Number(group))) {
 						throw fail(
 							index,
 							`dropped ${drop.start}..${drop.end} (${drop.error}) after handing out ${group}`,
 						);
 					}
 				}
-				for (let group = drop.start; group < Math.min(drop.end, GROUPS); group++) reader.dropped.add(group);
+				for (let group = Number(drop.start); group < Math.min(Number(drop.end), GROUPS); group++)
+					reader.dropped.add(group);
 			}
 		}
 
@@ -689,7 +690,7 @@ class Model {
 
 	/** Read a group handed out to its end, checking each frame against the model. */
 	async #read(index: number, reader: Reader, reading: Reading): Promise<void> {
-		const sequence = reading.group.sequence;
+		const sequence = Number(reading.group.sequence);
 		for (;;) {
 			let frame: Frame | undefined;
 			try {
