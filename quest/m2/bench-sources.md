@@ -14,15 +14,11 @@ tests and the nightly shipping sizes feed it now
 ([moq-dev/moq#7510](https://github.com/moq-dev/moq/pull/7510) added the last
 two). The binding runners stay an unmeasured smoke run: rust2 measures them,
 and [moq-dev/moq#6629](https://github.com/moq-dev/moq/pull/6629) retired their
-series. What remains joins through the same input format; the sources decided
-with the maintainer on 2026-10-15 left these for later:
+series. The relay load benches left Nightly in
+[moq-dev/moq#7603](https://github.com/moq-dev/moq/pull/7603). What remains joins
+through the same input format; the sources decided with the maintainer on
+2026-10-15 left it for later:
 
-- The relay load benches, `bench-audio` and `bench-shard` (the "Audio grouping
-  relay benchmark" and "Relay shard sweep" Nightly jobs). Each writes a JSON
-  summary per workload; pick the metrics a trend should follow (delivered
-  throughput, relay CPU, loss, latency) and convert them in
-  `sh/gh/bench-report.py`. "Relay profiles" and "Browser benchmark smoke" only
-  check their capture paths and stay out.
 - The audio-quality job's benchmarks: `just js qmux-bench`, `serve-bench` and
   `ring-bench`. Check each prints a CSV table the `js` converter reads before
   recording it.

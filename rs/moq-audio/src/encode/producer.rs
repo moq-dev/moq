@@ -194,6 +194,8 @@ impl Reserved {
 	/// Spend the reservation on a registered encoder, publishing through the track.
 	pub(crate) fn encode(self, registered: Registered) -> Producer {
 		let retention = self.track.track().info().max_age.unwrap_or(hang::container::MAX_AGE);
+		let bitrate = registered.encoder.bitrate();
+		self.track.report_bitrate(bitrate);
 
 		Producer {
 			backlog: Backlog::new(
@@ -203,7 +205,7 @@ impl Reserved {
 			),
 			active: true,
 			reset_pending: false,
-			bitrate: registered.encoder.bitrate(),
+			bitrate,
 			encoder: Some(registered.encoder),
 			input: registered.input,
 			remix: registered.remix,
@@ -319,6 +321,7 @@ impl Producer {
 			return Err(err.into());
 		}
 		self.bitrate = encoder.bitrate();
+		self.track.report_bitrate(self.bitrate);
 		Ok(())
 	}
 
@@ -680,6 +683,27 @@ mod tests {
 		}
 	}
 
+	/// The catalog's stats follow the encoder's target from the first rendition on.
+	#[tokio::test]
+	async fn stats_follow_the_target_bitrate() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".into()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+		let reported = || catalog.stats().remove("audio").and_then(|stats| stats.bitrate);
+		assert_eq!(reported(), Some(producer.bitrate().as_bps()));
+
+		let initial = producer.bitrate();
+		producer
+			.set_bitrate(moq_net::bandwidth::Rate::from_bps(initial.as_bps() / 2))
+			.unwrap();
+		assert_ne!(producer.bitrate(), initial);
+		assert_eq!(reported(), Some(producer.bitrate().as_bps()));
+	}
+
 	#[tokio::test]
 	#[ignore = "measures real codec CPU; run with just rs bench-playback"]
 	async fn benchmark_raw_audio() {
@@ -770,7 +794,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		let mut reader =
@@ -955,7 +982,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+			)
 			.await
 			.unwrap();
 		let mut reader =
@@ -1188,7 +1218,10 @@ mod tests {
 			consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
@@ -1471,7 +1504,10 @@ mod tests {
 			let mut track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 
@@ -1513,7 +1549,10 @@ mod tests {
 			let mut track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 			for index in 0..packets * 2 {
@@ -1622,7 +1661,10 @@ mod tests {
 			let track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 			let mut reader = moq_mux::container::Consumer::new(
@@ -1673,7 +1715,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		let mut reader =

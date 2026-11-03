@@ -128,6 +128,12 @@ class ReportTest(unittest.TestCase):
                     "test bbr3::bench::benchmark_per_packet ... ok\n\n"
                     "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 97 filtered out; finished in 0.05s\n",
                 ),
+                # Another controller's benchmark, named alike in the same package.
+                (
+                    "moq-congestion",
+                    "gcc::bench::benchmark_per_packet",
+                    "steady,flight,cpu_ns\nfalse,16,2210\n",
+                ),
             ],
         )
         self.junit(
@@ -150,13 +156,26 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(
             [(entry["name"], entry["unit"], entry["value"]) for entry in entries],
             [
-                ("rust-test/moq-congestion/benchmark_per_packet/state=packet/size_bytes", "bytes", 40),
-                ("rust-test/moq-congestion/benchmark_per_packet/steady=false/flight=16/cpu_ns", "ns", 3170),
-                ("rust-test/moq-congestion/benchmark_per_packet/steady=false/flight=16/peak_bytes", "bytes", 1336),
-                ("rust-test/moq-tokio/benchmark_receive_windows/path=loopback/mib_per_s", "MiB/s", 812),
-                ("rust-test/moq-tokio/benchmark_receive_windows/path=loopback/overflowed_packets", "packets", 0),
+                ("rust-test/moq-congestion/bbr3/bench/benchmark_per_packet/state=packet/size_bytes", "bytes", 40),
+                ("rust-test/moq-congestion/bbr3/bench/benchmark_per_packet/steady=false/flight=16/cpu_ns", "ns", 3170),
                 (
-                    "rust-test/moq-bench/benchmark_observation_contention/writers=1/snapshots=0/ns_per_sample",
+                    "rust-test/moq-congestion/bbr3/bench/benchmark_per_packet/steady=false/flight=16/peak_bytes",
+                    "bytes",
+                    1336,
+                ),
+                ("rust-test/moq-congestion/gcc/bench/benchmark_per_packet/steady=false/flight=16/cpu_ns", "ns", 2210),
+                (
+                    "rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/mib_per_s",
+                    "MiB/s",
+                    812,
+                ),
+                (
+                    "rust-test/moq-tokio/receive_credit/benchmark_receive_windows/path=loopback/overflowed_packets",
+                    "packets",
+                    0,
+                ),
+                (
+                    "rust-test/moq-bench/stats/tests/benchmark_observation_contention/writers=1/snapshots=0/ns_per_sample",
                     "ns",
                     57.39,
                 ),

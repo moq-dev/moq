@@ -194,9 +194,10 @@ def rust_tests(directory):
     entries = []
     for path in reports:
         for case in ElementTree.parse(path).getroot().iter("testcase"):
-            # A test binary is named `package` or `package::kind/target`.
+            # A test binary is named `package` or `package::kind/target`. The test's module
+            # path stays in its name, since modules of one package can name a test alike.
             package = case.get("classname").split("::", 1)[0]
-            test = case.get("name").rsplit("::", 1)[-1]
+            test = case.get("name").replace("::", "/")
             output = case.findtext("system-out") or ""
             text = "\n".join(line for line in output.splitlines() if not LIBTEST.fullmatch(line))
             entries += printed(text, f"rust-test/{package}/{test}", f"{path.name} {package} {test}")

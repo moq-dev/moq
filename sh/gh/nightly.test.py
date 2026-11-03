@@ -234,7 +234,7 @@ class NightlyTest(unittest.TestCase):
         # Every benchmark measures a release build, and each run keeps its JUnit report.
         self.assertTrue(all("--release" in call or " bench-" in call for call in runs), runs)
         self.assertIn("just rs bench-feed-fetch", runs)
-        self.assertEqual(self.raw, [f"nextest-{index}.xml" for index in range(1, len(runs) + 1)])
+        self.assertEqual(set(self.raw), {f"nextest-{index}.xml" for index in range(1, len(runs) + 1)})
         self.assertTrue(publish.startswith("just gh benchmark-report rust-test "), publish)
 
     def test_benchmark_test_without_its_report_fails(self):

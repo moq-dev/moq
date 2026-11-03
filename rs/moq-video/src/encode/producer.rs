@@ -234,6 +234,24 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Report capture frames the encoder never saw, in the catalog's stats.
+	#[cfg(feature = "capture")]
+	fn report_skipped(&self, frames: u64) {
+		match &self.codecs {
+			Codecs::H264 { import, .. } => import.report_skipped(frames),
+			Codecs::H265 { import, .. } => import.report_skipped(frames),
+		}
+	}
+
+	/// Report the encoder's target bitrate, in the catalog's stats.
+	#[cfg(feature = "capture")]
+	fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		match &self.codecs {
+			Codecs::H264 { import, .. } => import.report_bitrate(bitrate),
+			Codecs::H265 { import, .. } => import.report_bitrate(bitrate),
+		}
+	}
+
 	/// Finalize the track.
 	///
 	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
@@ -512,37 +530,46 @@ async fn next_target(rate: &mut RateControl) -> Result<rate::Target, moq_net::Er
 	}
 }
 
-/// Retune the encoder to the next target.
+/// Retune the encoder to the next target, returning it once the encoder takes it.
 ///
 /// An error means the grant is gone (the session ended for good), so rate control
 /// retires and the encoder holds its current bitrate.
 #[cfg(feature = "capture")]
-async fn apply_target(encoder: &mut Sink, rate: &mut RateControl, target: Result<rate::Target, moq_net::Error>) {
-	let Some(follower) = rate.as_mut() else { return };
+async fn apply_target(
+	encoder: &mut Sink,
+	rate: &mut RateControl,
+	target: Result<rate::Target, moq_net::Error>,
+) -> Option<moq_net::bandwidth::Rate> {
+	let follower = rate.as_mut()?;
 
 	let Ok(target) = target else {
 		tracing::debug!("bandwidth estimate ended; holding the current encoder bitrate");
 		*rate = None;
-		return;
+		return None;
 	};
 	let rate::Target::Enabled(bitrate) = target else {
 		unreachable!("a capture follows its grant with no lower rendition, so it never disables")
 	};
 
 	match encoder.set_bitrate(bitrate).await {
-		Ok(()) => tracing::debug!(bitrate = bitrate.as_bps(), "adjusted encoder bitrate"),
+		Ok(()) => {
+			tracing::debug!(bitrate = bitrate.as_bps(), "adjusted encoder bitrate");
+			Some(bitrate)
+		}
 		// The encoder can't retune, so keep encoding at the rate it opened with
 		// and stop asking. Dropping the source also stops the estimate arm, which
 		// would otherwise wake this loop for nothing on every change.
 		Err(Error::BitrateUnsupported(name)) => {
 			tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
 			*rate = None;
+			None
 		}
 		// A transient failure: the follower takes the target back and retries it,
 		// so a quiet grant still recovers.
 		Err(err) => {
 			tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate");
 			follower.failed();
+			None
 		}
 	}
 }
@@ -607,26 +634,32 @@ async fn wait_capture<T>(
 
 /// Return an encoder nobody watches to its ceiling, and start its rate control over from there
 /// for the next viewer. Its groups wait in the cache rather than being paced to a subscriber,
-/// and a past viewer's grant is stale by the time the next one arrives.
+/// and a past viewer's grant is stale by the time the next one arrives. Returns the ceiling once
+/// the encoder takes it.
 #[cfg(feature = "capture")]
 async fn rest(
 	encoder: &mut Sink,
 	rate: &mut RateControl,
 	claim: &moq_net::bandwidth::Reservation,
 	ceiling: moq_net::bandwidth::Rate,
-) {
+) -> Option<moq_net::bandwidth::Rate> {
 	// Retired: the encoder cannot retune, or the grant is gone and it holds its rate.
-	if rate.is_none() {
-		return;
-	}
+	rate.as_ref()?;
 	match encoder.set_bitrate(ceiling).await {
-		Ok(()) => *rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling))),
+		Ok(()) => {
+			*rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
+			Some(ceiling)
+		}
 		Err(Error::BitrateUnsupported(name)) => {
 			tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
 			*rate = None;
+			None
 		}
 		// The follower still matches the rate the encoder kept, so the next viewer follows on from it.
-		Err(err) => tracing::warn!(error = %err, bitrate = ceiling.as_bps(), "failed to rest the encoder bitrate"),
+		Err(err) => {
+			tracing::warn!(error = %err, bitrate = ceiling.as_bps(), "failed to rest the encoder bitrate");
+			None
+		}
 	}
 }
 
@@ -710,12 +743,18 @@ async fn capture_loop<S: CaptureSource>(
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
 		let mut rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
+		// The encoder's current target, reported again on any track the capture moves to.
+		let mut bitrate = ceiling;
+		producer.report_bitrate(bitrate);
 		// Per encoder, since a fresh one opens with a keyframe that serves every earlier ask.
 		let mut forced = Cuts::default();
 		// Rate control follows the grant only while someone watches. The first poll of `watch`
 		// reports the current demand.
 		let mut watch = demand.clone();
 		let mut watched = false;
+		// The camera's skips already accounted for, from its first read on: frames it replaced
+		// while this encoder was still opening are startup, not frames the encoder fell behind on.
+		let mut reported = None;
 
 		loop {
 			// Race the next frame against demand, so an on-demand capture releases the
@@ -734,8 +773,11 @@ async fn capture_loop<S: CaptureSource>(
 					if on_demand && !wanted {
 						break; // no viewers: release the camera, then wait for one
 					}
-					if watched && !wanted {
-						rest(&mut encoder, &mut rate, claim, ceiling).await;
+					if watched
+						&& !wanted && let Some(rested) = rest(&mut encoder, &mut rate, claim, ceiling).await
+					{
+						bitrate = rested;
+						producer.report_bitrate(bitrate);
 					}
 					watched = wanted;
 					continue;
@@ -743,7 +785,10 @@ async fn capture_loop<S: CaptureSource>(
 				// Retune between frames rather than mid-encode, and only when
 				// the policy says the target actually moved.
 				target = next_target(&mut rate), if watched => {
-					apply_target(&mut encoder, &mut rate, target).await;
+					if let Some(applied) = apply_target(&mut encoder, &mut rate, target).await {
+						bitrate = applied;
+						producer.report_bitrate(bitrate);
+					}
 					continue;
 				}
 				// A read error is terminal for this selection (the source is gone
@@ -752,6 +797,12 @@ async fn capture_loop<S: CaptureSource>(
 			};
 
 			let Some(mut frame) = frame else { break };
+			// Frames the camera replaced while this loop was encoding or retuning.
+			let skipped = camera.skipped();
+			if let Some(reported) = reported {
+				producer.report_skipped(skipped - reported);
+			}
+			reported = Some(skipped);
 			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
 			// A backend that cannot cut leaves every group to its cadence.
 			let wanted = cuts.then(|| producer.wanted()).flatten();
@@ -775,10 +826,19 @@ async fn capture_loop<S: CaptureSource>(
 				}
 				watch = demand.clone();
 				watched = false;
-				rest(&mut encoder, &mut rate, claim, ceiling).await;
+				// The new track's stats start empty, so they learn the target whether or not it rests.
+				if let Some(rested) = rest(&mut encoder, &mut rate, claim, ceiling).await {
+					bitrate = rested;
+				}
+				producer.report_bitrate(bitrate);
 			}
 		}
 
+		// Frames the camera replaced after the last read, before demand or the stream ended
+		// the loop: no read follows to report them.
+		if let Some(reported) = reported {
+			producer.report_skipped(camera.skipped() - reported);
+		}
 		// Drop the camera (LED off) and encoder before opening another.
 		drop(camera);
 		drop(encoder);
@@ -898,7 +958,9 @@ mod tests {
 				catalog.track_info(hang::catalog::PRIORITY.video).with_max_age(replay),
 			)
 			.unwrap();
-		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_delay(replay));
+		let consumer = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(replay)),
+		);
 
 		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
@@ -1206,7 +1268,10 @@ mod tests {
 					.consumer
 					.track(name)
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(RETAIN))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_delay(moq_net::track::Delay::default().with_max(RETAIN)),
+					)
 					.await
 					.unwrap();
 				moq_mux::container::Consumer::new(track, container)
@@ -1305,6 +1370,61 @@ mod tests {
 
 					assert!(published >= 4_000_000, "{published}us restarted the broadcast at zero");
 					fixture.assert_acquired(published, captured);
+					fixture.finish().await;
+				})
+				.await
+		}
+
+		/// The catalog's stats carry the encoder's target and every frame the camera replaced
+		/// before the loop read it, once the loop has read its first.
+		#[tokio::test]
+		async fn stats_report_the_target_and_skipped_frames() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+
+					// Replaced before the first read, while the encoder was still opening: not a skip.
+					camera.push_at(surface(), Instant::now());
+					camera.push_at(surface(), Instant::now());
+					read(&mut track).await;
+					// Back to back once encoding, so the loop only ever sees the second.
+					camera.push_at(surface(), Instant::now());
+					camera.push_at(surface(), Instant::now());
+					read(&mut track).await;
+
+					let stats = fixture.catalog.stats().remove("video").expect("the video rendition");
+					assert_eq!(stats.skipped, 1);
+					let ceiling = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap()).resolved_bitrate();
+					assert_eq!(stats.bitrate, Some(ceiling.as_bps()));
+					fixture.finish().await;
+				})
+				.await
+		}
+
+		/// Frames the camera replaced after the last read still count when the last viewer
+		/// leaves before another read.
+		#[tokio::test]
+		async fn stats_report_skips_left_when_the_viewer_leaves() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+					camera.push_at(surface(), Instant::now());
+					read(&mut track).await;
+
+					// The viewer leaves, then the camera replaces a frame before the loop runs again.
+					drop(track);
+					camera.push_at(surface(), Instant::now());
+					camera.push_at(surface(), Instant::now());
+					while !camera.released() {
+						tokio::task::yield_now().await;
+					}
+
+					let stats = fixture.catalog.stats().remove("video").expect("the video rendition");
+					assert_eq!(stats.skipped, 1);
 					fixture.finish().await;
 				})
 				.await
@@ -1809,7 +1929,10 @@ mod tests {
 				let mut subscriber = consumer
 					.track(&name)
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(5)))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5))),
+					)
 					.await
 					.unwrap();
 				for sequence in 0..2 {

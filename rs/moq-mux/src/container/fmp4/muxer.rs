@@ -11,8 +11,8 @@ use crate::container::Frame;
 use crate::container::source::{VideoTransform, build_video_transform, catalog_dimensions, codec_dimensions};
 
 use super::export::{
-	apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations,
-	timestamp_gap,
+	Run, apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init,
+	infer_missing_durations, timestamp_gap,
 };
 use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video_trak};
 
@@ -340,7 +340,7 @@ impl Muxer {
 		{
 			last.duration = Some(duration);
 		}
-		infer_missing_durations(&mut frames, None, self.default_frame, self.timescale)?;
+		infer_missing_durations(&mut frames, None, self.default_frame, self.timescale, Run::Whole)?;
 		Ok(frames)
 	}
 

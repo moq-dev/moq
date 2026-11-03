@@ -136,7 +136,7 @@ fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz)
+    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz)
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206
@@ -155,7 +155,7 @@ case "$action" in
         just rs "$action" "${flags[@]}"
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
-        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio|moq-scene|moq-studio)'; then
+        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
             if [[ "$action" == check-test ]]; then just rs capture-test; else just rs capture; fi
         fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.

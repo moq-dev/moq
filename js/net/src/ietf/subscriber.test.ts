@@ -1237,7 +1237,7 @@ test.each([
 	[VERSION, true, [3, 4]],
 ])("draft %s with FIRST_OBJECT=%s: a header-only stream delivers %p", async (version, firstObject, expected) => {
 	// A budget, so the empty group outlives its successor's arrival.
-	const { subscriber, track } = await subscribeTrack({ version, subscription: { maxDelay: Milli(60_000) } });
+	const { subscriber, track } = await subscribeTrack({ version, subscription: { delay: { max: Milli(60_000) } } });
 
 	await subscriber.handleGroup(
 		new GroupMessage({
@@ -1260,9 +1260,9 @@ test.each([
 		new Reader(undefined, encodeObjects([0]), version),
 	);
 
-	const ordered = track.ordered();
-	for (const sequence of expected) expect((await ordered.nextGroup())?.sequence).toBe(sequence);
-	ordered.close();
+	// This tests stream framing, independent of gaps below these groups. An ordered
+	// subscription with this budget would wait for the unreceived groups 0..2.
+	for (const sequence of expected) expect((await track.recvGroup())?.sequence).toBe(sequence);
 	track.close();
 });
 
@@ -1482,7 +1482,7 @@ test("an object datagram is a datagram group", async () => {
 	track.close();
 });
 
-test("a more specific epochless announcement replaces the consumed source", async () => {
+test("a more specific unnamed announcement replaces the consumed source", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
 	const announced = subscriber.announced();
@@ -1735,7 +1735,7 @@ for (const negotiated of [false, true]) {
 		const track = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ maxDelay: Milli(250) });
+			.subscribe({ delay: { max: Milli(250) } });
 		const peer = await nextStream(pair.client);
 		if (!peer) throw new Error("no subscribe stream");
 		expect(await peer.reader.u53()).toBe(Subscribe.id);
@@ -1745,7 +1745,7 @@ for (const negotiated of [false, true]) {
 		await new SubscribeOk({ trackAlias: ALIAS }).encode(peer.writer, VERSION);
 		await track.info();
 		// The aggregate can change before SUBSCRIBE_OK: the first update must catch it.
-		const tolerant = track.fork({ maxDelay: Milli(900), priority: 9 });
+		const tolerant = track.fork({ delay: { max: Milli(900) }, priority: 9 });
 		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
 		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
 		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);

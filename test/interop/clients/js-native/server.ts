@@ -20,7 +20,7 @@ const origin = new Moq.Origin.Producer();
 const broadcastPublication = origin.createBroadcast(Moq.Path.from("handover"));
 const broadcast = broadcastPublication.broadcast;
 const video = broadcast.createTrack("video");
-broadcastPublication.announce({ epoch: Moq.Epoch.mint() });
+broadcastPublication.announce();
 const markerPublication = origin.createBroadcast(Moq.Path.from("replacement"));
 const marker = markerPublication.broadcast;
 const ready = marker.createTrack("ready");
