@@ -11493,6 +11493,51 @@ mod serve_tests {
 		}
 	}
 
+	/// A token an update names holds the subscription to that grant alone, so a join kept past
+	/// the track's end goes once that token is revoked, though the session scope still covers
+	/// the track.
+	#[kio::test]
+	async fn a_kept_join_ends_with_a_token_an_update_named() {
+		const VERSION: Version = Version::Draft18;
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::all());
+		let mut requests = auth.handle().requests();
+		let mut h = serve_with_auth(VERSION, auth, Vec::new());
+		publish_groups(&mut h, 5);
+		settle().await;
+		let mut request = ScriptedSession::new(Vec::new());
+		request.log = h.log.clone();
+		let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), VERSION)
+			.await
+			.unwrap();
+		let mut serving = std::pin::pin!(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+		);
+		registered(&h, serving.as_mut()).await;
+
+		request.push(&subscribe_update_with_token(VERSION, true).await);
+		let token = match futures::future::select(std::pin::pin!(requests.next()), serving.as_mut()).await {
+			futures::future::Either::Left((Some(request), _)) => request,
+			futures::future::Either::Left((None, _)) => panic!("no verifier"),
+			futures::future::Either::Right((res, _)) => panic!("subscription ended: {res:?}"),
+		};
+		let issued = token.accept(crate::auth::Grant::all());
+		serve_until(serving.as_mut(), "the token's REQUEST_OK", || {
+			Wire::read(&h.log, VERSION).sent(ietf::RequestOk::ID).is_some()
+		})
+		.await;
+		finish_and_retain(&h, serving.as_mut()).await;
+
+		issued.revoke(crate::SessionError::Unauthorized, "revoked");
+		let _ = kio::clock::timeout(Duration::from_secs(1), serving.as_mut())
+			.await
+			.unwrap_or_else(|_| panic!("the join outlived the token its update named"));
+		assert!(h.publisher.joins.read().is_empty());
+		assert_eq!(joining_refusal(&h, VERSION).await, INVALID_JOINING_REQUEST_ID);
+	}
+
 	#[kio::test]
 	async fn a_joining_fetch_rejects_unsupported_filters() {
 		for version in JOINING_DRAFTS {

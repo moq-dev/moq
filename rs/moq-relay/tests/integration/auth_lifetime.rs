@@ -1849,7 +1849,7 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 	let script = Script::new(Grant::new(all(), all()));
 	let mut server = moq_tokio::listen::Config::default();
 	server.extensions.solicit = false;
-	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
 	let mut config = moq_tokio::connect::Config::default();
 	config.version = vec!["moq-transport-22".parse().unwrap()];

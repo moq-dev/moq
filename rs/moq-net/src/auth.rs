@@ -2008,8 +2008,9 @@ struct Held {
 	/// The request this grant must keep covering: a replacement that no longer does ends it.
 	path: crate::Path,
 	kind: RequestKind,
-	/// The request's slot, shared with a renewal's verification.
-	hold: Option<Hold>,
+	/// The request's slot, kept while the grant lives. A renewal's verification holds the slot
+	/// its caller names, see [`RequestGrant::verify_renewal`].
+	_hold: Option<Hold>,
 	/// The token of the renewal being verified, until the serve loop applies its verdict.
 	renewing: Option<kio::Shared<Issue>>,
 	clock: crate::time::Deadlines,
@@ -2096,7 +2097,7 @@ impl RequestGrant {
 			deadline,
 			path,
 			kind,
-			hold,
+			_hold: hold,
 			renewing: None,
 			clock: clock.clone(),
 			epoch: 1,
@@ -2117,14 +2118,19 @@ impl RequestGrant {
 	/// The request's slot, for re-attaching what it authorized without taking another.
 	#[cfg(test)]
 	pub(crate) fn hold(&self) -> Option<Hold> {
-		self.held().hold.clone()
+		self.held()._hold.clone()
 	}
 
-	/// Start verifying a renewal's token, holding the request's slot while it runs.
-	pub(crate) fn verify_renewal(&self, handle: &Link, token: crate::setup::Token) -> RequestVerdict {
-		let mut held = self.held();
-		let verdict = handle.verify_request(token, held.hold.clone());
-		held.renewing = verdict.issue.clone();
+	/// Start verifying a renewal's token, holding `hold` while it runs. Until the serve loop
+	/// applies a granted renewal, it takes over rather than the request ending between the two.
+	pub(crate) fn verify_renewal(
+		&self,
+		handle: &Link,
+		token: crate::setup::Token,
+		hold: Option<Hold>,
+	) -> RequestVerdict {
+		let verdict = handle.verify_request(token, hold);
+		self.held().renewing = verdict.issue.clone();
 		verdict
 	}
 
@@ -2280,7 +2286,7 @@ impl RequestBinding {
 
 	pub(crate) fn verify(&self, handle: &Link, token: crate::setup::Token) -> RequestVerdict {
 		match &*self.token.read() {
-			Some(grant) => grant.verify_renewal(handle, token),
+			Some(grant) => grant.verify_renewal(handle, token, self.hold.clone()),
 			None => handle.verify_request(token, self.hold.clone()),
 		}
 	}
@@ -2571,9 +2577,14 @@ impl Gate {
 		self.handle.token_decides(self.direction)
 	}
 
-	/// Verify an incoming request's token against the local acceptor.
+	/// Verify an incoming request's token against the local acceptor, holding `hold` while it
+	/// runs. Once a token bound the gate, another is verified as that grant's renewal, so a
+	/// granted replacement takes over rather than the old grant ending before it is admitted.
 	pub(crate) fn verify(&self, token: crate::setup::Token, hold: Option<Hold>) -> RequestVerdict {
-		self.handle.verify_request(token, hold)
+		match &self.token {
+			Some(grant) => grant.verify_renewal(&self.handle, token, hold),
+			None => self.handle.verify_request(token, hold),
+		}
 	}
 
 	/// What the session allows in this gate's direction, once it may have changed since `epoch`.
@@ -3594,6 +3605,32 @@ mod request_token_tests {
 		assert!(gate.poll_permit(&mut epoch, &kio::Waiter::noop()).is_pending());
 	}
 
+	/// A gate its token bound verifies another token as that grant's renewal: one the acceptor
+	/// granted takes over, rather than the old grant lapsing before the gate admits it.
+	#[kio::test]
+	async fn a_bound_gate_hands_over_to_a_granted_replacement() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		handle.handle().authorize(&Grant::all());
+		let mut requests = handle.handle().requests();
+		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
+		let verdict = gate.verify(token(b"jwt", 0), None);
+		let _issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
+		let answer = verdict.grant().await;
+		gate.admit(&runtime, (verdict, answer)).unwrap();
+
+		let renewal = gate.verify(token(b"jwt2", 0), None);
+		let _issued2 = requests.next().await.unwrap().accept(grant_in(&runtime, 600));
+		kio::clock::sleep(Duration::from_secs(61)).await;
+		let pending = kio::wait(|waiter| Poll::Ready(gate.poll_token_ended(waiter).is_pending())).await;
+		assert!(pending, "the old grant lapsed ahead of its granted replacement");
+
+		let answer = renewal.grant().await;
+		gate.admit(&runtime, (renewal, answer)).unwrap();
+		let pending = kio::wait(|waiter| Poll::Ready(gate.poll_token_ended(waiter).is_pending())).await;
+		assert!(pending, "the replacement holds the gate");
+	}
+
 	/// A request guarded by a grant it names only later, such as with an update's first
 	/// token, ends with that grant even while its body is stuck at an await.
 	#[kio::test]
@@ -4075,7 +4112,7 @@ mod request_token_tests {
 		)
 		.unwrap();
 
-		let renewal = request_grant.verify_renewal(&handle, token(b"jwt2", 0));
+		let renewal = request_grant.verify_renewal(&handle, token(b"jwt2", 0), None);
 		let second = grant_in(&runtime, 600);
 		let second_expires = second.expires;
 		let _issued2 = requests.next().await.unwrap().accept(second);
