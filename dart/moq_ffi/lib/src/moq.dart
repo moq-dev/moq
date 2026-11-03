@@ -9886,9 +9886,15 @@ class MoqRateControl implements MoqRateControlInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqRateControlFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqratecontrol(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqratecontrol(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqRateTarget target() {
