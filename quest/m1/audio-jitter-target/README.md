@@ -27,7 +27,12 @@ every viewer, so `"auto"` shipped ahead of the Chrome and Safari proof the
 Watch quest still owes; the maintainer accepted that, and the re-measured
 replay budgets, on 2026-10-04. Decided 2026-10-13: retain the remaining proof in m1 because the A/V
 clock and worker release contracts depend on it. Native quality expansion
-remains separately scoped in m2.
+remains separately scoped in m2, except native time-stretch: decided
+2026-11-03 (maintainer, on
+[moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679)), `moq play`
+copies NetEq's stretch in m1 as
+[Native stretch](/quest/m1/audio-jitter-target/native-stretch.md), sharing
+one algorithm and its vectors with the browser's.
 
 What the line still owes once Watch lands: its recorded trace replayed through
 the native decode path too, asserting the same target series the browser's

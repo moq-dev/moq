@@ -6,8 +6,7 @@
 received audio, as WebRTC NetEq does, instead of running its ring dry and
 padding with silence or trimming buffered audio. `moq play`'s native rows in
 `test/audio-quality` reach zero underruns once the target settles. The
-stretch shares one algorithm and one set of test vectors with the browser's
-in [Watch](/quest/m1/audio-jitter-target/watch.md).
+stretch shares one algorithm and one set of test vectors with the browser's.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is
 still missing audio; only received audio is stretched. The estimator
@@ -24,8 +23,12 @@ what NetEQ does"), milestone:
 - ✅ m1, in this epic
 - m2
 
-The browser half moved into m1 on #7679, which scopes native playback out of
-[Watch](/quest/m1/audio-jitter-target/watch.md). This is the native half.
+This is the native half. The browser half is
+[Time stretch](/quest/m2/watch-audio-time-stretch.md) on `main` today;
+#7679, still open, folds it into
+[Watch](/quest/m1/audio-jitter-target/watch.md) in m1 and scopes native
+playback out of Watch. Wherever the browser stretch lives when this starts,
+it shares the algorithm and vectors below.
 Today the native ring (`rs/moq-audio/src/ring.rs`) pads a dry ring with
 silence back up to its latency and trims when the writer runs ahead, so
 jitter and drift cost a glitch.
@@ -50,7 +53,7 @@ NetEq's thresholds and change one only with a measurement:
 WebRTC is BSD-3-Clause; keep its notice with any code ported from it.
 
 **Share with JS.** Like the estimator, the stretch is specified once and
-implemented in both languages. Whichever of this quest and Watch lands first
+implemented in both languages. Whichever of this quest and the browser stretch lands first
 adds the stretch to `doc/concept/audio-jitter.md` (normative), with test
 vectors beside the [conformance corpus](/doc/concept/audio-jitter.md):
 input PCM, a requested accelerate or expand, and the expected output. The
@@ -71,4 +74,5 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser stretch sharing this algorithm and its vectors
+- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - the browser stretch sharing this algorithm and its vectors, which #7679 folds into Watch
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, and the browser stretch's home once #7679 lands
