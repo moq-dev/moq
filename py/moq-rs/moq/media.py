@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any, cast
 
 from moq_ffi import MoqAudio as Audio
@@ -54,7 +54,7 @@ from moq_ffi import (
 
 from . import subscribe as _subscribe
 from ._read import End, Gap, _end, _gap
-from ._records import Frame, Subscription, _from_us, _subscription
+from ._records import Frame, Subscription, Timestamp, _subscription
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
@@ -111,12 +111,12 @@ class MediaFrame:
     """A container-decoded payload, presentation timestamp, and keyframe flag."""
 
     payload: bytes
-    timestamp: timedelta
+    timestamp: Timestamp
     keyframe: bool
 
     @staticmethod
     def _from_ffi(frame: MoqMediaFrame) -> MediaFrame:
-        return MediaFrame(frame.payload, _from_us(frame.timestamp_us), frame.keyframe)
+        return MediaFrame(frame.payload, Timestamp._from_ffi(frame.timestamp), frame.keyframe)
 
 
 Read = MediaFrame | Gap | End
@@ -129,9 +129,9 @@ class CatalogProducer:
     def __init__(self, broadcast: BroadcastProducer) -> None:
         self._inner = MoqMediaCatalogProducer(broadcast._inner)
 
-    def now(self) -> timedelta:
+    def now(self) -> Timestamp:
         """Read the broadcast clock, fixing it for subsequent media producers."""
-        return _from_us(self._inner.now())
+        return Timestamp._from_ffi(self._inner.now())
 
     def set_video_properties(self, properties: VideoProperties) -> None:
         """Replace the video properties shared by every rendition."""
@@ -168,9 +168,20 @@ class TrackProducer:
         return cls(MoqMediaTrackProducer.audio(broadcast._inner, target._ffi(), init))
 
     @classmethod
-    def video(cls, broadcast: BroadcastProducer, init: VideoInit, *, target: Target = Named()) -> TrackProducer:
-        """Import complete encoded video frames on a named or requested track."""
-        return cls(MoqMediaTrackProducer.video(broadcast._inner, target._ffi(), init))
+    def video(
+        cls,
+        broadcast: BroadcastProducer,
+        init: VideoInit,
+        *,
+        target: Target = Named(),
+        lower: TrackProducer | None = None,
+    ) -> TrackProducer:
+        """Import complete encoded video frames on a named or requested track.
+
+        Pass ``lower``, the next lower rendition of the same source, to publish this
+        track one priority below it, so a bandwidth allocator funds that one first.
+        """
+        return cls(MoqMediaTrackProducer.video(broadcast._inner, target._ffi(), _lower(init, lower)))
 
     def __init__(self, inner: MoqMediaTrackProducer) -> None:
         self._inner = inner
@@ -179,13 +190,22 @@ class TrackProducer:
         """A watch-only handle to whether this media track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta) -> None:
+    def write_frame(self, payload: bytes, timestamp: Timestamp) -> None:
         """Write one encoded frame with a presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
     def discontinuity(self) -> None:
         """Mark a timeline break, preserving the advertised jitter and delay."""
         self._inner.discontinuity()
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Advertise whether this video rendition is being produced, as its catalog ``enabled``.
+
+        Disable it when its sender stops for lack of bandwidth and mark a
+        :meth:`discontinuity`; enable it again just before the keyframe that
+        resumes it. An audio track refuses.
+        """
+        self._inner.set_enabled(enabled)
 
     def cut(self) -> None:
         """Draw a group boundary here.
@@ -254,9 +274,19 @@ class TrackStreamProducer:
     """
 
     @classmethod
-    def video(cls, broadcast: BroadcastProducer, init: VideoInit, *, target: Target = Named()) -> TrackStreamProducer:
-        """Import a video byte stream, inferring frame boundaries."""
-        return cls(MoqMediaTrackStreamProducer.video(broadcast._inner, target._ffi(), init))
+    def video(
+        cls,
+        broadcast: BroadcastProducer,
+        init: VideoInit,
+        *,
+        target: Target = Named(),
+        lower: TrackProducer | None = None,
+    ) -> TrackStreamProducer:
+        """Import a video byte stream, inferring frame boundaries.
+
+        ``lower`` is as for :meth:`TrackProducer.video`.
+        """
+        return cls(MoqMediaTrackStreamProducer.video(broadcast._inner, target._ffi(), _lower(init, lower)))
 
     def __init__(self, inner: MoqMediaTrackStreamProducer) -> None:
         self._inner = inner
@@ -272,6 +302,14 @@ class TrackStreamProducer:
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
+
+
+def _lower(init: VideoInit, lower: TrackProducer | None) -> VideoInit:
+    if lower is None:
+        return init
+    init = copy.copy(init)
+    init.lower = lower._inner
+    return init
 
 
 def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
@@ -312,9 +350,9 @@ class TrackConsumer(_Stream[Read]):
         if isinstance(value, MoqMediaRead.FRAME):
             return MediaFrame._from_ffi(value.frame)
         if isinstance(value, MoqMediaRead.GAP):
-            return _gap(value.timestamp_us, value.duration)
+            return _gap(value.timestamp, value.duration)
         if isinstance(value, MoqMediaRead.END):
-            return _end(value.end_us)
+            return _end(value.end)
         raise TypeError(f"unknown media read: {value!r}")
 
     def cancel(self) -> None:

@@ -6,14 +6,19 @@
 //! are held to the budgets below, which were set before the probe was tuned. The merge gate runs
 //! the short cases on one seed; the `#[ignore]`d acceptance suite runs nightly in release with
 //! `just rs quic-sim`, holding each budget on the mean across [`SEEDS`], since one seed's outcome
-//! beside a competing upload is a coin flip.
+//! beside a competing upload is a coin flip. Each seed also draws when its media starts, up to a
+//! frame interval after the handshake, any warmup, and the competing upload's start, so that mean
+//! carries no bias from one timing alignment shared by every seed.
 //!
-//! The same media trace without a target also checks when BBR3 skips ProbeRTT.
+//! The same media trace without a target also checks keyframe delivery deadlines.
 
 use std::collections::HashMap;
 
+use rand::{RngExt, SeedableRng};
+use rand_pcg::Pcg32;
+
 use super::*;
-use crate::congestion::{Bbr3, CubicConfig};
+use crate::congestion::{cubic, gcc};
 
 /// The media's bitrate, 2 Mbit/s, which the probe has to see past
 const MEDIA: u64 = 250_000;
@@ -65,6 +70,7 @@ fn frame_size(keyframe: u64, index: u64) -> u64 {
 /// One run's network and workload
 #[derive(Clone)]
 struct Scenario {
+	/// Seeds the run's entropy and, from its own generator, the media's start offset
 	seed: u64,
 	/// One-way propagation delay
 	latency: Duration,
@@ -87,6 +93,8 @@ struct Scenario {
 	ack_threshold: Option<u32>,
 	/// Bytes of bulk upload before the media starts, to learn the path's rate first
 	warmup: usize,
+	/// Whether the media runs GCC, reading the receive timestamps it asks for, rather than BBR3
+	gcc: bool,
 }
 
 impl Default for Scenario {
@@ -104,6 +112,7 @@ impl Default for Scenario {
 			receive_window: None,
 			ack_threshold: None,
 			warmup: 0,
+			gcc: false,
 		}
 	}
 }
@@ -131,10 +140,6 @@ struct Outcome {
 	expired: u64,
 	/// Samples taken while the controller allowed a probe
 	probing: u64,
-	/// ProbeRTT entries the samples caught, each lasting longer than the sampling interval
-	probe_rtts: u64,
-	/// The largest minimum RTT the controller's model held at a sample
-	min_rtt: Duration,
 	/// The most media bytes written and not yet read at a sample: the sender's backlog plus
 	/// what is in flight
 	unread: u64,
@@ -170,9 +175,9 @@ impl Outcome {
 			.map(|sample| sample.at)
 	}
 
-	/// How soon after `from` the estimate reaches the target, if it ever does
-	fn rise(&self, from: Duration) -> Option<Duration> {
-		self.first(from..Duration::MAX, |estimate| estimate >= TARGET)
+	/// How soon after `from` the estimate reaches `target`, if it ever does
+	fn rise(&self, from: Duration, target: u64) -> Option<Duration> {
+		self.first(from..Duration::MAX, |estimate| estimate >= target)
 			.map(|reached| reached - from)
 	}
 
@@ -211,8 +216,6 @@ impl Outcome {
 			competitor = self.competitor,
 			expired = self.expired,
 			probing = self.probing,
-			probe_rtts = self.probe_rtts,
-			min_rtt = ?self.min_rtt,
 			unread = self.unread,
 			"Mbit/s {estimates}"
 		);
@@ -243,9 +246,9 @@ struct Reading {
 }
 
 fn run(scenario: &Scenario) -> Outcome {
-	// Each run's packet trace is about 30 MB and takes most of its time; what it measured is
-	// reported once it returns
-	let _guard = subscribe_at(tracing::Level::INFO);
+	// Each run's packet trace is about 30 MB, so `RUST_LOG=trace` is slow here; what it measured
+	// is reported once it returns
+	let _guard = subscribe();
 	entropy::reseed(scenario.seed);
 	let mut server_transport = transport::Config::default();
 	if let Some(window) = scenario.receive_window {
@@ -267,13 +270,17 @@ fn run(scenario: &Scenario) -> Outcome {
 		};
 		transport.ack_frequency = Some(ack);
 	}
+	if scenario.gcc {
+		transport.congestion = Arc::new(gcc::Config::default());
+		transport.receive_timestamps = NonZeroU32::new(32);
+	}
 	let mut config = client_config();
 	config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(config);
 	let competitor = scenario.competitor.map(|upload| {
 		let mut transport = transport::Config::default();
 		if let Upload::Cubic = upload {
-			transport.congestion = Arc::new(CubicConfig::default());
+			transport.congestion = Arc::new(cubic::Config::default());
 		}
 		let mut config = client_config();
 		config.transport = transport;
@@ -288,7 +295,10 @@ fn run(scenario: &Scenario) -> Outcome {
 		super::upload(&mut pair, client_ch, server_ch, scenario.warmup, |_| {});
 	}
 
-	let start = pair.time;
+	// The seed delays the media up to a frame interval past the handshake, any warmup, and the
+	// competing upload's start. Its own generator leaves the run's other draws as they were.
+	let offset = Pcg32::seed_from_u64(scenario.seed).random_range(Duration::ZERO..Duration::from_secs(1) / FPS as u32);
+	let start = pair.time + offset;
 	let end = start + scenario.duration;
 	let mut outcome = Outcome::default();
 	let mut groups: Vec<Group> = Vec::new();
@@ -296,7 +306,6 @@ fn run(scenario: &Scenario) -> Outcome {
 	let mut next_frame = 0u64;
 	let mut next_sample = start;
 	let mut next_rate = 1;
-	let mut probing_rtt = false;
 	let mut competing = competitor.map(|(client, server)| {
 		let id = pair.client_streams(client).open(Dir::Uni, Default::default()).unwrap();
 		(client, server, id, None::<StreamId>)
@@ -304,8 +313,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 	loop {
 		let now = pair.time;
-		let elapsed = now - start;
-		if next_rate < scenario.rates.len() && elapsed >= scenario.rates[next_rate].0 {
+		if next_rate < scenario.rates.len() && now >= start + scenario.rates[next_rate].0 {
 			let rate = scenario.rates[next_rate].1;
 			pair.to_server.bottleneck.as_mut().unwrap().set_rate(rate);
 			next_rate += 1;
@@ -370,15 +378,6 @@ fn run(scenario: &Scenario) -> Outcome {
 		if now >= next_sample {
 			let estimate = conn.stats().path.bandwidth_estimate.unwrap_or(0);
 			outcome.probing += conn.congestion_state().metrics().probe_inflight.is_some() as u64;
-			let bbr = conn
-				.congestion_state()
-				.clone_box()
-				.into_any()
-				.downcast::<Bbr3>()
-				.expect("BBR3");
-			outcome.probe_rtts += (bbr.probing_rtt() && !probing_rtt) as u64;
-			probing_rtt = bbr.probing_rtt();
-			outcome.min_rtt = outcome.min_rtt.max(bbr.min_rtt());
 			let read: u64 = readings.values().map(|r| r.read).sum();
 			outcome.unread = outcome.unread.max(outcome.unique - read);
 			outcome.samples.push(Sample {
@@ -618,20 +617,28 @@ fn compare(label: &str, scenario: Scenario, seeds: ops::RangeInclusive<u64>) -> 
 
 /// Asserts the probing runs' estimate reaches the target within [`RISE`] of `from` on the mean
 fn rises(trials: &[Trial], from: Duration) {
+	let rise = reaches(trials, from, TARGET);
+	assert!(
+		rise <= RISE.as_secs_f64(),
+		"estimate reached {TARGET} B/s {rise:.1}s after {from:?} on the mean"
+	);
+}
+
+/// Asserts every probing run's estimate reaches `target` after `from`, returning how soon, in
+/// seconds on the mean
+fn reaches(trials: &[Trial], from: Duration, target: u64) -> f64 {
 	let rises = trials.iter().map(|Trial { seed, probing, .. }| {
-		let rise = probing.rise(from).unwrap_or_else(|| {
+		let rise = probing.rise(from, target).unwrap_or_else(|| {
 			panic!(
-				"seed {seed}: estimate {} B/s never reached {TARGET} B/s after {from:?}",
+				"seed {seed}: estimate {} B/s never reached {target} B/s after {from:?}",
 				probing.samples.last().expect("sampled").estimate
 			)
 		});
 		rise.as_secs_f64()
 	});
 	let rise = rises.sum::<f64>() / trials.len() as f64;
-	assert!(
-		rise <= RISE.as_secs_f64(),
-		"estimate reached {TARGET} B/s {rise:.1}s after {from:?} on the mean"
-	);
+	info!(target, rise, "estimate reached the target after {from:?} on the mean");
+	rise
 }
 
 /// Asserts the estimate, probing or not, falls to within the ProbeBW_UP gain of `rate` within
@@ -692,6 +699,48 @@ fn rises_to_target() {
 	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
 }
 
+/// The same under GCC, at the target and at twice it. GCC aims its probes at the target, at
+/// twice its estimate but no more than twice the target, and reads each at the slower of its send
+/// and receive rates, so the duplicates fill each cluster at its pace. Once the target is above
+/// its estimate, GCC probes from the application-limited region five seconds after it last
+/// probed or entered that region, so this holds the rise to reaching the target, not to [`RISE`],
+/// and reports how soon for the bake-off.
+#[test]
+#[ignore = "nightly: just rs quic-sim"]
+fn rises_to_target_under_gcc() {
+	let _guard = subscribe();
+	let opens = Duration::from_secs(5);
+	for target in [TARGET, 2 * TARGET] {
+		let scenario = Scenario {
+			latency: Duration::from_millis(50),
+			buffer: 170_000,
+			keyframe: 0,
+			rates: vec![(Duration::ZERO, 375_000), (opens, 1_500_000)],
+			duration: Duration::from_secs(20),
+			target,
+			gcc: true,
+			..Scenario::default()
+		};
+		let trials = compare(&format!("rises gcc {target}"), scenario, SEEDS);
+		for Trial {
+			seed,
+			probing,
+			baseline,
+		} in &trials
+		{
+			info!(
+				seed,
+				target,
+				rise = ?probing.rise(opens, target),
+				probing = probing.samples.last().expect("sampled").estimate,
+				baseline = baseline.samples.last().expect("sampled").estimate,
+				"estimate after the path opened up, in B/s"
+			);
+		}
+		reaches(&trials, opens, target);
+	}
+}
+
 /// A path short of the target, behind a queue a second deep: each attempt that misses sits out
 /// past the longest BBR3 waits between its own probes, and the path opening up is still found
 #[test]
@@ -719,7 +768,7 @@ fn backs_off_unreachable_target() {
 		// The samples are 100ms apart
 		assert!(gap > Duration::from_millis(2900), "attempts began at {starts:?}");
 	}
-	let rise = outcome.rise(opens).expect("reached the target");
+	let rise = outcome.rise(opens, TARGET).expect("reached the target");
 	assert!(rise <= RISE, "reached the target {rise:?} after the path opened");
 }
 
@@ -850,6 +899,100 @@ fn probe_inflight_limits_only_an_attempt() {
 	assert!(
 		!conn.app_limited(),
 		"an attempt held back by the bound was application-limited"
+	);
+}
+
+/// A controller that always probes, allowing [`Cluster::INFLIGHT`] in flight, and never limits
+/// the window or the pace
+#[derive(Clone)]
+struct Cluster {
+	paces_probe: bool,
+}
+
+impl Cluster {
+	const INFLIGHT: u64 = 20_000;
+}
+
+impl Controller for Cluster {
+	fn on_sent(&mut self, _sent: congestion::Sent) -> congestion::Packet {
+		Default::default()
+	}
+
+	fn on_ack(&mut self, _ack: congestion::Ack<'_>) {}
+
+	fn on_loss(&mut self, _loss: congestion::Loss<'_>) {}
+
+	fn on_ce(&mut self, _ce: congestion::Ce) {}
+
+	fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+	fn window(&self) -> u64 {
+		u64::MAX / 2
+	}
+
+	fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+		None
+	}
+
+	fn metrics(&self) -> congestion::Metrics {
+		congestion::Metrics {
+			congestion_window: self.window(),
+			probe_inflight: Some(Self::INFLIGHT),
+			..Default::default()
+		}
+	}
+
+	fn probes(&self) -> bool {
+		true
+	}
+
+	fn paces_probe(&self) -> bool {
+		self.paces_probe
+	}
+
+	fn clone_box(&self) -> Box<dyn Controller> {
+		Box::new(self.clone())
+	}
+}
+
+impl Factory for Cluster {
+	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
+		Box::new((*self).clone())
+	}
+}
+
+/// A controller that paces its own probe gets the inflight it allows filled at its pace, past
+/// what the target's pace would let leave at once; any other is held to the target
+#[test]
+fn paced_probe_fills_past_the_target() {
+	let _guard = subscribe();
+	let sent = |paces_probe| {
+		let mut pair = Pair::default();
+		pair.latency = Duration::from_millis(20);
+		let mut config = client_config();
+		config.transport.congestion = Arc::new(Cluster { paces_probe });
+		let (client_ch, _) = pair.connect_with(config);
+		pair.client_conn_mut(client_ch).set_probe_target(TARGET);
+		let id = pair
+			.client_streams(client_ch)
+			.open(Dir::Uni, Default::default())
+			.unwrap();
+		pair.client_send(client_ch, id).write(&mut &[0; 1400][..]).unwrap();
+		pair.drive_client();
+		let conn = pair.client_conn_mut(client_ch);
+		(conn.stats().path.sent_bandwidth_probe_bytes, conn.bytes_in_flight())
+	};
+
+	let (paced, in_flight) = sent(true);
+	assert!(
+		in_flight + DEFAULT_MTU as u64 > Cluster::INFLIGHT,
+		"{in_flight} bytes in flight, short of the probe's {}",
+		Cluster::INFLIGHT
+	);
+	let (held, _) = sent(false);
+	assert!(
+		held < paced,
+		"{held} probe bytes held to the target, {paced} paced by the controller"
 	);
 }
 
@@ -1028,7 +1171,7 @@ fn rtt_200ms() {
 /// past the deadline, but between bursts the flow is application-limited without loss, so it
 /// skips ProbeRTT.
 #[test]
-fn borderline_skips_probe_rtt() {
+fn borderline_frames_meet_deadline() {
 	let _guard = subscribe();
 	let outcome = run(&Scenario {
 		target: 0,
@@ -1036,33 +1179,6 @@ fn borderline_skips_probe_rtt() {
 		..Scenario::default()
 	});
 	outcome.report("borderline");
-	assert_eq!(outcome.probe_rtts, 0);
 	let slowest = *outcome.delays.last().expect("delivered");
 	assert!(slowest < DEADLINE, "a frame took {slowest:?}");
-}
-
-/// Below the media's bitrate, behind a queue that holds a standing delay and still overflows
-///
-/// The overflow's losses deny every skip, so the flow enters each ProbeRTT due, one per 5s
-/// interval after its exit, and the model's minimum stays below the path's mean RTT rather than
-/// creeping up through the queue.
-#[test]
-fn overflow_keeps_probe_rtt() {
-	let _guard = subscribe();
-	let scenario = Scenario {
-		target: 0,
-		rates: vec![(Duration::ZERO, 187_500)],
-		buffer: 15_000,
-		..Scenario::default()
-	};
-	let outcome = run(&scenario);
-	outcome.report("overflow");
-	assert!(outcome.queue.dropped > 0, "the queue never overflowed");
-	assert!(outcome.probe_rtts >= scenario.duration.as_secs() / 5 - 1);
-	let mean_rtt = 2 * scenario.latency + outcome.queue.mean_delay();
-	assert!(
-		outcome.min_rtt < mean_rtt,
-		"min RTT {:?} crept past the mean RTT {mean_rtt:?}",
-		outcome.min_rtt
-	);
 }

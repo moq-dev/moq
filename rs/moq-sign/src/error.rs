@@ -6,9 +6,9 @@ pub enum Error {
 	#[error("signature")]
 	Signature,
 
-	/// The broadcast was not resolved through a route that names its publisher epoch.
-	#[error("epoch")]
-	Epoch,
+	/// The broadcast was not resolved through a route that carries its publisher's instance.
+	#[error("instance")]
+	Instance,
 
 	/// The underlying MoQ broadcast, track, or group failed.
 	#[error(transparent)]

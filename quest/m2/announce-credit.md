@@ -14,7 +14,7 @@ unpublished lite version after lite-07.
 ## Plan
 
 Decided 2026-11-01 with the maintainer (the follow-up to the
-[sockets](/quest/m2/socket/README.md) interview):
+[sockets](/quest/m1/socket/README.md) interview):
 
 - Backpressure is fixed at the wire, not by a local cap. The draft already
   tells implementations to limit matching broadcasts but gives the subscriber
