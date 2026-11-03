@@ -156,12 +156,15 @@ def capture(pid, directory, delay, duration):
             stat.command("disable")
             record.command("disable")
             time.sleep(delay)
-            record.command("enable")
+            # Sampling interrupts run as the relay's kernel instructions, and their cost
+            # follows its stack depth, so the stacks come from the next window instead.
             start = stat.command("enable")
             load = [host_load()]
             time.sleep(duration)
             end = stat.command("disable")
             load.append(host_load())
+            record.command("enable")
+            time.sleep(duration)
             record.command("disable")
     finally:
         errors = []

@@ -71,7 +71,7 @@ metadata = {
     else None,
     "workload": None
     if mode == "--criterion"
-    else {"startup": "2s", "duration": "10s", "report": "500ms", "instructions_duration": "14s"},
+    else {"startup": "2s", "duration": "10s", "report": "500ms", "instructions_duration": "19s"},
 }
 (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 subprocess.run(

@@ -325,12 +325,17 @@ On the profiling host, a 1,000 Hz limit throttled every sample even at a period
 of 10,000,019. Temporarily raising `kernel.perf_event_max_sample_rate` to 100,000
 allowed complete captures. Save and restore the original setting around the
 whole gated run; the driver records the observed limit and changes no sysctls.
-The host sampler lasts fourteen seconds so delivery reports bracket both edges.
+The host sampler lasts nineteen seconds so delivery reports bracket both edges
+and the sampling window that follows.
 The normal `summary.json` still describes its own final throughput window;
 use `instructions.json` for instruction comparisons.
 
 `BENCH_INSTRUCTION_PERIOD` defaults to 1,000,003 retired instructions per sample.
-The fixed-period recording encloses the counter window; `instructions.folded`
+The fixed-period recording covers the five seconds after the counter window,
+not the window itself: each sampling interrupt runs as the relay's kernel
+instructions, at a cost that follows its stack depth, so at 2,000,003 it added
+about 28k instructions per frame to one relay and the kernel lowered its sample
+rate limit. Scale stacks by their share of samples. `instructions.folded`
 weights each stack by that period. `perf.data`, raw `stat.json`, `perf.log`,
 thread names, CPU sets, and delivery reports remain with the evidence. Both
 counters and samples cover only the relay. Compare equivalent delivery and loss.
