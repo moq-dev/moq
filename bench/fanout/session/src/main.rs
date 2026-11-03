@@ -8,10 +8,14 @@
 use std::hint::black_box;
 
 use bytes::Bytes;
-use moq_net::{Client, Hop, Server, Timestamp, Version, origin, transport::memory};
+use moq_net::{Client, Hop, Server, Timestamp, Version, cache, origin, transport::memory};
 
+/// An origin whose cache holds what the model scenario's does, so neither the relay's nor a
+/// viewer's grows with the groups a run delivers.
 fn origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	config.pool = cache::Pool::new(cache::Config::default().with_capacity(64 * 1024));
+	let (producer, driver) = origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
 	producer
 }
@@ -83,6 +87,9 @@ fn main() {
 				black_box(group.read_frame().await.unwrap().expect("a frame"));
 			}
 		}
-		black_box((ingest, audience, broadcast));
+		// Left standing: their teardown grows with what they delivered, which the zero-cycle
+		// run would not subtract.
+		std::mem::forget((ingest, audience, broadcast, relay, publisher));
 	});
+	std::process::exit(0);
 }

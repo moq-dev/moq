@@ -37,5 +37,7 @@ fn main() {
 			assert!(matches!(s.poll_recv_group(w), Poll::Pending));
 		}
 	}
-	black_box(&broadcast);
+	// Left standing, so teardown stays out of the count.
+	std::mem::forget((broadcast, track, subs));
+	std::process::exit(0);
 }
