@@ -14,7 +14,6 @@ import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
-import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
@@ -699,11 +698,6 @@ export const hooks: {
 	stampUnlisted: (target: BroadcastConsumer) => void;
 	/** Whether a broadcast handle was {@link stampUnlisted marked unlisted}. */
 	unlisted: (target: BroadcastConsumer) => boolean;
-	/**
-	 * Resolve a session-forwarded request with its peer's routed broadcast. An application
-	 * claim answers through `prepare` and `publish` instead. Assigned by `origin.ts`.
-	 */
-	acceptRequest: (request: OriginRequest, source: BroadcastProducer | BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
@@ -963,9 +957,6 @@ export const hooks: {
 	},
 	unlisted: () => {
 		throw new Error("broadcast.ts not loaded");
-	},
-	acceptRequest: () => {
-		throw new Error("origin.ts not loaded");
 	},
 };
 
