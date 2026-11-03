@@ -27,8 +27,8 @@ private func assertTimeOverflow<T>(
 
 final class SmokeTests: XCTestCase {
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
-        XCTAssertEqual(Subscription.default.maxDelay, 0)
-        XCTAssertNil(Subscription(maxDelay: nil).maxDelay)
+        XCTAssertEqual(Subscription.default.delay.min, 0)
+        XCTAssertEqual(Subscription.default.delay.max, 0)
     }
 
     func testContainerTimebaseBelongsToOneBroadcast() throws {
@@ -71,7 +71,7 @@ final class SmokeTests: XCTestCase {
         }
         let consumer = try track.consume(
             subscription: Subscription(
-                maxDelay: 10,
+                delay: Delay(min: 0, max: 10),
                 ranges: [Subscription.Range(start: .relative(groups: 2))],
                 order: .ascending
             ))
@@ -709,7 +709,7 @@ final class SmokeTests: XCTestCase {
 
         let fixed = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32, delay: Media.Delay(min: 0.08, max: 0), estimate: false)
+            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0.08, max: 0), estimate: false)
         )
         let estimated = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
