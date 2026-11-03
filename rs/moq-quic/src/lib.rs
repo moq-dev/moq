@@ -13,6 +13,14 @@
 
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(dead_code, reason = "test builds compile helpers only some tests call"))]
+#![cfg_attr(
+	not(any(feature = "aws-lc-rs", feature = "ring")),
+	allow(
+		dead_code,
+		unused_imports,
+		reason = "without a crypto provider only the mux connection is reachable"
+	)
+)]
 
 use std::{
 	net::{IpAddr, SocketAddr},
@@ -35,7 +43,7 @@ mod range_set;
 pub mod sim;
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 mod tests;
-pub mod transport_parameters;
+mod transport_parameters;
 mod varint;
 
 pub use varint::{VarInt, VarIntBoundsExceeded};
@@ -44,9 +52,7 @@ mod bloom_token_log;
 use bloom_token_log::BloomTokenLog;
 
 pub mod connection;
-pub use crate::connection::{
-	CreditStats, Datagrams, Event, FrameStats, PathStats, ShouldTransmit, StreamEvent, Streams, UdpStats, recv, send,
-};
+pub use crate::connection::{CreditStats, Datagrams, Event, FrameStats, PathStats, Streams, UdpStats, recv, send};
 
 pub mod stream;
 #[cfg(feature = "mux")]
@@ -54,7 +60,7 @@ pub mod stream;
 pub use connection::mux;
 pub(crate) use stream::{Dir, Id as StreamId};
 
-#[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
+// The configs take and report rustls types, so callers name the same version.
 pub use rustls;
 
 mod config;

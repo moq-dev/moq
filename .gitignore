@@ -13,6 +13,10 @@
 /.claude/cache/
 /.claude/tmp/
 /.claude/worktrees/
+# quest's own checkouts (`quest worktree create`, /quest-spawn, and its Claude
+# Code worktree hooks) live under the main checkout's .worktrees/, for the same
+# reason.
+/.worktrees/
 
 # Per-checkout scratch output, such as benchmark logs and agent notes.
 /.tmp/

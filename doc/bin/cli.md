@@ -290,7 +290,11 @@ moq ... import capture --audio on                        # encode audio continuo
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera and microphone stay open while publishing, so a late
+backends. An audio device that fails or stops ends the import with its source
+error; restart the command after the device is available again. Audio appears
+in the catalog once its device opens; a microphone permission prompt leaves
+other media available. The camera and
+microphone stay open while publishing, so a late
 subscriber can fetch the recent past. Choose each medium with
 `--video <on|demand|off>` (default `on`) and `--audio <on|demand|off>`
 (default `demand`). `on` encodes for the whole publish, and `off` publishes no
@@ -407,6 +411,10 @@ reachable. A recording still being made is followed, checked every `--refresh`
 stopped early stays live. It refuses a prefix with no recording, or with keys
 `export archive` does not write.
 
+Instances are percent-encoded as one key segment. When passing a stored key in an
+import URL, URL-encode its literal `%` characters too: instance `a/b` records under
+`event/@a%2Fb`, which the import URL names as `s3://recordings/event/@a%252Fb`.
+
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the
 usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables.
@@ -470,8 +478,10 @@ MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
 so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
-`--cluster-api-url`) share `--connect-bind` with `--connect`, and each binds
-it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
+`--cluster-api-url`) bind `--connect-bind`'s address. On port 0, each cluster
+session takes its own ephemeral port, so a redial leaves from a fresh one. A
+fixed port pins every WAN cluster dial to it, while LAN dials still take
+ephemeral ports. `--connect` binds it too, so a fixed `--connect-bind` port with
 both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
 `--connect` (unset `MOQ_CONNECT` if it supplies the URL).
 

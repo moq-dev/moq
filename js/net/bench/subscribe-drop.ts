@@ -27,7 +27,7 @@ try {
 					const broadcast = broadcastPublication.broadcast;
 					broadcastPublication.announce();
 					const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-					for (let sequence = 0; sequence < groups; sequence++) {
+					for (let sequence = 0n; sequence < BigInt(groups); sequence++) {
 						const group = track.createGroup(sequence);
 						group.writeFrame(textFrame("frame"));
 						group.finish();
@@ -61,7 +61,7 @@ try {
 									track: "video",
 									priority: 0,
 									maxDelay: Milli(30_000),
-									startGroup: 0,
+									startGroup: 0n,
 								}),
 								server,
 							);
@@ -73,7 +73,8 @@ try {
 										Version.DRAFT_07,
 									);
 									if (!response) break;
-									if ("drop" in response) dropped += response.drop.end - response.drop.start + 1;
+									if ("drop" in response)
+										dropped += Number(response.drop.end - response.drop.start + 1n);
 								}
 								if (dropped !== groups) throw new Error(`dropped ${dropped}, expected ${groups}`);
 								client.writer.close();

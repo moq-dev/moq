@@ -12,8 +12,8 @@ Mirror [the model](/quest/m1/time-addressing/model.md) and
 increasing starts, the three group ends, reach from a group's own end, and
 `Relative(n)` counting groups. The gap machinery that assumes `sequence + 1`
 (`delivered.ts`, `ledger.ts`, `track.ts`, `resume.ts`) follows
-previous-start links instead. Starts stay JavaScript numbers, so a decoded
-start past 2^53 is refused as today's group IDs are.
+previous-start links instead. Starts are `bigint`, as group IDs already are,
+so they are carried past 2^53 (decided 2026-11-03, maintainer).
 
 The spike found no sparse-ID breakage in direct `@moq/net` sessions over
 lite-06 and lite-07; its relay fills follow Rust's once

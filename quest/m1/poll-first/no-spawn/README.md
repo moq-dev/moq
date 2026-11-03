@@ -57,4 +57,3 @@ binding boundary.
 
 - [The remaining spawns](/quest/m2/spawn-audit.md) - the same rule for every other library crate
 - [Generated async wrappers](/quest/m1/poll-first/async-feature.md) - the poll-first sibling that gates the async layer
-- [Poll-native async in moq-ffi](/quest/m2/ffi-poll-migrate.md) - its PR reworks the moq-ffi task plumbing this epic touches

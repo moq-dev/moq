@@ -27,8 +27,8 @@ private func assertTimeOverflow<T>(
 
 final class SmokeTests: XCTestCase {
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
-        XCTAssertEqual(Subscription.default.maxDelay, 0)
-        XCTAssertNil(Subscription(maxDelay: nil).maxDelay)
+        XCTAssertEqual(Subscription.default.delay.min, 0)
+        XCTAssertEqual(Subscription.default.delay.max, 0)
     }
 
     func testContainerTimebaseBelongsToOneBroadcast() throws {
@@ -71,7 +71,7 @@ final class SmokeTests: XCTestCase {
         }
         let consumer = try track.consume(
             subscription: Subscription(
-                maxDelay: 10,
+                delay: Delay(min: 0, max: 10),
                 ranges: [Subscription.Range(start: .relative(groups: 2))],
                 order: .ascending
             ))
@@ -444,14 +444,15 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.StreamProducer<Event>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
+            broadcast: broadcast,
+            track: try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000)))
         let consumer = try Json.StreamConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "events"))
 
         for n in 0..<3 {
-            try producer.append(Event(n: n))
+            try producer.append(Event(n: n), timestamp: micros(UInt64(n) * 1000))
             let record = try await consumer.next()
-            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestamp: nil))
+            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestamp: micros(UInt64(n) * 1000)))
         }
 
         consumer.cancel()
@@ -498,10 +499,11 @@ final class SmokeTests: XCTestCase {
 
     func testJsonProducersReportDemand() async throws {
         let broadcast = try BroadcastProducer()
+        let timed = TrackInfo(timescale: 1_000_000)
         let snapshot = try Json.SnapshotProducer<[String: Int]>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"))
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "status", info: timed))
         let stream = try Json.StreamProducer<[String: Int]>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events", info: timed))
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")
@@ -709,7 +711,7 @@ final class SmokeTests: XCTestCase {
 
         let fixed = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32, delay: Media.Delay(min: 0.08, max: 0), estimate: false)
+            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0.08, max: 0), estimate: false)
         )
         let estimated = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,

@@ -65,7 +65,9 @@ export interface Config {
 
 	/**
 	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
-	 * group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	 * group's deltas outweigh the track's refresh ratio. Each track's catalog `hls` duration,
+	 * declared when the track is created, bounds its GOPs: a live change past it, including to
+	 * infinite, is capped there until a new track declares again. (default: 2000 milliseconds)
 	 */
 	keyframeInterval?: Milli;
 
@@ -419,12 +421,15 @@ export class Encoder {
 		// The largest group demand asked for that a keyframe already answers, including one still in
 		// the encoder. A join over the refresh ratio asks for one past the largest, which the next frame
 		// opens; any other join is served by a group already written, encoded with or without demand.
-		let answered: number | undefined;
+		let answered: bigint | undefined;
 		const answer = () => {
 			const wanted = demand.wanted.peek();
-			if (wanted !== undefined) answered = Math.max(answered ?? 0, wanted);
+			if (wanted !== undefined && (answered === undefined || wanted > answered)) answered = wanted;
 		};
-		const covered = () => Math.max(answered ?? -1, track.largest()?.group ?? -1);
+		const covered = () => {
+			const largest = track.largest()?.group ?? -1n;
+			return answered !== undefined && answered > largest ? answered : largest;
+		};
 		let tearingDown = false;
 
 		effect.spawn(async () => {
@@ -453,7 +458,7 @@ export class Encoder {
 					producer.encode(frame, frame.timestamp as Micro, key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
-					if (this.#estimator.write(frame.timestamp, order)) {
+					if (this.#estimator.write(frame.timestamp, order, key)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -531,7 +536,11 @@ export class Encoder {
 							}
 							lastEncoded = frame.timestamp as Micro;
 
-							const interval = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							// The catalog's declared duration is the track's longest GOP, fixed when the track
+							// was created, so a live raise past it stops there.
+							const requested = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							const declared = hls?.hls.peek()?.duration;
+							const interval = declared === undefined ? requested : Milli(Math.min(requested, declared));
 
 							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
 							// caller asked for one, or a join wants a group past the largest. No spacing: the

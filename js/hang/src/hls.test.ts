@@ -28,9 +28,9 @@ test("the consumer yields records in microseconds, a stop included", async () =>
 	const { producer, consumer, push, close } = records();
 	push({ sequence: 0, group: 4, pts: 250 });
 	push({ sequence: 1, group: 6, pts: 2250, duration: 0 });
-	expect(await consumer.next()).toEqual({ push: { index: 0, entry: { sequence: 0, group: 4, pts: us(250) } } });
+	expect(await consumer.next()).toEqual({ push: { index: 0, entry: { sequence: 0, group: 4n, pts: us(250) } } });
 	expect(await consumer.next()).toEqual({
-		push: { index: 1, entry: { sequence: 1, group: 6, pts: us(2250), duration: us(0) } },
+		push: { index: 1, entry: { sequence: 1, group: 6n, pts: us(2250), duration: us(0) } },
 	});
 	producer.pop(1, Time.Timestamp.now());
 	expect(await consumer.next()).toEqual({ pop: { start: 0, end: 1 } });
@@ -64,13 +64,13 @@ function drain(segmenter: Segmenter, first = 0): [number, number, number | undef
 }
 
 // Groups `start..end`, one frame each, `step` ms apart.
-function groups(segmenter: Segmenter, start: number, end: number, step: number) {
-	for (let group = start; group < end; group++) segmenter.frame(group, us(group * step));
+function groups(segmenter: Segmenter, start: bigint, end: bigint, step: number) {
+	for (let group = start; group < end; group++) segmenter.frame(group, us(Number(group) * step));
 }
 
 test("long groups get a segment each", () => {
 	const segmenter = new Segmenter();
-	groups(segmenter, 0, 3, 5000);
+	groups(segmenter, 0n, 3n, 5000);
 	expect(drain(segmenter)).toEqual([
 		[0, 0, undefined],
 		[1, 5000, undefined],
@@ -81,7 +81,7 @@ test("long groups get a segment each", () => {
 
 test("short groups pack into a grid cell", () => {
 	const segmenter = new Segmenter();
-	groups(segmenter, 0, 10, 1000);
+	groups(segmenter, 0n, 10n, 1000);
 	expect(drain(segmenter)).toEqual([
 		[0, 0, undefined],
 		[4, 4000, undefined],
@@ -96,7 +96,7 @@ test("a hint declares its smallest multiple at or past the duration", () => {
 
 test("a stopped first segment declares the grid", () => {
 	const segmenter = new Segmenter();
-	groups(segmenter, 0, 2, 1000);
+	groups(segmenter, 0n, 2n, 1000);
 	segmenter.close();
 	expect(segmenter.declared).toBe(DEFAULT_DURATION);
 	expect(drain(segmenter)).toEqual([
@@ -107,7 +107,7 @@ test("a stopped first segment declares the grid", () => {
 
 test("the end extends the stop", () => {
 	const segmenter = new Segmenter(hinted);
-	groups(segmenter, 0, 2, 1000);
+	groups(segmenter, 0n, 2n, 1000);
 	segmenter.end(us(2000));
 	segmenter.close();
 	expect(drain(segmenter)).toEqual([
@@ -115,15 +115,15 @@ test("the end extends the stop", () => {
 		[2, 2000, 0],
 	]);
 	// Nothing reports after the close.
-	segmenter.frame(5, us(9000));
+	segmenter.frame(5n, us(9000));
 	expect(drain(segmenter, 2)).toEqual([]);
 });
 
 test("a skipped sequence stops the segment", () => {
 	const segmenter = new Segmenter(hinted);
-	groups(segmenter, 0, 2, 1000);
+	groups(segmenter, 0n, 2n, 1000);
 	segmenter.end(us(1500));
-	segmenter.frame(5, us(60000));
+	segmenter.frame(5n, us(60000));
 	expect(drain(segmenter)).toEqual([
 		[0, 0, undefined],
 		[2, 1500, 0],
@@ -133,10 +133,10 @@ test("a skipped sequence stops the segment", () => {
 
 test("a stop ends the segment and the next group starts one", () => {
 	const segmenter = new Segmenter(hinted);
-	groups(segmenter, 0, 2, 1000);
+	groups(segmenter, 0n, 2n, 1000);
 	segmenter.end(us(2000));
-	segmenter.stop(2);
-	segmenter.frame(3, us(10000));
+	segmenter.stop(2n);
+	segmenter.frame(3n, us(10000));
 	expect(drain(segmenter)).toEqual([
 		[0, 0, undefined],
 		[2, 2000, 0],
@@ -146,15 +146,15 @@ test("a stop ends the segment and the next group starts one", () => {
 
 test("a report that goes backwards is refused", () => {
 	const segmenter = new Segmenter(hinted);
-	segmenter.frame(3, us(0));
-	segmenter.frame(3, us(10));
-	expect(() => segmenter.frame(2, us(20))).toThrow("group 2 after group 3");
+	segmenter.frame(3n, us(0));
+	segmenter.frame(3n, us(10));
+	expect(() => segmenter.frame(2n, us(20))).toThrow("group 2 after group 3");
 });
 
 test("an uneven GOP cuts on the grid", () => {
 	const segmenter = new Segmenter();
 	// 3s GOPs on a 4s grid: a group starts a segment only in a later cell than the one before.
-	groups(segmenter, 0, 9, 3000);
+	groups(segmenter, 0n, 9n, 3000);
 	expect(drain(segmenter)).toEqual([
 		[0, 0, undefined],
 		[2, 6000, undefined],
@@ -171,8 +171,8 @@ test("a sub-millisecond pts truncates on the wire", () => {
 	// 120 frames of 30000/1001 fps video: a 4004.004 ms grid.
 	const segmenter = new Segmenter({ durationHint: 33366.7 as Micro });
 	expect(segmenter.declared).toBeCloseTo(4_004_004);
-	groups(segmenter, 0, 1, 0);
-	segmenter.frame(1, 4_004_999 as Micro);
+	groups(segmenter, 0n, 1n, 0);
+	segmenter.frame(1n, 4_004_999 as Micro);
 	expect(drain(segmenter)).toEqual([
 		[0, 0, undefined],
 		[1, 4004, undefined],
@@ -209,11 +209,11 @@ test("a recorded legacy track publishes its records and declares its duration", 
 	const entries = [];
 	for await (const event of consumer) if ("push" in event) entries.push(event.push.entry);
 	expect(entries).toEqual([
-		{ sequence: 0, group: 0, pts: us(0) },
-		{ sequence: 1, group: 2, pts: us(4000) },
-		{ sequence: 2, group: 3, pts: us(6000), duration: us(0) },
-		{ sequence: 3, group: 4, pts: us(20000) },
-		{ sequence: 4, group: 6, pts: us(24000), duration: us(0) },
+		{ sequence: 0, group: 0n, pts: us(0) },
+		{ sequence: 1, group: 2n, pts: us(4000) },
+		{ sequence: 2, group: 3n, pts: us(6000), duration: us(0) },
+		{ sequence: 3, group: 4n, pts: us(20000) },
+		{ sequence: 4, group: 6n, pts: us(24000), duration: us(0) },
 	]);
 	broadcast.close();
 });
@@ -222,11 +222,11 @@ test("a report out of order aborts the records but not the media", async () => {
 	const broadcast = new Broadcast.Producer();
 	const records = broadcast.createTrack(defaultName("video"), Recorder.INFO);
 	const recorder = new Recorder(records);
-	recorder.frame(3, us(0));
-	recorder.frame(2, us(10));
+	recorder.frame(3n, us(0));
+	recorder.frame(2n, us(10));
 	expect(records.closed.peek()).toBeInstanceOf(Error);
 	// Later reports are ignored.
-	recorder.frame(4, us(20));
+	recorder.frame(4n, us(20));
 	recorder.finish();
 	broadcast.close();
 });

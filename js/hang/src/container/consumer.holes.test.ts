@@ -23,12 +23,12 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		}
 	})();
 	try {
-		const first = track.createGroup(0);
+		const first = track.createGroup(0n);
 		first.writeFrame({ payload: encodeFrame(new Uint8Array([1]), Micro(10_000)), timestamp: Time.Timestamp.now() });
 		first.finish();
 		await flush();
 		expect(results).toHaveLength(1);
-		const marker = track.createGroup(2);
+		const marker = track.createGroup(2n);
 		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
 		marker.finish();
 		await flush();
@@ -40,7 +40,7 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		}
 		expect(results.slice(1)).toEqual([
 			{ kind: "gap", timestamp: Micro(10_000), duration: Micro.zero },
-			{ kind: "end", group: 2, end: Micro(10_000) },
+			{ kind: "end", group: 2n, end: Micro(10_000) },
 		]);
 	} finally {
 		consumer.close();
@@ -67,7 +67,7 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 			results.push(read);
 		}
 	})();
-	const write = (sequence: number, timestamp?: number) => {
+	const write = (sequence: bigint, timestamp?: number) => {
 		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: timestamp === undefined ? new Uint8Array() : encodeFrame(new Uint8Array([1]), Micro(timestamp)),
@@ -76,22 +76,22 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		group.finish();
 	};
 	try {
-		write(0, 0);
+		write(0n, 0);
 		await flush();
-		write(2, 20_000);
+		write(2n, 20_000);
 		await flush();
 		await clock.advance(Nano.fromMilli(Milli(50)));
-		write(1, 10_000);
+		write(1n, 10_000);
 		await flush();
 		expect(results.map((read) => read.kind)).toEqual(["frame", "frame", "frame"]);
-		write(4);
+		write(4n);
 		await flush();
 		await clock.advance(Nano.fromMilli(Milli(99)));
 		expect(results).toHaveLength(3);
 		await clock.advance(Nano.fromMilli(Milli(1)));
 		expect(results.slice(3)).toEqual([
 			{ kind: "gap", timestamp: Micro(20_000), duration: Micro.zero },
-			{ kind: "end", group: 4, end: Micro(20_000) },
+			{ kind: "end", group: 4n, end: Micro(20_000) },
 		]);
 	} finally {
 		consumer.close();
@@ -118,18 +118,18 @@ test("the holes a stalled source left behind share one budget", async () => {
 			results.push(read);
 		}
 	})();
-	const write = (sequence: number) => {
+	const write = (sequence: bigint) => {
 		const group = track.createGroup(sequence);
 		group.writeFrame({
-			payload: encodeFrame(new Uint8Array([1]), Micro(sequence * 10_000)),
-			timestamp: Time.Timestamp.fromMicros(sequence * 10_000),
+			payload: encodeFrame(new Uint8Array([1]), Micro(Number(sequence) * 10_000)),
+			timestamp: Time.Timestamp.fromMicros(Number(sequence) * 10_000),
 		});
 		group.finish();
 	};
 	try {
-		write(0);
+		write(0n);
 		await flush();
-		for (const sequence of [2, 4, 6]) write(sequence);
+		for (const sequence of [2n, 4n, 6n]) write(sequence);
 		await flush();
 		expect(results).toHaveLength(1);
 		await clock.advance(Nano.fromMilli(Milli(100)));
@@ -159,21 +159,21 @@ test("a hole is late from the earliest arrival past it", async () => {
 			results.push(read);
 		}
 	})();
-	const write = (sequence: number) => {
+	const write = (sequence: bigint) => {
 		const group = track.createGroup(sequence);
 		group.writeFrame({
-			payload: encodeFrame(new Uint8Array([1]), Micro(sequence * 10_000)),
-			timestamp: Time.Timestamp.fromMicros(sequence * 10_000),
+			payload: encodeFrame(new Uint8Array([1]), Micro(Number(sequence) * 10_000)),
+			timestamp: Time.Timestamp.fromMicros(Number(sequence) * 10_000),
 		});
 		group.finish();
 	};
 	try {
-		write(0);
+		write(0n);
 		await flush();
-		write(4);
+		write(4n);
 		await flush();
 		await clock.advance(Nano.fromMilli(Milli(50)));
-		write(2);
+		write(2n);
 		await flush();
 		expect(results).toHaveLength(1);
 		await clock.advance(Nano.fromMilli(Milli(50)));
@@ -191,17 +191,20 @@ test("a hole in a drained backlog is late from the earliest arrival past it, not
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("data");
-	const marker = (sequence: number) => {
+	const marker = (sequence: bigint) => {
 		const group = track.createGroup(sequence);
-		group.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(sequence * 10_000) });
+		group.writeFrame({
+			payload: new Uint8Array(),
+			timestamp: Time.Timestamp.fromMicros(Number(sequence) * 10_000),
+		});
 		group.finish();
 	};
-	const first = track.createGroup(0);
+	const first = track.createGroup(0n);
 	first.writeFrame({ payload: encodeFrame(new Uint8Array([1]), Micro(0)), timestamp: Time.Timestamp.fromMicros(0) });
 	first.finish();
-	marker(5);
+	marker(5n);
 	await clock.advance(Nano.fromMilli(Milli(900)));
-	marker(3);
+	marker(3n);
 	await clock.advance(Nano.fromMilli(Milli(100)));
 
 	// Joined now, the backlog drains in sequence order: group 3 before group 5, which landed first.

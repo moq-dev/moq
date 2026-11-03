@@ -1080,8 +1080,10 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// The caller creates the track on the broadcast, as it does for a media track; this writes its
 	/// catalog entry and removes the entry when the returned handle drops. The catalog key is
-	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with
-	/// [`compress`](moq_net::track::Info::compress) set: JSON is small and repetitive.
+	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with a
+	/// [`timescale`](moq_net::track::Info::timescale), since every write is stamped on the
+	/// broadcast clock, and with [`compress`](moq_net::track::Info::compress) set: JSON is small and
+	/// repetitive.
 	///
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
@@ -1093,8 +1095,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
-	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
-	/// references another broadcast.
+	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, if the entry
+	/// references another broadcast, or with [`moq_net::Error::TimestampMismatch`] if `track` has no
+	/// timescale.
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
@@ -1397,7 +1400,7 @@ fn packaging_of(container: &hang::catalog::Container) -> moq_msf::Packaging {
 
 /// Convert a catalog to its MSF equivalent: the media sections become MSF tracks and the
 /// extension rides the MSF root under the same member names it uses in the hang catalog.
-fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf::Catalog<E> {
+pub(crate) fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf::Catalog<E> {
 	let mut msf = to_msf_media(&catalog.media(), base);
 	msf.ext = catalog.ext.clone();
 	msf
@@ -1472,7 +1475,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.max_grp_sap_starting_type = sap_type;
 		track.max_obj_sap_starting_type = sap_type;
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
@@ -1505,7 +1508,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.max_grp_sap_starting_type = Some(1);
 		track.max_obj_sap_starting_type = Some(1);
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
@@ -1526,7 +1529,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		}
 		track.render_group = Some(1);
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
@@ -3461,6 +3464,52 @@ mod test {
 
 	fn wire_jitter(catalog: &Producer, name: &str) -> Option<std::time::Duration> {
 		wire(catalog).video.renditions[name].jitter
+	}
+
+	/// Two renditions with two B-frames plus audio, written in lockstep in decode order, one frame
+	/// each per 20 ms and a group per frame, each reading handed to its rendition after every write.
+	/// The tracks in `late` start measuring at the third frame, as after a late join or a
+	/// discontinuity; the audio may be `offset` behind. Returns each delay on the wire.
+	async fn lockstep_on_the_wire(late: &[usize], offset: u64) -> Vec<Option<std::time::Duration>> {
+		let names = ["hevc", "avc", "audio"];
+		let (_broadcast, catalog, mut renditions) = estimating(&names);
+		let order = super::super::estimate::Order::default();
+		let mut estimators: Vec<_> = (0..3)
+			.map(|_| super::super::Estimator::with_order(order.clone()))
+			.collect();
+		let decode_order = [0u64, 60, 20, 40].into_iter().chain((1..50u64).flat_map(|gop| {
+			let base = gop * 60;
+			[base + 60, base + 20, base + 40]
+		}));
+		for (tick, pts) in decode_order.enumerate() {
+			let audio = (tick as u64 * 20).saturating_sub(offset);
+			for (i, pts) in [pts, pts, audio].into_iter().enumerate() {
+				if tick < 2 && late.contains(&i) {
+					continue;
+				}
+				estimators[i].write(moq_net::Timestamp::from_micros(pts * 1_000).unwrap(), 1_000);
+				estimators[i].cut(None);
+				renditions[i].estimate(estimators[i].reading()).unwrap();
+			}
+			tokio::time::advance(std::time::Duration::from_millis(20)).await;
+		}
+		names
+			.iter()
+			.map(|name| wire(&catalog).video.renditions[*name].delay)
+			.collect()
+	}
+
+	/// A track that starts measuring on a B-frame, or on audio trailing one, never publishes the
+	/// reorder as `delay`, which the catalog could then never lower. A constant offset still does.
+	///
+	/// Regression, from [moq-dev/moq#7689](https://github.com/moq-dev/moq/pull/7689): the least
+	/// trail over everything written so far started at the reorder, went out, and stuck.
+	#[tokio::test(start_paused = true)]
+	async fn a_late_start_publishes_no_reorder_delay() {
+		assert_eq!(lockstep_on_the_wire(&[], 0).await, [None, None, None]);
+		assert_eq!(lockstep_on_the_wire(&[0, 2], 0).await, [None, None, None]);
+		let ms = std::time::Duration::from_millis;
+		assert_eq!(lockstep_on_the_wire(&[0, 2], 200).await, [None, None, Some(ms(200))]);
 	}
 
 	/// A rising estimate publishes at once, then coalesces until an observation after the window,

@@ -8,7 +8,7 @@ import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { Estimator, Order } from "../order";
 import { Slot } from "../publication";
-import { Encoder } from "./encoder";
+import { type Config, Encoder } from "./encoder";
 
 // How long a fake hardware probe takes on the installed clock.
 const PROBE = Nano.fromMilli(Milli(5));
@@ -715,7 +715,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		]);
 		expect(encoder.out.active.peek()).toBe(false);
 		// The black keyframe is written during teardown, which must not seat the stopped rendition again.
-		expect(new Estimator().write(0, order)).toBe(false);
+		expect(new Estimator().write(0, order, true)).toBe(false);
 
 		// Muting releases the capture; the rendition keeps advertising what it last published.
 		source.set(undefined);
@@ -1188,7 +1188,7 @@ test.each([false, true])(
 			await recording.send(200);
 
 			const ordered = late.ordered();
-			const groups: number[] = [];
+			const groups: bigint[] = [];
 			const firsts: number[] = [];
 			for (let i = 0; i < (onDemand ? 1 : 2); i++) {
 				const group = await ordered.nextGroup();
@@ -1201,12 +1201,12 @@ test.each([false, true])(
 			if (onDemand) {
 				// The subscriber's arrival started the encoder, so its first frame opened the only group.
 				expect(recording.keys).toEqual([200]);
-				expect(groups).toEqual([0]);
+				expect(groups).toEqual([0n]);
 				expect(firsts).toEqual([200]);
 			} else {
 				// Both groups were cached before it arrived, and its join forced no fresh keyframe.
 				expect(recording.keys).toEqual([0, 100]);
-				expect(groups).toEqual([0, 1]);
+				expect(groups).toEqual([0n, 1n]);
 				expect(firsts).toEqual([0, 100]);
 			}
 		} finally {
@@ -1255,6 +1255,53 @@ test("an on-demand all-keyframe rendition advertises its records, whose subscrib
 		encoder.close();
 		broadcast.close();
 	}
+});
+
+// The catalog's `hls` duration is the track's longest GOP: a 2000ms interval declares 4000ms, and
+// a live change at 2500ms, after keyframes at 0 and 2000ms, is held to it.
+async function liveInterval(raised: Milli): Promise<{ keys: number[]; hls?: Catalog.Hls }> {
+	using recording = await installRecording();
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("interval.hang"),
+	});
+	const config = new Signal<Config | undefined>({ keyframeInterval: Milli(2000) });
+	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never, config });
+	const subscribers: Moq.Track.Subscriber[] = [];
+	try {
+		await settle();
+		for (let ms = 0; ms < 16000; ms += 100) {
+			if (ms === 2500) config.set({ keyframeInterval: raised });
+			await recording.send(ms);
+		}
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		const catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		subscribers.push(catalogSubscriber);
+		const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber }).latest();
+		return { keys: [...recording.keys], hls: catalog?.value.video?.renditions.video?.hls };
+	} finally {
+		for (const subscriber of subscribers) subscriber.close();
+		encoder.close();
+		broadcast.close();
+	}
+}
+
+test("a live keyframe interval raise is capped at the declared duration", async () => {
+	const declared = { track: "video.hls", duration: Catalog.u53(4000) };
+	expect(await liveInterval(Milli(6000))).toEqual({ keys: [0, 2000, 6000, 10000, 14000], hls: declared });
+	// Infinite is not a valid Milli, but a config is not checked.
+	expect(await liveInterval(Number.POSITIVE_INFINITY as Milli)).toEqual({
+		keys: [0, 2000, 6000, 10000, 14000],
+		hls: declared,
+	});
+	// Within the declaration, a raise or a cut applies as asked.
+	expect(await liveInterval(Milli(3000))).toEqual({ keys: [0, 2000, 5000, 8000, 11000, 14000], hls: declared });
+	expect(await liveInterval(Milli(1000))).toEqual({
+		keys: [0, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000, 14000, 15000],
+		hls: declared,
+	});
 });
 
 test("an unwatched rendition reserves nothing and encodes at its configured bitrate", async () => {
@@ -1312,7 +1359,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 	let siblingSubscriber: Moq.Track.Subscriber | undefined;
 	let catalogSubscriber: Moq.Track.Subscriber | undefined;
 	let recovered: Moq.Track.Subscriber | undefined;
-	let announced: Moq.Origin.Requesting | undefined;
+	let announced: Moq.Origin.Following | undefined;
 	try {
 		await encoder.out.catalog.changed();
 		const net = broadcast.net.peek();
@@ -1329,7 +1376,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		await flush();
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
-		expect(siblingTrack.appendGroup().sequence).toBe(0);
+		expect(siblingTrack.appendGroup().sequence).toBe(0n);
 		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
 		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).not.toBe(false);
@@ -1346,7 +1393,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
 		expect(siblingTrack.closed.peek()).toBeUndefined();
-		expect(siblingTrack.appendGroup().sequence).toBe(1);
+		expect(siblingTrack.appendGroup().sequence).toBe(1n);
 		const instances = FakeVideoEncoder.instances.length;
 		broadcast.audio("audio/new");
 		estimate.set(20_000_000);
@@ -1389,7 +1436,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
-		expect(siblingTrack.appendGroup().sequence).toBe(2);
+		expect(siblingTrack.appendGroup().sequence).toBe(2n);
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();

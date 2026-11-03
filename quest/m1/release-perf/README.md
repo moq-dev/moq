@@ -281,7 +281,8 @@ in every round. The re-pair above, on a quieter host, is what remains.
 Decided 2026-11-01 (maintainer), in
 [moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493): ✅ the new
 `session_fanout_threads` Criterion case joins the release pairing through a
-bench-only backport to `release`, which carries it once that PR lands. Bench-only
+bench-only backport to `release`, merged in
+[moq-dev/moq#7698](https://github.com/moq-dev/moq/pull/7698). Bench-only
 backports are allowed from now on.
 
 ## Required

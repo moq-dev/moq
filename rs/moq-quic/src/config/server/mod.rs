@@ -29,9 +29,7 @@ pub struct Config {
 	pub transport: transport::Config,
 
 	/// TLS configuration used for incoming connections
-	///
-	/// Must be set to use TLS 1.3 only.
-	pub crypto: Arc<dyn crypto::ServerConfig>,
+	pub(crate) crypto: Arc<dyn crypto::ServerConfig>,
 
 	/// Configuration for sending and handling validation tokens
 	pub validation_token: validation_token::Config,
@@ -94,8 +92,16 @@ pub struct Config {
 
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl Config {
-	/// Serve `crypto` with the default settings and a random handshake token key
-	pub fn new(crypto: Arc<dyn crypto::ServerConfig>) -> Self {
+	/// Run the handshake with `tls`, with the default settings and a random handshake token key
+	///
+	/// The config must enable TLS 1.3, or every incoming connection fails its handshake.
+	/// Early data stays off: if `tls` accepts it, the connection uses a copy that does not.
+	pub fn new(tls: Arc<rustls::ServerConfig>) -> Self {
+		Self::from_crypto(Arc::new(QuicServerConfig::new(tls)))
+	}
+
+	/// Serve any crypto, such as the fuzz target's plaintext
+	pub(crate) fn from_crypto(crypto: Arc<dyn crypto::ServerConfig>) -> Self {
 		#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
 		use aws_lc_rs::hkdf;
 		use rand::Rng;
@@ -127,7 +133,7 @@ impl Config {
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,
 	) -> Result<Self, rustls::Error> {
-		Ok(Self::new(Arc::new(QuicServerConfig::new(cert_chain, key)?)))
+		Ok(Self::new(Arc::new(QuicServerConfig::inner(cert_chain, key)?)))
 	}
 }
 
