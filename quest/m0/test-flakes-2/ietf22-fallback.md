@@ -3,8 +3,8 @@
 ## Goal
 
 When the newest of two live publishers withdraws, a browser `@moq/watch`
-viewer on moq-transport-22 plays the still-live older run within the media
-lane's derived 1039 ms bound. It keeps its session, and its audio resumes
+viewer on moq-transport-22, or on moq-lite in Firefox, plays the still-live
+older run within the media lane's derived 1039 ms bound. It keeps its session, and its audio resumes
 with its video. Both failures are fixed at their cause once one recurs with
 enough evidence to reproduce it deterministically.
 
@@ -20,6 +20,19 @@ enough evidence to reproduce it deterministically.
 
 Neither failure has a known cause or a reproduction yet, so no production or
 test change is justified until one recurs.
+
+Recurrence, added 2026-11-03 (maintainer, /quest-plan of the follow-ups from
+[moq-dev/moq#7667](https://github.com/moq-dev/moq/pull/7667)): Nightly's
+Firefox media job failed `live incumbent fallback plays` on two consecutive
+nights with the audio-stall symptom (`audioStalled:true, audioTimestamp:0`
+after the fallback), on `old-moq-lite-07-wip`:
+[2026-11-02](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408204778)
+and
+[2026-11-03](https://github.com/moq-dev/moq/actions/runs/41656613559/job/125988510133).
+[moq-dev/moq#7716](https://github.com/moq-dev/moq/pull/7716) found it
+separate from the Firefox tone problem. Read those jobs' artifacts first. If
+they isolate the cause, the Waiting item clears. If they don't, rerun the
+Firefox lane with the debug filter below.
 
 Two failures were seen while landing
 [moq-dev/moq#6548](https://github.com/moq-dev/moq/pull/6548), on a host at

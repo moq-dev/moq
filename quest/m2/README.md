@@ -184,6 +184,10 @@ lite-07; bitrate enforcement is not part of this release.
 - [Drop moq-auth's iroh transport](/quest/m2/auth-drop-iroh.md) - the next breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
+- [An Absolute join never races an older-history FETCH](/quest/m2/ietf-absolute-join-race.md) - reproduce #7680's suspected collision on main, then fix it or keep the test and delete
+- [Relays and moq-tokio offer versioned qmux-02 first](/quest/m2/qmux-02-subprotocols.md) - one shared qmux version list prefers 02, so JS clients negotiate it
+- [A passing interop run stops publishers cleanly](/quest/m2/interop-shutdown-warnings.md) - no lingering publisher or unfinished-producer warning in a green interop run
+- [Smoke tests make their certificates without a system OpenSSL config](/quest/m2/smoke-libressl.md) - moxygen and Cloudflare smoke pass `-config`, as the conformance runner does
 - [ashpd uses maintained D-Bus crates](/quest/m2/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
 - [Askama uses a maintained TOML parser](/quest/m2/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - every dependency earns its weight, preferring fewer, and the rest are current, deduplicated, and the best maintained option
@@ -241,7 +245,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [A kept draft-18 join pins its head group](/quest/m2/ietf-join-pin-head.md) - on draft 18, a joining FETCH that our publisher keeps open after a quick finish is answered even if the publisher drops its `track::Producer` right after `finish()`
 - [The JS player keeps a track's start when decoding from its first packet](/quest/m2/js-warmup-trim.md) - `@moq/watch` trims an audio track's catalog `warmup` only on a mid-stream join, as moq-audio does
 - [kio::Tasks tolerates a removed task's waker firing into its reused slot](/quest/m2/kio-tasks-waker-test.md) - A unit test in `rs/kio/src/task.rs` shows that when a task taken out with `Tasks::remove` wakes after another task was `insert`ed into its slot, the new occupant is polled at most once spuriously, still finishes on its own wake (handed back through `poll_each`), and its `TaskKey` still removes it
-- [Nightly's Miri job stays inside its time budget](/quest/m2/miri-nightly-budget.md) - Nightly's Miri job stays inside its 60-minute job and 15-minute-per-test budgets
 - [moqsrc reconnects correctly whatever order events arrive in](/quest/m2/moqsrc-reconnect-order.md) - A moq-gst test reconnects `moqsrc` while a rendition pad is blocked downstream, delivering the reconnect's events
 - [A library recorder gets the takeover cut](/quest/m2/mux-source-cut.md) - A recorder built directly with `moq_hls::export::Broadcaster::new` ends a replaced instance's recording at what it listed when another publisher takes the broadcast over, exactly as one built through `Server::broadcaster` does
 - [The relay NixOS module's peer list is tested](/quest/m2/nix-relay-peers-test.md) - `nix flake check` evaluates the moq-relay NixOS module with no, one, and several `cluster.rootUrl` peers and refuses an empty list, asserting the `MOQ_CLUSTER_CONNECT` value each produces

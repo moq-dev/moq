@@ -31,3 +31,7 @@ traced it to mbx copying a PATH that grew with every nested dev shell and
 dedupes PATH in `flake.nix`'s `shellHook`.
 
 Public API: none. Wire: none.
+
+## Related
+
+- [mbx's free-space GC never removes a live target](/quest/m0/ci/mbx-gc.md) - the host-side fix for the same GC, which also removed a live target outside interop

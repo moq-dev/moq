@@ -68,3 +68,4 @@ The epic's own work, once every child has merged:
 - [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
 - [moq-rtc on rind](/quest/m2/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
 - [Relay ACME on instant-acme](/quest/m2/rind/acme.md) - moq-relay replaces rustls-acme with instant-acme on rind and owns renewal
+- [moq-crypto's signing runs on rind](/quest/m2/rind/crypto-sign.md) - Ed25519 signing and keygen leave aws-lc-rs, after moq-crypto lands

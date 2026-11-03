@@ -21,3 +21,12 @@ checks.
 - Repro: `MOQ_RESUME_SEED=12345 MOQ_RESUME_CASES=3000 cargo test -p moq-net
   --all-features --release --lib model::resume_model::readers_match_the_logical_track`.
 - Keep #7542's flat per-range costs; add the minimal case as a fixed regression.
+- Also replay the clean-end stall that
+  [moq-dev/moq#7739](https://github.com/moq-dev/moq/pull/7739) found and
+  attributed to the fill-answer wake bug here (noted 2026-11-03, maintainer,
+  /quest-plan of #7739's follow-ups): `MOQ_RESUME_SEED=17893651
+  MOQ_RESUME_CASES=4096`. Shrunk case: Up instance 1/slot 2, Write group 11,
+  Join arrival reader (Hour, default ranges, drop polling), End that route,
+  finish=true. It hands out group 11 and drops 0..10, then never reports the
+  end. Seed 1's regression (`Up i1s0, Join, Write g11, End i1s0`) is similar
+  but differs in slot and order, so add this one too if it still fails.
