@@ -348,7 +348,7 @@ impl<O: Output> Video<O> {
 								break;
 							}
 						}
-						while !pending.is_empty() && vacancy(&queue, &presentation).is_none_or(|at| at <= now) {
+						while !pending.is_empty() && vacancy(&queue, presentation).is_none_or(|at| at <= now) {
 							if queue.len() >= MAX_FRAMES {
 								queue.pop_front();
 							}
@@ -365,7 +365,7 @@ impl<O: Output> Video<O> {
 						self.output.send(Event::Wake);
 					}
 					if !pending.is_empty() {
-						Step::Wait(vacancy(&queue, &presentation))
+						Step::Wait(vacancy(&queue, presentation))
 					} else if let Some(oldest) = oldest {
 						// Every access unit up to the earliest picture still owed must be
 						// decoded before that picture is due, however deep the stream
@@ -375,7 +375,7 @@ impl<O: Output> Video<O> {
 						let at = presentation
 							.due(owed)
 							.and_then(|at| at.checked_sub(DECODE_AHEAD))
-							.max(vacancy(&queue, &presentation));
+							.max(vacancy(&queue, presentation));
 						match at.filter(|at| *at > now) {
 							Some(at) => Step::Wait(soonest(Some(at), select)),
 							// Pictures the selector holds back wait for the max-delay decoder.
