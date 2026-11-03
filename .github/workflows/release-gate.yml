@@ -174,7 +174,7 @@ jobs:
               - ".github/workflows/obs.yml"
             oss-scanner:
               - ".oss-scanner/**"
-              - ".github/actions/nextest/**"
+              - ".github/actions/nextest/VERSION"
               - "sh/oss-scanner.sh"
               - ".github/workflows/oss-scanner.yml"
             release-dart:
