@@ -151,6 +151,7 @@ per-frame CPU growth since #5926.
 - [JS tests and docs say what keeps a group cached](/quest/m1/js-cache-window.md) - none assume maxAge is retention
 - [release carries the fanout-threads bench](/quest/m1/release-fanout-bench.md) - a bench-only port of session_fanout_threads for the pre-cut pairing
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
+- [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-crypto replaces moq-sign and moq-e2ee](/quest/m1/moq-crypto.md) - one Rust crate and one JS package hold signing and end-to-end encryption, sharing moq-net's timestamp check

@@ -10,7 +10,7 @@ when nobody watches, and the 60 s idle stop behave as before.
 
 ## Plan
 
-See the [epic](/quest/m2/socket/README.md) for the layout and the reply split.
+See the [epic](/quest/m1/socket/README.md) for the layout and the reply split.
 
 - Viewers dial `boy/game/<name>` with their random id. Their `command` track
   moves from `{viewerPrefix}/{name}/{viewerId}` to the socket. Drop the
@@ -22,12 +22,12 @@ See the [epic](/quest/m2/socket/README.md) for the layout and the reply split.
 - The demo relay's anonymous publish grant (`demo/relay/prod.toml`, and the
   `moq auth serve` line it documents) covers `demo/boy/game/*/.dial/*`
   instead of boy's use of `demo/viewer/**`. Whichever of this and
-  [CARLA on sockets](/quest/m2/socket/carla.md) lands second removes
+  [CARLA on sockets](/quest/m1/socket/carla.md) lands second removes
   `demo/viewer/**`.
 - Update `doc/bin/demo.md` and the boy README or CHANGELOG where they describe
   the viewer path.
 
 ## Required
 
-- [Rust sockets](/quest/m2/socket/rust.md) - the emulator's listener
-- [JS sockets](/quest/m2/socket/js.md) - the viewer's dial
+- [Rust sockets](/quest/m1/socket/rust.md) - the emulator's listener
+- [JS sockets](/quest/m1/socket/js.md) - the viewer's dial
