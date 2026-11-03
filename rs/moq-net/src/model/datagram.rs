@@ -294,6 +294,16 @@ impl Producer {
 		Poll::Ready(state.priority())
 	}
 
+	/// Ready once the track has no consumer; see [`Self::close_unused`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let _state = ready!(self.state.poll(waiter, |state| match state.priorities.is_empty() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}));
+		Poll::Ready(())
+	}
+
 	/// End the track with [`Error::Cancel`] if it has no consumer, returning whether it ended.
 	///
 	/// Atomic with a consumer joining, so a session letting an unread track go never strands
@@ -370,6 +380,12 @@ impl Request {
 	/// The highest subscriber priority among the consumers waiting, or `None` once they all left.
 	pub fn priority(&self) -> Option<i8> {
 		self.producer.priority()
+	}
+
+	/// [`Producer::poll_unused`] for a request.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.producer.poll_unused(waiter)
 	}
 
 	/// [`Producer::close_unused`] for a request nobody waits for any more.

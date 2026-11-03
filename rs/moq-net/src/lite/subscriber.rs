@@ -2429,6 +2429,10 @@ struct DatagramServe {
 	closed: Transport,
 	id: u64,
 	state: DatagramState,
+	/// Cancels the track once the session stops allowing its broadcast.
+	gate: crate::auth::Gate,
+	/// Holds the session busy while the track is subscribed.
+	_working: crate::session::Working,
 }
 
 enum DatagramState {
@@ -2476,6 +2480,8 @@ impl DatagramServe {
 	) -> Self {
 		let id = subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 		Self {
+			gate: crate::auth::Gate::new(subscriber.auth.clone(), path.clone(), crate::auth::Direction::Subscribe),
+			_working: subscriber.session.work().start(),
 			closed: subscriber.session.clone(),
 			subscriber,
 			path,
@@ -2513,13 +2519,27 @@ impl DatagramServe {
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 			}
+			// Nobody waits for it any more, unless a reader arrived meanwhile: then look again,
+			// which parks on that reader leaving. Live watches its priority instead.
+			let unused = match &self.state {
+				DatagramState::Open { request }
+				| DatagramState::Info { request, .. }
+				| DatagramState::TrackInfo { request, .. } => {
+					request.poll_unused(waiter).is_ready().then(|| request.close_unused())
+				}
+				DatagramState::Subscribe { producer, .. } => {
+					producer.poll_unused(waiter).is_ready().then(|| producer.close_unused())
+				}
+				_ => None,
+			};
+			match unused {
+				Some(true) => return Poll::Ready(Err(Error::Cancel)),
+				Some(false) => continue,
+				None => {}
+			}
 			match &mut self.state {
-				DatagramState::Open { request } => {
+				DatagramState::Open { .. } => {
 					self.validity.check(waiter)?;
-					// Nobody waits for it any more, unless a reader arrived meanwhile.
-					if request.close_unused() {
-						return Poll::Ready(Err(Error::Cancel));
-					}
 					if !version.has_datagrams() || !version.has_track_stream() || self.closed.max_datagram_size() == 0 {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
@@ -2738,6 +2758,17 @@ impl kio::Task for DatagramServe {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		ready!(self.gate.poll_ready(waiter));
+		// Nothing is left to revoke once our side finished, nor on a closed session, whose
+		// end decides how the track ends.
+		if !matches!(self.state, DatagramState::Finish { .. } | DatagramState::Done)
+			&& self.gate.poll_denied(waiter).is_ready()
+			&& self.closed.poll_closed(waiter).is_pending()
+		{
+			tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name(), "datagrams no longer authorized");
+			self.abort(Error::Unauthorized);
+			return Poll::Ready(());
+		}
 		let err = match ready!(self.poll_serve(waiter)) {
 			Ok(()) => return Poll::Ready(()),
 			Err(err) => err,
