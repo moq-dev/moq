@@ -5880,7 +5880,10 @@ async fn a_late_clock_revision_remains_visible_between_exports() {
 			.unwrap()
 			.timestamp
 	};
-	assert!(at(&a) > at(&b), "only the running leg already served the 4s slot");
+	// This fixture sends each PES in the PCR slice before its decode boundary.
+	// Pin both decisions to the media grid, including the late leg's next slot.
+	assert_eq!(Duration::from(at(&b)) + PCR_INTERVAL, Duration::from_secs(4));
+	assert_eq!(Duration::from(at(&a)) + PCR_INTERVAL, Duration::from_secs(5));
 	assert_only_continuity_differs(&a, &b, Timestamp::from_millis(5_250).unwrap());
 }
 
