@@ -57,8 +57,8 @@ or holds.
   `Consumer::poll_read_frame_once<..., Prefetch::pop_cached>` (26 and 18 us),
   with 937 us of total group-state wait at 16 workers in the first run. The second current 16-worker capture was
   refused for nonalternating switch records, so it supplies no measurement.
-  The foreground agent should plan the triggered epoch-versus-main follow-up;
-  this child was explicitly instructed not to create it.
+  Once a rerun establishes the quiet-host requirement, suggest the separate
+  epoch-versus-main quest if these cached-read waits persist.
 
 ## Waiting
 
