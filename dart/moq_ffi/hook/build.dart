@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
@@ -88,17 +89,36 @@ Future<_Resolved> _resolveLibrary(
 /// another recipe with different features. Cargo's own timestamp check makes
 /// the no-op case cheap.
 Future<_Resolved> _build(Uri workspace, String target, String library) async {
-  // The shared default build, an alias .cargo/config.toml defines for Cargo
-  // runs in the workspace; it ships the software H.264 fallback. A checkout build is a test build, carrying the hooks
-  // leak_test.dart reads; `--target` keeps it out of the default build's
-  // directory, since a cdylib's file name carries no feature hash.
-  final cargoArgs = ['build-ffi', '--features', 'testing'];
+  // Keep the leak-test allocator out of the shared cdylib. A separate output
+  // directory preserves Cargo's native compilation mode and dependency cache
+  // identities; passing the host as --target would split them.
+  final targetDir = workspace.resolve('target/dart/');
+  final cargoArgs = [
+    'build-ffi',
+    '--features',
+    'testing',
+    '--target-dir',
+    targetDir.toFilePath(),
+  ];
+  final rustc = await Process.run('rustc', [
+    '-vV',
+  ], workingDirectory: workspace.toFilePath());
+  if (rustc.exitCode != 0) {
+    throw StateError('rustc -vV failed: ${rustc.stderr}');
+  }
+  final host = LineSplitter.split(rustc.stdout as String)
+      .firstWhere((line) => line.startsWith('host: '))
+      .substring('host: '.length);
+  final native = target == host;
 
   // Android needs the NDK's linker and sysroot, which only cargo-ndk sets up.
   // This mirrors rs/moq-ffi/build.sh.
   final args = target.contains('-android')
       ? ['ndk', '--target', target, '--platform', '24', '--', ...cargoArgs]
-      : [...cargoArgs, '--target', target];
+      : [
+          ...cargoArgs,
+          if (!native) ...['--target', target],
+        ];
 
   // The iOS floor release-ffi.yml builds with, which also avoids its
   // ___chkstk_darwin linker errors. The hook's filtered environment drops it.
@@ -116,7 +136,7 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
     );
   }
 
-  final built = workspace.resolve('target/$target/debug/$library');
+  final built = targetDir.resolve('${native ? '' : '$target/'}debug/$library');
   if (!await File.fromUri(built).exists()) {
     throw StateError('cargo did not produce ${built.toFilePath()}');
   }

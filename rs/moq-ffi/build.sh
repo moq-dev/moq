@@ -141,18 +141,33 @@ build_target() {
         (cd "$WORKSPACE_DIR" && cargo ndk --target "$target" --platform 24 -- "${cargo_args[@]}")
     else
         # Set up cross-compilation for Linux ARM64
-        if [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then
+        if [[ "$target" == "aarch64-unknown-linux-gnu" && "$target" != "$HOST_TARGET" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
         fi
 
-        (cd "$WORKSPACE_DIR" && cargo "${cargo_args[@]}" --target "$target")
+        # An explicit host --target changes dependency cache identities too.
+        if [[ "$target" != "$HOST_TARGET" ]]; then
+            cargo_args+=(--target "$target")
+        fi
+        (cd "$WORKSPACE_DIR" && cargo "${cargo_args[@]}")
     fi
 }
 
-# Find the cdylib for binding generation
+# Native builds share the bindings' host artifacts; cross builds stay scoped
+# by triple. Packaging still uses the requested triple in its output names.
+artifact_dir() {
+    local target="$1"
+    if [[ "$target" == "$HOST_TARGET" ]]; then
+        echo "$TARGET_BASE_DIR/release"
+    else
+        echo "$TARGET_BASE_DIR/$target/release"
+    fi
+}
+
 find_cdylib() {
     local target="$1"
-    local target_dir="$TARGET_BASE_DIR/$target/release"
+    local target_dir
+    target_dir=$(artifact_dir "$target")
 
     if [[ "$target" == *"-apple-"* ]]; then
         echo "$target_dir/libmoq_ffi.dylib"
@@ -251,9 +266,9 @@ echo "Packaging $NAME..."
 
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR/lib"
+TARGET_DIR=$(artifact_dir "$TARGET")
 
 if [[ "$TARGET" == *"-windows-"* ]]; then
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/moq_ffi.dll" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/moq_ffi.dll.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
     cp "$TARGET_DIR/moq_ffi.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
@@ -263,24 +278,20 @@ elif is_ios "$TARGET"; then
     # Assets hook bundles the cdylib (the SDK does not implement static
     # linking). rustc emits a PLATFORM_IOS dylib for device and simulator
     # alike, so this is a packaging choice rather than a platform limit.
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/libmoq_ffi.dylib" "$PACKAGE_DIR/lib/"
 
 elif is_android "$TARGET"; then
     # Android: shared library only
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.so" "$PACKAGE_DIR/lib/"
 
 elif [[ "$TARGET" == *"-apple-"* ]]; then
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/libmoq_ffi.dylib" "$PACKAGE_DIR/lib/"
 
 else
     # Linux: ship both the cdylib (.so, consumed by JNA/Kotlin and
     # maturin/Python) and the staticlib (.a, linked by the Go module's cgo).
-    TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/libmoq_ffi.so" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
 fi

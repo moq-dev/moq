@@ -1,31 +1,42 @@
-# [S] Unify dependency features with cargo-hakari
+# [S] Record hosted cargo-hakari cache evidence
 
 ## Goal
 
-The FFI builds compile each dependency with the same features as each other,
-so mbx's cache hits across them, and Nightly's hosted platform jobs record
-their hit rate and CPU time before and after the workspace-hack.
+Nightly's hosted macOS and Windows jobs record their mbx hit rate and CPU time
+before and after the workspace-hack.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-25: use cargo-hakari, the standard tool
-from guppy's authors, rather than only trimming CI's feature permutations. mbx
-keys every compilation on its inputs, so a dependency built with a different
-feature set in another job is a miss, however warm the cache.
+Decided with the maintainer on 2026-10-25: use cargo-hakari rather than only
+trimming CI's feature permutations.
+[moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985) added the path-only
+dev-dependency layout, unifying test, lint, and bench builds. Keep that layout;
+library-only builds do not need the hack.
 
-[moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985) added
-`rs/workspace-hack` as a path-only dev-dependency of every member outside
-`.config/hakari.toml`'s excludes. Test, lint, and bench builds now unify;
-library-only builds do not, since dev-dependencies stay out of them. That
-leaves the FFI builds (`cargo build --release -p moq-ffi` in the bindings and
-release workflows), which also split on their own flags: the Dart build passes
-the host triple as `--target` and adds the `testing` feature. Align those
-invocations rather than add the hack to them, unless the PR's decision on the
-layout says otherwise.
+The remaining FFI invocation alignment is implemented in
+[moq-dev/moq#7666](https://github.com/moq-dev/moq/pull/7666): default builds use
+`cargo build-ffi` with `openh264`, native builds omit `--target`, and only cross
+builds name a target. Python and Dart host tests retain `testing` for the manual
+clock and leak allocator, with separate target directories so they cannot
+replace the default cdylib. Their third-party feature identities match the
+default host build; the intentional `kio/manual` split affects workspace crates.
 
-Nightly's macOS and Windows jobs read and write R2, so their before and after
-can only come from scheduled Nightlies on `main`
-(`gh run list --workflow nightly.yml --branch main --event schedule`): compare
-the mbx summaries of the last run before the merge with the first two after.
+Compare the mbx summaries of the last scheduled Nightly before the
+[2026-11-02 merge](https://github.com/moq-dev/moq/commit/8e53bf32185fec578e460ff6ccbe41a80a039a6a)
+with the first two after. Query only scheduled runs on `main`:
+`gh run list --workflow nightly.yml --branch main --event schedule`.
+The baseline is [2026-11-01](https://github.com/moq-dev/moq/actions/runs/41313466339);
+the first after is [2026-11-02](https://github.com/moq-dev/moq/actions/runs/41483654426).
+The first after has no Windows compilation evidence: NASM installation failed
+with a Chocolatey HTTP 503 before the build. macOS has partial mbx summaries
+but its Rust suite failed. Do not infer a completed-job CPU saving from either. Separate this FFI alignment's later landing
+from the workspace-hack landing when interpreting the results.
 
-Public API: none; the workspace-hack crate is not published.
+Public API and wire: none.
+
+## Waiting
+
+- moq-dev/moq: the second scheduled Nightly on `main` after the workspace-hack
+  merge has not run yet. Once it completes, collect both platforms' before and
+  first-two-after mbx summaries and CPU measurements, recording missing or
+  partial evidence explicitly. A manual Nightly dispatch is not a substitute.
