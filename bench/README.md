@@ -379,7 +379,8 @@ Two scenarios run every subscriber count on one thread:
   revision whose session API predates this harness reports it unsupported.
 
 Each `bench/fanout/<scenario>` crate builds against each base's and the current
-tree's own crates and lock, side by side, into `target/bench/fanout/`. Each
+tree's own crates and lock, side by side, into `target/bench/fanout/`, or
+`BENCH_FANOUT_TARGET` where a build cache might evict that during a long sweep. Each
 count pins the harness to one CPU (`BENCH_FANOUT_CPU`, by default the last
 allowed one) and takes its user instructions from `perf stat` for a run of
 zero cycles and one of many; the difference over the groups delivered is

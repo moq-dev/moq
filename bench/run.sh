@@ -1063,6 +1063,9 @@ run_fanout() {
     # Fat LTO links on one thread, so the harnesses build side by side on every allowed CPU,
     # BENCH_FANOUT_JOBS at a time.
     local jobs=${BENCH_FANOUT_JOBS:-4} first launched
+    # A build cache that evicts the `target` directory under a long sweep fails every later
+    # build; BENCH_FANOUT_TARGET names a directory it doesn't manage.
+    local targets=${BENCH_FANOUT_TARGET:-$TARGET/fanout}
     for ((index = 0; index < ${#labels[@]}; index++)); do
         for scenario in $FANOUT_SCENARIOS; do
             dir=$RUN/fanout/${labels[$index]}/$scenario
@@ -1071,7 +1074,7 @@ run_fanout() {
             # This revision's crates, resolved by its own lock.
             sed -i "s|path = \"../../../rs/|path = \"${checkouts[$index]}/rs/|" "$dir/Cargo.toml"
             cp "${checkouts[$index]}/Cargo.lock" "$dir/Cargo.lock"
-            printf '%s\n' "$TARGET/fanout/${keys[$index]}/$scenario" >"$dir/target"
+            printf '%s\n' "$targets/${keys[$index]}/$scenario" >"$dir/target"
             build_dirs+=("$dir")
         done
     done
@@ -1079,7 +1082,7 @@ run_fanout() {
         BUILD_PIDS=()
         for dir in "${build_dirs[@]:first:jobs}"; do
             # shellcheck disable=SC2016 # the inner shell expands its own arguments
-            setsid taskset -c "$ALLOWED_CPUS" bash -c 'cd "$1" && CARGO_TARGET_DIR=$2 cargo build --release' _ \
+            setsid taskset -c "$ALLOWED_CPUS" bash -c 'mkdir -p "$(readlink -m "$2")" && cd "$1" && CARGO_TARGET_DIR=$2 cargo build --release' _ \
                 "$dir" "$(cat "$dir/target")" >"$dir/build.log" 2>&1 &
             BUILD_PIDS+=($!)
         done
@@ -1109,7 +1112,7 @@ run_fanout() {
     for scenario in $FANOUT_SCENARIOS; do
         for ((index = 0; index < ${#labels[@]}; index++)); do
             dir=$RUN/fanout/${labels[$index]}/$scenario
-            binary=$TARGET/fanout/${keys[$index]}/$scenario/release/fanout-$scenario
+            binary=$targets/${keys[$index]}/$scenario/release/fanout-$scenario
             if [[ -f $dir/unsupported ]]; then binary=-; fi
             # shellcheck disable=SC2086 # one argument per subscriber count
             python3 "$ROOT/bench/fanout.py" measure "$RUN" "${labels[$index]}" "${revisions[$index]}" \
