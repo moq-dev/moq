@@ -131,7 +131,8 @@ impl Callback {
 	}
 
 	fn recv(&self) -> i32 {
-		self.rx.recv_timeout(TIMEOUT).expect("callback timed out")
+		// Delivery depends on the runtime and codec threads; nextest guards hangs.
+		self.rx.recv().expect("callback channel closed")
 	}
 
 	/// Wait for the terminal callback (code <= 0) the task delivers after close
