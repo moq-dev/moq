@@ -1,6 +1,6 @@
 # Migrating moq-mux
 
-How to update your code for each breaking change, newest first.
+How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 

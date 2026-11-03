@@ -2,13 +2,6 @@
 
 use std::time::Duration;
 
-use hang::moq_net::Timestamp;
-
-/// A wire timestamp as a duration from the start of the track.
-pub(super) fn timestamp(timestamp: Timestamp) -> Duration {
-	Duration::from_micros(timestamp.as_micros().min(u64::MAX as u128) as u64)
-}
-
 /// Where the audio track has reached, measured from its own origin so
 /// timestamp rounding can't accumulate into drift.
 #[derive(Default)]

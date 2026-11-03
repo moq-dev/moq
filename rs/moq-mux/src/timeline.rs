@@ -16,7 +16,29 @@ use kio::clock::Instant;
 use std::time::Duration;
 
 use moq_net::Timestamp;
-use std::{pin::Pin, task::Poll};
+use std::{
+	pin::Pin,
+	sync::{Arc, Mutex},
+	task::Poll,
+};
+
+struct Clock {
+	state: Mutex<State>,
+	changed: kio::Shared<()>,
+}
+
+impl Clock {
+	fn new(delay: Duration) -> Self {
+		Self {
+			state: Mutex::new(State::new(delay)),
+			changed: Default::default(),
+		}
+	}
+
+	fn wake(&self) {
+		*self.changed.lock() = ();
+	}
+}
 
 /// The playout clock: one anchor the window and the speaker both present
 /// against.
@@ -131,7 +153,7 @@ impl State {
 	fn position(&self, at: Instant) -> Option<Duration> {
 		let reference = self.reference?;
 		let due = self.due(reference)?;
-		let reference = timestamp(reference);
+		let reference = Duration::from(reference);
 		Some(if at >= due {
 			reference.saturating_add(at.duration_since(due))
 		} else {
@@ -254,7 +276,7 @@ impl State {
 
 /// Maps each encoder segment onto the shared playback clock.
 pub struct Track {
-	presentation: kio::Shared<State>,
+	presentation: Arc<Clock>,
 	role: Kind,
 	mapping: std::sync::Mutex<Mapping>,
 }
@@ -287,7 +309,7 @@ impl Mapping {
 }
 
 impl Track {
-	fn new(presentation: kio::Shared<State>, role: Kind) -> Self {
+	fn new(presentation: Arc<Clock>, role: Kind) -> Self {
 		Self {
 			presentation,
 			role,
@@ -303,7 +325,7 @@ impl Track {
 	/// then. Dropping instead discards the tail with the end.
 	pub fn retire(self, drained: Option<Instant>) {
 		let now = kio::clock::now();
-		let mut presentation = self.presentation.lock();
+		let mut presentation = self.presentation.state.lock().unwrap();
 		presentation.tails.retain(|tail| *tail > now);
 		if presentation.ends[self.role as usize].take().is_some()
 			&& let Some(drained) = drained
@@ -326,7 +348,7 @@ impl Track {
 	pub fn declare(&self) -> Transition {
 		let now = kio::clock::now();
 		let own = self.role as usize;
-		let mut presentation = self.presentation.lock();
+		let mut presentation = self.presentation.state.lock().unwrap();
 		presentation.prune(now);
 		let after = presentation.declared[own];
 		let joined = presentation
@@ -358,22 +380,24 @@ impl Track {
 		});
 		presentation.declared[own] = id;
 		drop(presentation);
+		self.presentation.wake();
 		id
 	}
 
 	/// Mark where this role's current segment ends on the shared clock.
 	pub fn end(&self, source: Timestamp) -> Result<()> {
 		let mapping = *self.mapping.lock().unwrap();
-		self.presentation.lock().ends[self.role as usize] = Some(Boundary {
+		self.presentation.state.lock().unwrap().ends[self.role as usize] = Some(Boundary {
 			starts: mapping.starts,
-			end: timestamp(mapping.map(source)?),
+			end: Duration::from(mapping.map(source)?),
 		});
+		self.presentation.wake();
 		Ok(())
 	}
 
 	/// Record the first replacement media for `transition`.
 	pub fn plan(&self, transition: Transition, source: Timestamp, delay: Option<Duration>) {
-		let mut presentation = self.presentation.lock();
+		let mut presentation = self.presentation.state.lock().unwrap();
 		let delay = delay.unwrap_or(presentation.delay);
 		if let Some(pending) = presentation.transition(transition) {
 			pending.plans[self.role as usize] = Some(Plan {
@@ -382,34 +406,38 @@ impl Track {
 			});
 		}
 		drop(presentation);
+		self.presentation.wake();
 	}
 
 	/// Media was lost: nothing waits for the discarded tail.
 	pub fn gap(&self) {
-		self.presentation.lock().ends[self.role as usize] = None;
+		self.presentation.state.lock().unwrap().ends[self.role as usize] = None;
+		self.presentation.wake();
 	}
 
 	/// This role will never resume `transition`, so a peer must not pair with its plan.
 	pub fn abandon(&self, transition: Transition) {
 		let own = self.role as usize;
-		let mut presentation = self.presentation.lock();
+		let mut presentation = self.presentation.state.lock().unwrap();
 		if let Some(pending) = presentation.transition(transition) {
 			pending.members[own] = false;
 			pending.plans[own] = None;
 		}
 		presentation.prune(kio::clock::now());
 		drop(presentation);
+		self.presentation.wake();
 	}
 
 	/// Commit the mapping once its replacement media starts playing.
 	pub fn apply(&self, transition: Transition, mapping: Mapping) {
 		*self.mapping.lock().unwrap() = mapping;
-		let mut presentation = self.presentation.lock();
+		let mut presentation = self.presentation.state.lock().unwrap();
 		if let Some(pending) = presentation.transition(transition) {
 			pending.resumed[self.role as usize] = true;
 		}
 		presentation.prune(kio::clock::now());
 		drop(presentation);
+		self.presentation.wake();
 	}
 
 	/// Prepare a mapping after the old media drains; dropping the wait leaves the track unchanged.
@@ -428,7 +456,7 @@ impl Drop for Track {
 	fn drop(&mut self) {
 		let own = self.role as usize;
 		{
-			let mut presentation = self.presentation.lock();
+			let mut presentation = self.presentation.state.lock().unwrap();
 			presentation.ends[own] = None;
 			for pending in presentation
 				.transitions
@@ -441,16 +469,11 @@ impl Drop for Track {
 			presentation.declared[own] = Transition(0);
 			presentation.prune(kio::clock::now());
 		}
+		self.presentation.wake();
 	}
 }
 
-/// A wire timestamp as a duration from the start of the track.
-fn timestamp(timestamp: Timestamp) -> Duration {
-	Duration::from_micros(timestamp.as_micros().min(u64::MAX as u128) as u64)
-}
-
-/// A duration from the start of the track as a wire timestamp, the inverse of
-/// [`timestamp`].
+/// A duration from the start of the track as a wire timestamp.
 fn media(duration: Duration) -> Timestamp {
 	// A timestamp caps at 2^61 - 1, which is ~73,000 years of microseconds.
 	const MAX: u128 = (1 << 61) - 1;
@@ -470,32 +493,31 @@ pub struct Resume<'a> {
 impl Resume<'_> {
 	/// Resolve the replacement's mapping once all declared old media has drained.
 	pub fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<Mapping>> {
+		let _ = self.track.presentation.changed.poll(waiter, |_| Poll::Pending);
 		let now = kio::clock::now();
-		let mut presentation = std::task::ready!(self.track.presentation.poll(waiter, |presentation| {
-			if presentation
-				.transitions
-				.iter()
-				.any(|pending| pending.id == self.transition && pending.mapping.is_some())
-			{
-				return Poll::Ready(());
+		let mut presentation = self.track.presentation.state.lock().unwrap();
+		if let Some(mapping) = presentation
+			.transition(self.transition)
+			.and_then(|pending| pending.mapping)
+		{
+			return Poll::Ready(Ok(mapping));
+		}
+		let end = presentation
+			.ends
+			.iter()
+			.flatten()
+			.filter(|boundary| boundary.starts.is_none_or(|start| start <= now))
+			.filter_map(|boundary| presentation.due(media(boundary.end)))
+			.chain(presentation.tails.iter().copied())
+			.max();
+		if let Some(end) = end.filter(|end| *end > now) {
+			let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(end));
+			if timer.deadline() != end {
+				timer.reset(end);
 			}
-			let end = presentation
-				.ends
-				.iter()
-				.flatten()
-				.filter(|boundary| boundary.starts.is_none_or(|start| start <= now))
-				.filter_map(|boundary| presentation.due(media(boundary.end)))
-				.chain(presentation.tails.iter().copied())
-				.max();
-			if let Some(end) = end.filter(|end| *end > now) {
-				let timer = self.timer.get_or_insert_with(|| kio::clock::sleep_until(end));
-				if timer.deadline() != end {
-					timer.reset(end);
-				}
-				return waiter.poll_future(Pin::new(timer));
-			}
-			Poll::Ready(())
-		}));
+			std::task::ready!(waiter.poll_future(Pin::new(timer)));
+		}
+
 		let peer = 1 - self.track.role as usize;
 		// A transition abandoned under this resume, by a gap the caller rechecks,
 		// maps alone like one the peer never joined.
@@ -572,56 +594,94 @@ pub struct Audio {
 }
 
 /// Updates one broadcast's playout clock, shared by audio and video tasks.
-#[derive(Clone)]
+///
+/// Clones capture this broadcast's clock; resetting a handle never changes the
+/// clock its previous clones or track handles update.
 pub struct Producer {
-	state: kio::Shared<State>,
+	clock: Mutex<Arc<Clock>>,
+	current: Arc<Mutex<Arc<Clock>>>,
+}
+
+impl Clone for Producer {
+	fn clone(&self) -> Self {
+		Self {
+			clock: Mutex::new(self.clock()),
+			current: self.current.clone(),
+		}
+	}
 }
 
 /// Reads the current playout schedule without moving its anchor.
 ///
-/// Keeps the final schedule readable after the updating handles are dropped, so
-/// a presenter can drain its remaining frames.
+/// Keeps the final schedule readable after update handles drop, and follows
+/// the replacement clock when a producer resets for another broadcast.
 #[derive(Clone)]
 pub struct Consumer {
-	state: kio::Shared<State>,
+	current: Arc<Mutex<Arc<Clock>>>,
 }
 
 impl Producer {
 	/// Create a broadcast clock with this video-only delay.
 	pub fn new(delay: Duration) -> Self {
+		let clock = Arc::new(Clock::new(delay));
 		Self {
-			state: kio::Shared::new(State::new(delay)),
+			clock: Mutex::new(clock.clone()),
+			current: Arc::new(Mutex::new(clock)),
 		}
 	}
 
-	/// Reset for a different broadcast after stopping every old track.
-	pub fn reset(&self, delay: Duration) {
-		*self.state.lock() = State::new(delay);
+	fn clock(&self) -> Arc<Clock> {
+		self.clock.lock().unwrap().clone()
 	}
 
-	/// Return a reader of the same broadcast clock.
+	/// Start a new broadcast clock and switch readers to it, isolating all previous update handles.
+	pub fn reset(&self, delay: Duration) {
+		let clock = Arc::new(Clock::new(delay));
+		*self.clock.lock().unwrap() = clock.clone();
+		*self.current.lock().unwrap() = clock;
+	}
+
+	/// Return a reader that follows this handle's broadcast replacements.
 	pub fn consume(&self) -> Consumer {
 		Consumer {
-			state: self.state.clone(),
+			current: self.current.clone(),
 		}
 	}
 
-	/// Return a track handle for one half of playback.
+	/// Return a track handle bound to this broadcast's clock.
 	pub fn track(&self, kind: Kind) -> Track {
-		Track::new(self.state.clone(), kind)
+		Track::new(self.clock(), kind)
 	}
+
 	/// Fold an arriving video frame into the anchor, unless the speaker owns it,
 	/// reporting whether that moved the schedule.
 	///
 	/// A move makes every queued frame due earlier, so the window has to recompute
 	/// the deadline it is already asleep on.
 	pub fn video(&self, timestamp: Timestamp, now: Instant) -> bool {
-		self.state.lock().video(timestamp, now)
+		let clock = self.clock();
+		let moved = clock.state.lock().unwrap().video(timestamp, now);
+		if moved {
+			clock.wake();
+		}
+		moved
 	}
 
 	/// Start a new video timeline without taking ownership from a speaker.
 	pub fn video_restarted(&self) {
-		self.state.lock().video_restarted()
+		let clock = self.clock();
+		let moved = {
+			let mut state = clock.state.lock().unwrap();
+			if state.speaker {
+				false
+			} else {
+				state.video_restarted();
+				true
+			}
+		};
+		if moved {
+			clock.wake();
+		}
 	}
 
 	/// Fold the speaker's position into the anchor, reporting whether that moved
@@ -637,16 +697,23 @@ impl Producer {
 	/// A move makes every queued video frame due earlier, so the window has to
 	/// recompute the deadline it is already asleep on.
 	pub fn audio(&self, audio: Audio, now: Instant) -> bool {
-		let mut state = self.state.lock();
-		state.hold(audio.target);
-		state.audio(audio.end, audio.buffered, now)
+		let clock = self.clock();
+		let moved = {
+			let mut state = clock.state.lock().unwrap();
+			state.hold(audio.target);
+			state.audio(audio.end, audio.buffered, now)
+		};
+		if moved {
+			clock.wake();
+		}
+		moved
 	}
 
 	/// The speaker restarted on a new timeline, so the media either side of the
 	/// break is unrelated: re-pin the anchor on the next audio frame rather than
 	/// pacing across a jump the speaker never plays.
 	pub fn audio_restarted(&self) {
-		self.state.lock().restarted()
+		self.clock().state.lock().unwrap().restarted()
 	}
 
 	/// The speaker went quiet, so nothing holds playback to its cadence any
@@ -657,31 +724,31 @@ impl Producer {
 	/// necessarily continuous with what just ended. That covers a pending
 	/// restart, which would otherwise re-pin the frame after it too.
 	pub fn audio_stopped(&self) {
-		self.state.lock().stopped()
+		self.clock().state.lock().unwrap().stopped()
 	}
 
 	/// When `timestamp` should be presented, or `None` before any frame has
 	/// anchored the clock. `None` means as soon as possible: there is nothing
 	/// left to wait for.
 	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
-		self.state.read().due(timestamp)
+		self.clock().state.lock().unwrap().due(timestamp)
 	}
 }
 
 impl Consumer {
 	/// The media time sounding now, held at the last audio write's end.
 	pub fn playhead(&self, now: Instant) -> Option<Duration> {
-		self.state.read().playhead(now)
+		self.current.lock().unwrap().state.lock().unwrap().playhead(now)
 	}
 
 	/// The caller-supplied audio playout target, or `None` without audio.
 	pub fn target(&self) -> Option<Duration> {
-		self.state.read().target()
+		self.current.lock().unwrap().state.lock().unwrap().target()
 	}
 
 	/// When this timestamp is due, or `None` before the first anchor.
 	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
-		self.state.read().due(timestamp)
+		self.current.lock().unwrap().state.lock().unwrap().due(timestamp)
 	}
 
 	/// The newest due picture's index in presentation order, or `None` to repeat the previous one.
@@ -691,7 +758,8 @@ impl Consumer {
 	/// their retention and backpressure to the caller. Query again after every
 	/// anchor update; a cached deadline can become stale.
 	pub fn present(&self, timestamps: impl IntoIterator<Item = Timestamp>, now: Instant) -> Option<usize> {
-		let state = self.state.read();
+		let clock = self.current.lock().unwrap();
+		let state = clock.state.lock().unwrap();
 		timestamps
 			.into_iter()
 			.take_while(|timestamp| state.due(*timestamp).is_none_or(|at| at <= now))
@@ -703,10 +771,109 @@ impl Consumer {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[tokio::test]
+	async fn replacing_a_broadcast_isolates_its_old_update_handles() {
+		tokio::time::pause();
+		let clock = Producer::new(DELAY);
+		let reader = clock.consume();
+		let previous = clock.clone();
+		let old = clock.track(Kind::Audio);
+		old.declare();
+		clock.reset(DELAY);
+		let now = kio::clock::now();
+		clock.audio(
+			Audio {
+				end: Duration::ZERO,
+				buffered: DELAY,
+				target: DELAY,
+			},
+			now,
+		);
+		let audio = clock.track(Kind::Audio);
+		audio.declare();
+		audio.end(ms(1_000)).unwrap();
+		// A JoinSet abort can leave these updates and drops until after the new track started.
+		drop(old);
+		previous.audio(
+			Audio {
+				end: Duration::from_secs(10),
+				buffered: Duration::ZERO,
+				target: Duration::ZERO,
+			},
+			now,
+		);
+		assert_eq!(reader.due(ms(0)), Some(now + DELAY));
+		let video = clock.track(Kind::Video);
+		let transition = video.declare();
+		video.plan(transition, ms(0), None);
+		let resumed = kio::clock::timeout(
+			DELAY + Duration::from_millis(500),
+			video.resume(transition, ms(0), None).ready(),
+		)
+		.await;
+		assert!(resumed.is_err(), "old handle cleared the new audio tail");
+	}
+
+	#[tokio::test]
+	async fn ordinary_arrivals_leave_a_parked_resume_asleep() {
+		use std::sync::{
+			Arc,
+			atomic::{AtomicUsize, Ordering},
+		};
+		use std::task::{Wake, Waker};
+		struct Wakes(AtomicUsize);
+		impl Wake for Wakes {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+		tokio::time::pause();
+		let clock = Producer::new(DELAY);
+		let now = kio::clock::now();
+		clock.audio(
+			Audio {
+				end: Duration::ZERO,
+				buffered: DELAY,
+				target: DELAY,
+			},
+			now,
+		);
+		let audio = clock.track(Kind::Audio);
+		audio.end(ms(1_000)).unwrap();
+		let video = clock.track(Kind::Video);
+		let transition = video.declare();
+		video.plan(transition, ms(0), None);
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waiter = kio::Waiter::new(Waker::from(wakes.clone()));
+		let mut resume = video.resume(transition, ms(0), None);
+		assert!(resume.poll_ready(&waiter).is_pending());
+		clock.video(ms(20), now);
+		clock.audio(
+			Audio {
+				end: Duration::from_millis(20),
+				buffered: DELAY,
+				target: DELAY,
+			},
+			now + Duration::from_millis(20),
+		);
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+		clock.audio(
+			Audio {
+				end: Duration::from_millis(40),
+				buffered: DELAY,
+				target: DELAY,
+			},
+			now + Duration::from_millis(20),
+		);
+		assert!(
+			wakes.0.load(Ordering::Relaxed) > 0,
+			"a moved anchor must wake the resume"
+		);
+	}
 
 	#[test]
 	fn discarded_replacements_release_their_transition_state() {
-		let presentation = kio::Shared::new(State::new(Duration::ZERO));
+		let presentation = Arc::new(Clock::new(Duration::ZERO));
 		let video = Track::new(presentation.clone(), Kind::Video);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let first = audio.declare();
@@ -716,11 +883,11 @@ mod tests {
 			let transition = video.declare();
 			video.plan(transition, Timestamp::ZERO, None);
 			video.abandon(transition);
-			assert_eq!(presentation.read().pending(), 1);
+			assert_eq!(presentation.state.lock().unwrap().pending(), 1);
 		}
 		video.abandon(first);
 		drop(audio);
-		assert_eq!(presentation.read().pending(), 0);
+		assert_eq!(presentation.state.lock().unwrap().pending(), 0);
 	}
 
 	#[test]
@@ -806,29 +973,33 @@ mod tests {
 	async fn one_ended_role_maps_to_the_continuous_peers_clock() {
 		tokio::time::pause();
 		let start = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
+		let presentation = Arc::new(Clock::new(DELAY));
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
-		presentation.lock().video(ms(10_000), start);
+		presentation.state.lock().unwrap().video(ms(10_000), start);
 		let transition = audio.declare();
 		audio.end(ms(10_020)).unwrap();
 		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
-		let unchanged = presentation.lock().due(ms(10_500));
+		let unchanged = presentation.state.lock().unwrap().due(ms(10_500));
 		audio.apply(
 			transition,
 			audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap(),
 		);
 		assert_eq!(audio.map(ms(0)).unwrap().as_millis(), 10_120);
 		assert_eq!(video.map(ms(10_500)).unwrap().as_millis(), 10_500);
-		assert_eq!(presentation.lock().due(ms(10_500)), unchanged);
+		assert_eq!(presentation.state.lock().unwrap().due(ms(10_500)), unchanged);
 	}
 
 	#[tokio::test]
 	async fn a_late_paired_replacement_keeps_its_media_offset() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -858,8 +1029,12 @@ mod tests {
 	async fn a_late_replacement_pairs_with_its_own_transition() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -892,8 +1067,12 @@ mod tests {
 	async fn a_peer_two_restarts_ahead_pairs_with_the_first() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -924,8 +1103,12 @@ mod tests {
 	async fn an_abandoned_replacement_leaves_the_next_transition_alone() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -946,15 +1129,22 @@ mod tests {
 		video.apply(next, video.resume(next, ms(5_000), None).ready().await.unwrap());
 		// The later replacement maps onto the running clock, not the audio restart's.
 		let resumed = kio::clock::now() + DELAY;
-		assert_eq!(presentation.lock().due(video.map(ms(5_000)).unwrap()), Some(resumed));
+		assert_eq!(
+			presentation.state.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
+			Some(resumed)
+		);
 	}
 
 	#[tokio::test]
 	async fn an_abandoned_peer_plan_is_not_paired() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -970,15 +1160,22 @@ mod tests {
 			video.resume(transition, ms(40), None).ready().await.unwrap(),
 		);
 		let resumed = kio::clock::now() + DELAY;
-		assert_eq!(presentation.lock().due(video.map(ms(40)).unwrap()), Some(resumed));
+		assert_eq!(
+			presentation.state.lock().unwrap().due(video.map(ms(40)).unwrap()),
+			Some(resumed)
+		);
 	}
 
 	#[tokio::test]
 	async fn a_resumed_transition_ignores_the_peers_later_end() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -1006,8 +1203,12 @@ mod tests {
 	async fn a_cancelled_role_releases_its_declared_end() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -1029,8 +1230,12 @@ mod tests {
 	async fn a_closed_role_still_holds_its_declared_end() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -1052,8 +1257,12 @@ mod tests {
 	async fn a_retired_end_ignores_a_later_re_pin() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -1061,7 +1270,7 @@ mod tests {
 		audio.retire(Some(now + Duration::from_millis(300)));
 		// A replacement rendition starts over at zero and re-pins the anchor.
 		{
-			let mut presentation = presentation.lock();
+			let mut presentation = presentation.state.lock().unwrap();
 			presentation.restarted();
 			presentation.audio(Duration::from_millis(50), DELAY, now);
 		}
@@ -1079,8 +1288,12 @@ mod tests {
 	async fn a_cancelled_successor_keeps_a_retired_tail() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -1104,8 +1317,12 @@ mod tests {
 	async fn paired_plans_keep_media_offsets_and_follow_the_speakers_delay() {
 		tokio::time::pause();
 		let now = kio::clock::now();
-		let presentation = kio::Shared::new(State::new(DELAY));
-		presentation.lock().audio(Duration::from_secs(10), DELAY, now);
+		let presentation = Arc::new(Clock::new(DELAY));
+		presentation
+			.state
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now);
 		let audio = Track::new(presentation.clone(), Kind::Audio);
 		let video = Track::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -1132,7 +1349,7 @@ mod tests {
 			40
 		);
 		assert_eq!(
-			presentation.lock().due(audio.map(ms(0)).unwrap()),
+			presentation.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
 			Some(now + Duration::from_millis(200))
 		);
 	}

@@ -16,7 +16,7 @@ use kio::clock::Instant;
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, Track, joined};
-use super::timeline::{AudioTimeline, fit, timestamp};
+use super::timeline::{AudioTimeline, fit};
 use super::video::{Refresh, Video};
 use super::window::Event;
 use moq_mux::timeline::{Producer as Presentation, Transition};
@@ -771,7 +771,7 @@ async fn play_audio<O: Output>(
 
 			let length = frame.data.len() / stride;
 			let mapped = role.map(frame.timestamp)?;
-			let start = timestamp(mapped);
+			let start = Duration::from(mapped);
 			let timing = timeline.push(start, length, sample_rate, fill_max);
 
 			// A rewind or a hole too large to fill starts a new playback sink. The old
@@ -1152,13 +1152,13 @@ mod tests {
 			let shown = shown
 				.iter()
 				.find(|(shown, _)| {
-					let start = super::timestamp(*shown);
+					let start = Duration::from(*shown);
 					start <= timestamp && timestamp < start + PACKET_DURATION
 				})
 				.expect("continuous video reaches resumed audio");
-			(shown.1 + (timestamp - super::timestamp(shown.0)), new[0].from)
+			(shown.1 + (timestamp - Duration::from(shown.0)), new[0].from)
 		} else {
-			let timestamp = super::timestamp(shown[3].0);
+			let timestamp = Duration::from(shown[3].0);
 			let index = (shown[3].0.as_millis() / 20) as usize;
 			let offset = timestamp - PACKET_DURATION * index as u32;
 			(shown[3].1, new[index - 3].from + offset)

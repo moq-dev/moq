@@ -1249,14 +1249,40 @@ mod tests {
 		}
 		tokio::time::advance(Duration::from_millis(500)).await;
 		tokio::task::yield_now().await;
+		media.output.present(&media);
+		// Once the old tail drained, audio must pair with the surviving replacement,
+		// rather than a discarded segment that still has a transition or a plan.
+		tokio::time::advance(Duration::from_secs(3)).await;
+		tokio::task::yield_now().await;
+		let start = moq_net::Timestamp::from_millis(3_000).unwrap();
+		let transition = audio.declare();
+		audio.plan(transition, start, Some(delay));
+		producer.write(frame(3_040, true)).unwrap();
 		producer.finish().unwrap();
-		drop(audio);
+		audio.apply(
+			transition,
+			audio.resume(transition, start, Some(delay)).ready().await.unwrap(),
+		);
+		let first = audio.map(start).unwrap();
+		media.presentation.audio(
+			moq_mux::timeline::Audio {
+				end: Duration::from(first),
+				buffered: delay,
+				target: delay,
+			},
+			Instant::now(),
+		);
+		let mut shown = None;
 		for _ in 0..1_000 {
 			tokio::task::yield_now().await;
-			media.output.present(&media);
+			shown = media.output.present(&media).or(shown);
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
 		task.await.unwrap().unwrap();
+		assert_eq!(
+			shown.map(Duration::from),
+			Some(Duration::from(first) + Duration::from_millis(40))
+		);
 	}
 
 	#[tokio::test]
