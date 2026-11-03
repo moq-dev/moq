@@ -6934,7 +6934,12 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 				.filter(|frame| count_pid(std::slice::from_ref(*frame), 0x0014) > 0)
 				.collect();
 			assert_eq!(clock.len(), 1, "revision at {millis}");
-			assert_eq!(clock[0].timestamp, Timestamp::from_millis(millis).unwrap());
+			// SI rides the media PES, which this unpadded fixture sends in the slice
+			// before its decode boundary. Its phase is shared by both exporters.
+			assert_eq!(
+				Duration::from(clock[0].timestamp) + PCR_INTERVAL,
+				Duration::from_millis(millis)
+			);
 			assert!(
 				frames
 					.iter()
