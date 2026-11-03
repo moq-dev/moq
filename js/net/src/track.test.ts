@@ -520,6 +520,9 @@ test("rescale matches the track's timeline, rounded down as Rust's convert does"
 	const half = rescale(fine, new Timestamp(2.5, Timescale(3)))?.value;
 	expect(half).toBe(7_505_999_378_950_825);
 	expect(rescale(fine, new Timestamp(5, Timescale(6)))?.value).toBe(half);
+	// The same binary value at two scales floors alike, below 0.117 s: 116 ms, as Rust converts it.
+	expect(rescale(timed, new Timestamp(0.11699999999999999, Timescale.SECOND))?.value).toBe(116);
+	expect(rescale(timed, new Timestamp(131730289100587, Timescale(1125899906842624)))?.value).toBe(116);
 	expect(() => rescale(timed, undefined)).toThrow(TimestampMismatch);
 	const huge = new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MILLI);
 	expect(() => rescale({ timescale: Timescale.NANO }, huge)).toThrow(TimestampMismatch);
