@@ -116,3 +116,49 @@ for (const [version, alpn] of [
 		server.abort();
 	});
 }
+
+test("a widening keeps a bounded lite-07 subscription open for the stale groups it re-offers", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publication = origin.createBroadcast(Path.from("room"));
+	publication.announce();
+	const broadcast = publication.broadcast;
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const write = (sequence: number, millis: number) => {
+		const group = producer.createGroup(BigInt(sequence));
+		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+		group.finish();
+	};
+	write(0, 0);
+
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ transport: pair.server, url, version: Version.DRAFT_07, publish: origin.consume() }),
+	]);
+	const remote = wireOf(client).consume(Path.from("room"));
+	const ranges = [{ start: { absolute: 0n }, end: { absolute: 5n } }];
+	const reader = remote.track("video").subscribe({ delay: { max: Milli(1500) }, ranges });
+	expect(await received(reader, 1)).toEqual([0n]);
+	// Groups 1 and 2 are reported stale after SUBSCRIBE_START.
+	for (const [sequence, millis] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 3000],
+		[4, 6000],
+	]) {
+		write(sequence, millis);
+	}
+	expect(await received(reader, 2)).toEqual([3n, 4n]);
+
+	// The widening re-offers them, and the track's end does not settle the tail before they arrive.
+	reader.update({ delay: { max: Milli(10_000) }, ranges });
+	producer.finish();
+	expect(await received(reader, 2)).toEqual([1n, 2n]);
+
+	reader.close();
+	remote.close();
+	broadcast.close();
+	origin.close();
+	client.abort();
+	server.abort();
+});

@@ -160,6 +160,11 @@ interface SubscribeEntry {
 	// The range terms id of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop judged
 	// under an earlier one is no verdict on the current terms. Undefined is the SUBSCRIBE's 0.
 	terms?: bigint;
+	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds.
+	maxDelay?: number;
+	// The runs `tail` accounts for by a stale drop, with the max age each was judged under: a
+	// widening past it reverses the verdict, so they are owed again.
+	stale?: { start: bigint; end: bigint; maxAge: number }[];
 	// Whether SUBSCRIBE_START arrived, which `start` alone cannot say when no range starts.
 	started?: boolean;
 	// Whether our side is FINned, which lite-07 does once the tail settles past SUBSCRIBE_FINISH.
@@ -1426,6 +1431,7 @@ export class Subscriber {
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
 		const entry: SubscribeEntry = {
 			track: producer,
+			maxDelay: msg.maxDelay,
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
@@ -1858,10 +1864,17 @@ export class Subscriber {
 				// The publisher will never send these groups, so they are accounted for without a
 				// stream, and a reader of one still arriving ends with the drop's error now.
 				const { start, end, maxAge, terms } = resp.drop;
-				entry.tail.account(start, end + 1n);
 				// A stale verdict under terms an update has since replaced says nothing of the
 				// current ones: the groups are unknown, and a reader that wants one fills it.
-				if (maxAge !== undefined && terms < (entry.terms ?? 0n)) continue;
+				const superseded = maxAge !== undefined && terms < (entry.terms ?? 0n);
+				// One the update widened past is served or dropped again, so it is still owed.
+				const reversed = superseded && maxAge < (entry.maxDelay ?? 0);
+				if (!reversed) entry.tail.account(start, end + 1n);
+				if (maxAge !== undefined && !reversed) {
+					entry.stale ??= [];
+					entry.stale.push({ start, end: end + 1n, maxAge });
+				}
+				if (superseded) continue;
 				hooks.dropTrackGroups(entry.track, start, end + 1n, {
 					error: resp.drop.cause(this.version),
 					stale: maxAge,
@@ -2050,7 +2063,14 @@ export class Subscriber {
 			// may move the range it was judged against, so the runs held as stale become unknown
 			// again: a reader fills them rather than trust an old verdict.
 			entry.terms = update.terms;
+			entry.maxDelay = update.maxDelay;
 			hooks.supersedeStale(entry.track, judgedEnd(ranges));
+			// A lite-07 publisher re-offers or drops again what a widening reverses, so the tail owes
+			// the stale runs judged under a narrower max age again.
+			for (const run of entry.stale ?? []) {
+				if (run.maxAge < update.maxDelay) entry.tail.unaccount(run.start, run.end);
+			}
+			entry.stale = entry.stale?.filter((run) => run.maxAge >= update.maxDelay);
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the

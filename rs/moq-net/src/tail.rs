@@ -71,6 +71,12 @@ impl Tail {
 		self.expire(now);
 	}
 
+	/// Owe `groups` again from `now`: a stale drop that accounted for them was reversed by a
+	/// widening, so the publisher serves or drops them anew.
+	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
+		self.ledger.unaccount(groups, now);
+	}
+
 	/// Restart the age of every gap reaching into `groups`, which the demand newly asks for.
 	pub fn demand(&mut self, groups: Range<u64>, now: Instant) {
 		self.ledger.demand(groups, now);

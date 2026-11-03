@@ -99,6 +99,11 @@ export class Tail {
 		this.#account(start, end);
 	}
 
+	/** Owe `[start, end)` again: a stale drop that accounted for it was reversed by a widening. */
+	unaccount(start: bigint, end: bigint): void {
+		this.#ledger.unaccount(start, end, now());
+	}
+
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
 	demand(start: bigint, end: bigint): void {
 		this.#ledger.demand(start, end, now());

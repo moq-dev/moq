@@ -154,6 +154,38 @@ export class Ledger {
 		return gaps;
 	}
 
+	/**
+	 * Take `[start, end)` back out of what is accounted for, owed again from `at`: a verdict that
+	 * accounted for it was reversed. The gap it leaves opens at `at`, so it is waited for a fresh
+	 * grace. Mirrors the Rust `Ledger::unaccount`.
+	 */
+	unaccount(start: bigint, end: bigint, at: Instant): void {
+		if (start >= end) return;
+		const lower = this.#runs.getPairOrNextLower(start)?.[1];
+		const overlapping: Run[] = [];
+		for (const [, run] of this.#runs.entries(lower?.start ?? start)) {
+			if (run.start >= end) break;
+			if (run.end > start) overlapping.push(run);
+		}
+		for (const run of overlapping) {
+			this.#remove(run);
+			if (this.#last === run) this.#last = undefined;
+			if (run.start < start) {
+				const below = { start: run.start, end: start, since: run.since };
+				this.#runs.set(below.start, below);
+				this.#ages.set(below, undefined);
+			}
+			if (end < run.end) {
+				const above = { start: end, end: run.end, since: at };
+				this.#runs.set(above.start, above);
+				this.#ages.set(above, undefined);
+			}
+		}
+		const last = this.#runs.maxKey();
+		this.#last = last === undefined ? undefined : this.#runs.get(last);
+		this.#nextExpiry();
+	}
+
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
 	demand(start: bigint, end: bigint, at: Instant): void {
 		if (start >= end) return;

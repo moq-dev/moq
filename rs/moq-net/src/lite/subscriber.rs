@@ -19,6 +19,7 @@ use super::Version;
 use crate::tail::{self, Reading, Settle, Tail};
 
 use kio::Lock;
+use rangemap::RangeMap;
 
 pub(super) struct SubscriberConfig {
 	pub runtime: crate::time::Deadlines,
@@ -2466,6 +2467,7 @@ mod tests {
 			updated: false,
 			_working: crate::session::Work::default().start(),
 			terms: 0,
+			stale: RangeMap::new(),
 		})
 	}
 
@@ -2616,6 +2618,7 @@ mod tests {
 				updated: false,
 				_working: crate::session::Work::default().start(),
 				terms: 0,
+				stale: RangeMap::new(),
 			});
 			if update {
 				h.serve
@@ -3078,6 +3081,7 @@ mod tests {
 			updated: false,
 			_working: crate::session::Work::default().start(),
 			terms: 0,
+			stale: RangeMap::new(),
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -7537,6 +7541,9 @@ struct SubStream {
 	/// The range terms id of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop
 	/// judged under an earlier one is no verdict on the current terms.
 	terms: u64,
+	/// The runs `tail` accounts for by a stale drop, with the max age each was judged under:
+	/// a widening past it reverses the verdict, so they are owed again.
+	stale: RangeMap<u64, Duration>,
 	/// Holds the session busy for as long as the subscription is open.
 	_working: crate::session::Working,
 }
@@ -8076,7 +8083,7 @@ impl TrackServe {
 							if start_moved {
 								let _ = producer.start_at(active.start);
 							}
-							buffer_update(active, producer)?;
+							buffer_update(active, producer, self.subscriber.runtime.now())?;
 						}
 						Ok(Begin::None)
 					}
@@ -8348,9 +8355,26 @@ fn judged_end(ranges: &[lite::Range]) -> Option<u64> {
 /// A stale drop judged under earlier terms may still be in flight, and the update may have
 /// moved the range it was judged against, so the runs `serving` holds as stale become
 /// unknown again: a reader fills them by range rather than trust an old verdict.
-fn buffer_update(active: &mut SubStream, serving: &track::Producer) -> Result<(), Error> {
+///
+/// A lite-07 publisher re-offers or drops again what a widening reverses, so the tail owes
+/// the stale runs judged under a narrower max age than this update's again, from `now`.
+fn buffer_update(active: &mut SubStream, serving: &track::Producer, now: crate::time::Instant) -> Result<(), Error> {
 	active.terms += 1;
 	serving.supersede_stale(judged_end(&active.ranges));
+	let reversed: Vec<_> = active
+		.stale
+		.iter()
+		.filter(|(_, judged)| **judged < active.max_delay)
+		.map(|(run, _)| run.clone())
+		.collect();
+	if let Ok(mut tail) = active.tail.write() {
+		for run in &reversed {
+			tail.unaccount(run.clone(), now);
+		}
+	}
+	for run in reversed {
+		active.stale.remove(run);
+	}
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,
@@ -8458,6 +8482,7 @@ impl Establish {
 			wanted: None,
 			updated: false,
 			terms: 0,
+			stale: RangeMap::new(),
 			_working: self.session.work().start(),
 		}
 	}
@@ -9464,12 +9489,17 @@ impl ServeLoop {
 			// one still arriving ends with the drop's error now.
 			lite::SubscribeResponse::Drop(dropped) => {
 				let groups = dropped.start..dropped.end.saturating_add(1);
-				if let Ok(mut tail) = active.tail.write() {
-					tail.account(groups.clone(), serve.subscriber.runtime.now());
-				}
 				// A stale verdict under terms an update has since replaced says nothing of the
 				// current ones: the groups are unknown, and a reader that wants one fills it by range.
 				let superseded = dropped.terms < active.terms;
+				// One the update widened past is served or dropped again, so it is still owed.
+				let reversed = superseded && dropped.max_age.is_some_and(|judged| judged < active.max_delay);
+				if !reversed && let Ok(mut tail) = active.tail.write() {
+					tail.account(groups.clone(), serve.subscriber.runtime.now());
+				}
+				if let Some(judged) = dropped.max_age.filter(|_| !reversed) {
+					active.stale.insert(groups.clone(), judged);
+				}
 				match dropped.max_age {
 					Some(_) if superseded => {}
 					stale => self.serving.give_up(
@@ -9711,7 +9741,7 @@ impl ServeLoop {
 							&& active.wanted != Some(wanted)
 						{
 							active.wanted = Some(wanted);
-							if let Err(err) = buffer_update(active, &self.serving) {
+							if let Err(err) = buffer_update(active, &self.serving, serve.subscriber.runtime.now()) {
 								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 							continue;
