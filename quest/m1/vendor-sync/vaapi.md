@@ -47,17 +47,36 @@ Checked 2026-10-31:
   queries for `cros-libva` and `cros-codecs`. This does not cover undisclosed
   vulnerabilities.
 
+Rechecked 2026-11-02: both ChromeOS default-branch heads above are unchanged,
+so no new commits need porting. The four repository advisory endpoints and
+both global Rust advisory queries remain empty. The completed audit and its
+dispositions still apply.
+
 Remaining this cycle: merge the ported fix,
 [moq-dev/vaapi#5](https://github.com/moq-dev/vaapi/pull/5), publish a new
 `moq-vaapi` release to crates.io, then bump moq's workspace `moq-vaapi = "0.1.0"`
 and lockfile to it and run the affected checks. Public API and wire formats are
 unchanged; applications regain control of their release log level.
 
-CI, added 2026-11-01 (maintainer, follow-up planning after the 2026-11-01
-/quest-afk run): moq-dev/vaapi's only workflow, `.github/workflows/check.yml`,
-sets `id-token: write` at the workflow level and runs on `pull_request`, so
-every PR's check job can mint an OIDC token without a protected environment.
-CI on pull requests must stay read-only. Remove it, leaving
-`contents: read`; if a step needs OIDC (`magic-nix-cache-action` is the likely one), confirm
-it still works without it, and otherwise move that step to a job limited to
-`main` behind a protected environment.
+Publication checked 2026-11-02: the crates.io sparse index still ends at
+`0.1.0` (2026-09-24), whose `log` dependency still enables
+`release_max_level_debug`. VAAPI's newest tag is `v0.1.0`; the source PR is
+still a draft at
+[`7b013835`](https://github.com/moq-dev/vaapi/commit/7b013835f2fe69e60972c7ffb7ed8602ce8a633e).
+Its local Claude review has not completed. Do not duplicate the port, adopt a
+git dependency, or bump MoQ before a release containing the fix is published.
+
+CI correction from the maintainer's 2026-11-01 follow-up planning is ready in
+[moq-dev/vaapi#6](https://github.com/moq-dev/vaapi/pull/6): remove workflow-wide
+`id-token: write`, keep `contents: read`, and explicitly select GitHub Actions
+caching with FlakeHub disabled. The pinned Magic Nix Cache action supports
+this without OIDC; its
+[upstream no-OIDC job](https://github.com/DeterminateSystems/magic-nix-cache-action/actions/runs/25946048507/job/76274417263)
+passed cache liveness, upload, and substitution checks. Local VAAPI `just ci`,
+actionlint, zizmor, and the Claude review passed. No protected write job is
+needed. This correction has not merged; no hosted run of the new PR is claimed.
+
+## Waiting
+
+- moq-dev/vaapi: review and merge [the existing source port](https://github.com/moq-dev/vaapi/pull/5), and merge [the read-only CI correction](https://github.com/moq-dev/vaapi/pull/6). Check both PRs' reviewed heads and merge status; neither is merged as of 2026-11-02.
+- Maintainer: publish a new `moq-vaapi` crate containing the source fix after it merges. Confirm the crates.io release no longer enables `log/release_max_level_debug`, then bump MoQ's workspace requirement and lockfile and run the affected checks. Recommend the next patch release; retaining `0.1.0` leaves the logging conflict unresolved.
