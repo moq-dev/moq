@@ -177,7 +177,13 @@ impl Reserved {
 			)?)
 		};
 
-		self.track.set(encoder.catalog())?;
+		let mut catalog = encoder.catalog();
+		// A resampler holds input past the frame it completes, so its frames trail by more than their
+		// own duration: measure the delay rather than state the encoder's zero.
+		if resampler.is_some() {
+			catalog.delay = None;
+		}
+		self.track.set(catalog)?;
 
 		let group_samples = options.group_duration.as_nanos() * u128::from(encoder.codec_rate());
 		let group_samples = u64::try_from(group_samples.div_ceil(1_000_000_000)).unwrap_or(u64::MAX);
@@ -1917,6 +1923,23 @@ mod tests {
 			let _producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
 			let published = catalog.snapshot().audio.renditions.remove("audio").unwrap();
 			assert_eq!(published, Encoder::new(&options.config).unwrap().catalog(), "{codec:?}");
+		}
+	}
+
+	/// A resampler holds input past the frame it completes, so a resampled rendition leaves its
+	/// delay to measurement instead of stating the encoder's zero.
+	#[tokio::test]
+	async fn a_resampled_rendition_measures_its_delay() {
+		for (rate, delay) in [(48_000, Some(Duration::ZERO)), (44_100, None)] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let options = Options {
+				track: Some("audio".into()),
+				..Options::default()
+			};
+			let input = Input::new(rate, crate::Layout::Stereo);
+			let _producer = Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
+			assert_eq!(catalog.snapshot().audio.renditions["audio"].delay, delay, "{rate} Hz");
 		}
 	}
 }

@@ -42,6 +42,7 @@ import {
 	type TrackRequestOptions,
 } from "./internal.ts";
 import { CACHE_EXPIRY, grace, Ledger } from "./ledger.ts";
+import { rescale } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { checkSequence, max, min } from "./util/sequence.ts";
 import {
@@ -215,6 +216,8 @@ export function authoredInfo(init: InfoInit = {}): Info {
 	const { maxAge, ...rest } = init;
 	return infoDefaults({ ...rest, maxAge: maxAge === undefined ? DEFAULT_MAX_AGE : (maxAge ?? undefined) });
 }
+
+export { rescale };
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
 //
@@ -1135,17 +1138,16 @@ export class Producer {
 	accept(info: InfoInit = {}): this {
 		if (this.#state.closed.peek() !== undefined) return this;
 		const resolved = authoredInfo(info);
-		const timed = resolved.timescale != null;
 		// Anything written before accept() must match too. A mismatch closes the track, so
 		// nothing waiting on info() hangs on a half-bound cache.
 		try {
 			for (const { group } of this.#cache) {
-				hooks.bindGroupTimed(group, timed);
+				hooks.bindGroupTimed(group, resolved);
 				hooks.bindGroupCompression(group, resolved.compress ?? false);
 			}
 			for (const sink of this.#sinks) {
 				for (const datagram of sink.datagrams.peek()) {
-					if ((datagram.timestamp !== undefined) !== timed) throw new TimestampMismatch();
+					rescale(resolved, datagram.timestamp);
 				}
 			}
 		} catch (err) {
@@ -1592,7 +1594,7 @@ export class Producer {
 	#bind(group: GroupProducer): void {
 		const info = this.#state.info.peek();
 		if (info) {
-			hooks.bindGroupTimed(group, info.timescale != null);
+			hooks.bindGroupTimed(group, info);
 			hooks.bindGroupCompression(group, info.compress ?? false);
 		}
 	}
@@ -1600,7 +1602,7 @@ export class Producer {
 	// Refuse a datagram whose timedness disagrees with this track's.
 	#checkDatagram(timestamp: Timestamp | undefined): void {
 		const info = this.#state.info.peek();
-		if (info && (info.timescale != null) !== (timestamp !== undefined)) throw new TimestampMismatch();
+		if (info) rescale(info, timestamp);
 	}
 
 	// Refuse a write once the track is closed, or at or past its declared end.

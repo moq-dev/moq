@@ -562,7 +562,7 @@ impl Route {
 	/// The highest epoch wins over every older one of the instance, cheaper or not.
 	///
 	/// Do not start a named instance with `~`: that marks one a relay minted
-	/// ([`Instance::is_minted`]), which moq-sign refuses to bind and a catalog's instance
+	/// ([`Instance::is_minted`]), which moq-crypto's signing refuses to bind and a catalog's instance
 	/// check skips. The mark is not refused, since a relay forwarding a route keeps the
 	/// instance it received.
 	pub fn with_instance(mut self, instance: Instance, epoch: u64) -> Self {

@@ -9,7 +9,7 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { authoredInfo, DEFAULT_MAX_AGE, infoDefaults, Subscription, Producer as TrackProducer } from "./track.ts";
+import { authoredInfo, DEFAULT_MAX_AGE, infoDefaults, rescale, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 
 const enc = new TextEncoder();
@@ -503,6 +503,34 @@ test("refresh must be a u32 ratio", () => {
 	expect(() => infoDefaults({ refresh: 0.5 })).toThrow(RangeError);
 	expect(() => infoDefaults({ refresh: 2 ** 32 })).toThrow(RangeError);
 	expect(infoDefaults({ refresh: 0 }).refresh).toBe(0);
+});
+
+test("rescale matches the track's timeline, rounded down as Rust's convert does", () => {
+	const timed = { timescale: Timescale.MILLI };
+	const rescaled = rescale(timed, Timestamp.fromMicros(2_400));
+	expect(rescaled?.value).toBe(2);
+	expect(rescaled?.scale).toBe(Timescale.MILLI);
+	// Halfway and fractional values round down too, where Math.round would give 2 and 3.
+	expect(rescale(timed, Timestamp.fromMicros(1_500))?.value).toBe(1);
+	expect(rescale(timed, new Timestamp(2.6, Timescale.MILLI))?.value).toBe(2);
+	expect(rescale(timed, new Timestamp(1_500.7, Timescale.MICRO))?.value).toBe(1);
+	// An aligned value keeps it exactly, where float division gives 4611686020.999999.
+	expect(rescale(timed, new Timestamp(4_611_686_021_000_000, Timescale.NANO))?.value).toBe(4_611_686_021);
+	// One instant, one result, whatever scale it came from: 2.5/3 s and 5/6 s agree exactly.
+	const fine = { timescale: Timescale(Number.MAX_SAFE_INTEGER) };
+	const half = rescale(fine, new Timestamp(2.5, Timescale(3)))?.value;
+	expect(half).toBe(7_505_999_378_950_825);
+	expect(rescale(fine, new Timestamp(5, Timescale(6)))?.value).toBe(half);
+	// The same binary value at two scales floors alike, below 0.117 s: 116 ms, as Rust converts it.
+	expect(rescale(timed, new Timestamp(0.11699999999999999, Timescale.SECOND))?.value).toBe(116);
+	expect(rescale(timed, new Timestamp(131730289100587, Timescale(1125899906842624)))?.value).toBe(116);
+	expect(() => rescale(timed, undefined)).toThrow(TimestampMismatch);
+	const huge = new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MILLI);
+	expect(() => rescale({ timescale: Timescale.NANO }, huge)).toThrow(TimestampMismatch);
+
+	expect(rescale({}, undefined)).toBeUndefined();
+	expect(rescale({ timescale: null }, undefined)).toBeUndefined();
+	expect(() => rescale({}, Timestamp.fromMillis(1))).toThrow(TimestampMismatch);
 });
 
 test("appendDatagram shares the group sequence counter", () => {
