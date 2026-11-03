@@ -21,6 +21,16 @@ replace are retired.
   quarantine, [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s
   dedup, and the 300 ms hold only once the fixtures below demonstrate their
   replacement (see the epic's hold-down note).
+- Add a transit fixture for routes scoped to interested origins (the
+  session child's "scope route state to interested origins"). The router
+  sends every route to every watching neighbor today, so a client is sent
+  the CDN's whole node table. The fixture decides when a route must still
+  go out to a stream whose interest meets none of the origin's claims:
+  - a transit node forwarding requests for paths outside its own interest;
+  - a node holding or forwarding a seqno request for that identity;
+  - a sender whose certified regions miss the interest, which must still
+    answer with an empty floor list
+    (`a_disjoint_interest_is_answered_with_nothing`).
 
 The counterexamples from #4349 (closed; this epic still owns the fix) are the `residual_*` tests in
 `rs/moq-net/tests/integration/mesh_withdraw.rs`. They pin today's hunting on lite-06:
