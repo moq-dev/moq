@@ -482,8 +482,11 @@ order-independent digest must match, so skipped work cannot read as a speedup.
 CMAF output is decoded and checked byte for byte in a separate call after each
 phase's CPU and trace snapshots.
 Crashes, wrong bytes, missing frames, a window that presents nothing, a racing
-dial that fails or a forced racing arm won by the other transport, or an
-unavailable CPU clock fail the run; timing never does. The nightly runs
+dial that fails or a forced racing arm won by the other transport, a stats
+window whose reservations hold more or fewer send-rate slices than the transport
+can give (every one over WebTransport with `getStats()`, none over qmux or
+without it), a resume cycle that never gets its slice, or an unavailable CPU
+clock fail the run; timing never does. The nightly runs
 `--smoke`, whose racing sweep runs every mode and a rotated query at 4 URLs x 2
 reconnects x 64 characters, and keeps its run directory as the `bench-browser`
 artifact.

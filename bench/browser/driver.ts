@@ -16,8 +16,9 @@ import { check, digest, payload } from "./fixture.ts";
 import type { Cmaf, Phase } from "./page/cmaf.ts";
 import type { Media } from "./page/media.ts";
 import type { Dial, Mode, Racing } from "./page/racing.ts";
-import type { Counts, Outcome, Sampling } from "./page/stats.ts";
+import type { Counts, Sampling } from "./page/stats.ts";
 import type { Delivery, Transport } from "./page/transport.ts";
+import { resumeFailure, type SamplingShape, samplingFailure } from "./sampling.ts";
 import { compare, type Row, summarize } from "./summary.ts";
 import { collections, GC_CATEGORIES, rendererPid, type TraceEvent, traceEvents } from "./trace.ts";
 
@@ -56,7 +57,8 @@ const warmup = smoke ? 0 : integer("warmup", values.warmup, 0);
 const timeout = integer("timeout", values.timeout, 1) * 1000;
 const scenarios = new Set(values.scenarios.split(","));
 for (const scenario of scenarios)
-	if (!["transport", "cmaf", "media", "racing", "stats"].includes(scenario)) throw new Error(`unknown scenario: ${scenario}`);
+	if (!["transport", "cmaf", "media", "racing", "stats"].includes(scenario))
+		throw new Error(`unknown scenario: ${scenario}`);
 
 // Fixed so a run on another host or day compares like with like. Software rendering and decode:
 // a hardware path appearing or disappearing would change what is measured.
@@ -149,8 +151,6 @@ const RACING_LINGER_MS = 2500;
 const MEDIA = { width: 1280, height: 720, fps: 30, codec: "avc1", bitrate: 2_500_000, keyframe_ms: 1000 };
 const MEDIA_WARMUP_MS = smoke ? 1000 : 3000;
 const MEDIA_WINDOW_MS = smoke ? 3000 : 10000;
-/** A sampling shape; `absent` deletes WebTransport getStats(), as shipping Chromium lacks it. */
-type SamplingShape = Omit<Sampling, "url" | "path"> & { absent?: boolean };
 const grid = (mode: Sampling["mode"], connections: number[], reservations: number[], absent?: boolean) =>
 	connections.flatMap((c) =>
 		reservations.map((r): SamplingShape => ({ mode, connections: c, reservations: r, absent })),
@@ -897,7 +897,8 @@ async function sampling(variant: string, shape: SamplingShape, round: number, pa
 		const after = await snapshot();
 		if (opened.errors.length) throw new Error(opened.errors.join("; "));
 		const seconds = (after.at - before.at) / 1000;
-		verify(key, variant, shape, before.outcome, after.outcome);
+		const failure = samplingFailure(shape, before.outcome, after.outcome);
+		if (failure) throw new Error(`${key} ${variant}: ${failure}`);
 		const rate = (value: number) => value / seconds;
 		const cpu = processCpu(before.processes, after.processes, { renderer: opened.pid });
 		const delta = (name: keyof Counts) => after.counts[name] - before.counts[name];
@@ -934,19 +935,6 @@ async function sampling(variant: string, shape: SamplingShape, round: number, pa
 	}
 }
 
-// The window must leave every connection working, so doing less cannot read as cheaper.
-function verify(key: string, variant: string, shape: SamplingShape, before: Outcome, after: Outcome) {
-	const fail = (what: string) => {
-		throw new Error(`${key} ${variant}: ${what}`);
-	};
-	if (after.connected !== shape.connections) fail(`${after.connected} of ${shape.connections} connected`);
-	const distinct = shape.mode === "pooled" ? 1 : shape.connections;
-	if (after.estimated > distinct * shape.reservations) fail(`${after.estimated} estimates`);
-	// Every playing connection reads frames throughout the window.
-	if (shape.mode === "receive" && after.received - before.received < shape.connections)
-		fail(`received ${after.received - before.received} frames in the window`);
-}
-
 // Bytes a sampled allocation profile attributes, summed over the whole call tree.
 function allocatedBytes(node: { selfSize: number; children: { selfSize: number; children: unknown[] }[] }): number {
 	let sum = node.selfSize;
@@ -973,7 +961,9 @@ async function resume(variant: string, round: number) {
 			`${key} cycles`,
 		);
 		if (opened.errors.length) throw new Error(opened.errors.join("; "));
-		const found = waits.filter(Number.isFinite).sort((a, b) => a - b);
+		const failure = resumeFailure(waits);
+		if (failure) throw new Error(`${key} ${variant}: ${failure}`);
+		const found = waits.toSorted((a, b) => a - b);
 		const at = (q: number) => found[Math.min(found.length - 1, Math.floor(q * found.length))] ?? Number.NaN;
 		const row: Row = {
 			scenario: "stats",
@@ -986,7 +976,6 @@ async function resume(variant: string, round: number) {
 			metrics: {
 				first_estimate_p50_ms: at(0.5),
 				first_estimate_max_ms: found.at(-1) ?? Number.NaN,
-				first_estimate_missing: waits.length - found.length,
 			},
 			heap: { before: null, after: null },
 			load: loadavg(),

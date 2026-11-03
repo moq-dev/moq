@@ -177,7 +177,7 @@ async function receive(config: Sampling): Promise<void> {
 		const request = origin.follow(Moq.Path.from(`${config.path}/live`));
 		cleanup.push(() => request.close());
 		const broadcast = await active(request);
-		const subscriber = broadcast.track("data").subscribe({ maxDelay: Milli(1000) });
+		const subscriber = broadcast.track("data").subscribe({ delay: { max: Milli(1000) } });
 		cleanup.push(() => subscriber.close());
 		readers.push(
 			(async () => {
