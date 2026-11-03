@@ -45,7 +45,7 @@ export class Producer {
 		const timescale = info.timescale ?? undefined;
 		let sequences = this.#sequences.get(name);
 		if (!sequences) {
-			sequences = { next: 0 };
+			sequences = { next: 0n };
 			this.#sequences.set(name, sequences);
 		}
 		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.instance, name), sequences, timescale);

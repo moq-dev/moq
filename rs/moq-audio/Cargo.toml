@@ -142,6 +142,14 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 workspace-hack = { path = "../workspace-hack" }
 
+# The batching bench counts the instructions each case retires.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+perf-event2 = "0.7.4"
+
+[[bench]]
+name = "batches"
+harness = false
+
 [[bench]]
 name = "capture"
 harness = false
