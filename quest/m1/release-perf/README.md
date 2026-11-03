@@ -284,9 +284,37 @@ Decided 2026-11-01 (maintainer), in
 bench-only backport to `release`, which carries it once that PR lands. Bench-only
 backports are allowed from now on.
 
+Decided 2026-11-03 (maintainer), in
+[moq-dev/moq#7605](https://github.com/moq-dev/moq/pull/7605): these flat
+per-group costs of the relay's chat fan-out are accepted as the features they
+pay for. Each is instructions per delivered group at 512 subscribers through
+the track model, counted by `just bench-fanout` against the merge's parent:
+
+- Per-reader ranges and time anchors
+  ([moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929)): +902 when
+  it landed. moq-dev/moq#7605 took back 351 of the window reads it and
+  [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) left on every
+  peek; what remains reads each reader's window and drift edge.
+- A subscriber reads only its ranges' frames
+  ([moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129)): +183.
+- Public ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)):
+  +200.
+- Compressed tracks ([moq-dev/moq#5928](https://github.com/moq-dev/moq/pull/5928)):
+  +33.
+- Closing the relay demand gaps
+  ([moq-dev/moq#7052](https://github.com/moq-dev/moq/pull/7052)): +365.
+- Bounded reads end through routes
+  ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): +275, and
+  +450 per group through the in-process session.
+
+The first four were counted with frame pointers forced and the last two
+without, so compare each only with its own parent. None grows with
+subscribers.
+
 ## Required
 
 - [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
+- [A read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md) - `group::Consumer` shrinks from 280 bytes, so a read stops copying it through every layer
 
 ## Related
 

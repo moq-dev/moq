@@ -29,10 +29,22 @@ Decided 2026-11-03 (maintainer, on [moq-dev/moq#7605](https://github.com/moq-dev
 
 Follow-up planning on 2026-11-03 (maintainer) added a load-independent mode to the driver: `just bench-fanout` counts the chat fan-out per delivered group on one pinned thread, through the model alone and through a relay over the in-memory transport, for any list of revisions. [The report](/.github/relay-cpu-bisect.md) attributes each step with it, and the fixes so far take `main`'s model path from 13,300 to 10,126 instructions per group (-23.9%) and the in-process session from 120,948 to 113,133 (-6.5%), at 512 subscribers.
 
+Decided 2026-11-03 (maintainer, on [moq-dev/moq#7605](https://github.com/moq-dev/moq/pull/7605)), after the attribution:
+
+1. Costs measured and not cut:
+   - ✅ Accept the flat ones (per-reader ranges' remainder, ranged reads, public ingest, compressed tracks, [moq-dev/moq#7052](https://github.com/moq-dev/moq/pull/7052), and bounded reads), recorded with their numbers in the [epic](/quest/m1/release-perf/README.md). Keep [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)'s and [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542)'s session cost here for a re-measure against this branch.
+   - Accept all of them now.
+   - Keep investigating all of them.
+2. The waiter's list records:
+   - ✅ A follow-up at m0, as a correctness bug: [a waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md).
+   - Leave the limit at 8.
+3. `group::Consumer` moves:
+   - ✅ A follow-up in this epic: [a read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md).
+   - Leave it.
+
 Remaining:
 
-- Settle the attributed costs nothing here cut without changing behavior (the report's tables: the window, drift, and live-group walks under [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929), [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995), and [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542); the small flat steps of compressed tracks, ranged reads, and public ingest; the lite publisher's per-group stream open and close), and record each accepted one and its feature in the epic's Plan.
-- The session path's remaining largest self costs: moves of large values (about 9.4k per group: `group::Consumer` is 280 bytes, moved by value through `poll_peek_group`, `take`, and the viewer's serve loop), and waiter registration (about 7.2k). A waiter that remembered 16 lists instead of 8 cut the session by 3.9% but made two integration tests miss a wake, since reads it no longer retires stay parked; see the report.
+- Re-measure [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)'s and [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542)'s session cost against `main` with the probe fast path (about +3.3k and +3.1k per group when each landed; much of it was the probe's walk of the live groups, which the fast path now skips), then fix what is accidental or record what remains in the epic.
 - Attribute in-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)) and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)), each against its parent, with relay runs on a quiet host: they are QUIC-level, which `just bench-fanout` doesn't reach, and the one attempt on `nixos2` lost the host to other agents after a round.
 - Re-pair `main` against [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95) on chat and video over both runtimes on a quiet host, then delete this quest.
 
@@ -41,6 +53,9 @@ Measure as the report does. For a model or session change, `just bench-fanout` a
 Public API: none expected. Wire: none.
 
 ## Related
+
+- [A waiter's record limit changes no behavior](/quest/m0/kio-waiter-records.md) - found here; the session's waiter registration cost waits on it
+- [A read moves a small group consumer](/quest/m1/release-perf/group-consumer-size.md) - found here; the session's largest remaining self cost
 
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - the nightly series that should have caught this growth
 - [Performance audit](/quest/m2/audit-perf.md) - counts instructions when bisecting, for the same reason
