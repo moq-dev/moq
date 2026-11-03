@@ -21,11 +21,24 @@ scheduled CI. Cache tuning and unrelated Nightly failures stay outside scope.
   connection attempt has a timeout, while its final server-task join waits
   for session closure. That is a place to investigate, not an established
   diagnosis. Distinguish negotiation, transport progress, and teardown.
-- Keep the WebSocket transport and both version assertions. Follow this
-  epic's event-driven or controlled-time test rules; no larger timeout,
-  retry, or weakened assertion substitutes for fixing the cause.
+- Keep the WebSocket transport and both version assertions. Follow the
+  [flake epic's test rules](/quest/m0/test-flakes-2/README.md); no larger
+  timeout, retry, or weakened assertion substitutes for fixing the cause.
 - Validate the affected lifecycle locally and retain the macOS scheduled
   evidence. Do not claim the scheduled failure fixed from Linux-only runs;
   keep any unavailable platform proof explicit.
+
+The job's retained excerpt (timestamps omitted):
+
+```text
+TIMEOUT [ 120.015s] (739/739) moq-tokio::integration broadcast::broadcast_websocket_uses_newest_version
+running 1 test
+test broadcast::broadcast_websocket_uses_newest_version has been running for over 60 seconds
+(test timed out)
+Summary [ 130.849s] 739 tests run: 738 passed, 1 timed out, 11 skipped
+```
+
+The captured test output had no negotiation or teardown diagnostics, so this
+evidence does not identify the blocked operation.
 
 Public API: none expected. Wire: none.
