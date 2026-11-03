@@ -22,13 +22,14 @@ by [VA-API external images](/quest/m2/vaapi-vulkan-import.md).
   enabled and closes when it is disabled, so the LED is off whenever capture
   is; with the `on_demand` opt-in it also opens and closes as the first viewer
   arrives and the last leaves. NV12 delivery from MJPEG and YUY2 cameras.
-- **The studio's program on a hardware encoder**: run the ignored
+- **A GPU export on a hardware encoder**: run the ignored
   `render::export::dx12::tests::exports_an_nv12_texture` (the Platform runner
   has only WARP, which has no Direct3D11 video device) and
   `render::export::dx12::tests::media_foundation_encodes_the_export_in_place`
-  on a Windows GPU with a Media Foundation H.264 encoder, and `moq-studio`
-  publishing on that machine and a Mac, confirming the Output panel reports
-  no readback.
+  on a Windows GPU with a Media Foundation H.264 encoder. The
+  [studio](https://github.com/moq-dev/studio), the export's main consumer,
+  confirms its Output panel reports no readback on that machine and a Mac in
+  its own repository.
 - **A live camera run per platform**: capture needs device permission that a
   headless or agent process cannot grant itself.
 - **OBS follows its grant on a shaped uplink**: stream from a real OBS build

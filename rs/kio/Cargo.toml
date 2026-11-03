@@ -63,9 +63,14 @@ kio = { path = ".", features = ["async", "manual", "sim", "serde"] }
 serde_json = { workspace = true }
 test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "tasks"
+harness = false
+
+[[bench]]
+name = "task_capacity"
 harness = false
 
 [[bench]]
