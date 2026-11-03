@@ -2771,7 +2771,7 @@ test("LARGEST_OBJECT is the live edge", async () => {
  * INCLUDE_PROPERTIES=0 opts the response out of Track Properties, which also opts the track
  * out of timestamps: with no declared Timescale there are no units to read one in.
  */
-test.each([Version.DRAFT_20, Version.DRAFT_22])("draft-%i: an opt-out peer gets no track properties", async (version) => {
+test.each([Version.DRAFT_20, Version.DRAFT_22])("draft-%i: opt-out omits timestamps", async (version) => {
 	for (const propertiesWanted of [true, false]) {
 		const fx = fixture(version);
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
