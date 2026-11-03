@@ -36,7 +36,8 @@ Decided 2026-11-02 (maintainer, from moq-dev/studio's source tracks):
 
 Test: one capture feeds a bus channel and an encoder at once, and both see
 every sample with matching timestamps; dropping one consumer leaves the
-other running.
+other running. Benchmark the producer with a growing number of consumers, so
+a per-consumer copy or lock shows as a slope rather than a fixed cost.
 
 ## Related
 
