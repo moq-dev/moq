@@ -651,12 +651,13 @@ pub struct moq_track_info {
 	pub priority: i8,
 
 	/// How long a superseded group stays fresh, in microseconds. The publisher-side half of
-	/// `moq_subscription.delay.max_us`. Ignored when `max_age_unlimited` is set.
+	/// `moq_subscription.delay.max_us`.
 	pub max_age_us: u64,
-	/// Whether `max_age_us` is set. When false, the track gets the 30 s default.
+	/// Whether `max_age_us` is set. When false, the track gets the 30 s default, or no limit
+	/// with `max_age_unlimited`.
 	pub max_age_present: bool,
 	/// No publisher age limit, leaving only the cache to bound how long a superseded group is
-	/// served.
+	/// served. Ignored when `max_age_present` is set, so a stated age always holds.
 	pub max_age_unlimited: bool,
 
 	/// Per-frame timescale in ticks per second.
@@ -683,10 +684,11 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority);
-		if info.max_age_unlimited {
-			out = out.with_max_age(None);
-		} else if info.max_age_present {
+		// A stated age wins, so a caller that states one never loses it to the flag.
+		if info.max_age_present {
 			out = out.with_max_age(std::time::Duration::from_micros(info.max_age_us));
+		} else if info.max_age_unlimited {
+			out = out.with_max_age(None);
 		}
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);

@@ -14,7 +14,7 @@ The hand-written crate never published as moq-c: a libmoq 0.6 user applies these
 
 ### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-A NULL or zeroed `moq_track_info`, or one with `max_age_present` false, now advertises a 30 s max age instead of no publisher limit. Set the new `max_age_unlimited`, which sits in the padding after `max_age_present`, where you relied on no limit. In the generated API, an unset `moq_track_info.max_age` is likewise 30 s, and `max_age_unlimited` sets no limit.
+A NULL or zeroed `moq_track_info`, or one with `max_age_present` false, now advertises a 30 s max age instead of no publisher limit. Set the new `max_age_unlimited`, with `max_age_present` false (a set `max_age_present` wins), where you relied on no limit. It sits in the padding after `max_age_present`, and recompiling does not initialize it: zero-initialize the struct (`moq_track_info info = {0};`) or assign it explicitly. In the generated API, an unset `moq_track_info.max_age` is likewise 30 s, and `max_age_unlimited` sets no limit.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

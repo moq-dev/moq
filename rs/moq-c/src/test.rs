@@ -1832,12 +1832,19 @@ fn track_info_max_age() {
 	};
 	assert_eq!(max_age(zero), Some(Duration::ZERO));
 	let unlimited = moq_track_info {
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(unlimited), None);
+	// A stated age survives a set flag, so a caller written before the flag existed keeps its
+	// finite age however that byte was left.
+	let stated = moq_track_info {
 		max_age_us: 5_000_000,
 		max_age_present: true,
 		max_age_unlimited: true,
 		..zeroed()
 	};
-	assert_eq!(max_age(unlimited), None);
+	assert_eq!(max_age(stated), Some(Duration::from_secs(5)));
 }
 
 /// Raw frames, datagrams, and JSON values read back exactly the timestamp written: a 90 kHz

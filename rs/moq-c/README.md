@@ -152,7 +152,10 @@ timestamp read, valid until the frame is freed, or NULL on an untimed track.
 
 A zeroed `moq_track_info`, like a NULL one, advertises a 30 s max age: how long
 a superseded group stays fresh. Set `max_age_present` and `max_age_us` for
-another age, or `max_age_unlimited` for no publisher limit.
+another age, or `max_age_unlimited` for no publisher limit; a set
+`max_age_present` wins over it. Zero-initialize the struct
+(`moq_track_info info = {0};`) before assigning members, so every flag starts
+false.
 
 JSON window pushes and pops accept an optional `const moq_timestamp *timestamp`,
 like snapshot updates and stream appends. It is when the edit occurred,
