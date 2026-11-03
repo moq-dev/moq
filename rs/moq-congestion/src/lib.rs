@@ -275,3 +275,45 @@ pub trait Factory {
 }
 
 const BASE_DATAGRAM_SIZE: u64 = 1200;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The largest UDP payload (RFC 9000), whose two datagrams outgrow every 1200-based default
+    const MTU: u16 = 65527;
+
+    fn factories() -> [(&'static str, Arc<dyn Factory>); 4] {
+        [
+            ("bbr3", Arc::new(bbr3::Config::default())),
+            ("cubic", Arc::new(cubic::Config::default())),
+            ("gcc", Arc::new(gcc::Config::default())),
+            ("unlimited", Arc::new(Unlimited)),
+        ]
+    }
+
+    fn init(mtu: u16) -> Init {
+        Init {
+            now: Instant::ZERO,
+            mtu,
+            rtt: Duration::from_millis(100),
+            max_pacing_rate: None,
+        }
+    }
+
+    /// The window holds two datagrams at the path MTU (RFC 9002 section 7.2's minimum), or the
+    /// transport could never send its first one.
+    #[test]
+    fn window_holds_two_datagrams_at_large_mtu() {
+        let floor = 2 * u64::from(MTU);
+        for (name, factory) in factories() {
+            let window = factory.clone().build(init(MTU)).window();
+            assert!(window >= floor, "{name} starts at {window}");
+
+            let mut controller = factory.build(init(1200));
+            controller.on_mtu_update(MTU);
+            let window = controller.window();
+            assert!(window >= floor, "{name} grows its MTU to {window}");
+        }
+    }
+}
