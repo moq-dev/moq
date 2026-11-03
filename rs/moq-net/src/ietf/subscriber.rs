@@ -3021,7 +3021,7 @@ where
 			}
 			// Register under the same lock as the read, so the head settling cannot miss
 			// waking this request.
-			match held.fill.poll_ref(waiter, |fill| match fill {
+			match held.fill.poll_ref(waiter, |fill| match **fill {
 				Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
 				Fill::Ready { .. } | Fill::Done => Poll::Ready(()),
 			}) {
