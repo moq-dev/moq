@@ -15,6 +15,13 @@ Protocol removal already landed in
 [englishm/moq-interop-runner#178](https://github.com/englishm/moq-interop-runner/pull/178)
 registered only drafts 18 and 22 before draft 20 returned.
 
+Decided with the maintainer on 2026-10-24: retain 18 and 22 rather than
+16, 18, and 22. Removing 14-16's control-stream adapter and request limit
+was worth losing Cloudflare `moq-rs` main and using Moxygen's experimental
+draft-18 support. On 2026-10-28, the maintainer restored draft 20 because
+it adds only the field-count LOCATION_FILTER codec and SUBSCRIBE_TRACKS
+parameters to the path shared with 22. Drafts 19 and 21 stay dropped.
+
 The maintainer approved posting the registry correction there on 2026-10-24.
 [englishm/moq-interop-runner#183](https://github.com/englishm/moq-interop-runner/pull/183)
 adds draft 20 to both entries, distinguishes the registered interop set from
