@@ -226,6 +226,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [PCM encodes in one pass](/quest/m2/pcm-bulk-encode.md) - the PCM encoder converts a frame in bulk instead of one sample at a time
 - [We own our WebRTC stack](/quest/m2/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [PUBLISH_DONE says why](/quest/m2/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
+- [A revoked announce resets instead of FINning](/quest/m2/announce-revoke-reset.md) - a PUBLISH_NAMESPACE revoked after its OK resets with INTERNAL_ERROR, per draft-22 §6.4.2.3
 - [moq repair refuses a live recording](/quest/m2/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair mp4` off a file still being written
 - [The error-queue reader decodes truncated control data](/quest/m2/errqueue-truncation.md) - `MSG_ERRQUEUE` keeps what fit on `MSG_CTRUNC`, like the receive paths
 - [The QUIC driver tells an MTU probe from an oversized send](/quest/m2/quic-emsgsize-classify.md) - a non-probe `EMSGSIZE` is logged and counted instead of dropped silently

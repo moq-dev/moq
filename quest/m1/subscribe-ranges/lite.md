@@ -124,6 +124,16 @@ Open questions the attempt raised, each with the attempt's recommendation:
   message can report a start. SUBSCRIBE_UPDATE keeps restating the whole list
   either way: each range is a few bytes, and restating stays stateless. If IDs
   are adopted, #7207 is the reference encoding.
+  Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03
+  /quest-afk and /quest-complete runs), for the implicit Range IDs that are
+  this quest's next step after
+  [moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675): a range a
+  SUBSCRIBE_UPDATE adds learns where it started through a new
+  **SUBSCRIBE_STARTED** message (type 0x3) carrying Range ID and Range Start,
+  which the publisher sends when the added range's start resolves. Options:
+  ✅ a new SUBSCRIBE_STARTED; repeat SUBSCRIBE_OK. (Recorded in this item
+  because #7675, which rewrites this text and moves the question to a
+  `## Waiting` item, had not merged.)
 - `auth::lite_07_narrowing_resets_a_fetch_in_flight` read `Stream(Cancel)`
   instead of `Unauthorized`/`Unroutable` when the grant narrowed mid-group;
   the refusal must carry the grant's error.
