@@ -55,7 +55,6 @@ import {
 	type DropRun,
 	finalSequence,
 	type GroupRecover,
-	groupBounds,
 	hooks,
 	insertDrop,
 	insertRun,
@@ -73,6 +72,7 @@ import {
 import { grace } from "./ledger.ts";
 import type { Lister, Tracks, TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
+import { clamped, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing to deliver rather than judging what it carried:
@@ -270,14 +270,18 @@ interface Copy {
 	lease: number;
 }
 
-/** Subscribe to a route's copy, or to a failed stand-in when that route can no longer serve. */
+/**
+ * Subscribe to a route's copy, or to a failed stand-in when that route can no longer serve. A
+ * copy parks past the end of a bounded window: the logical reader judges that end across its
+ * copies; see {@link Reader.exhausted}.
+ */
 function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscription): track.Subscriber {
 	try {
-		return wire.subscribe(name, subscription);
+		return hooks.parked(wire.subscribe(name, subscription));
 	} catch (err) {
 		const failed = new track.Producer(name);
 		failed.abort(err instanceof Error ? err : new Error(String(err)));
-		return failed.subscribe(subscription);
+		return hooks.parked(failed.subscribe(subscription));
 	}
 }
 
@@ -486,17 +490,9 @@ class Reader implements ResumeSource {
 	/** What `copy` is asked for: the reader's own preferences, from its floor and through its replacement. */
 	#wire(copy: Pick<Copy, "floor" | "until">): track.Subscription {
 		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
-		const bounds = groupBounds(preferences.groups);
-		const start = Math.max(bounds.start, copy.floor ?? 0);
-		const replaced = copyEnd(copy);
-		const end = replaced === undefined ? bounds.end : Math.min(bounds.end ?? replaced, replaced);
-		return {
-			...preferences,
-			groups: {
-				start: start > 0 ? { included: start } : undefined,
-				end: end === undefined ? undefined : { excluded: end },
-			},
-		};
+		const floor = copy.floor ? copy.floor : undefined;
+		// The copies resolve relative anchors against the groups they hold.
+		return { ...preferences, ranges: clamped(preferences.ranges ?? [{}], floor, copyEnd(copy), []) };
 	}
 
 	#update(copy: Copy): void {
@@ -688,6 +684,35 @@ class Reader implements ResumeSource {
 			if (dropped) return dropped;
 		}
 		return this.#end((copy) => copy.done);
+	}
+
+	/**
+	 * Whether the reader's bounded `window` has nothing left to deliver, once no replaced copy may
+	 * still deliver a group under its bound. The serving copy reads every group of the window from
+	 * its resume point, so it judges those, against what it and the reader (`delivered`) handed
+	 * out. What lies under its resume point was the copies' it replaced, each let go once it had
+	 * nothing more, though one there that the local floor or cap keeps out stays owed, as on one
+	 * cursor. A backfill still to ask is not judged yet, and a route between copies has nothing to
+	 * judge. Mirrors the Rust `Reader::exhausted`.
+	 */
+	exhausted(delivered: Delivered, window: Window): boolean {
+		this.sync();
+		if (this.#closed || this.#ended || this.#resumed) return false;
+		const serving = this.#copies.at(-1);
+		if (!serving || serving.replaced || serving.done !== undefined || serving.generation !== this.#generation) {
+			return false;
+		}
+		if (this.#letGo(delivered)) return false;
+		const end = window.end();
+		if (serving.floor !== undefined && end !== undefined) {
+			const cursor = this.#shell.cursor.peek();
+			for (const run of window.runs(window.floor() ?? 0, Math.min(serving.floor, end))) {
+				for (const gap of delivered.gaps(run.start, run.end)) {
+					if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
+				}
+			}
+		}
+		return hooks.exhaustedFor(serving.sub, delivered);
 	}
 
 	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
@@ -982,7 +1007,7 @@ class Reader implements ResumeSource {
 	 * Whether `within` passed since `copy` was superseded; see {@link Copy.since}. Arms a wakeup
 	 * for then, so a read waiting on the copy looks again.
 	 */
-	#expired(copy: Copy, within: Milli): boolean {
+	#expired(copy: Copy, within: number): boolean {
 		if (copy.since === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
 		const at = copy.since + within * 1_000_000;
@@ -1139,6 +1164,26 @@ class Reader implements ResumeSource {
 	end(): track.Position | undefined {
 		this.sync();
 		return this.#learnEnd();
+	}
+
+	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
+	starts(from: number): (number | undefined)[] | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingStarts(serving.sub, from);
+	}
+
+	// The reader's ranges resolve on the copies, which hold the groups their anchors name.
+	runs(start: number, end: number): Run[] | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingRuns(serving.sub, start, end);
+	}
+
+	servingEnd(): number | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingEnd(serving.sub);
 	}
 
 	/** The error the logical track's end carries, if it does not end cleanly. */
