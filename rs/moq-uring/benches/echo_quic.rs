@@ -9,6 +9,7 @@ mod support;
 #[cfg(target_os = "linux")]
 #[expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "benchmarks measure themselves on the host clock"
 )]
 mod linux {
@@ -76,18 +77,16 @@ mod linux {
 				.build()
 				.expect("runtime");
 			runtime.block_on(async move {
-				let client = moq_tokio::quic::web::ClientBuilder::new()
-					.dangerous()
-					.with_no_certificate_verification()
-					.expect("client");
 				let request = moq_tokio::quic::web::proto::ConnectRequest::new(
 					url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
 				);
-				let session = client.connect(request).await.expect("connect");
+				let session = super::support::web_connect(request, Default::default())
+					.await
+					.expect("connect");
 				let payload = vec![0x5a; PAYLOAD];
 				while let Ok(done) = start_rx.recv() {
 					let (mut send, mut recv) = session.open_bi(Default::default()).await.expect("open stream");
-					send.write_all(&payload).await.expect("write");
+					send.write_all(&payload[..]).await.expect("write");
 					send.finish().expect("finish");
 					assert_eq!(recv.read_to_end(PAYLOAD + 1).await.expect("read").len(), PAYLOAD);
 					done.send(()).expect("notify server");

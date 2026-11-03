@@ -34,6 +34,7 @@ function maxLengthPrefixedPayload(available: bigint): bigint {
 	for (const max of VARINT_MAX) {
 		const width = BigInt(VarInt.from(max).size());
 		if (available < width) break;
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 		const candidate = available - width < max ? available - width : max;
 		// Skip a candidate this width cannot describe: a narrower varint means a
 		// smaller width already covered it, exactly.

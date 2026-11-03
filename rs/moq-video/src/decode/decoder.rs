@@ -654,7 +654,7 @@ mod tests {
 			.unwrap();
 		producer.finish().unwrap();
 
-		let broadcast = origin.consume().request_broadcast("test", None).await.unwrap();
+		let broadcast = origin.consume().request("test", None).await.unwrap();
 		let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -682,7 +682,10 @@ mod tests {
 		let track = subscriber
 			.track(name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30))),
+			)
 			.await
 			.unwrap();
 		let mut track =

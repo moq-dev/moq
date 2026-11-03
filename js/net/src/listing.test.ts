@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Tracks } from "./listing.ts";
@@ -6,7 +7,7 @@ import { wireOf } from "./wire.ts";
 
 /** Lets queued microtasks and the listing's signal notifications run. */
 function settle(): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, 0));
+	return yieldNow();
 }
 
 /**
@@ -289,10 +290,10 @@ test("readers wait for the lister to sync", async () => {
 	const broadcast = new BroadcastProducer();
 	broadcast.createTrack("own");
 	const lister = wireOf(broadcast).lister();
-	expect(lister.used.peek()).toBe(false);
+	expect(lister.wanted.peek()).toBe(false);
 
 	const tracks = list(broadcast);
-	expect(lister.used.peek()).toBe(true);
+	expect(lister.wanted.peek()).toBe(true);
 	expect(await tracks.drain()).toEqual(["+own"]);
 	lister.add("up", { priority: 0 });
 	expect(() => lister.add("up", { priority: 0 })).toThrow("duplicate");
@@ -304,7 +305,7 @@ test("readers wait for the lister to sync", async () => {
 	expect(await tracks.drain()).toEqual(["-up"]);
 
 	tracks.tracks.close();
-	expect(lister.used.peek()).toBe(false);
+	expect(lister.wanted.peek()).toBe(false);
 });
 
 test("a name listed by both is reported once", async () => {
@@ -328,16 +329,16 @@ test("an aborted answer fails its readers and a later reader asks again", async 
 	lister.add("up", { priority: 0 });
 	lister.abort(new NotFound("broadcast"));
 	expect(await tracks.drain()).toEqual([`error: ${StreamCode.NotFound}`]);
-	expect(lister.used.peek()).toBe(false);
+	expect(lister.wanted.peek()).toBe(false);
 
 	const again = list(broadcast);
-	expect(lister.used.peek()).toBe(true);
+	expect(lister.wanted.peek()).toBe(true);
 	expect(await again.drain()).toEqual([]);
 	lister.synced();
 	expect(await again.drain()).toEqual(["synced"]);
 	// The failed reader leaving releases nothing.
 	tracks.tracks.close();
-	expect(lister.used.peek()).toBe(true);
+	expect(lister.wanted.peek()).toBe(true);
 });
 
 test("a closed lister withdraws its answer and syncs", async () => {
@@ -370,7 +371,7 @@ test("an owner lists each broadcast once", async () => {
 	expect(await newer.drain()).toEqual(["+b"]);
 	newer.tracks.close();
 	stranger.tracks.close();
-	expect(wireOf(broadcast).lister().used.peek()).toBe(false);
+	expect(wireOf(broadcast).lister().wanted.peek()).toBe(false);
 });
 
 test("a broadcast has one lister", () => {
@@ -390,7 +391,7 @@ test("an ended answer ends its readers and a later reader asks again", async () 
 	expect(await tracks.drain()).toEqual(["+up", "synced"]);
 	lister.end();
 	expect(await tracks.drain()).toEqual(["end"]);
-	expect(lister.used.peek()).toBe(false);
+	expect(lister.wanted.peek()).toBe(false);
 
 	const again = list(broadcast);
 	expect(await again.drain()).toEqual([]);

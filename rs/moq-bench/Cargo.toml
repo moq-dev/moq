@@ -35,16 +35,18 @@ required-features = ["uring"]
 doc = false
 
 [features]
-default = ["quic", "websocket"]
+default = ["quic", "websocket", "tcp"]
 iroh = ["moq-tokio/iroh"]
 quic = ["moq-tokio/quic"]
+# Qmux over TCP: `tcp://`, and `tls://`.
+tcp = ["moq-tokio/tcp"]
 uring = ["dep:moq-uring"]
 websocket = ["moq-tokio/websocket"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 humantime = { workspace = true }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "net"] }
 rand = { workspace = true }
@@ -61,6 +63,7 @@ moq-uring = { workspace = true, optional = true }
 procfs = "0.18"
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }
 # test-util enables tokio::time::pause/advance for the deterministic produce tests.

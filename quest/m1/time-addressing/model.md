@@ -15,9 +15,11 @@ Decided 2026-10-25 (maintainer). Why: group numbers need timelines just to
 map to and from time, and reusing a group number poisons caches, so resuming
 a producer would need per-track memory of its last number.
 
-- **A group's address is its first frame's PTS**, known when the group opens.
-  Frames inside a group stay in decode order and their PTS may go backwards
-  (B-frames).
+- **A group's address is its key.** A group our producers write is keyed by
+  its first frame's PTS, known when the group opens. A group ingested from a
+  legacy wire is keyed by the wire's group ID, verbatim (decided 2026-11-03,
+  below). Frames inside a group stay in decode order and their PTS may go
+  backwards (B-frames).
 - **Starts strictly increase.** An equal start is refused loudly like a
   rewind; `Neighbors::admit` (`model/track.rs`, about line 502) allows ties today.
 - **Three ways a group ends**: `finish(end)` with an exclusive end timestamp
@@ -27,9 +29,9 @@ a producer would need per-track memory of its last number.
 - **Reach** (decided 2026-10-26, maintainer): a finished group's own end
   bounds it, else its successor's start, so the last group of a paused or
   finished track ages out without a successor (`TrackState::reach`).
-- **Every track is timed.** Untimed goes away: the producer stamps an untimed
-  write with wall-clock time in microseconds, which stays under 2^53 (the
-  published JS decode limit, below) until the year 2255.
+- **Every write takes a timestamp, and nothing is ever wall-clock stamped**
+  (decided 2026-11-03, below). A track without a timescale is scale-less: its
+  keys and frame timestamps are bare numbers in no known unit.
 - **Gaps.** The model keeps each group's previous start, so a cache or reader
   sees a hole without a round trip. The first group of an epoch has none, and
   the gap before it is unknown. Restarts keep minting a new epoch with fresh
@@ -39,22 +41,20 @@ a producer would need per-track memory of its last number.
   Published `@moq/net` decodes a group ID with `u53` and refuses one past
   2^53 (`js/net/src/lite/group.ts`), so a track whose starts pass that, such
   as nanosecond epoch time, fails those readers.
-- **Legacy ingest.** A timed source keeps its timestamps. An untimed source
-  (moq-transport without TIMESCALE, lite-01..04) uses the group ID as the
-  timestamp on a synthetic scale, so relays agree and legacy egress
-  round-trips the exact ID; max age means nothing on those tracks. A timed
-  moq-transport group that starts at or before its predecessor ends the
-  track with an error.
+- **Legacy ingest.** Every legacy wire's group ID is taken verbatim as the
+  key, timed or not, so relays agree and legacy egress round-trips the exact
+  ID (decided 2026-11-03, below). A group whose ID is at or before its
+  predecessor's ends the track with an error.
 - **Ranges.** `Absolute(group)` ends and sequence-range drops become times.
   `Relative(n)` stays but counts groups instead of subtracting from an ID.
 - **Name reuse** landed in
   [moq-dev/moq#6780](https://github.com/moq-dev/moq/pull/6780); the cut
   removes its sequence half, leaving a re-created track to keep its PTS
   moving forward.
-- **What it waits on** (decided 2026-10-27, maintainer): only the
+- **What it waits on** (decided 2026-10-27, maintainer; Fetch as a range
+  finished in [moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): only the
   subscribe-ranges children that put sequence ranges into the model and the
-  wire, [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md),
-  [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md), and
+  wire, [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) and
   [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md),
   not the whole epic. [Drop set](/quest/m1/drop-set.md) lands first too: its
   runs keyed by group sequence convert mechanically to starts.
@@ -81,6 +81,52 @@ it:
   SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_DROP, FETCH, and
   every IETF Location, Filter, FETCH, Largest, and NEW_GROUP_REQUEST.
 
+### Timestamps are required and legacy IDs pass through
+
+Decided 2026-11-03 (maintainer, the `/quest-import` grill of
+[moq-dev/moq#7573](https://github.com/moq-dev/moq/issues/7573)). Why: a
+wall-clock or `now()` stamp on a write lands in a different epoch than the
+broadcast's media. That is what gives #7573's C publishers an 8 s catalog
+`delay`, and the convenience it buys has no use case. This replaces the
+2026-10-27 audit's "producer arguments keep an optional timestamp", which
+recorded only sequencing.
+
+- **Required timestamps.** Every producer write in moq-net and every binding
+  takes a timestamp. There is no `None`, and nothing is wall-clock stamped.
+  Reads return a timestamp too.
+- **Scale-less tracks.** A track with no timescale (moq-transport without
+  TIMESCALE, lite-01..04, or an app with no clock) is scale-less. Its frame
+  timestamp is its group's key, and the write API on a scale-less group takes
+  no per-frame time. Max-age on it counts bare units, so `max-age=5` keeps
+  groups within 5 IDs of the newest; the application knows how sparse its
+  IDs are.
+- **One unit per track.** A track's timescale is the unit of both its frame
+  timestamps and its group keys. Legacy keys are assumed to be in that unit
+  and nothing checks it, so time ranges compare keys numerically. A released
+  publisher numbering groups 0, 1, 2 with ms frames gets ranges in ID units,
+  which is accepted. Max-age keeps comparing frame timestamps, as today.
+- **Legacy IDs pass through.** Ingest keys a group by the wire's group ID on
+  every legacy wire, and egress writes the key back, so moq-transport group 6
+  leaves as group 6 and reaches moq-lite as key 6. No group carries a sequence
+  beside its key.
+- **Broadcasts are all timed or all scale-less.** moq-mux's catalog producer
+  stamps the catalog from the broadcast clock and refuses to list a track off
+  that clock's timescale, or a scale-less track beside timed ones. moq-net
+  tracks stay independent.
+- **Open, for whoever starts this, with the maintainer:** how lite-05/06,
+  which carry both a sequence and frame timestamps, map on the way out.
+
+Decision prompts:
+
+- Ingest key: ✅ ID verbatim; first PTS, renumbered; per wire.
+- A sequence beside the key: ✅ no, one key; yes, both.
+- Timescale meaning: ✅ one unit for keys and frames, no legacy flag; flag
+  legacy keys.
+- Enforcing timed broadcasts: ✅ the catalog producer; moq-net broadcast;
+  convention only.
+- A scale-less frame's timestamp: ✅ its group key; any increasing number.
+- Max-age on a scale-less track: ✅ bare units; doesn't apply.
+
 ### Spike evidence
 
 The spike published groups at their start ticks (2 s GOPs at 1 kHz and at
@@ -106,22 +152,18 @@ Rust half of every consumer the API change breaks to compile;
 [consumers](/quest/m1/time-addressing/consumers.md) and
 [bindings](/quest/m1/time-addressing/bindings.md) own the behavior changes.
 Test the legacy mapping both ways on every wire, with the
-[resume model](/quest/m1/resume-model-test.md) as the oracle for resume.
+resume model (`rs/moq-net/src/model/resume_model.rs`,
+`js/net/src/resume.model.test.ts`) as the oracle for resume.
 The PR's Impact section says how to migrate.
 
 Public API: breaking. `group::Info`, `create_group`, `append_group`,
 `Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, datagrams, and
-group consumers address by start timestamp, and untimed tracks go away.
+group consumers address by start timestamp, every producer write takes a
+required timestamp, and untimed tracks become scale-less.
 Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required
 
-- [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - the one-range reads this rework moves onto times
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the range ends and drops this rework moves onto times
 - [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - the lite cursor state lives in the model before the cut rekeys it
-- [Lite-05/06 timestamps pass through](/quest/m1/lite-timestamps-through.md) - lite-05/06 tracks stay timed, so their ingest keeps real starts
 - [Drop set](/quest/m1/drop-set.md) - its dropped and expired runs convert mechanically from sequences to starts
-
-## Related
-
-- [Resume checked against a model](/quest/m1/resume-model-test.md) - its reference model is the oracle for resume after the cut

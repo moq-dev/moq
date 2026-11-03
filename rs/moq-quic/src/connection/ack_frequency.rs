@@ -2,7 +2,7 @@ use crate::Duration;
 use crate::connection::spaces::PendingAcks;
 use crate::frame::AckFrequency;
 use crate::transport_parameters::TransportParameters;
-use crate::{AckFrequencyConfig, TIMER_GRANULARITY, TransportError, VarInt};
+use crate::{TIMER_GRANULARITY, TransportError, VarInt, transport::ack_frequency};
 
 /// State associated to ACK frequency
 pub(super) struct AckFrequencyState {
@@ -37,7 +37,7 @@ impl AckFrequencyState {
 	pub(super) fn candidate_max_ack_delay(
 		&self,
 		rtt: Duration,
-		config: &AckFrequencyConfig,
+		config: &ack_frequency::Config,
 		peer_params: &TransportParameters,
 	) -> Duration {
 		let min_ack_delay = Duration::from_micros(peer_params.min_ack_delay.map_or(0, |x| x.into()));
@@ -84,7 +84,7 @@ impl AckFrequencyState {
 	pub(super) fn should_send_ack_frequency(
 		&self,
 		rtt: Duration,
-		config: &AckFrequencyConfig,
+		config: &ack_frequency::Config,
 		peer_params: &TransportParameters,
 	) -> bool {
 		if self.next_outgoing_sequence_number.0 == 0 {
@@ -171,7 +171,7 @@ const MAX_ACK_DELAY_LIMIT: Duration = Duration::from_millis(1 << 14);
 
 /// Minimum value to request the peer set max ACK delay to when the peer supports the ACK frequency
 /// extension and an explicit max ACK delay is not configured.
-// Keep in sync with `AckFrequencyConfig::max_ack_delay` documentation
+// Keep in sync with `ack_frequency::Config::max_ack_delay` documentation
 const MIN_AUTOMATIC_ACK_DELAY: Duration = Duration::from_millis(25);
 
 #[cfg(test)]
@@ -191,7 +191,7 @@ mod tests {
 		let params = TransportParameters::read(Side::Client, &mut encoded.as_slice())
 			.expect("peer parameters must pass wire-level validation");
 		let state = AckFrequencyState::new(Duration::from_millis(100));
-		let delay = state.candidate_max_ack_delay(Duration::from_millis(5), &AckFrequencyConfig::default(), &params);
+		let delay = state.candidate_max_ack_delay(Duration::from_millis(5), &ack_frequency::Config::default(), &params);
 		assert_eq!(delay, Duration::from_millis(100));
 	}
 
@@ -207,7 +207,7 @@ mod tests {
 		let params = TransportParameters::read(Side::Client, &mut encoded.as_slice())
 			.expect("peer parameters must pass wire-level validation");
 		let state = AckFrequencyState::new(Duration::from_millis(100));
-		let delay = state.candidate_max_ack_delay(Duration::from_millis(5), &AckFrequencyConfig::default(), &params);
+		let delay = state.candidate_max_ack_delay(Duration::from_millis(5), &ack_frequency::Config::default(), &params);
 		assert_eq!(delay, Duration::from_millis(100));
 	}
 
@@ -215,8 +215,10 @@ mod tests {
 	#[test]
 	fn configured_max_ack_delay_stays_below_limit() {
 		let state = AckFrequencyState::new(Duration::from_millis(25));
-		let mut config = AckFrequencyConfig::default();
-		config.max_ack_delay(Some(MAX_ACK_DELAY_LIMIT));
+		let config = ack_frequency::Config {
+			max_ack_delay: Some(MAX_ACK_DELAY_LIMIT),
+			..ack_frequency::Config::default()
+		};
 		let delay = state.candidate_max_ack_delay(MAX_ACK_DELAY_LIMIT * 2, &config, &TransportParameters::default());
 		assert_eq!(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1));
 	}
@@ -241,8 +243,10 @@ mod tests {
 			(Some(100), 50, 50),
 			(Some(100), 200, 100),
 		] {
-			let mut config = AckFrequencyConfig::default();
-			config.max_ack_delay(configured.map(ms));
+			let config = ack_frequency::Config {
+				max_ack_delay: configured.map(ms),
+				..ack_frequency::Config::default()
+			};
 			let delay = state.candidate_max_ack_delay(ms(rtt), &config, &params);
 			assert_eq!(delay, ms(requested), "configured {configured:?} ms, RTT {rtt} ms");
 		}

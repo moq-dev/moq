@@ -1,6 +1,6 @@
 name: Cache
 
-# Publish development environments independently of the merge queue's local caches.
+# Publish development environments independently of the landing worker's local caches.
 permissions:
   contents: read
 

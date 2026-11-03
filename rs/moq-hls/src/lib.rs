@@ -17,6 +17,9 @@
 //! export via [`moq_mux::container::fmp4::Muxer`]) lives in `moq-mux`; this
 //! crate owns the HLS playlist and DASH manifest generation, the
 //! record-driven playlist window, and the HTTP surface.
+//!
+//! Its cryptography is [rind](https://docs.rs/rind), so every constructor that first needs it
+//! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`].
 
 #![warn(missing_docs)]
 
@@ -42,9 +45,6 @@ pub use axum;
 #[cfg(test)]
 pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
 	let consumer = origin.consume();
-	let broadcast = consumer
-		.request_broadcast(path, None)
-		.await
-		.expect("the broadcast resolves");
+	let broadcast = consumer.request(path, None).await.expect("the broadcast resolves");
 	moq_mux::Source::new(consumer, broadcast)
 }

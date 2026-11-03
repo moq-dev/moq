@@ -8,7 +8,7 @@ follows the [moq-boy](../boy) pattern: the viewer publishes, the truck
 subscribes, and the truck echoes what it accepted on `status`.
 
 ```text
-├── web/      # the player: map, video, keyboard and steering-wheel input (@moq/demo-carla)
+├── web/      # the player: the <moq-carla> element, with map, video, keyboard and steering-wheel input (@moq/demo-carla)
 ├── sim/      # the worker: one Python process driving every truck in CARLA
 │   ├── moq_carla_sim/  # safety gate, CARLA world, MoQ publish and control
 │   └── systemd/        # rootless user units for an always-on workstation
@@ -106,8 +106,8 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
 - **One driver at a time.** The first driver to send a command holds the
   lease until its broadcast ends or its 1 s watchdog expires; the player
   heartbeats every 250 ms. The lease is bound to the driver's path and the
-  epoch it announced with, so a driver that reconnects at the same path is a
-  new claimant rather than a continuation.
+  route instance it announced with, so a driver that reconnects at the same
+  path is a new claimant rather than a continuation.
 - **E-stop latches** until an explicit reset, from any viewer: the player
   latches and resets it through a short-lived safety broadcast without taking
   the lease.
@@ -207,8 +207,10 @@ at login.
 
 ## The player
 
-`just carla deploy` builds the player against `https://cdn.moq.dev/demo` and
-deploys it to `carla.moq.dev`. With no simulator publishing, it says so.
+The player is a `<moq-carla>` custom element: importing
+`@moq/demo-carla/element` registers it, and its `url` attribute names the relay.
+`just carla web` serves it on a local dev page. With no simulator publishing,
+it says so.
 
 Hover a truck on the map to stream its 240p preview; click it for 720p. A drive
 key, a wheel movement, or **Take control** claims the lease, and **Esc**

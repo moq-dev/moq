@@ -48,15 +48,13 @@ async fn connect_datagram_track() -> Fixture {
 	let producer = broadcast.create_track("datagrams", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
-	// Lite-07, since a lite-05/06 subscriber drops every timestamp it receives.
 	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
 
 	let consumer = consumer_origin.consume();
-	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench", None).await.unwrap();
+	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 	let subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 	// The subscriber is handed over once TRACK_INFO answers, before its SUBSCRIBE reaches
 	// the publisher, and a datagram only goes to a subscription already there.
@@ -77,9 +75,9 @@ async fn connect_datagram_track() -> Fixture {
 /// asserts what delivery actually guarantees rather than a fixed count: whatever
 /// arrives is intact and in order, and the last one written arrives, since nothing
 /// is pushed during the drain to evict it.
-#[moq_clock::test]
+#[kio::test]
 async fn datagrams_reach_the_subscriber_in_order() {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_datagram_track().await;
 		const COUNT: u64 = 32;
 
@@ -122,10 +120,10 @@ async fn datagrams_reach_the_subscriber_in_order() {
 
 /// MoQ Transport carries a datagram as an OBJECT_DATAGRAM at object 0, so it arrives as a
 /// datagram with its sequence, alongside the groups on streams.
-#[moq_clock::test]
+#[kio::test]
 async fn ietf_delivers_datagrams() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
-		moq_clock::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
+		kio::clock::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
@@ -145,8 +143,7 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let _pair = connect_mock(options).await;
 
 	let consumer = consumer_origin.consume();
-	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench", None).await.unwrap();
+	let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 	let mut subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 
 	// A group first, so the subscription's alias is bound before any datagram lands.
@@ -186,9 +183,9 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 }
 
 /// Explicit insert keeps the origin sequence on the lite wire, including a gap.
-#[moq_clock::test]
+#[kio::test]
 async fn inserted_sequences_survive_the_lite_wire() {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_datagram_track().await;
 
 		fixture
@@ -230,7 +227,7 @@ async fn inserted_sequences_survive_the_lite_wire() {
 /// moq-lite-07, and with the NOT_FOUND an earlier version has for it. A relay carries the
 /// answer across in the downstream version's terms. The moq-transport side (DOES_NOT_EXIST)
 /// is covered by the IETF publisher's own tests.
-#[moq_clock::test]
+#[kio::test]
 async fn a_fetched_datagram_is_refused_per_version() {
 	const NOT_FETCHABLE: &str = "not fetchable";
 	const NOT_FOUND: &str = "not found";
@@ -249,8 +246,7 @@ async fn a_fetched_datagram_is_refused_per_version() {
 		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
 
 		let consumer = nodes.last().unwrap().consume();
-		consumer.routed("room").await.unwrap();
-		let remote = consumer.request_broadcast("room", None).await.unwrap();
+		let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 		let err = match remote.track("datagrams").unwrap().fetch_group(sequence, None).await {
 			Ok(_) => panic!("{versions:?}: a datagram was fetched"),
 			Err(err) => err,
@@ -269,7 +265,7 @@ async fn a_fetched_datagram_is_refused_per_version() {
 		(&["moq-lite-07-wip"], NOT_FETCHABLE),
 		(&["moq-lite-07-wip", "moq-lite-06"], NOT_FOUND),
 	] {
-		let refused = moq_clock::timeout(TEST_TIMEOUT, fetch_a_datagram(versions))
+		let refused = kio::clock::timeout(TEST_TIMEOUT, fetch_a_datagram(versions))
 			.await
 			.unwrap_or_else(|_| panic!("{versions:?}: timed out"));
 		assert_eq!(refused, expected, "{versions:?}");

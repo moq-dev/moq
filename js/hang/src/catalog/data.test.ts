@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { compressionSupported } from "./compression.ts";
 import { modeSupported } from "./mode.ts";
 import type { RelativeBroadcast } from "./path.ts";
 import { RootSchema } from "./root.ts";
@@ -10,7 +9,7 @@ import { RootSchema } from "./root.ts";
 const catalog = {
 	json: {
 		tracks: {
-			chat: { mode: "stream", compression: "deflate", schema: "https://example.com/chat.schema.json" },
+			chat: { mode: "stream", schema: "https://example.com/chat.schema.json" },
 			status: { broadcast: "./source", mode: "snapshot" },
 		},
 	},
@@ -21,17 +20,15 @@ const catalog = {
 	},
 };
 
-test("data tracks parse with their mode and compression", () => {
+test("data tracks parse with their mode", () => {
 	const parsed = RootSchema.parse(catalog);
 
 	expect(parsed.json?.tracks.chat?.mode).toBe("stream");
-	expect(parsed.json?.tracks.chat?.compression).toBe("deflate");
 	expect(parsed.json?.tracks.chat?.schema).toBe("https://example.com/chat.schema.json");
 
 	expect(parsed.json?.tracks.status?.mode).toBe("snapshot");
 	// Normalized like Rust path::Relative, the same as a media rendition's reference.
 	expect(parsed.json?.tracks.status?.broadcast).toBe("source" as RelativeBroadcast);
-	expect(parsed.json?.tracks.status?.compression).toBeUndefined();
 
 	expect(parsed.binary?.tracks.thumbnail?.mode).toBe("snapshot");
 	expect(parsed.binary?.tracks.thumbnail?.mime).toBe("image/jpeg");
@@ -46,21 +43,19 @@ test("a media-only catalog leaves the data sections undefined", () => {
 test("a track without a mode is rejected", () => {
 	// There is no safe default: reading a stream as a snapshot silently drops every record but the
 	// last, so a mode-less entry is malformed rather than assumed.
-	expect(() => RootSchema.parse({ json: { tracks: { chat: { compression: "deflate" } } } })).toThrow();
+	expect(() => RootSchema.parse({ json: { tracks: { chat: { schema: "chat" } } } })).toThrow();
 });
 
-test("an unrecognized mode or compression survives verbatim", () => {
+test("an unrecognized mode survives verbatim", () => {
 	// A relay reparses and republishes the catalog, so a track it cannot read must round-trip
 	// rather than be corrupted. It just has to be skipped, not dropped.
 	const parsed = RootSchema.parse({
-		json: { tracks: { future: { mode: "windowed", compression: "zstd" } } },
+		json: { tracks: { future: { mode: "windowed" } } },
 	});
 
 	const future = parsed.json?.tracks.future;
 	expect(future?.mode).toBe("windowed");
-	expect(future?.compression).toBe("zstd");
 	expect(modeSupported(future?.mode ?? "")).toBe(false);
-	expect(compressionSupported(future?.compression ?? "")).toBe(false);
 });
 
 test("fields belonging to an unrecognized mode survive a round trip", () => {

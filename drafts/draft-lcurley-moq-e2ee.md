@@ -137,20 +137,22 @@ Clones of a producing generation MUST share permanent track claims so reopening 
 Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
 
 A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}.
-Each instance announces its epoch as the route's moq-lite Epoch; the HKDF `bytes(epoch)` input is the UUID text.
+Each instance announces its epoch text as the route's moq-lite Instance; the HKDF `bytes(epoch)` input is the UUID text.
 The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares one path.
 The path carries no format or protection marker; for example, the semantic name `meeting.hang` appears only as an input to the opaque derivation.
 A plaintext consumer that opens the protected broadcast fails because it cannot find the plaintext catalog it expects, not because of a path naming rule.
-Subscribers resolve `<opaque>` and take the epoch from its route, where relays rank the newest first.
-On a wire that cannot carry the route's epoch, the application supplies it over its own authenticated channel.
+Subscribers resolve `<opaque>` and take the epoch from its route's Instance, which relays rank like any other Instance rather than newest first.
+On a wire that cannot carry the route's Instance, where a relay mints one of its own, the application supplies the epoch over its own authenticated channel.
 
 The epoch and the path are not secret and are not authenticated.
 A relay that presents a wrong epoch causes authentication failure; a relay that withholds a newer instance denies service.
 Neither can cause a nonce to repeat, because only the publisher instance chooses the epoch it encrypts under.
 
 A restart or replacement of a publisher is a new instance and mints a new epoch.
+So is a cloned process image, such as a `fork` without `exec`, a restored VM snapshot or process checkpoint, or a producing generation prepared once and copied to two processes: each copy MUST mint its own generation before it encrypts.
+A clone copies the epoch and the per-track counters verbatim, so two copies that both encrypt would protect different plaintext under the same key and nonce, and nothing on the wire lets a receiver or relay detect it.
 Transport sequence numbers therefore restart freely without any coordination between instances.
-An ended instance stays readable only for as long as relays or archives retain it under its epoch; once a newer epoch wins the shared path, subscribers resolve the newer one.
+An ended instance stays readable only for as long as relays or archives retain it under its epoch; once another instance wins the shared path, subscribers resolve that one.
 
 
 # Canonical Encoding {#encoding}
@@ -271,17 +273,17 @@ Protected payload length is plaintext length plus `Nt`.
 A publisher MUST refuse plaintext that would make the protected payload exceed the transport payload limit for that object (`oversize`), before it touches the network.
 
 The interoperable grouped-frame payload cap matching current moq-net implementations is 32 MiB, so grouped plaintext MUST be at most `32 MiB - 16` bytes.
-moq-lite datagram bodies MUST remain at most 1200 bytes including Subscribe ID, Group Sequence, and Timestamp ({{moql}} Section "Datagrams").
-Those three varints are at most 24 bytes, so datagram plaintext MUST be at most `1200 - 24 - 16 = 1160` bytes; a publisher cannot observe the Subscribe ID each hop will encode and MUST NOT budget for a smaller header.
+moq-lite datagram bodies MUST remain at most 1200 bytes including Type, Subscribe ID, Group Sequence, and Timestamp ({{moql}} Section "Datagrams").
+The Type is one byte and each of those three varints at most 9 bytes, so datagram plaintext MUST be at most `1200 - 28 - 16 = 1156` bytes; a publisher cannot observe the Subscribe ID each hop will encode and MUST NOT budget for a smaller header.
 
 ## Catalogs
 A catalog is a track like any other: published under the physical name derived from its semantic name, with each snapshot or delta protected at its own group and frame identity.
-Hang {{hang}} `catalog.json` and `catalog.json.z` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation.
+Hang {{hang}} `catalog.json` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation.
 The decrypted catalog is unchanged from its plaintext form: every track it references, including rendition-map keys, `track` fields, and application extensions, keeps its semantic name.
 A subscriber derives the physical name of each track it reads; neither side rewrites the catalog, so extensions need no profile support.
 
-If a representation is compressed, compression is applied to the catalog bytes before AEAD and reversed after decryption.
-Encrypting then compressing is forbidden: ciphertext does not compress, and the `.z` sibling would leak the uncompressed size ratio.
+If a track is compressed, compression is applied to the plaintext before AEAD and reversed after decryption.
+Encrypting then compressing is forbidden: ciphertext does not compress.
 
 
 # Bounds {#bounds}
@@ -385,7 +387,7 @@ This document requests no registrations.
 {:numbered="false"}
 
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
-- Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
+- Require canonical UUIDv7 epochs, carried as the route's Instance rather than in the path, leaving HKDF UUID inputs unchanged. Relays no longer rank the newest epoch first.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
 - Forbid applications from relying on group completeness, which is unauthenticated.
 - Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.

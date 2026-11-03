@@ -20,7 +20,8 @@
 //! Indices stop at 2^53 - 1, the largest integer represented exactly by both implementations.
 //!
 //! Trimming is therefore an op, not a group boundary. Dropping a record costs one small frame
-//! inside the shared compression window instead of a roll that would throw that window away.
+//! instead of a roll that restates the whole window (and, on a
+//! [`compress`](moq_net::track::Info::compress)ed track, throws away the group's DEFLATE window).
 //!
 //! # Group boundaries are invisible
 //!
@@ -111,7 +112,44 @@ mod test {
 		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
 		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
 		producer.finish().unwrap();
-		let pushed: Vec<_> = drain(&mut consumer(track, false))
+		let pushed: Vec<_> = drain(&mut consumer(track))
+			.into_iter()
+			.filter_map(|event| match event {
+				Event::Push { value, .. } => Some(value),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(pushed, vec![rec(1), rec(2)]);
+	}
+
+	/// A timestamp the track's millisecond scale can't hold is refused before encoding: a header
+	/// publishes no group, and an op leaves the open group to carry on rather than rolling it.
+	#[test]
+	fn a_timed_track_refuses_an_unconvertible_timestamp() {
+		let (mut producer, mut track) = producer_on(ProducerConfig::default(), timed());
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		let huge = moq_net::Timestamp::from_scale((1 << 61) - 1, 1).unwrap();
+		let largest = |track: &mut moq_net::track::Subscriber| {
+			track.largest().now_or_never().flatten().map(|position| position.group)
+		};
+		let refused = |result: crate::Result<()>| {
+			assert!(matches!(
+				result,
+				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+			));
+		};
+
+		refused(producer.push(moq_net::Timed::from(&rec(1)).at(huge)));
+		assert_eq!(largest(&mut track), None, "a refused header published a group");
+
+		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
+		refused(producer.push(moq_net::Timed::from(&rec(2)).at(huge)));
+		refused(producer.pop(moq_net::Timed::from(1u64).at(huge)));
+		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
+		assert_eq!(largest(&mut track), Some(0), "a refused op rolled the group");
+
+		producer.finish().unwrap();
+		let pushed: Vec<_> = drain(&mut consumer(track))
 			.into_iter()
 			.filter_map(|event| match event {
 				Event::Push { value, .. } => Some(value),
@@ -127,7 +165,7 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut live = consumer(track.subscribe(None), false);
+		let mut live = consumer(track.subscribe(None));
 		let late = track.subscribe(None);
 		let mut producer = Producer::new(track, ProducerConfig::default());
 		let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
@@ -162,7 +200,7 @@ mod test {
 		producer.cut().unwrap();
 		producer.push(moq_net::Timed::from(&rec(3)).at(at(400))).unwrap();
 		let late = late.with_range(1..);
-		let mut late = consumer(late, false);
+		let mut late = consumer(late);
 		let events: Vec<_> = drain_timed(&mut late).into_iter().map(|e| (e.value, e.at)).collect();
 		assert_eq!(
 			events,
@@ -190,7 +228,7 @@ mod test {
 		let (mut producer, track) = producer(ProducerConfig::default());
 		producer.push(&rec(1)).unwrap();
 		producer.pop(1).unwrap();
-		let events = drain_timed(&mut consumer(track, false));
+		let events = drain_timed(&mut consumer(track));
 		assert_eq!(events.len(), 2);
 		assert!(events.iter().all(|event| event.at.is_none()));
 	}
@@ -245,19 +283,33 @@ mod test {
 		let _ = Encoder::<Value>::new(config);
 	}
 
-	fn consumer(track: moq_net::track::Subscriber, compression: bool) -> Consumer<Value> {
-		Consumer::new(track, ConsumerConfig::default().with_compression(compression))
+	fn consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
+		Consumer::new(track, ConsumerConfig::default())
 	}
 
-	/// A track whose timestamp conversion rejects every frame after its group is published.
+	/// A timed track whose first group already starts at ten seconds, so a group that a frame at
+	/// [`rewound`] opens is published by `append_group` and then refused by `write_frame` for
+	/// starting before it. That stands in for any post-`append_group` write failure (the reported
+	/// one is a frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut info = timed();
-		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
-
-		moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", Some(info))
-			.unwrap()
+			.create_track("test", timed())
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(
+				moq_net::Timestamp::from_millis(10_000).unwrap(),
+				bytes::Bytes::from_static(b"{}"),
+			)
+			.unwrap();
+		group.finish().unwrap();
+		track
+	}
+
+	/// Before [`rejecting_track`]'s first group starts, so a group opened at it is refused.
+	fn rewound() -> moq_net::Timestamp {
+		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
 
 	/// Drain every event currently available without blocking.
@@ -292,11 +344,14 @@ mod test {
 
 	impl Live {
 		fn new(config: ProducerConfig) -> Self {
-			let compression = config.compression;
-			let (producer, track) = producer(config);
+			Self::on(config, moq_net::track::Info::default())
+		}
+
+		fn on(config: ProducerConfig, info: moq_net::track::Info) -> Self {
+			let (producer, track) = producer_on(config, info);
 			Self {
 				producer,
-				consumer: consumer(track, compression),
+				consumer: consumer(track),
 				events: Vec::new(),
 			}
 		}
@@ -495,7 +550,7 @@ mod test {
 			.map(|position| position.group)
 			.unwrap();
 		subscriber = subscriber.with_range(largest..);
-		let mut fresh = consumer(subscriber, false);
+		let mut fresh = consumer(subscriber);
 		producer.finish().unwrap();
 
 		// Joining at offset 3 must not report 3 skips for records that were never this reader's to
@@ -599,7 +654,7 @@ mod test {
 				.produce()
 				.create_track("test", timed())
 				.unwrap();
-			let mut consumer = consumer(track.subscribe(None), false);
+			let mut consumer = consumer(track.subscribe(None));
 			let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_ops(false));
 
 			let first = encoder.push(&rec(0)).unwrap();
@@ -749,7 +804,10 @@ mod test {
 
 	#[test]
 	fn compressed_round_trip_across_rolls() {
-		let mut live = Live::new(ProducerConfig::default().with_compression(true));
+		let mut live = Live::on(
+			ProducerConfig::default(),
+			moq_net::track::Info::default().with_compress(true),
+		);
 		for n in 0..40 {
 			live.push(n);
 			if n >= 10 {
@@ -783,9 +841,8 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
-		// Too late for the timescale, so the header group is published before the write fails.
-		let late = moq_net::Timestamp::from_millis(10_000).unwrap();
-		assert!(producer.push(moq_net::Timed::from(&rec(1)).at(late)).is_err());
+		// Rewound past the first group, so the header group is published before the write fails.
+		assert!(producer.push(moq_net::Timed::from(&rec(1)).at(rewound())).is_err());
 		assert_eq!(producer.range(), 0..0);
 		assert!(producer.window().is_empty());
 
@@ -912,7 +969,8 @@ mod test {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let mut groups = track.subscribe(replay);
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 

@@ -19,6 +19,6 @@ mod consumer;
 mod decoded;
 mod decoder;
 
-pub use consumer::{Consumer, Options, Output, Read, Start};
+pub use consumer::{Consumer, Delay, Options, Output, Read, Start};
 pub use decoded::Decoded;
 pub use decoder::{Config, Decoder, Kind};

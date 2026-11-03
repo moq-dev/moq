@@ -37,13 +37,6 @@ pub struct ProducerConfig {
 	/// Defaults to `true`.
 	pub ops: bool,
 
-	/// Compress each group as one sync-flushed DEFLATE stream, so every op reuses the header and the
-	/// ops before it as context.
-	///
-	/// `false` (the default) emits plaintext JSON frames. A [`Decoder`](super::Decoder) reading them
-	/// must set [`ConsumerConfig::compression`](super::ConsumerConfig::compression) to match.
-	pub compression: bool,
-
 	/// Maximum records retained and repeated in a group checkpoint.
 	///
 	/// `None` (the default) repeats the complete window. A bound keeps checkpoints finite for an
@@ -56,7 +49,6 @@ impl Default for ProducerConfig {
 	fn default() -> Self {
 		Self {
 			ops: true,
-			compression: false,
 			checkpoint_records: None,
 		}
 	}
@@ -66,12 +58,6 @@ impl ProducerConfig {
 	/// Set [`ops`](Self::ops) (a builder, since the struct is `#[non_exhaustive]`).
 	pub fn with_ops(mut self, ops: bool) -> Self {
 		self.ops = ops;
-		self
-	}
-
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
 		self
 	}
 
@@ -87,7 +73,7 @@ impl ProducerConfig {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Encoded {
-	/// The frame payload, DEFLATE-compressed when [`ProducerConfig::compression`] is set.
+	/// The frame payload: a group header or an op.
 	pub payload: Bytes,
 
 	/// Whether this frame is a group header, which must open a new group.
@@ -150,8 +136,8 @@ impl<T> Drop for Pending<'_, T> {
 /// an append-only log cannot do.
 ///
 /// Frames must reach the wire in the order they were encoded, and a frame with
-/// [`keyframe`](Encoded::keyframe) set must open a new group: both the positional indices and the
-/// group-scoped DEFLATE window depend on it. When a joiner wants a fresh group (see
+/// [`keyframe`](Encoded::keyframe) set must open a new group: the positional indices depend on it.
+/// When a joiner wants a fresh group (see
 /// [`Demand::wanted`](moq_net::track::Demand::wanted)), [`snapshot`](Self::snapshot) restates the
 /// window in one.
 pub struct Encoder<T> {
@@ -166,15 +152,15 @@ pub struct Encoder<T> {
 	/// Absolute index of `window.front()`, which may follow `offset` in checkpoint mode.
 	start: u64,
 
-	/// The current group's DEFLATE encoder (one window per group), `Some` while compressing.
-	flate: Option<moq_flate::Encoder>,
-
-	/// Bytes charged to the current group, header included: each frame's slice, or its plaintext
-	/// when that is larger, since a reader's DEFLATE window is held to the same budget.
+	/// Bytes charged to the current group, header included.
 	group_bytes: u64,
 
 	/// Frames emitted into the current group, header included.
 	group_frames: usize,
+
+	/// The most bytes a group may hold, the cap both a header and the ops after it meet. A field
+	/// rather than the constant so a test can shrink it to a size it can reach.
+	max_group_bytes: u64,
 
 	/// Whether the next frame must be a header because a frame was lost. Kept separate from the
 	/// window, which a resync must never discard.
@@ -195,9 +181,9 @@ impl<T> Encoder<T> {
 			window: VecDeque::new(),
 			offset: 0,
 			start: 0,
-			flate: None,
 			group_bytes: 0,
 			group_frames: 0,
+			max_group_bytes: moq_net::group::MAX_CACHE_BYTES,
 			resync: true,
 			_marker: PhantomData,
 		}
@@ -220,7 +206,6 @@ impl<T> Encoder<T> {
 	/// Call this whenever the caller closes the current group behind the encoder's back. It is also
 	/// how the encoder recovers after an encoded frame did not reach the wire.
 	pub fn reset(&mut self) {
-		self.flate = None;
 		self.group_bytes = 0;
 		self.group_frames = 0;
 		self.resync = true;
@@ -272,20 +257,12 @@ impl<T> Encoder<T> {
 		self.config.ops && self.group_frames > 0 && self.group_frames < MAX_GROUP_FRAMES
 	}
 
-	/// Emit an op when the header will remain cached and inflatable, otherwise restate the window
-	/// in a new group.
-	///
-	/// Charged the larger of the slice and the plaintext: a sync-flushed DEFLATE frame can come out
-	/// slightly larger than its input, while a reader's window counts what it inflates.
+	/// Emit an op when the header will remain cached, otherwise restate the window in a new group.
 	fn emit_op(&mut self, bytes: Vec<u8>) -> Result<Option<Encoded>> {
-		let plain = bytes.len() as u64;
-		let payload = match self.flate.as_mut() {
-			Some(flate) => flate.frame(&bytes),
-			None => Bytes::from(bytes),
-		};
+		let payload = Bytes::from(bytes);
 		self.group_frames += 1;
-		self.group_bytes = self.group_bytes.saturating_add(plain.max(payload.len() as u64));
-		if self.group_bytes > moq_net::group::MAX_CACHE_BYTES {
+		self.group_bytes = self.group_bytes.saturating_add(payload.len() as u64);
+		if self.group_bytes > self.max_group_bytes {
 			self.reset();
 			return Ok(None);
 		}
@@ -295,7 +272,7 @@ impl<T> Encoder<T> {
 		}))
 	}
 
-	/// Serialize a bounded suffix before mutably borrowing the compression state.
+	/// Serialize a bounded suffix of the window as a group header.
 	fn header<'a>(
 		config: &ProducerConfig,
 		offset: u64,
@@ -320,28 +297,13 @@ impl<T> Encoder<T> {
 
 	/// Encode the header restating the whole window and opening a new group.
 	fn emit_header(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
-		// A reader inflates the header whole, so its plaintext meets the group budget too.
-		let plain = bytes.len() as u64;
-		if plain > moq_net::group::MAX_CACHE_BYTES {
+		let payload = Bytes::from(bytes);
+		if payload.len() as u64 > self.max_group_bytes {
 			return Err(Error::Json("window header exceeds the group cache limit".into()));
 		}
 
-		// Open a fresh per-group encoder (cold window) and compress the header as frame 0.
-		let (payload, flate) = match self.config.compression {
-			true => {
-				let mut flate = moq_flate::Encoder::new();
-				let payload = flate.frame(&bytes);
-				(payload, Some(flate))
-			}
-			false => (Bytes::from(bytes), None),
-		};
-		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
-			return Err(Error::Json("window header exceeds the group cache limit".into()));
-		}
-
-		self.group_bytes = plain.max(payload.len() as u64);
+		self.group_bytes = payload.len() as u64;
 		self.group_frames = 1;
-		self.flate = flate;
 		self.resync = false;
 
 		Ok(Encoded {
@@ -457,11 +419,15 @@ impl<T: Serialize> Encoder<T> {
 mod test {
 	use super::*;
 
+	/// A group budget small enough to fill cheaply, standing in for moq-net's 32 MiB cache.
+	const BUDGET: u64 = 32 * 1024;
+
 	#[test]
 	fn an_op_that_would_evict_the_header_rolls_first() {
 		let mut encoder = Encoder::<String>::new(ProducerConfig::default().with_ops(true));
-		let first = "a".repeat(16 * 1024 * 1024);
-		let next = "b".repeat(15 * 1024 * 1024);
+		encoder.max_group_bytes = BUDGET;
+		let first = "a".repeat(16 * 1024);
+		let next = "b".repeat(15 * 1024);
 
 		let frame = encoder.push(&first).unwrap();
 		assert!(frame.keyframe);
@@ -477,7 +443,7 @@ mod test {
 
 		let frame = encoder.push(&next).unwrap();
 		assert!(frame.keyframe);
-		assert!(frame.payload.len() < moq_net::group::MAX_CACHE_BYTES as usize);
+		assert!(frame.payload.len() < BUDGET as usize);
 		frame.commit();
 	}
 
@@ -497,24 +463,17 @@ mod test {
 		assert_eq!(encoder.window(), vec![Value::from(2)]);
 	}
 
-	/// Compression doesn't lift the limit: a reader inflates the header whole, so one past the group
-	/// budget is refused however small it deflates.
 	#[test]
 	fn a_header_larger_than_the_group_cache_is_rejected() {
-		for compression in [false, true] {
-			let config = ProducerConfig {
-				compression,
-				..Default::default()
-			};
-			let mut encoder = Encoder::<String>::new(config);
-			let record = "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
+		let mut encoder = Encoder::<String>::new(ProducerConfig::default());
+		encoder.max_group_bytes = BUDGET;
+		let record = "x".repeat(BUDGET as usize);
 
-			let err = encoder.push(&record).err().expect("oversized header should fail");
-			assert!(err.to_string().contains("group cache limit"));
-			assert!(encoder.window().is_empty());
+		let err = encoder.push(&record).err().expect("oversized header should fail");
+		assert!(err.to_string().contains("group cache limit"));
+		assert!(encoder.window().is_empty());
 
-			let frame = encoder.push(&"ok".to_string()).unwrap();
-			assert!(frame.keyframe);
-		}
+		let frame = encoder.push(&"ok".to_string()).unwrap();
+		assert!(frame.keyframe);
 	}
 }

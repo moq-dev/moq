@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/fd1d88fb19317afc1c0cbca34cc23e9cf4d32375";
+      url = "github:moq-dev/quest/5e66075d5acc397e400094ea4f53f7db45e351ce";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -71,16 +71,6 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        wasm-bindgen-version =
-          (pkgs.lib.findSingle (package: package.name == "wasm-bindgen")
-            (throw "Cargo.lock has no wasm-bindgen package")
-            (throw "Cargo.lock has multiple wasm-bindgen versions")
-            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
-          ).version;
-        wasm-bindgen-cli =
-          pkgs.${"wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasm-bindgen-version}"}
-            or (throw "nixpkgs does not package wasm-bindgen-cli ${wasm-bindgen-version} locked in Cargo.lock");
-
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
         # unnoticed. The floor is 1.98, not the 1.95 relay MSRV: earlier rustc
@@ -100,10 +90,7 @@
             # match rustc's LLVM. cargo-llvm-cov finds them in the sysroot.
             "llvm-tools"
           ];
-          targets = [
-            "wasm32-unknown-unknown"
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+          targets = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             "aarch64-apple-darwin"
           ];
         };
@@ -121,6 +108,24 @@
           old:
           pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
             makeFlags = old.makeFlags ++ [ "CXXFLAGS_WARNINGS=" ];
+          }
+        );
+
+        # The CodSpeed Criterion build (`just rs codspeed`). 6.0 runs each benchmark in its own
+        # process, so allocator state no longer carries between them; nixpkgs still has 5.x.
+        cargo-codspeed = pkgs.cargo-codspeed.overrideAttrs (
+          finalAttrs: old: {
+            version = "6.0.0";
+            src = pkgs.fetchFromGitHub {
+              owner = "CodSpeedHQ";
+              repo = "codspeed-rust";
+              tag = "v${finalAttrs.version}";
+              hash = "sha256-qY+IQx2apIOGTkRXUnbNCJT4Jo6TESY/80SXyknUBWY=";
+            };
+            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+              inherit (finalAttrs) pname version src;
+              hash = "sha256-qiyA74h80sT3tM/TToZxPDGMmnEwB8MYhFM84Wu2ySs=";
+            };
           }
         );
 
@@ -153,12 +158,12 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
-            # Per-crate feature matrices (`just rs features`), where workspace
-            # unification would otherwise hide a broken single-crate build.
-            cargo-hack
             # The workspace-hack that gives every build one feature set per dependency.
             cargo-hakari
+            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
+            cargo-mutants
             cargo-nextest
+            cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
             # Its LLVM test helpers must read the compiler's profile format.
             (cargo-llvm-cov.override {
@@ -167,10 +172,6 @@
                 rustc = rust-toolchain;
               };
             })
-            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
-            # Cargo.lock selects the matching schema version, independently of
-            # nixpkgs' default wasm-bindgen-cli.
-            wasm-bindgen-cli
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
@@ -290,13 +291,24 @@
         # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
-        lintDeps = with pkgs; [
-          shellcheck
-          shfmt
-          actionlint
-          taplo
-          nixfmt
-        ];
+        lintDeps =
+          with pkgs;
+          [
+            shellcheck
+            shfmt
+            actionlint
+            zizmor
+            taplo
+            nixfmt
+            # Formats and lints every Python file; the same version uv.lock pins.
+            ruff
+          ]
+          # Apple's formatter, so `just swift check` checks formatting off macOS
+          # too. nixpkgs marks the Swift compiler it builds with broken on
+          # aarch64-linux, where the check skips instead.
+          ++ lib.optionals (!(stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isAarch64)) [
+            swift-format
+          ];
 
         # Kotlin wrapper (kt/) toolchain so `just kt check` actually compiles
         # the wrapper and runs :moq:jvmTest instead of silently skipping.
@@ -306,6 +318,8 @@
         ktDeps = with pkgs; [
           jdk17
           gradle_8
+          # `just kt check` fails on Kotlin it would reformat; `just kt fix` applies it.
+          ktfmt
         ];
 
         # uniffi-bindgen-go renders rs/moq-ffi into the generated half of
@@ -316,8 +330,9 @@
         # targets (v0.10.0-kixelated.1+v0.32.0 -> uniffi 0.32), and it only
         # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
-        # generator version and must be bumped together: the repo and revision
-        # in release-ffi.yml, and the `cargo install` line in
+        # generator version and must be bumped together: the commit the tag
+        # peels to in .github/actions/uniffi-bindgen, which CI jobs outside
+        # the dev shell build, and the `cargo install` line in
         # rs/moq-ffi/build.sh, go/ffi/README.md, sh/go/check.sh, and
         # sh/go/stage.sh.
         #
@@ -357,6 +372,8 @@
         goDeps = [
           pkgs.go
           uniffi-bindgen-go
+          # `just go audit`, nightly.
+          pkgs.govulncheck
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
@@ -365,13 +382,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.6+v0.32.0";
+          version = "0.3.1-kixelated.7+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
+            hash = "sha256-uSApyCocEhADWu8Koj5vXIt0fMYQVjnBVKctDWQHqLM=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
@@ -399,10 +416,10 @@
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
-        # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
-        # and .github/workflows/release-shared-ffi.yml.
+        # bumped together: the commit the tag peels to in
+        # .github/actions/uniffi-bindgen, which CI jobs outside the dev shell
+        # (Windows among them) build, and the `cargo install` lines in
+        # rs/moq-ffi/build.sh and cpp/moq/README.md.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
@@ -502,6 +519,7 @@
             # too. Same 0.8.2 that obs-deps carries.
             simde
             qt6.qtbase
+            # clang-format, for the plugin and the c/ and cpp/moq packages.
             clang-tools
             gersemi
           ]
@@ -587,6 +605,12 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
+          # Nightly's `just rs send-depth` proves native Send futures on it.
+          # Pinned so a toolchain release alone never fails that job;
+          # bump it on purpose, like the stable toolchain above. Kept out of
+          # the dev shell, which every CI job downloads.
+          rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;
+
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
           # of the default shell because it pulls in ~3 GB (CEF, mostly) that
@@ -651,6 +675,14 @@
             if [ -x "$shim" ]; then
               export PATH="$(dirname "$shim"):$PATH"
             fi
+
+            # Each nested shell (direnv, then `nix develop`, then another
+            # inside a gate) prepends this shell's ~160 store paths again,
+            # about 10 KB. mbx copies PATH into two variables at ~3.6 times
+            # its size, and Linux rejects any one variable over 128 KiB, so
+            # four nested shells failed every Cargo launch with E2BIG. Keep
+            # each directory's first entry only: lookups resolve as before.
+            PATH=$(printf '%s' "$PATH" | awk -v RS=: '!seen[$0]++ { printf "%s%s", sep, $0; sep = ":" }')
           '';
 
           env = {

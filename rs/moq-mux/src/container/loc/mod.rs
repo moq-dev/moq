@@ -19,6 +19,14 @@ pub struct Wire(
 	pub Kind,
 );
 
+impl Wire {
+	/// The bytes preceding a frame's payload: its property block.
+	pub(crate) fn prefix(&self, timestamp: Timestamp) -> crate::Result<bytes::Bytes> {
+		let timestamp = timestamp.convert(DEFAULT_TIMESCALE).map_err(hang::Error::from)?;
+		Ok(moq_loc::encode(timestamp.value(), &[])?)
+	}
+}
+
 impl Container for Wire {
 	type Error = crate::Error;
 

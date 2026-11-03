@@ -4,8 +4,9 @@
 
 Every first-party consumer that numbered groups works by start timestamp,
 in Rust and JS, and hang stops writing duration and discontinuity markers
-that group ends and gaps now carry. The HLS/DASH export lists segments
-straight from group starts and ends, so the HLS records go away.
+that group ends and gaps now carry. The HLS/DASH export places each group on
+the declared `media.join.interval` grid by its start instead of its first
+frame's pts.
 
 ## Plan
 
@@ -20,10 +21,13 @@ Decided 2026-10-25 (maintainer), from the spike:
 - Legacy egress synthesizes neither: old players lose end durations and
   pause markers, which they already tolerate being absent.
 
-Decided 2026-10-27 (maintainer): moq-mux publishes HLS records by default
-until this lands. Then the `<track>.hls` record tracks, the catalog `hls`
-field (hang draft and both catalog libraries), the `catalog::Config::with_hls`
-opt-out, and any A/V segment alignment go away.
+Decided 2026-11-02 (maintainer): removing the HLS records, the per-rendition
+`hls` field, and A/V segment alignment moved to m0 as
+[HLS export on a declared grid](/quest/m0/hls-media-grid.md), which also adds
+`media.join.interval`, moves `clock` to `media.clock`, and settles the
+segmentation rules decided here on 2026-10-27/28. It places groups by their
+first frame's pts; this quest swaps that for the group start, without
+changing the segment numbers.
 
 Convert each consumer that numbers groups: hang and moq-mux timelines,
 HLS/DASH export, `seek` for GOP-aligned failover in moq-mux, HLS import's
@@ -33,12 +37,11 @@ JS container consumers and `js/watch`. Update the hang draft and the docs
 each one makes stale; rename CLI flags per the repo's CLI rule.
 
 Public API: breaking where a consumer exposes group numbers (CLI
-`--group`, archive keys), and `moq_mux::hls`, `hang::hls`, and
-`catalog::Config::with_hls` are deleted. Wire: hang drops empty duration
-frames, discontinuity marker groups, the `hls` catalog field, and the record
-tracks.
+`--group`, archive keys). Wire: hang drops empty duration frames and
+discontinuity marker groups.
 
 ## Required
 
+- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - supplies the grid and removes the records; this quest only swaps its first-frame pts placement for group starts
 - [Rust groups by start](/quest/m1/time-addressing/model.md) - the Rust API these consume
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - the JS API these consume

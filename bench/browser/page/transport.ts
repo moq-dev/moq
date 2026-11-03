@@ -73,7 +73,7 @@ async function prepare(config: Transport): Promise<string> {
 		websocket: { enabled: false },
 	});
 	if (connection.transport !== "webtransport") throw new Error(`consumer negotiated ${connection.transport}`);
-	const request = origin.request(Moq.Path.from(config.path), { announced: true });
+	const request = origin.follow(Moq.Path.from(config.path));
 	cleanup.push(() => {
 		request.close();
 		connection.abort();
@@ -92,7 +92,7 @@ async function consume(config: Transport): Promise<Delivery> {
 	if (!broadcast) throw new Error("consume before prepare");
 	const groups = Math.ceil(config.frames / config.group);
 	const start = performance.now();
-	const subscriber = broadcast.track("data").subscribe({ maxDelay: Milli(600_000), order: "ascending" });
+	const subscriber = broadcast.track("data").subscribe({ delay: { max: Milli(600_000) }, order: "ascending" });
 	cleanup.push(() => subscriber.close());
 	let frames = 0;
 	let bytes = 0;

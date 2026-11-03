@@ -56,7 +56,7 @@ async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::cat
 	}
 	catalog.finish().unwrap();
 	broadcast.announce(Default::default()).unwrap();
-	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
+	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let fixture = Fixture {
 		_published: Box::new((broadcast, catalog, publishers)),
@@ -213,7 +213,7 @@ async fn prepare_video(
 	video.finish().unwrap();
 	catalog.finish().unwrap();
 	broadcast.announce(Default::default()).unwrap();
-	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
+	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	(
 		source,

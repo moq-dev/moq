@@ -19,14 +19,14 @@ use super::mock::{MockSession, MockStats, create_mock_session_pair};
 
 /// The current ambient instant.
 pub fn now() -> moq_net::time::Instant {
-	moq_clock::now()
+	kio::clock::now()
 }
 
-/// Run a protocol driver in the background: on `moq-clock`'s sim in tests, on tokio in
+/// Run a protocol driver in the background: on `kio::clock`'s sim in tests, on tokio in
 /// the benches.
 pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
-	match moq_clock::sim::is_running() {
-		true => drop(moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+	match kio::clock::sim::is_running() {
+		true => drop(kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}))),
 		false => drop(tokio::spawn(moq_net::time::run(driver))),

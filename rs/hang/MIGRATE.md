@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Compression moves to the track
+
+`catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.
+A compressed track is one name with `compress: true` on its `moq_net::track::Info`, and moq-net hands every reader plain frames, so read `catalog.json` with `Consumer::new` whether or not it is compressed.
+`Catalog::default_track_info()` sets `compress`, so a publisher using it compresses `catalog.json`; stop publishing `catalog.json.z`.
+An old catalog's `"compression"` key on a data track lands in the entry's `extra`, and its frames are still app-level DEFLATE nothing here inflates.
+
 ### `moq_net::Path` has no lifetime
 
 `catalog` reference fields, `Echo::path`, and `health::Observer` use the lifetime-free `moq_net::path::Relative` and `moq_net::Path`: replace `RelativeOwned` with `Relative` and `PathOwned` with `Path`. `Echo::new` takes `impl Into<Relative>`: pass `Relative::new(s)?` rather than a string. See moq-net's migration for the rest.
@@ -32,10 +39,10 @@ Call `json.parse::<Catalog>()`, or bring `std::str::FromStr` into scope to keep 
 `catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.
 `PRIORITY` keeps its values (100, 90, 80, 60), which now sit above the unset default instead of below it, so their moq-lite bytes move from 100..60 to 228..188.
 
-### `catalog::Reference` names its epoch (#5699)
+### `catalog::Reference` names its instance (#5699)
 
-Every rendition and data track config gains an optional `epoch` beside `broadcast`.
-`Reference` has a new required `epoch()`: an implementor outside this crate returns the entry's epoch, or `None` when it names none.
+Every rendition and data track config gains an optional `instance` beside `broadcast`.
+`Reference` has a new required `instance()`: an implementor outside this crate returns the entry's instance, or `None` when it names none.
 
 ### A lost catalog track is `Error::Moq` (#6114)
 

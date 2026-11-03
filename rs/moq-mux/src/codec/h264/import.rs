@@ -122,7 +122,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// The MoQ track name this importer publishes on.
+	/// The MoQ track name this importer publishes on, which a decoder identity change replaces
+	/// with a newly minted one.
 	pub fn name(&self) -> &str {
 		self.track.name()
 	}
@@ -130,6 +131,12 @@ impl Import {
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
+	}
+
+	/// The track this importer publishes on, which a decoder identity change replaces with a
+	/// newly named one.
+	pub fn track(&self) -> &moq_net::track::Producer {
+		self.track.track()
 	}
 
 	/// Finish the track, flushing any buffered data.
@@ -166,6 +173,18 @@ impl Import {
 		Ok(())
 	}
 
+	/// Report frames the encoder feeding this track skipped. See
+	/// [`Producer::report_skipped`](crate::container::Producer::report_skipped).
+	pub fn report_skipped(&self, frames: u64) {
+		self.track.report_skipped(frames);
+	}
+
+	/// Report the target bitrate of the encoder feeding this track. See
+	/// [`Producer::report_bitrate`](crate::container::Producer::report_bitrate).
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		self.track.report_bitrate(bitrate);
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
@@ -195,10 +214,7 @@ impl Import {
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
-	///
-	/// A changed config (new avcC, or a new inline SPS) just re-mirrors the
-	/// rendition; there are no fixed tracks to reject a reconfiguration.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}
@@ -441,7 +457,8 @@ mod tests {
 	}
 
 	/// A frame-only SPS declares its reorder depth, which holds for the track's life: a later SPS
-	/// declaring less or none keeps it, and one declaring more is refused.
+	/// declaring less or none keeps it, and one declaring more is refused. An SPS that changes the
+	/// decoder identity mints a new track, which declares its own.
 	#[tokio::test(start_paused = true)]
 	async fn a_declared_reorder_depth_holds_for_the_track() {
 		use crate::codec::h264::fixtures::{PPS, SPS_FIELD, SPS_IPB, SPS_PYRAMID};
@@ -452,7 +469,7 @@ mod tests {
 		let mut deep = Import::new(deep, catalog.reserve(), Default::default()).unwrap();
 		let mut shallow = Import::new(shallow, catalog.reserve(), Default::default()).unwrap();
 		let mut split = Split::new();
-		let mut keyframe = |import: &mut Import, name: &str, ms: u64, sps: &[u8]| {
+		let mut keyframe = |import: &mut Import, ms: u64, sps: &[u8]| {
 			let mut annexb = BytesMut::new();
 			for nal in [sps, PPS, idr] {
 				annexb.extend_from_slice(&[0, 0, 0, 1]);
@@ -463,18 +480,17 @@ mod tests {
 			frames.extend(split.flush(pts).expect("flush keyframe"));
 			import
 				.decode(frames)
-				.map(|()| catalog.snapshot().video.renditions[name].reorder)
+				.map(|()| catalog.snapshot().video.renditions[import.name()].reorder)
 		};
 
-		assert_eq!(keyframe(&mut deep, "deep", 0, SPS_PYRAMID).unwrap(), Some(2));
-		assert_eq!(keyframe(&mut deep, "deep", 40, SPS_IPB).unwrap(), Some(2));
-		assert_eq!(
-			keyframe(&mut deep, "deep", 80, SPS_FIELD).unwrap(),
-			Some(2),
-			"fields declare none"
-		);
-		assert_eq!(keyframe(&mut shallow, "shallow", 0, SPS_IPB).unwrap(), Some(1));
-		assert!(keyframe(&mut shallow, "shallow", 40, SPS_PYRAMID).is_err());
+		assert_eq!(keyframe(&mut deep, 0, SPS_PYRAMID).unwrap(), Some(2));
+		assert_eq!(keyframe(&mut deep, 40, SPS_IPB).unwrap(), Some(2));
+		assert_eq!(deep.name(), "deep");
+		// A field-coded SPS is a new profile, level, and scan: a new track with its own bound.
+		assert_eq!(keyframe(&mut deep, 80, SPS_FIELD).unwrap(), None, "fields declare none");
+		assert_eq!(deep.name(), "deep/1");
+		assert_eq!(keyframe(&mut shallow, 0, SPS_IPB).unwrap(), Some(1));
+		assert!(keyframe(&mut shallow, 40, SPS_PYRAMID).is_err());
 	}
 
 	/// A new out-of-band avcC starts a new coded sequence, so in-band HDR metadata from the last one
@@ -502,7 +518,10 @@ mod tests {
 		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
 		assert!(color().mastering.is_some());
 
+		// The new avcC is a new description, so it publishes a new track.
 		import.initialize(&avcc(SPS_BT709)).unwrap();
+		assert_eq!(import.name(), "video/1");
+		let color = || catalog.snapshot().video.renditions["video/1"].color.clone().unwrap();
 		assert_eq!(color().primaries, Some(1));
 		assert_eq!((color().mastering, color().content_light), (None, None));
 	}
@@ -707,7 +726,7 @@ mod tests {
 		];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		// recovery-point SEI (payload type 6), then a non-IDR I-slice (type 1).
-		let sei: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+		let sei: &[u8] = &[0x06, 0x06, 0x01, 0x84, 0x80];
 		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
 
 		let mut annexb = BytesMut::new();

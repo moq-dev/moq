@@ -213,7 +213,6 @@ impl Mode {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
@@ -275,14 +274,14 @@ mod tests {
 		// Caller: dial with m=publish, then drop (we only assert connect + routing).
 		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Publish).await });
 
-		let socket = tokio::time::timeout(Duration::from_secs(10), caller)
+		let socket = kio::clock::timeout(Duration::from_secs(10), caller)
 			.await
 			.expect("caller timed out")
 			.expect("caller task")
 			.expect("SRT caller should connect");
 		drop(socket);
 
-		let (resource, is_publish) = tokio::time::timeout(Duration::from_secs(10), server_task)
+		let (resource, is_publish) = kio::clock::timeout(Duration::from_secs(10), server_task)
 			.await
 			.expect("server timed out")
 			.expect("server task");
@@ -316,14 +315,14 @@ mod tests {
 
 		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Request).await });
 
-		let socket = tokio::time::timeout(Duration::from_secs(10), caller)
+		let socket = kio::clock::timeout(Duration::from_secs(10), caller)
 			.await
 			.expect("caller timed out")
 			.expect("caller task")
 			.expect("SRT caller should connect");
 		drop(socket);
 
-		let (resource, is_subscribe) = tokio::time::timeout(Duration::from_secs(10), server_task)
+		let (resource, is_subscribe) = kio::clock::timeout(Duration::from_secs(10), server_task)
 			.await
 			.expect("server timed out")
 			.expect("server task");

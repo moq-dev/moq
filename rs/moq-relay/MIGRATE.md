@@ -5,6 +5,33 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Smaller default receive windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`[quic]` defaults to a 4 MiB `receive_window`, a 1 MiB `stream_receive_window`, and a 4 MiB `send_window`, down from 128 MiB, 4 MiB, and 16 MiB, and the smallest `receive_window` accepted here or in `[limits.peer.quic]` is 1 MiB instead of about 64 MiB.
+`[limits.peer.quic]` defaults to a 16 MiB `receive_window` and `send_window`, down from 640 MiB. Set the old values to keep them: a link that must carry more than about 450 Mbps at a 250 ms RTT needs a larger window.
+WebSocket, `tcp://`, `tls://`, and `unix://` sessions take the `[quic]` windows and stream count instead of qmux's own 1 MiB and 256 KiB, cancel the least urgent stream when incomplete messages fill the window as QUIC does, and peers over them widen to `[limits.peer.quic]`.
+An embedder that builds `web::Web` itself passes the relay's `[quic]` with `Web::with_quic`; without it, WebSocket sessions start at the `[quic]` defaults until admitted.
+A lite-01/02 peer whose initial announcement set exceeds 1 MiB is refused; it needs lite-03 or later.
+
+### `Cluster::new` returns a driver to poll ([#7626](https://github.com/moq-dev/moq/pull/7626))
+
+`Cluster::new` no longer spawns the origin's lifecycle work or the cache governor; it returns `(Cluster, Driver)`, and nothing runs until the driver is polled.
+`Relay` polls it for you. An embedder building a `Cluster` itself keeps the driver for as long as the cluster serves, and polls it with `Driver::poll` or runs it with `Driver::run`, for example `tokio::spawn(driver.run())`:
+
+```rust
+let (cluster, driver) = moq_relay::cluster::Cluster::new(options)?;
+tokio::spawn(driver.run());
+```
+
+Dropping the driver tears the origin down. `Driver::run` returns the first panic among its tasks, such as `origin driver panicked: ...`, which `Started::run` used to report.
+
+### `tls://` links verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
+
+The `listen.tcp.tls` listener applies `listen.tls.root` and pinned `tls.peers` as the QUIC listener does, so a stream-only relay with that listener no longer refuses them.
+A peer dialing `tls://` with a `connect.tls` certificate now presents it, and a certificate presented beside a JWT is refused as it is on QUIC: give such a peer `cluster.token` or a certificate, not both.
+With pinned `tls.peers`, a `tls://` peer must present a pinned certificate; a token alone is refused.
+The auth request's `server_name` reports the SNI on `tls://` too.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 A session dialed at a URL path with a trailing or doubled `/`, such as `/room/` or `/room//cam`, is refused as a bad request instead of collapsed; dial `/room`. An auth grant whose `root`, `mounts`, `tier`, or `label` has one is refused as forbidden, and `stats.prefix`, `stats.node`, and `--cluster-tier` with one refuse to start.
@@ -145,14 +172,15 @@ Set `load_balancer`, or `lb_id` alone (nonce 8), or `lb_id` with `lb_nonce`.
 
 ### Settings no listener reads stop startup (#5006)
 
-A stream-only relay (TCP or Unix, no `--listen`) refuses the QUIC-only `--listen-preferred-v4` / `-v6`, `--listen-quic-lb-id`, and pinned `tls.peers`.
-It also refuses `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls` serves it, and `listen.tls.root`, since only QUIC verifies a client CA.
+A stream-only relay (TCP or Unix, no `--listen`) refuses the QUIC-only `--listen-preferred-v4` / `-v6` and `--listen-quic-lb-id`.
+It also refuses `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls` serves it, and `listen.tls.root` or pinned `tls.peers` unless `--listen-tcp-tls` verifies them.
 `--listen-unix-allow-*` needs `--listen-unix-bind`, and `web.https.cert`, `key`, and `root` need `web.https.listen`.
 Each used to be ignored: drop it, or add the listener it configures.
 
 ### `--cluster-mesh` and `--cluster-linger` are unknown flags (#4818)
 
-They, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER` are no longer read.
+Remove the flags, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER`.
+The removed environment variables stop startup rather than being ignored.
 List every peer with `--cluster-connect` or `--cluster-connect-api`.
 In Rust, `cluster::Config` has no `mesh` or `linger` field.
 

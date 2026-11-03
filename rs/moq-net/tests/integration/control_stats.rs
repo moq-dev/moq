@@ -17,7 +17,7 @@ fn origin() -> origin::Producer {
 	origin
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload() {
 	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let publisher = origin();
@@ -37,8 +37,13 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 			)
 			.unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		subscriber.consume().routed("room").await.unwrap();
-		let remote = subscriber.consume().request_broadcast("room", None).await.unwrap();
+		let remote = subscriber
+			.consume()
+			.follow("room", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 		subscribed(&track).await;
 		let mut group = track.append_group().unwrap();
@@ -66,7 +71,7 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 
 /// The SETUP a server reads before admission counts under the stats the handshake is
 /// admitted with, even for a session with neither origin.
-#[moq_clock::test]
+#[kio::test]
 async fn setup_counts_under_the_admitted_stats() {
 	for version in ["moq-lite-07-wip", "moq-transport-22"] {
 		let version: moq_net::Version = version.parse().unwrap();
@@ -90,7 +95,7 @@ async fn setup_counts_under_the_admitted_stats() {
 			session
 		};
 		let _sessions = futures::join!(client, server);
-		moq_clock::sleep(std::time::Duration::from_millis(100)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(100)).await;
 		let rows = registry.snapshot().control();
 		assert!(
 			rows.iter()

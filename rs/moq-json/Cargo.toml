@@ -15,7 +15,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [dependencies]
 bytes = { workspace = true }
 kio = { workspace = true }
-moq-flate = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,7 +23,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 json-patch = "4"
 proptest = { workspace = true, features = ["handle-panics"] }

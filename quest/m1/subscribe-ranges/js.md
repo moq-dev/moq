@@ -13,22 +13,36 @@ Decided 2026-10-27 (maintainer): removing FETCH from lite-07 moved to
 [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md), and
 this quest no longer waits on
 [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md). The rest starts now:
-the ranges model, anchors, `maxDelay: null`, and the on-demand request
+the ranges model, anchors, `delay: { max: null }`, and the on-demand request
 surface. Rust's lite-07 SUBSCRIBE already carries ranges
 ([moq-dev/moq#6715](https://github.com/moq-dev/moq/pull/6715)).
 
-Mirror lite-07 bounded completion in the publisher: a covered bounded
-subscription FINs without SUBSCRIBE_END. The JS subscriber already accepts that
-FIN, closing the request's track once its tail settles, and failing it when an
-update moved the range and the groups that arrived leave it uncovered. Reopen
-that demand on the same track instead, as the Rust copy does.
+Mirror lite-07 bounded completion as the Rust copy implements it when this
+lands. The target is [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)'
+"Ends are signaled" design: a covered bounded subscription sends
+SUBSCRIBE_FINISH, keeps the Subscribe Stream open, and never FINs it. This
+quest does not wait on that one, so if it lands first, the wire still FINs a
+covered bounded subscription without SUBSCRIBE_END. The JS subscriber already
+accepts that FIN, closing the request's track once its tail settles, and
+failing it when an update moved the range and the groups that arrived leave it
+uncovered; until SUBSCRIBE_FINISH ships it reopens that demand on the same
+track instead, as the Rust copy does.
 
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
-Also mirror Rust's optional `Subscription::max_delay`
+The publisher resolves no relative or time start, serving it from the oldest
+group its budget allows, and SUBSCRIBE_OK `Range Start` says so; resolve them.
+Also mirror Rust's optional `Delay::max`
 ([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)): a `null`
-`maxDelay` asks for the publisher's max age alone, dominates when subscriptions
+`delay.max` asks for the publisher's max age alone, dominates when subscriptions
 combine, and goes out as the largest delay the wire allows, where today an
 omitted one means the live edge only.
+
+Fills mirror Rust's rule from [#7168](https://github.com/moq-dev/moq/pull/7168)
+(decided 2026-10-29, maintainer): give up a run below a start already
+resolved under a budget at least as loose as the reader's, and on a pre-06
+wire fill below the start only when the reader names a floor. `js/net`
+requests no fills today, so nothing over-fetches yet; this keeps it that way
+once it does.
 
 Decided in the 2026-10-05 audit: the producer half of
 JavaScript FETCH folds in here, so `@moq/net`'s
