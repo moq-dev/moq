@@ -193,13 +193,16 @@ class NightlyTest(unittest.TestCase):
                 continue
             for path in recipes[args[2]]:
                 entries.add(ROOT / "js" / path.replace("{{ name }}", args[-1]))
-        # The browser smoke lane runs the in-memory net fixtures in Chromium.
+        # The browser smoke lane runs the in-memory fixtures in Chromium.
         self.assertIn("recipe: bench-browser --smoke", workflow)
         smoke = re.search(
             r"^for benchmark in (.+); do\n\s+bun micro\.ts ", (ROOT / "bench/browser/run.sh").read_text(), re.M
         )
         self.assertIsNotNone(smoke)
-        entries |= {ROOT / "js/net/bench" / f"{name}.ts" for name in smoke[1].split()}
+        for name in smoke[1].split():
+            fixtures = list((ROOT / "js").glob(f"*/bench/{name}.ts"))
+            self.assertEqual(len(fixtures), 1, f"browser smoke bench {name}")
+            entries |= set(fixtures)
         # Bundled helpers only run through the entry that names them.
         helpers = {
             path for entry in entries for path in entry.parent.glob("*.ts") if f"/{path.name}" in entry.read_text()
