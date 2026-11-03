@@ -16,7 +16,7 @@ ends them. Bindings mirror Rust.
   route recovers; let-go reported as END, as today; and availability with
   let-go kept as END, which hides whether the origin ended or the network
   lost it.
-- Build on [Listing and follow](/quest/m1/api-audit/route/events.md)'s
+- Build on [Listing and follow](https://github.com/moq-dev/moq/pull/7678)'s
   listing and its offline report rather than adding event kinds beside it.
 - JS gets the API shape here, fed by what `js/net` knows today; the
   [js/net route layer](/quest/m1/cluster-routing/routes/js.md) feeds it from the wire.
