@@ -343,6 +343,10 @@ quic-sim:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::receive_ts::/)'
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^receive_ts::/)'
 
+# Prove the FFI simulcast publisher disables and resumes over a shaped BBR3 uplink.
+rung-disable:
+    just rs test -p moq-ffi --lib --run-ignored only --no-capture -E 'test(/^test::rung::/)'
+
 # Prove downstream futures are Send at the default recursion limit on the
 # flake's pinned nightly. Nightly runs it; the land gate does not.
 send-depth:
