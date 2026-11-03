@@ -116,8 +116,10 @@ Decided 2026-10-16 (maintainer interview):
   [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md).
   Accepted 2026-11-03 (maintainer), from the lock profiles in
   [moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742): no
-  lock-contention regression attributable to #6782. The pre-epoch run shows
-  the same `GroupState` wait stack at a similar wait (709 vs 599 µs).
+  lock-contention regression attributable to #6782. The pre-epoch run on
+  `nixos2` shows the same `GroupState` wait stack (709 µs) as the epoch run on
+  `desktop` (599 µs). The figures come from different hosts and are not
+  comparable; no quiet same-host repeat was completed.
 - Readers pin nothing: reads refresh recency as today. Within a group,
   victims go front to back.
 - Whole cold groups are still evicted first. A group loses part of itself
