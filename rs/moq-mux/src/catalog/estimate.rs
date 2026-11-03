@@ -39,7 +39,10 @@ pub struct Estimate {
 	pub jitter: Option<Duration>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
-	/// The most a frame's timestamp has trailed one already written by another track.
+	/// The least a frame's timestamp has trailed the highest one another track had already
+	/// written: the constant offset of a track that reaches the transport behind the others.
+	/// Lateness only some frames have, such as B-frames written after a later reference picture,
+	/// is variable and left to `jitter` and the receiver's own measurement.
 	pub delay: Option<Duration>,
 	/// The maximum frame rate in frames per second, when it is a standard one.
 	pub framerate: Option<f64>,
@@ -117,8 +120,9 @@ pub struct Estimator {
 	framerate: Framerate,
 	/// This track's place in the write order of every track sharing it.
 	seat: Seat,
-	/// The most a written timestamp has trailed the highest one another track had written.
-	delay: Duration,
+	/// The least a written timestamp has trailed the highest one another track had written, once
+	/// any other track has written.
+	delay: Option<Duration>,
 }
 
 impl Estimator {
@@ -149,12 +153,16 @@ impl Estimator {
 		self.framerate.write(timestamp);
 	}
 
-	/// Place a frame stamped `timestamp` in the write order. Its delay is how far it trails the
-	/// highest timestamp another track has already written: a frame the transport carries after
-	/// later media from another track has to be waited for by a consumer playing both.
+	/// Place a frame stamped `timestamp` in the write order. It trails by how far the highest
+	/// timestamp another track has already written is ahead of it: a frame the transport carries
+	/// after later media from another track has to be waited for by a consumer playing both.
+	///
+	/// The delay is the least of those trails, so one frame that trails nothing clears it. Only a
+	/// track every frame of which trails keeps one; the rest of the lateness varies from frame to
+	/// frame, which the receiver measures and `jitter` floors.
 	pub(crate) fn order(&mut self, timestamp: Timestamp) {
 		if let Some(behind) = self.seat.write(nanos(timestamp)) {
-			self.delay = self.delay.max(behind);
+			self.delay = Some(self.delay.map_or(behind, |delay| delay.min(behind)));
 		}
 	}
 
@@ -206,7 +214,7 @@ impl Estimator {
 		Estimate {
 			jitter: self.jitter.current(),
 			bitrate: self.bitrate.current(),
-			delay: (!self.delay.is_zero()).then_some(self.delay),
+			delay: self.delay.filter(|delay| !delay.is_zero()),
 			framerate: self.framerate.max,
 		}
 	}
@@ -420,6 +428,14 @@ impl Jitter {
 /// A frame is compared with the other tracks only: its own track's earlier frames say nothing
 /// about the interleave, and a B-frame trailing its own reference picture is already reorder
 /// jitter.
+///
+/// Every timestamp is a presentation time, written in decode order. A track with B-frames writes
+/// each reference picture before the B-frames presenting ahead of it, so its high runs ahead of
+/// what it writes, and frames of the other tracks written beside it trail that high too: another
+/// rendition's B-frames, and the audio of the same decode slot. The reference pictures, and that
+/// audio when it lines up with them, trail by nothing, which is why a track's `delay` is the
+/// least it trails rather than the most. Only a constant offset between tracks survives, and that
+/// is the one thing a receiver's measurement of each track against itself cannot see.
 #[derive(Clone, Default)]
 pub(crate) struct Order(Arc<Mutex<Highs>>);
 
@@ -457,7 +473,8 @@ impl Highs {
 		self.seats.len() - 1
 	}
 
-	/// Raise `index`'s high to `timestamp` and return how far `timestamp` trails the others' highest.
+	/// Raise `index`'s high to `timestamp` and return how far `timestamp` trails the others'
+	/// highest, zero when it trails none, or `None` when no other track has a high to trail.
 	fn write(&mut self, index: usize, timestamp: u128) -> Option<Duration> {
 		let others = match self.first {
 			Some((first, _)) if first == index => self.second,
@@ -485,7 +502,7 @@ impl Highs {
 		}
 
 		let (_, others) = others?;
-		elapsed(timestamp, others)
+		Some(elapsed(timestamp, others).unwrap_or_default())
 	}
 
 	/// Forget `index`'s high, freeing its seat when `leave` is set.
@@ -583,10 +600,11 @@ mod tests {
 		Duration::from_millis(value)
 	}
 
-	/// Video at 20 ms and audio at 15 ms, written `v0 v20 a0 a15 v40 a30 v60 a45 a60`: audio's
-	/// first frame lands after video has already written 20 ms ahead of it.
+	/// Video at 20 ms and audio at 15 ms, written `v0 v20 a0 a15 v40 a30 v60 a45 a60`: audio
+	/// trails video by anything from nothing to 20 ms, which varies frame to frame and so is no
+	/// constant offset.
 	#[test]
-	fn interleave_measures_the_worst_trail() {
+	fn an_interleave_is_not_delay() {
 		let [mut video, mut audio] = tracks();
 		for (video_frame, pts) in [
 			(true, 0),
@@ -602,8 +620,64 @@ mod tests {
 			let track = if video_frame { &mut video } else { &mut audio };
 			track.write(micros(pts * 1_000), 1);
 		}
-		assert_eq!(audio.estimate().delay, Some(ms(20)));
+		assert_eq!(audio.estimate().delay, None);
 		assert_eq!(video.estimate().delay, None);
+	}
+
+	/// A track every frame of which trails keeps the least of those trails: the constant offset,
+	/// without the lateness only some of its frames add.
+	#[test]
+	fn a_constant_offset_is_delay() {
+		let [mut video, mut audio] = tracks();
+		for i in 0..50u64 {
+			video.write(micros(100_000 + i * 20_000), 1);
+			// Every third frame trails a further 10 ms on top of the 100 ms offset.
+			let late = if i % 3 == 1 { 10_000 } else { 0 };
+			audio.write(micros(i * 20_000 - late), 1);
+		}
+		assert_eq!(audio.estimate().delay, Some(ms(100)));
+		assert_eq!(video.estimate().delay, None);
+	}
+
+	/// Two renditions of one 50 fps source with two B-frames (I0 P60 B20 B40 P120 B80 B100 …) and
+	/// audio, written in lockstep in decode order: one frame of each track per 20 ms.
+	///
+	/// From [moq-dev/moq#7579](https://github.com/moq-dev/moq/issues/7579).
+	fn lockstep(declare_reorder: bool) -> [Estimate; 3] {
+		let [mut hevc, mut avc, mut audio] = tracks();
+		if declare_reorder {
+			// What the MPEG-TS and fMP4 importers report for this GOP: its largest PTS - DTS, with
+			// decoding starting one frame before the first PTS.
+			hevc.reorder(micros(60_000));
+			avc.reorder(micros(60_000));
+		}
+		let decode_order = [0, 60, 20, 40].into_iter().chain((1..10u64).flat_map(|gop| {
+			let base = gop * 60;
+			[base + 60, base + 20, base + 40]
+		}));
+		for (tick, pts) in decode_order.enumerate() {
+			hevc.write(micros(pts * 1_000), 1);
+			avc.write(micros(pts * 1_000), 1);
+			audio.write(micros(tick as u64 * 20_000), 1);
+		}
+		[hevc.estimate(), avc.estimate(), audio.estimate()]
+	}
+
+	/// B-frame reorder is never `delay`: not on the B-frame tracks, and not on the audio beside
+	/// them. Only some frames trail, by the reorder, which is variable lateness the receiver
+	/// already measures; counting it as `delay` too would buffer it twice.
+	#[test]
+	fn bframe_reorder_is_not_delay() {
+		let [hevc, avc, audio] = lockstep(false);
+		assert_eq!((hevc.jitter, hevc.delay), (None, None));
+		assert_eq!((avc.jitter, avc.delay), (None, None));
+		assert_eq!((audio.jitter, audio.delay), (None, None));
+
+		// A declared reorder is the video's jitter, and still nobody's delay.
+		let [hevc, avc, audio] = lockstep(true);
+		assert_eq!((hevc.jitter, hevc.delay), (Some(ms(60)), None));
+		assert_eq!((avc.jitter, avc.delay), (Some(ms(60)), None));
+		assert_eq!((audio.jitter, audio.delay), (None, None));
 	}
 
 	#[test]
@@ -683,7 +757,7 @@ mod tests {
 						.filter(|seat| **seat != index)
 						.filter_map(|seat| highs.seats[*seat].flatten())
 						.max();
-					let expected = others.and_then(|others| elapsed(timestamp, others));
+					let expected = others.map(|others| elapsed(timestamp, others).unwrap_or_default());
 					assert_eq!(highs.write(index, timestamp), expected, "step {step}");
 				}
 				_ => live.push(highs.join()),

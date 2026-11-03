@@ -512,7 +512,8 @@ where
 	/// moof+mdat). Zero (the default) flushes each frame immediately.
 	///
 	/// This is the publisher-side counterpart to the consumer's max delay, and the one
-	/// knob here that genuinely *adds* delay.
+	/// knob here that genuinely *adds* delay. A batch's oldest frame reaches the transport
+	/// as late as the batch's span, so the catalog advertises that span as `jitter`.
 	pub fn with_buffer(mut self, duration: std::time::Duration) -> Self {
 		self.buffer_duration = duration;
 		self
@@ -627,18 +628,9 @@ where
 			self.observe_end(frame.timestamp, frame.duration);
 			self.buffer.push(frame);
 
-			// Flush if the buffered span has reached the buffer duration. Compute
-			// min/max across the buffer rather than first/last: frames within a track
-			// are in *decode* order, and B-frames have non-monotonic PTS, so
-			// `last - first` can shrink as a B-frame lands between two earlier-PTS
-			// frames. The min/max pair captures the actual presentation span.
-			if self.buffer.len() >= 2 {
-				let mut iter = self.buffer.iter().map(|f| std::time::Duration::from(f.timestamp));
-				let first = iter.next().unwrap();
-				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
-				if max.saturating_sub(min) >= self.buffer_duration {
-					self.flush_buffer(None)?;
-				}
+			// Flush if the buffered span has reached the buffer duration.
+			if self.buffered_span() >= self.buffer_duration {
+				self.flush_buffer(None)?;
 			}
 		}
 
@@ -885,6 +877,23 @@ where
 		Ok(())
 	}
 
+	/// The presentation span of the buffered frames, zero for fewer than two.
+	///
+	/// Taken across the buffer rather than first to last: frames within a track are in *decode*
+	/// order, and B-frames have non-monotonic PTS, so `last - first` can shrink as a B-frame lands
+	/// between two earlier-PTS frames.
+	fn buffered_span(&self) -> std::time::Duration {
+		let mut timestamps = self
+			.buffer
+			.iter()
+			.map(|frame| std::time::Duration::from(frame.timestamp));
+		let Some(first) = timestamps.next() else {
+			return std::time::Duration::ZERO;
+		};
+		let (min, max) = timestamps.fold((first, first), |(min, max), ts| (min.min(ts), max.max(ts)));
+		max - min
+	}
+
 	/// Flush any buffered frames into the current group without closing it.
 	///
 	/// Backfills the per-sample duration the source didn't provide. A CMAF fragment
@@ -927,6 +936,10 @@ where
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.frame(group.sequence, self.buffer[0].timestamp);
 		}
+		// The batch reaches the transport at once, so its earliest frame is as late as the span to its
+		// latest. That is jitter, not delay: the latest frame isn't late at all.
+		let span = self.buffered_span();
+		self.estimator.burst(span);
 		// Counted only once written: an abort discards the buffer, and those frames were never sent.
 		let mut buffer = std::mem::take(&mut self.buffer);
 		for frame in &buffer {
@@ -1062,6 +1075,9 @@ mod tests {
 	type Rendition = Producer<Container, hang::catalog::VideoConfig>;
 
 	/// Video renditions sharing one catalog, each opened with a keyframe at 0.
+	///
+	/// The openers are history, so they take no place in the write order: one at 0 trails nothing,
+	/// which would clear the least trail a test means to measure.
 	fn renditions(names: &[&str]) -> (moq_net::broadcast::Producer, crate::catalog::Producer, Vec<Rendition>) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -1074,6 +1090,7 @@ mod tests {
 			let mut track = catalog
 				.video(net, Container::Legacy(crate::container::Kind::Video), config)
 				.unwrap();
+			track.history(Timestamp::ZERO);
 			track.write(frame(0, true)).unwrap();
 			tracks.push(track);
 		}
@@ -1174,10 +1191,11 @@ mod tests {
 		assert_eq!(tracks[1].estimate().delay, Some(std::time::Duration::from_millis(20)));
 	}
 
-	/// Buffered frames reach the transport when the buffer flushes, so that is where they are ordered:
-	/// interleaved by timestamp on the way in, a second-long buffer still trails the other rendition.
+	/// Buffered frames reach the transport when the buffer flushes, so a second-long buffer's oldest
+	/// frame trails the other rendition by the batch's span, and its newest by nothing: the span is
+	/// jitter, not delay.
 	#[test]
-	fn a_buffered_rendition_is_ordered_when_it_flushes() {
+	fn a_buffered_rendition_flushes_its_span_as_jitter() {
 		let (_broadcast, catalog, tracks) = renditions(&["live", "buffered"]);
 		let [mut live, buffered] = <[Rendition; 2]>::try_from(tracks).ok().unwrap();
 		let mut buffered = buffered.with_buffer(std::time::Duration::from_secs(1));
@@ -1188,8 +1206,11 @@ mod tests {
 		}
 		buffered.cut(None).unwrap();
 
-		let delay = catalog.snapshot().video.renditions["buffered"].delay;
-		assert_eq!(delay, Some(std::time::Duration::from_millis(960)));
+		let buffered = &catalog.snapshot().video.renditions["buffered"];
+		assert_eq!(
+			(buffered.jitter, buffered.delay),
+			(Some(std::time::Duration::from_millis(960)), None)
+		);
 	}
 
 	/// A finished rendition may be kept around, but its media stops holding the others back.

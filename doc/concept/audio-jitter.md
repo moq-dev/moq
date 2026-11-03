@@ -347,10 +347,13 @@ constant offset between tracks cancels out of `measured`: a video encoder that
 flushes 200 ms behind the audio encoder produces the same video target as one
 that does not, and its frames would all arrive 200 ms late for the shared clock.
 
-The catalog `delay` field carries that offset: how far a rendition's
-timestamps trail those the broadcast's other renditions already wrote, measured
-by the publisher and never lowered. It is an addend, not a floor, because nothing on
-this page contains it. The shared playout is the largest requirement among the
+The catalog `delay` field carries that offset: the least a rendition's
+timestamps have trailed those the broadcast's other renditions already wrote,
+measured by the publisher and never lowered once published. It is an addend, not
+a floor, because nothing on this page contains it. Lateness only some frames
+have is left out, since `measured` already contains it: a B-frame written after
+a later reference picture trails that picture and another rendition's, and the
+audio written beside it trails them too, but the reference pictures do not. The shared playout is the largest requirement among the
 renditions actually subscribed:
 
 ```
@@ -358,7 +361,7 @@ playout = max over subscribed renditions of (delay + target)
 ```
 
 A receiver **must not** subtract one rendition's `delay` from another's. Each is
-a lifetime maximum taken against whichever rendition was ahead, so two values need not
+taken against whichever rendition was ahead and only ever rises, so two values need not
 share an origin: if the earliest rendition later drifts behind another, their
 difference understates the real spread. The maximum never under-buffers,
 because the subscribed renditions' spread is measured from an earliest baseline

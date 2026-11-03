@@ -127,13 +127,14 @@ in the same shape as the relay's sessions track. One read returns both from
 the same instant, so their difference is 1 while connected. Unlike `status`, a
 drop you did not poll still moves both counters.
 
-The catalog `delay` of each pad is how far its buffers' timestamps trail ones
+The catalog `delay` of each pad is the least its buffers' timestamps trail ones
 the other pads already pushed, so players buffer for an encoder that delivers
-behind the others. Arrival time is never measured, so file, demuxed, and network
-media advertise the same values as a live encoder.
+behind the others. Lateness only some buffers have, such as B-frame reorder, is
+left to the player's own measurement. Arrival time is never measured, so file,
+demuxed, and network media advertise the same values as a live encoder.
 
 After a pause, flush, or changed TIME segment, the pad stops holding the others
-back until its next buffer, and previously measured maxima remain. Resumed
+back until its next buffer, and values already published remain. Resumed
 timestamps must continue forward on the broadcast media clock.
 
 A video pad joining mid-GOP drops delta frames until its first keyframe. If a
