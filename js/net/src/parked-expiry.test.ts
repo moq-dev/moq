@@ -34,13 +34,13 @@ for (const protocol of protocols) {
 			const broadcast = broadcastPublication.broadcast;
 			broadcastPublication.announce();
 			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-			const write = (sequence: number) => {
+			const write = (sequence: bigint) => {
 				const group = track.createGroup(sequence);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 				group.finish();
 			};
 
-			write(0);
+			write(0n);
 
 			const parked = Promise.withResolvers<void>();
 			const slot = Promise.withResolvers<void>();
@@ -110,7 +110,7 @@ for (const protocol of protocols) {
 			try {
 				await parked.promise;
 				expect(ended).toBe(false);
-				write(1);
+				write(1n);
 				if (mode === "expires") {
 					await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 					expect(ended).toBe(false);
@@ -120,7 +120,7 @@ for (const protocol of protocols) {
 				if (protocol.kind === "lite") {
 					for (;;) {
 						const response = await decodeSubscribeResponse(client.reader, protocol.version);
-						if (!("drop" in response) || response.drop.start !== 0) continue;
+						if (!("drop" in response) || response.drop.start !== 0n) continue;
 						const cause = mode === "expires" ? StreamCode.Old : StreamCode.TooFarBehind;
 						expect(response.drop.error).toBe(protocol.version === Lite.DRAFT_07 ? cause : 0);
 						break;
@@ -157,7 +157,7 @@ for (const protocol of protocols) {
 		const broadcast = broadcastPublication.broadcast;
 		broadcastPublication.announce();
 		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-		const write = (sequence: number, frames: number) => {
+		const write = (sequence: bigint, frames: number) => {
 			const group = track.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
@@ -166,7 +166,7 @@ for (const protocol of protocols) {
 		};
 
 		// Two frames, so the second is still unread while the stream's first write waits on credit.
-		write(0, 2);
+		write(0n, 2);
 
 		const blocked = Promise.withResolvers<void>();
 		const credit = Promise.withResolvers<void>();
@@ -223,7 +223,7 @@ for (const protocol of protocols) {
 		}
 		try {
 			await blocked.promise;
-			write(1, 1);
+			write(1n, 1);
 			await clock.advance(Nano.fromMilli(Milli(33_750)));
 			// The write already handed to the stream finishes, and the stream is reset after it.
 			credit.resolve();

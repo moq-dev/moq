@@ -2585,10 +2585,23 @@ impl TrackState {
 	/// [`Self::poll_arrival`] applies: not accounted for, not dropped, within the feed, and
 	/// in a gap a later arrival opened less than `grace` ago, or that nothing later opened.
 	/// Below the first arrival only when the feed was asked to start lower, as `floor` says.
-	/// With `delivered`, only a group it lacks counts.
-	fn may_land(&self, groups: ops::Range<u64>, floor: bool, grace: Duration, delivered: Option<&Delivered>) -> bool {
-		self.find_landable(groups, floor, grace, |open| {
-			delivered.is_none_or(|delivered| !delivered.covers(open)).then_some(())
+	/// With `delivered`, only a group it lacks counts. Parks `waiter` until the gap folds.
+	fn may_land(
+		&self,
+		groups: ops::Range<u64>,
+		floor: bool,
+		grace: Duration,
+		delivered: Option<&Delivered>,
+		waiter: &kio::Waiter,
+	) -> bool {
+		self.find_landable(groups, floor, grace, |open, folds| {
+			if delivered.is_some_and(|delivered| delivered.covers(open)) {
+				return None;
+			}
+			if let Some(at) = folds {
+				self.cache.watch_wall(at, waiter);
+			}
+			Some(())
 		})
 		.is_some()
 	}
@@ -2600,7 +2613,7 @@ impl TrackState {
 		groups: ops::Range<u64>,
 		floor: bool,
 		grace: Duration,
-		mut f: impl FnMut(ops::Range<u64>) -> Option<R>,
+		mut f: impl FnMut(ops::Range<u64>, Option<crate::time::Instant>) -> Option<R>,
 	) -> Option<R> {
 		let start = match floor {
 			true => groups.start,
@@ -2610,13 +2623,11 @@ impl TrackState {
 		let end = groups.end.min(self.final_sequence().unwrap_or(u64::MAX));
 		let now = self.cache.pool().now_wall();
 		for (gap, opened) in self.arrivals.gaps(start..end) {
-			if opened
-				.and_then(|opened| opened.checked_add(grace))
-				.is_some_and(|folds| now >= folds)
-			{
+			let folds = opened.and_then(|opened| opened.checked_add(grace));
+			if folds.is_some_and(|folds| now >= folds) {
 				continue;
 			}
-			if let Some(found) = self.drops.gaps(&gap).find_map(&mut f) {
+			if let Some(found) = self.drops.gaps(&gap).find_map(|open| f(open, folds)) {
 				return Some(found);
 			}
 		}
@@ -2632,7 +2643,7 @@ impl TrackState {
 			return None;
 		}
 		let asked = self.start_sequence.is_some();
-		self.find_landable(groups, asked, self.arrival_grace(), |open| {
+		self.find_landable(groups, asked, self.arrival_grace(), |open, _| {
 			window.clip(open).map(|run| run.start)
 		})
 	}
@@ -5169,19 +5180,22 @@ impl Consumer {
 	}
 
 	/// Whether a group in `groups` may still land here; see `TrackState::may_land`. Never
-	/// once no producer is left to write one.
+	/// once no producer is left to write one. Parks `waiter` until its gap folds.
 	pub(super) fn may_land(
 		&self,
 		groups: ops::Range<u64>,
 		floor: bool,
 		grace: Duration,
 		delivered: Option<&Delivered>,
+		waiter: &kio::Waiter,
 	) -> bool {
 		if let Some(serving) = self.serving() {
-			return serving.may_land(groups, floor, grace, delivered);
+			return serving.may_land(groups, floor, grace, delivered, waiter);
 		}
 		self.with_state(|state| {
-			state.is_some_and(|state| !state.is_closed() && state.read().may_land(groups, floor, grace, delivered))
+			state.is_some_and(|state| {
+				!state.is_closed() && state.read().may_land(groups, floor, grace, delivered, waiter)
+			})
 		})
 	}
 
