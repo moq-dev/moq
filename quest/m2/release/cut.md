@@ -48,6 +48,14 @@ From the 2026-10-25 pre-cut run:
   `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
   [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
 
+From [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702), which
+merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
+
+- Publish `main`'s code-free `rs/moq-e2ee` stub, whose README points at
+  moq-crypto, as moq-e2ee's final release. It must take a version above
+  crates.io's current `max_version` (0.0.20 on 2026-11-02); check with
+  `curl -s https://crates.io/api/v1/crates/moq-e2ee`.
+
 The [2026-10-22 release audit](https://github.com/moq-dev/moq/pull/7176)
 closed with its fixes rechecked together. At source candidate
 [main 487759f62a](https://github.com/moq-dev/moq/commit/487759f62a9ef39d916fe5b92df06dcff83478ce),

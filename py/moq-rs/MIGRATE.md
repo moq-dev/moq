@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `moq.json.SnapshotConsumer` reads at a zero `delay.max`, whatever the subscription asked for: iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a stream track when every state must survive, or a window track for a bounded recent history.
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of an optional `timestamp=` keyword. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale=1_000)`; one without is refused.

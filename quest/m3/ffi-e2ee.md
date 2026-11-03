@@ -2,9 +2,9 @@
 
 ## Goal
 
-The Swift and Kotlin bindings publish and consume moq-e2ee protected
+The Swift and Kotlin bindings publish and consume moq-crypto protected
 broadcasts under an application-supplied `(context, kid, secret)` credential,
-interoperating with `@moq/e2ee` in both directions, with the same epoch rules
+interoperating with `@moq/crypto` in both directions, with the same epoch rules
 and typed authentication failures as Rust and JS.
 
 ## Plan
@@ -15,7 +15,7 @@ to, adding both halves. The named consumer is moq.pro's
 [T3 Code over MoQ](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/t3/README.md)
 mobile app, which receives its credential in a pairing link.
 
-Wrap `moq-e2ee`'s producer and consumer entry points without new crypto in
+Wrap `moq-crypto`'s producer and consumer entry points without new crypto in
 the binding layer, and keep the encrypting publisher's refusal of a shared or
 explicit epoch. Add a binding test that decrypts a JS-published broadcast and
 the reverse to the interop suite.

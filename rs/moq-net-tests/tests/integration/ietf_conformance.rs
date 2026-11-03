@@ -7,7 +7,7 @@ use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 use moq_net::{Hop, Version, broadcast, origin};
 use std::sync::Arc;
 
-// Moxygen c27ae6358df62a1195da479b2e07c50dd8174279, moqtest/Utils.cpp.
+// Moxygen's moqtest/Utils.cpp, pinned in nix/moxygen-sources.nix.
 const PREFIX: &str = "moq-test-00";
 const NAMESPACE: &str = "moq-test-00/0/0/0/1/2/2/1024/100/50/1/1/1/-1/-1/0";
 
