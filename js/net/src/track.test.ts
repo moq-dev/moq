@@ -3924,6 +3924,30 @@ test("a received stale run settles a bounded reader only to the judged end", () 
 	producer.close();
 });
 
+test("a superseded stale run leaves a bounded reader waiting, and a later reader judges it too", () => {
+	const producer = new TrackProducer("video").accept({});
+	hooks.receiveTrack(producer);
+	const bounded = (max: number) =>
+		producer.subscribe({
+			delay: { max: Milli(max) },
+			ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		});
+	const wider = bounded(5000);
+	hooks.supersedeStale(producer, 2n);
+	producer.createGroup(2n).finish();
+	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
+	// A reader added after the verdict judges it against the same judged end.
+	const later = bounded(500);
+	expect(hooks.tryDrop(later)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
+	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
+	// New terms make the groups unknown again: still wanted, never proven delivered.
+	hooks.supersedeStale(producer, 2n);
+	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
+	for (const reader of [wider, later]) reader.close();
+	producer.finish();
+	producer.close();
+});
+
 test("a wide drop is held and reported as one run", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });

@@ -1070,8 +1070,9 @@ export class Producer {
 				}
 			}
 		}
-		// A pending tail owes nothing the publisher gave up.
-		this.#arrive(start, end);
+		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: new
+		// terms may supersede it, leaving those groups unknown again, as in Rust.
+		if (hole.stale === undefined) this.#arrive(start, end);
 	}
 
 	// A publisher may re-create a group it cut; the sequence is no longer given up.
@@ -1262,6 +1263,7 @@ export class Producer {
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 		sink.drops.set(this.#state.drops.peek());
+		sink.judgedEnd = this.#state.judgedEnd;
 
 		sink.received.set(this.#received);
 		sink.endError = this.#state.endError;
