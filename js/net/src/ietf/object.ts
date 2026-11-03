@@ -1,9 +1,8 @@
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { decodePayload } from "../payload.ts";
-import { floorAt } from "../rescale.ts";
 import type { Cursor, Reader } from "../stream.ts";
 import { concat, encodeVarint, Writer } from "../stream.ts";
-import { type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
 import { type IetfVersion, Version } from "./version.ts";

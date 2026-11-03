@@ -112,6 +112,26 @@ export class Timestamp {
 	}
 }
 
+/**
+ * `timestamp`'s value at `scale`, rounded down exactly, as Rust's integer `Timestamp::convert`.
+ *
+ * A double is a dyadic rational, so the conversion runs in BigInt with no rounding before the
+ * floor: an aligned value keeps it (4611686021000000 ns is 4611686021 ms, where `as` gives
+ * 4611686020.999999), and one instant gives one result whatever scale it came from. Throws a
+ * `RangeError` past the safe integer range.
+ *
+ * @internal
+ */
+export function floorAt(timestamp: Timestamp, scale: Timescale): number {
+	if (timestamp.scale === scale) return Math.floor(timestamp.value);
+	const [mantissa, exponent] = binary(timestamp.value);
+	const result = Number((mantissa * BigInt(scale)) / (BigInt(timestamp.scale) << BigInt(-exponent)));
+	if (!Number.isSafeInteger(result)) {
+		throw new RangeError(`timestamp ${timestamp.value} at ${timestamp.scale} exceeds the safe range at ${scale}`);
+	}
+	return result;
+}
+
 // A finite, non-negative `value` exactly as `mantissa * 2^exponent`. Doubling is exact, so
 // a fraction becomes an integer within its binary digits.
 function binary(value: number): [bigint, number] {
