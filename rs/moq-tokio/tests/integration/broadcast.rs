@@ -801,6 +801,22 @@ async fn broadcast_moq_transport_22_current_group_join() {
 	server_handle.await.expect("server panicked").expect("server failed");
 }
 
+/// Wait for the next route change as `(announce, active)`, failing the test on a timeout or a
+/// closed origin.
+async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce::Announce, bool) {
+	let event = kio::clock::timeout(TIMEOUT, routes.next())
+		.await
+		.expect("announce timeout")
+		.expect("origin closed");
+	match event {
+		moq_net::origin::RouteEvent::End(announce) => (announce, false),
+		moq_net::origin::RouteEvent::Start(announce)
+		| moq_net::origin::RouteEvent::Update(announce)
+		| moq_net::origin::RouteEvent::Restart(announce)
+		| moq_net::origin::RouteEvent::Takeover { announce, .. } => (announce, true),
+	}
+}
+
 /// Wait for the next announce event, failing the test on a timeout or a closed origin.
 async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> (moq_net::announce::Announce, bool) {
 	kio::clock::timeout(TIMEOUT, next_update(announcements))
@@ -1439,7 +1455,8 @@ async fn route_reannounce_test(version: Option<&str>) {
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	// A hop change is a route update, which only the relay-level stream reports.
+	let mut announcements = sub_consumer.routes();
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
@@ -1453,7 +1470,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let (update, active) = next_announce(&mut announcements).await;
+	let (update, active) = next_route(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce");
 	let initial = update.route;
@@ -1480,7 +1497,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 		.expect("update route");
 
 	// The subscriber sees the new chain as another active update for the prefix...
-	let (update, active) = next_announce(&mut announcements).await;
+	let (update, active) = next_route(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "a restart must not retract the route");
 	assert_ne!(initial.hops, update.route.hops, "route must change");

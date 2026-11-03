@@ -483,16 +483,18 @@ async fn following_restarts_on_a_new_instance() {
 			..Default::default()
 		})
 		.unwrap();
-	tokio::time::timeout(std::time::Duration::from_secs(1), following.available())
+	kio::clock::timeout(TIMEOUT, following.available())
 		.await
 		.expect("the new instance is handed out")
 		.unwrap();
-	assert!(
-		tokio::time::timeout(std::time::Duration::from_millis(100), announced.next())
-			.await
-			.is_err(),
-		"a restart is not listed"
-	);
+
+	// The next listed event is the path going absent under the new instance: the restart
+	// itself was never listed.
+	publication.unannounce().unwrap();
+	match next_event(&announced).await {
+		MoqAnnounceEvent::Absent { announce } => assert_eq!(announce.route.instance, second),
+		other => panic!("expected an absence, got {other:?}"),
+	}
 
 	publication.broadcast().close().unwrap();
 }
