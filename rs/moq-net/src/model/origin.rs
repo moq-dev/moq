@@ -13050,7 +13050,7 @@ mod tests {
 	/// The publisher finishes a track, then its broadcast. A subscription already in
 	/// flight must conclude normally: the track's last group, then the end. moq-lite,
 	/// ANNOUNCE_END: "Retraction does not disturb subscriptions already in flight,
-	/// which conclude normally with SUBSCRIBE_END."
+	/// which conclude normally with SUBSCRIBE_FINISH."
 	///
 	/// The runtime is single-threaded and the publisher's whole ending has no await in
 	/// it, so the outcome does not depend on timing.
@@ -13096,7 +13096,7 @@ mod tests {
 	/// last group and end are still on their way. The subscription already in flight
 	/// must still conclude normally. moq-lite, ANNOUNCE_END: "Retraction does not
 	/// disturb subscriptions already in flight, which conclude normally with
-	/// SUBSCRIBE_END."
+	/// SUBSCRIBE_FINISH."
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_retracted_route_concludes_in_flight_subscriptions() {
