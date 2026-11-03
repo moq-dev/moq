@@ -56,7 +56,9 @@ for (const [name, root] of roots) {
 						importer.endsWith(`/${dir}/${benchmark}.ts`) ? { path: resolve(root, dir, path) } : undefined,
 					);
 					build.onLoad(
-						{ filter: /\/bench\/(frames|drift|ledger|bandwidth|replay|resume-history|buffered|algebra)\.ts$/ },
+						{
+							filter: /\/bench\/(frames|drift|ledger|bandwidth|replay|resume-history|buffered|algebra)\.ts$/,
+						},
 						async ({ path }) => {
 							const source = await Bun.file(path).text();
 							if (benchmark !== "frames")
