@@ -168,6 +168,6 @@ export class Priority {
 // Negative when `a` goes before `b`. Group order dominates, earlier objects win within one
 // group so a fill precedes its live rest, and identical starts tie.
 function compareStarts(a: Start, b: Start, order: track.Order): number {
-	if (a.sequence !== b.sequence) return (a.sequence < b.sequence) === (order === "ascending") ? -1 : 1;
+	if (a.sequence !== b.sequence) return a.sequence < b.sequence === (order === "ascending") ? -1 : 1;
 	return a.object - b.object;
 }

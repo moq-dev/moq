@@ -17,8 +17,8 @@ import type * as Instance from "./instance.ts";
 import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import { max, min } from "./util/sequence.ts";
 import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
 import type { Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
@@ -161,9 +161,7 @@ export function insertRun(runs: Run[], start: bigint, end: bigint): void {
 	let last = first;
 	while (last < runs.length && runs[last].start <= end) last++;
 	const merged =
-		first === last
-			? { start, end }
-			: { start: min(start, runs[first].start), end: max(end, runs[last - 1].end) };
+		first === last ? { start, end } : { start: min(start, runs[first].start), end: max(end, runs[last - 1].end) };
 	runs.splice(first, last - first, merged);
 }
 

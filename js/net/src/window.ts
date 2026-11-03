@@ -28,7 +28,8 @@ function anchorOf(field: string, anchor: Anchor): Anchor {
 	const value = keys.length === 1 ? (anchor as Record<string, unknown>)[keys[0]] : undefined;
 	if (keys[0] === "time" && value instanceof Timestamp) return { time: value };
 	if (keys[0] === "absolute" && typeof value === "bigint" && value >= 0n) return { absolute: value };
-	if (keys[0] === "relative" && Number.isSafeInteger(value) && (value as number) >= 0) return { relative: value as number };
+	if (keys[0] === "relative" && Number.isSafeInteger(value) && (value as number) >= 0)
+		return { relative: value as number };
 	throw new TypeError(
 		`${field} must be {absolute}, a non-negative bigint, {relative}, a non-negative safe integer, or {time}, a Timestamp`,
 	);

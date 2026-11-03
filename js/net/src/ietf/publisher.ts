@@ -2416,10 +2416,7 @@ export class Publisher {
 
 			// Only a finished track's final object ends it, never a live track's Largest Object.
 			const final = hooks.subscriberEnd(cache);
-			const endOfTrack =
-				last.complete &&
-				final !== undefined &&
-				finalSequence(final) === last.sequence + 1n;
+			const endOfTrack = last.complete && final !== undefined && finalSequence(final) === last.sequence + 1n;
 			const sequence = last.sequence;
 			const groupEnd = BigInt(last.end);
 			const until = fetchSlice(range, last.sequence).until;
@@ -2892,8 +2889,7 @@ type FillServe =
 function liveEdge(track: TrackSubscriber): LiveEdge {
 	const latest = hooks.latestSequence(track);
 	const largest = hooks.objectLargest(track);
-	if (!largest)
-		return latest === undefined ? {} : { latest, next: { group: latest, object: 0n } };
+	if (!largest) return latest === undefined ? {} : { latest, next: { group: latest, object: 0n } };
 
 	const group = largest.group;
 	const object = BigInt(largest.frame);

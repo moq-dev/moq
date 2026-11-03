@@ -469,8 +469,7 @@ export class SubscribeUpdate {
 				await w.u53(this.maxDelay);
 				await encodeMinDelay(w, version, this.minDelay);
 				await encodeSpan(w, version, this, this.ranges);
-				if (hasRefresh(version))
-					await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
+				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
 				break;
 		}
 	}
@@ -500,7 +499,8 @@ export class SubscribeUpdate {
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
-		if (this.wantedGroup !== undefined && this.wantedGroup < 0n) throw new RangeError("wanted group must be non-negative");
+		if (this.wantedGroup !== undefined && this.wantedGroup < 0n)
+			throw new RangeError("wanted group must be non-negative");
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
