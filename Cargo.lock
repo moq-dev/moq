@@ -5153,22 +5153,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-e2ee"
+name = "moq-crypto"
 version = "0.0.11"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.23.1",
  "bench-harness",
  "bytes",
+ "data-encoding",
  "hex",
  "kio 0.6.2",
  "moq-net",
  "rind",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "uuid",
  "workspace-hack",
  "zeroize",
+]
+
+[[package]]
+name = "moq-e2ee"
+version = "0.0.11"
+dependencies = [
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5657,25 +5667,6 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "workspace-hack",
-]
-
-[[package]]
-name = "moq-sign"
-version = "0.0.1"
-dependencies = [
- "aws-lc-rs",
- "bench-harness",
- "bytes",
- "data-encoding",
- "hex",
- "kio 0.6.2",
- "moq-net",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "workspace-hack",
- "zeroize",
 ]
 
 [[package]]

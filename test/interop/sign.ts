@@ -1,11 +1,11 @@
 /** Exchange signed groups with Rust: verify the ones Rust signed, and sign through the JS wrappers. */
 import assert from "node:assert/strict";
 import { Broadcast, Instance, type Track as NetTrack, Path, Time } from "../../js/net/src/index.ts";
-import * as Signed from "../../js/sign/src/broadcast.ts";
-import { Failure } from "../../js/sign/src/failure.ts";
-import { SecretKey } from "../../js/sign/src/key.ts";
-import { Scope } from "../../js/sign/src/scope.ts";
-import * as Track from "../../js/sign/src/track.ts";
+import * as Signed from "../../js/crypto/src/sign/broadcast.ts";
+import { Failure } from "../../js/crypto/src/sign/failure.ts";
+import { SecretKey } from "../../js/crypto/src/sign/key.ts";
+import { Scope } from "../../js/crypto/src/sign/scope.ts";
+import * as Track from "../../js/crypto/src/sign/track.ts";
 
 /** One frame as it crosses the wire: its body, signature included, and its timestamp at the track's timescale. */
 type Frame = { body: string; timestamp?: number | null };
