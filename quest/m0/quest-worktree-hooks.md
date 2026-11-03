@@ -1,54 +1,46 @@
-# [S] Agents use quest's worktree hooks
+# [XS] quest init keeps moq's nix-wrapped worktree hooks
 
 ## Goal
 
-moq's `.claude/settings.json` carries the `WorktreeCreate`, `WorktreeRemove`,
-`SubagentStart` and `SubagentStop` hooks that `quest init` installs (running
-`quest worktree hook`), so agent worktrees are created and cleaned up the way
-quest expects, without breaking T3 Code's own worktree management.
+moq's Claude Code worktree hooks run the `quest` moq pins, and they survive
+quest pin bumps: `quest init` leaves them alone instead of refusing them, and
+`--worktree '#123'` and workflow agents behave under them as without them.
 
 ## Plan
 
-Planned 2026-11-02 (maintainer, /quest-unblock), from
-[moq-dev/moq#7644](https://github.com/moq-dev/moq/pull/7644): the quest pin bump
-left the hooks out because they change how agent worktrees are made here, and
-moq never adopted them after moq-dev/quest#350.
+Decided 2026-11-03 (maintainer, on
+[moq-dev/moq#7674](https://github.com/moq-dev/moq/pull/7674)): ✅ the hooks
+reach `quest` through nix (or a submodule) long-term, so they run moq's pin.
+A host-wide `quest` on `PATH` is acceptable only as a temporary bridge.
+Rejected: relying on an installed `quest`, `direnv exec`, adopting the bare
+`quest worktree hook` now, and dropping the quest.
 
-- First confirm the hooks coexist with T3 Code's worktree threads and its
-  isolated delegate checkouts (create, hand off, and clean up one of each with
-  the hooks on). If they conflict, stop and report rather than adopting.
-- Then add them with `quest init` and document the behavior in AGENTS.md.
+[moq-dev/moq#7674](https://github.com/moq-dev/moq/pull/7674) installed the four
+hooks as `nix run "${CLAUDE_PROJECT_DIR}#quest" -- worktree hook`. That command
+takes 0.1–0.5 s warm and 1.5–3 s with a cold nix cache, and builds a new pin in
+about 6 s. The PR checked live that it coexists with T3 Code's worktree threads
+and isolated delegates. What remains:
 
-Findings, 2026-11-02 ([moq-dev/moq#7674](https://github.com/moq-dev/moq/pull/7674)):
-
-- The hook itself leaves T3 Code's checkouts alone. T3 makes its own
-  (`~/worktrees/moq/t3-*` on `t3/*` branches) rather than going through
-  Claude's `WorktreeCreate`. `SubagentStart`/`SubagentStop` act only on a
-  registered checkout named `agent-<agent_id>`, and `WorktreeRemove` refuses a
-  path quest doesn't own. A scratch run against a T3-style linked worktree
-  confirmed each case.
-- They still conflict today: hooks run with the `PATH` Claude Code started
-  with, not the direnv dev shell, and T3 Code's `PATH` has no `quest`. With the
-  hooks on, every isolated subagent, `--worktree`, and `EnterWorktree` fails
-  with `quest: not found`. moq-dev/quest's own adoption,
-  [moq-dev/quest#423](https://github.com/moq-dev/quest/pull/423), waits on the
-  same install.
-- Without
-  [moq-dev/quest#425](https://github.com/moq-dev/quest/pull/425) in moq's pin,
-  `--worktree '#123'` starts at `origin/HEAD` instead of the PR head, and
-  workflow agents' checkouts are never released.
-- Once both clear, run `quest init`, document the behavior and the `quest`
-  install in AGENTS.md, and do the live T3 check above, plus a native
-  `isolation: "worktree"` subagent inside a T3 session.
+- `quest init` matches only the literal `quest worktree hook`, so it refuses a
+  wrapped `WorktreeCreate`/`WorktreeRemove` command (exit 1, nothing written)
+  and would add duplicate subagent hooks. Until quest recognizes a wrapped
+  command, a pin bump drops the four entries for its `quest init` run and
+  restores `.claude/settings.json` afterwards, as AGENTS.md says. Once a
+  quest release recognizes them, bump the pin, check that `quest init` is a
+  no-op here, and drop that AGENTS.md sentence.
+- Bump moq's `quest` input past
+  [moq-dev/quest#425](https://github.com/moq-dev/quest/pull/425), so
+  `--worktree '#123'` starts at the PR head instead of `origin/HEAD` and
+  workflow agents' checkouts get released.
 
 ## Waiting
 
-- Maintainer: install a reviewed `quest` on the `PATH` Claude Code and T3 Code
-  start with on every host that runs agents here, for example
-  `nix profile add github:moq-dev/quest` (`~/.nix-profile/bin` is already on
-  T3 Code's `PATH`). Check from a shell outside the dev shell:
-  `echo '{}' | quest worktree hook` prints `expected a Claude Code hook's JSON
-  input`, not `command not found`.
+- Maintainer: ask moq-dev/quest to let `quest init` and `quest uninstall`
+  recognize a hook command that wraps `quest worktree hook` in a launcher, such
+  as `nix run <flake>#quest -- worktree hook`. Options: (a) recognize any
+  command hook whose arguments end in `worktree hook` (recommended: no config,
+  and `quest init` stays idempotent); (b) a configured hook command `quest init`
+  writes and matches; (c) don't ask, and keep the drop-and-restore step on
+  every pin bump.
 - moq-dev/quest: land
-  [moq-dev/quest#425](https://github.com/moq-dev/quest/pull/425), then bump
-  moq's `quest` flake input past it.
+  [moq-dev/quest#425](https://github.com/moq-dev/quest/pull/425).
