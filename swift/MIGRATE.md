@@ -8,16 +8,21 @@ How to update your code for each breaking change, newest first.
 
 `Media.TrackProducer.video` and `Media.TrackStreamProducer.video` take `lower: Media.Producer?` instead of `TrackProducer?`. Pass `lower: .track(producer)`, or `.stream(producer)` for a byte-stream rendition.
 
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.maxDelay` is `delay: Delay`: pass `delay: Delay(min: 0, max: maxDelay)`, where a `nil` `max` sets no subscriber limit, or start from `Subscription.default`.
+`Media.Delay` moves to the root `Delay`, and its `min` is optional: `nil` leaves the target latency unstated, which a decoder plays as zero.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `[String]` instead of `[String]?`. Remove optional checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Rebuild with the matching MoqFFI package and native library.
 
-### Decoder outputs take a `Media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`Audio.DecoderOutput` replaces `maxDelay` and the playout `delay: TimeInterval?` with `delay: Media.Delay?` and `estimate: Bool = true`.
-`Video.DecoderOutput.maxDelay` is `delay: Media.Delay?`.
-`Media.Delay(min:max:)`: `max` (nil for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
-A fixed audio playout delay `d` is `delay: Media.Delay(min: d, max: ...)` with `estimate: false`.
+`Audio.DecoderOutput` replaces `maxDelay` and the playout `delay: TimeInterval?` with `delay: Delay?` and `estimate: Bool = true`.
+`Video.DecoderOutput.maxDelay` is `delay: Delay?`.
+`Delay(min:max:)`: `max` (nil for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `delay: Delay(min: d, max: ...)` with `estimate: false`.
 
 ### Compression moves to the track
 
@@ -46,7 +51,6 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 Every duration is a `TimeInterval` in seconds instead of a `UInt64` `...Us` field, and drops the suffix: `Client(timeout:race:resolutionDelay:)`, `Backoff(initial:max:timeout:)`, `QuicConfig(idleTimeout:keepAlive:)`, `WebSocketConfig(delay:)`, `ConnectionStats.rtt`, `Grant.expires`, `TrackInfo.maxAge`, `Subscription.maxDelay`, `Fill.maxDelay`, `Audio.Consumer.delay`, and the decoder outputs' `maxDelay` and `delay`.
 Divide a microsecond value by 1,000,000. A negative interval traps.
 `AudioEncoderOutput.frameDuration` is optional: pass `nil` where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` has no default: start from `Subscription.default`, or pass `0`, for the old default. `nil` sets no subscriber limit.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state

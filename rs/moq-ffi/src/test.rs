@@ -6,7 +6,7 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqGroupConsumer;
 use crate::consumer::MoqTrackConsumer;
-use crate::consumer::{MoqAnchor, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
+use crate::consumer::{MoqAnchor, MoqDelay, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
 use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
 use crate::json::{
 	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConsumer,
@@ -728,8 +728,8 @@ async fn audio_subscribes_a_held_disabled_rendition() {
 		"voice".into(),
 		muted,
 		MoqAudioDecoderOutput {
-			delay: Some(crate::media::MoqDelay {
-				min: Duration::ZERO,
+			delay: Some(MoqDelay {
+				min: Some(Duration::ZERO),
 				max: Some(Duration::from_secs(30)),
 			}),
 			..audio_output()
@@ -795,8 +795,8 @@ async fn audio_raw_publish_from_many_threads() {
 		MoqAudioDecoderOutput {
 			// The track's whole retention: reading starts only after finish, and the budget
 			// ages groups by wall clock, so a stalled host would otherwise skip the start.
-			delay: Some(crate::media::MoqDelay {
-				min: Duration::ZERO,
+			delay: Some(MoqDelay {
+				min: Some(Duration::ZERO),
 				max: Some(Duration::from_secs(30)),
 			}),
 			..audio_output()
@@ -945,8 +945,8 @@ async fn raw_audio_decode_delay() {
 			"microphone".into(),
 			rendition.clone(),
 			MoqAudioDecoderOutput {
-				delay: delay.map(|min| crate::media::MoqDelay {
-					min,
+				delay: delay.map(|min| MoqDelay {
+					min: Some(min),
 					max: Some(Duration::ZERO),
 				}),
 				estimate: delay.is_none(),
@@ -1044,8 +1044,8 @@ async fn raw_audio_decode_reports_encoder_ends() {
 		snapshot.audio["microphone"].clone(),
 		MoqAudioDecoderOutput {
 			// Reading starts only after finish, so keep every group.
-			delay: Some(crate::media::MoqDelay {
-				min: Duration::ZERO,
+			delay: Some(MoqDelay {
+				min: Some(Duration::ZERO),
 				max: Some(Duration::from_secs(30)),
 			}),
 			..audio_output()
@@ -1296,7 +1296,10 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay: Some(Duration::from_millis(25)),
+			delay: MoqDelay {
+				min: Some(Duration::ZERO),
+				max: Some(Duration::from_millis(25)),
+			},
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
@@ -4375,8 +4378,8 @@ async fn video_decode_start() {
 			MoqVideoDecoderOutput {
 				start,
 				// The track's whole retention, so a slow host does not skip the first group.
-				delay: Some(crate::media::MoqDelay {
-					min: Duration::ZERO,
+				delay: Some(MoqDelay {
+					min: Some(Duration::ZERO),
 					max: Some(Duration::from_secs(30)),
 				}),
 				..Default::default()
@@ -5446,7 +5449,10 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay: Some(Duration::from_millis(25)),
+			delay: MoqDelay {
+				min: Some(Duration::ZERO),
+				max: Some(Duration::from_millis(25)),
+			},
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
@@ -6693,6 +6699,7 @@ async fn server_new_validates_the_config() {
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
+	assert_eq!(defaults.delay.min, Some(Duration::ZERO));
 	assert_eq!(defaults.delay.max, Some(Duration::ZERO));
 }
 
@@ -8589,7 +8596,10 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 
 	let subscription = MoqSubscription {
 		priority: 0,
-		max_delay: Some(Duration::from_secs(10)),
+		delay: MoqDelay {
+			min: Some(Duration::ZERO),
+			max: Some(Duration::from_secs(10)),
+		},
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Relative { groups: 2 },
 			end: None,
@@ -8798,7 +8808,10 @@ async fn time_anchors_start_at_the_containing_group() {
 
 	let since = |timestamp_us| MoqSubscription {
 		priority: 0,
-		max_delay: Some(Duration::from_secs(10)),
+		delay: MoqDelay {
+			min: Some(Duration::ZERO),
+			max: Some(Duration::from_secs(10)),
+		},
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Time {
 				timestamp: us(timestamp_us),
@@ -9015,7 +9028,10 @@ async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
 	let consumer = track
 		.consume(Some(MoqSubscription {
-			max_delay: None,
+			delay: MoqDelay {
+				min: Some(Duration::ZERO),
+				max: None,
+			},
 			..moq_subscription_defaults()
 		}))
 		.unwrap();
@@ -9084,7 +9100,10 @@ async fn raw_next_group_wakes_read_frame_after_unlocking() {
 	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
 	let consumer = track
 		.consume(Some(MoqSubscription {
-			max_delay: None,
+			delay: MoqDelay {
+				min: Some(Duration::ZERO),
+				max: None,
+			},
 			..moq_subscription_defaults()
 		}))
 		.unwrap();
@@ -9121,7 +9140,10 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 	// No age limit, so a group nobody has read yet is never skipped for a newer one.
 	let consumer = track
 		.consume(Some(MoqSubscription {
-			max_delay: None,
+			delay: MoqDelay {
+				min: Some(Duration::ZERO),
+				max: None,
+			},
 			..moq_subscription_defaults()
 		}))
 		.unwrap();

@@ -22,27 +22,6 @@ pub struct MoqDimensions {
 	pub height: u32,
 }
 
-/// How far behind the live edge a decoder plays, the counterpart of `moq_net::track::Delay`.
-#[derive(Clone, Copy, Debug, uniffi::Record)]
-pub struct MoqDelay {
-	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
-	/// where a cold join starts. The subscription carries it too, which moq-lite-07 sends
-	/// upstream. A `min` past `max` starts at `max`, since the publisher serves nothing older.
-	pub min: std::time::Duration,
-	/// How far a group may fall behind the live edge before it is skipped, or null for no limit.
-	/// It bounds lateness only, never the start.
-	pub max: Option<std::time::Duration>,
-}
-
-impl From<MoqDelay> for moq_net::track::Delay {
-	fn from(delay: MoqDelay) -> Self {
-		Self {
-			min: Some(delay.min),
-			max: delay.max,
-		}
-	}
-}
-
 /// Where an audio or video decoder starts on a track that already holds groups.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqDecodeStart {
@@ -1811,7 +1790,7 @@ impl MoqMediaGroupConsumer {
 	/// Pair it with [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group)
 	/// to read media in arrival order: frame timestamps are container media time, not the
 	/// transport's. Which groups arrive, and how long a stalled one stays readable, is the
-	/// subscription's `max_delay`. Takes over `group`, whose handle is closed afterward; errors
+	/// subscription's `delay.max`. Takes over `group`, whose handle is closed afterward; errors
 	/// if it has already read a frame.
 	#[uniffi::constructor]
 	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
