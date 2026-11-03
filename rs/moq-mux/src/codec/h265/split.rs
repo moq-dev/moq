@@ -89,12 +89,31 @@ impl Split {
 	/// Consume a complete init buffer as the stream's leading bytes, and retain its parameter sets.
 	///
 	/// The init's sets replace the retained ones, so a reset before the first keyframe still
-	/// re-injects them. Framing is unchanged: the final NAL stays buffered, so a picture the init
-	/// carries completes with the caller's next timestamp rather than a generated one.
+	/// re-injects them. Header NALs still waiting for a picture belong to the configuration this
+	/// init replaces, so they are dropped. A picture the init carries stays open, so it completes
+	/// with the caller's next timestamp rather than a generated one.
 	pub(crate) fn initialize(&mut self, data: &[u8]) -> Result<Vec<crate::container::Frame>> {
-		let frames = self.decode(data, None)?;
+		let pts = self.pts(None)?;
+		// The init's leading start code ends any NAL still in flight.
+		self.end_tail(pts)?;
+		if !self.current.contains_slice {
+			self.current = Au::default();
+		}
+		let mut frames = self.decode(data, pts)?;
+		// The init is complete, so its final NAL ends with it.
+		self.end_tail(pts)?;
+		frames.append(&mut self.pending);
 		InBandCodec::H265.adopt_init(data, &mut [&mut self.vps, &mut self.sps, &mut self.pps])?;
 		Ok(frames)
+	}
+
+	/// Decode the buffered final NAL, which the caller says is complete, without closing its access unit.
+	fn end_tail(&mut self, pts: moq_net::Timestamp) -> Result<()> {
+		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
+			self.decode_nal(nal, pts)?;
+		}
+		self.tail.clear();
+		Ok(())
 	}
 
 	/// Decode a buffer where frame boundaries are unknown, returning the access
@@ -127,10 +146,7 @@ impl Split {
 	/// (or at end of stream) so the final NAL isn't left buffered.
 	pub fn flush(&mut self, pts: impl Into<Option<moq_net::Timestamp>>) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
-			self.decode_nal(nal, pts)?;
-		}
-		self.tail.clear();
+		self.end_tail(pts)?;
 		self.maybe_start_frame(pts)?;
 		Ok(std::mem::take(&mut self.pending))
 	}
@@ -391,6 +407,24 @@ mod tests {
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].payload, annexb(&[VPS, SPS, PPS, IDR]));
 		assert_eq!(frames[0].timestamp, next);
+
+		// Without a reset, the open unit drops the superseded init's headers too.
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[VPS, SPS, PPS, IDR]),
+			"the superseded PPS is not sent"
+		);
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[VPS, SPS, PPS, IDR]),
+			"the superseded PPS is not retained"
+		);
 
 		let mut split = Split::new();
 		assert!(split.initialize(&annexb(&[VPS, SPS, PPS, pps1])).unwrap().is_empty());

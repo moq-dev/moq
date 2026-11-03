@@ -56,7 +56,7 @@ fn with_init(init: &AudioInit, mut config: hang::catalog::AudioConfig) -> hang::
 ///
 /// The import reads `init` for the codec config (or publishes from `hint` up front); the split then
 /// reads it as the leading bytes of the stream (caching any inline SPS/PPS). Any frames in the init
-/// buffer are published.
+/// buffer are published: a final picture with the next decode's timestamp, or at finish.
 fn build_h264_avc3<E: CatalogExt>(
 	track: moq_net::track::Producer,
 	reserved: crate::catalog::Reserved<E>,
@@ -431,12 +431,13 @@ impl Track {
 
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
-		// Each decode flushed its whole frame, so a splitter holds only input storage, which ends
-		// with the input. The import stays, keeping the finished track and its rendition published.
+		// Each decode flushed its whole frame, so a splitter holds at most a picture its init
+		// carried. It is taken out to flush, so its input storage ends with the input. The import
+		// stays, keeping the finished track and its rendition published.
 		match &mut self.kind {
-			TrackKind::Avc3 { split, .. } => *split = Default::default(),
-			TrackKind::Hev1 { split, .. } => *split = Default::default(),
-			TrackKind::Av01 { split, .. } => *split = Default::default(),
+			TrackKind::Avc3 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
+			TrackKind::Hev1 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
+			TrackKind::Av01 { split, import } => import.decode(std::mem::take(split).flush(None)?)?,
 			_ => {}
 		}
 		import!(&mut self.kind, import => import.finish())
@@ -1425,6 +1426,35 @@ mod tests {
 				"{format}: streaming seek"
 			);
 		}
+	}
+
+	/// A picture an init carries is published at finish when no decode follows it.
+	async fn init_picture_published_at_finish(format: VideoFormat, init: Vec<u8>) {
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let mut import = Track::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(format, init.clone()),
+		)
+		.unwrap();
+		import.finish().unwrap();
+		let frame = first_frame(&consumer, "video").await;
+		assert!(frame.keyframe, "{format}");
+		assert_eq!(frame.payload.as_ref(), init.as_slice(), "{format}");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn avc3_init_picture_published_at_finish() {
+		let mut init = h264_init();
+		init.extend_from_slice(&annexb(&[H264_IDR]));
+		init_picture_published_at_finish(VideoFormat::Avc3, init).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn hev1_init_picture_published_at_finish() {
+		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+		init_picture_published_at_finish(VideoFormat::Hev1, annexb(&[VPS, SPS, PPS, H265_IDR])).await;
 	}
 
 	#[tokio::test(start_paused = true)]

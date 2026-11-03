@@ -290,8 +290,8 @@ fn sequence_color(seq_header: &SequenceHeaderObu) -> Option<hang::catalog::Color
 	)
 }
 
-/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the first parseable sequence
-/// header's, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
+/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the last sequence header's, if
+/// it parses, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
 pub(crate) fn color(obus: &[u8]) -> Option<hang::catalog::Color> {
 	let mut color = find_sequence_header(obus)
 		.and_then(|seq| parse_sequence_header(&seq).ok().flatten())
