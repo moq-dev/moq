@@ -169,11 +169,16 @@ impl Demux {
 		self.scratch.drain(..self.off);
 		self.position += self.off as u64;
 		self.off = 0;
+		// Input a resync skipped frames no packet, so its chunks would otherwise linger.
+		while self.arrivals.front().is_some_and(|&(end, _)| end <= self.position) {
+			self.arrivals.pop_front();
+		}
 	}
 
 	/// No input follows: release the storage that held a partial packet for the next push.
 	pub fn finish(&mut self) {
 		self.scratch = Vec::new();
+		self.arrivals = VecDeque::new();
 	}
 
 	/// `pid` changed route: its next packet starts a fresh chain.
@@ -195,5 +200,21 @@ impl Demux {
 	#[cfg(test)]
 	pub fn held(&self) -> usize {
 		self.scratch.len()
+	}
+}
+
+#[cfg(test)]
+mod test {
+	/// Input that never frames a packet keeps no arrival record once drained.
+	#[tokio::test(start_paused = true)]
+	async fn junk_keeps_no_arrival_history() {
+		let mut demux = super::Demux::default();
+		for _ in 0..100 {
+			demux.push(&[0; 1_000]);
+			while demux.next().is_some() {}
+			demux.drain();
+		}
+		assert!(demux.held() < 188, "held {} bytes", demux.held());
+		assert!(demux.arrivals.len() <= 1, "{} arrival records", demux.arrivals.len());
 	}
 }
