@@ -26,16 +26,16 @@ const SHAPES: [(usize, usize); 4] = [(10, 10), (1_000, 10), (10, 1_000), (1_000,
 struct Table {
 	producer: origin::Producer,
 	_driver: origin::Driver,
-	_watches: Vec<announce::Consumer>,
+	_watches: Vec<origin::Routes>,
 	sessions: Vec<fuzz::Interests>,
 }
 
 fn table(watches: usize, sessions: usize) -> Table {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 	let mut held: Vec<_> = (0..watches)
-		.map(|i| scoped(&producer, &format!("other/{i}")).announced())
+		.map(|i| scoped(&producer, &format!("other/{i}")).routes())
 		.collect();
-	held.push(scoped(&producer, "room").announced());
+	held.push(scoped(&producer, "room").routes());
 	let sessions: Vec<_> = (0..sessions).map(|_| fuzz::interests(&producer)).collect();
 	for session in &sessions {
 		session.drain();
@@ -63,7 +63,7 @@ fn bench_uncovered(c: &mut Criterion) {
 			let table = table(watches, sessions);
 			let incoming = scoped(&table.producer, "incoming");
 			b.iter(|| {
-				drop(incoming.announced());
+				drop(incoming.routes());
 				for session in &table.sessions {
 					assert_eq!(session.drain(), 2);
 				}
@@ -81,7 +81,7 @@ fn bench_covered(c: &mut Criterion) {
 			let table = table(watches, sessions);
 			let incoming = scoped(&table.producer, "room/incoming");
 			b.iter(|| {
-				drop(incoming.announced());
+				drop(incoming.routes());
 			});
 			for session in &table.sessions {
 				assert_eq!(session.drain(), 0);

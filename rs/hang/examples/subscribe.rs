@@ -37,34 +37,27 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	Ok(reconnect.closed().await?)
 }
 
-// Follow the announced broadcast: play it once it starts, play it afresh when another
-// publisher instance replaces it (a restart), keep playing when a route takes it over in
-// place, and stop when it ends.
+// List the announced broadcasts and play the first: follow it across publisher instances,
+// playing afresh when another replaces it, until it goes offline.
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
 	let mut announced = consumer.announced();
 	let mut playing: Option<tokio::task::JoinHandle<()>> = None;
 	while let Some(event) = announced.next().await {
 		match event {
-			// The same broadcast continued in place: nothing to do.
-			moq_net::announce::Event::Takeover { announce, predecessor } if predecessor == announce.prefix => {}
 			// The convention is that a publisher announces each broadcast's exact path.
-			moq_net::announce::Event::Start(announce)
-			| moq_net::announce::Event::Restart(announce)
-			| moq_net::announce::Event::Takeover { announce, .. } => {
+			moq_net::announce::Event::Present(announce) => {
 				tracing::info!(path = %announce.prefix, "broadcast announced");
 				if let Some(old) = playing.take() {
 					old.abort();
 				}
 				let consumer = consumer.clone();
 				playing = Some(tokio::spawn(async move {
-					if let Err(err) = play(consumer, announce).await {
+					if let Err(err) = follow(consumer, announce.prefix).await {
 						tracing::warn!(%err, "playback failed");
 					}
 				}));
 			}
-			// The same broadcast over another route: nothing to do.
-			moq_net::announce::Event::Update(_) => {}
-			moq_net::announce::Event::End(announce) => {
+			moq_net::announce::Event::Absent(announce) => {
 				tracing::info!(path = %announce.prefix, "broadcast ended");
 				if let Some(old) = playing.take() {
 					old.abort();
@@ -75,10 +68,27 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 	anyhow::bail!("origin closed")
 }
 
-// Resolve an announced broadcast and read media frames.
-async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::Announce) -> anyhow::Result<()> {
-	let broadcast = consumer.request(&announce.prefix, announce.route.instance).await?;
+// Play each publisher instance serving `path`, starting afresh when another replaces it.
+async fn follow(consumer: moq_net::origin::Consumer, path: moq_net::Path) -> anyhow::Result<()> {
+	let mut following = consumer.follow(&path, None)?;
+	let mut next = following.available().await?;
+	while let Some(broadcast) = next {
+		tracing::info!(%path, instance = ?broadcast.info().instance, "broadcast online");
+		next = tokio::select! {
+			played = play(broadcast) => {
+				if let Err(err) = played {
+					tracing::warn!(%err, "playback failed");
+				}
+				following.available().await?
+			}
+			changed = following.available() => changed?,
+		};
+	}
+	Ok(())
+}
 
+// Read the catalog and media frames of one publisher instance.
+async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast
 		.track(hang::Catalog::DEFAULT_NAME)?

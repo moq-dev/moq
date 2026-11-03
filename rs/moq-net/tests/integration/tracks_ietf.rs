@@ -61,7 +61,7 @@ async fn resolve(origin: &moq_net::origin::Producer, path: &str) -> moq_net::bro
 	kio::clock::timeout(TIMEOUT, origin.consume().follow(path, None).unwrap().available())
 		.await
 		.expect("announce timeout")
-		.expect("routed")
+		.expect("routed").unwrap()
 }
 
 /// How many request streams of `kind` the client has opened.

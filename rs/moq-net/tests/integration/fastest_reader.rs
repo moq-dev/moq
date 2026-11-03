@@ -46,7 +46,7 @@ async fn relay(version: &str) -> Relay {
 	let remote = kio::clock::timeout(TIMEOUT, relay.consume().follow("live", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves").unwrap();
 	let subscriber = kio::clock::timeout(
 		TIMEOUT,
 		remote.track("data").unwrap().subscribe(

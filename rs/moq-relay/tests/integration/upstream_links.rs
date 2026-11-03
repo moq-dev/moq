@@ -207,10 +207,10 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 /// cursor replays that set when it registers, all starts and none held, so it
 /// drains without waiting.
 fn routes(origin: &origin::Producer) -> BTreeMap<String, Vec<u64>> {
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let mut routes = BTreeMap::new();
 	while let Some(event) = announced.try_next() {
-		let announce::Event::Start(announce) = event else {
+		let origin::RouteEvent::Start(announce) = event else {
 			panic!("an initial set is only starts: got {event:?}");
 		};
 		let hops = announce.route.hops.iter().map(|hop| hop.id()).collect();
@@ -227,7 +227,7 @@ async fn routes_when(
 ) -> BTreeMap<String, Vec<u64>> {
 	within(step, async {
 		// Created first, so a change landing between two reads still wakes us.
-		let mut changes = origin.consume().announced();
+		let mut changes = origin.consume().routes();
 		loop {
 			let routes = routes(origin);
 			if ready(&routes) {

@@ -118,7 +118,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves").unwrap();
 
 	let subscription = Subscription::default()
 		.with_delay(Delay::default().with_max(BUDGET))
@@ -235,7 +235,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves").unwrap();
 
 	let subscribe = |range: Range| {
 		let track = remote.track("late").unwrap();

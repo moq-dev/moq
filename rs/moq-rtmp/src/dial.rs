@@ -822,7 +822,7 @@ mod tests {
 			});
 
 			let consumer = downstream.consume();
-			let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+			let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap().unwrap();
 			// The catalog goes out once the keyframe landed, so the copy holds media to linger with.
 			let mut listed = copy.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 			assert!(listed.recv_group().await.unwrap().is_some());
@@ -938,7 +938,7 @@ mod tests {
 
 		// Read what reaches the remote back out as FLV.
 		let consumer = downstream.consume();
-		let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let copy = consumer.follow("live/cam0", None).unwrap().available().await.unwrap().unwrap();
 		let source = moq_mux::Source::new(consumer, copy);
 		let catalog = source
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
@@ -955,12 +955,13 @@ mod tests {
 		until(OLD_IDR).await;
 
 		let instance = moq_net::Instance::random();
-		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&instance)).unwrap();
+		let mut instances = upstream.consume().follow("live/cam0", instance.clone()).unwrap();
 		let (_new, _new_catalog) = publish(&upstream, &instance, NEW_IDR);
-		kio::clock::timeout(Duration::from_secs(5), instances.next())
+		kio::clock::timeout(Duration::from_secs(5), instances.available())
 			.await
 			.expect("the new publisher takes over")
-			.unwrap();
+			.unwrap()
+			.expect("the new publisher serves");
 
 		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
 		delta.extend_from_slice(OLD_DELTA);
@@ -1037,7 +1038,7 @@ mod tests {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 
 		// It should carry a hang catalog track (proof the FLV demux produced real
 		// media on the far side): subscribe to it and read one catalog frame.

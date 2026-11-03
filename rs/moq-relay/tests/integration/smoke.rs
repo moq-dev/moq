@@ -171,7 +171,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 
 	let (_client, sub_connection) =
 		kio::clock::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -261,14 +261,14 @@ async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 }
 
 /// Read announcements until `until` shows up, returning every active prefix seen.
-async fn announced_until(announcements: &mut moq_net::announce::Consumer, until: &str) -> Vec<String> {
+async fn announced_until(announcements: &mut moq_net::origin::Routes, until: &str) -> Vec<String> {
 	let mut seen = Vec::new();
 	while !seen.iter().any(|prefix| prefix == until) {
 		let event = kio::clock::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed");
-		if let moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Update(announce) = event {
+		if let moq_net::origin::RouteEvent::Start(announce) | moq_net::origin::RouteEvent::Update(announce) = event {
 			seen.push(announce.prefix.as_str().to_owned());
 		}
 	}
@@ -307,7 +307,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 
 	// An opted-in lite-07 client discovers the hidden broadcast.
 	let opted_origin = moq_tokio::origin::spawn();
-	let mut opted = opted_origin.consume().with_hidden(true).announced();
+	let mut opted = opted_origin.consume().with_hidden(true).routes();
 	let (_opted_client, opted_connection) = kio::clock::timeout(
 		TIMEOUT,
 		connect_once(client_version(Some(lite07)).with_subscriber(opted_origin), url.clone()),
@@ -328,7 +328,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	for (version, local_hidden) in [(lite07, false), (lite06, true)] {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume().with_hidden(local_hidden);
-		let mut announcements = consumer.announced();
+		let mut announcements = consumer.routes();
 		let (_client, connection) = kio::clock::timeout(
 			TIMEOUT,
 			connect_once(client_version(Some(version)).with_subscriber(origin), url.clone()),
@@ -505,7 +505,7 @@ async fn relay_websocket_root_path_upgrades() {
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 	let (_client, sub_connection) =
 		kio::clock::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
@@ -643,7 +643,7 @@ async fn internal_tcp_round_trip() {
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 	let (_client, sub_connection) =
 		kio::clock::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
@@ -746,7 +746,7 @@ async fn internal_unix_round_trip() {
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 	let (_client, sub_connection) =
 		kio::clock::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 			.await
@@ -822,7 +822,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 	let sub_client = client_version(Some(version)).with_subscriber(sub_origin);
 	let (_client, sub_connection) = kio::clock::timeout(TIMEOUT, connect_once(sub_client, sub_url))
 		.await
@@ -961,12 +961,12 @@ async fn connect_once(
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

@@ -395,7 +395,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 			.unwrap()
 			.available()
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves").unwrap();
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");
@@ -507,9 +507,9 @@ async fn goaway_drains_routes(version: Version) {
 		// Nothing else is sent on the announce stream, so this only resolves if the
 		// subscriber acted on the GOAWAY rather than on another message. The drain
 		// re-prices the route in place, which arrives as another active update.
-		let mut announced = sub.announced();
+		let mut announced = sub.routes();
 		loop {
-			let (moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) =
+			let (moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update)) =
 				announced.next().await.expect("update")
 			else {
 				continue;

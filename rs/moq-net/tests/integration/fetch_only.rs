@@ -33,7 +33,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 	kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves")
+		.expect("broadcast resolves").unwrap()
 }
 
 /// Publish a finished track of three groups, and flag any subscription it ever gets.

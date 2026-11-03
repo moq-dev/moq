@@ -79,7 +79,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	broadcast.announce(Default::default()).unwrap();
 
 	let consumer = nodes.last().unwrap().consume();
-	let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
+	let remote = consumer.follow("room", None).unwrap().available().await.unwrap().unwrap();
 
 	if !matches!(arrival, Arrival::Together) {
 		reader.hold_bidis();

@@ -13,7 +13,7 @@ use std::{collections::HashMap, time::Duration};
 
 use futures::channel::mpsc;
 
-use moq_net::{Hop, Version, announce, cache, origin};
+use moq_net::{Hop, Version, cache, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -32,7 +32,7 @@ fn produce(hop: u64, hold: Duration) -> origin::Producer {
 	producer
 }
 
-/// The kind of an [`announce::Event`] for a prefix.
+/// The kind of an [`origin::RouteEvent`] for a prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
 	Start,
@@ -55,16 +55,16 @@ fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<Strin
 /// Watch `announced` from its own task, the way a session's announce writer does:
 /// it runs when woken, between the relays' own tasks, rather than only once the
 /// test task is polled again, which would coalesce every intermediate update.
-fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, Kind)> {
+fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, Kind)> {
 	let (tx, rx) = mpsc::unbounded();
 	kio::clock::sim::spawn(async move {
 		while let Some(event) = announced.next().await {
 			let (kind, announce) = match event {
-				announce::Event::Start(announce) => (Kind::Start, announce),
-				announce::Event::Update(announce) => (Kind::Update, announce),
-				announce::Event::Restart(announce) => (Kind::Restart, announce),
-				announce::Event::Takeover { announce, .. } => (Kind::Takeover, announce),
-				announce::Event::End(announce) => (Kind::End, announce),
+				origin::RouteEvent::Start(announce) => (Kind::Start, announce),
+				origin::RouteEvent::Update(announce) => (Kind::Update, announce),
+				origin::RouteEvent::Restart(announce) => (Kind::Restart, announce),
+				origin::RouteEvent::Takeover { announce, .. } => (Kind::Takeover, announce),
+				origin::RouteEvent::End(announce) => (Kind::End, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;
@@ -89,7 +89,7 @@ impl Mesh {
 		for &(a, b) in edges {
 			pairs.push(peer(version, &nodes[a], &nodes[b]).await);
 		}
-		let watched = watch(nodes.last().unwrap().consume().announced());
+		let watched = watch(nodes.last().unwrap().consume().routes());
 		Self {
 			nodes,
 			_pairs: pairs,
@@ -223,7 +223,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 	for (&(a, b), &ms) in PRODUCTION.iter().zip(PRODUCTION_LATENCY_MS) {
 		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], Duration::from_millis(ms)).await);
 	}
-	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().routes())).collect();
 
 	for publisher in [5, 13, 22, 26, 32] {
 		let broadcast = nodes[publisher].create_broadcast(format!("room/{publisher}")).unwrap();
@@ -278,7 +278,7 @@ async fn retracted_relay_ignores_a_stale_path() {
 	for &((a, b), latency) in STALE_PATHS {
 		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], latency).await);
 	}
-	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().routes())).collect();
 
 	let broadcast = nodes[7].create_broadcast("room/7").unwrap();
 	broadcast.announce(Default::default()).unwrap();
@@ -351,8 +351,8 @@ impl Cluster {
 		let mut cluster = Self {
 			_pairs: pairs,
 			publisher: publishing,
-			client: watch(watching.consume().announced()),
-			relays: relays.iter().map(|relay| watch(relay.consume().announced())).collect(),
+			client: watch(watching.consume().routes()),
+			relays: relays.iter().map(|relay| watch(relay.consume().routes())).collect(),
 		};
 		// Let every session's announce interest land before anything is published.
 		kio::clock::sim::idle().await;
@@ -641,8 +641,8 @@ async fn hop_limit_bounds_receive_and_send() {
 		let sink = produce_origin(3);
 		let _upstream = peer(version, &source, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
-		let mut received = watch(relay.consume().announced());
-		let mut sent = watch(sink.consume().announced());
+		let mut received = watch(relay.consume().routes());
+		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 		let route = |count: u64| {
 			origin::Route::default().with_hops(
@@ -706,7 +706,7 @@ async fn hop_limit_falls_back_to_a_forwardable_route() {
 		let _near = peer(version, &near, &relay).await;
 		let _far = peer(version, &far, &relay).await;
 		let _downstream = peer(version, &relay, &sink).await;
-		let mut sent = watch(sink.consume().announced());
+		let mut sent = watch(sink.consume().routes());
 		kio::clock::sim::idle().await;
 
 		let route = |first: u64, count: u64, cost: u64| {

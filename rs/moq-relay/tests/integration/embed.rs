@@ -274,7 +274,7 @@ async fn embed_and_stop(mut config: Config) {
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
 	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let subscriber = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -577,12 +577,12 @@ fn embedded_loader_refuses_obsolete_file_settings() {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

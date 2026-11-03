@@ -7107,7 +7107,7 @@ mod tests {
 			let session =
 				crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, Some(2), entries).await);
 			let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
-			let mut cursor = consumer.announced();
+			let mut cursor = consumer.routes();
 			let (_live, live) = live();
 			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
 				.await
@@ -7135,7 +7135,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, None, &[]).await);
 		let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, false, session.clone());
-		let cursor = consumer.announced();
+		let cursor = consumer.routes();
 		assert!(!cursor.is_synced());
 		let (_live, live) = live();
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
@@ -8869,13 +8869,13 @@ mod tests {
 			.start_announce(crate::Path::from_static("room/host"), advert, Admit::Session(None))
 			.unwrap();
 
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let route = announced.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 		assert!(route.is_anonymous());
 
-		let mut hidden = consumer.excluding(assigned).announced();
+		let mut hidden = consumer.excluding(assigned).routes();
 		hidden.assert_next_wait();
 	}
 
@@ -8893,12 +8893,12 @@ mod tests {
 
 		let origin = crate::origin::Config::new(self_origin).produce();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 
 		// The publish direction: an origin handle scoped to the peer, which is what
 		// `Client::with_peer_hop` hands the publisher. Holding its announce stream
 		// is what records that the peer has been offered these paths.
-		let mut publishing = consumer.clone().excluding(peer).announced();
+		let mut publishing = consumer.clone().excluding(peer).routes();
 
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
@@ -8946,7 +8946,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(self_origin).produce();
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 
 		let connect = || {
 			let (tasks, task_set) = crate::util::TaskSet::new();
@@ -8983,7 +8983,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		// Neither route is offered back to the peer they both came from.
-		consumer.clone().excluding(peer).announced().assert_next_wait();
+		consumer.clone().excluding(peer).routes().assert_next_wait();
 
 		// The stale session finally retracting leaves the fresh route standing.
 		drop(first);
@@ -9019,12 +9019,12 @@ mod tests {
 	/// The current best route covering `path`, if any (synchronous peek).
 	fn routed_now(consumer: &crate::origin::Consumer, path: &str) -> Option<crate::origin::Route> {
 		use futures::FutureExt;
-		match consumer.routes(path).ok()?.next().now_or_never()?? {
-			crate::announce::Event::End(_) => None,
-			crate::announce::Event::Start(announce)
-			| crate::announce::Event::Update(announce)
-			| crate::announce::Event::Restart(announce)
-			| crate::announce::Event::Takeover { announce, .. } => Some(announce.route),
+		match consumer.path_routes(path).ok()?.next().now_or_never()?? {
+			crate::origin::RouteEvent::End(_) => None,
+			crate::origin::RouteEvent::Start(announce)
+			| crate::origin::RouteEvent::Update(announce)
+			| crate::origin::RouteEvent::Restart(announce)
+			| crate::origin::RouteEvent::Takeover { announce, .. } => Some(announce.route),
 		}
 	}
 
@@ -10906,7 +10906,7 @@ mod tests {
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended early");
 			let _ = task_set.poll(&kio::Waiter::noop());
 			if let Poll::Ready(routed) = futures::poll!(routing.as_mut()) {
-				broadcast = Some(routed.expect("the announce routes the broadcast"));
+				broadcast = routed.expect("the announce routes the broadcast");
 				break;
 			}
 			settle().await;

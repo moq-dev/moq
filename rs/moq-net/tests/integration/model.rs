@@ -64,7 +64,7 @@ fn follow_resolves_with_only_explicit_polls() {
 	broadcast.announce(origin::Route::default()).unwrap();
 	assert!(following.poll_available(&waiter).is_pending());
 	driver.poll(now, &waiter).unwrap();
-	let resolved = ready(following.poll_available(&waiter)).unwrap();
+	let resolved = ready(following.poll_available(&waiter)).unwrap().unwrap();
 	assert_eq!(resolved.info().path.as_str(), "room/live");
 
 	// A closed origin ends a parked follower.

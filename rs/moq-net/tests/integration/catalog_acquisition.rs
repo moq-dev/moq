@@ -38,10 +38,10 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		.unwrap()
 		.available()
 		.await
-		.unwrap();
-	let mut announced = subscriber.consume().announced();
+		.unwrap().unwrap();
+	let mut announced = subscriber.consume().routes();
 	let old_cost = match announced.next().await {
-		Some(moq_net::announce::Event::Start(announce)) => announce.route.cost,
+		Some(moq_net::origin::RouteEvent::Start(announce)) => announce.route.cost,
 		other => panic!("expected the first route, got {other:?}"),
 	};
 	let mut pending = Box::pin(remote.track("catalog.json").unwrap().subscribe(None));
@@ -55,8 +55,8 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	// A replacement under a minted instance restarts the advertisement; a carried one only
 	// updates it.
 	let new_cost = match announced.next().await {
-		Some(moq_net::announce::Event::Update(announce)) if carries_instance => announce.route.cost,
-		Some(moq_net::announce::Event::Restart(announce)) if !carries_instance => announce.route.cost,
+		Some(moq_net::origin::RouteEvent::Update(announce)) if carries_instance => announce.route.cost,
+		Some(moq_net::origin::RouteEvent::Restart(announce)) if !carries_instance => announce.route.cost,
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");

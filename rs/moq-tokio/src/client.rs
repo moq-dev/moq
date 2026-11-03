@@ -1243,7 +1243,7 @@ mod tests {
 		let _ = websocket_handle.await;
 
 		let update = match announcements.next().await.expect("origin closed") {
-			moq_net::announce::Event::Start(update) => update,
+			moq_net::announce::Event::Present(update) => update,
 			event => panic!("expected announcement, got {event:?}"),
 		};
 		assert_eq!(update.prefix.as_str(), "test");

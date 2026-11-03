@@ -7,7 +7,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Instance, Version, announce, origin};
+use moq_net::{Hop, Instance, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -24,24 +24,24 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 }
 
 /// The instance of the next route `announced` starts, failing on any other event.
-async fn started(announced: &mut announce::Consumer) -> Instance {
+async fn started(announced: &mut origin::Routes) -> Instance {
 	match kio::clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		announce::Event::Start(announce) => announce.route.instance.expect("a delivered route has an instance"),
+		origin::RouteEvent::Start(announce) => announce.route.instance.expect("a delivered route has an instance"),
 		other => panic!("expected a start, got {other:?}"),
 	}
 }
 
-async fn ended(announced: &mut announce::Consumer) {
+async fn ended(announced: &mut origin::Routes) {
 	match kio::clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
 	{
-		announce::Event::End(_) => {}
+		origin::RouteEvent::End(_) => {}
 		other => panic!("expected an end, got {other:?}"),
 	}
 }
@@ -59,7 +59,7 @@ async fn job_reannounced(version: &str) {
 		.publish("job", origin::Route::default().with_instance(instance.clone(), 0))
 		.unwrap();
 	let _session = link(version, &publisher, &relay).await;
-	let mut announced = relay.consume().announced();
+	let mut announced = relay.consume().routes();
 
 	let first = started(&mut announced).await;
 	job.unannounce();

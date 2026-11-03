@@ -184,7 +184,7 @@ mod linux {
 							.unwrap()
 							.available()
 							.await
-							.expect("broadcast resolves")
+							.expect("broadcast resolves").unwrap()
 					};
 					let sub = bc
 						.track("data")

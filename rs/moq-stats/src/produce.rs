@@ -1479,7 +1479,7 @@ mod tests {
 			drain.collect();
 			drain.publish(Instant::now());
 			let consumer = edge.consume().with_hidden(true);
-			let mut events = consumer.announced();
+			let mut events = consumer.routes();
 			let (route, active) = next_update(&mut events).await.unwrap();
 			assert!(active);
 			assert_eq!(route.prefix.as_str(), ".stats/node");
@@ -1625,13 +1625,13 @@ mod tests {
 	}
 
 	/// The next route and whether it is active.
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
@@ -1657,7 +1657,7 @@ mod tests {
 	/// announce (bumping the `_closed` counters).
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
-		announced: announce::Consumer,
+		announced: origin::Routes,
 		source: origin::Publication,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
@@ -1682,7 +1682,7 @@ mod tests {
 		// Egress (publisher side) is tagged; the local publisher stays untagged.
 		let egress = origin.consume().with_stats(ctx);
 
-		let mut announced = egress.announced();
+		let mut announced = egress.routes();
 		let source = origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
 		let producer = source.create_track("video", timed()).expect("create_track");
@@ -1726,7 +1726,7 @@ mod tests {
 
 	/// Awaits the stats announce and returns its broadcast.
 	async fn announced(origin: &origin::Producer) -> (String, moq_net::broadcast::Consumer) {
-		let mut consumer = origin.consume().with_hidden(true).announced();
+		let mut consumer = origin.consume().with_hidden(true).routes();
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (update, active) = next_update(&mut consumer).await.expect("expected announce");
 		assert!(active);
@@ -1946,7 +1946,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn restarted_producer_announces_a_new_instance() {
 		let origin = produce_origin();
-		let mut events = origin.consume().with_hidden(true).announced();
+		let mut events = origin.consume().with_hidden(true).routes();
 
 		let first = node_producer(&origin);
 		drive_tick().await;
@@ -1975,7 +1975,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn restart_replaces_a_still_announced_instance() {
 		let origin = produce_origin();
-		let mut events = origin.consume().with_hidden(true).announced();
+		let mut events = origin.consume().with_hidden(true).routes();
 
 		let first = node_producer(&origin);
 		let _f1 = feed(first.registry(), Tier::default(), "foo/bar", true, 1, 100).await;
@@ -2006,7 +2006,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_publisher_run_after_its_producer_dropped_announces_nothing() {
 		let origin = produce_origin();
-		let mut events = origin.consume().with_hidden(true).announced();
+		let mut events = origin.consume().with_hidden(true).routes();
 
 		let (stale, publisher) = Producer::new(
 			Config::new()
@@ -2229,7 +2229,7 @@ mod tests {
 
 	/// The announce events buffered so far in delivery order, as
 	/// `(path, active, epoch)`. Every stats route carries an epoch.
-	fn take_epochs(events: &mut announce::Consumer) -> Vec<(String, bool, Instance)> {
+	fn take_epochs(events: &mut origin::Routes) -> Vec<(String, bool, Instance)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
 		while let Some(Some((update, active))) = next_update(events).now_or_never() {
@@ -3015,7 +3015,7 @@ mod tests {
 		drain.collect();
 		drain.publish(start);
 		let consumer = edge.consume().with_hidden(true);
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let (route, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
 		assert_eq!(route.prefix.as_str(), ".stats/node");

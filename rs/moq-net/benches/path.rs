@@ -173,7 +173,7 @@ fn fanout() {
 		let _pubs: Vec<_> = (0..100)
 			.map(|i| producer.publish(format!("room/{i}"), origin::Route::default()).unwrap())
 			.collect();
-		let mut cursors: Vec<announce::Consumer> = (0..100).map(|_| consumer.announced()).collect();
+		let mut cursors: Vec<origin::Routes> = (0..100).map(|_| consumer.routes()).collect();
 		for cursor in &mut cursors {
 			while cursor.next().now_or_never().flatten().is_some() {}
 		}

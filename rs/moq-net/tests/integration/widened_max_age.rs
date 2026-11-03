@@ -110,7 +110,7 @@ impl Chain {
 	/// Subscribe from the viewer with `budget`, reading from the oldest group still around.
 	async fn subscribe(&self, budget: Duration) -> track::Subscriber {
 		let consumer = self.viewer.consume();
-		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap().unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(budget))
 			.with_ranges([Range::oldest()]);
@@ -318,7 +318,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		let viewer = origin(3);
 		links.push(peer(version, &relay, &viewer).await);
 		let consumer = viewer.consume();
-		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap().unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(budget))
 			.with_ranges([Range::oldest()]);

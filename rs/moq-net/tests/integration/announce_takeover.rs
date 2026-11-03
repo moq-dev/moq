@@ -9,7 +9,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Hop, Timestamp, Version, announce, origin, track};
+use moq_net::{Hop, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -73,17 +73,17 @@ impl Worker {
 }
 
 /// Every announce event already delivered, as `(kind, prefix, predecessor)`.
-async fn drain(announced: &mut announce::Consumer) -> Vec<(&'static str, String, Option<String>)> {
+async fn drain(announced: &mut origin::Routes) -> Vec<(&'static str, String, Option<String>)> {
 	let mut events = Vec::new();
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		events.push(match event.expect("announce ended") {
-			announce::Event::Start(a) => ("start", a.prefix.to_string(), None),
-			announce::Event::Update(a) => ("update", a.prefix.to_string(), None),
-			announce::Event::Restart(a) => ("restart", a.prefix.to_string(), None),
-			announce::Event::Takeover { announce, predecessor } => {
+			origin::RouteEvent::Start(a) => ("start", a.prefix.to_string(), None),
+			origin::RouteEvent::Update(a) => ("update", a.prefix.to_string(), None),
+			origin::RouteEvent::Restart(a) => ("restart", a.prefix.to_string(), None),
+			origin::RouteEvent::Takeover { announce, predecessor } => {
 				("takeover", announce.prefix.to_string(), Some(predecessor.to_string()))
 			}
-			announce::Event::End(a) => ("end", a.prefix.to_string(), None),
+			origin::RouteEvent::End(a) => ("end", a.prefix.to_string(), None),
 		});
 	}
 	events
@@ -117,8 +117,8 @@ async fn chain(version: &str, claim: &str) {
 	let _downstream = link(version, &relay, &edge, 1).await;
 	settle().await;
 
-	let mut at_relay = relay.consume().announced();
-	let mut at_edge = edge.consume().announced();
+	let mut at_relay = relay.consume().routes();
+	let mut at_edge = edge.consume().routes();
 	let claimed = [("start", claim.to_string(), None)];
 	assert_eq!(drain(&mut at_relay).await, claimed, "{version}");
 	assert_eq!(drain(&mut at_edge).await, claimed, "{version}");
@@ -149,7 +149,7 @@ async fn chain(version: &str, claim: &str) {
 	assert_eq!(drain(&mut at_edge).await, answered, "{version}: at the edge");
 
 	// A late snapshot starts what stands, replaying no takeover.
-	let mut late = edge.consume().announced();
+	let mut late = edge.consume().routes();
 	let mut snapshot = vec![("start", "pool/p".to_string(), None)];
 	if claim != "pool/p" {
 		snapshot.insert(0, ("start", claim.to_string(), None));
@@ -191,7 +191,7 @@ async fn two_workers_announce_a_start() {
 		let _b = link(version, &b.origin, &relay, 10).await;
 		settle().await;
 
-		let mut announced = relay.consume().announced();
+		let mut announced = relay.consume().routes();
 		assert_eq!(drain(&mut announced).await, [("start", "pool".to_string(), None)]);
 
 		assert_eq!(watch(&relay, "pool/p").await, "a");
@@ -217,7 +217,7 @@ async fn an_unrequested_publish_is_a_start() {
 		let _link = link(version, &worker.origin, &relay, 1).await;
 		settle().await;
 
-		let mut announced = relay.consume().announced();
+		let mut announced = relay.consume().routes();
 		assert_eq!(drain(&mut announced).await, [("start", "pool".to_string(), None)]);
 
 		let _direct = worker.origin.publish("pool/q", origin::Route::default()).unwrap();
@@ -240,8 +240,8 @@ async fn an_older_downstream_gets_a_start() {
 		let _downstream = link("moq-lite-06".parse().unwrap(), &relay, &edge, 1).await;
 		settle().await;
 
-		let mut at_relay = relay.consume().announced();
-		let mut at_edge = edge.consume().announced();
+		let mut at_relay = relay.consume().routes();
+		let mut at_edge = edge.consume().routes();
 		drain(&mut at_relay).await;
 		drain(&mut at_edge).await;
 

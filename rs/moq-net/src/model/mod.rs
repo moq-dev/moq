@@ -10,6 +10,8 @@ pub mod track;
 // modules so neither leaks the other's plumbing.
 #[path = "origin.rs"]
 mod origin_impl;
+// The app-level announcement listing over a route stream.
+mod announced;
 // Reduces the routes covering one path to the one serving it.
 mod follow;
 // The failover state machine origin fronts run; pure, so its transitions are
@@ -58,11 +60,16 @@ pub mod origin {
 		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
 		Requesting, Requests, Route, Source,
 	};
+	// Relay-level: every route change, for forwarding and stats. Apps read
+	// `announce` and `follow` instead.
+	#[doc(hidden)]
+	pub use super::origin_impl::{RouteEvent, Routes};
 }
 
-/// Subscribing to route (un)announcements from an origin.
+/// Listing the paths announced on an origin.
 pub mod announce {
-	pub use super::origin_impl::{Announce, AnnounceConsumer as Consumer, AnnounceEvent as Event};
+	pub use super::announced::{AnnounceConsumer as Consumer, AnnounceEvent as Event};
+	pub use super::origin_impl::Announce;
 }
 
 // Hop identity and the `Consume` conversion trait aren't part of a role

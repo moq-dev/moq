@@ -145,7 +145,7 @@ pub struct MockPair {
 	/// The server's end of the mock transport, for steering delivery.
 	pub server_transport: MockSession,
 	/// See [`MockConnectOptions::client_discovers_all`].
-	pub client_discovery: Option<moq_net::announce::Consumer>,
+	pub client_discovery: Option<moq_net::origin::Routes>,
 }
 
 /// Run the MoQ handshake over the mock transport, returning connected sessions.
@@ -183,7 +183,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		.client_subscribe
 		.as_ref()
 		.filter(|_| opts.client_discovers_all)
-		.map(|subscribe| subscribe.consume().announced());
+		.map(|subscribe| subscribe.consume().routes());
 	if let Some(subscribe) = opts.client_subscribe {
 		client = client.with_subscriber(subscribe);
 	}

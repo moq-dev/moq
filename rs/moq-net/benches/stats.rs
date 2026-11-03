@@ -17,7 +17,7 @@ struct Registry {
 	registry: stats::Registry,
 	_driver: origin::Driver,
 	_publishers: Vec<origin::Publication>,
-	_cursors: Vec<announce::Consumer>,
+	_cursors: Vec<origin::Routes>,
 }
 
 fn registry(broadcasts: usize, tiers: usize) -> Registry {
@@ -31,7 +31,7 @@ fn registry(broadcasts: usize, tiers: usize) -> Registry {
 			let session = registry
 				.tier(stats::Tier::new(moq_net::Path::new(&format!("tier{t}")).unwrap()))
 				.session(moq_net::Path::from_static("root"));
-			let mut cursor = producer.consume().with_stats(session).announced();
+			let mut cursor = producer.consume().with_stats(session).routes();
 			// Each announce the cursor replays records under its tier.
 			while cursor.next().now_or_never().flatten().is_some() {}
 			cursor

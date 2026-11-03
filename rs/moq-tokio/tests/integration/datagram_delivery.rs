@@ -104,7 +104,7 @@ impl Viewer {
 		let broadcast = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves").unwrap();
 		let track = kio::clock::timeout(TIMEOUT, broadcast.track("audio").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")

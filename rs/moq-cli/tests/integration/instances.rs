@@ -119,15 +119,15 @@ async fn within<T>(started: Instant, change: impl Future<Output = T>) -> T {
 }
 
 /// Ignore same-instance metadata updates, but keep the actual replacement representation.
-async fn changed(follow: &mut announce::Consumer) -> bool {
+async fn changed(follow: &mut origin::Routes) -> bool {
 	loop {
 		match follow.next().await.unwrap() {
-			announce::Event::Restart(_) => return true,
-			announce::Event::End(_) => {
-				assert!(matches!(follow.next().await, Some(announce::Event::Start(_))));
+			origin::RouteEvent::Restart(_) => return true,
+			origin::RouteEvent::End(_) => {
+				assert!(matches!(follow.next().await, Some(origin::RouteEvent::Start(_))));
 				return false;
 			}
-			announce::Event::Update(_) => {}
+			origin::RouteEvent::Update(_) => {}
 			other => panic!("expected replacement, got {other:?}"),
 		}
 	}
@@ -149,7 +149,7 @@ async fn replacement(version: &str) {
 	let viewer = viewer_origin.consume();
 	let watch = |path| {
 		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
-		viewer.scope("", &path).unwrap().announced()
+		viewer.scope("", &path).unwrap().routes()
 	};
 	let mut catalog_follow = watch("live/catalog.hang");
 	let mut media_follow = watch("live/media");
@@ -160,8 +160,8 @@ async fn replacement(version: &str) {
 		.established()
 		.await
 		.unwrap();
-	assert!(matches!(catalog_follow.next().await, Some(announce::Event::Start(_))));
-	assert!(matches!(media_follow.next().await, Some(announce::Event::Start(_))));
+	assert!(matches!(catalog_follow.next().await, Some(origin::RouteEvent::Start(_))));
+	assert!(matches!(media_follow.next().await, Some(origin::RouteEvent::Start(_))));
 
 	let held = viewer.request("live/catalog.hang", None).await.unwrap();
 	let old = moq_mux::Source::new(viewer.clone(), held);

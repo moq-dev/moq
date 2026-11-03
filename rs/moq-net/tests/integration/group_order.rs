@@ -53,7 +53,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 			.unwrap()
 			.available()
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves").unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(FOREVER))
 			.with_range(0..)

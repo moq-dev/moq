@@ -88,7 +88,7 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 	let event = running(&mut child, "the announce", announced.next())
 		.await
 		.expect("origin closed");
-	let moq_tokio::moq_net::announce::Event::Start(announce) = event else {
+	let moq_tokio::moq_net::announce::Event::Present(announce) = event else {
 		panic!("the first announce event is {event:?}, not a start");
 	};
 	assert_eq!(announce.prefix.as_str(), "demo");

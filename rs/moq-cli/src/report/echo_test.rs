@@ -30,7 +30,7 @@ async fn export_echo_reports_where_the_import_solicits() {
 	import.decode(&CLIP[..HALF]).unwrap();
 	publication.announce(Default::default()).unwrap();
 	let consumer = origin.consume();
-	let resolved = consumer.follow("demo", None).unwrap().available().await.unwrap();
+	let resolved = consumer.follow("demo", None).unwrap().available().await.unwrap().unwrap();
 
 	let args = SubscribeArgs {
 		format: SubscribeFormat::Ts,

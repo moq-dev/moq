@@ -33,7 +33,7 @@ async fn release(version: Version) {
 		.unwrap()
 		.available()
 		.await
-		.expect("resolves");
+		.expect("resolves").unwrap();
 	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
 	crate::support::wanted(track.demand()).await.unwrap();
 

@@ -69,7 +69,6 @@ use std::task::Poll;
 use std::time::Duration;
 
 use axum::Router;
-use moq_mux::follow;
 
 use crate::export::{Broadcaster, Config};
 
@@ -228,7 +227,7 @@ impl Server {
 			return Some(followed.clone());
 		}
 
-		let instances = follow::Instances::new(&self.inner.origin, name, None)
+		let instances = self.inner.origin.follow(name, None)
 			.map_err(|err| tracing::warn!(%err, %name, "failed to follow broadcast"))
 			.ok()?;
 		// A request answers once the origin has synced with the relay, so a path with no route
@@ -295,7 +294,7 @@ async fn run_follow(
 	inner: Weak<Inner>,
 	name: String,
 	followed: Weak<Followed>,
-	mut instances: follow::Instances,
+	mut instances: moq_net::origin::Following,
 	served: moq_net::broadcast::Consumer,
 ) {
 	let mut served = Some(served);
@@ -305,13 +304,13 @@ async fn run_follow(
 				return Poll::Ready(None);
 			};
 			followed.forget_closed(waiter);
-			if let Poll::Ready(next) = instances.poll_next(waiter) {
+			if let Poll::Ready(next) = instances.poll_available(waiter) {
 				return Poll::Ready(Some(next));
 			}
 			// The follower folds away an instance that started and ended before its first poll,
 			// so the served instance closing before it is handed out means nothing serves the path.
 			match &served {
-				Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(follow::Event::End))),
+				Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(None))),
 				None => Poll::Pending,
 			}
 		})
@@ -320,12 +319,12 @@ async fn run_follow(
 			return;
 		};
 		match next {
-			Some(Ok(follow::Event::Start(broadcast))) => {
+			Some(Ok(Some(broadcast))) => {
 				if !served.take().is_some_and(|served| served.is_clone(&broadcast)) {
 					followed.start(inner.serve(broadcast));
 				}
 			}
-			Some(Ok(follow::Event::End)) => break (inner, followed),
+			Some(Ok(None)) => break (inner, followed),
 			Some(Err(err)) => {
 				tracing::warn!(%err, %name, "stopped following broadcast");
 				break (inner, followed);

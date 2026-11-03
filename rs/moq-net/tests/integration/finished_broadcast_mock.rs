@@ -53,7 +53,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves").unwrap();
 
 	// Resolved before the ending starts: a SUBSCRIBE sent alongside its TRACK reaches the
 	// publisher before the subscriber has the TRACK_INFO it accepts the track with.

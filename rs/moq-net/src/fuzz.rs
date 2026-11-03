@@ -1889,7 +1889,7 @@ mod tests {
 		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
 		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
 		let _broadcast = origin.publish("room/1", crate::origin::Route::default()).unwrap();
-		let mut cursor = origin.consume().with_stats(session).announced();
+		let mut cursor = origin.consume().with_stats(session).routes();
 		while cursor.next().now_or_never().flatten().is_some() {}
 
 		bump_publisher_bytes(&registry, crate::Path::from_static("room/1"), &tier, 5);

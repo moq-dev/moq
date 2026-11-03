@@ -2,19 +2,19 @@
 
 use std::collections::HashMap;
 
-use crate::announce;
+use crate::{announce, origin};
 
 /// Keep each prefix's last active event in its original event order.
-pub(super) fn initial(events: impl IntoIterator<Item = announce::Event>) -> Vec<announce::Announce> {
+pub(super) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> Vec<announce::Announce> {
 	let mut pending: Vec<Option<announce::Announce>> = Vec::new();
 	let mut positions = HashMap::new();
 	for event in events {
 		let (update, active) = match event {
-			announce::Event::Start(update)
-			| announce::Event::Update(update)
-			| announce::Event::Restart(update)
-			| announce::Event::Takeover { announce: update, .. } => (update, true),
-			announce::Event::End(update) => (update, false),
+			origin::RouteEvent::Start(update)
+			| origin::RouteEvent::Update(update)
+			| origin::RouteEvent::Restart(update)
+			| origin::RouteEvent::Takeover { announce: update, .. } => (update, true),
+			origin::RouteEvent::End(update) => (update, false),
 		};
 		if let Some(index) = positions.remove(&update.prefix) {
 			pending[index] = None;

@@ -96,7 +96,7 @@ struct Relay {
 	_origin: origin::Producer,
 	_origin_driver: origin::Driver,
 	_publishers: Vec<origin::Publication>,
-	_cursors: Vec<announce::Consumer>,
+	_cursors: Vec<origin::Routes>,
 	_sessions: Vec<stats::Session>,
 	_held: Vec<moq_net::track::Subscriber>,
 }
@@ -131,7 +131,7 @@ impl Relay {
 			.map(|tier| {
 				let tier = stats::Tier::new(moq_net::Path::new(&format!("t{tier}")).unwrap());
 				let session = registry.tier(tier.clone()).session(moq_net::Path::from_static("root"));
-				let mut cursor = origin.consume().with_stats(session.clone()).announced();
+				let mut cursor = origin.consume().with_stats(session.clone()).routes();
 				while cursor.next().now_or_never().flatten().is_some() {}
 				cursors.push(cursor);
 				sessions.push(session);

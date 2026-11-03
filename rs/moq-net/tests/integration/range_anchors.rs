@@ -73,7 +73,7 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 			kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 				.await
 				.expect("resolve timeout")
-				.expect("broadcast resolves")
+				.expect("broadcast resolves").unwrap()
 		}
 	};
 

@@ -1405,7 +1405,7 @@ mod tests {
 						.unwrap()
 						.available()
 						.await
-						.unwrap();
+						.unwrap().unwrap();
 					let mut track = broadcast
 						.track("status")
 						.unwrap()
@@ -1515,7 +1515,7 @@ mod tests {
 			.unwrap()
 			.available()
 			.await
-			.unwrap()
+			.unwrap().unwrap()
 			.track("live")
 			.unwrap()
 			.subscribe(None)

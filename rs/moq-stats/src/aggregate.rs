@@ -763,7 +763,7 @@ impl<S: Shape> Node<S> {
 struct Merged<S: Shape> {
 	/// Resolves announced node paths into broadcasts.
 	origin: origin::Consumer,
-	announce: moq_net::announce::Consumer,
+	announce: moq_net::origin::Routes,
 	prefix: Path,
 	/// Track name subscribed on each node broadcast.
 	name: String,
@@ -783,7 +783,7 @@ impl<S: Shape> Merged<S> {
 	fn new(origin: origin::Consumer, config: &Config, name: String) -> Self {
 		Self {
 			// Stats live under a `.`-named prefix, which discovery hides by default.
-			announce: origin.clone().with_hidden(true).announced(),
+			announce: origin.clone().with_hidden(true).routes(),
 			origin,
 			prefix: config.prefix.clone(),
 			name,
@@ -808,16 +808,16 @@ impl<S: Shape> Merged<S> {
 			match self.announce.poll_next(waiter) {
 				// A takeover continues what was read through its predecessor, like an update.
 				Poll::Ready(Some(
-					moq_net::announce::Event::Start(update)
-					| moq_net::announce::Event::Update(update)
-					| moq_net::announce::Event::Takeover { announce: update, .. },
+					moq_net::origin::RouteEvent::Start(update)
+					| moq_net::origin::RouteEvent::Update(update)
+					| moq_net::origin::RouteEvent::Takeover { announce: update, .. },
 				)) => changed |= self.apply_announce(update, true),
-				Poll::Ready(Some(moq_net::announce::Event::End(update))) => {
+				Poll::Ready(Some(moq_net::origin::RouteEvent::End(update))) => {
 					changed |= self.apply_announce(update, false)
 				}
 				// Another instance: the one tracked at the path ends, then the new one
 				// starts, so its reader resolves afresh.
-				Poll::Ready(Some(moq_net::announce::Event::Restart(update))) => {
+				Poll::Ready(Some(moq_net::origin::RouteEvent::Restart(update))) => {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
 					if let Some(previous) = absolute.and_then(|absolute| self.last_announced.get(&absolute).cloned()) {
@@ -1121,13 +1121,13 @@ mod tests {
 	}
 
 	/// The next route and whether it is active.
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
@@ -1232,7 +1232,7 @@ mod tests {
 	/// announce, bumping the `_closed` counters.
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
-		announced: announce::Consumer,
+		announced: origin::Routes,
 		source: origin::Publication,
 		consumer: broadcast::Consumer,
 		sub: track::Subscriber,
@@ -1250,7 +1250,7 @@ mod tests {
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
-		let mut announced = egress.announced();
+		let mut announced = egress.routes();
 		let source = feed_origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
 		let track = source.create_track("video", timed()).expect("create_track");

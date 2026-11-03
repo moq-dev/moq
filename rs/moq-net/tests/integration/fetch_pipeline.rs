@@ -68,7 +68,7 @@ async fn fetch_ahead(
 	let remote = kio::clock::timeout(TIMEOUT, upstream.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves").unwrap();
 	let fetching = kio::clock::sim::spawn(async move { remote.track("video").unwrap().fetch_group(0, None).await });
 
 	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
@@ -156,7 +156,7 @@ async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 	let remote = kio::clock::timeout(TIMEOUT, upstream.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves").unwrap();
 	let start = kio::clock::now();
 	let mut fetched = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().fetch_group(0, None))
 		.await

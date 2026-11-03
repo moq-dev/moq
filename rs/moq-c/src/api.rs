@@ -926,8 +926,8 @@ pub struct moq_announce_route {
 	/// publisher is a new stream viewers restart onto. Set one only for a publisher that
 	/// continues its group sequences across restarts and raises `epoch` on each: readers
 	/// stitch every route of one instance together, so restarting the sequences under an
-	/// old instance splices unrelated groups into their tracks. Changing it is a
-	/// `MOQ_ANNOUNCE_KIND_RESTART`.
+	/// old instance splices unrelated groups into their tracks. Changing it hands followers
+	/// ([moq_origin_follow]) a new broadcast.
 	pub instance: *const c_char,
 	/// The length in bytes of `instance`.
 	pub instance_len: usize,
@@ -997,22 +997,14 @@ pub struct moq_announce_config {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_announce_kind {
-	/// A route now covers the prefix; the listener had none there.
-	MOQ_ANNOUNCE_KIND_START = 0,
-	/// The route covering the prefix changed hops or cost.
-	MOQ_ANNOUNCE_KIND_UPDATE = 1,
-	/// No route covers the prefix any more.
-	MOQ_ANNOUNCE_KIND_END = 2,
-	/// Another publisher instance now serves the prefix: drop what was resolved under
-	/// it and request afresh.
-	MOQ_ANNOUNCE_KIND_RESTART = 3,
-	/// A route now covers the prefix and continues what the route at
-	/// [moq_announce_event::predecessor] served beneath it: keep what was resolved through it.
-	MOQ_ANNOUNCE_KIND_TAKEOVER = 4,
+	/// A route now covers the path, which was absent. Another instance taking it over keeps it
+	/// present: follow it with [moq_origin_follow] to see the broadcast change.
+	MOQ_ANNOUNCE_KIND_PRESENT = 0,
+	/// No route covers the path any more.
+	MOQ_ANNOUNCE_KIND_ABSENT = 1,
 }
 
-/// An announce event from an origin: a route starting, updating, ending, restarting, or
-/// taking over.
+/// An announce event from an origin: a path becoming present or absent.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -1029,14 +1021,9 @@ pub struct moq_announce_event {
 	/// Which event this is.
 	pub kind: moq_announce_kind,
 
-	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_END` it carries the last
+	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` it carries the last
 	/// advertised route.
 	pub route: moq_route,
-	/// For [moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER], the prefix of the route continued,
-	/// relative to the origin, NOT NULL terminated. Empty for every other kind.
-	pub predecessor: *const c_char,
-	/// The length in bytes of `predecessor`.
-	pub predecessor_len: usize,
 }
 
 /// Where a session is in its lifecycle, reported by [moq_connection_state].

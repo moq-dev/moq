@@ -577,7 +577,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	let back = kio::clock::timeout(TIMEOUT, relay.origin.follow("demo", None).unwrap().available())
 		.await
 		.expect("the relay observes the returning publication")
-		.unwrap();
+		.unwrap().unwrap();
 	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
 	for chunk in chunks {
@@ -1057,13 +1057,13 @@ async fn redundant_failover(bufferbloat: bool) {
 }
 
 /// The instance of the next route announced for the path.
-async fn next_instance(announced: &mut moq_net::announce::Consumer) -> moq_net::Instance {
+async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Instance {
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
-				moq_net::announce::Event::Start(announce)
-				| moq_net::announce::Event::Restart(announce)
-				| moq_net::announce::Event::Takeover { announce, .. } => {
+				moq_net::origin::RouteEvent::Start(announce)
+				| moq_net::origin::RouteEvent::Restart(announce)
+				| moq_net::origin::RouteEvent::Takeover { announce, .. } => {
 					return announce
 						.route
 						.instance
@@ -1084,7 +1084,7 @@ async fn next_instance(announced: &mut moq_net::announce::Consumer) -> moq_net::
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let relay = relay().await;
 	let demo = moq_net::Patterns::from(moq_net::Pattern::literal("demo").unwrap());
-	let mut announced = relay.origin.scope("", &demo).unwrap().announced();
+	let mut announced = relay.origin.scope("", &demo).unwrap().routes();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
 	let incumbent = next_instance(&mut announced).await;
@@ -1196,7 +1196,7 @@ fn delivered(relay: &Relay) -> Arc<AtomicUsize> {
 	let counting = count.clone();
 	let origin = relay.origin.clone();
 	tokio::spawn(async move {
-		let broadcast = origin.follow("demo", None).unwrap().available().await.unwrap();
+		let broadcast = origin.follow("demo", None).unwrap().available().await.unwrap().unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 		let name = loop {
 			let catalog = catalogs.next().await.unwrap().expect("the catalog ended");

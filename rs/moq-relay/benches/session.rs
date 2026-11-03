@@ -95,7 +95,7 @@ impl Backend for Relay {
 			.client_subscribe
 			.as_ref()
 			.filter(|_| options.client_discovers_all)
-			.map(|origin| origin.consume().announced());
+			.map(|origin| origin.consume().routes());
 		let mut client = moq_net::Client::new()
 			.with_versions(version.into())
 			.with_extensions(options.client_extensions);

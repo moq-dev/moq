@@ -90,7 +90,7 @@ fn churn_allocs(root: &str, cursors: usize) -> usize {
 	let _winner = producer.publish("room/a", peer_route(1, 1)).unwrap();
 	let all = Patterns::from(Pattern::all());
 	let mut cursors: Vec<_> = (0..cursors)
-		.map(|_| producer.consume().scope(root, &all).unwrap().announced())
+		.map(|_| producer.consume().scope(root, &all).unwrap().routes())
 		.collect();
 	for cursor in &mut cursors {
 		while cursor.try_next().is_some() {}
@@ -281,7 +281,7 @@ async fn a_lite_request_keeps_one_copy_of_its_track_name() {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		WATCH.with(|watch| watch.set(TRACK.len()));
 		SIZED.with(|sized| sized.set((0, 0)));
 		let subscriber = remote.track(TRACK).unwrap().subscribe(None).await.unwrap();

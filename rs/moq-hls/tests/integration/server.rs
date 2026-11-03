@@ -53,7 +53,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		let remote = kio::clock::timeout(TIMEOUT, origin.follow("live", None).unwrap().available())
 			.await
 			.expect("request timed out")
-			.expect("remote broadcast");
+			.expect("remote broadcast").unwrap();
 		let (broadcaster, driver) = Broadcaster::new(moq_mux::Source::new(origin, remote), Default::default()).unwrap();
 		tokio::spawn(driver.run());
 		// Recorded as soon as the catalog lists it with its records, as a recorder does.
@@ -174,7 +174,7 @@ async fn a_sibling_resolves_through_a_client_session() {
 		let broadcast = kio::clock::timeout(TIMEOUT, origin.follow("room/live", None).unwrap().available())
 			.await
 			.expect("catalog resolve timed out")
-			.expect("catalog broadcast");
+			.expect("catalog broadcast").unwrap();
 		let source = moq_mux::Source::new(origin, broadcast);
 		let sibling = kio::clock::timeout(
 			TIMEOUT,
@@ -230,7 +230,7 @@ async fn a_disconnected_sibling_publisher_answers_404() {
 	)
 	.await
 	.expect("sibling resolve timed out")
-	.expect("sibling broadcast");
+	.expect("sibling broadcast").unwrap();
 	// Only the sibling goes: the catalog keeps listing the rendition, so the request reaches the
 	// media fetch rather than missing the rendition.
 	media_broadcast.close();

@@ -68,7 +68,7 @@ async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves").unwrap();
 	let subscribe = |priority: i8| {
 		let track = remote.track("video").unwrap();
 		async move {

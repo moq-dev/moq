@@ -396,16 +396,16 @@ async fn granted(session: &Session) -> Grant {
 
 /// Wait until `path` is announced (`true`) or retracted (`false`) in `origin`.
 async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
-	let mut announced = origin.announced();
+	let mut announced = origin.routes();
 	let mut live = std::collections::HashSet::new();
-	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::announce::Event| match event {
-		moq_net::announce::Event::Start(update)
-		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update)
-		| moq_net::announce::Event::Takeover { announce: update, .. } => {
+	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::origin::RouteEvent| match event {
+		moq_net::origin::RouteEvent::Start(update)
+		| moq_net::origin::RouteEvent::Update(update)
+		| moq_net::origin::RouteEvent::Restart(update)
+		| moq_net::origin::RouteEvent::Takeover { announce: update, .. } => {
 			live.insert(update.prefix.to_string());
 		}
-		moq_net::announce::Event::End(update) => {
+		moq_net::origin::RouteEvent::End(update) => {
 			live.remove(update.prefix.as_str());
 		}
 	};
@@ -1104,7 +1104,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 				.unwrap()
 				.available()
 				.await
-				.unwrap();
+				.unwrap().unwrap();
 			let prefs = moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
@@ -1166,7 +1166,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut group = published.append_group().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"first".as_ref())
@@ -1246,7 +1246,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut down_sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 		down_sub.recv_group().await.unwrap().unwrap();
 
@@ -1256,7 +1256,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut up_sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 		up_sub.recv_group().await.unwrap().unwrap();
 
@@ -1638,7 +1638,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut audio_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		audio_sub.recv_group().await.unwrap().unwrap();
 		let remote = received
@@ -1647,7 +1647,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut video_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		video_sub.recv_group().await.unwrap().unwrap();
 
@@ -1726,7 +1726,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut mic_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		mic_sub.recv_group().await.unwrap().unwrap();
 		let remote = relay
@@ -1735,7 +1735,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut cam_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		cam_sub.recv_group().await.unwrap().unwrap();
 
@@ -1786,7 +1786,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut fetched = remote.track("video").unwrap().fetch_group(0, None).await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().expect("first frame");
 		assert_eq!(frame.payload.as_ref(), b"first");
@@ -1857,7 +1857,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		sub.recv_group().await.unwrap().unwrap();
 
@@ -1875,7 +1875,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		let mut group = audio_track.append_group().unwrap();
 		group.write_frame(ts(1), b"a".as_ref()).unwrap();
@@ -1933,7 +1933,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		let mut group = mic_track.append_group().unwrap();
 		group.write_frame(ts(0), b"m".as_ref()).unwrap();

@@ -81,7 +81,6 @@ struct AnnouncedRecord {
 	cost: u64,
 	/// The route's instance.
 	instance: String,
-	predecessor: String,
 }
 
 // The raw pointers only borrow immutable String allocations owned by this record.
@@ -91,16 +90,9 @@ unsafe impl Send for AnnouncedRecord {}
 impl AnnouncedRecord {
 	fn new(event: moq_net::announce::Event) -> Self {
 		use moq_net::announce::Event;
-		let (update, kind, predecessor) = match event {
-			Event::Start(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_START, String::new()),
-			Event::Update(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE, String::new()),
-			Event::End(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_END, String::new()),
-			Event::Restart(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART, String::new()),
-			Event::Takeover { announce, predecessor } => (
-				announce,
-				moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER,
-				predecessor.to_string(),
-			),
+		let (update, kind) = match event {
+			Event::Present(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT),
+			Event::Absent(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_ABSENT),
 		};
 		let captures: Vec<_> = update
 			.captures
@@ -128,7 +120,6 @@ impl AnnouncedRecord {
 				.instance
 				.map(|instance| instance.to_string())
 				.unwrap_or_default(),
-			predecessor,
 		}
 	}
 }
@@ -217,8 +208,6 @@ impl Origin {
 					len: announced.instance.len(),
 				},
 			},
-			predecessor: announced.predecessor.as_ptr().cast::<c_char>(),
-			predecessor_len: announced.predecessor.len(),
 		};
 		Ok(())
 	}
@@ -288,7 +277,10 @@ impl Origin {
 				biased;
 				_ = &mut close => return Ok(()),
 				available = announced.available() => match available {
-					Ok(broadcast) => broadcast,
+					Ok(Some(broadcast)) => broadcast,
+					// The path went offline: the delivered handle's tracks end on their own, and the
+					// announce listing reports the absence.
+					Ok(None) => continue,
 					// The origin closing ends the wait, cleanly once a handle was delivered.
 					Err(moq_net::Error::Closed) if delivered => return Ok(()),
 					Err(moq_net::Error::Closed) => return Err(Error::BroadcastNotFound),

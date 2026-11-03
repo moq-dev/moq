@@ -288,7 +288,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 	let sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -655,7 +655,7 @@ async fn a_moved_tier_retags_the_live_session() {
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
+	let mut announcements = sub_consumer.routes();
 	let sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -816,7 +816,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow(path, None).unwrap().available())
 				.await
 				.expect("announcement timeout")
-				.expect("announced broadcast resolves");
+				.expect("announced broadcast resolves").unwrap();
 			subs.push(
 				broadcast
 					.track("media")
@@ -879,7 +879,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow("alice/audio", None).unwrap().available())
 			.await
 			.expect("the undeafened path was never announced again")
-			.expect("announced broadcast resolves");
+			.expect("announced broadcast resolves").unwrap();
 		let mut audio = broadcast
 			.track("media")
 			.unwrap()
@@ -997,7 +997,7 @@ async fn http_routes_hold_a_lease() {
 	// Wait until the announcement reaches the relay before asking over HTTP:
 	// the /announced handler only reports what has arrived so far.
 	let sub_origin = moq_tokio::origin::spawn();
-	let mut announcements = sub_origin.consume().announced();
+	let mut announcements = sub_origin.consume().routes();
 	let _sub_session = kio::clock::timeout(
 		TIMEOUT,
 		client()
@@ -1337,7 +1337,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	.expect("connect timeout")
 	.expect("the peer is admitted");
 
-	let mut announced = cluster.origin.consume().announced();
+	let mut announced = cluster.origin.consume().routes();
 	let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("timed out waiting for forwarded")
@@ -1690,13 +1690,13 @@ async fn a_late_decision_within_the_deadline_admits() {
 }
 
 /// The next route and whether it is active.
-async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route)
-		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route)
-		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::announce::Event::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent::Start(route)
+		| moq_net::origin::RouteEvent::Update(route)
+		| moq_net::origin::RouteEvent::Restart(route)
+		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }
 
@@ -1780,7 +1780,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let a_read = kio::clock::timeout(TIMEOUT, read.follow("a/cam", None).unwrap().available())
 			.await
 			.unwrap()
-			.unwrap();
+			.unwrap().unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
 		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
@@ -1792,7 +1792,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		let b_read = kio::clock::timeout(TIMEOUT, read.follow("b/cam", None).unwrap().available())
 			.await
 			.expect("new prefix not announced")
-			.unwrap();
+			.unwrap().unwrap();
 		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = b_track.append_group().unwrap();
 		group
@@ -1851,7 +1851,7 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 			options.peer.announces = 2;
 			let cluster = crate::spawn_cluster(options);
 			let consumer = cluster.origin.consume();
-			let mut observed = consumer.announced();
+			let mut observed = consumer.routes();
 			let (port, relay) = match scheme {
 				"tcp" => spawn_relay_with(auth, cluster).await,
 				_ => spawn_ws_relay_with(auth, cluster).await,

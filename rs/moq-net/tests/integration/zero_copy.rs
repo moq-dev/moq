@@ -63,7 +63,7 @@ async fn frames_cross_without_a_copy() {
 		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves").unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 		subscribed(&track).await;
 

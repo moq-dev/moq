@@ -3,7 +3,7 @@
 
 fn require_send(_: impl Send) {}
 
-async fn watch_announcements(mut consumer: moq_net::announce::Consumer) {
+async fn watch_announcements(mut consumer: moq_net::origin::Routes) {
 	while let Some(event) = consumer.next().await {
 		drop(event);
 	}
@@ -23,7 +23,7 @@ async fn read_frames(mut consumer: moq_net::group::Consumer) {
 
 #[test]
 fn announcement_next_is_send() {
-	let _: fn(moq_net::announce::Consumer) = |consumer| {
+	let _: fn(moq_net::origin::Routes) = |consumer| {
 		require_send(watch_announcements(consumer));
 	};
 }

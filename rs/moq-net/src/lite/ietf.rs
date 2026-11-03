@@ -991,7 +991,7 @@ pub(crate) async fn test_hop(
 	);
 	downstream
 		.consume()
-		.routes(broadcast)
+		.path_routes(broadcast)
 		.unwrap()
 		.next()
 		.await

@@ -82,7 +82,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 			event = announced.next() => {
 				let announce = match event.context("announcements ended")? {
 					// Another instance, or the same one announced again.
-					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) | moq_net::announce::Event::Takeover { announce, .. } => announce,
+					moq_net::announce::Event::Present(announce) | moq_net::announce::Event::Present(announce) | moq_net::announce::Event::Present(announce) => announce,
 					_ => continue,
 				};
 				if !announce.prefix.has_prefix(&prefix) {
@@ -444,7 +444,7 @@ mod tests {
 		let mut announced = origin.consume().announced();
 		kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
-				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
+				if let Some(moq_net::announce::Event::Present(announce)) = announced.next().await {
 					assert_eq!(announce.prefix.as_str(), "replay");
 					assert_eq!(announce.route.instance, Some(instance.clone()));
 					break;

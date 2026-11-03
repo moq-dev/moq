@@ -9,7 +9,6 @@ use kio::clock::Instant;
 
 use super::{Export, catalog};
 use crate::container::Frame;
-use crate::follow::{Event, Instances};
 
 type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>> + Send>>;
 
@@ -60,7 +59,7 @@ enum State<E: catalog::Catalog> {
 }
 
 /// Carries an [`Export`] across its broadcast's returns, following the publisher instances
-/// serving its path through [`Instances`].
+/// serving its path through [`Following`](moq_net::origin::Following).
 ///
 /// The same stream (the same instance) returning within the [follow](Self::with_follow)
 /// continues the export. Another instance taking the path fails with
@@ -77,11 +76,11 @@ enum State<E: catalog::Catalog> {
 /// An instance that comes back is awaited until its catalog serves a first snapshot, with no
 /// deadline but its own end. A return that refuses its catalog waits for the next change, and
 /// the follow running out reports that refusal. A refusal to resolve the path at all fails at
-/// once, as it does for every [`Instances`] reader.
+/// once, as it does for every [`Following`](moq_net::origin::Following) reader.
 pub struct Follower<E: catalog::Catalog = ()> {
 	export: Export<crate::catalog::Consumer<E>>,
 	state: State<E>,
-	instances: Instances,
+	instances: moq_net::origin::Following,
 	path: moq_net::Path,
 	serving: Serving,
 	/// Taking the instances on hand when built, which replay the route the export resolved.
@@ -103,7 +102,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	/// Fails when the export's origin can never cover its path.
 	pub fn new(export: Export<crate::catalog::Consumer<E>>) -> crate::Result<Self> {
 		let source = export.source();
-		let instances = Instances::new(source.origin(), source.path(), None)?;
+		let instances = source.origin().follow(source.path(), None)?;
 		let mut follower = Self {
 			path: source.path().clone(),
 			export,
@@ -344,8 +343,8 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	fn poll_instances(&mut self, waiter: &kio::Waiter) -> crate::Result<bool> {
 		let mut any = false;
 		while !self.closed {
-			match self.instances.poll_next(waiter) {
-				Poll::Ready(Ok(Event::Start(broadcast))) => {
+			match self.instances.poll_available(waiter) {
+				Poll::Ready(Ok(Some(broadcast))) => {
 					self.serving = match self.export.instance() {
 						// A broadcast not resolved through an origin has no instance to match,
 						// so only the broadcast being exported is its own.
@@ -359,9 +358,9 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						_ => Serving::Other(broadcast),
 					};
 				}
-				Poll::Ready(Ok(Event::End)) => self.serving = Serving::Gone,
-				Poll::Ready(Err(crate::Error::Moq(moq_net::Error::Closed))) => self.closed = true,
-				Poll::Ready(Err(err)) => return Err(err),
+				Poll::Ready(Ok(None)) => self.serving = Serving::Gone,
+				Poll::Ready(Err(moq_net::Error::Closed)) => self.closed = true,
+				Poll::Ready(Err(err)) => return Err(err.into()),
 				Poll::Pending => break,
 			}
 			any = true;

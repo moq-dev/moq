@@ -43,8 +43,8 @@ enum Observer {
 }
 
 /// Drain every route event the cursor has pending, as `kind prefix` lines.
-fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
-	use moq_net::announce::Event;
+fn drain(announced: &mut moq_net::origin::Routes) -> Vec<String> {
+	use moq_net::origin::RouteEvent as Event;
 
 	let mut seen = Vec::new();
 	while let Some(event) = announced.try_next() {
@@ -141,7 +141,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 			(subscriber.consume(), Some(pair))
 		}
 	};
-	let mut announced = consumer.announced();
+	let mut announced = consumer.routes();
 	let mut log = Vec::new();
 
 	// Created, not yet announced: nobody can see or reach it.

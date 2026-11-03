@@ -1,11 +1,8 @@
 //! A room is a path prefix. Participants are discovered from the announce stream.
 
-use std::task::{Poll, ready};
+use std::task::Poll;
 
-use moq_net::{
-	Path, announce, broadcast,
-	origin::{self, Requesting},
-};
+use moq_net::{Path, announce, broadcast, origin};
 
 use crate::path::{Kind, parse};
 
@@ -33,23 +30,24 @@ impl std::fmt::Debug for Event {
 	}
 }
 
-/// An in-flight request for the broadcast an active announcement named.
-struct Inflight {
+/// A listed participant broadcast, followed across the instances that serve it.
+struct Participant {
 	identity: Path,
 	kind: Kind,
 	path: Path,
-	request: Requesting,
+	following: origin::Following,
 }
 
 /// Runs the announce loop and yields remote participant broadcasts.
 ///
 /// Skips paths that are not `{identity}/camera.hang` or `{identity}/screen.hang`, and
-/// skips the local identity so a publisher does not see itself as a remote.
+/// skips the local identity so a publisher does not see itself as a remote. A participant
+/// that restarts is yielded again with its new broadcast.
 pub struct Room {
 	origin: origin::Consumer,
 	announced: announce::Consumer,
 	local: Option<Path>,
-	inflight: Option<Inflight>,
+	participants: Vec<Participant>,
 }
 
 impl std::fmt::Debug for Room {
@@ -67,87 +65,76 @@ impl Room {
 			announced: origin.announced(),
 			origin: origin.clone(),
 			local,
-			inflight: None,
+			participants: Vec::new(),
 		}
 	}
 
 	/// Poll for the next remote camera/screen (un)announce.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Event>> {
 		loop {
-			if let Some(event) = ready!(self.poll_inflight(waiter)) {
-				return Poll::Ready(Some(event));
-			}
-
-			let (update, active) = match ready!(self.announced.poll_next(waiter)) {
-				// A restart resolves the new instance, replacing the one handed out before.
-				Some(
-					announce::Event::Start(update)
-					| announce::Event::Update(update)
-					| announce::Event::Restart(update)
-					| announce::Event::Takeover { announce: update, .. },
-				) => (update, true),
-				Some(announce::Event::End(update)) => (update, false),
-				None => return Poll::Ready(None),
-			};
-			let path = update.prefix;
-			let Some(parsed) = parse(&path) else {
-				continue;
-			};
-			if self.local.as_ref().is_some_and(|id| *id == parsed.identity) {
-				continue;
-			}
-			if !active {
-				return Poll::Ready(Some(Event {
-					identity: parsed.identity,
-					kind: parsed.kind,
-					path,
-					broadcast: None,
-				}));
-			}
-
-			let mut request = self.origin.request(&path, None).into_inner();
-			match kio::Task::poll(&mut request, waiter) {
-				Poll::Ready(Ok(broadcast)) => {
+			match self.announced.poll_next(waiter) {
+				Poll::Ready(Some(announce::Event::Present(announce))) => self.listed(announce.prefix),
+				Poll::Ready(Some(announce::Event::Absent(announce))) => {
+					let Some(index) = self.participants.iter().position(|p| p.path == announce.prefix) else {
+						continue;
+					};
+					let gone = self.participants.swap_remove(index);
 					return Poll::Ready(Some(Event {
-						identity: parsed.identity,
-						kind: parsed.kind,
-						path,
-						broadcast: Some(broadcast),
+						identity: gone.identity,
+						kind: gone.kind,
+						path: gone.path,
+						broadcast: None,
 					}));
 				}
-				Poll::Ready(Err(_)) => continue,
-				Poll::Pending => {
-					self.inflight = Some(Inflight {
-						identity: parsed.identity,
-						kind: parsed.kind,
-						path,
-						request,
-					});
-					return Poll::Pending;
-				}
+				Poll::Ready(None) => return Poll::Ready(None),
+				Poll::Pending => break,
 			}
 		}
+		self.poll_participants(waiter).map(Some)
 	}
 
-	fn poll_inflight(&mut self, waiter: &kio::Waiter) -> Poll<Option<Event>> {
-		let Some(inflight) = self.inflight.as_mut() else {
-			return Poll::Ready(None);
+	/// Follow a listed path, unless it is not a remote participant broadcast.
+	fn listed(&mut self, path: Path) {
+		let Some(parsed) = parse(&path) else {
+			return;
 		};
-		match ready!(kio::Task::poll(&mut inflight.request, waiter)) {
-			Ok(broadcast) => {
-				let inflight = self.inflight.take().expect("inflight still set");
-				Poll::Ready(Some(Event {
-					identity: inflight.identity,
-					kind: inflight.kind,
-					path: inflight.path,
-					broadcast: Some(broadcast),
-				}))
-			}
-			Err(_) => {
-				self.inflight = None;
-				Poll::Ready(None)
+		if self.local.as_ref().is_some_and(|id| *id == parsed.identity) {
+			return;
+		}
+		let Ok(following) = self.origin.follow(&path, None) else {
+			return;
+		};
+		self.participants.push(Participant {
+			identity: parsed.identity,
+			kind: parsed.kind,
+			path,
+			following,
+		});
+	}
+
+	/// The next broadcast a participant's follower hands out. A follower that fails, such as a
+	/// handler refusing its path, is dropped until the path is listed again; its end comes
+	/// from the listing.
+	fn poll_participants(&mut self, waiter: &kio::Waiter) -> Poll<Event> {
+		let mut index = 0;
+		while let Some(participant) = self.participants.get_mut(index) {
+			match participant.following.poll_available(waiter) {
+				Poll::Ready(Ok(Some(broadcast))) => {
+					return Poll::Ready(Event {
+						identity: participant.identity.clone(),
+						kind: participant.kind,
+						path: participant.path.clone(),
+						broadcast: Some(broadcast),
+					});
+				}
+				Poll::Ready(Ok(None)) => continue,
+				Poll::Ready(Err(_)) => {
+					self.participants.swap_remove(index);
+				}
+				Poll::Pending => index += 1,
 			}
 		}
+		Poll::Pending
 	}
 
 	/// Wait for the next remote camera/screen (un)announce.

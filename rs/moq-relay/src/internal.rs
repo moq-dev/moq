@@ -1354,13 +1354,13 @@ mod tests {
 	}
 
 	/// The next route and whether it is active.
-	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route)
-			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent::Start(route)
+			| moq_net::origin::RouteEvent::Update(route)
+			| moq_net::origin::RouteEvent::Restart(route)
+			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}
 
@@ -1836,7 +1836,7 @@ mod tests {
 		let default_ctx = stats.tier(Tier::default()).session(moq_net::Path::from_static("acme"));
 		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
-		let mut announced = egress.announced();
+		let mut announced = egress.routes();
 		let pub_source = pub_origin.create_broadcast("demo/x").unwrap();
 		pub_source.announce(Default::default()).unwrap();
 		let pub_track = pub_source.create_track("video", timed()).unwrap();

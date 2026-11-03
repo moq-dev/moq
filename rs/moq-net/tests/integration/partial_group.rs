@@ -44,7 +44,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves").unwrap();
 	let mut live = kio::clock::timeout(
 		TIMEOUT,
 		remote

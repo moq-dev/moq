@@ -75,7 +75,7 @@ struct Fanout {
 	consumer: origin::Consumer,
 	driver: origin::Driver,
 	_publishers: Vec<origin::Publication>,
-	subscribers: Vec<announce::Consumer>,
+	subscribers: Vec<origin::Routes>,
 }
 
 fn fanout(publishers: usize, subscribers: usize) -> Fanout {
@@ -84,7 +84,7 @@ fn fanout(publishers: usize, subscribers: usize) -> Fanout {
 	let publishers = (0..publishers)
 		.map(|i| producer.publish(format!("room/{i}"), origin::Route::default()).unwrap())
 		.collect();
-	let mut subscribers: Vec<announce::Consumer> = (0..subscribers).map(|_| consumer.announced()).collect();
+	let mut subscribers: Vec<origin::Routes> = (0..subscribers).map(|_| consumer.routes()).collect();
 	// Drain the replay so each iteration measures only what it adds.
 	for cursor in &mut subscribers {
 		while cursor.next().now_or_never().flatten().is_some() {}
@@ -141,7 +141,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 						.scope("", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
 						.unwrap();
 					let consumer = if covering { consumer.covering() } else { consumer };
-					let mut cursors: Vec<_> = (0..readers).map(|_| consumer.announced()).collect();
+					let mut cursors: Vec<_> = (0..readers).map(|_| consumer.routes()).collect();
 					for cursor in &mut cursors {
 						while cursor.next().now_or_never().flatten().is_some() {}
 					}
@@ -174,7 +174,7 @@ fn bench_pending_churn(c: &mut Criterion) {
 				let _routes: Vec<_> = (0..routes)
 					.map(|i| producer.publish(format!("z/{i}"), origin::Route::default()).unwrap())
 					.collect();
-				let mut cursors: Vec<_> = (0..readers).map(|_| producer.consume().announced()).collect();
+				let mut cursors: Vec<_> = (0..readers).map(|_| producer.consume().routes()).collect();
 				let mut sequence = 0u64;
 				b.iter(|| {
 					sequence += 1;
@@ -219,7 +219,7 @@ fn bench_withdraw(c: &mut Criterion) {
 							.unwrap()
 						})
 						.collect();
-					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
 					for cursor in &mut cursors {
 						while cursor.next().now_or_never().flatten().is_some() {}
 					}
@@ -292,7 +292,7 @@ fn bench_withdraw_wave(c: &mut Criterion) {
 								.unwrap()
 							})
 							.collect();
-						let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+						let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
 						for cursor in &mut cursors {
 							while cursor.try_next().is_some() {}
 						}
@@ -343,7 +343,7 @@ fn bench_route_churn(c: &mut Criterion) {
 						.unwrap()
 					})
 					.collect();
-				let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+				let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().routes()).collect();
 				for cursor in &mut cursors {
 					while cursor.try_next().is_some() {}
 				}
@@ -384,7 +384,7 @@ fn bench_announce_mounted(c: &mut Criterion) {
 						.unwrap()
 				})
 				.collect();
-			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+			let mut cursors: Vec<origin::Routes> = (0..subscribers)
 				.map(|project| {
 					producer
 						.mount(format!("p{project}/.svc"), ".svc/p0")
@@ -393,7 +393,7 @@ fn bench_announce_mounted(c: &mut Criterion) {
 						.unwrap()
 						.consume()
 						.with_hidden(true)
-						.announced()
+						.routes()
 				})
 				.collect();
 			for cursor in &mut cursors {
@@ -440,7 +440,7 @@ fn bench_announce_fleet(c: &mut Criterion) {
 					let patterns: Patterns = [Pattern::subtree(&format!(".stats/p{}", peer % projects)).unwrap()]
 						.into_iter()
 						.collect();
-					consumer.scope("", &patterns).unwrap().announced()
+					consumer.scope("", &patterns).unwrap().routes()
 				})
 				.collect();
 			b.iter(|| {
@@ -489,8 +489,8 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 					.unwrap()
 				})
 				.collect();
-			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
-				.map(|_| consumer.clone().with_hidden(true).announced())
+			let mut cursors: Vec<origin::Routes> = (0..subscribers)
+				.map(|_| consumer.clone().with_hidden(true).routes())
 				.collect();
 			for cursor in &mut cursors {
 				while cursor.next().now_or_never().flatten().is_some() {}
@@ -552,7 +552,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 					peer_route(challenger, incumbent_cost + 1),
 				)
 				.unwrap();
-				let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+				let mut cursors: Vec<origin::Routes> = (0..subscribers)
 					.map(|peer| {
 						producer
 							.consume()
@@ -562,7 +562,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 							)
 							.unwrap()
 							.with_hidden(true)
-							.announced()
+							.routes()
 					})
 					.collect();
 				for cursor in &mut cursors {
@@ -574,7 +574,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						for cursor in &mut cursors {
 							// The winner switches between unnamed routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
-							let moq_net::announce::Event::Restart(update) = event else {
+							let moq_net::origin::RouteEvent::Restart(update) = event else {
 								panic!("expected a restart: got {event:?}");
 							};
 							assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(incumbent_cost)));
@@ -664,7 +664,7 @@ fn bench_takeover(c: &mut Criterion) {
 					(request, answer(&claim, path))
 				};
 				let _answered: Vec<_> = (0..publishers).map(|i| ask(&format!("room/{i}"))).collect();
-				let mut cursors: Vec<_> = (0..subscribers).map(|_| consumer.announced()).collect();
+				let mut cursors: Vec<_> = (0..subscribers).map(|_| consumer.routes()).collect();
 				for cursor in &mut cursors {
 					while cursor.next().now_or_never().flatten().is_some() {}
 				}
@@ -674,7 +674,7 @@ fn bench_takeover(c: &mut Criterion) {
 					let (request, output) = ask(&format!("room/incoming{n}"));
 					for cursor in &mut cursors {
 						let event = cursor.next().now_or_never().flatten();
-						assert!(matches!(event, Some(announce::Event::Takeover { .. })), "{event:?}");
+						assert!(matches!(event, Some(origin::RouteEvent::Takeover { .. })), "{event:?}");
 					}
 					drop(request);
 					drop(output);
@@ -735,9 +735,9 @@ fn bench_subscribe(c: &mut Criterion) {
 		group.bench_function(id, |b| {
 			let fleet = fanout(publishers, subscribers);
 			b.iter(|| {
-				let mut cursor = fleet.consumer.announced();
+				let mut cursor = fleet.consumer.routes();
 				let mut replayed = 0;
-				while let Some(announce::Event::Start(_)) = cursor.next().now_or_never().flatten() {
+				while let Some(origin::RouteEvent::Start(_)) = cursor.next().now_or_never().flatten() {
 					replayed += 1;
 				}
 				assert_eq!(replayed, publishers);
@@ -842,7 +842,7 @@ struct Pool {
 	_members: Vec<origin::Requests>,
 	_producers: Vec<broadcast::Producer>,
 	_consumers: Vec<broadcast::Consumer>,
-	cursors: Vec<announce::Consumer>,
+	cursors: Vec<origin::Routes>,
 }
 
 impl Pool {
@@ -857,7 +857,7 @@ impl Pool {
 fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 	let consumer = producer.consume();
-	let cursors = (0..cursors).map(|_| consumer.announced()).collect();
+	let cursors = (0..cursors).map(|_| consumer.routes()).collect();
 	let members: Vec<_> = (0..members)
 		.map(|i| {
 			moq_net::fuzz::requests_route(
@@ -1166,7 +1166,7 @@ async fn watching(routes: usize, subscribers: usize) -> Watching {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let subscription = remote.track("video").unwrap().subscribe(None).await.unwrap();
 		subscriptions.push(subscription);
 	}

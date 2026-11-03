@@ -27,15 +27,15 @@ use moq_net::{
 mod replay;
 
 /// The previous replay, retained here as a scaling reference.
-fn scanned(events: Vec<announce::Event>) -> Vec<announce::Announce> {
+fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
 	let mut initial: Vec<announce::Announce> = Vec::new();
 	for event in events {
 		let (update, active) = match event {
-			announce::Event::Start(update)
-			| announce::Event::Update(update)
-			| announce::Event::Restart(update)
-			| announce::Event::Takeover { announce: update, .. } => (update, true),
-			announce::Event::End(update) => (update, false),
+			origin::RouteEvent::Start(update)
+			| origin::RouteEvent::Update(update)
+			| origin::RouteEvent::Restart(update)
+			| origin::RouteEvent::Takeover { announce: update, .. } => (update, true),
+			origin::RouteEvent::End(update) => (update, false),
 		};
 		initial.retain(|held| held.prefix != update.prefix);
 		if active {
@@ -52,7 +52,7 @@ fn initial(c: &mut Criterion) {
 			let events: Vec<_> = (0..updates)
 				.flat_map(|cost| {
 					(0..routes).map(move |route| {
-						announce::Event::Update(announce::Announce {
+						origin::RouteEvent::Update(announce::Announce {
 							prefix: moq_net::Path::new(&format!("route/{route}")).unwrap(),
 							captures: None,
 							route: moq_net::origin::Route::default().with_cost(cost),

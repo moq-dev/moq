@@ -40,17 +40,17 @@ fn assert_open(pair: &MockPair, context: &str) {
 
 /// Whether `path` is announced in `origin` right now.
 fn announced(origin: &origin::Producer, path: &str) -> bool {
-	let mut announced = origin.consume().announced();
+	let mut announced = origin.consume().routes();
 	let mut live = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			moq_net::announce::Event::Start(update)
-			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update)
-			| moq_net::announce::Event::Takeover { announce: update, .. } => {
+			moq_net::origin::RouteEvent::Start(update)
+			| moq_net::origin::RouteEvent::Update(update)
+			| moq_net::origin::RouteEvent::Restart(update)
+			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } => {
 				live |= update.prefix.as_str() == path;
 			}
-			moq_net::announce::Event::End(update) => {
+			moq_net::origin::RouteEvent::End(update) => {
 				live &= update.prefix.as_str() != path;
 			}
 		}

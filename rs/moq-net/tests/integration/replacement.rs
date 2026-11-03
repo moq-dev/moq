@@ -14,7 +14,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, Instance, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Error, Hop, Instance, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -39,7 +39,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 }
 
 /// The next announce event, failing on a hang.
-async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
+async fn next_event(announced: &mut origin::Routes) -> origin::RouteEvent {
 	kio::clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
@@ -90,9 +90,9 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	let meta = cam.create_track("meta", timed()).unwrap();
 
 	let _first = link(version, &publisher, &viewer).await;
-	let mut announced = viewer.consume().announced();
+	let mut announced = viewer.consume().routes();
 	match next_event(&mut announced).await {
-		announce::Event::Start(announce) => {
+		origin::RouteEvent::Start(announce) => {
 			assert_eq!(announce.prefix.as_str(), "cam");
 			let carried = announce.route.instance.as_ref().expect("every route has an instance");
 			assert_eq!(carried.is_minted(), !carries, "{version}: minted {carried}");
@@ -131,7 +131,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	// A minted instance makes the replacement a restart, delivered at once, and the old
 	// handle refuses new requests from then on.
 	match announced.try_next() {
-		Some(announce::Event::Restart(announce)) => assert_eq!(announce.prefix.as_str(), "cam"),
+		Some(origin::RouteEvent::Restart(announce)) => assert_eq!(announce.prefix.as_str(), "cam"),
 		other => panic!("{version}: expected the restart, got {other:?}"),
 	}
 	let Err(err) = subscribe(&old, "meta").await else {
@@ -199,7 +199,7 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 		true => Some(link(version, &relay, &viewer).await),
 		false => None,
 	};
-	let mut announced = viewer.consume().announced();
+	let mut announced = viewer.consume().routes();
 	next_event(&mut announced).await;
 
 	let old = viewer.consume().request("cam", None).await.unwrap();
@@ -276,7 +276,7 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	let old_cam = old.publish("cam", origin::Route::default()).unwrap();
 	let _old_video = old_cam.create_track("video", timed()).unwrap();
 	let old_session = link(version, &old, &viewer).await;
-	let mut announced = viewer.consume().announced();
+	let mut announced = viewer.consume().routes();
 	next_event(&mut announced).await;
 
 	// The old process dies without a close: its session falls silent.

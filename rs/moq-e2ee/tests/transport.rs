@@ -57,7 +57,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	// The subscriber knows the opaque path and takes the epoch from the announced route's
 	// instance. A wire without instances leaves it to the application's own channel.
 	let consumer = consumer_origin.consume();
-	let remote = consumer.follow(&path, None).unwrap().available().await.unwrap();
+	let remote = consumer.follow(&path, None).unwrap().available().await.unwrap().unwrap();
 	if version.to_string().starts_with("moq-lite-07") {
 		assert_eq!(
 			moq_e2ee::Epoch::of(&remote).as_ref(),

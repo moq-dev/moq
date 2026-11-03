@@ -168,14 +168,12 @@ struct Following {
 
 impl Following {
 	async fn run(self) -> anyhow::Result<()> {
-		use moq_mux::follow::{Event, Instances};
-
-		let mut instances = Instances::new(&self.origin, &self.source_path, None)?;
+		let mut instances = self.origin.follow(&self.source_path, None)?;
 		let mut running = None;
 		loop {
 			tokio::select! {
-				event = instances.next() => match event? {
-					Event::Start(source) => {
+				event = instances.available() => match event? {
+					Some(source) => {
 						// Dropping the old ladder cancels its pending requests and rung tasks.
 						drop(running.take());
 						let output = self.publish.create_broadcast(&self.output_path)?;
@@ -184,7 +182,7 @@ impl Following {
 						tracing::info!(source = %self.source_path, output = %self.output_path, "transcoding");
 						running = Some(Box::pin(transcoder.run()));
 					}
-					Event::End => tracing::info!(source = %self.source_path, "offline, waiting for it to return"),
+					None => tracing::info!(source = %self.source_path, "offline, waiting for it to return"),
 				},
 				result = async { running.as_mut().expect("guarded").await }, if running.is_some() => {
 					running = None;
@@ -233,7 +231,7 @@ mod tests {
 		};
 		let old = origin.publish("source", route()).unwrap();
 		let _old_dynamic = old.requests();
-		let mut derivatives = moq_mux::follow::Instances::new(&publish.consume(), "derived", None).unwrap();
+		let mut derivatives = publish.consume().follow("derived", None).unwrap();
 		let following = Following {
 			origin: origin.consume(),
 			publish: publish.clone(),
@@ -280,7 +278,7 @@ mod tests {
 		let route = || moq_net::origin::Route::default();
 		let old = origin.publish("source", route()).unwrap();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut old.broadcast().clone(), Default::default()).unwrap();
-		let mut derivatives = moq_mux::follow::Instances::new(&publish.consume(), "derived", None).unwrap();
+		let mut derivatives = publish.consume().follow("derived", None).unwrap();
 		let following = Following {
 			origin: origin.consume(),
 			publish: publish.clone(),
@@ -306,12 +304,11 @@ mod tests {
 	}
 
 	/// The next derivative instance announced at the output path.
-	async fn next(instances: &mut moq_mux::follow::Instances) -> moq_net::broadcast::Consumer {
+	async fn next(instances: &mut moq_net::origin::Following) -> moq_net::broadcast::Consumer {
 		let start = async {
 			loop {
-				match instances.next().await.unwrap() {
-					moq_mux::follow::Event::Start(broadcast) => return broadcast,
-					moq_mux::follow::Event::End => continue,
+				if let Some(broadcast) = instances.available().await.unwrap() {
+					return broadcast;
 				}
 			}
 		};

@@ -1,110 +1,52 @@
-//! Following a broadcast across the publisher instances that serve it.
+//! Following a catalog rendition's broadcast across the publisher instances that serve it.
 //!
 //! An announcement is the online and offline signal, so a reader that restarts on each instance
 //! follows [`Instances`] rather than pinning one broadcast as a [`Binding`](crate::Binding) does.
 
 use std::task::Poll;
 
-/// The publisher instances serving a broadcast, as each comes online, takes over, and goes.
+/// The publisher instances serving a rendition's broadcast, as each comes online, takes over,
+/// and goes. Created by [`Source::follow`](crate::Source::follow).
 ///
-/// Built on [`follow`](moq_net::origin::Consumer::follow). Create one
-/// with [`Source::follow`](crate::Source::follow) for a catalog reference, or [`Instances::new`]
-/// for a path.
-pub struct Instances {
-	feed: Feed,
-	/// The instance a reference named, if any.
-	instance: Option<moq_net::Instance>,
-	/// The instance handed out last, until it stops serving.
-	current: Option<moq_net::broadcast::Consumer>,
-}
+/// A sibling broadcast is followed through [`Following`](moq_net::origin::Following); the
+/// catalog's own broadcast is handed out once and its end never reported, since a reader
+/// follows its catalog's end itself.
+pub struct Instances(Feed);
 
 enum Feed {
 	/// Every instance announced at a path.
-	Announced(Box<moq_net::origin::Following>),
+	Following(Box<moq_net::origin::Following>),
 	/// One instance, handed out once.
 	Fixed(Option<moq_net::broadcast::Consumer>),
 }
 
-/// A change to the instance [`Instances`] serves.
-pub enum Event {
-	/// Start on this instance, dropping whatever was read from the one before.
-	Start(moq_net::broadcast::Consumer),
-	/// The instance handed out last stopped serving: idle until the next start.
-	End,
-}
-
 impl Instances {
-	/// Follow the broadcast at `path` through `origin`, handing out only `instance` when given.
-	///
-	/// Unlike [`Source::follow`](crate::Source::follow), this needs no catalog broadcast, so a
-	/// reader can follow the broadcast whose catalog it reads and build a
-	/// [`Source`](crate::Source) for each instance.
-	pub fn new(
-		origin: &moq_net::origin::Consumer,
-		path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
-		instance: Option<&moq_net::Instance>,
-	) -> crate::Result<Self> {
-		let announced = origin.follow(path, None)?;
-		Ok(Self::with(Feed::Announced(Box::new(announced)), instance))
+	pub(crate) fn following(following: moq_net::origin::Following) -> Self {
+		Self(Feed::Following(Box::new(following)))
 	}
 
-	/// Hand out `broadcast` once and never report its end, which its owner follows.
 	pub(crate) fn fixed(broadcast: moq_net::broadcast::Consumer) -> Self {
-		Self::with(Feed::Fixed(Some(broadcast)), None)
-	}
-
-	fn with(feed: Feed, instance: Option<&moq_net::Instance>) -> Self {
-		Self {
-			feed,
-			instance: instance.cloned(),
-			current: None,
-		}
+		Self(Feed::Fixed(Some(broadcast)))
 	}
 
 	/// Poll for the next change, registering `waiter` when there is none yet.
 	///
-	/// Each announcement that brings an instance hands it out, so the same one returns after an
-	/// end. Fails once the origin closes, and with any resolution failure, such as a handler
-	/// refusing the path.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Event>> {
-		loop {
-			let next = match &mut self.feed {
-				// Followed unpinned and checked here, so another instance taking over ends the
-				// rendition rather than waiting for the named one to come back.
-				Feed::Announced(announced) => announced.poll_available(waiter).map_err(crate::Error::from),
-				Feed::Fixed(broadcast) => match broadcast.take() {
-					Some(broadcast) => Poll::Ready(Ok(broadcast)),
-					None => Poll::Pending,
-				},
-			};
-			if let Poll::Ready(next) = next {
-				let broadcast = next?;
-				if crate::source::check_instance(self.instance.as_ref(), &broadcast).is_err() {
-					tracing::debug!(path = %broadcast.info().path, "skipping a broadcast of another instance");
-					match self.current.take() {
-						Some(_) => return Poll::Ready(Ok(Event::End)),
-						None => continue,
-					}
-				}
-				// A fixed instance ends with its owner, which follows that itself.
-				if let Feed::Announced(_) = self.feed {
-					self.current = Some(broadcast.clone());
-				}
-				return Poll::Ready(Ok(Event::Start(broadcast)));
-			}
-
-			if let Some(current) = &self.current
-				&& current.poll_closed(waiter).is_ready()
-			{
-				self.current = None;
-				return Poll::Ready(Ok(Event::End));
-			}
-			return Poll::Pending;
+	/// Returns each instance as it comes online or takes over, and `None` once the path goes
+	/// offline; see [`Following::available`](moq_net::origin::Following::available). Fails
+	/// once the origin closes, and with any resolution failure, such as a handler refusing the
+	/// path.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<moq_net::broadcast::Consumer>>> {
+		match &mut self.0 {
+			Feed::Following(following) => following.poll_available(waiter).map_err(crate::Error::from),
+			Feed::Fixed(broadcast) => match broadcast.take() {
+				Some(broadcast) => Poll::Ready(Ok(Some(broadcast))),
+				None => Poll::Pending,
+			},
 		}
 	}
 
 	/// The next change; see [`Self::poll_next`].
-	pub async fn next(&mut self) -> crate::Result<Event> {
+	pub async fn next(&mut self) -> crate::Result<Option<moq_net::broadcast::Consumer>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
@@ -128,14 +70,10 @@ mod tests {
 
 	/// The next change a follower reports, which must arrive within the origin's update hold.
 	async fn followed(follow: &mut Instances) -> Option<moq_net::broadcast::Consumer> {
-		let next = kio::clock::timeout(std::time::Duration::from_secs(1), follow.next())
+		kio::clock::timeout(std::time::Duration::from_secs(1), follow.next())
 			.await
 			.expect("no change")
-			.expect("the follow failed");
-		match next {
-			Event::Start(broadcast) => Some(broadcast),
-			Event::End => None,
-		}
+			.expect("the follow failed")
 	}
 
 	/// The follower stays quiet past the origin's update hold.

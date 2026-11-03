@@ -48,7 +48,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let remote = remote.track("state").unwrap();
 		let mut baseline = remote.subscribe(None).await.unwrap();
 		assert_eq!(baseline.info().refresh, Some(ratio));
@@ -166,7 +166,7 @@ async fn ratio_joins_cross_two_relays() {
 			options.client_subscribe = Some(downstream.clone());
 			links.push(connect_mock(options).await);
 		}
-		let remote = b.consume().follow("room", None).unwrap().available().await.unwrap();
+		let remote = b.consume().follow("room", None).unwrap().available().await.unwrap().unwrap();
 		let remote = remote.track("data").unwrap();
 		let mut baseline = remote.subscribe(None).await.unwrap();
 		assert_eq!(baseline.info().refresh, (name == "moq-lite-07-wip").then_some(1));

@@ -65,61 +65,57 @@ pub async fn handle_viewers(
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
 	let mut announced = viewer_origin.announced();
-	// The command reader per viewer, so a restarted viewer replaces the old one's.
+	// The follower per viewer, which reads each broadcast a restarted viewer replaces the old with.
 	let mut readers: std::collections::HashMap<String, tokio::task::AbortHandle> = Default::default();
-	loop {
-		let (update, active, restart) = match announced.next().await {
-			// A takeover continues what was read through its predecessor.
-			Some(
-				moq_net::announce::Event::Start(update)
-				| moq_net::announce::Event::Update(update)
-				| moq_net::announce::Event::Takeover { announce: update, .. },
-			) => (update, true, false),
-			// The viewer restarted: read the new broadcast instead of the old one.
-			Some(moq_net::announce::Event::Restart(update)) => (update, true, true),
-			Some(moq_net::announce::Event::End(update)) => (update, false, false),
-			None => break,
-		};
-
-		let viewer_id = update.prefix.to_string();
-
-		if active {
-			if !restart && readers.get(&viewer_id).is_some_and(|reader| !reader.is_finished()) {
-				continue;
-			}
-			let Ok(broadcast) = viewer_origin.request(&update.prefix, None).await else {
-				continue;
-			};
-			tracing::info!(%viewer_id, restart, "viewer connected");
-			if let Some(old) = readers.remove(&viewer_id) {
-				old.abort();
-			}
-			let cmd_tx = cmd_tx.clone();
-			let vid = viewer_id.clone();
-			let reader = tokio::spawn(async move {
-				if let Err(e) = handle_viewer_commands(&vid, broadcast, &cmd_tx).await {
-					tracing::warn!(viewer_id = %vid, error = %e, "viewer command error");
+	while let Some(event) = announced.next().await {
+		match event {
+			moq_net::announce::Event::Present(announce) => {
+				let viewer_id = announce.prefix.to_string();
+				let reader = tokio::spawn(follow_viewer(viewer_origin.clone(), announce.prefix, cmd_tx.clone()));
+				if let Some(old) = readers.insert(viewer_id, reader.abort_handle()) {
+					old.abort();
 				}
-				tracing::info!(viewer_id = %vid, "viewer disconnected");
-				let _ = cmd_tx.send(Command::ViewerLeft { viewer_id: vid }).await;
-			});
-			readers.insert(viewer_id, reader.abort_handle());
-		} else {
-			// Dropping an abort handle leaves its task running. Older versions send a restart
-			// as END then START, and the old track keeps flowing meanwhile, so the old reader
-			// must stop here or it would race the replacement.
-			if let Some(old) = readers.remove(&viewer_id) {
-				old.abort();
 			}
-			tracing::info!(%viewer_id, "viewer went offline");
-			let _ = cmd_tx
-				.send(Command::ViewerLeft {
-					viewer_id: viewer_id.clone(),
-				})
-				.await;
+			moq_net::announce::Event::Absent(announce) => {
+				let viewer_id = announce.prefix.to_string();
+				// Dropping an abort handle leaves its task running, so stop it here.
+				if let Some(old) = readers.remove(&viewer_id) {
+					old.abort();
+				}
+				tracing::info!(%viewer_id, "viewer went offline");
+				let _ = cmd_tx.send(Command::ViewerLeft { viewer_id }).await;
+			}
 		}
 	}
 	Ok(())
+}
+
+/// Read the commands of each broadcast a viewer publishes at `path`, switching to the new one
+/// when the viewer restarts.
+async fn follow_viewer(
+	origin: moq_net::origin::Consumer,
+	path: moq_net::Path,
+	cmd_tx: tokio::sync::mpsc::Sender<Command>,
+) {
+	let viewer_id = path.to_string();
+	let Ok(mut following) = origin.follow(&path, None) else {
+		return;
+	};
+	let mut next = following.available().await;
+	while let Ok(Some(broadcast)) = next {
+		tracing::info!(%viewer_id, "viewer connected");
+		next = tokio::select! {
+			read = handle_viewer_commands(&viewer_id, broadcast, &cmd_tx) => {
+				if let Err(e) = read {
+					tracing::warn!(%viewer_id, error = %e, "viewer command error");
+				}
+				tracing::info!(%viewer_id, "viewer disconnected");
+				let _ = cmd_tx.send(Command::ViewerLeft { viewer_id: viewer_id.clone() }).await;
+				following.available().await
+			}
+			changed = following.available() => changed,
+		};
+	}
 }
 
 async fn handle_viewer_commands(

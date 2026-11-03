@@ -103,7 +103,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	});
 
 	let consumer = nodes.last().unwrap().consume();
-	let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
+	let remote = consumer.follow("room", None).unwrap().available().await.unwrap().unwrap();
 
 	let subscribing = remote.track("video").unwrap().subscribe(None);
 	if reorder {
@@ -190,7 +190,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	});
 
 	let consumer = nodes.last().unwrap().consume();
-	let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
+	let remote = consumer.follow("room", None).unwrap().available().await.unwrap().unwrap();
 
 	let handle = remote.track("video").unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;

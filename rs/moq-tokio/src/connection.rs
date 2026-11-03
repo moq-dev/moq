@@ -3377,7 +3377,7 @@ mod tests {
 		let cam = kio::clock::timeout(WAIT, consumer.follow("cam", None).unwrap().available())
 			.await
 			.unwrap()
-			.unwrap();
+			.unwrap().unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track.append_group().unwrap();
@@ -3460,7 +3460,7 @@ mod tests {
 		kio::clock::timeout(WAIT, subscriber.consume().follow("late", None).unwrap().available())
 			.await
 			.expect("the drained session stopped serving")
-			.unwrap();
+			.unwrap().unwrap();
 		assert!(
 			connection
 				.draining()
@@ -3698,7 +3698,7 @@ mod tests {
 			.await
 			.expect("the broadcast never reached the server")
 			.expect("the server's origin closed");
-		assert!(matches!(arrived, moq_net::announce::Event::Start(update) if update.prefix.as_str() == "room"));
+		assert!(matches!(arrived, moq_net::announce::Event::Present(update) if update.prefix.as_str() == "room"));
 		assert!(
 			futures::FutureExt::now_or_never(dialed.session.closed()).is_none(),
 			"the session closed before the configured token was answered"

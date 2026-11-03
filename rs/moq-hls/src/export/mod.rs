@@ -2345,7 +2345,7 @@ mod tests {
 			.unwrap()
 			.available()
 			.await
-			.unwrap();
+			.unwrap().unwrap();
 		let source = crate::resolved(consuming, "live").await;
 		let broadcaster = (!late).then(|| Broadcaster::spawned(source.clone(), Config::default()));
 		for i in 0..20u64 {

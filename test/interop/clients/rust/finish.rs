@@ -156,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
 					.next()
 					.await
 					.context("origin ended before broadcast withdrawal")?;
-				if let moq_net::announce::Event::End(announce) = event
+				if let moq_net::announce::Event::Absent(announce) = event
 					&& announce.prefix.as_str() == args.broadcast
 				{
 					break;

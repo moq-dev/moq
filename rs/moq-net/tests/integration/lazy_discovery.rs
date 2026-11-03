@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, Pattern, Patterns, Version, announce, origin};
+use moq_net::{Error, Hop, Pattern, Patterns, Version, origin};
 
 use crate::support;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -77,12 +77,12 @@ impl Lazy {
 	}
 
 	/// Watch everything under `prefix`.
-	fn watch(&self, prefix: &str) -> announce::Consumer {
+	fn watch(&self, prefix: &str) -> origin::Routes {
 		self.subscriber
 			.consume()
 			.scope(prefix, &Patterns::from(Pattern::all()))
 			.unwrap()
-			.announced()
+			.routes()
 	}
 
 	/// Inspect the current table without running discovery for the observation itself.
@@ -92,16 +92,16 @@ impl Lazy {
 			.consume()
 			.scope("", &Patterns::from(Pattern::literal(path).unwrap()))
 			.unwrap();
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		matches!(
 			announced.poll_next(&kio::Waiter::noop()),
-			std::task::Poll::Ready(Some(announce::Event::Start(_)))
+			std::task::Poll::Ready(Some(origin::RouteEvent::Start(_)))
 		)
 	}
 }
 
 /// Read until the stream syncs, returning the prefixes it then holds.
-async fn synced(announced: &mut announce::Consumer) -> Vec<String> {
+async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 	let mut seen = Vec::new();
 	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
 		let event = kio::clock::timeout(SETTLE, announced.next())
@@ -109,11 +109,11 @@ async fn synced(announced: &mut announce::Consumer) -> Vec<String> {
 			.expect("synced in time")
 			.expect("the stream stays open");
 		match event {
-			announce::Event::Start(announce)
-			| announce::Event::Restart(announce)
-			| announce::Event::Takeover { announce, .. } => seen.push(announce.prefix.to_string()),
-			announce::Event::End(announce) => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
-			announce::Event::Update(_) => {}
+			origin::RouteEvent::Start(announce)
+			| origin::RouteEvent::Restart(announce)
+			| origin::RouteEvent::Takeover { announce, .. } => seen.push(announce.prefix.to_string()),
+			origin::RouteEvent::End(announce) => seen.retain(|prefix| *prefix != announce.prefix.as_str()),
+			origin::RouteEvent::Update(_) => {}
 		}
 	}
 	seen.sort();
@@ -151,7 +151,7 @@ async fn a_new_session_asks_about_existing_watches() {
 		.consume()
 		.scope("b", &Patterns::from(Pattern::all()))
 		.unwrap()
-		.announced();
+		.routes();
 	let lazy = Lazy::with("moq-lite-07-wip", subscriber).await;
 	assert_eq!(synced(&mut watch).await, ["y"]);
 	assert_eq!(lazy.requests(), 1);
@@ -283,12 +283,12 @@ async fn waiting_on_a_path_asks_about_it() {
 		kio::clock::timeout(SETTLE, consumer.follow("a/x", None).unwrap().available())
 			.await
 			.expect("routed in time")
-			.unwrap();
+			.unwrap().unwrap();
 		let mut followed = consumer.follow("b/y", None).unwrap();
 		kio::clock::timeout(SETTLE, followed.available())
 			.await
 			.expect("announced in time")
-			.unwrap();
+			.unwrap().unwrap();
 		assert_eq!(lazy.requests(), 2, "{version}");
 	}
 }
@@ -416,19 +416,19 @@ const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 /// Apply what `announced` reports once everything in flight has arrived to `held`, and
 /// say whether any of it ended a prefix.
-async fn settled(announced: &mut announce::Consumer, held: &mut Vec<String>) -> bool {
+async fn settled(announced: &mut origin::Routes, held: &mut Vec<String>) -> bool {
 	kio::clock::sleep(SETTLE).await;
 	let mut ended = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			announce::Event::Start(announce)
-			| announce::Event::Restart(announce)
-			| announce::Event::Takeover { announce, .. } => held.push(announce.prefix.to_string()),
-			announce::Event::End(announce) => {
+			origin::RouteEvent::Start(announce)
+			| origin::RouteEvent::Restart(announce)
+			| origin::RouteEvent::Takeover { announce, .. } => held.push(announce.prefix.to_string()),
+			origin::RouteEvent::End(announce) => {
 				ended = true;
 				held.retain(|prefix| *prefix != announce.prefix.as_str())
 			}
-			announce::Event::Update(_) => {}
+			origin::RouteEvent::Update(_) => {}
 		}
 	}
 	held.sort();
@@ -526,7 +526,7 @@ async fn ietf_waiting_on_a_path_asks_about_it() {
 		kio::clock::timeout(SETTLE, consumer.follow("a/x", None).unwrap().available())
 			.await
 			.expect("routed in time")
-			.unwrap();
+			.unwrap().unwrap();
 		assert!(!lazy.routes("b/y").await, "{version}");
 	}
 }

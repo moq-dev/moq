@@ -43,7 +43,7 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.unwrap()
-		.unwrap();
+		.unwrap().unwrap();
 
 	{
 		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track("audio").unwrap().subscribe(None))
