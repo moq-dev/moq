@@ -3,26 +3,26 @@
 ```ts
 import { $strict } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
-import { ZodMiniArray } from "@zod/mini";
-import { ZodMiniBoolean } from "@zod/mini";
-import { ZodMiniCatch } from "@zod/mini";
-import { ZodMiniDefault } from "@zod/mini";
-import { ZodMiniDiscriminatedUnion } from "@zod/mini";
-import { ZodMiniEnum } from "@zod/mini";
-import { ZodMiniInt } from "@zod/mini";
-import { ZodMiniLiteral } from "@zod/mini";
-import { ZodMiniNever } from "@zod/mini";
-import { ZodMiniNumber } from "@zod/mini";
-import { ZodMiniObject } from "@zod/mini";
-import { ZodMiniOptional } from "@zod/mini";
-import { ZodMiniPipe } from "@zod/mini";
-import { ZodMiniRecord } from "@zod/mini";
-import { ZodMiniString } from "@zod/mini";
-import { ZodMiniTransform } from "@zod/mini";
-import { ZodMiniUnion } from "@zod/mini";
-import { ZodMiniUnknown } from "@zod/mini";
-import { infer } from "@zod/mini";
-import { output } from "@zod/mini";
+import { ZodMiniArray } from "zod/mini";
+import { ZodMiniBoolean } from "zod/mini";
+import { ZodMiniCatch } from "zod/mini";
+import { ZodMiniDefault } from "zod/mini";
+import { ZodMiniDiscriminatedUnion } from "zod/mini";
+import { ZodMiniEnum } from "zod/mini";
+import { ZodMiniInt } from "zod/mini";
+import { ZodMiniLiteral } from "zod/mini";
+import { ZodMiniNever } from "zod/mini";
+import { ZodMiniNumber } from "zod/mini";
+import { ZodMiniObject } from "zod/mini";
+import { ZodMiniOptional } from "zod/mini";
+import { ZodMiniPipe } from "zod/mini";
+import { ZodMiniRecord } from "zod/mini";
+import { ZodMiniString } from "zod/mini";
+import { ZodMiniTransform } from "zod/mini";
+import { ZodMiniUnion } from "zod/mini";
+import { ZodMiniUnknown } from "zod/mini";
+import { infer } from "zod/mini";
+import { output } from "zod/mini";
 
 export type Algorithm = infer<typeof AlgorithmSchema>;
 
@@ -674,6 +674,7 @@ export type Request = infer<typeof RequestSchema>;
 
 export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	auth: ZodMiniOptional<ZodMiniString<string>>;
 	event: ZodMiniLiteral<"connect">;
 	id: ZodMiniString<string>;
 	implementation: ZodMiniOptional<ZodMiniString<string>>;
@@ -712,6 +713,46 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>>;
 }, $strip>, ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	auth: ZodMiniString<string>;
+	event: ZodMiniLiteral<"attach">;
+	id: ZodMiniString<string>;
+	implementation: ZodMiniOptional<ZodMiniString<string>>;
+	local: ZodMiniOptional<ZodMiniString<string>>;
+	node: ZodMiniString<string>;
+	path: ZodMiniString<string>;
+	query: ZodMiniOptional<ZodMiniString<string>>;
+	remote: ZodMiniOptional<ZodMiniString<string>>;
+	role: ZodMiniOptional<ZodMiniEnum<{
+		publisher: "publisher";
+		subscriber: "subscriber";
+	}>>;
+	server_name: ZodMiniOptional<ZodMiniString<string>>;
+	tls: ZodMiniOptional<ZodMiniObject<{
+		expires: ZodMiniOptional<ZodMiniInt>;
+		fingerprint: ZodMiniString<string>;
+		issuer: ZodMiniString<string>;
+		name: ZodMiniString<string>;
+	}, $strip>>;
+	token: ZodMiniOptional<ZodMiniObject<{
+		kind: ZodMiniInt;
+		value: ZodMiniString<string>;
+	}, $strip>>;
+	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
+		http: "http";
+		iroh: "iroh";
+		quic: "quic";
+		rtmp: "rtmp";
+		srt: "srt";
+		tcp: "tcp";
+		unix: "unix";
+		unknown: "unknown";
+		webrtc: "webrtc";
+		websocket: "websocket";
+		webtransport: "webtransport";
+	}>>>;
+}, $strip>, ZodMiniObject<{
+	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	auth: ZodMiniOptional<ZodMiniString<string>>;
 	event: ZodMiniLiteral<"revalidate">;
 	id: ZodMiniString<string>;
 	implementation: ZodMiniOptional<ZodMiniString<string>>;
@@ -750,6 +791,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>>;
 }, $strip>, ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	auth: ZodMiniOptional<ZodMiniString<string>>;
 	bytes: ZodMiniObject<{
 		received: ZodMiniInt;
 		sent: ZodMiniInt;

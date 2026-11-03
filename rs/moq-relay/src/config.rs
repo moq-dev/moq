@@ -137,12 +137,6 @@ pub struct Config {
 	#[usage(skip)]
 	#[serde(skip)]
 	origins: Option<usage_rs::config::Resolved>,
-
-	/// Iroh specific configuration, used for both a client and server.
-	#[usage(flatten)]
-	#[serde(default)]
-	#[cfg(feature = "iroh")]
-	pub iroh: moq_tokio::iroh::Config,
 }
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
@@ -286,19 +280,6 @@ impl Config {
 			"MOQ_STUN_BIND requires a moq-relay build with the stun feature"
 		);
 
-		#[cfg(not(feature = "iroh"))]
-		for name in [
-			"MOQ_IROH_ENABLED",
-			"MOQ_IROH_SECRET",
-			"MOQ_IROH_BIND_V4",
-			"MOQ_IROH_BIND_V6",
-			"MOQ_IROH_DISABLE_RELAY",
-		] {
-			anyhow::ensure!(
-				env.get(name).is_none(),
-				"{name} requires a moq-relay build with the iroh feature"
-			);
-		}
 		let mut deprecated = self.deprecated();
 		let (merged, resolved) = moq_tokio::cli::Merge {
 			registry: crate::settings(),
@@ -630,31 +611,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(not(feature = "iroh"))]
-	#[test]
-	fn iroh_environment_requires_the_feature() {
-		for name in [
-			"MOQ_IROH_ENABLED",
-			"MOQ_IROH_SECRET",
-			"MOQ_IROH_BIND_V4",
-			"MOQ_IROH_BIND_V6",
-			"MOQ_IROH_DISABLE_RELAY",
-		] {
-			let mut config = Config::default();
-			let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
-			let env = usage_rs::config::EnvLayer::new([(name.to_string(), "false".to_string())]);
-			let error = config.merge_into(&cli, &env, None).unwrap_err();
-			assert!(error.to_string().contains(name), "{error}");
-		}
-	}
-
-	#[cfg(not(feature = "iroh"))]
-	#[test]
-	fn iroh_file_and_flags_require_the_feature() {
-		assert!(Cli::parse_from(&[std::ffi::OsStr::new("--iroh-enabled")]).is_err());
-		assert!(toml::from_str::<Config>("[iroh]\nenabled = false").is_err());
-	}
-
 	#[test]
 	fn packaged_service_arguments() {
 		let unit = include_str!("../../../packaging/moq-relay/moq-relay.service");
@@ -946,7 +902,7 @@ root = ["ca.pem"]
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.stats.enabled);
-		let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster");
+		let cluster = cluster::Cluster::spawn(cluster::Options::default()).expect("cluster");
 		let _ = config.stats.build(cluster.origin.clone()).expect("stats build");
 	}
 

@@ -11,13 +11,13 @@ import {
 	connect as connectSession,
 	type Established,
 } from "./connection/index.ts";
-import * as Epoch from "./epoch.ts";
-import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
 import { refuse as refuseRequest } from "./ietf/request_stream.ts";
 import { SubscribeTracks } from "./ietf/subscribe_tracks.ts";
+import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
@@ -88,9 +88,9 @@ afterEach(() => mock.restore());
 async function routed(origin: OriginConsumer, path: Path.Valid): Promise<BroadcastConsumer | undefined> {
 	const request = origin.request(path);
 	await yieldNow();
-	const front = request.active.peek()?.clone();
-	request.close();
-	return front;
+	// The handle is the request's logical front, which ends with the request, so the request
+	// stays open for the test.
+	return request.active.peek()?.clone();
 }
 
 async function runPublishSubscribeFlow(protocol: string, version?: number) {
@@ -196,7 +196,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.groups?.start?.included === 1) resolveProducer?.(producer);
+				if (subscription?.ranges?.[0]?.start?.absolute === 1) resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -207,28 +207,29 @@ test("integration: lite subscription options and updates reach the publisher", a
 	// A floor of group 1, a concrete group on every draft.
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
-		maxDelay: Milli(250),
-		groups: { start: { included: 1 }, end: { excluded: 9 } },
+		delay: { max: Milli(250) },
+		ranges: [{ start: { absolute: 1 }, end: { absolute: 9 } }],
 	});
 	const producer = await accepted;
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
-		maxDelay: Milli(250),
+		// The negotiated lite-06 cannot state a minimum.
+		delay: { min: null, max: Milli(250) },
 		order: "descending",
-		groups: { start: { included: 1 }, end: { excluded: 9 } },
+		ranges: [{ start: { absolute: 1 }, end: { absolute: 9 } }],
 	});
 
 	const updated = producer.subscription.changed();
 	subscriber.update({
 		priority: 8,
-		maxDelay: Milli(500),
-		groups: { start: { included: 2 }, end: { excluded: 12 } },
+		delay: { max: Milli(500) },
+		ranges: [{ start: { absolute: 2 }, end: { absolute: 12 } }],
 	});
 	expect(await updated).toEqual({
 		priority: 8,
-		maxDelay: Milli(500),
+		delay: { min: null, max: Milli(500) },
 		order: "descending",
-		groups: { start: { included: 2 }, end: { excluded: 12 } },
+		ranges: [{ start: { absolute: 2 }, end: { absolute: 12 } }],
 	});
 
 	subscriber.close();
@@ -256,14 +257,14 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age 
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ maxDelay: Milli(250) });
+	const subscriber = remote.track("video").subscribe({ delay: { max: Milli(250) } });
 	const producer = await accepted;
 	// Without the negotiated parameter the publisher keeps its whole backlog instead.
-	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(250));
+	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(250));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ maxDelay: Milli(500) });
-	expect((await updated)?.maxDelay).toBe(Milli(500));
+	subscriber.update({ delay: { max: Milli(500) } });
+	expect((await updated)?.delay?.max).toBe(Milli(500));
 
 	subscriber.close();
 	remote.close();
@@ -273,7 +274,7 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age 
 	server.abort();
 });
 
-test("integration: lite carries a fractional maxDelay as a whole millisecond", async () => {
+test("integration: lite carries a fractional delay as a whole millisecond", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -294,7 +295,7 @@ test("integration: lite carries a fractional maxDelay as a whole millisecond", a
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.groups?.start?.included === 1) resolveProducer?.(producer);
+				if (subscription?.ranges?.[0]?.start?.absolute === 1) resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -304,7 +305,9 @@ test("integration: lite carries a fractional maxDelay as a whole millisecond", a
 	const remote = wireOf(client).consume(Path.from("test"));
 	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
 	// nothing resubscribes. The publisher must see the budget rounded up instead.
-	const subscriber = remote.track("video").subscribe({ maxDelay: Milli(38.75), groups: { start: { included: 1 } } });
+	const subscriber = remote
+		.track("video")
+		.subscribe({ delay: { max: Milli(38.75) }, ranges: [{ start: { absolute: 1 } }] });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -313,11 +316,11 @@ test("integration: lite carries a fractional maxDelay as a whole millisecond", a
 	});
 
 	const producer = await Promise.race([accepted, failed]);
-	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(39));
+	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(39));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ maxDelay: Milli(500.25), groups: { start: { included: 1 } } });
-	expect((await Promise.race([updated, failed]))?.maxDelay).toBe(Milli(501));
+	subscriber.update({ delay: { max: Milli(500.25) }, ranges: [{ start: { absolute: 1 } }] });
+	expect((await Promise.race([updated, failed]))?.delay?.max).toBe(Milli(501));
 
 	subscriber.close();
 	remote.close();
@@ -353,28 +356,36 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const subscriber = remote
 		.track("video")
 		.subscribe({
-			maxDelay: Milli(REPLAY_LATENCY_MS),
-			groups: { start: { included: INITIAL_START_GROUP }, end: { excluded: INITIAL_END_GROUP } },
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			ranges: [{ start: { absolute: INITIAL_START_GROUP }, end: { absolute: INITIAL_END_GROUP } }],
 		})
 		.ordered();
 	try {
 		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_START_GROUP);
 		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP - 1);
 
-		const pending = subscriber.nextGroup();
-		expect(await Promise.race([pending, sleepMs(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
+		// A bounded read ends once its window is read, as in Rust.
+		expect(await subscriber.nextGroup()).toBeUndefined();
 
+		// Replacing the ranges reads on from the same reader, the update going upstream.
 		subscriber.update({
-			maxDelay: Milli(REPLAY_LATENCY_MS),
-			groups: { start: { included: UPDATED_GROUP }, end: { excluded: UPDATED_END_GROUP } },
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			ranges: [{ start: { absolute: UPDATED_GROUP }, end: { absolute: UPDATED_END_GROUP } }],
 		});
-		expect(
-			(await withTimeout(pending, Nano.fromMilli(Milli(UPDATE_TIMEOUT_MS)), "updated group bound timed out"))
-				?.sequence,
-		).toBe(UPDATED_GROUP);
+		const updated = (pending: Promise<unknown>) =>
+			withTimeout(pending, Nano.fromMilli(Milli(UPDATE_TIMEOUT_MS)), "updated group bound timed out");
+		expect(((await updated(subscriber.nextGroup())) as { sequence: number } | undefined)?.sequence).toBe(
+			UPDATED_GROUP,
+		);
+		expect(await updated(subscriber.nextGroup())).toBeUndefined();
 
-		const capped = subscriber.nextGroup();
-		expect(await Promise.race([capped, sleepMs(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
+		// An open range parks at the live edge instead.
+		subscriber.update({
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			ranges: [{ start: { absolute: GROUP_COUNT } }],
+		});
+		const live = subscriber.nextGroup();
+		expect(await Promise.race([live, sleepMs(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
 	} finally {
 		subscriber.close();
 		remote.close();
@@ -403,32 +414,182 @@ test("integration: lite refuses an empty requested range on open and on update",
 	const remote = wireOf(client).consume(Path.from("test"));
 	const video = remote.track("video");
 	try {
-		// Bounds that meet cannot go on the wire: the nearest encoding inverts the range.
+		// Bounds that meet cannot go on the wire: the nearest encoding inverts the range. The read
+		// of an empty window ends at once, and the copy is refused.
 		const empty = video.subscribe({
-			maxDelay: Milli(REPLAY_LATENCY_MS),
-			groups: { start: { included: 2 }, end: { excluded: 2 } },
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			ranges: [{ start: { absolute: 2 }, end: { absolute: 2 } }],
 		});
-		await expect(
-			withTimeout(empty.recvGroup(), Nano.fromMilli(Milli(TIMEOUT_MS)), "empty open never settled"),
-		).rejects.toThrow("empty subscription range cannot be encoded");
+		expect(await empty.recvGroup()).toBeUndefined();
+		expect(
+			await withTimeout(
+				Promise.resolve(empty.closed),
+				Nano.fromMilli(Milli(TIMEOUT_MS)),
+				"empty open never settled",
+			),
+		).toHaveProperty("message", "empty subscription range cannot be encoded");
 		empty.close();
 
 		// A live subscription whose demand later collapses to nothing fails the same way.
 		const live = video
 			.subscribe({
-				maxDelay: Milli(REPLAY_LATENCY_MS),
-				groups: { start: { included: 1 }, end: { excluded: 2 } },
+				delay: { max: Milli(REPLAY_LATENCY_MS) },
+				ranges: [{ start: { absolute: 1 }, end: { absolute: 2 } }],
 			})
 			.ordered();
 		expect((await live.nextGroup())?.sequence).toBe(1);
 		live.update({
-			maxDelay: Milli(REPLAY_LATENCY_MS),
-			groups: { start: { included: 3 }, end: { excluded: 3 } },
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
+			ranges: [{ start: { absolute: 3 }, end: { absolute: 3 } }],
 		});
-		await expect(
-			withTimeout(live.nextGroup(), Nano.fromMilli(Milli(TIMEOUT_MS)), "empty update never settled"),
-		).rejects.toThrow("empty subscription range cannot be encoded");
+		expect(await live.nextGroup()).toBeUndefined();
+		expect(
+			await withTimeout(
+				Promise.resolve(live.closed),
+				Nano.fromMilli(Milli(TIMEOUT_MS)),
+				"empty update never settled",
+			),
+		).toHaveProperty("message", "empty subscription range cannot be encoded");
 		live.close();
+	} finally {
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
+// Lite-07 carries every range, so a sparse request counting back from the latest group delivers
+// just its groups, and the publisher ends it once they are accounted for.
+test("integration: lite-07 serves sparse and relative ranges", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	for (let sequence = 0; sequence < 10; sequence++) producer.appendGroup().finish();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	try {
+		const reader = remote
+			.track("video")
+			.subscribe({
+				delay: { max: null },
+				order: "ascending",
+				ranges: [
+					{ start: { absolute: 1 }, end: { absolute: 3 } },
+					{ start: { relative: 2 }, end: { absolute: 9 } },
+				],
+			})
+			.ordered();
+		// Covering the ranges ends the subscription upstream, and the read with its window.
+		const got: number[] = [];
+		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1);
+		expect(got).toEqual([1, 2, 7, 8]);
+		expect(await reader.nextGroup()).toBeUndefined();
+		reader.close();
+	} finally {
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
+// A lite-07 publisher ends a bounded subscription once it covered the range, releasing its
+// demand, and the subscriber keeps the copy: the read ends with its window, the same range reads
+// again from the cache, and a wider one subscribes again for the rest. Mirrors the Rust
+// `a_covered_bounded_subscription_ends_on_lite07`; reads end as Rust's do since moq-dev/moq#7545.
+test("integration: lite-07 keeps a covered bounded subscription's copy", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	for (const sequence of [0, 1, 2, 4, 5]) producer.createGroup(sequence).finish();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const bounded = (end: number) =>
+		remote.track("video").subscribe({
+			delay: { max: Milli(60_000) },
+			order: "ascending",
+			ranges: [{ start: { absolute: 1 }, end: { absolute: end } }],
+		});
+	// Arrival reads, as the Rust test's: an ordered one would wait out the missing group 3.
+	const read = async (reader: ReturnType<typeof bounded>, count: number) => {
+		const got: number[] = [];
+		for (let i = 0; i < count; i++) got.push((await reader.recvGroup())?.sequence ?? -1);
+		return got;
+	};
+	try {
+		const reader = bounded(3);
+		expect(await read(reader, 2)).toEqual([1, 2]);
+		// The publisher's demand ends with the covered subscription, and the read with its window.
+		while (producer.subscription.peek() !== undefined) await producer.subscription.changed();
+		expect(await reader.recvGroup()).toBeUndefined();
+
+		const again = bounded(3);
+		expect(await read(again, 2)).toEqual([1, 2]);
+		expect(producer.subscription.peek()).toBeUndefined();
+
+		const wider = bounded(6);
+		expect(await read(wider, 4)).toEqual([1, 2, 4, 5]);
+		reader.close();
+		again.close();
+		wider.close();
+	} finally {
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
+// A time range goes upstream in the track's timescale, the publisher resolves its start from
+// where its groups start, and the copy's reader resolves the end from the groups it receives.
+test("integration: lite-07 serves a time range", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MICRO });
+	for (let sequence = 0; sequence < 10; sequence++) {
+		const group = producer.appendGroup();
+		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(sequence * 1000)));
+		group.finish();
+	}
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	try {
+		const reader = remote
+			.track("video")
+			.subscribe({
+				delay: { max: null },
+				order: "ascending",
+				ranges: [{ start: { time: Timestamp.fromMillis(2500) }, end: { time: Timestamp.fromMillis(5000) } }],
+			})
+			.ordered();
+		const got: number[] = [];
+		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1);
+		expect(got).toEqual([2, 3, 4, 5]);
+		reader.close();
+
+		// An untimed track refuses it.
+		broadcast.createTrack("untimed", {});
+		const untimed = remote.track("untimed").subscribe({ ranges: [{ start: { time: Timestamp.fromMillis(0) } }] });
+		await expect(untimed.recvGroup()).rejects.toThrow(TimestampMismatch);
 	} finally {
 		remote.close();
 		broadcast.close();
@@ -961,11 +1122,11 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const origin = new OriginProducer();
 	const path = Path.from("test");
 	// One publisher instance, so the two compete on cost alone.
-	const epoch = Epoch.mint();
+	const instance = Instance.random();
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
-	localPublication.announce({ epoch, cost: 5n });
-	const dynamic = origin.requestsRoute(path, { epoch, cost: 1n });
+	localPublication.announce({ instance, cost: 5n });
+	const dynamic = origin.requestsRoute(path, { instance, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -1943,7 +2104,9 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 
 	// Nobody publishes the path yet, so a subscribe is how the caller finds out. That kills the
 	// track, not the handle: a consumed broadcast is scoped to the path, not to one publisher.
-	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow();
+	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toMatchObject({
+		code: StreamCode.NotFound,
+	});
 	expect(watched.active.peek()).toBe(blind);
 
 	// So a subscribe made after the publisher finally shows up still works, on the same handle.
@@ -2006,7 +2169,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 	if (!blind) throw new Error("expected a blind consumer");
 
 	// Rejects with 404 rather than resetting the whole handle.
-	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow();
+	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow("does_not_exist");
 	expect(watched.active.peek()).toBe(blind);
 
 	const producer = publish(origin, Path.from("later"));

@@ -10,7 +10,7 @@ use std::{
 	collections::{HashMap, HashSet, VecDeque},
 	net::{Ipv6Addr, SocketAddr},
 	num::NonZeroU64,
-	sync::Arc,
+	task::Poll,
 };
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -18,12 +18,12 @@ use bytes::{Buf, Bytes, BytesMut};
 
 use super::plaintext::{Clear, Plaintext, TAG_LEN};
 use crate::{
-	Dir, Duration, Event, Instant, Limits, Side, StreamId, client,
+	Dir, Duration, Instant, Limits, Side, StreamId,
 	connection::Connection,
 	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received},
 	frame::{self, Frame},
 	packet::{FixedLengthConnectionIdParser, PartialDecode},
-	recv, server, transport,
+	recv, transport,
 };
 
 /// The connection ID length both endpoints issue, which a captured packet needs to parse.
@@ -219,7 +219,7 @@ struct Peer {
 impl Peer {
 	fn new(side: Side, port: u16) -> Self {
 		let server = side.is_server().then(|| {
-			let mut config = server::Config::new(Arc::new(Plaintext));
+			let mut config = Plaintext::server();
 			config.transport = transport();
 			config
 		});
@@ -323,7 +323,7 @@ impl Pair {
 			capture: None,
 		};
 
-		let mut config = client::Config::new(Arc::new(Plaintext));
+		let mut config = Plaintext::client();
 		config.transport = transport();
 		let (ch, conn) = pair
 			.client
@@ -484,7 +484,7 @@ impl Pair {
 					conn.handle_event(event);
 				}
 			}
-			while let Some(transmit) = conn.poll_transmit(now, MAX_DATAGRAMS, &mut buf) {
+			while let Some(transmit) = conn.transmit(now, MAX_DATAGRAMS, &mut buf) {
 				progress = true;
 				send(
 					&mut other.inbound,
@@ -499,20 +499,15 @@ impl Pair {
 			}
 		}
 
-		while let Some(event) = conn.poll() {
-			match event {
-				Event::Connected => peer.connected = true,
-				Event::DatagramReceived => {
-					while let Some(datagram) = conn.datagrams().recv() {
-						if peer.forged_datagrams.contains(&datagram) {
-							continue;
-						}
-						let seq = check_datagram(&datagram, &other.datagrams_sent);
-						assert!(peer.datagrams_received.insert(seq), "datagram {seq} delivered twice");
-					}
-				}
-				_ => {}
+		// Nothing waits between polls, so each wait is only asked for its answer as it stands.
+		let waiter = kio::Waiter::noop();
+		peer.connected |= conn.poll_connected(&waiter) == Poll::Ready(Ok(()));
+		while let Poll::Ready(Ok(datagram)) = conn.datagrams().poll_recv(&waiter) {
+			if peer.forged_datagrams.contains(&datagram) {
+				continue;
 			}
+			let seq = check_datagram(&datagram, &other.datagrams_sent);
+			assert!(peer.datagrams_received.insert(seq), "datagram {seq} delivered twice");
 		}
 	}
 

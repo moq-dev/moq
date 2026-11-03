@@ -494,6 +494,11 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		moq_net::transport::MIN_RECEIVE_WINDOW
 	);
 
+	anyhow::ensure!(
+		!quic.has_controller(),
+		"the io_uring runtime cannot run a custom congestion controller; drop quic.controller or use the tokio runtime"
+	);
+
 	let mut transport = moq_uring::quic::transport::Config::default();
 	#[cfg(feature = "qlog")]
 	if let Some(dir) = quic.qlog.as_deref() {
@@ -739,13 +744,7 @@ async fn serve_connection(
 	let sni = conn.server_name().map(str::to_owned);
 	// TLS validated this against the configured roots before the connection
 	// existed, so a chain here is an authenticated peer.
-	let identity = conn.peer_chain().map(|chain| {
-		let chain = chain
-			.into_iter()
-			.map(moq_tokio::rustls::pki_types::CertificateDer::from)
-			.collect();
-		moq_tokio::tls::PeerIdentity::from_chain(chain)
-	});
+	let identity = conn.peer_identity().map(moq_tokio::tls::PeerIdentity::from_chain);
 
 	// Browsers speak WebTransport; everyone else raw QUIC. The moq version
 	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`.
@@ -1079,7 +1078,7 @@ mod tests {
 		set.send_window = Some(32 << 20);
 
 		for (quic, expected) in [
-			(moq_tokio::quic::Config::default(), (128 << 20, 4 << 20, 16 << 20)),
+			(moq_tokio::quic::Config::default(), (4 << 20, 1 << 20, 4 << 20)),
 			(set, (256 << 20, 8 << 20, 32 << 20)),
 		] {
 			let resolved = quic.resolve();
@@ -1137,7 +1136,7 @@ mod tests {
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
 		let workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
-		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 		let workers = workers
 			.spawn(
 				cluster,
@@ -1183,7 +1182,9 @@ mod tests {
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().unwrap();
 		let trigger = relay.shutdown_trigger().clone();
+		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);
@@ -1241,7 +1242,9 @@ mod tests {
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().unwrap();
 		let trigger = relay.shutdown_trigger().clone();
+		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);

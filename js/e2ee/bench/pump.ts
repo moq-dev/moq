@@ -29,7 +29,7 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 			});
 			const consumer = credential
 				.consume(generation.epoch)
-				.consume(net.subscribe({ maxDelay: Milli(60_000) }), "video");
+				.consume(net.subscribe({ delay: { max: Milli(60_000) } }), "video");
 			const producer = await generation.produce(net, "video");
 
 			const sealStart = performance.now();

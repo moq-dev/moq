@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { Producer } from "./group.ts";
 import { textFrame } from "./mock.ts";
 import * as Zod from "./zod.ts";

@@ -9,7 +9,7 @@ import { VarInt } from "./varint.ts";
 //   1. The current decoder parses them into the expected Frame value.
 //   2. The current encoder produces the same bytes from the same Frame value.
 //
-// Mirrors `rs/qmux/tests/wire_format.rs` — the Rust and TS implementations must
+// Mirrors `rs/qmux/tests/wire_format.rs` - the Rust and TS implementations must
 // agree on the bytes, otherwise the JS polyfill can't interop with Rust peers.
 
 function bytes(...arr: number[]): Uint8Array {
@@ -97,7 +97,7 @@ describe("QMux draft-00 wire format", () => {
 	});
 
 	test("application_close", () => {
-		// 0x1d + code(=42) + reason_len(=3) + "bye". No Frame Type field — RFC 9000
+		// 0x1d + code(=42) + reason_len(=3) + "bye". No Frame Type field - RFC 9000
 		// §19.19 omits it for the application variant.
 		const wire = bytes(0x1d, 0x2a, 0x03, 0x62, 0x79, 0x65);
 		const frame: Frame.ApplicationClose = {
@@ -114,7 +114,7 @@ describe("QMux draft-00 wire format", () => {
 	});
 
 	test("connection_close (transport, 0x1c)", () => {
-		// 0x1c + code(=42) + frame_type(=0) + reason_len(=3) + "bye" — a transport
+		// 0x1c + code(=42) + frame_type(=0) + reason_len(=3) + "bye" - a transport
 		// error / protocol violation. The transport variant carries the Frame Type.
 		const wire = bytes(0x1c, 0x2a, 0x00, 0x03, 0x62, 0x79, 0x65);
 		const frame: Frame.ConnectionClose = {
@@ -140,7 +140,7 @@ describe("QMux draft-00 wire format", () => {
 		// `maxRecordSize` is seeded from DEFAULT_TRANSPORT_PARAMS on decode (16382), per draft-01.
 		expect(decoded.params.maxRecordSize).toBe(Frame.DEFAULT_MAX_RECORD_SIZE);
 
-		// Re-encoding must round-trip. Clear maxRecordSize so the encoder skips it —
+		// Re-encoding must round-trip. Clear maxRecordSize so the encoder skips it -
 		// a peer that didn't send the parameter wouldn't have it set, and the encoder
 		// only writes non-zero params.
 		const frame: Frame.TransportParameters = {

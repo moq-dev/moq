@@ -65,8 +65,7 @@ or ordering that suits only some rates.
   without one behaves as today. The same estimate of forward delay applies:
   drop one that can't arrive before its deadline.
 - moq-net: the datagram writer sets the deadline from the subscription's
-  max delay (`Delay::max` once [subscription delay](/quest/m1/subscription-delay.md)
-  renames it), through the same `transport::poll` seam as the stream
+  max delay (`Delay::max`), through the same `transport::poll` seam as the stream
   deadline; a backend without it sends as today.
 - Keep newest-first within a subscription; with stale datagrams expiring,
   it no longer starves the fresh ones.

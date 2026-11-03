@@ -146,8 +146,8 @@ try {
 			// `late` names no start, joining the latest group as a player does: group 0, whose
 			// head predates the subscription.
 			const track = broadcast.track("tail").subscribe({
-				maxDelay: Milli(drop ? 60_000 : 5000),
-				...(late ? {} : { groups: { start: { included: 0 } } }),
+				delay: { max: Milli(drop ? 60_000 : 5000) },
+				...(late ? {} : { ranges: [{ start: { absolute: 0 } }] }),
 			});
 			if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
 			const seen: number[] = [];

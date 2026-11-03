@@ -41,25 +41,16 @@ use tokio_util::sync::CancellationToken;
 #[global_allocator]
 static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jemalloc::tikv_jemallocator::Jemalloc;
 
-/// Everything needed to build MoQ clients/servers, encapsulating the optional
-/// iroh endpoint so the rest of the code is feature-agnostic.
+/// Everything needed to build MoQ clients/servers.
 #[derive(Clone)]
 struct Net {
 	/// The shared QUIC tuning, handed to whichever roles this process builds.
 	quic: moq_tokio::quic::Config,
-	#[cfg(feature = "iroh")]
-	iroh: Option<moq_tokio::iroh::Endpoint>,
 }
 
 impl Net {
 	fn client(&self, config: moq_tokio::connect::Config) -> anyhow::Result<moq_tokio::Client> {
-		let client = config.init(self.quic.clone())?;
-		#[cfg(feature = "iroh")]
-		let client = match self.iroh.clone() {
-			Some(iroh) => client.with_iroh(iroh),
-			None => client,
-		};
-		Ok(client)
+		Ok(config.init(self.quic.clone())?)
 	}
 
 	fn server(
@@ -71,10 +62,6 @@ impl Net {
 		server.listen = config;
 		server.activity = activity;
 		server.quic = self.quic.clone();
-		#[cfg(feature = "iroh")]
-		{
-			server.iroh = self.iroh.clone();
-		}
 		Ok(server.init()?)
 	}
 }
@@ -393,8 +380,6 @@ async fn run() -> anyhow::Result<()> {
 
 	let net = Net {
 		quic: cli.moq.quic.clone(),
-		#[cfg(feature = "iroh")]
-		iroh: cli.moq.iroh.clone().bind(&cli.moq.quic).await?,
 	};
 
 	#[cfg(feature = "jemalloc")]
@@ -482,11 +467,6 @@ async fn spawn_moq(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Attached> {
 	let cluster = cluster.with_connect(moq.client.clone(), moq.quic.clone());
-	#[cfg(feature = "iroh")]
-	let cluster = match net.iroh.clone() {
-		Some(iroh) => cluster.with_iroh(iroh),
-		None => cluster,
-	};
 	let origin = cluster.origin.clone();
 
 	// Built only to dial `--connect`: the cluster binds its own client from the
@@ -499,7 +479,7 @@ async fn spawn_moq(
 	};
 
 	let (started, shutdown) = spawn_server(tasks, moq, &cluster, net, directions).await?;
-	// Even standalone: it is what reports a panic in the origin driver.
+	// Even standalone: it is what reports a panic in a critical task.
 	tasks.spawn(async move { started.run().await });
 
 	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
@@ -557,9 +537,10 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 	// Before anything dials: a codec we can't decode is a blank window otherwise.
 	args.validate()?;
 
-	let cluster = moq.cluster()?;
+	let (cluster, driver) = moq.cluster()?;
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+	tasks.spawn(driver.run());
 
 	let directions = Directions {
 		consume: true,
@@ -584,8 +565,9 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 /// and the first endpoint to finish ends the process. A shutdown signal keeps
 /// accepted sessions serving through the configured drain window.
 async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Result<()> {
-	let cluster = moq.cluster()?;
+	let (cluster, driver) = moq.cluster()?;
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+	tasks.spawn(driver.run());
 	// The stdin/capture pipelines run on this thread instead of the JoinSet: the
 	// platform capture stream is not Send, so their futures cannot be spawned.
 	let mut locals: Vec<Publish> = Vec::new();
@@ -621,8 +603,8 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		let mut stdout = None;
 
 		// Each run publishes its own content and therefore mints its own instance.
-		let epoch = moq_net::Epoch::mint();
-		tracing::info!(%epoch, "publisher instance");
+		let instance = moq_net::Instance::random();
+		tracing::info!(%instance, "publisher instance");
 
 		for stage in stages {
 			let name = stage.broadcast(&moq);
@@ -639,7 +621,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 						.transpose()?
 						.map(hang::catalog::Echo::new);
 					if let Some(mut publish) =
-						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
+						spawn_import(&origin, import, name, instance.clone(), bandwidth.clone(), &mut tasks)?
 					{
 						// Before `run` declares a track, so the `stats` and `echo` sections ride the
 						// first catalog.
@@ -753,7 +735,7 @@ fn display_name(name: &str) -> &str {
 
 /// Route one stage's source INTO the shared Origin, exposing it to the MoQ network.
 ///
-/// The sources announced once per run take `epoch`; the ingest gateways and
+/// The sources announced once per run take `instance`; the ingest gateways and
 /// `ts --program all` mint their own per connection or program.
 ///
 /// Returns the pipeline that has to run on the caller's thread, for the sources
@@ -762,7 +744,7 @@ fn spawn_import(
 	origin: &moq_net::origin::Producer,
 	import: Import,
 	name: String,
-	epoch: moq_net::Epoch,
+	instance: moq_net::Instance,
 	bandwidth: moq_net::bandwidth::Allocator,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
@@ -802,13 +784,13 @@ fn spawn_import(
 			Publish::stdin(origin, &name, &format, config)?
 		}
 		.with_linger(linger);
-		publish.announce(epoch)?;
+		publish.announce(instance)?;
 		local = Some(publish);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
-				tasks.spawn(hls::import(target(name), hls, epoch));
+				tasks.spawn(hls::import(target(name), hls, instance));
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
@@ -844,20 +826,20 @@ fn spawn_import(
 						},
 					));
 				} else if let Some(url) = rtc.connect {
-					tasks.spawn(rtc::connect_import(target(name), url, epoch));
+					tasks.spawn(rtc::connect_import(target(name), url, instance));
 				}
 			}
 			ImportSource::Archive(args) => {
 				// A replay serves the retention the recording was made with.
 				anyhow::ensure!(max_age.is_none(), "`--max-age` does not apply to `import archive`");
-				tasks.spawn(archive::import(origin.clone(), name, args, epoch));
+				tasks.spawn(archive::import(origin.clone(), name, args, instance));
 			}
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
 				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 				let mut publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
-				publish.announce(epoch)?;
+				publish.announce(instance)?;
 				local = Some(publish);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
@@ -1298,7 +1280,8 @@ mod tests {
 				.unwrap();
 				let listener = cli.moq.server_config().init_streams().unwrap().listen().await.unwrap();
 				let addr = listener.tcp_local_addr().unwrap();
-				let cluster = moq_relay::cluster::Cluster::new(Default::default()).unwrap();
+				let (cluster, driver) = moq_relay::cluster::Cluster::new(Default::default()).unwrap();
+				tokio::spawn(driver.run());
 				let broadcast = cluster.origin.create_broadcast("probe").unwrap();
 				broadcast.announce(Default::default()).unwrap();
 				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
@@ -1565,11 +1548,10 @@ mod tests {
 			"ts",
 		])
 		.expect("parse");
-		let cluster = invocation.moq.cluster().expect("create cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("create cluster");
+		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		};
 		let mut tasks = JoinSet::new();
 		let directions = Directions {
@@ -1589,11 +1571,10 @@ mod tests {
 	async fn a_listener_without_auth_stops_startup() {
 		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"])
 			.expect("parse TCP-only invocation");
-		let cluster = invocation.moq.cluster().expect("create cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("create cluster");
+		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		};
 		let mut tasks = JoinSet::new();
 
@@ -1629,11 +1610,10 @@ mod tests {
 			"ts",
 		])
 		.expect("parse TCP-only invocation");
-		let cluster = invocation.moq.cluster().expect("create cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("create cluster");
+		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		};
 		let mut tasks = JoinSet::new();
 
@@ -1670,7 +1650,8 @@ mod tests {
 			Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])
 				.expect("parse");
 		assert!(invocation.moq.validate().is_ok());
-		let cluster = invocation.moq.cluster().expect("cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("cluster");
+		tokio::spawn(driver.run());
 		let err = cluster
 			.clone()
 			.start()
@@ -1707,11 +1688,10 @@ mod tests {
 		])
 		.expect("parse");
 		invocation.moq.validate().expect("validate");
-		let cluster = invocation.moq.cluster().expect("cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("cluster");
+		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		};
 		let mut tasks = JoinSet::new();
 		let attached = spawn_moq(

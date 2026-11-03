@@ -158,6 +158,12 @@ pub(crate) fn sei(rbsp: &[u8]) -> Hdr {
 const AV1_METADATA_HDR_CLL: u64 = 1;
 const AV1_METADATA_HDR_MDCV: u64 = 2;
 
+/// The type of the HDR metadata an AV1 metadata OBU's payload carries, if [`av1_metadata`] reads it.
+pub(crate) fn av1_hdr_type(payload: &[u8]) -> Option<u64> {
+	let mut buf = payload;
+	leb128(&mut buf).filter(|kind| matches!(*kind, AV1_METADATA_HDR_CLL | AV1_METADATA_HDR_MDCV))
+}
+
 /// The HDR metadata in an AV1 metadata OBU's payload (AV1 5.8.1, 6.7.3 and 6.7.4): content light
 /// levels, or a mastering display whose chromaticities are 0.16 fixed point and whose luminances
 /// are 24.8 (max) and 18.14 (min) fixed point. Anything else, or a short payload, is ignored.

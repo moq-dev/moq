@@ -1,7 +1,7 @@
 [workspace]
 # Keep source-only members discoverable in Maturin's dependency-pruned archive,
 # including the separately packaged UniFFI generator.
-members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
+members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-mux/fuzz", "rs/moq-net/fuzz", "rs/moq-quic/fuzz", "rs/moq-rtmp/fuzz"]
 default-members = [
     "rs/bench-harness",
     "rs/kio",
@@ -35,13 +35,11 @@ default-members = [
     "rs/moq-rtc",
     "rs/moq-rtmp",
     "rs/moq-rtsp",
-    "rs/moq-scene",
     "rs/moq-shaper",
     "rs/moq-sign",
     "rs/moq-sock",
     "rs/moq-srt",
     "rs/moq-stats",
-    "rs/moq-studio",
     "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-uring",
@@ -57,7 +55,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-# Floor for the library surface: iroh 1.0 (via moq-tokio) needs 1.91. This is
+# Floor for the library surface: usage-rs 7.1 (via moq-tokio) needs 1.91. This is
 # what consumers of moq-net / hang / moq-tokio / etc. see. moq-relay overrides
 # it to 1.95 (sysinfo 0.39), and moq-cli does too because it depends on that
 # library. Those crates are applications; the point of the per-crate override
@@ -150,7 +148,6 @@ moq-relay = { version = "0.17.2", path = "rs/moq-relay", default-features = fals
 moq-rtc = { version = "0.3.12", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.3.11", path = "rs/moq-rtmp" }
 moq-rtsp = { version = "0.1.0", path = "rs/moq-rtsp" }
-moq-scene = { version = "0.1.0", path = "rs/moq-scene" }
 moq-sock = { version = "0.2.0", path = "rs/moq-sock" }
 moq-srt = { version = "0.3.11", path = "rs/moq-srt" }
 moq-stats = { version = "0.2.12", path = "rs/moq-stats" }
@@ -179,9 +176,8 @@ moq-vaapi = "0.1.0"
 # that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
+mp4-atom = "0.17.0"
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
-# Upstream noq-proto, only for iroh's controller factory types.
-noq-proto = { version = "1.2", default-features = false }
 num_enum = "0.7"
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
@@ -207,6 +203,7 @@ rcgen = { version = "0.14", default-features = false }
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }
 rind = "0.1.2"
+rind-jsonwebtoken = "0.1.2"
 rind-object-store = "0.1.2"
 rind-rustls = "0.1.2"
 rustc-hash = "2.1.3"
@@ -240,17 +237,17 @@ uniffi = "0.32"
 url = "2"
 usage-rs = "7.1.0"
 uuid = { version = "1.26", features = ["v7"] }
-web-transport-iroh = "0.8.3"
-web-transport-proto = "0.6"
+web-transport-proto = "0.6.4"
 web-transport-trait = "0.5"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
 x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
 
 [patch.crates-io]
-# web-transport-iroh depends on kio from crates.io. Without
-# this, the lock carries a second kio whose pin drifts behind the member, and the
-# next publish that reaches both fails to resolve a single version (#3551).
+# The published moq-auth 0.2.1 compatibility fixture depends on kio from
+# crates.io. Without this, the lock carries a second kio whose pin drifts behind
+# the member, and the next publish that reaches both fails to resolve a single
+# version (#3551).
 kio = { path = "rs/kio" }
 
 [profile.dev]

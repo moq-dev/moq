@@ -1,4 +1,4 @@
-/** Follow a Rust server's epochless GOAWAY redirect by subscribing to its replacement announcement. */
+/** Follow a Rust server's GOAWAY redirect by subscribing to its replacement announcement. */
 import assert from "node:assert/strict";
 import { Milli } from "@moq/clock";
 import * as Moq from "@moq/net";
@@ -29,8 +29,9 @@ async function active(request: (typeof requests)[number]) {
 }
 try {
 	const initial = await active(requests[0]);
-	assert.equal(initial.epoch, undefined, "moq-transport carries no epoch");
-	let track = initial.track("video").subscribe({ groups: { start: { included: 0 } } });
+	// moq-transport carries no instance, so the session mints one for each announcement.
+	assert(initial.instance && Moq.Instance.isMinted(initial.instance), "moq-transport carries no instance");
+	let track = initial.track("video").subscribe({ ranges: [{ start: { absolute: 0 } }] });
 	try {
 		for (let sequence = 0; sequence < 3; sequence++) {
 			const group = await track.recvGroup();
@@ -66,7 +67,7 @@ try {
 				replacementProbe = wireOf(replacement)
 					.consume(Moq.Path.from("handover"))
 					.track("video")
-					.subscribe({ groups: { start: { included: 1 } } });
+					.subscribe({ ranges: [{ start: { absolute: 1 } }] });
 				const probe = await replacementProbe.recvGroup();
 				assert(probe, "replacement has no group");
 				try {
@@ -80,8 +81,13 @@ try {
 					await requests[0].active.changed();
 					restarted = requests[0].active.peek();
 				}
-				assert.equal(restarted.epoch, undefined, "replacement is epochless");
-				const next = restarted.track("video").subscribe({ groups: { start: { included: 2 } } });
+				assert(
+					restarted.instance &&
+						Moq.Instance.isMinted(restarted.instance) &&
+						restarted.instance !== initial.instance,
+					"the replacement announcement is another minted instance",
+				);
+				const next = restarted.track("video").subscribe({ ranges: [{ start: { absolute: 2 } }] });
 				track.close();
 				track = next;
 				process.stdout.write("replacement ready\n");
