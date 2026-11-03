@@ -1,6 +1,6 @@
-publishing smoke-js-web-4737-4642.hang (fake camera, vite) to https://relay.moqtail.dev
+publishing smoke-js-web-5192-30015.hang (fake camera, vite) to https://relay.moqtail.dev
 [page] negotiated protocol: moqt-22
-[page] subscribe_namespace written: requestId=0
+[page] subscribe_namespace written: requestId=2
 [page] announced: broadcast=moqtail/ch07_all active=true
 [page] announced: broadcast=moqtail/ch06 active=true
 [page] announced: broadcast=moqtail/ch03 active=true
@@ -12,6 +12,7 @@ publishing smoke-js-web-4737-4642.hang (fake camera, vite) to https://relay.moqt
 [page] announced: broadcast=moqtail/ch04 active=true
 [page] announced: broadcast=moqtail/ch05 active=true
 [page] announced: broadcast=moqtail/ch02 active=true
-[page] publish ok: broadcast=smoke-js-web-4737-4642.hang track=catalog.json
-[page] publish done: broadcast=smoke-js-web-4737-4642.hang track=catalog.json
-[page] publish error: broadcast=smoke-js-web-4737-4642.hang track=catalog.json error=remote error: 0
+[page] announced: broadcast=smoke-js-web-5192-30015.hang active=true
+[page] publish ok: broadcast=smoke-js-web-5192-30015.hang track=catalog.json
+[page] publish done: broadcast=smoke-js-web-5192-30015.hang track=catalog.json
+[page] publish error: broadcast=smoke-js-web-5192-30015.hang track=catalog.json error=remote error: 0
