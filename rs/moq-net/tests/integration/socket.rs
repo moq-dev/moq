@@ -28,6 +28,8 @@ async fn client(origin: &origin::Producer, relay: &origin::Producer) -> MockPair
 	options.client_subscribe = Some(origin.clone());
 	options.server_publish = Some(relay.consume());
 	options.server_subscribe = Some(relay.clone());
+	// Discovery follows the socket's own watches, as it does for an application.
+	options.client_discovers_all = false;
 	connect_mock(options).await
 }
 
