@@ -45,21 +45,29 @@ replacement arc):
   `moq-pattern` supports. The dot keeps sessions out of ordinary discovery
   ([hidden broadcasts](/doc/concept/moq-lite.md#hidden-broadcasts)), so boy's game list
   never sees viewers.
-- Identity is a dialer-chosen id plus a pinned epoch. The id is the dialer's
-  own: an endpoint ID in the mesh, a random id in the demos. Each announce
-  epoch is one socket: a new epoch ends the old socket and starts a new one,
-  and the listener's request is pinned to the epoch (`origin::Consumer::request`
-  with an owned `Epoch`, as CARLA already does), so a restarted dialer never
-  inherits state. A socket ends when either side's broadcast ends or its epoch
-  is replaced.
+- Identity is a dialer-chosen id plus a pinned instance (the epic first
+  called it an epoch; the code's term is the route's `Instance`). The id is the
+  dialer's own: an endpoint ID in the mesh, a random id in the demos. Each dial
+  instance is one socket: a new instance ends the old socket and starts a new
+  one, and the listener's request is pinned to the instance
+  (`origin::Consumer::request` with an owned `Instance`, as CARLA already
+  does), so a restarted dialer never inherits state. A socket ends when either
+  side's broadcast ends or its instance is replaced. Settled by the Rust
+  implementation: the listener's answer carries the dial's instance, and the
+  dialer follows its answer pinned to it, so it never takes an answer to an
+  older dial of its id. A dial waits indefinitely; callers bound it by dropping
+  it.
 - Streams are tracks. A uni stream is a track the opener publishes in its own
   socket broadcast. A bi stream is the same track name in both. The peer
   learns of new tracks from the Lite07 Tracks stream (`TRACKS_ADD`, `REMOVE`,
   `FINISH`), which pushes them like QUIC's accept. `requested_track` was
   declined because it is pull-shaped: only the side being subscribed to can
-  accept. Track names opened by the two sides must never collide (for example
-  a role prefix, like QUIC's stream-id low bit); the Rust quest settles the
-  scheme.
+  accept. Settled by the Rust implementation: tracks are named
+  `.<opener>/<uni|bi>/<name>` with `<opener>` `dial` or `accept`, so the two
+  sides' names never collide; accept skips names outside the scheme, so fixed
+  track names coexist; the opener chooses the track info (priority included)
+  and a bi answer mirrors it. [`doc/concept/socket.md`](/doc/concept/socket.md)
+  is the convention JS and Python follow.
 - Accept is unbounded and lazy. Announced dialers queue without limit, and a
   dialer's broadcast is requested only when the application accepts it, so an
   application that stops accepting holds no subscriptions. Backpressure on the
@@ -81,7 +89,6 @@ announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or
 
 ## Required
 
-- [Rust sockets](/quest/m1/socket/rust.md) - `moq_net::socket` with `Listener`, `dial`, and `Socket`, plus the concept page
 - [JS sockets](/quest/m1/socket/js.md) - the same surface in `@moq/net`, interoperating with Rust
 - [Python sockets](/quest/m1/socket/py.md) - moq-ffi and `py/moq-rs` bindings, interoperating with Rust
 - [moq-boy on sockets](/quest/m1/socket/boy.md) - the emulator accepts viewers through a listener and echoes latency per socket

@@ -54,7 +54,6 @@ the window.
 
 ## Required
 
-- [Rust sockets](/quest/m1/socket/rust.md) - the dial/accept primitive and tracks as streams
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - relays push back instead of evicting a reader that keeps up
 - [Rust byte streams](/quest/m2/stream/rust.md) - a duplex `AsyncRead`/`AsyncWrite` stream, a listener and a dialer, and `moq` CLI forwarding
 - [JS byte streams](/quest/m2/stream/js.md) - the same surface in `@moq/net`

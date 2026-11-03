@@ -29,5 +29,4 @@ See the [epic](/quest/m1/socket/README.md) for the layout and the reply split.
 
 ## Required
 
-- [Rust sockets](/quest/m1/socket/rust.md) - the emulator's listener
 - [JS sockets](/quest/m1/socket/js.md) - the viewer's dial

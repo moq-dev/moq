@@ -16,7 +16,7 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 
 - A service is the iroh ALPN analog: a name under `mesh/<id>/`.
 - Decided 2026-11-01 (maintainer, socket planning interview): an `Endpoint`
-  wraps [sockets](/quest/m1/socket/rust.md). A service is a `Listener` at
+  wraps [sockets](/doc/concept/socket.md). A service is a `Listener` at
   `mesh/<id>/<service>`, `connect` dials it with the caller's own endpoint ID,
   and `accept` reads the remote endpoint ID from the `.dial/<id>` segment,
   which the grant pins. Extend `moq auth`'s mesh grant with publish on
@@ -34,5 +34,4 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 
 ## Required
 
-- [Rust sockets](/quest/m1/socket/rust.md) - the dial and accept this wraps
 - [Rust byte streams](/quest/m2/stream/rust.md) - the stream this API returns
