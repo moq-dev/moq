@@ -90,8 +90,8 @@ impl Default for Config {
 /// the keys ever reported, not every node ever seen. Each route instance is its
 /// own node: a restarted producer announces a new instance whose counters add to
 /// the old one's kept contribution instead of regressing it, and a group
-/// track's new instance, under a new [`GroupFrame::epoch`], adds to the old
-/// instance's the same way. A reader stays pinned to its instance, so a
+/// track's new [`GroupFrame::epoch`] adds to the old epoch's counters the same
+/// way. A reader stays pinned to its broadcast instance, so a
 /// replacement never feeds it. A wire that carries no instance has its relay
 /// mint one per announcement, so a node reached through one announces anew each
 /// time it is announced again.
@@ -621,7 +621,7 @@ impl<V: Mergeable> Shape for Keyed<V> {
 /// traffic, and each `(tier, label)`'s sessions.
 #[derive(Default)]
 struct Grouped {
-	/// The track instance the last frame came from.
+	/// The group counter epoch the last frame came from.
 	epoch: Option<Epoch>,
 	totals: Keyed<Totals>,
 	paths: Keyed<Usage, (String, String)>,
@@ -634,7 +634,7 @@ impl Shape for Grouped {
 	const LISTED: bool = true;
 
 	fn observe(&mut self, frame: GroupFrame) {
-		// A new instance counts from zero, whatever its counters read by the time
+		// A new epoch counts from zero, whatever its counters read by the time
 		// this reader sees them.
 		let reset = self.epoch.as_ref().is_some_and(|epoch| *epoch != frame.epoch);
 		self.epoch = Some(frame.epoch);
@@ -1211,7 +1211,7 @@ mod tests {
 	}
 
 	/// The group epoch every hand-published group frame carries, so a new
-	/// [`NodeBroadcast`] at the same path is the same track instance returning.
+	/// [`NodeBroadcast`] at the same path resumes that group's counters.
 	fn group_epoch() -> Epoch {
 		"01900000-0000-7000-8000-0000000000ff".parse().unwrap()
 	}
@@ -1886,9 +1886,9 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn a_relisted_group_adds_its_new_epoch() {
-		// A group's track that lingers out and is listed again is a new instance
-		// counted from zero under a new epoch: the reader follows the listing to
-		// it, and its totals add to the old instance's instead of regressing.
+		// A group's track that lingers out and is listed again starts a new epoch
+		// counted from zero: the reader follows the listing to it, and its totals
+		// add to the old epoch's instead of regressing.
 		let origin = produce_origin();
 		let node = crate::produce::spawned(Producer::new(
 			produce::Config::new()
@@ -2288,7 +2288,7 @@ mod tests {
 		expected.subscriptions_ended = 7;
 		assert_eq!(merged.merged()["room"], expected);
 
-		// A route without an explicit instance still resets, including after a resume.
+		// Regressing counters reset within the same instance, even after a resume.
 		let mut reset = Traffic::default();
 		reset.subscriptions_started = 1;
 		reset.bytes = 10;

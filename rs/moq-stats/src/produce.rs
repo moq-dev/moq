@@ -54,7 +54,7 @@ pub struct Config {
 	/// first segment, and larger values include more leading segments. A
 	/// group's track is listed while its group has live traffic, plus the
 	/// [`Self::linger`], and a group returning after that is a new track
-	/// instance with a new [`GroupFrame::epoch`](crate::GroupFrame::epoch),
+	/// run with a new [`GroupFrame::epoch`](crate::GroupFrame::epoch),
 	/// counted from zero.
 	pub depth: usize,
 	/// How long a group's track stays listed after its group's last entry
@@ -661,7 +661,7 @@ fn tier_entry<'a, V: Default>(tiers: &'a mut HashMap<Tier, V>, tier: &Tier) -> &
 }
 
 /// The always-present `totals.json` track and its per-tier sums. Never pruned
-/// while the broadcast lives, so it is cumulative within the epoch.
+/// while the broadcast lives, so it is cumulative within the broadcast instance.
 struct TotalsTrack {
 	output: Output<Totals>,
 	sums: Cumulative<Totals>,
@@ -777,7 +777,7 @@ impl PrefixTrack {
 }
 
 /// One group's track: listed from the group's first entry until it lingers
-/// empty, then finished. A return after that is a new instance under a new
+/// empty, then finished. A return after that is a new run under a new
 /// epoch, counted from zero, so it holds no state for groups that left.
 struct GroupTrack {
 	/// The track name, for logs.
@@ -831,8 +831,7 @@ impl GroupTrack {
 			name,
 			snapshot: Snapshot::new(track, config()),
 			body: GroupBody {
-				// A new instance of the name: readers keep its counters apart from
-				// an earlier instance's.
+				// A new counter run: readers keep its counters apart from an earlier epoch's.
 				epoch: Epoch::mint(),
 				tiers: Frame::default(),
 			},
@@ -1555,7 +1554,7 @@ mod tests {
 			assert_eq!(
 				(total.wire_tx, total.wire_rx),
 				(1_307, 2_614),
-				"epoch totals never reset on re-hold"
+				"broadcast totals never reset on re-hold"
 			);
 		}
 	}
@@ -3070,9 +3069,9 @@ mod tests {
 		);
 	}
 
-	/// A group that returns after its linger is a new track instance: a new
+	/// A group that returns after its linger starts a new counter run: a new
 	/// epoch counted from zero, so a reader summing each epoch never counts the
-	/// old one twice, and group numbers that continue past the old instance's.
+	/// old one twice, and group numbers that continue past the old run's.
 	#[tokio::test(start_paused = true)]
 	async fn a_relisted_group_starts_a_new_epoch_from_zero() {
 		let (producer, origin) = grouped_producer(Duration::ZERO);
@@ -3115,14 +3114,17 @@ mod tests {
 			.await
 			.unwrap()
 			.unwrap();
-		assert!(second.epoch > first.epoch, "a returning group mints a new epoch");
+		assert!(
+			second.epoch.as_str() > first.epoch.as_str(),
+			"a returning group mints a newer UUIDv7"
+		);
 		assert_eq!(
 			second.tiers[""].sessions.sessions_started, 1,
 			"a new epoch counts from zero"
 		);
 		assert!(
 			sequence(&broadcast).await > old_sequence,
-			"group numbers continue past the old instance"
+			"group numbers continue past the old run"
 		);
 		assert_eq!(
 			default_totals(&broadcast).await.sessions.sessions_started,

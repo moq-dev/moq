@@ -126,7 +126,7 @@ pub struct Prefix {
 	pub children: BTreeMap<String, Usage>,
 }
 
-/// One frame off a group track: one instance of the track, and its counters.
+/// One frame off a group track: its counter epoch and counters.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct GroupFrame {

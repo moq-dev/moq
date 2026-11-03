@@ -1,9 +1,7 @@
 use std::{fmt, str::FromStr, sync::Arc};
 
 /// Names one run of a group's counters, independently of its broadcast's instance.
-#[derive(
-	Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde_with::SerializeDisplay, serde_with::DeserializeFromStr,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde_with::SerializeDisplay, serde_with::DeserializeFromStr)]
 pub struct Epoch(Arc<str>);
 
 /// The group epoch is empty.
