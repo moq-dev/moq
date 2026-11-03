@@ -114,20 +114,27 @@ carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a s
 of records a reader can join at any point; the catalog has no window mode, so the producer
 takes only the track. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
-`Update` / `Append` / `Push` / `Pop` take a final `*moq.Timestamp` on the broadcast clock; nil publishes untimed.
+`Update` / `Append` take a final `moq.Timestamp` on the broadcast clock, so their track needs a timescale; `Push` / `Pop` take a `*moq.Timestamp`, where nil publishes untimed.
 Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
-`media.CatalogProducer.Now()` samples and fixes the catalog clock for explicit local-event stamps.
+`media.CatalogProducer.Now()` samples and fixes the broadcast clock, the epoch every track in the broadcast shares; stamp media and JSON from it.
 Opaque bytes go on a plain `TrackProducer`.
 
 ```go
-import moqjson "moq.dev/moq/json"
+import (
+	moqjson "moq.dev/moq/json"
+	moqmedia "moq.dev/moq/media"
+)
 
 publication, _ := client.CreateBroadcast("room")
 broadcast := publication.Broadcast()
-// JSON is small and repetitive, so compress the track on the wire.
-track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Compress: true})
+// Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
+// compress it on the wire.
+scale := uint64(1_000)
+track, _ := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compress: true})
 status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{})
-_ = status.Update(map[string]any{"viewers": 42}, nil)
+catalog, _ := moqmedia.NewCatalogProducer(broadcast)
+now, _ := catalog.Now()
+_ = status.Update(map[string]any{"viewers": 42}, now)
 _ = publication.Announce(moq.AnnounceRoute{})
 ```
 

@@ -22,8 +22,8 @@
 //! # ) -> moq_mux::Result<()> {
 //! // A timed track, since every write is stamped. JSON is small and repetitive, so compress it.
 //! let info = moq_net::track::Info::default()
-//! 	.with_timescale(moq_net::Timescale::MILLI)
-//! 	.with_compress(true);
+//!     .with_timescale(moq_net::Timescale::MILLI)
+//!     .with_compress(true);
 //! let track = broadcast.create_track("chat", info)?;
 //! let mut chat = catalog.json_stream::<Message>(track, moq_mux::json::Config::default())?;
 //! chat.append(&Message { text: "hello".to_string() }, catalog.clock().now())?;
