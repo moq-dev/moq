@@ -171,7 +171,10 @@ async fn every_backend_matches_independent_reference() {
 		let (_source, broadcast, name, config) = import(vector);
 		let track = broadcast.track(&name).unwrap();
 		let track = track
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		let wire = moq_mux::catalog::hang::Container::try_from(&config).unwrap();
@@ -242,12 +245,7 @@ async fn consumer_preserves_reference_samples_and_timeline() {
 				pcm.extend(samples(&frame.data));
 			}
 		}
-		let warmup = config.warmup.unwrap_or_default();
-		let skip = (warmup.as_nanos() * vector.rate as u128 / 1_000_000_000) as usize * vector.channels as usize;
-		let reference = Vector {
-			reference: &vector.reference[skip * 4..],
-			..*vector
-		};
-		compare(&reference, "consumer", &pcm);
+		// Decoded from the track's first packet, so no warmup is trimmed.
+		compare(vector, "consumer", &pcm);
 	}
 }

@@ -17,7 +17,7 @@ const PACKET: u16 = 1200;
 fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
     let base = Instant::now();
     let region = Region::new(ALLOCATOR);
-    let config = Bbr3Config {
+    let config = Config {
         probe_rng_seed: Some([7; 16]),
         ..Default::default()
     };

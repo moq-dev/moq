@@ -57,6 +57,7 @@ moq-video = { path = "../moq-video", features = ["openh264"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 url = { workspace = true }
 usage-rs = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 # The ladder bench reads the driving thread's CPU clock.
 [target.'cfg(unix)'.dev-dependencies]

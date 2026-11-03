@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### An evicted stream fails `received_reset` ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`recv::Stream::received_reset` returns `Err(Error::Evicted)` for a stream evicted to free a stuck receive window, until the application stops it, rather than `Err(Error::Closed)`.
+Treat it as a failed read and stop the stream: a reader that watches for a reset instead of reading would otherwise leave its leased bytes holding further eviction off.
+
 ### Early data is removed
 
 Wait for `Event::Connected` before opening streams or sending application data.
@@ -82,4 +87,4 @@ targets run through the hidden `fuzz` module behind the `fuzz` feature; see
 ### `congestion::NewReno` removed
 
 `congestion::NewReno` and `congestion::NewRenoConfig` are gone.
-Use `Bbr3Config` (the default) or `CubicConfig` instead.
+Use `bbr3::Config` (the default) or `cubic::Config` instead.

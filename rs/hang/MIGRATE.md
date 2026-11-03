@@ -39,10 +39,10 @@ Call `json.parse::<Catalog>()`, or bring `std::str::FromStr` into scope to keep 
 `catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.
 `PRIORITY` keeps its values (100, 90, 80, 60), which now sit above the unset default instead of below it, so their moq-lite bytes move from 100..60 to 228..188.
 
-### `catalog::Reference` names its epoch (#5699)
+### `catalog::Reference` names its instance (#5699)
 
-Every rendition and data track config gains an optional `epoch` beside `broadcast`.
-`Reference` has a new required `epoch()`: an implementor outside this crate returns the entry's epoch, or `None` when it names none.
+Every rendition and data track config gains an optional `instance` beside `broadcast`.
+`Reference` has a new required `instance()`: an implementor outside this crate returns the entry's instance, or `None` when it names none.
 
 ### A lost catalog track is `Error::Moq` (#6114)
 
