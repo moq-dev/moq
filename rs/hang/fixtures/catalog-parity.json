@@ -3921,5 +3921,54 @@
 			}
 		},
 		"refused": true
+	},
+	{
+		"name": "contribution IDs are any string",
+		"catalog": {
+			"contributions": {
+				"": {
+					"broadcast": "./a.hang"
+				},
+				"__proto__": {
+					"broadcast": "./a.hang"
+				},
+				"constructor": {
+					"broadcast": "./a.hang"
+				},
+				"toString": {
+					"broadcast": "./a.hang"
+				}
+			}
+		},
+		"contributions": [
+			"",
+			"__proto__",
+			"constructor",
+			"toString"
+		]
+	},
+	{
+		"name": "contribution malformed __proto__ refuses the catalog",
+		"catalog": {
+			"contributions": {
+				"ok": {
+					"broadcast": "./a.hang"
+				},
+				"__proto__": {}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "contribution malformed bad refuses the catalog",
+		"catalog": {
+			"contributions": {
+				"__proto__": {
+					"broadcast": "./a.hang"
+				},
+				"bad": {}
+			}
+		},
+		"refused": true
 	}
 ]

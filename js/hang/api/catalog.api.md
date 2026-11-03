@@ -20,7 +20,6 @@ import { ZodMiniNumber } from "zod/mini";
 import { ZodMiniObject } from "zod/mini";
 import { ZodMiniOptional } from "zod/mini";
 import { ZodMiniPipe } from "zod/mini";
-import { ZodMiniRecord } from "zod/mini";
 import { ZodMiniString } from "zod/mini";
 import { ZodMiniTransform } from "zod/mini";
 import { ZodMiniType } from "zod/mini";
@@ -341,10 +340,10 @@ export const RootSchema: ZodMiniObject<{
 		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
 		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 	}, $strip>>;
-	contributions: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-		broadcast: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
-		instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
-	}, $strip>>>;
+	contributions: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
+		broadcast: RelativeBroadcast;
+		instance?: ReferenceInstance | undefined;
+	}>, Record<string, unknown>>>>;
 	echo: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
 		path: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
 	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;

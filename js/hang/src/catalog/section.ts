@@ -35,7 +35,8 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
 }
 
 /**
- * A section's rendition or data track map, refusing the catalog if any entry is malformed.
+ * A catalog map keyed by ID (renditions, data tracks, contributions), refusing the catalog if any
+ * entry is malformed.
  *
  * Each entry must parse with `schema`; the issue names the entry. An unknown container
  * or extension field is not malformed, so it never refuses the catalog. Mirrors the Rust

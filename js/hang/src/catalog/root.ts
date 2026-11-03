@@ -11,7 +11,7 @@ import { TRACK } from "./format";
 import { JsonSchema } from "./json";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { named, section } from "./section";
+import { named, renditions, section } from "./section";
 import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
 import { track } from "./track";
@@ -82,7 +82,7 @@ export const RootSchema = z.looseObject({
 	json: section(JsonSchema, "tracks"),
 	binary: section(BinarySchema, "tracks"),
 	// A new key, so a malformed entry fails the catalog, the same as Rust.
-	contributions: z.optional(z.record(z.string(), ContributionSchema)),
+	contributions: z.optional(renditions(ContributionSchema)),
 });
 
 /** The root catalog object: the media sections, the clock, the data track sections, plus any app extensions. */

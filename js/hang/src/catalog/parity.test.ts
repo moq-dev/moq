@@ -10,10 +10,11 @@ interface Case {
 	text?: string[];
 	json?: string[];
 	binary?: string[];
+	contributions?: string[];
 }
 
 // The corpus rs/hang also loads: both languages accept the same catalogs and keep the same
-// rendition and data track IDs, so a divergence fails CI on whichever side drifts.
+// rendition, data track, and contribution IDs, so a divergence fails CI on whichever side drifts.
 const cases = (await Bun.file(
 	new URL("../../../../rs/hang/fixtures/catalog-parity.json", import.meta.url),
 ).json()) as Case[];
@@ -34,5 +35,6 @@ for (const c of cases) {
 		expect(ids(root.text?.renditions)).toEqual(c.text ?? []);
 		expect(ids(root.json?.tracks)).toEqual(c.json ?? []);
 		expect(ids(root.binary?.tracks)).toEqual(c.binary ?? []);
+		expect(ids(root.contributions)).toEqual(c.contributions ?? []);
 	});
 }
