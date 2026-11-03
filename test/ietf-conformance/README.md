@@ -54,8 +54,7 @@ Every other check is upstream's: forwarded object IDs, properties, payloads,
 END\_OF\_GROUP status objects and header bits, and FIRST\_OBJECT. Any other
 priority, a second END\_OF\_TRACK, or one anywhere else still fails.
 
-Measured over three consecutive runs, after six earlier runs of the
-direct-origin and one-relay cells:
+Measured on the current pin:
 
 | Draft | Direct origin | One relay | Two relays |
 | --- | --- | --- | --- |

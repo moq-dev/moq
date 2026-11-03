@@ -112,7 +112,7 @@ run_suite() {
     fi
 }
 
-# The pin supports drafts 16, 18, and a Meta draft-20 variant; use shared draft 18.
+# Moxygen's MoQVersions.h uses moqt-20-meta-02 for draft 20; use shared moqt-18.
 failed=0
 version=18
 for topology in single cluster; do

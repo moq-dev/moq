@@ -60,21 +60,16 @@ stdenv.mkDerivation {
   # The standalone client uses blockingWait, which needs Folly's concrete executor.
   postPatch =
     lib.concatStringsSep "\n" (
-      lib.mapAttrsToList (
-        name: source:
-        ''
-          cp -R ${source} .vendor-${name}
-          chmod -R u+w .vendor-${name}
-          patchShebangs .vendor-${name}
-        ''
-        # The upstream export lost Meta's revision files. CMake uses the same
-        # pins as the vendored sources, without reading those missing files.
-        + lib.optionalString (name != "fast_float") ''
-          substituteInPlace standalone/CMakeLists.txt \
-            --replace-fail 'read_rev_hash("${pins.${name}.owner}" "${name}" ${lib.toUpper name}_REV)' \
-              'set(${lib.toUpper name}_REV "${pins.${name}.rev}")'
-        ''
-      ) (builtins.removeAttrs sources [ "moxygen" ])
+      lib.mapAttrsToList (name: source: ''
+        cp -R ${source} .vendor-${name}
+        chmod -R u+w .vendor-${name}
+        patchShebangs .vendor-${name}
+        # The upstream export lost Meta's revision files. Restore CMake's
+        # metadata from the same pins as the vendored sources.
+        mkdir -p build/deps/github_hashes/${pins.${name}.owner}
+        printf 'Subproject commit %s\n' '${pins.${name}.rev}' \
+          > build/deps/github_hashes/${pins.${name}.owner}/${name}-rev.txt
+      '') (builtins.removeAttrs sources [ "moxygen" ])
     )
     + ''
       substituteInPlace moxygen/moqtest/CMakeLists.txt \
