@@ -475,6 +475,41 @@ async fn each_open_is_a_new_track() {
 	assert_eq!(recv(&opened.consumer).await, b"pong");
 }
 
+/// A peer that accepts a bi stream, finishes its half at once, and only reads still
+/// answers the open, though its half left the listing before the opener read it.
+#[kio::test]
+async fn a_finished_answer_still_answers_the_open() {
+	let fixture = Fixture::new().await;
+	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
+	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
+
+	let open = dialer.open_bi(None).unwrap();
+	let answered = kio::clock::timeout(TIMEOUT, accepted.accept_bi())
+		.await
+		.expect("accept timeout")
+		.unwrap()
+		.expect("a stream");
+	answered.producer.finish().unwrap();
+	drop(answered.producer);
+	// Long enough for the answer to come and go before the open is polled.
+	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
+
+	let (opened, read) = kio::clock::timeout(TIMEOUT, async {
+		futures::join!(
+			async {
+				let opened = open.await.expect("open");
+				send(&opened.producer, b"request");
+				opened
+			},
+			recv(&answered.consumer)
+		)
+	})
+	.await
+	.expect("open timeout");
+	assert_eq!(read, b"request");
+	drop(opened);
+}
+
 /// A fixed-name track sits beside the streams: accept skips it, and the peer reads it by
 /// name from [`Socket::remote`].
 #[kio::test]

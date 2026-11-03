@@ -337,6 +337,7 @@ impl Socket {
 		Ok(kio::Pending::new(OpenBi {
 			inner: inner.clone(),
 			track,
+			demand: producer.demand(),
 			producer: Some(producer),
 		}))
 	}
@@ -468,12 +469,18 @@ pub struct OpenBi {
 	track: Arc<str>,
 	/// This side's track, handed over once the peer answers.
 	producer: Option<track::Producer>,
+	/// Whether anyone reads this side's track, which only the peer does once it accepted.
+	demand: track::Demand,
 }
 
 impl OpenBi {
-	/// Poll for the peer's answer. Fails with [`Error::Unroutable`] once the peer's
-	/// broadcast ends without one, and with [`Error::Closed`] once this side closed, even
-	/// if the answer came.
+	/// Poll for the peer's answer: its half listed, or its subscription to this side's
+	/// half. Fails with [`Error::Unroutable`] once the peer's broadcast ends without one,
+	/// and with [`Error::Closed`] once this side closed, even if the answer came.
+	///
+	/// The subscription counts because a listing drops an add its reader never reached
+	/// once the track leaves it: a peer that finishes its half at once and only reads
+	/// would otherwise never be seen to answer.
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bi, Error>> {
 		let inner = &self.inner;
 		// This side's track went with its broadcast, and a peer that keeps its own up
@@ -481,9 +488,12 @@ impl OpenBi {
 		if inner.poll_local_closed(waiter) {
 			return Poll::Ready(Err(Error::Closed));
 		}
+		// Polled until it parks, so a later change wakes this.
+		while let Poll::Ready(Ok(_)) = self.demand.poll_wanted_changed(waiter) {}
+		let read = self.demand.wanted().is_some();
 		let mut listing = inner.listing.lock();
 		listing.drain(waiter, inner.role, &inner.remote);
-		if listing.opening.get(&self.track) == Some(&true) {
+		if read || listing.opening.get(&self.track) == Some(&true) {
 			listing.opening.remove(&self.track);
 			drop(listing);
 			let consumer = inner.remote.track(&self.track)?;

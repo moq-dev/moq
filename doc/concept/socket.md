@@ -106,7 +106,9 @@ alike, and is never reused within a socket, so each open is a new track.
 - **Bi.** The opener publishes the track in its own broadcast. The peer accepts
   it by publishing the same name in its broadcast, with the opener's track
   info, and each side subscribes to the other's. The opener's stream resolves
-  once the answer is listed.
+  once it sees the answer listed or the peer subscribing to its track. The
+  subscription counts because a listing drops an add its reader never reached,
+  so an answer finished at once may never be seen listed.
 
 The opener prefix and the number together work like a QUIC stream ID. The
 prefix keeps the two sides' streams apart, the way the ID's low bit does, so
