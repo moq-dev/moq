@@ -325,7 +325,7 @@ impl Live {
 			.write(Frame {
 				timestamp: Timestamp::from_micros((index * AUDIO_US).strict_add_signed(self.offset)).unwrap(),
 				duration: None,
-				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
+				payload: audio_payload(index),
 				keyframe: index.is_multiple_of(AUDIO_GROUP),
 			})
 			.unwrap();
@@ -347,15 +347,21 @@ impl Live {
 
 	/// End the broadcast and let every leg render what it holds.
 	fn finish(&mut self, legs: &mut [&mut Leg]) {
+		self.finish_media();
+		self.catalog.finish().unwrap();
+		for leg in legs.iter_mut() {
+			leg.drain(&self.clock);
+		}
+	}
+
+	/// End the media tracks while the catalog can still announce more.
+	fn finish_media(&mut self) {
 		if let Some(mut group) = self.group.take() {
 			group.finish().unwrap();
 		}
 		self.stalled.clear();
 		self.video.finish().unwrap();
 		self.audio.finish().unwrap();
-		for leg in legs.iter_mut() {
-			leg.drain(&self.clock);
-		}
 	}
 
 	/// Run the clock to `at`, letting every leg read whenever it would have on its own.
@@ -370,7 +376,7 @@ impl Live {
 			let now = kio::clock::now();
 			for leg in legs.iter_mut() {
 				if leg.wake().is_some_and(|wake| wake <= now) {
-					leg.poll();
+					assert!(!leg.poll(), "export ended while the broadcast is live");
 					if !leg.every.is_zero() {
 						while leg.next_poll <= now {
 							leg.next_poll += leg.every;
@@ -426,7 +432,7 @@ impl Leg {
 	/// nothing woke finds nothing new.
 	fn poll_now(&mut self) {
 		if self.every.is_zero() && self.woken.0.load(Ordering::Relaxed) {
-			self.poll();
+			assert!(!self.poll(), "export ended while the broadcast is live");
 		}
 	}
 
@@ -443,27 +449,79 @@ impl Leg {
 		false
 	}
 
-	/// Read to the end of the broadcast, or until nothing is due and 10 ms pass with no end.
-	///
-	/// Only `clock` fires the export's timers, so the 10 ms is an advance of it: a timeout armed
-	/// on it would never fire.
+	/// Read to the end of the broadcast, advancing only to scheduled output.
 	fn drain(&mut self, clock: &kio::clock::Deadlines) {
 		while !self.poll() {
-			if let Some(deadline) = self.export.next_due() {
-				clock.advance(deadline.max(clock.now()));
-				continue;
-			}
-			clock.advance(clock.now() + Duration::from_millis(10));
-			if self.export.next_due().is_none() {
-				self.poll();
-				break;
-			}
+			let deadline = self
+				.export
+				.next_due()
+				.expect("export parked without ending or scheduled output");
+			clock.advance(deadline.max(clock.now()));
 		}
 	}
 
 	/// The PES timing this leg rendered: one entry per PES start.
 	fn units(&self) -> Vec<Unit> {
 		units(&self.out)
+	}
+}
+
+/// Media drains while the catalog stays open; EOF needs both, in either finish order.
+#[tokio::test(start_paused = true)]
+async fn end_waits_for_catalog_and_media() {
+	for catalog_first in [false, true] {
+		let mut live = Live::new(1.0, 0).await;
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(2 * GOP, &mut [&mut leg], |_| false);
+		let expected = if catalog_first {
+			live.catalog.finish().unwrap();
+			// Catalog EOF fixes the layout, but the named tracks can still publish media.
+			live.run(3 * GOP, &mut [&mut leg], |_| false);
+			// Close the groups so their tails flush, leaving both tracks open for more.
+			live.group.take().unwrap().finish().unwrap();
+			live.audio.cut(None).unwrap();
+			3 * GOP as usize
+		} else {
+			live.finish_media();
+			2 * GOP as usize
+		};
+		loop {
+			assert!(
+				!leg.poll(),
+				"EOF before both catalog and media finish: catalog_first {catalog_first}"
+			);
+			let Some(deadline) = leg.export.next_due() else {
+				break;
+			};
+			live.clock.advance(deadline.max(live.clock.now()));
+		}
+		assert_eq!(
+			leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
+			expected
+		);
+		let audio: Vec<Bytes> = (0..live.audio_index).map(audio_payload).collect();
+		assert_eq!(aac_frames(&leg), audio, "catalog_first {catalog_first}: audio drained");
+		if catalog_first {
+			live.finish_media();
+		} else {
+			assert!(!leg.woken.0.load(Ordering::Relaxed), "the exporter is parked");
+			live.catalog.finish().unwrap();
+			assert!(
+				leg.woken.0.load(Ordering::Relaxed),
+				"catalog EOF must wake the exporter"
+			);
+		}
+		leg.drain(&live.clock);
+		assert_eq!(leg.export.dropped(), 0);
+		assert_eq!(
+			leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
+			expected
+		);
+		assert_eq!(
+			aac_frames(&leg),
+			audio,
+			"catalog_first {catalog_first}: no audio after EOF"
+		);
 	}
 }
 
@@ -709,7 +767,7 @@ async fn an_unmarked_step_keeps_the_export_rendering() {
 
 // A publisher that dies leaves the last video frames it sent held for their DTS, and nothing
 // settles them until frames come again. Where the receiver is not told the source changed (a
-// replacement on a protocol without an epoch, or the other half of a 1+1 pair), those come on the
+// replacement on a protocol under another instance, or the other half of a 1+1 pair), those come on the
 // same timeline after the silence. In the field the held frames then went into a schedule that had
 // already gone past them, and the export ended on a missed decode deadline.
 
@@ -1180,6 +1238,45 @@ async fn live_audio_shares_its_pes() {
 			assert!(matches!(frames, 12 | 7), "lag {lag}: a PES carried {frames} frames");
 		}
 	}
+}
+
+/// The raw AAC of the fixture's audio frame `index`.
+fn audio_payload(index: u64) -> Bytes {
+	Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8))
+}
+
+/// Each AAC frame a leg rendered, in output order, with its ADTS header removed.
+fn aac_frames(leg: &Leg) -> Vec<Bytes> {
+	let bytes: Vec<u8> = leg
+		.out
+		.iter()
+		.flat_map(|(_, frame)| frame.payload.iter().copied())
+		.collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut pes: Vec<Vec<u8>> = Vec::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if packet.header.pid.as_u16() != AUDIO_PID {
+			continue;
+		}
+		match packet.payload {
+			Some(TsPayload::PesStart(start)) => pes.push(start.data.to_vec()),
+			Some(TsPayload::PesContinuation(rest)) => {
+				pes.last_mut().expect("a PES start first").extend_from_slice(&rest)
+			}
+			_ => {}
+		}
+	}
+	let mut frames = Vec::new();
+	for data in &pes {
+		// One PES carries several frames.
+		let mut data = &data[..];
+		while !data.is_empty() {
+			let header = super::adts::Header::parse(data).unwrap();
+			frames.push(Bytes::copy_from_slice(&data[header.header_len..header.frame_len]));
+			data = &data[header.frame_len..];
+		}
+	}
+	frames
 }
 
 /// Each video frame's DTS (else PTS) by its PTS, in 90 kHz ticks, as a leg rendered it.

@@ -2,18 +2,19 @@
 
 ```ts
 import { $ZodBranded } from "zod/v4/core";
-import { $brand } from "@zod/mini";
+import { $brand } from "zod/mini";
 import { $loose } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
-import { ZodMiniNullable } from "@zod/mini";
-import { ZodMiniNumber } from "@zod/mini";
-import { ZodMiniObject } from "@zod/mini";
-import { ZodMiniOptional } from "@zod/mini";
-import { ZodMiniPipe } from "@zod/mini";
-import { ZodMiniRecord } from "@zod/mini";
-import { ZodMiniString } from "@zod/mini";
-import { ZodMiniTransform } from "@zod/mini";
-import { infer } from "@zod/mini";
+import { ZodMiniNullable } from "zod/mini";
+import { ZodMiniNumber } from "zod/mini";
+import { ZodMiniObject } from "zod/mini";
+import { ZodMiniOptional } from "zod/mini";
+import { ZodMiniPipe } from "zod/mini";
+import { ZodMiniRecord } from "zod/mini";
+import { ZodMiniString } from "zod/mini";
+import { ZodMiniTransform } from "zod/mini";
+import { ZodMiniType } from "zod/mini";
+import { infer } from "zod/mini";
 
 export * as Catalog from "@moq/hang/catalog";
 
@@ -112,7 +113,7 @@ export namespace Health {
 		unhealthy: number;
 	}
 	export interface Observer {
-		epoch?: Net.Epoch.Valid;
+		instance?: Net.Instance.Valid;
 		path: Net.Path.Valid;
 	}
 	export interface Rendition {
@@ -159,6 +160,18 @@ export namespace Health {
 export * as Hls from "@moq/hang/hls";
 
 export * as Net from "@moq/net";
+
+export namespace Report {
+	export const INTERVAL: 1000;
+	export const PRIORITY: -128;
+	export class Writer<T> {
+		constructor(broadcast: Net.Broadcast.Producer, name: string, schema?: ZodMiniType<T>);
+		finish(): void;
+		readonly track: Net.Track.Producer;
+		update(value: T): void;
+		get wanted(): boolean;
+	}
+}
 
 export * as Signals from "@moq/signals";
 

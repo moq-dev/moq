@@ -565,7 +565,7 @@ fn lite_tracks_interop() {
 	let version = lite::Version::Lite07;
 	let request = lite::Tracks {
 		broadcast: crate::Path::from_static("room"),
-		epoch: None,
+		instance: None,
 	}
 	.encode_bytes(version)
 	.unwrap();
@@ -635,6 +635,7 @@ fn ietf_track_status_interop() {
 			let mut w = Encoder::new(&mut buf, version.into());
 			w.varint(<ietf::TrackStatus as ietf::Message>::ID).unwrap();
 			ietf::TrackStatus {
+				authorization_token: None,
 				request_id: ietf::RequestId(id),
 				track_namespace: crate::Path::new(namespace).unwrap(),
 				track_name: "video".into(),

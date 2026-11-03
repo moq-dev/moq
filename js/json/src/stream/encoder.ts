@@ -1,5 +1,5 @@
 import { Error as NetError } from "@moq/net";
-import type * as z from "@zod/mini";
+import type * as z from "zod/mini";
 import { MAX_FRAME_BYTES } from "../limits.ts";
 
 /** Options for an {@link Encoder}. */

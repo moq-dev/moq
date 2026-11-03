@@ -28,14 +28,12 @@ panic then ends the session being admitted, the same scope the per-admission
 polled by `Relay::run`, which brings back the long-lived decider task that
 #7360 removed.
 
-The publisher joins `Driver`, the type
-[Cluster polls its own work](/quest/m1/poll-first/no-spawn/cluster.md)
-introduces, so a publisher panic still ends the relay. `Publisher::run` is an
-`async fn`; giving `Publisher` a `poll` is optional and only worth it if
-`Driver` needs it.
+The publisher joins the cluster's `Driver` (`rs/moq-relay/src/cluster.rs`,
+from [moq-dev/moq#7626](https://github.com/moq-dev/moq/pull/7626)), so a
+publisher panic still ends the relay. `Cluster::new` has already handed the
+driver out by the time `Cluster::with_stats` runs, so the publisher either
+reaches it through a queue the driver polls or moves into `Options` for
+`Cluster::new` to add. `Publisher::run` is an `async fn`; giving `Publisher` a
+`poll` is optional and only worth it if `Driver` needs it.
 
 Public API: `Cluster::with_stats` no longer needs a tokio runtime. Wire: none.
-
-## Required
-
-- [Cluster polls its own work](/quest/m1/poll-first/no-spawn/cluster.md) - provides the `Driver` the publisher joins

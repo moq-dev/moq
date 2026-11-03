@@ -48,10 +48,12 @@ Match `CatalogFailed` wherever you match `RecordsFailed`, and look through
 master playlist and DASH manifest list now sits under that instance:
 `/{broadcast}/@{instance}/{kind}/{rendition}/...` instead of
 `/{broadcast}/{kind}/{rendition}/...`. `Route::parse` refuses the old layout,
-and `Resource::{Media, Init, Segment, SegmentAt}` carry the `instance` they
+and `Resource::{Media, Init, Segment}` carry the `instance` they
 name. `Broadcaster::master_playlist` and `Broadcaster::manifest` render the new
 layout. An embedder that answers through `Server::respond` needs no change; one
-that routes rendition URLs itself must pass the `@{instance}` segment through.
+that routes rendition URLs itself must percent-decode the instance after splitting the
+`@{instance}` segment from the path. Instance delimiters such as `/`, `?`, `%`, and `#` are
+percent-encoded, just like rendition names.
 
 ### Denied broadcast references report authorization failure
 

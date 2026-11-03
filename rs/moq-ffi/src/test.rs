@@ -227,6 +227,7 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 		data,
 		label: None,
 		hint: None,
+		lower: None,
 	}
 }
 
@@ -275,7 +276,7 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 			preference: 0,
 			label: None,
 			broadcast: None,
-			epoch: None,
+			instance: None,
 			track: None,
 			codec: "avc1.64001f".into(),
 			description: None,
@@ -289,14 +290,14 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 	}
 }
 
-/// A rendition whose catalog `broadcast` field names `reference`, served by `epoch`.
-fn referencing(reference: Option<&str>, epoch: Option<&str>) -> MoqRendition {
+/// A rendition whose catalog `broadcast` field names `reference`, served under `instance`.
+fn referencing(reference: Option<&str>, instance: Option<&str>) -> MoqRendition {
 	let mut rendition = rendition("video", MoqContainer::Legacy);
 	let MoqRendition::Video { config, .. } = &mut rendition else {
 		unreachable!()
 	};
 	config.broadcast = reference.map(Into::into);
-	config.epoch = epoch.map(Into::into);
+	config.instance = instance.map(Into::into);
 	rendition
 }
 
@@ -308,7 +309,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
-		epoch: None,
+		instance: None,
 		track: None,
 		codec: "opus".to_string(),
 		description: None,
@@ -381,7 +382,11 @@ fn route_conversions_keep_cost_and_derive_anonymity() {
 	assert_eq!(MoqRoute::from(route).cost, 9);
 
 	// A publisher seeds its production cost with one number.
-	let seeded = moq_net::origin::Route::try_from(MoqAnnounceRoute { cost: 5, epoch: None }).unwrap();
+	let seeded = moq_net::origin::Route::try_from(MoqAnnounceRoute {
+		cost: 5,
+		..Default::default()
+	})
+	.unwrap();
 	assert_eq!(seeded.cost, moq_net::origin::Cost::new(5));
 	assert!(seeded.hops.is_empty());
 
@@ -397,7 +402,12 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let publication = origin.create_broadcast("priced-route".into()).unwrap();
-	publication.announce(MoqAnnounceRoute { cost: 9, epoch: None }).unwrap();
+	publication
+		.announce(MoqAnnounceRoute {
+			cost: 9,
+			..Default::default()
+		})
+		.unwrap();
 
 	// Reading an advertisement preserves its static production price.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
@@ -415,7 +425,8 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 	publication
 		.announce(MoqAnnounceRoute {
 			cost: route.cost,
-			epoch: route.epoch.clone(),
+			instance: Some(route.instance.clone()),
+			..Default::default()
 		})
 		.unwrap();
 	assert_eq!(publication.inner.route().map(MoqRoute::from), Some(route));
@@ -424,62 +435,56 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 }
 
 #[test]
-fn epoch_helpers_mint_parse_and_refuse() {
-	let epoch = moq_mint_epoch();
-	let parsed: moq_net::Epoch = epoch.parse().unwrap();
-	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
-
-	// The text the route carries round-trips, and anything but a UUIDv7 is refused.
+fn instance_routes_parse_and_refuse() {
+	// A stable instance round-trips with its epoch, which only orders its runs.
 	let route = MoqAnnounceRoute {
-		epoch: Some(epoch.clone()),
+		instance: Some("cam".into()),
+		epoch: 3,
 		..Default::default()
 	};
 	let back = moq_net::origin::Route::try_from(route).unwrap();
-	assert_eq!(back.epoch, Some(parsed));
-	assert_eq!(MoqRoute::from(back).epoch, Some(epoch.clone()));
+	assert_eq!(back.instance, Some("cam".parse().unwrap()));
+	assert_eq!(MoqRoute::from(back).instance, "cam");
 
-	let uuid_v4 = "6ba7b810-9dad-41d1-80b4-00c04fd430c8".to_string();
-	for bad in [uuid_v4, epoch.to_uppercase(), String::new()] {
-		let route = MoqAnnounceRoute {
-			epoch: Some(bad),
-			..Default::default()
-		};
-		assert!(matches!(
-			moq_net::origin::Route::try_from(route),
-			Err(MoqError::InvalidEpoch { .. })
-		));
-	}
+	let route = MoqAnnounceRoute {
+		instance: Some(String::new()),
+		..Default::default()
+	};
+	assert!(matches!(
+		moq_net::origin::Route::try_from(route),
+		Err(MoqError::InvalidInstance { .. })
+	));
 }
 
 #[tokio::test]
-async fn announced_epoch_restarts_on_a_new_epoch() {
+async fn announced_restarts_on_a_new_instance() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let publication = origin.create_broadcast("epoch-route".into()).unwrap();
+	let publication = origin.create_broadcast("instance-route".into()).unwrap();
 
-	let first = moq_mint_epoch();
+	let first = moq_net::Instance::random().to_string();
 	publication
 		.announce(MoqAnnounceRoute {
-			epoch: Some(first.clone()),
+			instance: Some(first.clone()),
 			..Default::default()
 		})
 		.unwrap();
 	let announce = next_announced(&announced).await;
-	assert_eq!(announce.route.epoch, Some(first));
+	assert_eq!(announce.route.instance, first);
 
 	// A new run of the same publisher is another instance: consumers restart onto it.
-	let second = moq_mint_epoch();
+	let second = moq_net::Instance::random().to_string();
 	publication
 		.announce(MoqAnnounceRoute {
-			epoch: Some(second.clone()),
+			instance: Some(second.clone()),
 			..Default::default()
 		})
 		.unwrap();
 	match next_event(&announced).await {
 		MoqAnnounceEvent::Restart { announce } => {
-			assert_eq!(announce.prefix, "epoch-route");
-			assert_eq!(announce.route.epoch, Some(second));
+			assert_eq!(announce.prefix, "instance-route");
+			assert_eq!(announce.route.instance, second);
 		}
 		other => panic!("expected a restart, got {other:?}"),
 	}
@@ -2903,6 +2908,51 @@ async fn video_publish_named_track() {
 	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
 }
 
+/// A pre-encoded rung above a lower rendition sits one priority below it, so an allocator
+/// funds the lower one first, and disables in the catalog without leaving it.
+#[tokio::test]
+async fn video_rung_sits_below_its_lower_and_disables() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+
+	let named = |name: &str| MoqMediaTarget::Named {
+		name: Some(name.into()),
+	};
+	let low =
+		MoqMediaTrackProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::Avc3, h264_init())).unwrap();
+	let high = MoqMediaTrackProducer::video(
+		&broadcast,
+		named("high"),
+		MoqVideoInit {
+			lower: Some(low.clone()),
+			..video_init(MoqVideoFormat::Avc3, h264_init())
+		},
+	)
+	.unwrap();
+
+	let priority = |name: &str| {
+		let consumer = consumer.clone();
+		let name = name.to_string();
+		async move { consumer.subscribe_track(name, None).await.unwrap().info().priority }
+	};
+	assert_eq!(priority("low").await, hang::catalog::PRIORITY.video);
+	assert_eq!(priority("high").await, hang::catalog::PRIORITY.video - 1);
+
+	high.set_enabled(false).unwrap();
+	let disabled = loop {
+		let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
+			.await
+			.expect("timed out waiting for catalog")
+			.unwrap()
+			.expect("expected a catalog");
+		if catalog.video.get("high").is_some_and(|high| !high.enabled) {
+			break catalog;
+		}
+	};
+	assert!(disabled.video["low"].enabled);
+}
+
 /// A keyframe whose SPS names another level is a new decoder identity, so the track producer moves
 /// to a new track, and its demand follows rather than watching the one that ended.
 #[tokio::test]
@@ -3404,7 +3454,7 @@ async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 		);
 		assert_eq!(
 			announcement.captures,
-			Some(vec![prefix.strip_prefix("a/").unwrap().to_string()]),
+			vec![prefix.strip_prefix("a/").unwrap().to_string()],
 			"the implicit trailing glob captures the suffix beneath the literal prefix"
 		);
 		if prefix == "a/pub" {
@@ -3431,25 +3481,28 @@ async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 async fn announced_filters_patterns_and_reports_captures() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let announced = consumer
-		.announced(MoqAnnounceConfig {
-			prefix: "room".into(),
-			filter: Some("*/chat".into()),
-			hidden: false,
-		})
-		.unwrap();
+	for (filter, captures) in [("*/chat", vec!["alice"]), ("alice/chat", vec![])] {
+		let announced = consumer
+			.announced(MoqAnnounceConfig {
+				prefix: "room".into(),
+				filter: Some(filter.into()),
+				hidden: false,
+			})
+			.unwrap();
 
-	// A claim at `room` could serve a match, but its own name is none, so it is not listed.
-	let _broad = origin.requests("room".into()).unwrap();
+		// A claim at `room` could serve a match, but its own name is none, so it is not listed.
+		let broad = origin.requests("room".into()).unwrap();
+		let chat = create_announced(&origin, "room/alice/chat");
+		let audio = create_announced(&origin, "room/alice/audio");
+		let update = next_announced(&announced).await;
 
-	let chat = create_announced(&origin, "room/alice/chat");
-	let _audio = create_announced(&origin, "room/alice/audio");
-	let update = next_announced(&announced).await;
+		assert_eq!(update.prefix, "room/alice/chat");
+		assert_eq!(update.captures, captures);
 
-	assert_eq!(update.prefix, "room/alice/chat");
-	assert_eq!(update.captures, Some(vec!["alice".into()]));
-
-	chat.close().unwrap();
+		chat.close().unwrap();
+		audio.close().unwrap();
+		broad.cancel();
+	}
 }
 
 /// A `.`-named broadcast is listed only when the config opts in or the prefix names it.
@@ -3537,27 +3590,27 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	source.close().unwrap();
 }
 
-/// A reference's epoch names the instance it expects: a broadcast proven to serve another fails
-/// the rendition, while an epochless reference, or a route that cannot prove its instance, reads
+/// A reference's instance names the instance it expects: a broadcast proven to serve another fails
+/// the rendition, while an unnamed reference, or a route that cannot prove its instance, reads
 /// whichever instance resolves.
 #[tokio::test]
-async fn resolve_honors_the_reference_epoch() {
+async fn resolve_honors_the_reference_instance() {
 	async fn resolve(
 		broadcast: &MoqBroadcastConsumer,
 		reference: &str,
-		epoch: Option<&str>,
+		instance: Option<&str>,
 	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), epoch)))
+		kio::clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), instance)))
 			.await
 			.expect("timed out resolving the reference")
 	}
 
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let served = moq_mint_epoch();
-	let other = moq_mint_epoch();
+	let served = moq_net::Instance::random().to_string();
+	let other = moq_net::Instance::random().to_string();
 	let route = MoqAnnounceRoute {
-		epoch: Some(served.clone()),
+		instance: Some(served.clone()),
 		..Default::default()
 	};
 
@@ -3577,24 +3630,28 @@ async fn resolve_honors_the_reference_epoch() {
 	let matching = resolve(&broadcast, "./source", Some(&served)).await.unwrap();
 	assert_eq!(matching.inner().info().path.as_str(), "a/source");
 	resolve(&broadcast, "./source", None).await.unwrap();
-	resolve(&broadcast, "./plain", Some(&other)).await.unwrap();
+	// A broadcast that minted its own instance is another stream than the one named.
+	assert!(matches!(
+		resolve(&broadcast, "./plain", Some(&other)).await,
+		Err(MoqError::Mux { reason }) if reason.contains("serves instance")
+	));
 
 	assert!(matches!(
 		resolve(&broadcast, "./source", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+		Err(MoqError::Mux { reason }) if reason.contains("serves instance")
 	));
-	// Without a broadcast, the epoch names the catalog's own instance.
+	// Without a broadcast, the instance names the catalog's own stream.
 	resolve(&broadcast, "", Some(&served)).await.unwrap();
 	assert!(matches!(
 		resolve(&broadcast, "", Some(&other)).await,
-		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+		Err(MoqError::Mux { reason }) if reason.contains("serves instance")
 	));
 	assert!(matches!(
-		resolve(&broadcast, "./source", Some("not-an-epoch")).await,
-		Err(MoqError::InvalidEpoch { .. })
+		resolve(&broadcast, "./source", Some("")).await,
+		Err(MoqError::InvalidInstance { .. })
 	));
 
-	// The rendition-based consumers read the epoch off the rendition.
+	// The rendition-based consumers read the instance off the rendition.
 	let config = MoqMediaTrackConfig {
 		rendition: referencing(Some("./source"), Some(&other)),
 		subscription: None,
@@ -3602,7 +3659,7 @@ async fn resolve_honors_the_reference_epoch() {
 	let subscribed = kio::clock::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
 		.await
 		.expect("timed out subscribing to the rendition");
-	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves epoch")));
+	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves instance")));
 
 	catalog.close().unwrap();
 	source.close().unwrap();
@@ -4870,18 +4927,18 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let epoch = moq_net::Epoch::mint().to_string();
-	let prepared = request.prepare(epoch.clone()).unwrap();
+	let prepared = request.prepare().unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	// Only publish announces the answer, under its epoch and after admission, and it
+	// Only publish announces the answer, under a fresh instance and after admission, and it
 	// hands back the fill handle the answer was prepared with.
 	let publication = prepared.publish().unwrap();
 	assert!(Arc::ptr_eq(&publication.broadcast(), &served));
+	// A re-price that names no instance keeps the one the answer was published under.
 	publication
 		.announce(MoqAnnounceRoute {
-			epoch: Some(epoch),
 			cost: 7,
+			..Default::default()
 		})
 		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
@@ -4930,7 +4987,7 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		.expect("timed out waiting for the prefix request")
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "live/cam");
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let prepared = request.prepare().unwrap();
 	let served = prepared.broadcast();
 	prepared.publish().unwrap();
 	kio::clock::timeout(TIMEOUT, requesting)
@@ -4972,7 +5029,7 @@ async fn dynamic_keeps_the_origin_alive() {
 		.await
 		.expect("the handler must still receive requests")
 		.unwrap();
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let prepared = request.prepare().unwrap();
 	let served = prepared.broadcast();
 	prepared.publish().unwrap();
 	kio::clock::timeout(TIMEOUT, requesting)
@@ -5282,23 +5339,6 @@ async fn raw_track_pending_datagram_does_not_block_recv_group() {
 #[tokio::test]
 async fn raw_track_pending_datagram_does_not_block_read_frame() {
 	pending_datagram_does_not_block_group(|consumer| async move { consumer.read_frame().await }).await;
-}
-
-#[tokio::test]
-async fn raw_track_pending_group_read_holds_the_lane() {
-	let (_broadcast, _track, consumer) = raw_track();
-
-	let group_read = {
-		let consumer = consumer.clone();
-		spawn_parked(async move { consumer.next_group().await }).await
-	};
-	assert!(!group_read.is_finished(), "group read should still be pending");
-	assert!(
-		consumer.group_lane_busy(),
-		"a parked group read should hold the lane guard"
-	);
-
-	group_read.abort();
 }
 
 #[tokio::test]
@@ -5844,10 +5884,32 @@ fn without_runtime() {
 
 #[tokio::test]
 async fn server_client_roundtrip() {
+	server_client_run_end("moq-lite-07-wip").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft18() {
+	server_client_run_end("moq-transport-18").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft20() {
+	server_client_run_end("moq-transport-20").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft22() {
+	server_client_run_end("moq-transport-22").await;
+}
+
+/// Finishing content and withdrawing a run are distinct from aborting an open track, and a
+/// follower picks up the next run by announcement over every protocol. The aborted track keeps
+/// the error its wire carries, so readers follow runs by lifecycle, not by error kind.
+async fn server_client_run_end(version: &str) {
 	// Server side: bind, set a publish origin, accept incoming sessions.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
-		versions: vec!["moq-lite-07-wip".into()],
+		versions: vec![version.into()],
 		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
 		publish: Some(server_origin.clone()),
@@ -5878,7 +5940,7 @@ async fn server_client_roundtrip() {
 	// Client side: connect, subscribe via a consume origin.
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let client = MoqClient::new(MoqClientConfig {
-		versions: vec!["moq-lite-07-wip".into()],
+		versions: vec![version.into()],
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		consume: Some(client_origin.clone()),
@@ -5912,8 +5974,28 @@ async fn server_client_roundtrip() {
 	let announcement = next_announced(&announced).await;
 	assert_eq!(announcement.prefix, "hello");
 
-	// Subscribe to the audio track and verify a frame round-trips.
-	let bc = await_announced(&consumer, "hello").await;
+	// Follow the path as a player does, then subscribe and verify a frame round-trips.
+	let following = consumer.follow("hello".into(), None).unwrap();
+	let bc = kio::clock::timeout(TIMEOUT, following.available())
+		.await
+		.expect("timed out waiting for the first run")
+		.unwrap();
+	let unfinished = broadcast
+		.publish_track("unfinished".into(), Some(timed_info()))
+		.unwrap();
+	let unfinished_consumer = bc.subscribe_track("unfinished".into(), None).await.unwrap();
+	let group = unfinished.create_group(0).unwrap();
+	group.write_frame(group_frame(b"still live")).unwrap();
+	group.finish().unwrap();
+	assert_eq!(
+		kio::clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+			.await
+			.expect("unfinished track read timed out")
+			.unwrap()
+			.unwrap()
+			.payload,
+		b"still live"
+	);
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc).await.unwrap();
 	let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -5950,10 +6032,65 @@ async fn server_client_roundtrip() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(micros(frame.timestamp), 1_000_000);
 
-	// Clean up. Exercise `shutdown()` on the client side and the underlying
-	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
+	assert!(
+		kio::clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+			.await
+			.expect("media end timed out")
+			.unwrap()
+			.is_none(),
+		"{version}: finished media did not end cleanly"
+	);
 	broadcast.close().unwrap();
+	let Err(error) = kio::clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+		.await
+		.expect("unfinished track end timed out")
+	else {
+		panic!("withdrawal falsely declared the unfinished track complete");
+	};
+	if version == "moq-lite-07-wip" {
+		assert_protocol(&error, crate::error::MoqErrorScope::Stream, MoqProtocolKind::Unroutable);
+	} else {
+		// The IETF PUBLISH_DONE registry has no Unroutable, so the publisher sends INTERNAL_ERROR
+		// and the reader keeps it. Neither TRACK_ENDED nor an EOF fits withdrawn content.
+		assert!(matches!(error, MoqError::Internal { .. }), "{version}: {error:?}");
+	}
+	while kio::clock::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("catalog end timed out")
+		.unwrap()
+		.is_some()
+	{}
+	kio::clock::timeout(TIMEOUT, bc.closed())
+		.await
+		.expect("broadcast end timed out")
+		.unwrap();
+
+	// The announcement, not the track's error, ends the run.
+	match next_event(&announced).await {
+		MoqAnnounceEvent::End { announce } => assert_eq!(announce.prefix, "hello"),
+		other => panic!("{version}: expected the run's end, got {other:?}"),
+	}
+
+	// A replacement run at the same path reaches the follower on its next `available()`.
+	let replacement = create_announced(&server_origin, "hello");
+	let replacement_media = MoqMediaTrackProducer::audio(
+		&replacement,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	let next = kio::clock::timeout(TIMEOUT, following.available())
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the next run was never handed out"))
+		.unwrap();
+	let next_track = subscribe_audio(&next).await;
+	roundtrip(&replacement_media, &next_track, b"next run", 2_000_000).await;
+	replacement_media.finish().unwrap();
+	replacement.close().unwrap();
+	following.cancel();
+
+	// Exercise both shutdown paths after content ended with the session still open.
 	cs.shutdown();
 	cs.closed().await.unwrap();
 	server_session.cancel(0);
@@ -6005,10 +6142,10 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 }
 
 /// A replacement session from the same publisher re-announces every route while the old one
-/// is still open, as a GOAWAY drain does. Without an epoch that is another instance: the
+/// is still open, as a GOAWAY drain does. Under another instance that is another instance: the
 /// next `available()` hands it out, and reading it carries on past the old session's close.
 #[tokio::test]
-async fn follow_follows_an_epochless_replacement() {
+async fn follow_follows_a_minted_replacement() {
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
@@ -6101,7 +6238,7 @@ async fn follow_retries_a_dropped_wait() {
 	assert!(matches!(dropped.await, Err(err) if err.is_cancelled()));
 
 	let retry = tokio::spawn(async move { followed.available().await });
-	let served = request.prepare(moq_mint_epoch()).unwrap().publish().unwrap();
+	let served = request.prepare().unwrap().publish().unwrap();
 	kio::clock::timeout(TIMEOUT, retry)
 		.await
 		.expect("the retry waited for another instance")
@@ -6122,7 +6259,7 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
-	// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
+	// The wait is on the dynamic route's answer when the exact path takes over under another instance.
 	let _unanswered = kio::clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the wait never asked for the broadcast")
@@ -6152,14 +6289,14 @@ async fn follow_hands_out_a_held_takeover_once() {
 }
 
 /// An end is a gap that ended every request on the old route, even when a claim above the path
-/// answers under the same epoch. So the instance serving the path afterwards is handed out
-/// again, though its epoch is the one the caller still holds.
+/// answers under the same instance. So the stream serving the path afterwards is handed out
+/// again, though its instance is the one the caller still holds.
 #[tokio::test]
 async fn follow_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let followed = origin.consume().follow("live".into(), None).unwrap();
 	let route = MoqAnnounceRoute {
-		epoch: Some(moq_mint_epoch()),
+		instance: Some(moq_net::Instance::random().to_string()),
 		..Default::default()
 	};
 	let publication = origin.create_broadcast("live".into()).unwrap();
@@ -6169,7 +6306,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
 
-	// A covering claim answering under the same epoch.
+	// A covering claim answering under the same instance.
 	let dynamic = origin.inner().inner.requests("").unwrap();
 	publication.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
@@ -6177,8 +6314,10 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.await
 		.expect("the instance never asked the route above the path")
 		.unwrap();
-	let epoch = route.epoch.clone().unwrap().parse().unwrap();
-	let served = request.prepare(epoch).unwrap().publish().unwrap();
+	let served = request.prepare().unwrap().publish().unwrap();
+	served
+		.announce(moq_net::origin::Route::try_from(route.clone()).unwrap())
+		.unwrap();
 
 	let again = kio::clock::timeout(TIMEOUT, again)
 		.await
@@ -6186,53 +6325,56 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(
-		again.inner().info().epoch,
-		first.inner().info().epoch,
+		again.inner().info().instance,
+		first.inner().info().instance,
 		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
 	publication.broadcast().close().unwrap();
 }
 
-/// An epoch pins both resolutions to one publisher instance: a request for another one is
+/// An instance pins both resolutions to one publisher instance: a request for another one is
 /// unroutable, and a follower never hands out another one taking over.
 #[tokio::test]
-async fn an_epoch_pins_request_and_follow() {
+async fn an_instance_pins_request_and_follow() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let epoch = moq_mint_epoch();
+	let instance = moq_net::Instance::random().to_string();
 	let first = origin.create_broadcast("live".into()).unwrap();
 	first
 		.announce(MoqAnnounceRoute {
-			epoch: Some(epoch.clone()),
+			instance: Some(instance.clone()),
 			..Default::default()
 		})
 		.unwrap();
 
-	let pinned = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(epoch.clone())))
+	let pinned = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(instance.clone())))
 		.await
 		.expect("timed out requesting the pinned instance")
 		.unwrap();
 	assert_eq!(
-		pinned.inner().info().epoch.as_ref().map(ToString::to_string),
-		Some(epoch.clone())
+		pinned.inner().info().instance.as_ref().map(ToString::to_string),
+		Some(instance.clone())
 	);
-	let err = kio::clock::timeout(TIMEOUT, consumer.request("live".into(), Some(moq_mint_epoch())))
-		.await
-		.expect("timed out requesting another instance")
-		.err()
-		.expect("another instance is unroutable");
+	let err = kio::clock::timeout(
+		TIMEOUT,
+		consumer.request("live".into(), Some(moq_net::Instance::random().to_string())),
+	)
+	.await
+	.expect("timed out requesting another instance")
+	.err()
+	.expect("another instance is unroutable");
 	assert_protocol(
 		&err,
 		crate::error::MoqErrorScope::Stream,
 		crate::error::MoqProtocolKind::Unroutable,
 	);
 	assert!(matches!(
-		consumer.follow("live".into(), Some("not-an-epoch".into())),
-		Err(MoqError::InvalidEpoch { .. })
+		consumer.follow("live".into(), Some(String::new())),
+		Err(MoqError::InvalidInstance { .. })
 	));
 
-	let followed = consumer.follow("live".into(), Some(epoch.clone())).unwrap();
+	let followed = consumer.follow("live".into(), Some(instance.clone())).unwrap();
 	kio::clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out following the pinned instance")
@@ -6240,7 +6382,7 @@ async fn an_epoch_pins_request_and_follow() {
 	let second = origin.create_broadcast("live".into()).unwrap();
 	second
 		.announce(MoqAnnounceRoute {
-			epoch: Some(moq_mint_epoch()),
+			instance: Some(moq_net::Instance::random().to_string()),
 			..Default::default()
 		})
 		.unwrap();
@@ -6251,8 +6393,8 @@ async fn an_epoch_pins_request_and_follow() {
 		.expect("timed out requesting the takeover")
 		.unwrap();
 	assert_ne!(
-		takeover.inner().info().epoch.as_ref().map(ToString::to_string),
-		Some(epoch)
+		takeover.inner().info().instance.as_ref().map(ToString::to_string),
+		Some(instance)
 	);
 	let next = std::pin::pin!(followed.available());
 	assert!(
@@ -6296,10 +6438,11 @@ async fn follow_hands_out_a_gap_while_resolving_once() {
 	arrival.close().unwrap();
 }
 
-/// A handle the caller dropped no longer counts as handed out, so the restart that names it
-/// hands it out again rather than leaving the caller with nothing.
+/// Dropping a handed-out handle changes nothing about the path, so the follower hands out
+/// nothing until another instance takes it over. The takeover's restart reached the follower
+/// before its resolution handed the handle out, so no restart is owed.
 #[tokio::test]
-async fn follow_hands_out_a_dropped_takeover_again() {
+async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "live");
 	let followed = origin.consume().follow("live".into(), None).unwrap();
@@ -6319,11 +6462,19 @@ async fn follow_hands_out_a_dropped_takeover_again() {
 			.unwrap(),
 	);
 
+	let hold = moq_net::origin::Config::default().update_hold * 2;
+	assert!(
+		kio::clock::timeout(hold, followed.available()).await.is_err(),
+		"the dropped takeover was handed out again"
+	);
+
+	let next = create_announced(&origin, "live");
 	kio::clock::timeout(TIMEOUT, followed.available())
 		.await
-		.expect("the dropped takeover was never handed out again")
+		.expect("the next instance was never handed out")
 		.unwrap();
 	takeover.close().unwrap();
+	next.close().unwrap();
 }
 
 #[tokio::test]
@@ -6449,7 +6600,7 @@ async fn server_new_validates_the_config() {
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
-	assert_eq!(defaults.max_delay, Some(Duration::ZERO));
+	assert_eq!(defaults.delay.max, Some(Duration::ZERO));
 }
 
 /// A settings UI shows these, so each must be what an unset knob actually dials with.
@@ -7321,8 +7472,8 @@ async fn cancel_before_connect_fails_fast() {
 /// Dropping the future returned by a `Task::run` call used to leave the spawned
 /// closure detached and still holding the state lock, so it consumed the next
 /// transition into its own cursor and the retry blocked behind it, missing the
-/// edge. Every repeatable read on the bindings (`status`, `next`, `read_frame`,
-/// `recv_datagram`) sits on that path; `status` is just the easiest to drive.
+/// edge. Session `status` still sits on that path; the poll-native reads have their
+/// own cancelled-call tests.
 #[tokio::test]
 async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 	let server = MoqServer::new(MoqServerConfig {
@@ -8169,7 +8320,6 @@ async fn shutdown_failure_survives_a_discarded_waiter() {
 }
 
 /// Real sockets exercise the FFI runtime and both accepted/client session handles.
-/// Only lite-07 acknowledges the received tail; default lite-06 closes after transport ACKs.
 async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
 	session_pair("moq-lite-07-wip").await
 }
@@ -8606,4 +8756,401 @@ async fn next_encoded_frame(consumer: &MoqMediaTrackConsumer) -> Result<Option<M
 			None => return Ok(None),
 		}
 	}
+}
+
+/// Drives reads through uniffi's `RustFuture` the way a foreign binding does.
+mod rust_future {
+	use std::sync::{Condvar, Mutex};
+
+	use uniffi::{Handle, LiftArgsError, RustFuturePoll};
+
+	use crate::error::MoqError;
+	use crate::media::MoqFrame;
+
+	/// Each continuation uniffi called, by the `data` its poll was given.
+	static CONTINUATIONS: Mutex<Vec<(u64, RustFuturePoll)>> = Mutex::new(Vec::new());
+	/// Notified on each continuation.
+	static CALLED: Condvar = Condvar::new();
+
+	extern "C" fn continuation(data: u64, poll: RustFuturePoll) {
+		CONTINUATIONS.lock().unwrap().push((data, poll));
+		CALLED.notify_all();
+	}
+
+	/// Wait for a continuation for `data`, then take every one called for it.
+	fn wait_called(data: u64) -> Vec<RustFuturePoll> {
+		let continuations = CONTINUATIONS.lock().unwrap();
+		let (continuations, timeout) = CALLED
+			.wait_timeout_while(continuations, super::TIMEOUT, |continuations| {
+				!continuations.iter().any(|(d, _)| *d == data)
+			})
+			.unwrap();
+		assert!(!timeout.timed_out(), "the read never woke");
+		drop(continuations);
+		called(data)
+	}
+
+	/// Take the continuations called for `data`.
+	fn called(data: u64) -> Vec<RustFuturePoll> {
+		let mut continuations = CONTINUATIONS.lock().unwrap();
+		let (called, rest) = continuations.drain(..).partition(|(d, _)| *d == data);
+		*continuations = rest;
+		called.into_iter().map(|(_, poll)| poll).collect::<Vec<_>>()
+	}
+
+	/// A read as a foreign future, resolving to the frame's payload.
+	pub(super) struct Read {
+		handle: Handle,
+		data: u64,
+	}
+
+	impl Read {
+		pub(super) fn start<F>(read: F, data: u64) -> Self
+		where
+			F: Future<Output = Result<Option<MoqFrame>, MoqError>> + Send + 'static,
+		{
+			let handle = uniffi::rust_future_new(
+				async move {
+					let frame = read.await.expect("read failed").expect("read ended");
+					Ok::<u8, LiftArgsError>(frame.payload[0])
+				},
+				crate::UniFfiTag,
+			);
+			let read = Self { handle, data };
+			read.poll();
+			read
+		}
+
+		fn poll(&self) {
+			// SAFETY: the handle is live until `Drop` frees it.
+			unsafe { uniffi::rust_future_poll::<u8>(self.handle.clone(), continuation, self.data) }
+		}
+
+		/// Whether the read is still parked: no continuation since its last poll.
+		pub(super) fn parked(&self) -> bool {
+			called(self.data).is_empty()
+		}
+
+		/// Stop polling without freeing, which is all `rust_future_cancel` does: Kotlin and Swift
+		/// leave this window open until they free the future.
+		pub(super) fn cancel(&self) {
+			// SAFETY: the handle is live until `Drop` frees it.
+			unsafe { uniffi::rust_future_cancel::<u8>(self.handle.clone()) };
+			assert_eq!(
+				called(self.data),
+				[RustFuturePoll::Ready],
+				"cancel resolves the continuation"
+			);
+		}
+
+		/// Poll on every wake until ready, then complete the read.
+		pub(super) fn finish(&self) -> u8 {
+			while !wait_called(self.data).contains(&RustFuturePoll::Ready) {
+				self.poll();
+			}
+			let mut status = uniffi::RustCallStatus::default();
+			// SAFETY: the handle is live, and its continuation reported it ready.
+			let value = unsafe { uniffi::rust_future_complete::<u8>(self.handle.clone(), &mut status) };
+			assert_eq!(status.code, uniffi::RustCallStatusCode::Success);
+			value
+		}
+	}
+
+	impl Drop for Read {
+		fn drop(&mut self) {
+			// SAFETY: freed once, here.
+			unsafe { uniffi::rust_future_free::<u8>(self.handle.clone()) };
+		}
+	}
+}
+
+/// A read the foreign side cancelled but has not freed yet holds nothing the next read on the
+/// same handle needs, so the next read resolves while the first is still allocated.
+fn cancelled_unfreed_read_does_not_block_the_next<F, Fut>(read: F, write: impl FnOnce(), data: u64)
+where
+	F: Fn() -> Fut,
+	Fut: Future<Output = Result<Option<MoqFrame>, MoqError>> + Send + 'static,
+{
+	let first = rust_future::Read::start(read(), data);
+	assert!(first.parked(), "the first read parks");
+	first.cancel();
+
+	let second = rust_future::Read::start(read(), data + 1);
+	write();
+	assert_eq!(
+		second.finish(),
+		7,
+		"the second read gets the frame written after the cancel"
+	);
+	drop(second);
+	drop(first);
+}
+
+#[test]
+fn raw_read_frame_cancelled_unfreed_does_not_block_the_next() {
+	let (_broadcast, track, consumer) = raw_track();
+	cancelled_unfreed_read_does_not_block_the_next(
+		|| {
+			let consumer = consumer.clone();
+			async move { consumer.read_frame().await }
+		},
+		|| track.write_frame(group_frame(&[7])).unwrap(),
+		100,
+	);
+}
+
+#[test]
+fn raw_group_read_frame_cancelled_unfreed_does_not_block_the_next() {
+	let (_broadcast, track, _consumer) = raw_track();
+	let group = track.append_group().unwrap();
+	let consumer = group.consume().unwrap();
+	cancelled_unfreed_read_does_not_block_the_next(
+		|| {
+			let consumer = consumer.clone();
+			async move { consumer.read_frame().await }
+		},
+		|| group.write_frame(group_frame(&[7])).unwrap(),
+		200,
+	);
+}
+
+/// A `read_frame` parked on a frameless group moves on when `next_group` takes that group
+/// from it, rather than waiting for a frame it no longer reads.
+#[tokio::test]
+async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let consumer = track
+		.consume(Some(MoqSubscription {
+			max_delay: None,
+			..moq_subscription_defaults()
+		}))
+		.unwrap();
+
+	let open = track.create_group(0).unwrap();
+	let read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.read_frame().await }).await
+	};
+	let later = track.create_group(1).unwrap();
+	later.write_frame(group_frame(b"later")).unwrap();
+	later.finish().unwrap();
+	// Let the read run any wake the new group sent, so it is parked on the open group again.
+	for _ in 0..4 {
+		tokio::task::yield_now().await;
+	}
+	assert!(!read.is_finished(), "the open group has no frame yet");
+
+	let taken = kio::clock::timeout(TIMEOUT, consumer.next_group())
+		.await
+		.expect("next_group timed out")
+		.unwrap()
+		.expect("expected the open group");
+	assert_eq!(taken.sequence(), 0);
+
+	let frame = kio::clock::timeout(TIMEOUT, read)
+		.await
+		.expect("the parked read_frame never moved on")
+		.expect("read task panicked")
+		.unwrap()
+		.expect("expected the later group's frame");
+	assert_eq!(frame.payload, b"later");
+	drop(open);
+}
+
+/// UniFFI's waker runs the foreign continuation on the waking thread, and a binding may poll
+/// the woken call right there. `next_group` taking a parked `read_frame`'s group wakes that
+/// read, so it must have released the track's state by then, or the inline poll deadlocks.
+#[tokio::test]
+async fn raw_next_group_wakes_read_frame_after_unlocking() {
+	type Read = std::pin::Pin<Box<dyn Future<Output = Result<Option<MoqFrame>, MoqError>> + Send>>;
+
+	/// Polls its read inline on every wake, as an unconfined coroutine would.
+	struct Inline {
+		read: std::sync::Mutex<Read>,
+		polls: std::sync::atomic::AtomicUsize,
+	}
+	impl Inline {
+		fn poll(self: &Arc<Self>) -> std::task::Poll<Result<Option<MoqFrame>, MoqError>> {
+			// The read wakes itself while it ends; that wake has nothing left to poll.
+			let Ok(mut read) = self.read.try_lock() else {
+				return std::task::Poll::Pending;
+			};
+			self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			let waker = std::task::Waker::from(self.clone());
+			read.as_mut().poll(&mut std::task::Context::from_waker(&waker))
+		}
+	}
+	impl std::task::Wake for Inline {
+		fn wake(self: Arc<Self>) {
+			let _ = self.poll();
+		}
+	}
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let consumer = track
+		.consume(Some(MoqSubscription {
+			max_delay: None,
+			..moq_subscription_defaults()
+		}))
+		.unwrap();
+	let open = track.create_group(0).unwrap();
+
+	let reader = consumer.clone();
+	let inline = Arc::new(Inline {
+		read: std::sync::Mutex::new(Box::pin(async move { reader.read_frame().await })),
+		polls: Default::default(),
+	});
+	assert!(inline.poll().is_pending(), "the open group has no frame yet");
+
+	let taken = kio::clock::timeout(TIMEOUT, consumer.next_group())
+		.await
+		.expect("next_group timed out")
+		.unwrap()
+		.expect("expected the open group");
+	assert_eq!(taken.sequence(), 0);
+	assert_eq!(
+		inline.polls.load(std::sync::atomic::Ordering::SeqCst),
+		2,
+		"next_group should wake the parked read once"
+	);
+	drop(open);
+}
+
+/// Reads parked together on one track each wake, and between them take every group once,
+/// whether they go through `read_frame` or `next_group`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn raw_track_concurrent_reads_take_every_group_once() {
+	const GROUPS: u64 = 200;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	// No age limit, so a group nobody has read yet is never skipped for a newer one.
+	let consumer = track
+		.consume(Some(MoqSubscription {
+			max_delay: None,
+			..moq_subscription_defaults()
+		}))
+		.unwrap();
+
+	// Each reader returns the group sequences it took: a frame's payload names its group.
+	let frames = |consumer: Arc<MoqTrackConsumer>| {
+		tokio::spawn(async move {
+			let mut taken = Vec::new();
+			while let Some(frame) = consumer.read_frame().await.unwrap() {
+				taken.push(u64::from_be_bytes(frame.payload.try_into().unwrap()));
+			}
+			taken
+		})
+	};
+	let groups = |consumer: Arc<MoqTrackConsumer>| {
+		tokio::spawn(async move {
+			let mut taken = Vec::new();
+			while let Some(group) = consumer.next_group().await.unwrap() {
+				taken.push(group.sequence());
+			}
+			taken
+		})
+	};
+	let readers = [
+		frames(consumer.clone()),
+		frames(consumer.clone()),
+		groups(consumer.clone()),
+		groups(consumer.clone()),
+	];
+	ffi_caught_up().await;
+
+	for sequence in 0..GROUPS {
+		let group = track.create_group(sequence).unwrap();
+		group
+			.write_frame(MoqFrame {
+				payload: sequence.to_be_bytes().to_vec(),
+				timestamp: Some(us(sequence)),
+			})
+			.unwrap();
+		group.finish().unwrap();
+		if sequence % 8 == 0 {
+			tokio::task::yield_now().await;
+		}
+	}
+	track.finish().unwrap();
+
+	let mut taken = Vec::new();
+	let mut each = Vec::new();
+	for reader in readers {
+		let reader = kio::clock::timeout(TIMEOUT, reader)
+			.await
+			.expect("a parked read never woke")
+			.expect("reader panicked");
+		each.push(reader.len());
+		taken.extend(reader);
+	}
+	taken.sort_unstable();
+	assert_eq!(taken, (0..GROUPS).collect::<Vec<_>>(), "per reader: {each:?}");
+}
+
+/// A poll in flight when shutdown starts finishes before shutdown returns, a call parked
+/// across it resolves `Cancelled`, and so does every later call.
+#[test]
+fn shutdown_waits_for_a_polled_call() {
+	if !shutdown_child("shutdown_waits_for_a_polled_call") {
+		return;
+	}
+
+	let polled = Arc::new(crate::ffi::Polled::new(()));
+	let block_on = |future: std::pin::Pin<Box<dyn Future<Output = Result<u8, MoqError>> + Send>>| {
+		std::thread::spawn(move || {
+			tokio::runtime::Builder::new_current_thread()
+				.build()
+				.unwrap()
+				.block_on(future)
+		})
+	};
+
+	// Parked with no item coming: only the shutdown can end it.
+	let parked = block_on(Box::pin({
+		let polled = polled.clone();
+		async move { polled.wait(|_, _| std::task::Poll::Pending).await }
+	}));
+
+	let (entered, entered_rx) = std::sync::mpsc::channel();
+	let (release, release_rx) = std::sync::mpsc::channel::<()>();
+	let holding = block_on(Box::pin({
+		let polled = polled.clone();
+		async move {
+			polled
+				.wait(move |_, _| {
+					entered.send(()).unwrap();
+					// Holds this poll open while shutdown starts on another thread.
+					release_rx.recv().unwrap();
+					std::task::Poll::Ready(Ok(7))
+				})
+				.await
+		}
+	}));
+	entered_rx.recv().unwrap();
+
+	let shutdown = std::thread::spawn(|| crate::moq_ffi_shutdown());
+
+	// A fresh call resolves `Cancelled` on its first poll once shutdown has begun. On another
+	// handle, since the held poll holds this one's state.
+	let probe = crate::ffi::Polled::new(());
+	loop {
+		let mut call = std::pin::pin!(probe.wait(|_, _| std::task::Poll::Ready(Ok(0u8))));
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		match call.as_mut().poll(&mut cx) {
+			std::task::Poll::Ready(Err(MoqError::Cancelled)) => break,
+			std::task::Poll::Ready(result) => assert!(matches!(result, Ok(0)), "{result:?}"),
+			std::task::Poll::Pending => unreachable!("the call is ready or cancelled"),
+		}
+		std::thread::yield_now();
+	}
+	assert!(!shutdown.is_finished(), "shutdown returned with a poll in flight");
+
+	release.send(()).unwrap();
+	// It began before the shutdown, so it delivers; the shutdown waited for it.
+	assert!(matches!(holding.join().unwrap(), Ok(7)));
+	shutdown.join().unwrap();
+	let parked = parked.join().unwrap();
+	assert!(matches!(parked, Err(MoqError::Cancelled)), "{parked:?}");
 }

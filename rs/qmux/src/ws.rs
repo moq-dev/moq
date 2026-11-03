@@ -13,7 +13,7 @@ use crate::{Config, Driver, Error, Session, Version, alpn};
 /// The `tokio-tungstenite` version this crate is built against.
 ///
 /// [`Client::with_connector`] and [`Upgraded`] take `tokio-tungstenite` types
-/// directly, so use this re-export rather than a separately pinned dependency —
+/// directly, so use this re-export rather than a separately pinned dependency -
 /// a different minor version is a distinct crate to the compiler and fails to
 /// typecheck against these APIs.
 pub use tokio_tungstenite;
@@ -52,7 +52,7 @@ fn capped(
 ///
 /// WebSocket has no built-in idle timeout: when the peer's host crashes
 /// or its network drops without sending a TCP FIN, the local socket
-/// stays "open" until OS-level TCP keep_alive eventually probes — typically
+/// stays "open" until OS-level TCP keep_alive eventually probes - typically
 /// hours. Set this to send periodic Pings and close the session if no
 /// frame arrives within `timeout`.
 #[derive(Debug, Clone, Copy)]

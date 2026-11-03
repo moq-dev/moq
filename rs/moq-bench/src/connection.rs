@@ -454,7 +454,7 @@ fn spawn_drain(
 async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
-	let subscription = track::Subscription::default().with_max_delay(max_delay);
+	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(max_delay));
 	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?;
 	let mut gaps = GapTracker::new(stats);
 	let mut learned_shape = false;
@@ -766,6 +766,7 @@ mod tests {
 		reason = "the benchmark measures real establishment time"
 	)]
 	fn benchmark_readiness_establishment() {
+		println!("connections,broadcasts_per_connection,elapsed_ns");
 		for connections in [1, 16, 128] {
 			for broadcasts in [1, 16, 128] {
 				let count = connections * broadcasts;
@@ -793,10 +794,7 @@ mod tests {
 					}
 				}
 				assert!(std::hint::black_box(stats.ready()));
-				println!(
-					"readiness connections={connections} broadcasts_per_connection={broadcasts} elapsed_ns={}",
-					start.elapsed().as_nanos()
-				);
+				println!("{connections},{broadcasts},{}", start.elapsed().as_nanos());
 				assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), count);
 			}
 		}
@@ -824,7 +822,7 @@ mod tests {
 	}
 
 	fn replay() -> track::Subscription {
-		track::Subscription::default().with_max_delay(Duration::from_secs(30))
+		track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
 	}
 
 	/// A produced group must start with the JSON keyframe describing the rolled
