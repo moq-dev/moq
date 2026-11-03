@@ -130,6 +130,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 
 	/// Whether the current PMT declares a media stream that can anchor the program clock.
 	media_clock: bool,
+	/// Whether video paces the audio bursts, fixed by the PMT.
+	has_video: bool,
 
 	/// The program's timestamp base: the first media PTS, or a data-only PCR, anchors it; every PTS shifts by
 	/// its offset onto the catalog clock.
@@ -165,6 +167,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
+	/// PES with new payload since the last batch, so decoded units need not wait for the PES end.
+	partial: Vec<Pid>,
 	/// Partial clear PES headers, at most 9 + 255 bytes per elementary PID, each with where its
 	/// start code sits on the program clock ([`Placement::span`]).
 	headers: HashMap<Pid, (Option<Span>, Vec<u8>)>,
@@ -276,6 +280,7 @@ impl<E: catalog::Catalog> Import<E> {
 			catalog,
 			container,
 			media_clock: false,
+			has_video: false,
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			mux_rate_reservation,
@@ -295,6 +300,7 @@ impl<E: catalog::Catalog> Import<E> {
 			damage_log: Default::default(),
 			liveness: Liveness::default(),
 			pending: HashMap::new(),
+			partial: Vec::new(),
 			headers: HashMap::new(),
 			placement: Placement::default(),
 			unplaced: BTreeMap::new(),
@@ -480,6 +486,25 @@ impl<E: catalog::Catalog> Import<E> {
 	/// coalesces a junction's burst of sub-table commits into few groups instead of one per
 	/// commit.
 	pub(super) fn flush_batch(&mut self) -> anyhow::Result<()> {
+		let mut partial = std::mem::take(&mut self.partial);
+		for pid in partial.drain(..) {
+			if !self.streams.get(&pid).is_some_and(Stream::salvages_partial_pes) {
+				continue;
+			}
+			let Some(pending) = self.pending.get_mut(&pid).filter(|pending| !pending.data.is_empty()) else {
+				continue;
+			};
+			let mut next = Pending::empty();
+			next.retained = Retained::new(self.staging.clone());
+			next.offset = pending.offset;
+			next.continuation = true;
+			next.data_len = pending.data_len.map(|len| len - pending.data.len());
+			let mut piece = std::mem::replace(pending, next);
+			// This is a piece of a PES, not a truncated end. The remaining length stays in `next`.
+			piece.data_len = None;
+			self.write_pending(pid, piece)?;
+		}
+		self.partial = partial;
 		self.damage_log.flush(kio::clock::now());
 		self.si.flush(self.last_pts.unwrap_or(Timestamp::ZERO), false)
 	}
@@ -828,6 +853,8 @@ impl<E: catalog::Catalog> Import<E> {
 			} else {
 				self.ensure_stream(es.pid, es.stream_type, &es.descriptors)?;
 			}
+			// Tracks configured by the PMT must carry their PID before the clock releases the catalog.
+			self.record_media_track(es.pid)?;
 			// Report a new PID or a changed route once; a repeated PMT stays quiet.
 			if let Some((outcome, carriage)) = self.route(es.pid)
 				&& before != Some((outcome, carriage))
@@ -841,6 +868,7 @@ impl<E: catalog::Catalog> Import<E> {
 				);
 			}
 		}
+		self.has_video = self.streams.values().any(Stream::video);
 		self.media_clock = pmt.streams.iter().any(|es| {
 			self.streams.get(&es.pid).is_some_and(|stream| {
 				stream.video() || matches!(stream, Stream::Aac(_) | Stream::Opus(_) | Stream::Legacy(_))
@@ -1320,15 +1348,12 @@ impl<E: catalog::Catalog> Import<E> {
 			}
 		}
 		if pts.is_some() {
-			// A first PTS may have anchored the timebase whole PES were waiting on.
+			// The clock is final. Configured tracks need not wait for this PES's payload.
+			self.initial_reservation = None;
 			self.release_placed()?;
 		}
 
 		if is_clock {
-			// A clock-only stream never flushes, so release its reservation here.
-			if pts.is_some() {
-				self.initial_reservation = None;
-			}
 			// Nothing is published, but each PES is a picture the source delivered.
 			self.liveness.delivered(pid.as_u16(), 1);
 			return Ok(());
@@ -1340,11 +1365,7 @@ impl<E: catalog::Catalog> Import<E> {
 				// A span whose timebase ended while its header assembled was settled with it, or
 				// is dropped as unplaced at release.
 				let Some(span) = span else {
-					// Before the first PCR on this timebase nothing places it. A PTS it carried still
-					// anchored the timebase, so it releases the reservation like a flushed PES would.
-					if pts.is_some() {
-						self.initial_reservation = None;
-					}
+					// Before the first PCR on this timebase nothing places it.
 					*self.unplaced.entry(pid.as_u16()).or_default() += 1;
 					return Ok(());
 				};
@@ -1366,11 +1387,13 @@ impl<E: catalog::Catalog> Import<E> {
 			data: Vec::with_capacity(header.len() + data.len()),
 			data_len,
 			span,
+			continuation: false,
 		};
 		pending.data.extend_from_slice(header);
 		pending.data.extend_from_slice(data);
 		let complete = matches!(data_len, Some(len) if pending.data.len() >= len);
 		self.pending.insert(pid, pending);
+		self.partial.push(pid);
 
 		if complete {
 			self.flush(pid)?;
@@ -1386,6 +1409,9 @@ impl<E: catalog::Catalog> Import<E> {
 			.data_len
 			.map_or(data.len(), |len| len - pending.data.len())
 			.min(data.len());
+		if pending.data.is_empty() && len != 0 {
+			self.partial.push(pid);
+		}
 		pending.retained.grow(len, 0)?;
 		pending.data.extend_from_slice(&data[..len]);
 		if matches!(pending.data_len, Some(len) if pending.data.len() >= len) {
@@ -1440,7 +1466,11 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		};
 
-		let batched = self.streams.values().any(Stream::video);
+		self.write_pending(pid, pending)
+	}
+
+	fn write_pending(&mut self, pid: Pid, pending: Pending) -> anyhow::Result<()> {
+		let batched = self.has_video;
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
@@ -1452,13 +1482,6 @@ impl<E: catalog::Catalog> Import<E> {
 			);
 		}
 
-		// Its PES start anchored the timebase. Release the reservation only now, so the first
-		// snapshot carries the final clock: an Opus config comes from the PMT and would otherwise
-		// publish first. Every stream in the initial program reserved at its PMT, so any stream's
-		// PES releases it.
-		if pending.pts.is_some() {
-			self.initial_reservation = None;
-		}
 		let result = stream.write(pending, batched);
 		self.video_damage(pid);
 		let (units, damage) = match result {
@@ -2174,10 +2197,12 @@ struct Pending {
 	dts: Option<u64>,
 	/// The payload, or the whole packet, header included, for a [`PesPacketStream`].
 	data: Vec<u8>,
-	/// Expected length of `data` for bounded PES, else `None` (unbounded video).
+	/// Bytes left in a bounded PES, including `data`, else `None` (unbounded video).
 	data_len: Option<usize>,
 	/// Where a whole PES sits on the program clock; `None` for every other stream.
 	span: Option<Span>,
+	/// This payload continues the current PES, so audio keeps its next frame timestamp.
+	continuation: bool,
 }
 
 impl Pending {
@@ -2191,6 +2216,7 @@ impl Pending {
 			data: Vec::new(),
 			data_len: None,
 			span: None,
+			continuation: false,
 		}
 	}
 }
@@ -3800,7 +3826,11 @@ impl<E: CatalogExt> AacStream<E> {
 
 		// PTS for the next frame to emit. The tail frame keeps the PTS computed at its cut;
 		// the first frame that BEGINS in this PES takes the PES PTS (per ISO 13818-1).
-		let mut pts = if carried > 0 { self.tail_pts.take() } else { pes_base };
+		let mut pts = if carried > 0 || pending.continuation {
+			self.tail_pts.take()
+		} else {
+			pes_base
+		};
 		let mut in_tail = carried > 0;
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
@@ -3812,7 +3842,9 @@ impl<E: CatalogExt> AacStream<E> {
 		let mut fallback = None;
 		while offset + adts::MIN_HEADER_LEN <= data.len() {
 			if in_tail && offset >= carried {
-				pts = pes_base;
+				if !pending.continuation {
+					pts = pes_base;
+				}
 				in_tail = false;
 			}
 
@@ -3994,19 +4026,23 @@ impl<E: CatalogExt> AacStream<E> {
 		}
 
 		if let Some(import) = &mut self.import {
-			self.burst = if batched { self.burst + burst } else { burst };
+			self.burst = if batched || pending.continuation {
+				self.burst + burst
+			} else {
+				burst
+			};
 			import.burst(self.burst)?;
 		}
 
 		// Keep any partial frame (cut mid-frame, or even mid-header) for the next PES,
 		// with the PTS it should carry.
 		if offset < data.len() {
-			if in_tail && offset >= carried {
+			if in_tail && offset >= carried && !pending.continuation {
 				pts = pes_base;
 			}
 			self.tail = data[offset..].to_vec();
-			self.tail_pts = pts;
 		}
+		self.tail_pts = pts;
 
 		Ok(published)
 	}
@@ -4390,7 +4426,11 @@ impl<E: CatalogExt> LegacyStream<E> {
 		// ISO 13818-1, a PES PTS refers to the first access unit starting in it).
 		// After each frame it advances by that frame's duration (per frame, not
 		// `index * constant`: E-AC-3 varies the samples per frame).
-		let mut pts = if carried > 0 { self.tail_pts.take() } else { pes_base };
+		let mut pts = if carried > 0 || pending.continuation {
+			self.tail_pts.take()
+		} else {
+			pes_base
+		};
 		let mut in_tail = carried > 0;
 
 		let mut offset = 0;
@@ -4399,7 +4439,9 @@ impl<E: CatalogExt> LegacyStream<E> {
 		let mut fallback = None;
 		while offset + self.descriptor.min_header_len <= data.len() {
 			if in_tail && offset >= carried {
-				pts = pes_base;
+				if !pending.continuation {
+					pts = pes_base;
+				}
 				in_tail = false;
 			}
 
@@ -4560,12 +4602,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 		// Keep any partial frame (cut mid-frame, or even mid-header) for the next
 		// PES, with the PTS it should carry.
 		if offset < data.len() {
-			if in_tail && offset >= carried {
+			if in_tail && offset >= carried && !pending.continuation {
 				pts = pes_base;
 			}
 			self.tail = data[offset..].to_vec();
-			self.tail_pts = pts;
 		}
+		self.tail_pts = pts;
 
 		Ok(published)
 	}
@@ -6450,6 +6492,58 @@ pub(super) mod test {
 		let mut f = vec![0xFF, 0xF5, 0x18, 0xC0];
 		f.resize(72, fill);
 		f
+	}
+
+	/// The first confirmed frame resolves the catalog while the rest of its bounded PES is
+	/// still arriving. Later pieces keep every frame's timestamp, including an empty tail.
+	#[tokio::test(start_paused = true)]
+	async fn a_complete_audio_frame_does_not_wait_for_its_pes_tail() {
+		const PID: u16 = 0x61;
+		let expected: Vec<_> = (1..=10).map(mp2_frame).collect();
+		let payload = expected.concat();
+		let len = 8 + payload.len();
+		let mut pes = vec![0, 0, 1, 0xc0, (len >> 8) as u8, len as u8, 0x80, 0x80, 5];
+		pes.extend_from_slice(&pes_timestamp(2, 90_000));
+		pes.extend_from_slice(&payload);
+		let (_, packets) = super::super::fixture::Mux::default().split(PID, &pes);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg1Audio, PID)], false))
+			.unwrap();
+		// The last stream's config arrives 760 ms after a cut; its PES ends at 1.2 s.
+		tokio::time::advance(Duration::from_millis(760)).await;
+		import.decode(&packets[0]).unwrap();
+		assert!(
+			matches!(
+				consumer
+					.track(hang::Catalog::DEFAULT_NAME)
+					.unwrap()
+					.poll_largest(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Some(_))
+			),
+			"the first confirmed stream config releases the catalog before its PES ends"
+		);
+		for packet in &packets[1..] {
+			tokio::time::advance(Duration::from_millis(440) / (packets.len() - 1) as u32).await;
+			import.decode(packet).unwrap();
+		}
+		import.finish().unwrap();
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let frames = read_track(&consumer, &name, crate::container::Kind::Audio).await;
+		assert_eq!(
+			frames.iter().map(|frame| frame.payload.to_vec()).collect::<Vec<_>>(),
+			expected
+		);
+		assert_eq!(
+			frames
+				.iter()
+				.map(|frame| frame.timestamp.as_micros())
+				.collect::<Vec<_>>(),
+			(0..10).map(|i| 1_000_000 + i * 72_000).collect::<Vec<_>>()
+		);
 	}
 
 	// A frame header that changes the channel count is a new decoder identity: the frames after
@@ -8407,7 +8501,11 @@ pub(super) mod test {
 				flagged: true
 			}
 		);
-		assert_eq!(restart.remainder, after, "the new instance starts at the break");
+		assert_eq!(
+			&restart.remainder[2 * 188..],
+			after,
+			"the unread media starts at the break after its PAT/PMT"
+		);
 		import.finish().unwrap();
 	}
 
@@ -10649,6 +10747,52 @@ pub(super) mod test {
 			1,
 			"one flag per program break"
 		);
+	}
+
+	/// A PMT-configured track is ready at its first PTS, with its PID already in the first
+	/// catalog. Its bounded PES need not have delivered any payload yet.
+	#[tokio::test(start_paused = true)]
+	async fn a_configured_track_releases_the_catalog_at_its_pes_header() {
+		const PID: u16 = 0x62;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut initial = crate::catalog::hang::Catalog::<Ext>::default();
+		initial.ext.mpegts.mux_rate = Some(400_000);
+		let catalog =
+			crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default().with_catalog(initial))
+				.unwrap();
+		let mut published = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let mut tables = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x100)]));
+		tables.extend(psi_packets(
+			0x100,
+			&mut 0,
+			&[],
+			&pmt_section(1, 0, &[(0x06, PID, &[5, 4, b'O', b'p', b'u', b's'])]),
+		));
+		import.decode(&tables).unwrap();
+		assert!(
+			published.poll_next(&kio::Waiter::noop()).is_pending(),
+			"the clock is not anchored"
+		);
+		let body = [0x7f, 0xe0, 3, 0xf8, 0xff, 0xfe];
+		let mut header = vec![0, 0, 1, 0xbd, 0, 8 + body.len() as u8, 0x80, 0x80, 5];
+		header.extend_from_slice(&pes_timestamp(2, 90_000));
+		import.decode(&pes_fragment(PID, true, 0, &header)).unwrap();
+		let std::task::Poll::Ready(Ok(Some(first))) = published.poll_next(&kio::Waiter::noop()) else {
+			panic!("the known config and final clock release the catalog at the header");
+		};
+		let name = first.audio.renditions.keys().next().unwrap();
+		assert_eq!(
+			first.ext.mpegts.tracks[name].pid, PID,
+			"the first snapshot carries the PID"
+		);
+		assert_eq!(
+			first.clock,
+			catalog.snapshot().clock,
+			"the first snapshot carries the anchored clock"
+		);
+		import.decode(&pes_fragment(PID, false, 1, &body)).unwrap();
+		import.finish().unwrap();
 	}
 
 	fn opus_extension(body: &[u8]) -> Vec<super::catalog::Descriptor> {

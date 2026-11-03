@@ -589,6 +589,45 @@ mod test {
 		assert_eq!(pat.section(&next), None);
 	}
 
+	/// A restart preserves a multi-section PAT, including a section spanning packets, and
+	/// continues the source's counter even when the prefix wraps through zero.
+	#[test]
+	fn restart_packets_preserve_whole_sections_and_the_counter() {
+		let entries: Vec<_> = (1u16..=200)
+			.flat_map(|program| {
+				let mut entry = program.to_be_bytes().to_vec();
+				entry.extend_from_slice(&(0xe000 | (0x100 + program)).to_be_bytes());
+				entry
+			})
+			.collect();
+		let sections: Vec<bytes::Bytes> = [
+			section(0, 7, 3, 0, 1, &entries),
+			section(0, 7, 3, 1, 1, &[0, 201, 0xe3, 1]),
+		]
+		.into_iter()
+		.map(Into::into)
+		.collect();
+		let mut input = Vec::new();
+		packets(&mut input, (0, Some(1)), &sections);
+		let mut continuity = super::super::health::Continuity::default();
+		let mut reader = super::super::import::PatReader::default();
+		let mut errors = 0;
+		let mut pat = None;
+		for packet in input.as_chunks::<188>().0 {
+			assert_eq!(
+				continuity.observe(packet),
+				super::super::health::Continuation::Contiguous
+			);
+			pat = reader.push(packet, &mut errors).or(pat);
+		}
+		let pat = pat.unwrap();
+		assert_eq!(pat.sections.as_ref(), sections);
+		assert_eq!(pat.programs.len(), 201);
+		assert_eq!(pat.programs.last().unwrap().program_number, 201);
+		assert_eq!(reader.counter(), Some(1));
+		assert_eq!(errors, 0);
+	}
+
 	#[test]
 	fn pat_skips_a_table_not_yet_in_force() {
 		let mut next = section(0, 1, 0, 0, 0, &[0x00, 0x01, 0xe1, 0x00]);

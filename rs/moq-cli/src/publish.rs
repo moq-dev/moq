@@ -2370,7 +2370,7 @@ pub(crate) mod tests {
 			catalog,
 			pending: Some(Pending::new(control.clone(), publish.route.unwrap()).unwrap()),
 			control: Some(control),
-			broadcast: Some(publish.broadcast),
+			broadcast: publish.broadcast,
 			report: None,
 		};
 		let republish = publish.republish.unwrap();

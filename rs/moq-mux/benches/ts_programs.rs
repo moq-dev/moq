@@ -290,5 +290,61 @@ fn programs(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, programs);
+/// Reacquire one program after a clock step while the multiplex's programs and bitrate vary.
+fn restarts(c: &mut Criterion) {
+	let mut group = c.benchmark_group("ts_restart");
+	group.measurement_time(Duration::from_secs(2));
+	group.warm_up_time(Duration::from_millis(300));
+	group.sample_size(10);
+	for programs in [1, 4, 16] {
+		for mbps in [1, 4] {
+			let input = multiplex(
+				programs,
+				Extra {
+					idle: 0,
+					strays: 0,
+					null: false,
+				},
+				mbps * 1_000_000,
+			);
+			let open = || {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+				(
+					moq_mux::container::ts::Import::new(broadcast, catalog.reserve()).with_program(1),
+					catalog,
+				)
+			};
+			group.throughput(Throughput::Bytes(input.len() as u64));
+			group.bench_function(BenchmarkId::new(programs.to_string(), format!("{mbps}mbps")), |b| {
+				b.iter_batched(
+					|| {
+						let (mut import, catalog) = open();
+						import.decode(&input).unwrap();
+						(import, catalog)
+					},
+					|(mut import, _catalog)| {
+						let mut chunks = input.chunks(188 * 7);
+						let restart = chunks
+							.find_map(|chunk| import.decode(chunk).err())
+							.unwrap()
+							.downcast::<moq_mux::container::ts::Restart>()
+							.unwrap();
+						let (mut replacement, catalog) = open();
+						replacement.decode(&restart.remainder).unwrap();
+						for chunk in chunks {
+							replacement.decode(chunk).unwrap();
+						}
+						assert_eq!(catalog.snapshot().video.renditions.len(), 1);
+						std::hint::black_box((import, replacement, catalog));
+					},
+					BatchSize::PerIteration,
+				)
+			});
+		}
+	}
+	group.finish();
+}
+criterion_group!(benches, programs, restarts);
+
 criterion_main!(benches);
