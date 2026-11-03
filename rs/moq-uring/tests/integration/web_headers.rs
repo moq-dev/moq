@@ -87,7 +87,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 			// Wait for acknowledgement so the client stays alive until all payloads arrived.
 			let mut recv = session.accept_uni().await.unwrap();
 			assert_eq!(recv.read_to_end(1).await.unwrap(), [0xff]);
-				acknowledgement.await.expect("server received the ACK");
+			acknowledgement.await.expect("server received the ACK");
 		});
 	});
 	let elapsed = worker
