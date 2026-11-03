@@ -219,7 +219,7 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 ## Subscription defaults
 
-`moq::subscription_defaults()` returns moq-net's defaults, whose zero `max_delay` skips a superseded group at once; passing `std::nullopt` for a subscription means the same. Change its fields rather than starting from `moq::Subscription{}`, whose unset `max_delay` sets no subscriber limit.
+Start every subscription from `moq::subscription_defaults()` and change its fields. It holds moq-net's defaults, a zero `delay` that starts at the newest group and skips a superseded one at once, and passing `std::nullopt` for a subscription means the same. A bare `moq::Subscription{}` does not: the generated records carry no duration defaults, so its unset `delay.max` sets no subscriber limit and its unset `delay.min` leaves the target latency unstated.
 
 ## Track demand
 
@@ -250,8 +250,9 @@ its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.
 The broadcast stays announced and keeps serving the finished tracks, so a
 subscriber still catching up can drain them, until `broadcast->close()` takes it
 offline. How long to keep it up is yours to decide. A track still open at the
-close, or released without a finish, ends with `Unroutable`, which readers take
-as the publisher leaving.
+close, or released without a finish, ends with `Unroutable` (`Internal` over
+moq-transport, which has no such code). Readers follow a publisher's runs by
+announcement, not by that error: see [identity and recovery](/concept/identity).
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

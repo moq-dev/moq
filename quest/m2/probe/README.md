@@ -55,8 +55,8 @@ Decided with the maintainer on 2026-10-20:
   the next breaking release. Their rung disable needs the target and native
   probing, not padding.
 - Padding is browser-only (WebTransport in `js/net`). moq-quic with BBR3 is
-  the only native backend with a probing hook; other native backends (iroh
-  on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
+  the only native backend with a probing hook; moq-quic under CUBIC
+  has no sender, keep `Report`, and never
   disable a rung. lite-07 reserves its stream
   type before the cut (Padding Stream 0x2), and
   the sender stays here.
@@ -90,6 +90,7 @@ This README's own work, once the children land:
 - [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
+- [Viewer targets are tested end to end and documented in Python](/quest/m2/probe/viewer-followups.md) - three gaps moq-dev/moq#7090 left are closed
 
 ## Related
 

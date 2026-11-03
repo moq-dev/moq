@@ -21,8 +21,9 @@ export class Consumer implements AsyncIterable<Event> {
 
 export const DEFAULT_DURATION: Micro;
 
-export type Entry = Omit<Record, "pts" | "duration"> & {
+export type Entry = Omit<Record, "group" | "pts" | "duration"> & {
 	duration?: Micro;
+	group: bigint;
 	pts: Micro;
 };
 
@@ -50,9 +51,9 @@ export class Recorder {
 	abort(err: Error): void;
 	end(pts: Micro): void;
 	finish(): void;
-	frame(group: number, pts: Micro): void;
+	frame(group: bigint, pts: Micro): void;
 	readonly hls: Signals.Getter<Hls | undefined>;
-	stop(group: number): void;
+	stop(group: bigint): void;
 	readonly track: Net.Track.Producer;
 }
 
@@ -63,8 +64,8 @@ export class Segmenter {
 	close(): void;
 	get declared(): Micro | undefined;
 	end(pts: Micro): void;
-	frame(group: number, pts: Micro): void;
-	stop(group: number): void;
+	frame(group: bigint, pts: Micro): void;
+	stop(group: bigint): void;
 	take(): Record[];
 }
 
