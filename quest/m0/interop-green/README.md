@@ -58,8 +58,8 @@ showed more causes, fixed in this quest's own PR:
   [moq-dev/moq#7222](https://github.com/moq-dev/moq/pull/7222).
 - Wire-compat fails on a stale planned break: the `moq-lite-07-wip` entry
   in `test/interop/compat/planned-breaks.json` pins moq-cli 0.14.10, and
-  0.14.11 has been released. Remeasured with
-  `just test wire-compat --remeasure`.
+  0.14.11 has been released. Remeasured against moq-cli 0.14.12 and
+  moq-relay 0.17.12 with `just test wire-compat --remeasure`.
 
 The P2P data-channel test timed out once, in 41668668824, and passes
 locally; triage it if it recurs.
