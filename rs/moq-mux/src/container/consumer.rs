@@ -4212,7 +4212,7 @@ mod tests {
 			frames
 		})
 		.await
-		.expect("consumer hung — possible infinite loop regression");
+		.expect("consumer hung - possible infinite loop regression");
 
 		assert_eq!(frames.len(), 3);
 		finisher.await.expect("finisher task panicked");
@@ -4302,7 +4302,7 @@ mod tests {
 			frames
 		})
 		.await
-		.expect("consumer hung — max_timestamp regression");
+		.expect("consumer hung - max_timestamp regression");
 
 		assert_eq!(frames.len(), 4, "Expected all 4 frames, got {}", frames.len());
 		assert_eq!(frames[0].timestamp, ts(0));
@@ -4704,7 +4704,7 @@ mod tests {
 		// Group 0: finished normally, its first frame read before group 2 lands.
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
-		// Group 2: finished (group 1 is missing — sequence gap)
+		// Group 2: finished (group 1 is missing - sequence gap)
 		write_group(&mut track, 2, &[ts(200_000)]);
 		track.finish().unwrap();
 
@@ -4923,7 +4923,7 @@ mod tests {
 
 		let frames = kio::clock::timeout(Duration::from_secs(2), async { continuous_frames(&mut consumer).await })
 			.await
-			.expect("consumer hung — duration skip regression");
+			.expect("consumer hung - duration skip regression");
 
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].timestamp, ts(0));

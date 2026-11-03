@@ -2,7 +2,7 @@
 //!
 //! Wraps the `boytacean` emulator library, adding per-viewer button tracking
 //! for crowd-control input. A button is pressed on the emulator as long as
-//! at least one viewer is holding it (union semantics — "anarchy mode").
+//! at least one viewer is holding it (union semantics - "anarchy mode").
 
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -142,7 +142,7 @@ impl Emulator {
 		self.sync_buttons();
 	}
 
-	/// A viewer disconnected — remove their button state.
+	/// A viewer disconnected - remove their button state.
 	pub fn viewer_left(&mut self, viewer_id: &str) {
 		self.viewers.remove(viewer_id);
 		self.sync_buttons();

@@ -31,6 +31,7 @@ import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
+import { max, min } from "../util/sequence.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -40,8 +41,8 @@ import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
-	exclusiveGroupEnd,
-	type RangeGroups,
+	hasWireTime,
+	requestedRanges,
 	type Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -61,6 +62,7 @@ import {
 	hasInstance,
 	hasLargest,
 	hasProbeRtt,
+	hasRanges,
 	hasRouteCost,
 	hasSynced,
 	hasTrackStream,
@@ -128,8 +130,8 @@ function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage 
 	return new TrackInfoMessage({
 		priority: info.priority,
 		refresh: info.refresh,
-		// Publisher Max Age: the publisher's retention bound, advertised so relays re-serve
-		// with the same window.
+		// Publisher Max Age: the publisher's staleness bound, advertised so relays re-serve
+		// with the same bound.
 		maxAge: info.maxAge,
 		// `#serveGroup` emits each frame converted to it.
 		timescale: info.timescale ?? undefined,
@@ -186,11 +188,11 @@ interface RunGroup {
  */
 type FrameBounds = {
 	/** The group {@link startFrame} qualifies, if the subscription named one. */
-	startGroup?: number;
+	startGroup?: bigint;
 	/** First frame to send within {@link startGroup}; every other group starts at 0. */
 	startFrame: number;
 	/** The group {@link endFrame} qualifies, if the subscription named one. */
-	endGroup?: number;
+	endGroup?: bigint;
 	/** Last frame (inclusive) to send within {@link endGroup}; every other group runs to its end. */
 	endFrame?: number;
 };
@@ -199,14 +201,14 @@ type FrameBounds = {
  * The frames of `sequence` a subscription asked for, as a start index and an inclusive end.
  *
  * The frame bounds qualify the start and end group only; every other group is served whole.
- * Which groups are served at all is the subscriber's read cursor (`withRange`),
+ * Which groups are served at all is the serving subscriber's ranges and floor,
  * applied when a group is popped rather than re-checked here.
  *
  * The serving loop calls this synchronously after the pop, before any SUBSCRIBE_UPDATE can
  * change `bounds`. Nothing downstream trims the frame range: it is a wire request,
  * deliberately decoupled from the receiver's local read cursor.
  */
-function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } {
+function frameRange(bounds: FrameBounds, sequence: bigint): { start: number; end?: number } {
 	return {
 		start: bounds.startGroup === sequence ? bounds.startFrame : 0,
 		end: bounds.endGroup === sequence ? bounds.endFrame : undefined,
@@ -356,15 +358,10 @@ class SubscriptionControls {
 	}
 }
 
-// Where each range starts once delivery starts at `from`, `undefined` for one with no group
-// there. Before lite-07 there is one range, which starts there.
-function rangeStarts(ranges: (RangeGroups | undefined)[] | undefined, from: number): (number | undefined)[] {
-	if (!ranges) return [from];
-	return ranges.map((range) => {
-		if (!range) return undefined;
-		const start = Math.max(range.start, from);
-		return range.end === undefined || range.end > start ? start : undefined;
-	});
+// Where each range of `track` starts once delivery starts at `from`, undefined for one with no
+// group there. Before lite-07 there is one range, which starts there.
+function rangeStarts(version: Version, track: track.Subscriber, from: bigint): (bigint | undefined)[] {
+	return hasRanges(version) ? hooks.servingStarts(track, from) : [from];
 }
 
 // The later of two locations, either of which may be unknown.
@@ -400,11 +397,11 @@ function waitForSubscription(
  *
  * A version without the field decodes as `0`, which is indistinguishable from a peer
  * genuinely asking for the live edge. Serving that as real time would discard backlog
- * a legacy subscriber never declined, so fall back to a window wide enough not to drop
+ * a legacy subscriber never declined, so fall back to the publisher's max age alone
  * and leave enforcement to the receiver, as the IETF path does for the same reason.
  */
-function servingMaxDelay(version: Version, requested: number | undefined): number {
-	return carriesMaxDelay(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+function servingMaxDelay(version: Version, requested: number): Milli | null {
+	return carriesMaxDelay(version) ? Milli(requested) : null;
 }
 
 /** Whether this version's SUBSCRIBE carries Subscriber Max Age at all. */
@@ -424,10 +421,10 @@ function carriesMaxDelay(version: Version): boolean {
  * an unbounded budget so nothing is dropped under them (see {@link servingMaxDelay}), which
  * must not read as a request to replay the whole cache on join.
  */
-function cursorFloor(version: Version, startGroup: number | undefined, latest: number | undefined): number {
+function cursorFloor(version: Version, startGroup: bigint | undefined, latest: bigint | undefined): bigint {
 	if (startGroup !== undefined) return startGroup;
-	if (resolvesStart(version)) return 0;
-	return latest ?? 0;
+	if (resolvesStart(version)) return 0n;
+	return latest ?? 0n;
 }
 
 /**
@@ -872,11 +869,6 @@ export class Publisher {
 			return;
 		}
 
-		if (msg.ranges?.some((range) => range?.unresolved)) {
-			stream.abort(new Error("relative and time subscription anchors are not supported"));
-			return;
-		}
-
 		// The requester leaving while the broadcast and track resolve ends the request, as
 		// Rust polls the requester throughout, so a cancelled subscription gives back its
 		// charge instead of holding it until the track is answered, which may be never. A
@@ -904,26 +896,48 @@ export class Publisher {
 			return;
 		}
 
-		const endGroup = exclusiveGroupEnd(msg.endGroup);
-		const track = front.track(msg.track).subscribe({
+		const consumer = front.track(msg.track);
+		const subscription = (ranges: track.Range[]): track.Subscription => ({
 			priority: msg.priority,
 			order: msg.order,
 			delay: {
-				max: Milli(servingMaxDelay(this.version, msg.maxDelay)),
+				max: servingMaxDelay(this.version, msg.maxDelay),
 				min: msg.minDelay === undefined ? null : Milli(msg.minDelay),
 			},
-			groups: {
-				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
-				end: endGroup === undefined ? undefined : { excluded: endGroup },
-			},
+			ranges,
 		});
+		// A time anchor counts in the timescale this peer was told, so it waits for the info.
+		// Meanwhile the subscription asks for nothing but holds the track it resolves, so an
+		// on-demand track's request answers it, rather than one released once its info lands.
+		const timed = hasWireTime(msg.ranges);
+		let ranges: track.Range[] = [];
+		try {
+			if (!timed) ranges = requestedRanges(msg, undefined);
+		} catch (err: unknown) {
+			stream.writer.reset(error(err));
+			return;
+		}
+		// Parked past a bounded window's end: the peer reads this stream's end as the track's.
+		const track = hooks.parked(consumer.subscribe(subscription(ranges)));
 		serving(track);
+		if (timed) {
+			try {
+				const info = await untilAborted(track.info(), left.signal);
+				track.update(subscription(requestedRanges(msg, info.timescale ?? undefined)));
+			} catch (err: unknown) {
+				track.close();
+				stream.writer.reset(error(err));
+				return;
+			}
+		}
+		if (watch.revoked()) {
+			track.close();
+			return;
+		}
 		const latest = hooks.latestSequence(track);
 		let floor = cursorFloor(this.version, msg.startGroup, latest);
-		track.withRange({
-			start: { included: floor },
-			end: endGroup === undefined ? undefined : { excluded: endGroup },
-		});
+		// The ranges cap what is served; the floor only pins where an older wire starts.
+		track.withRange({ start: { included: floor } });
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
@@ -960,10 +974,7 @@ export class Publisher {
 			const resolved = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
 			if (latest === undefined && resolved !== floor) {
 				floor = resolved;
-				track.withRange({
-					start: { included: floor },
-					end: endGroup === undefined ? undefined : { excluded: endGroup },
-				});
+				track.withRange({ start: { included: floor } });
 			}
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;
@@ -1004,8 +1015,6 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
-					if (update.ranges?.some((range) => range?.unresolved))
-						throw new Error("relative and time subscription anchors are not supported");
 					Object.assign(datagramBounds, {
 						startGroup: update.startGroup,
 						startFrame: update.startFrame,
@@ -1017,18 +1026,14 @@ export class Publisher {
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
 						hooks.joinSubscriber(track);
-					const end = exclusiveGroupEnd(update.endGroup);
 					track.update({
 						priority: update.priority,
 						order: update.order,
 						delay: {
-							max: Milli(servingMaxDelay(this.version, update.maxDelay)),
+							max: servingMaxDelay(this.version, update.maxDelay),
 							min: update.minDelay === undefined ? null : Milli(update.minDelay),
 						},
-						groups: {
-							start: update.startGroup === undefined ? undefined : { included: update.startGroup },
-							end: end === undefined ? undefined : { excluded: end },
-						},
+						ranges: requestedRanges(update, info.timescale ?? undefined),
 					});
 				},
 			});
@@ -1041,7 +1046,6 @@ export class Publisher {
 				served,
 				floor,
 				bounds,
-				ranges: msg.ranges,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1205,23 +1209,16 @@ export class Publisher {
 			compress: boolean;
 			served: Run[] | undefined;
 			// The read cursor's floor; see {@link cursorFloor}.
-			floor: number;
+			floor: bigint;
 			bounds: FrameBounds;
-			// Each lite-07 range, which SUBSCRIBE_START answers for.
-			ranges: (RangeGroups | undefined)[] | undefined;
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
-		// The read cursor's floor, assigned with the cap in {@link bounds} on every move.
+		// The read cursor's floor; the subscription's ranges cap it.
 		let floor = serving.floor;
-		let ranges = serving.ranges;
-		const moveCursor = () =>
-			track.withRange({
-				start: { included: floor },
-				end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
-			});
+		const moveCursor = () => track.withRange({ start: { included: floor } });
 		// Raise the floor to `start`, keeping any higher floor already set.
-		const raiseFloor = (start: number) => {
+		const raiseFloor = (start: bigint) => {
 			if (start <= floor) return;
 			floor = start;
 			moveCursor();
@@ -1231,9 +1228,9 @@ export class Publisher {
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Dispositions before START refine its boundary; later ones must be named as drops.
-		const skipped: { start: number; end: number; error: Error }[] = [];
+		const skipped: { start: bigint; end: bigint; error: Error }[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
-		let startSequence: number | undefined;
+		let startSequence: bigint | undefined;
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
@@ -1241,11 +1238,11 @@ export class Publisher {
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
 		// yet, given up with `err`.
-		const drop = async (start: number, end: number, err: Error): Promise<boolean> => {
+		const drop = async (start: bigint, end: bigint, err: Error): Promise<boolean> => {
 			if (!served) return true;
 			for (const gap of runGaps(served, start, end)) {
 				insertRun(served, gap.start, gap.end);
-				const msg = SubscribeDrop.given(gap.start, gap.end - 1, err, this.version);
+				const msg = SubscribeDrop.given(gap.start, gap.end - 1n, err, this.version);
 				if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 					return false;
 			}
@@ -1261,7 +1258,7 @@ export class Publisher {
 		// stream FIN says where it stops.
 		const boundary = () => {
 			const end = hooks.subscriberEnd(track);
-			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
+			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1n) + 1n;
 		};
 
 		// Declare the boundary immediately; groups below it can still be in flight. Lite-07 carries
@@ -1276,13 +1273,22 @@ export class Publisher {
 			);
 		};
 
+		// The FIN tells the subscriber every group is accounted for, so it waits until each group
+		// stream finished or reset. False once the subscriber left instead, which cancels whatever
+		// is still queued. `race`, since this repeats per batch of drops against the subscription's end.
+		const drained = async (): Promise<boolean> => {
+			const done = Symbol("drained");
+			const end = await race([Promise.all(groups).then(() => done), controls.ended]);
+			if (end instanceof Error) throw end;
+			return end === done;
+		};
 		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
 		// early could let the subscriber settle before the reset arrives. A subscription capped
 		// short of the end is owed no error, so its boundary goes out.
 		const declareEarly = () =>
 			hasEndError(this.version) ||
 			!hooks.subscriberEndError(track) ||
-			(bounds.endGroup !== undefined && bounds.endGroup + 1 < boundary());
+			(bounds.endGroup !== undefined && bounds.endGroup + 1n < boundary());
 
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track, publisher);
@@ -1306,8 +1312,8 @@ export class Publisher {
 					for (const range of skipped) {
 						// What was given up below the start is never named, so a wider budget may serve it.
 						if (range.start < startSequence)
-							hooks.unreport(track, range.start, Math.min(range.end, startSequence));
-						if (!(await drop(Math.max(range.start, startSequence), range.end, range.error))) return false;
+							hooks.unreport(track, range.start, min(range.end, startSequence));
+						if (!(await drop(max(range.start, startSequence), range.end, range.error))) return false;
 					}
 					skipped.length = 0;
 				}
@@ -1346,8 +1352,8 @@ export class Publisher {
 								update.startGroup === undefined &&
 								requested !== undefined &&
 								!resolvesStart(this.version)
-									? (hooks.latestSequence(track) ?? 0)
-									: (update.startGroup ?? (resolvesStart(this.version) ? 0 : undefined));
+									? (hooks.latestSequence(track) ?? 0n)
+									: (update.startGroup ?? (resolvesStart(this.version) ? 0n : undefined));
 							if (start !== undefined) {
 								floor = start;
 								// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
@@ -1355,13 +1361,12 @@ export class Publisher {
 								// covers them. A raised one sends no early drop: the subscriber already
 								// stops owing below its floor, and a later update may lower it again to
 								// reopen those groups.
-								if (startSequence !== undefined) startSequence = Math.min(startSequence, start);
+								if (startSequence !== undefined) startSequence = min(startSequence, start);
 							}
 							bounds.startGroup = update.startGroup;
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
-							ranges = update.ranges;
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
@@ -1410,7 +1415,25 @@ export class Publisher {
 								startSent = true;
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(rangeStarts(ranges, bounds.startGroup), largest);
+								const start = new SubscribeStart(
+									rangeStarts(this.version, track, bounds.startGroup),
+									largest,
+								);
+								if (
+									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
+								)
+									return false;
+								continue;
+							}
+						}
+						// A lite-07 window whose bounded ranges all resolved empty owes nothing: say so at
+						// once, and the subscription ends as covered below. No group would ever answer it.
+						if (emitRange && !startSent && hasRanges(this.version)) {
+							const end = hooks.servingEnd(track);
+							if (end !== undefined && hooks.servingRuns(track, 0n, end).length === 0) {
+								startSent = true;
+								startSequence = end;
+								const start = new SubscribeStart(rangeStarts(this.version, track, end), largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1422,6 +1445,23 @@ export class Publisher {
 						if (!endSent && hooks.subscriberEnd(track) !== undefined && declareEarly()) {
 							if (!(await sendEnd())) return false;
 							continue;
+						}
+						// Lite-07 ends a subscription whose every range has an end once it accounted for
+						// each group in them, without SUBSCRIBE_END: the FIN ends the subscription, not the
+						// track. What lies below SUBSCRIBE_START was accounted for by it.
+						if (hasRanges(this.version) && served && startSequence !== undefined) {
+							const end = hooks.servingEnd(track);
+							const covered =
+								end !== undefined &&
+								hooks
+									.servingRuns(track, startSequence, end)
+									.every((run) => runGaps(served, run.start, run.end).length === 0);
+							if (covered) {
+								if (!(await drained())) return false;
+								if (pendingDrops.length > 0) continue;
+								finished = true;
+								return true;
+							}
 						}
 						await waitForSubscription(controls, track, drops);
 						continue;
@@ -1439,29 +1479,23 @@ export class Publisher {
 						if (
 							endError &&
 							!hasEndError(this.version) &&
-							(bounds.endGroup === undefined || bounds.endGroup + 1 >= boundary())
+							(bounds.endGroup === undefined || bounds.endGroup + 1n >= boundary())
 						)
 							throw endError;
 						// Name every sequence from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startSequence !== undefined) {
-							const end =
-								bounds.endGroup === undefined ? boundary() : Math.min(boundary(), bounds.endGroup + 1);
 							const unserved = new StreamError(StreamCode.NotFound, { message: "group not served" });
-							if (!(await drop(startSequence, end, unserved))) return false;
+							// Only the groups inside the ranges are owed.
+							for (const run of hooks.servingRuns(track, startSequence, boundary())) {
+								if (!(await drop(run.start, run.end, unserved))) return false;
+							}
 						}
 						if (!endSent) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						// The FIN tells the subscriber every group is accounted for, so it waits
-						// until each group stream finished or reset. The subscriber leaving
-						// instead cancels whatever is still queued.
-						const drained = Symbol("drained");
-						// `race`, since this repeats per batch of drops against the subscription's end.
-						const end = await race([Promise.all(groups).then(() => drained), controls.ended]);
-						if (end instanceof Error) throw end;
-						if (end !== drained) return false;
+						if (!(await drained())) return false;
 						if (pendingDrops.length > 0) continue;
 						finished = true;
 						return true;
@@ -1483,13 +1517,13 @@ export class Publisher {
 					startSent = true;
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
-					startSequence = Math.min(group.sequence, source ?? group.sequence);
+					startSequence = min(group.sequence, source ?? group.sequence);
 					// A group given up cannot be where the feed starts. Adjacent runs given up with
 					// different errors stay separate, so walk them in order.
-					skipped.sort((a, b) => a.start - b.start);
+					skipped.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 					for (const range of skipped) {
 						if (range.start <= startSequence && range.end > startSequence)
-							startSequence = Math.min(range.end, group.sequence);
+							startSequence = min(range.end, group.sequence);
 					}
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
@@ -1500,14 +1534,14 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(rangeStarts(ranges, startSequence), largest) },
+								{ start: new SubscribeStart(rangeStarts(this.version, track, startSequence), largest) },
 								this.version,
 							),
 						))
 					)
 						return false;
 				}
-				if (served) insertRun(served, group.sequence, group.sequence + 1);
+				if (served) insertRun(served, group.sequence, group.sequence + 1n);
 
 				const options: RunGroup = {
 					sub,
@@ -1765,7 +1799,7 @@ export class Publisher {
 				}
 
 				// A sent datagram counts as delivered even if it is lost, so the end sweep skips it.
-				if (served) insertRun(served, datagram.sequence, datagram.sequence + 1);
+				if (served) insertRun(served, datagram.sequence, datagram.sequence + 1n);
 				await writer.ready;
 				await writer.write(body);
 			}

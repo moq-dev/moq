@@ -36,7 +36,7 @@ type State =
  */
 export class Join {
 	/** The group this join brings the head of: SUBSCRIBE_OK's Largest group. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 
 	#state: State = { kind: "pending" };
 	// Tails parked on the head, woken synchronously so they hold the end before the head lets go.
@@ -55,7 +55,7 @@ export class Join {
 	 * Stream Count includes: a draft-22 fill. A draft-18 joining FETCH is a request of its own,
 	 * so the join holds the end open for it instead.
 	 */
-	constructor(sequence: number, tail: Tail, { counted = false }: { counted?: boolean } = {}) {
+	constructor(sequence: bigint, tail: Tail, { counted = false }: { counted?: boolean } = {}) {
 		this.sequence = sequence;
 		this.#tail = tail;
 		this.#release = counted ? () => {} : tail.hold();

@@ -2465,10 +2465,9 @@ pub extern "C" fn moq_publication_free(publication: u32) -> i32 {
 /// End a broadcast for good and release its handle.
 ///
 /// The origin retracts the path immediately and serves no new tracks. Every media, raw track,
-/// container, encoder, and JSON handle still open on the broadcast ends with `UNROUTABLE`,
-/// the way a reader sees a publisher leave, and is released; finish a track first to end it
-/// cleanly. The
-/// handles are invalid afterwards, so closing it again fails like any unknown handle, and so
+/// container, encoder, and JSON handle still open on the broadcast ends with `UNROUTABLE`
+/// (an internal error to a moq-transport reader), and is released; finish a track first to end
+/// it cleanly. The handles are invalid afterwards, so closing it again fails like any unknown handle, and so
 /// does any later call on a released child.
 ///
 /// Returns a zero on success, or a negative code on failure.
@@ -4012,6 +4011,10 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 ///   `user_data` is never touched again, so release `user_data` there. The
 ///   terminal callback fires even after [moq_consume_video_cancel].
 ///
+/// The catalog rendition's `warmup` reaches that much further back for decoder history and
+/// increases the subscription's max delay by the same amount. The steady-state skip budget
+/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
+///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
@@ -4059,6 +4062,10 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 /// terminal callback fires even after [moq_consume_audio_cancel].
 /// `delay` is how far behind the live edge to play: where a cold join starts and when
 /// frames are skipped. NULL uses the defaults (see [moq_delay]).
+///
+/// The catalog rendition's `warmup` reaches that much further back for decoder history and
+/// increases the subscription's max delay by the same amount. The steady-state skip budget
+/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
