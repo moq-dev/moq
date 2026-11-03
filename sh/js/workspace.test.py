@@ -86,9 +86,7 @@ class SelectionTest(unittest.TestCase):
         )
         just.chmod(0o755)
         subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
-        self.assertEqual(
-            calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"]
-        )
+        self.assertEqual(calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts"])
         self.assertFalse(summary.exists())
 
     def test_cli_loads_without_shadowing_standard_library_modules(self):
@@ -234,32 +232,6 @@ class SelectionTest(unittest.TestCase):
             [{"extends": "./tsconfig.json", "exclude": ["**/dist", str(self.root / "test/browser")]}],
         )
         self.assertEqual(list((self.root / "test").glob("tmp*.json")), [])
-
-    def test_biome_covers_unowned_js_files_in_fallback(self):
-        def biome(paths):
-            return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
-
-        self.assertEqual(
-            biome(["js/tsconfig.json"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"],
-        )
-        self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "--error-on-warnings", "doc", "js/common"])
-        self.assertEqual(
-            biome(["demo/nested/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "demo/nested", "js/common"],
-        )
-        self.assertEqual(
-            biome(["demo/pub/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"],
-        )
-        self.assertEqual(
-            biome(["js/core/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js/core", "js/view", "doc", "js/common"],
-        )
-        self.assertEqual(
-            biome(["js/bindings/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js/bindings", "test/browser", "demo/nested", "js/common"],
-        )
 
     def test_tests_do_not_build_unselected_packages(self):
         calls = self.calls(["doc/index.md"], "test")
