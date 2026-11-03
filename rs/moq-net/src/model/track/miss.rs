@@ -2082,7 +2082,8 @@ mod tests {
 
 	/// A reader waiting on many fills looks only at the ones that answered, yet each still
 	/// wakes it, and wakes the task that read it last: a reader read by another task since
-	/// parked learns of the answer too.
+	/// parked learns of the answer too. The read resolves through its idle gate, which wakes
+	/// only the task that parked it last.
 	#[kio::test]
 	async fn an_answered_fill_wakes_the_task_that_read_last() {
 		use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2198,6 +2199,10 @@ mod tests {
 			"the read waits on the fill for group 0"
 		);
 		assert!(reader.poll_drop(&drops_waiter).is_pending(), "nothing given up yet");
+		assert!(
+			reader.poll_drop(&kio::Waiter::noop()).is_pending(),
+			"a no-op poll leaves the real registrations in place"
+		);
 
 		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
 			.await
