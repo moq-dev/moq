@@ -635,8 +635,13 @@ impl Copy {
 					.take_while(|run| *run.start() < end)
 					.any(|run| {
 						let end = run.end().saturating_add(1).min(end);
-						self.track
-							.may_land(*run.start()..end, floor.is_some(), grace, Some(reader.delivered))
+						self.track.may_land(
+							*run.start()..end,
+							floor.is_some(),
+							grace,
+							Some(reader.delivered),
+							reader.waiter,
+						)
 					}) {
 				return Retains::Wait;
 			}
@@ -663,7 +668,7 @@ impl Copy {
 				|| (lands
 					&& self
 						.track
-						.may_land(sequence..sequence.saturating_add(1), asked, grace, None))
+						.may_land(sequence..sequence.saturating_add(1), asked, grace, None, reader.waiter))
 		};
 		match Arc::strong_count(&self.lease) > 1 || reader.out.iter().any(|(sequence, _)| backs(*sequence)) {
 			true => Retains::Keep,
@@ -4575,6 +4580,62 @@ mod test {
 		write(&a, 1);
 		assert_eq!(drain(&mut sub, false), [1]);
 		assert!(matches!(sub.poll_recv_group(&noop), Poll::Ready(Ok(None))));
+	}
+
+	/// A capped cursor never probes the gap outside its cap, but the resume reader still
+	/// waits for it. Its grace must wake the clean end before the replacement's budget.
+	#[test]
+	fn a_replaced_copys_gap_wakes_the_clean_end_at_its_grace() {
+		for first_group in [false, true] {
+			for ordered in [false, true] {
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let a = copy();
+				let pool = a.broadcast().pool.clone();
+				let opened = a.consume().now();
+				let noop = kio::Waiter::noop();
+				pool.poll(opened, &noop);
+				routes.serve(a.consume());
+				let budget = Duration::from_secs(1);
+				let mut sub = subscribe(&logical, budget);
+				write(&a, 0);
+				write(&a, 2);
+				assert_eq!(drain(&mut sub, false), [0, 2]);
+
+				pool.poll(opened + budget / 2, &noop);
+				let b = copy();
+				write(&b, if first_group { 3 } else { 2 });
+				routes.serve(b.consume());
+				if first_group {
+					assert_eq!(recv(&mut sub).sequence, 3);
+				}
+				b.finish().unwrap();
+				sub.set_range(..1);
+				let wake = Arc::new(Wake::default());
+				let waiter = kio::Waiter::new(wake.clone().into());
+				let mut poll = || match ordered {
+					true => sub.poll_next_group(&waiter),
+					false => sub.poll_recv_group(&waiter),
+				};
+				assert!(poll().is_pending());
+				wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+				assert!(poll().is_pending());
+				assert!(!wake.0.load(std::sync::atomic::Ordering::Relaxed));
+
+				let deadline = opened + budget;
+				assert_eq!(pool.poll(deadline - Duration::from_micros(1), &noop), Some(deadline));
+				assert!(
+					!wake.0.load(std::sync::atomic::Ordering::Relaxed),
+					"not before the grace"
+				);
+				pool.poll(deadline, &noop);
+				assert!(
+					wake.0.load(std::sync::atomic::Ordering::Relaxed),
+					"first_group={first_group}, ordered={ordered}: the gap's grace wakes the reader"
+				);
+				assert!(matches!(poll(), Poll::Ready(Ok(None))));
+			}
+		}
 	}
 
 	/// A read parked on that wait, which never looks at the route, still wakes once the
