@@ -6907,7 +6907,6 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 	for table_id in [0x70, 0x73] {
 		let section = |value| make_short_section(table_id, &[value; 5]);
 		let mut rig = si_cadence_rig(0x0014, table_id, Duration::from_secs(30)).await;
-		rig.exporter = rig.exporter.with_delay(Duration::from_secs(10));
 		rig.si_track
 			.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
 			.unwrap();
@@ -6917,6 +6916,10 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 			rig.si_track
 				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from(section(value)))
 				.unwrap();
+			assert!(
+				poll_frames(&mut rig.exporter).is_empty(),
+				"SI alone cannot advance media"
+			);
 		}
 		for millis in [1_500, 2_500, 2_999] {
 			assert_eq!(rig.media(millis, 0x0014).await, 0, "future revision at {millis}");
