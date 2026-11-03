@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `container::MAX_AGE` is `moq_net::track::Info::DEFAULT_MAX_AGE` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+The media max age is moq-net's authored default, so `hang::container::MAX_AGE` is removed: use `moq_net::track::Info::DEFAULT_MAX_AGE`, the same 30 seconds.
+`container::track_info` and `Catalog::default_track_info` keep that default; the catalog track advertises 30 s where it advertised no limit.
+
 ### Compression moves to the track
 
 `catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.

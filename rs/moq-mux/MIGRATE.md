@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `catalog::Config::with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `moq_net::track::Info::DEFAULT_MAX_AGE` (30 s), `None` sets no publisher limit, and a value is that value.
+Callers that passed an optional override straight through call `with_max_age` only when it is set.
+
+```rust
+// Before
+Config::default().with_max_age(override_or_none);
+// After
+let mut config = Config::default();
+if let Some(max_age) = override_or_none {
+	config = config.with_max_age(max_age);
+}
+```
+
+The catalog and HLS record tracks now advertise the 30 s default instead of no limit.
+
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `json::Snapshot::update` and `json::Stream::append` take `(&value, timestamp)`, a required `moq_net::Timestamp` on the broadcast clock, instead of `impl Into<Timed<&T>>`. Every track in a broadcast shares that clock's epoch, so nothing stamps a write for you.

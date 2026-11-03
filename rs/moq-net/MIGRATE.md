@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`track::Info::default()` sets `max_age` to `Some(Info::DEFAULT_MAX_AGE)`, 30 seconds, instead of `None`.
+A superseded group now goes stale 30 s after its successor; the newest group never does.
+A track that relied on unlimited history requests it explicitly before it is created, with `with_max_age(None)`, or a longer window.
+Readers asking for history still set a sufficient `Delay::max` and range.
+Received metadata is unchanged: a track that arrives without a max age keeps `None`, and the wire is unchanged.
+
+```rust
+// Before: no publisher limit
+track::Info::default();
+// After: the same, stated explicitly
+track::Info::default().with_max_age(None);
+```
+
 ### `Subscription::max_delay` is `delay: track::Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `track::Subscription` carries a `track::Delay { min, max }` in place of `max_delay`, and `with_max_delay(d)` is `with_delay(Delay)`.

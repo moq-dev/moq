@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+The ingest builders' `with_max_age` default to `moq_net::track::Info::DEFAULT_MAX_AGE` (30 s), and `None` now sets no publisher limit instead of keeping that default.
+Call `with_max_age` only when you have a value, as with `moq_mux::catalog::Config::with_max_age`.
+
 ### `moq_net::Path` has no lifetime
 
 Entry points that took `impl moq_net::AsPath` take `impl Into<moq_net::Path>`: pass a `Path` or `&Path`, from `moq_net::Path::new(s)?` or `moq_net::Path::from_static`, since a string can be too long. See moq-net's migration for the rest.

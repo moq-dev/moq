@@ -280,9 +280,10 @@ impl Info {
 
 #[cfg(test)]
 impl Info {
-	/// A millisecond track, for tests that write timestamps.
+	/// A millisecond track with no publisher max age, for tests that write timestamps: a test
+	/// of staleness sets its max age explicitly.
 	pub(crate) fn timed() -> Self {
-		Self::default().with_timescale(Timescale::MILLI)
+		Self::default().with_timescale(Timescale::MILLI).with_max_age(None)
 	}
 }
 
@@ -9711,8 +9712,10 @@ mod test {
 	use std::time::Duration;
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
-	/// normally born from a [`broadcast::Producer`].
+	/// normally born from a [`broadcast::Producer`]. `None` is an untimed track with no
+	/// publisher max age.
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
+		let info = info.into().unwrap_or_else(|| Info::default().with_max_age(None));
 		Producer::new(Arc::new(broadcast::Info::default()), name, info)
 	}
 
@@ -12130,6 +12133,7 @@ mod test {
 
 	#[test]
 	fn optional_age_keeps_publisher_metadata_and_local_policy_separate() {
+		assert_eq!(Info::default().max_age, Some(Info::DEFAULT_MAX_AGE));
 		assert_eq!(Info::timed().max_age, None);
 		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 			let producer = track_producer_capped("optional", Info::timed().with_max_age(age), Duration::from_secs(1));
@@ -12431,7 +12435,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_floor_raised_under_an_asked_fill_keeps_its_fresh_suffix() {
-		let mut producer = track_producer("test", Info::default());
+		let mut producer = track_producer("test", Info::default().with_max_age(None));
 		let requests = producer.requests();
 		producer.received();
 		for sequence in 0..3 {
@@ -12486,7 +12490,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn the_cache_below_the_floor_is_unread_only_to_unlimited_reads() {
-		let mut producer = track_producer("test", Info::default());
+		let mut producer = track_producer("test", Info::default().with_max_age(None));
 		producer.received();
 		for sequence in 0..3 {
 			framed(&producer, sequence, 1).finish().unwrap();
@@ -12539,7 +12543,7 @@ mod test {
 	fn a_resumed_history_read_accounts_for_cached_and_refused_groups() {
 		for ordered in [false, true] {
 			for bounded in [false, true] {
-				let mut producer = track_producer("test", Info::default());
+				let mut producer = track_producer("test", Info::default().with_max_age(None));
 				let requests = producer.requests();
 				producer.received();
 				framed(&producer, 0, 1).finish().unwrap();
@@ -13726,6 +13730,55 @@ mod test {
 		let mut subscriber =
 			producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))));
 		assert_eq!(drain(&mut subscriber), vec![1, 2]);
+	}
+
+	/// An authored track keeps a superseded group fresh for [`Info::DEFAULT_MAX_AGE`] on the
+	/// media clock, so even a reader with no budget of its own reaches back at most that far,
+	/// while the newest group, a snapshot a late joiner bootstraps from, never goes stale.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_default_max_age_bounds_timed_history() {
+		let history = || Subscription::default().with_delay(Delay::default().with_max(None));
+		let mut producer = track_producer("test", Info::default().with_timescale(Timescale::MILLI));
+		append_at(&mut producer, 0);
+		append_at(&mut producer, 1_000);
+		append_at(&mut producer, 30_999);
+
+		// Group 0's successor starts 29.999 s behind the edge: still fresh.
+		assert_eq!(drain(&mut producer.subscribe(history())), vec![0, 1, 2]);
+
+		// A full 30 s behind, it is stale; group 1's successor trails the edge by 1 ms.
+		append_at(&mut producer, 31_000);
+		assert_eq!(drain(&mut producer.subscribe(history())), vec![1, 2, 3]);
+
+		// Explicitly unlimited keeps it all.
+		let mut unlimited = track_producer("unlimited", Info::timed());
+		for millis in [0, 1_000, 30_999, 31_000] {
+			append_at(&mut unlimited, millis);
+		}
+		assert_eq!(drain(&mut unlimited.subscribe(history())), vec![0, 1, 2, 3]);
+	}
+
+	/// The wall clock judges an authored untimed track by the same default: a superseded group
+	/// stays fresh for 30 s after its successor arrived, and the newest group stays readable
+	/// to a late joiner however long it goes unchanged.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_default_max_age_bounds_untimed_history() {
+		let history = || Subscription::default().with_delay(Delay::default().with_max(None));
+		let mut producer = track_producer("test", Info::default());
+		append_untimed(&mut producer);
+		append_untimed(&mut producer);
+		elapse(&producer, Info::DEFAULT_MAX_AGE - Duration::from_millis(1));
+		assert_eq!(drain(&mut producer.subscribe(history())), vec![0, 1]);
+
+		elapse(&producer, Duration::from_millis(1));
+		assert_eq!(drain(&mut producer.subscribe(history())), vec![1]);
+
+		// An hour on, the unchanged newest group still bootstraps a late joiner.
+		elapse(&producer, Duration::from_secs(3600));
+		assert_eq!(drain(&mut producer.subscribe(None)), vec![1]);
+		assert_eq!(drain(&mut producer.subscribe(history())), vec![1]);
 	}
 
 	#[test]
