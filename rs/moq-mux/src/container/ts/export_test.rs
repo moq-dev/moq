@@ -6925,8 +6925,16 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 			assert_eq!(rig.media(millis, 0x0014).await, 0, "future revision at {millis}");
 		}
 		for (millis, value) in [(3_000, 1), (4_000, 2)] {
-			let frames = rig.media_frames(millis).await;
-			assert_eq!(count_pid(&frames, 0x0014), 1, "revision at {millis}");
+			let mut frames = rig.media_frames(millis).await;
+			// A 1ms media step need not close a 25ms PCR slice. Advance past that
+			// slice and assert its timestamp, independently of which read returns it.
+			frames.extend(rig.media_frames(millis + 40).await);
+			let clock: Vec<_> = frames
+				.iter()
+				.filter(|frame| count_pid(std::slice::from_ref(*frame), 0x0014) > 0)
+				.collect();
+			assert_eq!(clock.len(), 1, "revision at {millis}");
+			assert_eq!(clock[0].timestamp, Timestamp::from_millis(millis).unwrap());
 			assert!(
 				frames
 					.iter()
