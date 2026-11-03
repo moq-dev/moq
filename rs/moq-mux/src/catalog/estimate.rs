@@ -180,10 +180,14 @@ impl Estimator {
 	/// Discard the open bitrate span and this track's place in the write order, so nothing is
 	/// measured across a break in the timeline. See
 	/// [`container::Producer::discontinuity`](crate::container::Producer::discontinuity).
+	///
+	/// The track may resume at another offset from the others, so the least trail is measured
+	/// afresh; a delay already in the catalog stays there.
 	pub fn discontinuity(&mut self) {
 		self.bitrate.discontinuity();
 		self.framerate.discontinuity();
 		self.seat.discontinuity();
+		self.delay = None;
 	}
 
 	/// Observe a frame's reorder delay (`PTS - DTS`), which raises the jitter to the decode buffer a
@@ -711,6 +715,21 @@ mod tests {
 		ahead.write(micros(1_000_000), 1);
 		steady.write(micros(1_000_000), 1);
 		assert_eq!(steady.estimate().delay, None);
+	}
+
+	/// A track that resumes behind where it was trails by its new offset, however little it
+	/// trailed before the break.
+	#[test]
+	fn a_discontinuity_measures_the_new_offset() {
+		let [mut video, mut audio] = tracks();
+		video.write(micros(0), 1);
+		audio.write(micros(0), 1);
+		audio.discontinuity();
+		for i in 1..10u64 {
+			video.write(micros(1_000_000 + i * 20_000), 1);
+			audio.write(micros(800_000 + i * 20_000), 1);
+		}
+		assert_eq!(audio.estimate().delay, Some(ms(200)));
 	}
 
 	#[test]
