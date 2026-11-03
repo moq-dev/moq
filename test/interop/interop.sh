@@ -504,7 +504,8 @@ plan_pass() {
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         record "not run" case="CLI FETCH" publisher="$runtime" subscriber=rust
-        record "not run" case="CLI FETCH history" publisher="$runtime" subscriber=rust
+        # run_tails skips it on moq-transport, so only plan it where it runs.
+        [[ "$VERSION" == moq-transport-* ]] || record "not run" case="CLI FETCH history" publisher="$runtime" subscriber=rust
         record "not run" case="late join" publisher=rust subscriber="$runtime"
         record "not run" case="late join" publisher="$runtime" subscriber=rust
         record "not run" case=tail publisher=rust subscriber="$runtime"

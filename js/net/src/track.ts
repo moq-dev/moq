@@ -2505,7 +2505,8 @@ export class Subscriber {
 	// Ask the producer's fills for the misses in `[start, end)`: groups this reader reads below
 	// the newest one received that the cache does not hold and nobody gave up. A run whose newest
 	// group the budget already convicts is not asked, so a reader at the live edge never asks.
-	// Returns the first sequence a fill still owes this reader. Mirrors the Rust `Misses::judge`.
+	// Returns the first sequence a fill still owes this reader whose budget still wants it, arming
+	// the wakeup for when that changes. Mirrors the Rust `Misses::judge`.
 	#askFills(start: bigint, end: bigint, drift?: Drift): bigint | undefined {
 		const producer = this.#state.producer;
 		if (this.#resume || !producer || this.#closed) return undefined;
@@ -2514,6 +2515,14 @@ export class Subscriber {
 		if (fills.serving || fills.active) {
 			drift ??= this.#drift();
 			const asker = this.#askerOf();
+			// Keep only what this reader still reads, as the Rust `Misses` clips what it judged to
+			// the window: a group handed out, forgotten past the budget, or outside the window is
+			// never asked again, so these stay within the live span. A window moving back over a
+			// clipped group asks it once more, as in Rust.
+			if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
+			if (this.#refilled.length > 0) {
+				this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
+			}
 			const timeline = this.#state.timeline;
 			// A datagram still buffered took its sequence, so no group is missed there; the Rust
 			// fetch names it `NotFetchable`.
@@ -2536,7 +2545,14 @@ export class Subscriber {
 			}
 		}
 		const asker = this.#state.asker;
-		return asker && fills.owed(start, end, asker);
+		if (!asker) return undefined;
+		// Every group of an owed run waits on the same successor, so its newest judges the run;
+		// a stale run gives way to a later one the budget still wants.
+		for (const run of fills.covered(start, end, asker)) {
+			drift ??= this.#drift();
+			if (!this.#staleAt(run.end - 1n, drift, true)) return run.start;
+		}
+		return undefined;
 	}
 
 	// Ask a fill for a fetch's group at once, written yet or not, as the Rust `fetch_group` queues
@@ -2562,8 +2578,7 @@ export class Subscriber {
 		const fills = fillsOf(producer);
 		if (!fills.serving && !fills.active) return undefined;
 		const drift = this.#drift();
-		const filling = this.#askFills(this.#cursor.peek().start, UNBOUNDED, drift);
-		return filling !== undefined && !this.#staleAt(filling, drift) ? filling : undefined;
+		return this.#askFills(this.#cursor.peek().start, UNBOUNDED, drift);
 	}
 
 	// Ask a fill for the missed run `[start, end)`, unless its newest group is stale: what was
@@ -2628,8 +2643,7 @@ export class Subscriber {
 		const end = this.#window.end();
 		if (end === undefined) return false;
 		// A fill still owes a group it reads.
-		const filling = this.#askFills(this.#window.floor() ?? 0n, end);
-		if (filling !== undefined && !this.#staleAt(filling, this.#drift(), true)) return false;
+		if (this.#askFills(this.#window.floor() ?? 0n, end) !== undefined) return false;
 		const held = this.#state.groups.peek();
 		const received = this.#state.received.peek();
 		const drops = this.#state.drops.peek();
@@ -3179,8 +3193,7 @@ export class Subscriber {
 		// A clean close completes this range, retaining groups a later cap raise can read.
 		if (closed !== undefined) return { kind: "done" };
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
-		const filling = this.#askFills(start, end ?? UNBOUNDED, drift);
-		if (filling !== undefined && !this.#staleAt(filling, drift, true)) return { kind: "idle" };
+		if (this.#askFills(start, end ?? UNBOUNDED, drift) !== undefined) return { kind: "idle" };
 		// A bounded window ends once nothing in it is left to deliver, as in Rust.
 		if (this.#exhausted()) return { kind: "done" };
 		if (!this.#complete() || this.#starting(groups)) return { kind: "idle" };
@@ -3407,8 +3420,7 @@ export class Subscriber {
 		if (!owed) {
 			// A fill still owes a group below, which lands as a group does. Its staleness deadline
 			// wakes the cursor too, so a fill that never answers cannot pin it.
-			const filling = this.#askFills(start, end, drift);
-			if (filling === undefined || this.#staleAt(filling, drift, true)) return false;
+			if (this.#askFills(start, end, drift) === undefined) return false;
 			this.#state.waitingOrdered = true;
 			return true;
 		}
@@ -3489,8 +3501,7 @@ export class Subscriber {
 		// A clean close completes this range, retaining groups a later cap raise can read.
 		if (closed !== undefined) return { kind: "done" };
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
-		const filling = this.#askFills(start, cursor.end ?? UNBOUNDED, drift);
-		if (filling !== undefined && !this.#staleAt(filling, drift, true)) {
+		if (this.#askFills(start, cursor.end ?? UNBOUNDED, drift) !== undefined) {
 			// Its staleness deadline wakes the cursor, as for any owed hole.
 			this.#state.waitingOrdered = true;
 			return { kind: "idle" };

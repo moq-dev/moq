@@ -171,11 +171,6 @@ export class FillState {
 		return asked;
 	}
 
-	/** The first sequence of `[start, end)` a fill still owes `asker`. */
-	owed(start: bigint, end: bigint, asker: Asker): bigint | undefined {
-		return this.covered(start, end, asker)[0]?.start;
-	}
-
 	/** The parts of `[start, end)` a fill `asker` joined still owes, in order. */
 	covered(start: bigint, end: bigint, asker: Asker): Run[] {
 		const covered: Run[] = [];

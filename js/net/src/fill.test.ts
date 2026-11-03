@@ -385,6 +385,55 @@ test("fill: an ordered reader stops waiting on an unanswered fill once its budge
 	}
 });
 
+test("fill: a bounded reader keeps waiting on a fresh fill once an older one goes stale", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const broadcast = new BroadcastProducer();
+		const track = broadcast.createTrack("video");
+		const write = (sequence: bigint) => {
+			const group = track.createGroup(sequence);
+			group.writeFrame({ payload: enc.encode(`live ${sequence}`) });
+			group.finish();
+		};
+		// Holes 0-1 wait on group 2, which arrives first; holes 3-4 on group 5, half a second later.
+		write(2n);
+		await clock.advance(Nano.fromMilli(Milli(500)));
+		write(5n);
+		const requests = track.requests();
+		const reader = track.subscribe({
+			ranges: [{ start: { absolute: 0n }, end: { absolute: 6n } }],
+			delay: { max: Milli(1000) },
+		});
+		expect((await reader.recvGroup())?.sequence).toBe(2n);
+		expect((await reader.recvGroup())?.sequence).toBe(5n);
+		const next = reader.recvGroup();
+		const fills: Fill[] = [];
+		for (let i = 0; i < 2; i++) {
+			const fill = await requests.requestedFill();
+			if (fill) fills.push(fill);
+		}
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([
+			[0n, 2n],
+			[3n, 5n],
+		]);
+
+		// Holes 0-1 are past the budget now, but 3-4 are not: the read waits on them.
+		await clock.advance(Nano.fromMilli(Milli(600)));
+		const late = fills[1].accept(3n);
+		late.writeFrame({ payload: enc.encode("old 3") });
+		late.finish();
+		expect((await next)?.sequence).toBe(3n);
+
+		for (const fill of fills) fill.close();
+		expect(await reader.recvGroup()).toBeUndefined();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
 test("fill: a reader joins a fill still served after its handler's handle closed", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
