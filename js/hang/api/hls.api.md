@@ -47,7 +47,7 @@ export interface Record {
 
 export class Recorder {
 	constructor(track: Net.Track.Producer, config?: Config);
-	static readonly INFO: Partial<Net.Track.Info>;
+	static readonly INFO: Net.Track.InfoInit;
 	abort(err: Error): void;
 	end(pts: Micro): void;
 	finish(): void;

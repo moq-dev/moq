@@ -307,8 +307,11 @@ export class Segmenter {
  * or a failed publish aborts the record track instead, and the media carries on.
  */
 export class Recorder {
-	/** The properties a record track is created with. */
-	static readonly INFO: Partial<Moq.Track.Info> = {
+	/**
+	 * The properties a record track is created with. It keeps the authored default max age: its
+	 * newest group restates the window, and the newest group is never stale.
+	 */
+	static readonly INFO: Moq.Track.InfoInit = {
 		timescale: Moq.Time.Timescale.MILLI,
 		priority: PRIORITY.catalog,
 		// A joiner asks for a fresh group once the ops outweigh eight headers.

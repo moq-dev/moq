@@ -93,11 +93,11 @@ export interface ReceivedFrame extends Frame {
 }
 
 export type TrackInfoOptions = {
-	maxAge?: Milli;
+	maxAge?: Milli | null;
 	priority: number;
 };
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
-export function trackInfo(options: TrackInfoOptions): Partial<Net.Track.Info>;
+export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
 ```

@@ -130,7 +130,7 @@ export interface Position {
 /**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
  *
- * A producer declares these once (via {@link Request.accept} or
+ * A producer declares these once from an {@link InfoInit} (via {@link Request.accept} or
  * {@link Producer.accept}); a consumer awaits them via {@link Subscriber.info}
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
@@ -153,10 +153,12 @@ export interface Info {
 	 * stale once either clock reaches the budget: the wall-clock time since its successor
 	 * arrived at this hop, or how far its successor's first timestamp trails the live edge.
 	 * The newest group is never stale, and an untimed track is judged by the wall clock alone.
-	 * Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound. Omission sets
-	 * no publisher limit; zero serves only the live edge. This clamps each subscriber budget.
-	 * Rounded up to a whole millisecond by {@link infoDefaults}, which refuses a negative
-	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
+	 * Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound. Absence sets
+	 * no publisher limit, as on a track received without one; zero serves only the live edge.
+	 * This clamps each subscriber budget. An authored track gets {@link DEFAULT_MAX_AGE} unless
+	 * its {@link InfoInit.maxAge} says otherwise. Rounded up to a whole millisecond by
+	 * {@link infoDefaults}, which refuses a negative or non-finite value and a result past
+	 * `Number.MAX_SAFE_INTEGER`.
 	 */
 	maxAge?: Milli;
 	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). Defaults to `0`. */
@@ -177,6 +179,41 @@ export interface Info {
 	 * @internal
 	 */
 	unchecked?: boolean;
+}
+
+/**
+ * The {@link Info.maxAge} an authored track advertises unless its author sets one: 30 seconds.
+ *
+ * Long enough for a reader to fetch superseded groups for catch-up, a segmented egress (HLS/DASH)
+ * to serve its playlist window, and a recorder to absorb reordering, without delaying a live
+ * reader, whose own {@link Delay.max} defaults to zero. Mirrors the Rust
+ * `track::Info::DEFAULT_MAX_AGE`.
+ */
+export const DEFAULT_MAX_AGE = Milli(30_000);
+
+/**
+ * What an author supplies to create a track: any {@link Info} field, each defaulting as
+ * {@link infoDefaults} does, except {@link maxAge}.
+ *
+ * Received metadata is an {@link Info}, whose absent `maxAge` means no publisher limit. To serve
+ * one onward unchanged, pass `{ ...info, maxAge: info.maxAge ?? null }`.
+ */
+export interface InfoInit extends Partial<Omit<Info, "maxAge">> {
+	/**
+	 * The publisher max age; see {@link Info.maxAge}. Omitted or `undefined` is
+	 * {@link DEFAULT_MAX_AGE}, `null` sets no publisher limit (the wire omits it), and a number
+	 * is that bound.
+	 */
+	maxAge?: Milli | null;
+}
+
+/**
+ * Resolve an author's {@link InfoInit} into the {@link Info} a producer commits.
+ * @internal
+ */
+export function authoredInfo(init: InfoInit = {}): Info {
+	const { maxAge, ...rest } = init;
+	return infoDefaults({ ...rest, maxAge: maxAge === undefined ? DEFAULT_MAX_AGE : (maxAge ?? undefined) });
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -203,7 +240,11 @@ function priorityValue(value: number): number {
 	return value;
 }
 
-/** Fill in any unset {@link Info} fields with their defaults. */
+/**
+ * Fill in any unset {@link Info} fields with their defaults, as for received metadata: an absent
+ * `maxAge` stays absent, meaning no publisher limit. An authored track resolves its
+ * {@link InfoInit} at {@link Producer.accept} instead, which applies {@link DEFAULT_MAX_AGE}.
+ */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	if (info.compress !== undefined && typeof info.compress !== "boolean")
 		throw new TypeError("compress must be a boolean");
@@ -478,14 +519,14 @@ export class Request {
 	}
 
 	/**
-	 * Accept the request, committing the track's immutable {@link Info}. Throws, rejecting the
-	 * request, if `info` is invalid.
+	 * Accept the request, committing the track's immutable {@link Info}, resolved as
+	 * {@link Producer.accept} does. Throws, rejecting the request, if `info` is invalid.
 	 */
-	accept(info: Partial<Info> = {}): Producer {
+	accept(info: InfoInit = {}): Producer {
 		return this.#stage(info).commit();
 	}
 
-	#stage(info: Partial<Info>): StagedTrack {
+	#stage(info: InfoInit): StagedTrack {
 		this.#pending.delete(this);
 		const producer = this.#producer;
 		return {
@@ -514,7 +555,7 @@ export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
 
-	/** Maximum age behind the live edge this caller accepts. Omission uses publisher retention alone. */
+	/** Maximum age behind the live edge this caller accepts. Omission leaves the publisher's {@link Info.maxAge} as the only bound. */
 	maxDelay?: Milli;
 
 	/**
@@ -553,7 +594,8 @@ export class Consumer {
 	 * {@link Delay.max} is what asks for data: delivery skips everything in range that the budget
 	 * convicts. Without options this is {@link Subscription.default}, whose budget of zero
 	 * delivers only the latest group; a larger one reaches back over what it can still use, and
-	 * `delay: { max: null }` reaches back as far as the publisher retains.
+	 * `delay: { max: null }` reaches back over every group the publisher's {@link Info.maxAge} still
+	 * considers fresh.
 	 */
 	subscribe(options?: Subscription): Subscriber {
 		return this.#broadcast.subscribe(this.name, options);
@@ -1086,10 +1128,13 @@ export class Producer {
 		return this.#state.update;
 	}
 
-	/** Commit the immutable publisher properties, resolving {@link info}. Returns `this`. */
-	accept(info: Partial<Info> = {}): this {
+	/**
+	 * Commit the immutable publisher properties, resolving {@link info}. An omitted `maxAge` is
+	 * {@link DEFAULT_MAX_AGE}; see {@link InfoInit.maxAge}. Returns `this`.
+	 */
+	accept(info: InfoInit = {}): this {
 		if (this.#state.closed.peek() !== undefined) return this;
-		const resolved = infoDefaults(info);
+		const resolved = authoredInfo(info);
 		const timed = resolved.timescale != null;
 		// Anything written before accept() must match too. A mismatch closes the track, so
 		// nothing waiting on info() hangs on a half-bound cache.
@@ -1137,7 +1182,8 @@ export class Producer {
 	 * {@link Delay.max} is what asks for data: delivery skips everything in range that the budget
 	 * convicts. Without options this is {@link Subscription.default}, whose budget of zero
 	 * delivers only the latest group; a larger one reaches back over what it can still use, and
-	 * `delay: { max: null }` reaches back as far as the publisher retains.
+	 * `delay: { max: null }` reaches back over every group the publisher's {@link Info.maxAge} still
+	 * considers fresh.
 	 */
 	subscribe(options: Subscription = Subscription.default()): Subscriber {
 		const sink = new TrackState(options);
@@ -1758,7 +1804,7 @@ export class Producer {
 	}
 
 	// The grace the session's tail uses, from the max delay the track's subscribers ask for,
-	// bounded by how long the publisher keeps a group. The demand asked upstream is not.
+	// bounded by how long the publisher keeps a superseded group fresh. The demand asked upstream is not.
 	#grace(): Milli {
 		const update = this.#state.update.peek();
 		const maxDelay = update ? maxDelayOf(update) : Milli.zero;
@@ -2006,7 +2052,7 @@ export class Subscriber {
 	// and end. A group inside it is read only if the window contains it too.
 	#cursor = new Signal<{ start: bigint; end?: bigint }>({ start: 0n });
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
-	// default, an omitted one is unbounded, leaving publisher retention alone.
+	// default, an omitted one is unbounded, leaving the publisher's maxAge as the only bound.
 	#fetchBudget?: number;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
@@ -2055,10 +2101,10 @@ export class Subscriber {
 
 		const update = this.#state.update.peek();
 		const requested = this.#fetchBudget ?? (update ? maxDelayOf(update) : 0);
-		const retained = info?.maxAge;
+		const fresh = info?.maxAge;
 		return {
-			budget: retained === undefined ? requested : Math.min(requested, retained),
-			bounded: retained !== undefined && requested >= retained,
+			budget: fresh === undefined ? requested : Math.min(requested, fresh),
+			bounded: fresh !== undefined && requested >= fresh,
 			presentation,
 			end,
 		};

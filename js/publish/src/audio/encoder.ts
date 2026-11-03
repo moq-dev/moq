@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -434,9 +434,9 @@ export class Encoder {
 			const resolved = effect.get(this.#config);
 			if (!enabled || !format || fatal || !resolved) return;
 
-			const maxAge =
-				effect.get(broadcast.in.maxAge) ?? Container.trackInfo({ priority: Catalog.PRIORITY.audio }).maxAge;
-			this.#encode(broadcast.order, format, Micro.fromMilli(maxAge ?? Milli(30_000)), effect);
+			// Raw history needs a finite bound, so an unlimited max age keeps the default's worth.
+			const maxAge = effect.get(broadcast.in.maxAge) ?? Moq.Track.DEFAULT_MAX_AGE;
+			this.#encode(broadcast.order, format, Micro.fromMilli(maxAge), effect);
 		});
 
 		// A network track change ends the epoch; subscriber changes keep the same producer.

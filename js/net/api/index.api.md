@@ -91,7 +91,7 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
-		createTrack(name: string, info?: Partial<Track.Info>): Track.Producer;
+		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
 	}
@@ -611,6 +611,7 @@ export namespace Track {
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
+	export const DEFAULT_MAX_AGE: Milli;
 	export interface Datagram {
 		payload: Uint8Array;
 		sequence: bigint;
@@ -641,6 +642,9 @@ export namespace Track {
 		refresh?: number;
 		timescale?: Time.Timescale | null;
 	}
+	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
+		maxAge?: Milli | null;
+	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
 		close(abort?: Error): void;
@@ -670,7 +674,7 @@ export namespace Track {
 	export class Producer {
 		constructor(name: string);
 		abort(error: Error): void;
-		accept(info?: Partial<Track.Info>): this;
+		accept(info?: Track.InfoInit): this;
 		appendDatagram(timestamp: Time.Timestamp | undefined, payload: Uint8Array): bigint;
 		appendGroup(): Group.Producer;
 		close(): void;
@@ -693,7 +697,7 @@ export namespace Track {
 		start?: Track.Anchor;
 	}
 	export class Request {
-		accept(info?: Partial<Track.Info>): Track.Producer;
+		accept(info?: Track.InfoInit): Track.Producer;
 		demand(): Track.Demand;
 		readonly name: string;
 		get priority(): number;

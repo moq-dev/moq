@@ -40,7 +40,7 @@ export class Producer {
 	}
 
 	/** Create a track whose frames are signed; throws the net error if the broadcast already holds it. */
-	createTrack(name: string, info: Partial<NetTrack.Info> = {}): Track.Producer {
+	createTrack(name: string, info: NetTrack.InfoInit = {}): Track.Producer {
 		const inner = this.#inner.createTrack(name, info);
 		const timescale = info.timescale ?? undefined;
 		let sequences = this.#sequences.get(name);

@@ -1252,7 +1252,8 @@ export class Subscriber {
 			// No TIMESCALE means no timeline, and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
-			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
+			// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
+			maxAge: maxCacheDuration === undefined ? null : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 			ietf: version,
 		});

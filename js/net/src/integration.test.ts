@@ -27,7 +27,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import type { Position, Producer as TrackProducer } from "./track.ts";
+import { DEFAULT_MAX_AGE, type Position, type Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
@@ -1406,6 +1406,51 @@ test("integration: lite draft-07 track info follows a republished broadcast", as
 	client.abort();
 	server.abort();
 });
+
+// An authored track omitting maxAge advertises the 30 s default, an explicit null advertises no
+// limit, which a consumer decodes as absence, and a number goes out as itself. Before lite-05
+// nothing is carried, and a received track without one has no publisher limit.
+test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
+	"integration: %s carries the authored max age default, null, and a value",
+	async (alpn) => {
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		const path = Path.from("test");
+		const broadcast = publish(origin, path);
+		const tracks = {
+			omitted: broadcast.createTrack("omitted", { timescale: Timescale.MILLI }),
+			unlimited: broadcast.createTrack("unlimited", { timescale: Timescale.MILLI, maxAge: null }),
+			explicit: broadcast.createTrack("explicit", { timescale: Timescale.MILLI, maxAge: Milli(5000) }),
+		};
+		expect((await tracks.omitted.info()).maxAge).toBe(DEFAULT_MAX_AGE);
+		expect((await tracks.unlimited.info()).maxAge).toBeUndefined();
+
+		const remote = wireOf(client).consume(path);
+		const info = async (name: string) => {
+			// moq-transport answers info through a subscription, so hold one open.
+			const sub = remote.track(name).subscribe();
+			try {
+				return await withTimeout(sub.info(), Nano.fromMilli(Milli(5_000)), `${name} info`);
+			} finally {
+				sub.close();
+			}
+		};
+		const carried = alpn !== Lite.ALPN_03;
+		expect((await info("omitted")).maxAge).toBe(carried ? Milli(30_000) : undefined);
+		expect((await info("unlimited")).maxAge).toBeUndefined();
+		expect((await info("explicit")).maxAge).toBe(carried ? Milli(5000) : undefined);
+
+		broadcast.close();
+		remote.close();
+		client.abort();
+		server.abort();
+	},
+);
 
 // FETCH reads the same cache to decide the timescale it serves frames in, so a stale entry
 // quantizes the successor's timestamps to the predecessor's resolution.

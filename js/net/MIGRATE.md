@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a 30 s `maxAge` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A track created with `Broadcast.Producer.createTrack`, `Track.Request.accept`, or `Track.Producer.accept` takes a `Track.InfoInit`, whose omitted or `undefined` `maxAge` is now `Track.DEFAULT_MAX_AGE` (30 seconds) instead of no publisher limit. It is advertised on the wire like any other value, so superseded groups go stale 30 seconds after their successor arrives.
+A publisher relying on unlimited history passes `maxAge: null` (or a longer window) when it creates the track; changing it means a new track or broadcast.
+Received metadata is unchanged: a decoded `Track.Info` without `maxAge` still means no publisher limit, and `Track.infoDefaults` keeps an absent `maxAge` absent. To serve a received `Track.Info` onward unchanged, pass `{ ...info, maxAge: info.maxAge ?? null }`.
+
 ### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
 
 Every group sequence is a `bigint`, so a group ID past 2^53 decodes, relays, and encodes again instead of being refused: `Group.Producer`/`Consumer.sequence`, `Track.Position.group`, `Track.Bound`, an `absolute` `Track.Anchor`, `Track.Datagram.sequence`, `Track.Demand.wanted`, the `group` of `Ordered.readFrame()`, and the `sequence` that `createGroup`, `insertDatagram`, and `fetchGroup` take and `appendDatagram` returns.

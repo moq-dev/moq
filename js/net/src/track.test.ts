@@ -9,7 +9,7 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { infoDefaults, Subscription, Producer as TrackProducer } from "./track.ts";
+import { authoredInfo, DEFAULT_MAX_AGE, infoDefaults, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 
 const enc = new TextEncoder();
@@ -59,9 +59,10 @@ function manualTime(initial: number) {
 	};
 }
 
-// A session-fed copy owes holes; an in-process producer does not.
+// A session-fed copy owes holes; an in-process producer does not. Received without a max age,
+// it has no publisher limit, as a decoded TRACK_INFO without one does.
 function receivedTrack(info: Parameters<TrackProducer["accept"]>[0] = {}) {
-	const producer = new TrackProducer("test").accept(info);
+	const producer = new TrackProducer("test").accept({ maxAge: null, ...info });
 	hooks.receiveTrack(producer);
 	return producer;
 }
@@ -812,6 +813,56 @@ test("infoDefaults re-validates timescale and the safe maxAge bound", () => {
 	expect(() => infoDefaults({ maxAge: Milli(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
 });
 
+test("an authored track defaults to DEFAULT_MAX_AGE, null is unlimited, and decoded absence stays unlimited", async () => {
+	expect(DEFAULT_MAX_AGE).toBe(Milli(30_000));
+	expect((await new TrackProducer("omitted").accept().info()).maxAge).toBe(DEFAULT_MAX_AGE);
+	expect((await new TrackProducer("undefined").accept({ maxAge: undefined }).info()).maxAge).toBe(DEFAULT_MAX_AGE);
+	expect((await new TrackProducer("unlimited").accept({ maxAge: null }).info()).maxAge).toBeUndefined();
+	expect((await new TrackProducer("explicit").accept({ maxAge: Milli(5000) }).info()).maxAge).toBe(Milli(5000));
+	expect((await new TrackProducer("zero").accept({ maxAge: Milli.zero }).info()).maxAge).toBe(Milli.zero);
+	expect(authoredInfo({ maxAge: null }).maxAge).toBeUndefined();
+	// Decoded metadata has no authored default: absence is no publisher limit.
+	expect(infoDefaults({}).maxAge).toBeUndefined();
+	expect(infoDefaults({ maxAge: undefined }).maxAge).toBeUndefined();
+});
+
+// The catalog relies on this: a track that publishes one snapshot and never changes it stays
+// readable to a viewer joining long after the default max age, since only a superseded group
+// goes stale and the live edge is exempt from the payload cache window.
+test("a sole snapshot outlives the default max age for a late joiner", async () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("catalog").accept({ timescale: Timescale.MILLI, compress: true });
+	try {
+		expect((await producer.info()).maxAge).toBe(DEFAULT_MAX_AGE);
+		const group = producer.appendGroup();
+		group.writeFrame(textFrame("snapshot", Timestamp.fromMillis(0)));
+		group.finish();
+
+		// Well past both the default max age and the payload cache window.
+		await clock.advance(10_000 + 10 * Math.max(DEFAULT_MAX_AGE, CACHE_WINDOW_MS));
+		for (const delay of [undefined, { max: null }] as const) {
+			const late = producer.subscribe(delay ? { delay } : undefined);
+			const joined = late.tryRecvGroup();
+			if (!joined) throw new Error("the sole snapshot was not served");
+			expect(joined.sequence).toBe(0n);
+			expect(await joined.readString()).toBe("snapshot");
+			late.close();
+		}
+
+		// A declared end keeps the track open, so its former edge is still exempt.
+		producer.finish();
+		await clock.advance(10_000 + 20 * Math.max(DEFAULT_MAX_AGE, CACHE_WINDOW_MS));
+		const late = producer.subscribe();
+		const joined = late.tryRecvGroup();
+		if (!joined) throw new Error("the finished snapshot was not served");
+		expect(await joined.readString()).toBe("snapshot");
+		late.close();
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
+});
+
 test("multiple subscriber options aggregate like Rust", async () => {
 	const producer = new TrackProducer("test");
 	const bounded = producer.subscribe({
@@ -1156,7 +1207,7 @@ test("the producer aggregate is not clamped to the track's maxAge", () => {
 	expect(producer.subscription.peek()).toEqual(before);
 	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(10_000));
 	expect(track.subscription.peek()?.delay?.max).toBe(Milli(10_000));
-	// A late group is waited for no longer than the publisher keeps it.
+	// A late group is waited for no longer than the publisher keeps it fresh.
 	expect(hooks.tailGrace(producer)).toBe(Milli(2_000));
 });
 
@@ -1441,7 +1492,7 @@ test("an omitted delay is the default zero, and a null max sets no limit", async
 	expect((await bare.recvGroup())?.sequence).toBe(2n);
 	expect(producer.subscription.peek()?.delay?.max).toBe(Milli.zero);
 
-	// An explicit null leaves the publisher's retention as the only bound.
+	// An explicit null leaves the publisher's max age as the only bound.
 	const unlimited = producer.subscribe({ delay: { max: null } });
 	for (const sequence of [0n, 1n, 2n]) expect((await unlimited.recvGroup())?.sequence).toBe(sequence);
 	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(Number.MAX_SAFE_INTEGER));
@@ -1901,7 +1952,7 @@ test("a parked read wakes at its wall deadline", async () => {
 // a failure: the held group is still judged by that successor's arrival, not the next one's.
 test("an evicted successor with unread frames still starts the wall clock", async () => {
 	const clock = manualTime(10_000);
-	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	try {
 		const budget = 2 * CACHE_WINDOW_MS;
 		const track = producer.subscribe({ delay: { max: Milli(budget) } });
@@ -1943,7 +1994,7 @@ test("an evicted successor with unread frames still starts the wall clock", asyn
 // guard looks again, rather than convicting by the failed one's arrival.
 test("a failed successor hands the wall clock on after the cache evicts it", async () => {
 	const clock = manualTime(10_000);
-	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	try {
 		const budget = 2 * CACHE_WINDOW_MS;
 		const track = producer.subscribe({ delay: { max: Milli(budget) } });
@@ -2142,7 +2193,7 @@ test("an idle live edge ages out once a newer group arrives", async () => {
 
 test("an abandoned open group ages out with no further write", async () => {
 	const clock = manualTime(10_000);
-	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	try {
 		// A budget past the cache window, so the eviction rather than the budget ends it.
 		const track = producer.subscribe({ delay: { max: Milli(2 * CACHE_WINDOW_MS) } });

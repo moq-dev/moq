@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Container.trackInfo` takes `maxAge: null` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`TrackInfoOptions.maxAge` accepts `null` for no publisher limit, and `trackInfo` returns a `@moq/net` `Track.InfoInit`. An omitted `maxAge` is still 30 seconds, now `@moq/net`'s shared `Track.DEFAULT_MAX_AGE`.
+`Hls.Recorder.INFO` is a `Track.InfoInit` and, following `@moq/net`, record tracks now advertise that 30-second default instead of no limit.
+A media publisher relying on unlimited history passes `maxAge: null`.
+
 ### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
 
 Following `@moq/net`, a `Container.Consumer` read's `group` is a `bigint`, as is the `group` that `Hls.Segmenter` and `Hls.Recorder` take in `frame` and `stop` and an `Hls.Entry` carries. An HLS `Record` on the wire still holds its group as a JSON number, so a group past 2^53 throws when it is recorded.

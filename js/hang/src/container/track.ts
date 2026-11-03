@@ -7,31 +7,24 @@
  * @module
  */
 
-import { Milli } from "@moq/clock";
-import { Time, type Track } from "@moq/net";
-
-// How long a media track asks its publisher (and, through TRACK_INFO, every relay) to keep a
-// non-latest group fetchable. Must match `hang::container::MAX_AGE` in
-// rs/hang/src/container/frame.rs.
-const MAX_AGE_MS = Milli(30_000);
+import type { Milli } from "@moq/clock";
+import { Time, Track } from "@moq/net";
 
 /**
  * Track properties for a track carrying media frames, for `Request.accept`.
  *
- * Pins the timescale to microseconds (the timestamps hang's containers stamp), and declares a
- * retention long enough for a FETCH-based consumer to reach back over a full playlist window: a
- * segmented egress (HLS/DASH) may only advertise segments a fetch can still reach, and a standard
- * player starts several target durations behind live. Every media track a publisher accepts should
- * use this rather than the bare defaults, which are sized for the catalog and timeline: both are
- * read at the live edge, which is retained unconditionally, so neither pays for history it never
- * serves.
+ * Pins the timescale to microseconds (the timestamps hang's containers stamp), and keeps the
+ * authored {@link Track.DEFAULT_MAX_AGE}: superseded groups stay fresh long enough for a
+ * FETCH-based consumer to reach back over a full playlist window. A segmented egress (HLS/DASH)
+ * may only advertise segments a fetch can still reach, and a standard player starts several
+ * target durations behind live.
  *
- * Options override that retention; see {@link TrackInfoOptions.maxAge}.
+ * Options override that max age; see {@link TrackInfoOptions.maxAge}.
  */
-export function trackInfo(options: TrackInfoOptions): Partial<Track.Info> {
+export function trackInfo(options: TrackInfoOptions): Track.InfoInit {
 	return {
 		timescale: Time.Timescale.MICRO,
-		maxAge: options.maxAge ?? MAX_AGE_MS,
+		maxAge: options.maxAge === undefined ? Track.DEFAULT_MAX_AGE : options.maxAge,
 		priority: options.priority,
 	};
 }
@@ -49,11 +42,13 @@ export type TrackInfoOptions = {
 	priority: number;
 
 	/**
-	 * How long a relay keeps a non-latest group fetchable, in milliseconds, replacing the
-	 * retention {@link trackInfo} declares by default.
+	 * How long, in milliseconds, a superseded group stays fresh, so a fetch or a subscriber's
+	 * `delay.max` can still reach it; see `Track.Info.maxAge`. Omitted or `undefined` is
+	 * {@link Track.DEFAULT_MAX_AGE}, and `null` sets no publisher limit.
 	 *
-	 * A RETENTION budget, not a delivery one, so it never makes anyone play further behind live
+	 * A freshness bound, not a delivery budget, so it never makes anyone play further behind live
 	 * and lowering it does not reduce latency: it only shortens how far back a fetch can reach.
+	 * It keeps no bytes either; the cache decides how long a group's payload stays held.
 	 */
-	maxAge?: Milli;
+	maxAge?: Milli | null;
 };
