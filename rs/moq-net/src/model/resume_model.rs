@@ -1154,6 +1154,76 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// A read parked on a fill wakes once it answers, though the drop poll resolved after
+		// it parked: the track's end with groups the fill gave up ends the read, so groups
+		// landing below the end afterwards are not owed.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 0 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, true),
+				},
+				Op::Write {
+					instance: 1,
+					slot: 0,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::End { instance: 1, slot: 0 },
+			],
+			finish: false,
+		},
+		// The same, once the serving route's fill of a group the reader already holds gives
+		// it up: the read ends with the track.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, true),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(8),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::GiveUp {
+					instance: 0,
+					slot: 1,
+					group: 8,
+				},
+			],
+			finish: true,
+		},
+		Case {
+			ops: vec![
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, true),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::GiveUp {
+					instance: 0,
+					slot: 1,
+					group: 1,
+				},
+			],
+			finish: true,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {
