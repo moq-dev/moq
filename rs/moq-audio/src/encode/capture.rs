@@ -349,13 +349,22 @@ impl Driver {
 	pub async fn run(mut self) -> Result<(), Error> {
 		let end = self.drive().await;
 		let mut producer = self.producer.take().unwrap();
-		let ended = end.and_then(|end| {
-			producer.set_active(false, self.clock.now())?;
-			match end {
-				End::Closed => producer.finish().map(|()| None),
-				End::Failed(error) => producer
-					.fail(moq_net::Error::Transport(error.to_string()))
-					.map(|()| Some(error)),
+		let now = self.clock.now();
+		let ended = end.and_then(|end| match end {
+			End::Closed => producer
+				.set_active(false, now)
+				.and_then(|()| producer.finish())
+				.map(|()| None),
+			End::Failed(error) => {
+				let ended = producer
+					.set_active(false, now)
+					.and_then(|()| producer.fail(moq_net::Error::Transport(error.to_string())));
+				// The source failure stays the cause, even when its track can no longer end
+				// cleanly, such as one aborted while it still retained audio.
+				match ended {
+					Ok(()) => Ok(Some(error)),
+					Err(_) => Err(error),
+				}
 			}
 		});
 		let result = match ended {

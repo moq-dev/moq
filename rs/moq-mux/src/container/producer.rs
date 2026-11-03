@@ -961,7 +961,8 @@ where
 	/// producing media worth keeping.
 	///
 	/// Unlike [`abort`](Self::abort), every group written stays readable and keeps being
-	/// served; a reader reaching the end gets `err` instead of the end of stream.
+	/// served; a reader reaching the end gets `err` instead of the end of stream. Over IETF
+	/// moq-transport, a remote subscriber is told only of a generic internal error.
 	pub fn fail(&mut self, err: moq_net::Error) -> crate::Result<()> {
 		self.end_with(Some(err))
 	}
