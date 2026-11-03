@@ -151,6 +151,11 @@ name = "batches"
 harness = false
 
 [[bench]]
+name = "capture"
+harness = false
+required-features = ["capture"]
+
+[[bench]]
 name = "bus"
 harness = false
 required-features = ["bus"]

@@ -469,100 +469,135 @@ async fn a_relay_answers_a_live_subscribe_on_a_fetched_copy() {
 
 /// A copy kept after a fetch resumes a bounded subscription that ends at or below the
 /// upstream's new Largest Object, and reads it, though no group past its end arrives.
-/// Draft 22 only: a draft-18 join is live, so these groups come from one fill of the run,
-/// and our publisher answers only a one-group FETCH.
+/// A draft-18 join fills the missing run with one FETCH, which our publisher refuses
+/// until hole markers are supported. That refusal ends the read instead of hanging.
 #[kio::test]
 async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
-	kio::clock::timeout(TIMEOUT, async {
-		let version: Version = "moq-transport-22".parse().unwrap();
-		let publisher = produce_origin(1);
-		let (broadcast, track) = publish_live(&publisher, 2);
+	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
+		kio::clock::timeout(TIMEOUT, async {
+			let version: Version = version.parse().unwrap();
+			let publisher = produce_origin(1);
+			let (broadcast, track) = publish_live(&publisher, 2);
 
-		let client = produce_origin(2);
-		let mut options = MockConnectOptions::new(version);
-		options.server_publish = Some(publisher.consume());
-		options.client_subscribe = Some(client.clone());
-		let pair = connect_mock(options).await;
+			let client = produce_origin(2);
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(client.clone());
+			let pair = connect_mock(options).await;
 
-		// The fetch learns Largest Object (1, 1), and leaves the copy unfed.
-		let remote = resolve(&client).await;
-		assert_eq!(fetch(&remote, 0).await.expect("fetch"), frames(0));
-		for sequence in 2..4 {
-			write_group(&track, sequence);
-		}
+			// The fetch learns Largest Object (1, 1), and leaves the copy unfed.
+			let remote = resolve(&client).await;
+			assert_eq!(fetch(&remote, 0).await.expect("fetch"), frames(0));
+			for sequence in 2..4 {
+				write_group(&track, sequence);
+			}
 
-		// Past the reported edge, so it subscribes; the answer names group 3, which the
-		// bounded feed never delivers.
-		let copy = remote.track("video").unwrap();
-		let subscription = moq_net::track::Subscription::default()
-			.with_order(moq_net::track::Order::Ascending)
-			.with_delay(moq_net::track::Delay::default().with_max(None))
-			.with_range(1..3);
-		let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
-			.await
-			.expect("subscribe timed out")
-			.expect("subscribe");
-		// Read in arrival order, whichever group lands first.
-		let mut read = vec![next_frames(&mut sub).await, next_frames(&mut sub).await];
-		read.sort();
-		assert_eq!(read, [Some(frames(1)), Some(frames(2))]);
-		assert!(track.subscription().is_some(), "the read never subscribed");
+			// Past the reported edge, so it subscribes; the answer names group 3, which the
+			// bounded feed never delivers.
+			let copy = remote.track("video").unwrap();
+			let subscription = moq_net::track::Subscription::default()
+				.with_order(moq_net::track::Order::Ascending)
+				.with_delay(moq_net::track::Delay::default().with_max(None))
+				.with_range(1..3);
+			let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
+				.await
+				.expect("subscribe timed out")
+				.expect("subscribe");
+			// Read in arrival order, whichever group lands first. A refused multi-group
+			// FETCH gives up the whole run; it never falls back to fetching each group.
+			let mut read = Vec::new();
+			while let Some(group) = next_frames(&mut sub).await {
+				read.push(group);
+			}
+			read.sort();
+			if version == "moq-transport-18".parse().unwrap() {
+				assert!(read.is_empty(), "the unsupported multi-group FETCH was refused");
+			} else {
+				assert_eq!(read, [frames(1), frames(2)]);
+			}
+			assert!(track.subscription().is_some(), "the read never subscribed");
 
-		drop((sub, copy, remote, pair, track, broadcast, client, publisher));
-	})
-	.await
-	.expect("timed out");
+			drop((sub, copy, remote, pair, track, broadcast, client, publisher));
+		})
+		.await
+		.expect("timed out");
+	}
 }
 
 /// A copy that went idle holding a group resumes a bounded subscription of that group after
 /// the upstream moved on, and still reads it: the feed starts where it asked, not at the
-/// answer's Largest, so the cached group stays below no floor. Draft 22 only: a draft-18
-/// join is live, so it starts at the answer's Largest whatever it asked.
+/// answer's Largest. A live join also keeps the cached history for an unlimited read.
 #[kio::test]
 async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
-	kio::clock::timeout(TIMEOUT, async {
-		let version: Version = "moq-transport-22".parse().unwrap();
-		let publisher = produce_origin(1);
-		let (broadcast, track) = publish_live(&publisher, 1);
+	let versions = moq_net::Versions::all();
+	for version in versions.iter().copied().chain(["moq-lite-07-wip".parse().unwrap()]) {
+		kio::clock::timeout(TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let (broadcast, track) = publish_live(&publisher, 1);
 
-		let client = produce_origin(2);
-		let mut options = MockConnectOptions::new(version);
-		options.server_publish = Some(publisher.consume());
-		options.client_subscribe = Some(client.clone());
-		let pair = connect_mock(options).await;
+			let client = produce_origin(2);
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(client.clone());
+			let pair = connect_mock(options).await;
 
-		// A live read caches group 0, then leaves, so the copy goes idle holding it.
-		let remote = resolve(&client).await;
-		let copy = remote.track("video").unwrap();
-		let mut live = kio::clock::timeout(TIMEOUT, copy.subscribe(None))
-			.await
-			.expect("subscribe timed out")
-			.expect("subscribe");
-		assert_eq!(next_frames(&mut live).await, Some(frames(0)));
-		drop(live);
-		let mut watch = track.clone();
-		while watch.subscription().is_some() {
-			kio::clock::timeout(TIMEOUT, watch.subscription_changed())
+			// A live read caches group 0, then leaves, so the copy goes idle holding it.
+			let remote = resolve(&client).await;
+			let copy = remote.track("video").unwrap();
+			let mut live = kio::clock::timeout(TIMEOUT, copy.subscribe(None))
 				.await
-				.expect("unsubscribe timed out")
-				.unwrap();
-		}
-		for sequence in 1..4 {
-			write_group(&track, sequence);
-		}
+				.expect("subscribe timed out")
+				.expect("subscribe");
+			assert_eq!(next_frames(&mut live).await, Some(frames(0)));
+			drop(live);
+			let mut watch = track.clone();
+			while watch.subscription().is_some() {
+				kio::clock::timeout(TIMEOUT, watch.subscription_changed())
+					.await
+					.expect("unsubscribe timed out")
+					.unwrap();
+			}
+			for sequence in 1..4 {
+				write_group(&track, sequence);
+			}
 
-		// Past the edge the live read learned, so it subscribes; the answer names group 3.
+			// Past the edge the live read learned, so it subscribes; the answer names group 3.
+			let subscription = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(None))
+				.with_range(0..1);
+			let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
+				.await
+				.expect("subscribe timed out")
+				.expect("subscribe");
+			assert_eq!(next_frames(&mut sub).await, Some(frames(0)), "{version}");
+
+			drop((sub, copy, remote, pair, track, broadcast, client, publisher));
+		})
+		.await
+		.expect("timed out");
+	}
+}
+
+/// A relay's retained group cannot hide a missing earlier group in the same read.
+#[kio::test]
+async fn a_relay_accounts_for_every_group_in_multi_group_history() {
+	for (upstream, downstream) in [
+		("moq-transport-18", "moq-transport-22"),
+		("moq-transport-22", "moq-transport-22"),
+		("moq-transport-18", "moq-lite-07-wip"),
+		("moq-transport-22", "moq-lite-07-wip"),
+	] {
+		let copy = fetched_copy(upstream.parse().unwrap(), downstream.parse().unwrap()).await;
 		let subscription = moq_net::track::Subscription::default()
+			.with_order(moq_net::track::Order::Ascending)
 			.with_delay(moq_net::track::Delay::default().with_max(None))
-			.with_range(0..1);
-		let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
-			.await
-			.expect("subscribe timed out")
-			.expect("subscribe");
-		assert_eq!(next_frames(&mut sub).await, Some(frames(0)));
-
-		drop((sub, copy, remote, pair, track, broadcast, client, publisher));
-	})
-	.await
-	.expect("timed out");
+			.with_range(1..3);
+		let mut sub = copy.fresh.subscribe(subscription).await.unwrap();
+		let mut groups = Vec::new();
+		while let Some(group) = next_frames(&mut sub).await {
+			groups.push(group);
+		}
+		groups.sort();
+		assert_eq!(groups, [frames(1), frames(2)], "{upstream} to {downstream}");
+	}
 }
