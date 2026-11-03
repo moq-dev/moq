@@ -7,8 +7,6 @@
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
-# Selection runs inside command substitutions, which otherwise clear -e.
-shopt -s inherit_errexit
 
 usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all"
 action=${1:?$usage}
@@ -113,7 +111,13 @@ select_packages() {
 	' <<<"$metadata" | sort -u | tr '\n' ' '
 }
 
-packages=$(select_packages)
+# A command substitution clears -e, so a failing jq inside selection would
+# otherwise print a partial selection. Restore it there; Bash 4.4's
+# `inherit_errexit` would too, but macOS ships Bash 3.2.
+packages=$(
+    set -e
+    select_packages
+)
 
 # Ids are `path+file://<dir>#<version>` for a directory named after its crate.
 names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
