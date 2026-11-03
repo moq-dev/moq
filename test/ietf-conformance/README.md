@@ -61,17 +61,13 @@ direct-origin and one-relay cells:
 | --- | --- | --- | --- |
 | 18 | 29 pass | 29 pass | 29 pass |
 
-## Local Moxygen patches
-
 A cluster's edge asks the origin about a track with TRACK\_STATUS before
-subscribing.
-[`nix/moxygen-track-status.patch`](../../nix/moxygen-track-status.patch) makes
-the pinned MoQTestPublisher answer it with what its SUBSCRIBE\_OK carries,
-instead of NOT\_SUPPORTED, and stops Moxygen writing a GROUP\_ORDER parameter
-in TRACK\_STATUS\_OK, which draft 18 forbids there. Drop it at the next pin
-bump once
+subscribing. The pinned MoQTestPublisher answers it with what its
+SUBSCRIBE\_OK carries, without a GROUP\_ORDER parameter in TRACK\_STATUS\_OK,
+using the upstream implementation from
 [facebookexperimental/moxygen#264](https://github.com/facebookexperimental/moxygen/pull/264)
-is in the pinned revision.
+instead of a local patch. The build supplies CMake's dependency revisions from
+our source pins because the upstream export omits Meta's revision files.
 
 ## Known verifier flake
 

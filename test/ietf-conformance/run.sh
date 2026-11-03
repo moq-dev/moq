@@ -112,7 +112,7 @@ run_suite() {
     fi
 }
 
-# The pinned MoQVersions.h supports drafts 16 and 18; this relay supports only 18.
+# The pin supports drafts 16, 18, and a Meta draft-20 variant; use shared draft 18.
 failed=0
 version=18
 for topology in single cluster; do

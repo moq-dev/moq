@@ -1,6 +1,6 @@
 --- a/moxygen/moqtest/MoQTestClient.cpp
 +++ b/moxygen/moqtest/MoQTestClient.cpp
-@@ -554,6 +554,10 @@
+@@ -539,6 +539,10 @@
    XLOG(DBG1) << "MoQTest DEBUGGING: calling onObjectStatus";
  
    ObjectHeader header = objHeader;
@@ -11,7 +11,7 @@
    // Validate the received data
    if (header.status != ObjectStatus::END_OF_GROUP) {
      XLOG(ERR)
-@@ -594,6 +598,35 @@
+@@ -579,6 +583,35 @@
    }
  }
  
@@ -47,7 +47,7 @@
  void MoQTestClient::onEndOfStream() {
    XLOG(DBG1) << "MoQTest DEBUGGING: calling onEndOfStream";
  }
-@@ -793,6 +826,16 @@
+@@ -778,6 +811,16 @@
    publishDoneReceived_ = true;
  }
  
@@ -64,7 +64,7 @@
  void MoQTestClient::validateSubgroupHeader(
      const ReceiveState& state,
      uint64_t groupID,
-@@ -811,8 +854,11 @@
+@@ -796,8 +839,11 @@
      return;
    }
  
@@ -77,7 +77,7 @@
      recordSemanticsFailure(
          folly::to<std::string>(
              "End of Group Signal Mismatch for group=",
-@@ -839,7 +885,7 @@
+@@ -824,7 +870,7 @@
    // The publisher may elide the priority from the wire, but the value the
    // subscriber ends up with must still be the one the publisher chose.
    auto expectedPriority = publisherPriorityForGroup(groupID);
@@ -86,7 +86,7 @@
      recordSemanticsFailure(
          folly::to<std::string>(
              "Subgroup Priority Mismatch for group=",
-@@ -876,7 +922,7 @@
+@@ -861,7 +907,7 @@
    }
  
    auto expectedPriority = publisherPriorityForGroup(header.group);
@@ -106,7 +106,7 @@
    void onError(ReceiveState& state, ResetStreamErrorCode);
    void onPublishDone();
 @@ -318,6 +319,8 @@
-   // Last group the joining FETCH half covers; unset when there is no join.
+   // Last group the fill covers; unset when there is no fill.
    std::optional<uint64_t> fetchHalfLastGroup_;
    bool publishDoneReceived_{false};
 +  // A track ends at most once.

@@ -27,18 +27,13 @@ let
 in
 stdenv.mkDerivation {
   pname = "moxygen-conformance";
-  version = "unstable-2026-10-23";
+  version = "unstable-2026-10-30";
   src = sources.moxygen;
   cmakeDir = "../standalone";
   patches = [
     # The relay conformance profile: the client accepts track-level priority and
     # an END_OF_TRACK directly after the last object. Every other check stays.
     ./moxygen-profile.patch
-    # The test origin answers TRACK_STATUS, which a relay cluster's edge sends
-    # before subscribing, without the GROUP_ORDER parameter draft-18 forbids in
-    # TRACK_STATUS_OK. Drop at the next pin bump once
-    # https://github.com/facebookexperimental/moxygen/pull/264 lands.
-    ./moxygen-track-status.patch
   ];
   nativeBuildInputs = [
     cmake
@@ -65,11 +60,21 @@ stdenv.mkDerivation {
   # The standalone client uses blockingWait, which needs Folly's concrete executor.
   postPatch =
     lib.concatStringsSep "\n" (
-      lib.mapAttrsToList (name: source: ''
-        cp -R ${source} .vendor-${name}
-        chmod -R u+w .vendor-${name}
-        patchShebangs .vendor-${name}
-      '') (builtins.removeAttrs sources [ "moxygen" ])
+      lib.mapAttrsToList (
+        name: source:
+        ''
+          cp -R ${source} .vendor-${name}
+          chmod -R u+w .vendor-${name}
+          patchShebangs .vendor-${name}
+        ''
+        # The upstream export lost Meta's revision files. CMake uses the same
+        # pins as the vendored sources, without reading those missing files.
+        + lib.optionalString (name != "fast_float") ''
+          substituteInPlace standalone/CMakeLists.txt \
+            --replace-fail 'read_rev_hash("${pins.${name}.owner}" "${name}" ${lib.toUpper name}_REV)' \
+              'set(${lib.toUpper name}_REV "${pins.${name}.rev}")'
+        ''
+      ) (builtins.removeAttrs sources [ "moxygen" ])
     )
     + ''
       substituteInPlace moxygen/moqtest/CMakeLists.txt \
