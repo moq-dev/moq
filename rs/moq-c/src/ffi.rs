@@ -25,6 +25,9 @@ pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state
 /// `code` is the broadcast handle for `MOQ_FOLLOW_EVENT_ONLINE`, `0` for
 /// `MOQ_FOLLOW_EVENT_OFFLINE`, and the terminal status for `MOQ_FOLLOW_EVENT_END`: `0`, or a
 /// negative error whose reason [crate::moq_error] reports inside the callback.
+///
+/// Runs on moq-c's runtime thread. The callback and `user_data` must be safe to use on that thread.
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_follow_callback = Option<extern "C" fn(user_data: *mut c_void, event: crate::moq_follow_event, code: i32)>;
 
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
