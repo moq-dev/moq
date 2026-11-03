@@ -914,13 +914,22 @@ impl Misses {
 			state.cache.watch_wall(at, waiter);
 		}
 
+		// An old cache's floor is a boundary inside a missing run, not a drift verdict
+		// for that whole run. Discard only its prefix before asking for the fresh suffix.
+		let floor = state.cache_floor(drift.budget);
+		let old: Vec<_> = asks
+			.overlapping(&(0..floor))
+			.map(|run| run.start..run.end.min(floor))
+			.collect();
+		for run in old {
+			asks.remove(run.clone());
+			self.give_up(run, given_up);
+		}
 		// Starts never rewind, so a run whose newest group is stale under this reader's
 		// budget is stale throughout.
 		let stale: Vec<ops::Range<u64>> = asks
 			.iter()
-			.filter(|run| {
-				state.unjudgeable(run.end - 1, drift.budget) || state.drifted(run.end - 1, &drift.edge, drift.budget)
-			})
+			.filter(|run| state.drifted(run.end - 1, &drift.edge, drift.budget))
 			.cloned()
 			.collect();
 		for run in stale {
@@ -959,13 +968,23 @@ impl Misses {
 
 	/// What [`Self::expire`] gives up as stale, and what arrived live, parking `waiter`.
 	fn expired(&self, state: &TrackState, drift: &Drift, waiter: &kio::Waiter) -> (RangeSet<u64>, RangeSet<u64>) {
-		let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
+		let floor = state.cache_floor(drift.budget);
+		// A floor raised after this fill was asked can cut through its wanted run.
+		let mut stale: RangeSet<u64> = self
+			.wanted
+			.overlapping(&(0..floor))
+			.map(|run| run.start..run.end.min(floor))
+			.collect();
+		let mut arrived = RangeSet::new();
 		let servable = &drift.edge.servable;
-		let mut next = self.wanted.iter().next().map(|run| run.start);
+		let mut next = self
+			.wanted
+			.overlapping(&(floor..u64::MAX))
+			.next()
+			.map(|run| run.start.max(floor));
 		while let Some(from) = next {
 			let bound = state.arrival(from, servable).map(|slot| slot.group.sequence);
-			let drifted =
-				state.unjudgeable(from, drift.budget) || state.poll_drifted(from, servable, drift.budget, None, waiter);
+			let drifted = state.poll_drifted(from, servable, drift.budget, None, waiter);
 			next = self.stretches(state, from, bound, drifted, &mut stale, &mut arrived);
 		}
 		(stale, arrived)

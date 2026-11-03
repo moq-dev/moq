@@ -1741,13 +1741,13 @@ impl TrackState {
 	/// frame's timestamp on a low sequence without being an edge at all.
 	fn is_stale(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
 		self.lookup.contains_key(&sequence)
-			&& (self.unjudgeable(sequence, budget) || self.drifted(sequence, edge, budget))
+			&& (sequence < self.cache_floor(budget) || self.drifted(sequence, edge, budget))
 	}
 
 	/// A finite subscription cannot admit a cache whose reach its resumed feed cannot
 	/// bound. Unlimited history still owes it, and one-shot fetches judge their own budget.
-	fn unjudgeable(&self, sequence: u64, budget: Duration) -> bool {
-		budget != Duration::MAX && self.live_floor.is_some_and(|floor| sequence < floor)
+	fn cache_floor(&self, budget: Duration) -> u64 {
+		self.live_floor.filter(|_| budget != Duration::MAX).unwrap_or(0)
 	}
 
 	/// Whether group `sequence`, cached or not, has a successor a full `budget` behind
@@ -7406,10 +7406,7 @@ impl Cursor {
 		let window = &self.filter.window;
 		self.poll(waiter, |state| {
 			// An unjudgeable old gap cannot stand in for a fresh gap above the floor.
-			let floor = match drift.budget == Duration::MAX {
-				true => groups.start,
-				false => groups.start.max(state.live_floor.unwrap_or(0)),
-			};
+			let floor = groups.start.max(state.cache_floor(drift.budget));
 			if floor >= groups.end {
 				return Poll::Ready(Ok(()));
 			}
@@ -7907,7 +7904,7 @@ impl Cursor {
 					let _ = state.cache.wakes().watch_landing(sequence, waiter);
 					// Judged whether or not the cache still holds the headless copy: an evicted
 					// one goes stale all the same, and counts as a group of unknown size.
-					(state.unjudgeable(sequence, drift.budget)
+					(sequence < state.cache_floor(drift.budget)
 						|| state.poll_drifted(sequence, &servable, drift.budget, None, waiter))
 					.then(|| {
 						let content = match state.lookup.get(&sequence) {
@@ -12313,6 +12310,63 @@ mod test {
 		framed(&producer, 5, 1).finish().unwrap();
 		assert_eq!(read_now(&mut reader, true), Some(Some(5)));
 		assert_eq!(read_now(&mut reader, true), Some(Some(6)));
+	}
+
+	/// Cache pressure can make one missing run span the old cache floor. A finite
+	/// reader gives up only the unjudgeable prefix, keeping the fresh suffix's fill.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fill_crossing_the_cache_floor_keeps_its_fresh_suffix() {
+		let budget = Duration::from_millis(400);
+		for cached in [false, true] {
+			let mut producer = track_producer("test", Info::default());
+			let requests = producer.requests();
+			producer.received();
+			for sequence in 0..3 {
+				framed(&producer, sequence, 1).finish().unwrap();
+			}
+			producer.set_idle();
+			producer.start_at(6).unwrap();
+			producer.set_live(Some(Position::group(6)), None);
+			framed(&producer, 6, 1).finish().unwrap();
+			if !cached {
+				for sequence in 0..3 {
+					evict(&producer, sequence);
+				}
+			}
+			let mut reader = producer.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(budget))
+					.with_range(0..6),
+			);
+			let waiter = kio::Waiter::noop();
+			assert_eq!(read_now(&mut reader, false), None);
+			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+				panic!("cached: {cached}: missing history must be requested");
+			};
+			assert_eq!(
+				(fill.start().group, fill.end()),
+				(3, 6),
+				"only fresh history is fetched"
+			);
+			assert_eq!(read_now(&mut reader, false), None, "the fill is still owed");
+			assert_eq!(fill.wanted(), Some(5), "the fresh suffix stays wanted");
+			for sequence in 3..6 {
+				let mut group = fill.accept(sequence, None).unwrap();
+				group.write_frame(None, &b"x"[..]).unwrap();
+				group.finish().unwrap();
+			}
+			let mut got = Vec::new();
+			loop {
+				match read_now(&mut reader, false) {
+					Some(Some(sequence)) => got.push(sequence),
+					Some(None) => break,
+					None => panic!("cached: {cached}: the bounded read still owes history"),
+				}
+			}
+			got.sort_unstable();
+			assert_eq!(got, [3, 4, 5], "cached: {cached}");
+		}
 	}
 
 	/// An idle cache's old groups and the holes after them stay owed by unlimited reads.
