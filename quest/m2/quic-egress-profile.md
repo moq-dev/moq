@@ -96,9 +96,11 @@ Then, only where the profile shows a cost:
     a handshake, and a queued send's error never reaches it, so a dial to an
     unreachable address would wait out the handshake timeout instead of
     failing with `NO_VIABLE_PATH`.
-  - A rebind wraps the new socket the same way. Dropping the queue flushes it
-    and closes the socket synchronously, so `close` still sends its
-    CONNECTION_CLOSE frames and frees the port.
+  - A rebind wraps the new socket the same way. Dropping the queue sends what
+    the socket has room for and closes it synchronously, freeing the port. The
+    flush is best-effort: it stops at `WouldBlock`, and a batch the flush task
+    already took is dropped once the socket closes, so a CONNECTION_CLOSE can
+    be lost. A shipped version should drain that batch too.
 
   Open: whether batching is opt-in in the driver's config or on by default,
   given the added p50 and p99 latency, and whether moq-uring, which already
