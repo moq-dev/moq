@@ -202,6 +202,9 @@ TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
     TARGET=$ROOT/$TARGET
 fi
+# A build cache may evict the directory a `target` symlink points to: recreate it rather
+# than fail every build through a dangling link.
+mkdir -p "$(readlink -m "$TARGET")"
 BASE_TARGET=$TARGET/base
 CURRENT_TARGET=$TARGET/current
 
