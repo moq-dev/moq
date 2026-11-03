@@ -828,3 +828,51 @@ test.each(["source", "request", "output"] as const)(
 		}
 	},
 );
+
+// A write parked on flow control never reads the group, so the group failing has to reach it
+// another way, or the answer holds its reader until the request ends.
+test("a FETCH parked on flow control stops when its group fails", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		const group = fx.track.createGroup(0n);
+		const frames = 2048;
+		for (let index = 0; index < frames; index++)
+			group.writeFrame({
+				payload: new Uint8Array(64).fill(index),
+				timestamp: new Timestamp(index, Timescale.MILLI),
+			});
+		const request = requestStream(version);
+		let settled = false;
+		const task = fx.pub
+			.runFetch(new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, frames)) }), request.stream)
+			.finally(() => {
+				settled = true;
+			});
+		try {
+			expect(await request.answer.u53()).toBe(FetchOk.id);
+			await FetchOk.decode(request.answer, version);
+			const next = await fx.uni.read();
+			if (!next.value) throw new Error("missing fetch stream");
+			// Nothing reads the fetch stream, so it fills its window and the publisher parks on a write.
+			await flush();
+			expect(settled).toBe(false);
+
+			group.abort(new Error("source failed"));
+			await flush();
+			expect(settled).toBe(true);
+			// Both streams are reset rather than ending as if the answer were complete.
+			expect(await request.answer.u53().catch(error)).toBeInstanceOf(Error);
+			const data = next.value.getReader();
+			let failure: unknown;
+			try {
+				while (!(await data.read()).done);
+			} catch (err: unknown) {
+				failure = err;
+			}
+			expect(failure).toBeInstanceOf(Error);
+		} finally {
+			request.stream.abort(new Error("test ended"));
+			await task;
+		}
+	}
+});

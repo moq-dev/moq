@@ -1391,9 +1391,16 @@ export class Publisher {
 			const out = new FetchWriter({ stream, version, timescale });
 			const group = hooks.cachedGroup(cache, fill.start.group);
 			if (!group) throw new NotFound("fill group unavailable");
+			const given = untilGivenUp(group, cancelled);
 			try {
-				await this.#writeFetchGroup({ out, group, slice: groupSlice(fill, group.sequence), cancelled });
+				await this.#writeFetchGroup({
+					out,
+					group,
+					slice: groupSlice(fill, group.sequence),
+					cancelled: given.signal,
+				});
 			} finally {
+				given.release();
 				group.close();
 			}
 
@@ -2549,10 +2556,13 @@ export class Publisher {
 	 * Write FETCH_OK, then the group on a fetch stream named by the FETCH's own request ID. Nothing past FETCH_OK can be refused, so a failure
 	 * resets both streams instead.
 	 */
-	async #answerFetch(msg: Fetch, request: RequestStream, answer: FetchAnswer, stop: AbortSignal) {
+	async #answerFetch(msg: Fetch, request: RequestStream, answer: FetchAnswer, cancel: AbortSignal) {
 		const version = this.#session.version;
 		const { range, group, slice, timescale, ranking } = answer;
 
+		// The group failing for good ends the answer too, even while a write is parked on flow control.
+		const given = untilGivenUp(group, cancel);
+		const stop = given.signal;
 		let stream: Writer | undefined;
 		try {
 			// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
@@ -2570,6 +2580,8 @@ export class Publisher {
 			const out = new FetchWriter({ stream, version, timescale });
 			await this.#writeFetchGroup({ out, group, slice, cancelled: stop });
 			stream.close();
+			// The stream holds every object it owes, so the group failing later no longer resets it.
+			given.release();
 			// The request stream ends once the answer is delivered.
 			await untilAborted(stream.closed, stop);
 		} catch (err: unknown) {
@@ -2578,6 +2590,7 @@ export class Publisher {
 			stream?.reset(e);
 			request.abort(e);
 		} finally {
+			given.release();
 			group.close();
 			// Ranked until it settles, like a group stream.
 			if (stream && ranking) {
@@ -2779,6 +2792,30 @@ class FetchWriter {
 			);
 		this.#written = true;
 	}
+}
+
+/**
+ * `signal`, also aborted with why `group` was given up: its copy failed with no route to continue
+ * it, it was evicted, or it expired. A write parked on flow control never reads the group, so
+ * without this a FETCH would hold its reader until the request ends. Release once nothing is
+ * left to write.
+ */
+function untilGivenUp(group: group.Consumer, signal: AbortSignal): { signal: AbortSignal; release(): void } {
+	const givenUp = new GivenUp(group);
+	const failed = new AbortController();
+	const released = Promise.withResolvers<void>();
+	void givenUp
+		.write(() => released.promise)
+		.then((reason) => {
+			if (reason) failed.abort(reason);
+		});
+	return {
+		signal: AbortSignal.any([signal, failed.signal]),
+		release: () => {
+			givenUp.close();
+			released.resolve();
+		},
+	};
 }
 
 /** The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with. */
