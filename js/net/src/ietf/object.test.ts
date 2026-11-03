@@ -24,6 +24,8 @@ test("a timestamp is converted to the track's scale", () => {
 	expect(roundtrip(Timestamp.fromMillis(1234), Timescale.NANO)?.value).toBe(1_234_000_000);
 	// Rounded down, as Rust converts it.
 	expect(roundtrip(Timestamp.fromMicros(1_500), Timescale.MILLI)?.value).toBe(1);
+	// Exact for an aligned value, where float division gives 4611686020.999999.
+	expect(roundtrip(new Timestamp(4_611_686_021_000_000, Timescale.NANO), Timescale.MILLI)?.value).toBe(4_611_686_021);
 });
 
 test("a conversion past what a Timestamp holds is refused before anything is written", () => {

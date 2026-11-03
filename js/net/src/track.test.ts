@@ -512,6 +512,9 @@ test("rescale matches the track's timeline, rounded down as Rust's convert does"
 	// Halfway and fractional values round down too, where Math.round would give 2 and 3.
 	expect(rescale(timed, Timestamp.fromMicros(1_500))?.value).toBe(1);
 	expect(rescale(timed, new Timestamp(2.6, Timescale.MILLI))?.value).toBe(2);
+	expect(rescale(timed, new Timestamp(1_500.7, Timescale.MICRO))?.value).toBe(1);
+	// An aligned value keeps it exactly, where float division gives 4611686020.999999.
+	expect(rescale(timed, new Timestamp(4_611_686_021_000_000, Timescale.NANO))?.value).toBe(4_611_686_021);
 	expect(() => rescale(timed, undefined)).toThrow(TimestampMismatch);
 	const huge = new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MILLI);
 	expect(() => rescale({ timescale: Timescale.NANO }, huge)).toThrow(TimestampMismatch);

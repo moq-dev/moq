@@ -25,7 +25,7 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
-import { rescale } from "../rescale.ts";
+import { floorAt, rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -119,7 +119,7 @@ function stamping(version: Version, info: Pick<track.Info, "timescale">): Stamp 
 /** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out untimed. */
 function wireTime(timestamp: Timestamp | undefined, stamp: Stamp): number {
 	const own = stamp.timed && rescale(stamp.timed, timestamp);
-	return own ? own.value : Math.floor(Timestamp.now().as(stamp.timescale));
+	return own ? own.value : floorAt(Timestamp.now(), stamp.timescale);
 }
 
 /**
