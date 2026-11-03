@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Consumer decoder setup refusals are typed
 
-`decode::Consumer::new` reports `Error::UnsupportedConfig` for a codec, description, or decoder output it cannot open. Direct `decode::Decoder::new` retains its detailed setup errors. Subscription failures keep their existing errors. A codec worker that cannot start or exits during initialization reports `Error::CodecGone`, like a worker lost after initialization, rather than `Error::Codec`.
+`decode::Consumer::new` reports `Error::UnsupportedConfig` for a codec or description this build cannot decode, where `decode::Decoder::new` reports `Error::UnsupportedCodec`. That now includes a missing or malformed avcC or hvcC description (previously `Error::Codec` or `Error::Mux`) and a codec no compiled-in decoder handles (previously `Error::NoDecoder`). `Error::NoDecoder` now means only that every decoder for the codec failed to open. Backend faults, scale-hint errors, and subscription failures keep their own errors. A codec worker that cannot start or exits during initialization reports `Error::CodecGone`, like a worker lost after initialization, rather than `Error::Codec`.
 
 ### `decode::Options::max_delay` is `delay` ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
 

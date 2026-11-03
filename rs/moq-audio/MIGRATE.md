@@ -6,7 +6,9 @@ How to update your code for each breaking change, newest first.
 
 ### Consumer decoder setup refusals are typed
 
-`decode::Consumer::new` reports `Error::UnsupportedConfig` for a codec, layout, description, or decoder output it cannot open. Direct `decode::Decoder::new` retains its detailed setup errors. Subscription conditions, including a playout delay beyond the track's retention, keep their existing errors.
+`decode::Consumer::new` reports `Error::UnsupportedConfig` for a codec, layout, or description it refuses, where `decode::Decoder::new` reports `Error::Unsupported`. Codec faults, an output sample rate of zero, and subscription conditions such as a playout delay beyond the track's retention keep their own errors.
+
+A libopus allocation, internal, or state failure is the new `Error::Codec` instead of `Error::Unsupported`, which now means only a configuration libopus refuses. When several decoder backends fail, a fault is reported instead of being folded into `Unsupported`.
 
 ### Capture is one producer with independent consumers
 

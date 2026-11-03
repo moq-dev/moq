@@ -9236,22 +9236,24 @@ async fn audio_subscribe_configuration_boundary() {
 			);
 		}
 	}
-	// Output refusals are setup errors too; a missing track is not.
-	for output in [
-		crate::audio::MoqAudioDecoderOutput {
-			sample_rate: Some(0),
-			..audio_output()
-		},
-		crate::audio::MoqAudioDecoderOutput {
-			channels: Some(0),
-			..audio_output()
-		},
-	] {
-		assert!(matches!(
-			MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), output).await,
-			Err(MoqError::UnsupportedConfig { .. })
-		));
-	}
+	// An output layout the decoder cannot produce is refused too. A zero output rate
+	// is a caller error no rendition avoids, and a missing track is not a refusal.
+	let layout = crate::audio::MoqAudioDecoderOutput {
+		channels: Some(0),
+		..audio_output()
+	};
+	assert!(matches!(
+		MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), layout).await,
+		Err(MoqError::UnsupportedConfig { .. })
+	));
+	let rate = crate::audio::MoqAudioDecoderOutput {
+		sample_rate: Some(0),
+		..audio_output()
+	};
+	assert!(matches!(
+		MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), rate).await,
+		Err(MoqError::Audio { .. })
+	));
 	let missing = MoqAudioConsumer::subscribe(&consumer, "missing".into(), sibling_audio(""), audio_output()).await;
 	assert!(matches!(missing, Err(MoqError::Audio { .. })));
 	let _limited = broadcast
@@ -9272,7 +9274,7 @@ async fn audio_subscribe_configuration_boundary() {
 		sibling_audio(""),
 		crate::audio::MoqAudioDecoderOutput {
 			delay: Some(MoqDelay {
-				min: Duration::from_millis(20),
+				min: Some(Duration::from_millis(20)),
 				max: None,
 			}),
 			..audio_output()

@@ -82,7 +82,7 @@ pub const MOQ_ERROR_UNRESOLVABLE_BROADCAST: i32 = -41;
 pub const MOQ_ERROR_EXPIRED: i32 = -42;
 /// The catalog requires a newer moq-hang version than this build supports.
 pub const MOQ_ERROR_UNSUPPORTED_CATALOG: i32 = -43;
-/// The rendition or decoder output was refused during setup; another configuration may work.
+/// The rendition's codec, layout, or description was refused during setup; another rendition may work.
 pub const MOQ_ERROR_UNSUPPORTED_CONFIG: i32 = -44;
 
 /// Whether a protocol code is from the session or stream registry.
@@ -195,7 +195,7 @@ pub type Status = i32;
 #[derive(Debug, thiserror::Error, Clone)]
 #[non_exhaustive]
 pub enum Error {
-	/// The rendition or decoder output could not be configured before decoding started.
+	/// The rendition's codec, layout, or description was refused before decoding started.
 	#[error("unsupported configuration: {0}")]
 	UnsupportedConfig(String),
 

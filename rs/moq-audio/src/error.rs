@@ -42,6 +42,12 @@ pub enum Error {
 	#[error("audio resource already in use: {0}")]
 	Busy(String),
 
+	/// The codec library failed for a reason the configuration does not explain,
+	/// such as an allocation or internal error. Other settings are no more likely
+	/// to work; the codec itself is at fault.
+	#[error("audio codec: {0}")]
+	Codec(String),
+
 	/// A packet could not be decoded: truncated, corrupt, or using a codec
 	/// feature this build doesn't implement. The stream itself may be fine, so a
 	/// consumer can log this one and read the next packet.

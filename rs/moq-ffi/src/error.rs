@@ -401,7 +401,8 @@ pub enum MoqError {
 		/// The catalog version this build cannot read.
 		version: u64,
 	},
-	/// The rendition or decoder output was refused during setup; another configuration may work.
+	/// The rendition's codec, layout, or description was refused during setup; another rendition may work.
+	/// Decoder faults keep [`MoqError::Audio`] or [`MoqError::Video`].
 	#[error("unsupported configuration: {reason}")]
 	UnsupportedConfig {
 		/// A diagnostic message describing the refusal.

@@ -179,8 +179,9 @@ impl Consumer {
 		name: impl Into<String>,
 		options: Options,
 	) -> Result<Self, Error> {
-		// Only the local decoder/output setup is a capability refusal. Conditions learned
-		// from the subscription, such as retention, keep their original errors.
+		// Only a codec, layout, or description the decoder refuses is a capability refusal.
+		// Codec faults and conditions learned from the subscription, such as retention,
+		// keep their original errors.
 		let setup = |err| match err {
 			Error::Unsupported(reason) => Error::UnsupportedConfig(reason),
 			err => err,
@@ -194,7 +195,7 @@ impl Consumer {
 			.map_err(setup)?;
 
 		if sample_rate == 0 {
-			return Err(Error::UnsupportedConfig("output sample rate must be > 0".into()));
+			return Err(Error::Unsupported("output sample rate must be > 0".into()));
 		}
 
 		let name = name.into();
