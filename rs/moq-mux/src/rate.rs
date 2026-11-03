@@ -1348,7 +1348,7 @@ mod tests {
 	/// invariants after every wake.
 	mod model {
 		use proptest::prelude::*;
-		use proptest::test_runner::{Config, RngSeed, TestRunner};
+		use proptest::test_runner::{Config, RngAlgorithm, RngSeed, TestRunner};
 
 		use super::*;
 
@@ -1513,6 +1513,8 @@ mod tests {
 			let mut runner = TestRunner::new(Config {
 				cases: 512,
 				rng_seed: RngSeed::Fixed(6781),
+				// Every op forks the runner's RNG, which ChaCha makes the bulk of a debug run.
+				rng_algorithm: RngAlgorithm::XorShift,
 				failure_persistence: None,
 				..Default::default()
 			});

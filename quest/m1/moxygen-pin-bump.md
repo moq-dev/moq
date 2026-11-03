@@ -2,15 +2,15 @@
 
 ## Goal
 
-Waiting on upstream Moxygen. Once
-[facebookexperimental/moxygen#264](https://github.com/facebookexperimental/moxygen/pull/264)
-merges, `nix/moxygen.nix` pins a Moxygen that includes it,
+`nix/moxygen.nix` pins a Moxygen that includes
+[facebookexperimental/moxygen#264](https://github.com/facebookexperimental/moxygen/pull/264),
 `nix/moxygen-track-status.patch` is deleted, and the Moxygen interop and
-conformance lanes still pass.
-
-Check moxygen#264's state. Delete this quest once the patch is gone.
+conformance lanes still pass. Delete this quest once the patch is gone.
 
 ## Plan
+
+Cleared 2026-11-02 (/quest-unblock): Meta's bot merged moxygen#264 as `aaa50a77` on 2026-10-30 (GitHub shows the PR closed). Our pin `c27ae635` (2026-10-23) predates it, so the bump is ready to start.
+
 
 The patch is on `main`:
 [moq-dev/moq#6729](https://github.com/moq-dev/moq/pull/6729) (merged

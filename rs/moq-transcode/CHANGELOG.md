@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `active::Consumer` stops reporting a rendition the ladder retired before it encoded a frame, so a source that keeps resizing no longer grows every cursor.
+
+### Fixed
+
+- Rungs resize frames on their encoder's thread instead of a tokio worker.
+- A source flapping between sizes probes each rung shape once rather than opening an encoder on every catalog edit.
+
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-transcode-v0.1.9...moq-transcode-v0.1.10) - 2026-10-05
 
 ### Other

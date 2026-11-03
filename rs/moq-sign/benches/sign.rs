@@ -36,11 +36,12 @@ async fn roundtrip(
 	let info = moq_net::track::Info::default().with_max_age(Duration::ZERO);
 	let track = signed.create_track("stream", info).unwrap();
 	publication
-		.announce(moq_net::origin::Route::default().with_epoch(signed.epoch().clone()))
+		.announce(moq_net::origin::Route::default().with_instance(signed.instance().clone(), 0))
 		.unwrap();
 	let inner = origin.consume().request(&path, None).await.unwrap();
 	let consumer = broadcast::Consumer::new(inner, key.public(), path).unwrap();
-	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let subscription = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)));
 	let consumer = consumer.subscribe("stream", subscription).unwrap().await.unwrap();
 	(track, consumer, publication)
 }

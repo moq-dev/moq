@@ -16,7 +16,7 @@ import { Video } from "@moq/watch";
 
 export default class extends HTMLElement {
 	constructor();
-	attributeChangedCallback(name: "delay" | "buffer" | "url" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "announced" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
+	attributeChangedCallback(name: "delay" | "buffer" | "url" | "echo" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "announced" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
 	readonly audio: Audio.Decoder;
 	get backend(): Video.Backend;
 	set backend(value: Video.Backend);
@@ -52,6 +52,8 @@ export default class extends HTMLElement {
 	get delay(): Delay;
 	set delay(value: Delay);
 	disconnectedCallback(): void;
+	get echo(): string | undefined;
+	set echo(value: string | undefined);
 	emitter: Audio.Emitter;
 	get follow(): boolean;
 	set follow(value: boolean);
@@ -59,7 +61,7 @@ export default class extends HTMLElement {
 	set muted(value: boolean);
 	get name(): Net.Path.Valid;
 	set name(value: string | Net.Path.Valid);
-	static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "follow", "announced", "delay", "buffer", "catalog-format", "captions"];
+	static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "follow", "announced", "delay", "buffer", "catalog-format", "captions", "echo"];
 	get paused(): boolean;
 	set paused(value: boolean);
 	readonly player: Player;

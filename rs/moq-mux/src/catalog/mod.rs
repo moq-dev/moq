@@ -43,6 +43,8 @@ pub use entry::Entry;
 pub(crate) use estimate::Reading;
 pub use estimate::{Estimate, Estimator};
 pub use format::*;
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) use producer::to_msf;
 pub use producer::{Config, Guard, Producer};
 pub use select::Select;
 pub use stream::Stream;

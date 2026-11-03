@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/7a191e6197c691f477b4c55edba34cc425c3e77c";
+      url = "github:moq-dev/quest/5e66075d5acc397e400094ea4f53f7db45e351ce";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -158,6 +158,8 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
+            # The workspace-hack that gives every build one feature set per dependency.
+            cargo-hakari
             # Weekly mutation testing of the security-critical modules (`just rs mutants`).
             cargo-mutants
             cargo-nextest
@@ -325,11 +327,12 @@
         # check` skips itself, which reads as a pass in CI.
         #
         # The tag pairs the generator's own version with the uniffi release it
-        # targets (v0.10.0-kixelated.1+v0.32.0 -> uniffi 0.32), and it only
+        # targets (v0.10.0-kixelated.2+v0.32.0 -> uniffi 0.32), and it only
         # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
-        # generator version and must be bumped together: the repo and revision
-        # in release-ffi.yml, and the `cargo install` line in
+        # generator version and must be bumped together: the commit the tag
+        # peels to in .github/actions/uniffi-bindgen, which CI jobs outside
+        # the dev shell build, and the `cargo install` line in
         # rs/moq-ffi/build.sh, go/ffi/README.md, sh/go/check.sh, and
         # sh/go/stage.sh.
         #
@@ -337,21 +340,22 @@
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even
         # though the contract version did not, so v0.7.1+v0.31.0 fails to read a
         # 0.32-built cdylib at all. The fork carries the port, tracked upstream
-        # as NordSecurity/uniffi-bindgen-go#96, and renders an enum error's
-        # exported Display as its Error(). Move back to NordSecurity once they
-        # tag a 0.32 release carrying both.
+        # as NordSecurity/uniffi-bindgen-go#96, renders an enum error's
+        # exported Display as its Error(), and destroys an async result whose
+        # context was cancelled as it completed. Move back to NordSecurity once
+        # they tag a 0.32 release carrying all three.
         uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-go";
-          version = "0.10.0-kixelated.1+v0.32.0";
+          version = "0.10.0-kixelated.2+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-go";
             rev = "v${version}";
-            hash = "sha256-0DCIgHt4R5ndtLkeXw/KF500HidB13L2HeuS4eLvLHU=";
+            hash = "sha256-1dXQI30UYjIqiSY/yq4OTNxRKuERm1mrLDrff32fty4=";
           };
 
-          cargoHash = "sha256-wD+5Ghd4WFFQWAY2PXedXVPG+oPGozG9HbOhXB0fWco=";
+          cargoHash = "sha256-Q9746NcD4FkhHVtrvl+2PbqMe7kiiw4Uxt3z/Qbqy7A=";
 
           # The tag is a virtual workspace whose other members are uniffi test
           # fixtures. Building from the root would compile all of them, and CI
@@ -379,13 +383,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.6+v0.32.0";
+          version = "0.3.1-kixelated.7+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
+            hash = "sha256-uSApyCocEhADWu8Koj5vXIt0fMYQVjnBVKctDWQHqLM=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
@@ -413,10 +417,10 @@
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
-        # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
-        # and .github/workflows/release-shared-ffi.yml.
+        # bumped together: the commit the tag peels to in
+        # .github/actions/uniffi-bindgen, which CI jobs outside the dev shell
+        # (Windows among them) build, and the `cargo install` lines in
+        # rs/moq-ffi/build.sh and cpp/moq/README.md.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
@@ -672,6 +676,14 @@
             if [ -x "$shim" ]; then
               export PATH="$(dirname "$shim"):$PATH"
             fi
+
+            # Each nested shell (direnv, then `nix develop`, then another
+            # inside a gate) prepends this shell's ~160 store paths again,
+            # about 10 KB. mbx copies PATH into two variables at ~3.6 times
+            # its size, and Linux rejects any one variable over 128 KiB, so
+            # four nested shells failed every Cargo launch with E2BIG. Keep
+            # each directory's first entry only: lookups resolve as before.
+            PATH=$(printf '%s' "$PATH" | awk -v RS=: '!seen[$0]++ { printf "%s%s", sep, $0; sep = ":" }')
           '';
 
           env = {

@@ -1,6 +1,6 @@
 ---
 title: MoQ vs RTMP/SRT
-description: Pull-based contribution, on-demand encoding, and failover
+description: Pull-based contribution, optional on-demand encoding, and failover
 ---
 
 # MoQ vs RTMP/SRT
@@ -15,23 +15,29 @@ downstream wants the second one.
 A MoQ viewer's first act is subscribing to the catalog. It then subscribes to
 the renditions it wants, and that subscription travels upstream (merging with
 duplicates) until one copy reaches the publisher. No subscribers, no
-transmission, and a publisher can go further and not encode either.
+transmission.
 
 That matters for long-tail content: hundreds of security cameras uploading
-360p, with 1080p pulled only when someone zooms in. It matters for AI too, where
-a captions track backed by an expensive model runs only while someone has
-captions on.
+360p, with 1080p pulled only when someone zooms in.
+
+Encoding is a separate choice. MoQ's own publishers keep encoding video while a
+source is enabled, and keep raw audio to encode once someone listens, so a
+viewer who arrives late can still fetch the last few seconds. A publisher can
+opt in to encoding on demand instead, which saves the work while nobody watches
+at the cost of that past. It pays off when the encode is the expensive part,
+such as a captions track backed by an AI model that runs only while someone has
+captions on, or a transcoder's extra renditions.
 
 ## Failover and restarts
 
 A broadcast can be announced over several connections. Seamless failover
-between them needs a [publisher epoch](/concept/moq-lite#publisher-epochs)
-(moq-lite 07, opt-in), which names the instance behind a broadcast: replicas
-sharing one fail over mid-group, and a restart is a newer epoch that viewers
-switch to instead of stalling on the old group numbers, given hosts whose
-clocks roughly agree. The RTMP, SRT, and
-WHIP ingests mint one per connection. Without an epoch, a subscription stays on
-the route it first resolved through until that route goes.
+between them needs a [publisher instance](/concept/moq-lite#publisher-instances)
+carried on every hop (moq-lite 07, opt-in), which names the stream behind a
+broadcast: replicas sharing one fail over mid-group, and a restart is a new
+instance that viewers switch to instead of stalling on the old group numbers.
+The RTMP, SRT, and WHIP ingests mint one per connection. Over an older wire the
+receiving relay mints an instance per announcement, so failover onto such a
+route is a restart.
 
 ## One protocol both ways
 

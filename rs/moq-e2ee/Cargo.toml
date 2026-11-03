@@ -20,6 +20,7 @@ kio = { workspace = true }
 moq-net = { workspace = true }
 rind = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
@@ -28,6 +29,7 @@ hex = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "protect"

@@ -1,6 +1,6 @@
 // Every vector in drafts/moq-sign-00.json, run against the internal primitives.
 import { expect, test } from "bun:test";
-import { Epoch, type Path, Time } from "@moq/net";
+import { Instance, type Path, Time } from "@moq/net";
 import { Failure } from "./failure.ts";
 import { PublicKey, SecretKey } from "./key.ts";
 import { Scope } from "./scope.ts";
@@ -24,7 +24,7 @@ function hex(bytes: Uint8Array): string {
 
 // The vectors' path field is the raw signed text, including an empty one.
 function scope(row: Row): Scope {
-	return new Scope(String(row.path) as Path.Valid, Epoch.parse(String(row.epoch)), String(row.track));
+	return new Scope(String(row.path) as Path.Valid, Instance.parse(String(row.instance)), String(row.track));
 }
 
 // A row's timestamp at its timescale, or undefined when the timescale is 0 (untimed).

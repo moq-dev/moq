@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
 				.track(name)?
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
-						.with_max_delay(args.timeout)
+						.with_delay(moq_net::track::Delay::default().with_max(args.timeout))
 						.with_range(0..),
 				))
 				.await?;
