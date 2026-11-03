@@ -2626,6 +2626,7 @@ mod tests {
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.web.ws = true;
+		config.auth.public = vec![moq_auth::Pattern::all()];
 		config.quic.receive_window = Some(3 << 20);
 		config.quic.stream_receive_window = Some(384 << 10);
 		config.quic.max_streams = Some(17);
