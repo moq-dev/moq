@@ -16,7 +16,7 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 - ✅ m2
 
 From [moq-dev/moq#7703](https://github.com/moq-dev/moq/pull/7703)'s
-follow-ups. That PR resets a lapsed announce with EXPIRED_AUTH_TOKEN (0x7)
+follow-ups. That PR (merged) resets a lapsed announce with EXPIRED_AUTH_TOKEN (0x7)
 but leaves a revoked or narrowed one ending with a FIN, as before.
 
 - Use INTERNAL_ERROR, since the stream registry has no "unauthorized" code.
@@ -29,7 +29,3 @@ but leaves a revoked or narrowed one ending with a FIN, as before.
   reset, on mocked time for drafts 18, 20, and 22.
 
 Public API: none. Wire: existing codes only; a revoked announce now resets.
-
-## Required
-
-- [A lapsed request token resets its groups with EXPIRED_AUTH_TOKEN](/quest/m1/auth-expiry-reset.md) - adds the announce reset path this reuses (moq-dev/moq#7703)
