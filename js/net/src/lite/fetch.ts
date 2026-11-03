@@ -25,7 +25,7 @@ export class Fetch {
 	priority: number;
 	/** Reader freshness budget. Lite-07+ only; omission uses publisher retention alone. */
 	maxDelay?: Milli;
-	group: number;
+	group: bigint;
 
 	/** Index of the first frame to return; 0 is the start of the group. Lite-06+. */
 	startFrame: number;
@@ -51,7 +51,7 @@ export class Fetch {
 		track: string;
 		priority: number;
 		maxDelay?: Milli;
-		group: number;
+		group: bigint;
 		startFrame?: number;
 		endFrame?: number;
 	}) {
@@ -72,7 +72,7 @@ export class Fetch {
 		await w.u8(toWire(this.priority));
 		if (hasFetchMaxDelay(version)) await w.u53(this.maxDelay === undefined ? 0 : this.maxDelay + 1);
 		else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
-		await w.u53(this.group);
+		await w.u62(this.group);
 
 		if (hasFrameBounds(version)) {
 			await w.u53(this.startFrame);
@@ -90,7 +90,7 @@ export class Fetch {
 		const priority = fromWire(await r.u8());
 		const encodedMaxDelay = hasFetchMaxDelay(version) ? await r.u53() : 0;
 		const maxDelay = encodedMaxDelay > 0 ? ((encodedMaxDelay - 1) as Milli) : undefined;
-		const group = await r.u53();
+		const group = await r.u62();
 
 		if (!hasFrameBounds(version)) {
 			return new Fetch({ broadcast, instance, track, priority, maxDelay, group });

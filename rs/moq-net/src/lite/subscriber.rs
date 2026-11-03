@@ -2555,6 +2555,35 @@ mod tests {
 		);
 	}
 
+	/// A bounded feed goes live at its answer alone only when its resolved ranges stop short
+	/// of Largest. One that serves Largest waits for it, so a finite read judges an old
+	/// cached group against that edge rather than against itself.
+	#[kio::test]
+	async fn a_bounded_feed_goes_live_ahead_only_without_largest() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let largest = Some(Position::group(10));
+		active.ranges = vec![lite::Range::span(Some(0), 0, Some(10), None)];
+		active.served = Some(0);
+		active.starts = vec![Some(0)];
+		assert_eq!(active.never_serves(largest), None, "group 10 is in 0..11");
+
+		active.ranges = vec![lite::Range::span(Some(0), 0, Some(3), None)];
+		assert_eq!(active.never_serves(largest), largest, "0..4 never reaches group 10");
+
+		active.ranges.push(lite::Range::span(Some(10), 0, Some(12), None));
+		active.starts = vec![Some(0), Some(10)];
+		assert_eq!(active.never_serves(largest), None, "a later range serves it");
+		active.starts[1] = None;
+		assert_eq!(active.never_serves(largest), largest, "that range served nothing");
+
+		active.ranges[1].end = None;
+		assert_eq!(active.never_serves(largest), None, "an open feed reaches it");
+		assert_eq!(active.never_serves(None), None, "nothing to go live at");
+	}
+
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
 	/// A fetch held for group 1 keeps waiting through the grace and is served when it lands.
 	#[kio::test]
@@ -4878,6 +4907,54 @@ mod tests {
 				"{version}: registered with its copy pending"
 			);
 			assert!((&mut waiting).now_or_never().is_none(), "{version}: no TRACK_INFO yet");
+		}
+	}
+
+	/// An in-flight TRACK survives withdrawal, like its pipelined SUBSCRIBE, but
+	/// never accepts a replacement instance's info.
+	#[kio::test]
+	async fn an_in_flight_track_info_keeps_its_instance() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for replace in [false, true] {
+				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+				let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
+				let (_waiting, mut run) = subscribing(&subscriber, Subscription::default());
+				let route = kio::Producer::new(());
+				run.serve.route = Some(route.consume());
+				let mut selection = crate::model::TestSelection::new();
+				run.serve.validity = selection.validity();
+				let mut fetch = TrackInfoFetch::new(&run.serve);
+				let waiter = kio::Waiter::noop();
+				assert!(fetch.poll_fetch(&run.serve, true, &waiter).is_pending());
+				drop(route);
+				selection.withdraw();
+				if replace {
+					selection.replace();
+				} else {
+					assert!(
+						fetch.poll_fetch(&run.serve, true, &waiter).is_pending(),
+						"{version}: the request already went out"
+					);
+				}
+
+				let mut info = Vec::new();
+				lite::TrackInfo {
+					refresh: None,
+					priority: 0,
+					max_age: None,
+					timescale: Some(Timescale::MILLI),
+					compress: false,
+				}
+				.encode(&mut crate::coding::Encoder::new(&mut info, version.into()), version)
+				.unwrap();
+				session.push(&info);
+				let result = fetch.poll_fetch(&run.serve, true, &waiter);
+				if replace {
+					assert!(matches!(result, Poll::Ready(Err(Error::Unroutable))), "{version}");
+				} else {
+					assert!(matches!(result, Poll::Ready(Ok(_))), "{version}");
+				}
+			}
 		}
 	}
 
@@ -7530,6 +7607,19 @@ impl SubStream {
 		Some(start..end)
 	}
 
+	/// `largest`, when this bounded subscription's ranges, as SUBSCRIBE_START resolved them,
+	/// stop short of it, so the feed never delivers it. The range and arrival ledger then wait
+	/// for the groups it owes instead of an edge outside the requested history. A feed that
+	/// serves Largest waits for it, so an old cache is judged against that edge.
+	fn never_serves(&self, largest: Option<Position>) -> Option<Position> {
+		largest.filter(|largest| {
+			bounded(&self.ranges)
+				&& self
+					.covered()
+					.is_none_or(|spans| !spans.iter().any(|span| span.contains(&largest.group)))
+		})
+	}
+
 	/// The groups the publisher owed once it FINs a covered bounded lite-07 subscription
 	/// without SUBSCRIBE_END: each range from its absolute start, or else from where
 	/// SUBSCRIBE_START resolved delivery, up to its end. Groups below SUBSCRIBE_START were
@@ -8595,7 +8685,10 @@ impl kio::Task for TrackServeRun {
 					}
 					// TRACK opens first: its stream fails fast without credit, where a fetch's
 					// waits for it, so fetches opened ahead could starve their own prerequisite.
-					let fetched = info.poll_fetch(&self.serve, waiter);
+					let subscribed = pipelined
+						.as_ref()
+						.is_some_and(|subscribing| matches!(subscribing.state, PipelinedState::Open(_)));
+					let fetched = info.poll_fetch(&self.serve, subscribed, waiter);
 					let failed = match pipelined {
 						Some(subscribing) => subscribing.poll(waiter),
 						None => Poll::Pending,
@@ -8762,15 +8855,19 @@ impl TrackInfoFetch {
 	fn poll_fetch(
 		&mut self,
 		serve: &TrackServe,
+		subscribed: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(track::Info, HeldTrack), Error>> {
 		#[every_poll]
-		self.validity.check(waiter)?;
-		// A withdrawn route fails an info still owed. One already delivered stays usable, like
-		// one read before the withdrawal: a SUBSCRIBE sent alongside may already be served.
-		#[every_poll]
-		if !matches!(self.state, TrackInfoState::Read(_)) && withdrawn(serve, waiter) {
-			return Poll::Ready(Err(Error::Unroutable));
+		if subscribed && matches!(self.state, TrackInfoState::Read(..) | TrackInfoState::Properties(..)) {
+			// The request is on the wire: withdrawal leaves it to its answer, just like
+			// the SUBSCRIBE sent alongside it. A replacement still invalidates that answer.
+			self.validity.check_unanswered(waiter)?;
+		} else {
+			self.validity.check(waiter)?;
+			if withdrawn(serve, waiter) {
+				return Poll::Ready(Err(Error::Unroutable));
+			}
 		}
 
 		let mut stream: Stream<Transport, Version> =
@@ -8788,14 +8885,10 @@ impl TrackInfoFetch {
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 			}
-			let read = match serve.subscriber.peer_setup.poll_ietf(waiter) {
+			match serve.subscriber.peer_setup.poll_ietf(waiter) {
 				Poll::Ready(ietf) => stream.reader.poll_decode::<lite::TrackInfo>(waiter).map_ok(|info| (ietf, info)),
 				Poll::Pending => Poll::Pending,
-			};
-			if read.is_pending() && withdrawn(serve, waiter) {
-				return Poll::Ready(Err(Error::Unroutable));
 			}
-			read
 		})?;
 
 		// Publisher Max Age rides on the wire, so the local retention
@@ -9534,9 +9627,16 @@ impl ServeLoop {
 										}
 										// No range starting anywhere leaves nothing owed.
 										let served = start.starts.iter().flatten().min().copied();
+										active.served = served;
+										active.starts = start.starts.clone();
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
-											self.serving.set_live(start.largest, served);
+											// A bounded feed that never delivers Largest goes live at the
+											// answer alone; one that does waits for it to show.
+											match active.never_serves(start.largest) {
+												Some(largest) => self.serving.set_live_ahead(largest, served),
+												None => self.serving.set_live(start.largest, served),
+											}
 											if let Some(largest) = start.largest {
 												self.serving.report_largest(largest);
 											}
@@ -9557,8 +9657,6 @@ impl ServeLoop {
 												_ => self.serving.start_at(served),
 											};
 										}
-										active.served = served;
-										active.starts = start.starts.clone();
 										// The groups the SUBSCRIBE asked for below it are not
 										// waited for, whatever the demand asks later. One that
 										// still arrives is delivered, so they are not dropped.
