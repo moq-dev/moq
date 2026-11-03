@@ -1539,9 +1539,28 @@ impl Connection {
 		self.update_keys(None, false);
 	}
 
-	/// Get a session reference
-	pub fn crypto_session(&self) -> &dyn crypto::Session {
-		&*self.crypto
+	/// What the handshake negotiated, once the connection emits [`Event::HandshakeDataReady`]
+	pub fn handshake_data(&self) -> Option<crypto::HandshakeData> {
+		self.crypto.handshake_data()
+	}
+
+	/// The certificate chain the peer presented, end entity first, if it presented one
+	///
+	/// Complete only once the handshake finishes, signaled by [`Event::Connected`].
+	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+		self.crypto.peer_identity()
+	}
+
+	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
+	/// `label` and `context` for domain separation
+	#[cfg(test)]
+	pub(crate) fn export_keying_material(
+		&self,
+		output: &mut [u8],
+		label: &[u8],
+		context: &[u8],
+	) -> Result<(), crypto::ExportKeyingMaterialError> {
+		self.crypto.export_keying_material(output, label, context)
 	}
 
 	/// Whether the connection is in the process of being established
@@ -3844,9 +3863,15 @@ impl Connection {
 			)
 		});
 		self.peer_params = params;
+		let mtu = self.path.mtud.current_mtu();
 		self.path.mtud.on_peer_max_udp_payload_size_received(
 			u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX),
 		);
+		// A peer limit below the initial MTU shrinks the datagrams the controller sizes its
+		// minimum window and pacing burst by
+		if self.path.mtud.current_mtu() != mtu {
+			self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
+		}
 	}
 
 	fn decrypt_packet(&mut self, now: Instant, packet: &mut Packet) -> Result<Option<u64>, Option<TransportError>> {

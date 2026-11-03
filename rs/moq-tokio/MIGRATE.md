@@ -9,6 +9,13 @@ How to update your code for each breaking change, newest first.
 The `iroh` feature and module are gone, with `settings::Iroh`, `Client::with_iroh` and `with_iroh_addrs`, `server::Config::iroh`, `Server::iroh_endpoint` and `Listener::iroh_endpoint`, `Transport::Iroh`, `Error::Iroh` and `Error::IrohDisabled`, `secret::load_or_create`, and `quic::Resolved::gso_disabled`.
 Connect over QUIC or WebTransport instead; an `iroh://` URL no longer dials.
 
+### QUIC handshake data needs no downcast ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+`quic::driver::Connecting::handshake_data` returns `crypto::HandshakeData` and `Connection::handshake_data` returns `Option<crypto::HandshakeData>`, so drop the `downcast`.
+`Connection::peer_identity` returns `Option<Vec<CertificateDer<'static>>>`.
+Pass a rustls config straight to `quic::driver::client::Config::new` or `server::Config::new` instead of wrapping it in `crypto::rustls::QuicClientConfig::try_from` or `QuicServerConfig::try_from`.
+`quic::Error::NoInitialCipherSuite` is removed.
+
 ### Smaller default windows, which qmux shares ([#7624](https://github.com/moq-dev/moq/pull/7624))
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 4 MiB, `DEFAULT_STREAM_RECEIVE_WINDOW` 1 MiB, and `DEFAULT_SEND_WINDOW` 4 MiB, down from 128 MiB, 4 MiB, and 16 MiB. `Error::ReceiveWindowTooSmall` now refuses only a `receive_window` below 1 MiB.

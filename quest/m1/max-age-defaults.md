@@ -28,7 +28,7 @@ Before claiming, checked ready state with `quest unblocked` and searched open PR
 
 ### Current defaults
 
-Publisher max-age is a freshness bound on **superseded groups**. A group expires when either its successor's arrival is old enough at this hop or the successor's first timestamp trails the live edge enough. Untimed tracks use the wall clock. The newest group is exempt. Byte reclamation has a separate cache policy. See [rs/moq-net/src/model/track.rs:120](https://github.com/moq-dev/moq/blob/c95a9b1201/rs/moq-net/src/model/track.rs#L120) and [js/net/src/track.ts:137](https://github.com/moq-dev/moq/blob/c95a9b1201/js/net/src/track.ts#L137).
+Publisher max-age is a freshness bound on **superseded groups**. A group expires when either its successor's arrival is old enough at this hop or the successor's first timestamp trails the live edge enough. Untimed tracks use the wall clock today; once [time-addressing](/quest/m1/time-addressing/model.md) lands, a scale-less track counts max-age in bare key units instead (decided 2026-11-03). The newest group is exempt. Byte reclamation has a separate cache policy. See [rs/moq-net/src/model/track.rs:120](https://github.com/moq-dev/moq/blob/c95a9b1201/rs/moq-net/src/model/track.rs#L120) and [js/net/src/track.ts:137](https://github.com/moq-dev/moq/blob/c95a9b1201/js/net/src/track.ts#L137).
 
 | Surface | Current default and meaning | Source |
 | --- | --- | --- |
