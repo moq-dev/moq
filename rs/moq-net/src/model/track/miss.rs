@@ -657,7 +657,7 @@ impl Misses {
 		}) || self.budget != Some(drift.budget)
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
-		let low = state.live_floor.unwrap_or(0).max(key.0);
+		let low = key.0;
 		let top = newest.min(u64::MAX - 1);
 		let mut candidates = RangeSet::new();
 		if terms {

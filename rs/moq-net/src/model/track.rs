@@ -526,8 +526,8 @@ pub(crate) struct TrackState {
 	// state, never judged from the cache. A bounded read's holes are then misses up to its
 	// end at once, with nothing to wait for (see [`Self::nothing_arrives`]).
 	unfed: bool,
-	// Readers start at this group: the route's live feed starts past a gap after
-	// everything cached, so nothing bounds how old the cache below it is.
+	// The route's live feed starts past a gap after everything cached, so the cache
+	// below this group is unjudgeable for readers with a finite delay budget.
 	live_floor: Option<u64>,
 
 	// Where production stopped, snapshotted when the open groups are released (an
@@ -1267,7 +1267,6 @@ impl TrackState {
 	) -> Poll<Result<Option<(group::Handle, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		let readable = self.serves_bounded(window);
-		let min_sequence = min_sequence.max(self.live_floor.unwrap_or(0));
 		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start).filter(|_| readable) {
 			// A cut group is handed out too, so its reader sees why it ended.
 			if *sequence >= min_sequence
@@ -1395,7 +1394,7 @@ impl TrackState {
 		}
 
 		let best = window
-			.runs(next_sequence.max(self.live_floor.unwrap_or(0)))
+			.runs(next_sequence)
 			.filter(|_| self.serves_bounded(window))
 			.find_map(|run| {
 				// A cut group is handed out too, so its reader sees why it ended.
@@ -1747,6 +1746,11 @@ impl TrackState {
 	/// [`Self::is_stale`] for group `sequence`, whether this track holds it or not: its
 	/// successor here starts a full `budget` behind the edge, or arrived a full `budget` ago.
 	fn drifted(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
+		// A gap after an idle cache gives its old groups no known reach. A finite
+		// budget cannot admit them, but an unlimited history read still owes them.
+		if budget != Duration::MAX && self.live_floor.is_some_and(|floor| sequence < floor) {
+			return true;
+		}
 		if self.superseded(sequence, &edge.servable, budget) {
 			return true;
 		}
@@ -1778,6 +1782,9 @@ impl TrackState {
 		superseded: Option<&Superseded>,
 		waiter: &kio::Waiter,
 	) -> bool {
+		if budget != Duration::MAX && self.live_floor.is_some_and(|floor| sequence < floor) {
+			return true;
+		}
 		// Unbounded until a group lands above. Registered before judging, so a racing abort
 		// is observed or wakes us, and armed for whichever successor this pass selected, so
 		// re-selecting re-arms it.
@@ -2622,9 +2629,8 @@ impl TrackState {
 		if !self.received || self.closed || !self.readable() {
 			return None;
 		}
-		let floor = groups.start.max(self.live_floor.unwrap_or(0));
 		let asked = self.start_sequence.is_some();
-		self.find_landable(floor..groups.end, asked, self.arrival_grace(), |open| {
+		self.find_landable(groups, asked, self.arrival_grace(), |open| {
 			window.clip(open).map(|run| run.start)
 		})
 	}
@@ -2907,7 +2913,8 @@ impl TrackState {
 	/// is current up to there. `start` is the first group the feed serves, when the answer
 	/// names it; otherwise the largest stands in. A feed that starts past a gap after
 	/// everything cached leaves the cache unjudgeable, since nothing bounds how far an old
-	/// group reached, so readers skip it; whatever the feed delivers stays.
+	/// group reached, so readers with a finite delay budget skip it; an unlimited read
+	/// still serves it. Whatever the feed delivers stays.
 	///
 	/// Readers wait until the cache shows that position: before then its newest group would
 	/// read as the live edge, though the route already holds a newer one.
@@ -7246,14 +7253,13 @@ impl Cursor {
 		if !state.serves_bounded(&self.filter.window) {
 			return None;
 		}
-		let low = state.live_floor.unwrap_or(0);
 		loop {
 			let run = match ascending {
 				true => self.filter.owed.first(),
 				false => self.filter.owed.last(),
 			}
 			.cloned()?;
-			let from = (*run.start()).max(low);
+			let from = *run.start();
 			let found = (from <= *run.end())
 				.then(|| {
 					let mut slots = state.lookup.range(from..=*run.end()).map(|(_, slot)| slot);
@@ -8590,7 +8596,7 @@ impl Subscriber {
 			Inner::Resume(resume, _) => return resume.has_unread_group(unread),
 		};
 		let state = cursor.state.read();
-		let floor = cursor.floor().max(state.live_floor.unwrap_or(0)).max(unread.start);
+		let floor = cursor.floor().max(unread.start);
 		let eligible = |sequence: u64| {
 			sequence >= floor
 				&& super::subscription::before_end(sequence, unread.end)
@@ -12270,6 +12276,64 @@ mod test {
 		let mut subscriber = producer
 			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(400))));
 		assert_eq!(drain(&mut subscriber), vec![2]);
+	}
+
+	/// An idle cache's old groups and the holes after them stay owed by unlimited reads.
+	/// A refused run reports every missing sequence and releases a bounded reader, while
+	/// an open reader keeps receiving the live feed. Both cursor orders use the same rule.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_history_read_accounts_for_cached_and_refused_groups() {
+		for ordered in [false, true] {
+			for bounded in [false, true] {
+				let mut producer = track_producer("test", Info::default());
+				let requests = producer.requests();
+				producer.received();
+				framed(&producer, 0, 1).finish().unwrap();
+				producer.set_idle();
+				let subscription = Subscription::default()
+					.with_delay(Delay::default().with_max(None))
+					.with_range((
+						Bound::Included(0),
+						if bounded { Bound::Excluded(3) } else { Bound::Unbounded },
+					));
+				let mut reader = producer.subscribe(subscription);
+				let waiter = kio::Waiter::noop();
+				assert!(reader.poll_drop(&waiter).is_pending());
+				assert_eq!(read_now(&mut reader, ordered), None, "the copy is idle");
+
+				producer.start_at(3).unwrap();
+				producer.set_live(Some(Position::group(3)), None);
+				framed(&producer, 3, 1).finish().unwrap();
+				assert_eq!(read_now(&mut reader, ordered), Some(Some(0)), "cached history");
+				// An arrival-order reader may take the live group before its history.
+				if !bounded && !ordered {
+					assert_eq!(read_now(&mut reader, ordered), Some(Some(3)));
+				}
+				assert_eq!(read_now(&mut reader, ordered), None, "the missing run is owed");
+				let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+					panic!("the missing history was never requested");
+				};
+				assert_eq!((fill.start(), fill.end()), (Position::group(1), 3));
+				fill.refuse_groups(1..3, Error::Unsupported);
+				assert!(
+					reader.poll_drop(&waiter).is_pending(),
+					"a late live arrival may still answer"
+				);
+				elapse(&producer, ledger::GRACE);
+				assert_eq!(reader.poll_drop(&waiter), Poll::Ready((1..3, StreamError::NotFound)));
+				assert!(reader.poll_drop(&waiter).is_pending(), "each drop is reported once");
+				if bounded {
+					assert_eq!(read_now(&mut reader, ordered), Some(None), "nothing remains owed");
+				} else {
+					if ordered {
+						assert_eq!(read_now(&mut reader, ordered), Some(Some(3)));
+					}
+					framed(&producer, 4, 1).finish().unwrap();
+					assert_eq!(read_now(&mut reader, ordered), Some(Some(4)), "the feed survives");
+				}
+			}
+		}
 	}
 
 	/// The cancel that idles a copy resets the group in flight, which the publisher never
