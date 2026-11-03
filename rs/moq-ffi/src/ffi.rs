@@ -1154,7 +1154,9 @@ mod tests {
 			*ready.write().ok().unwrap() = true;
 			std::future::pending().await
 		});
-		let root = rooted.recv_timeout(Duration::from_secs(5)).expect("the root polls its child");
+		let root = rooted
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the root polls its child");
 		let continuation = entering
 			.recv_timeout(Duration::from_secs(5))
 			.expect("the continuation is woken");
