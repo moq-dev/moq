@@ -663,7 +663,7 @@ test("the catalog bitrate only rises", async () => {
 });
 
 // Another rendition on the same broadcast that already wrote media ahead of this one's frames leaves
-// this one trailing it, which the catalog advertises as `delay`.
+// this one trailing it, which the catalog advertises as `delay` once a second of it has been measured.
 test("a rendition written behind another advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const clock = manualAt(200);
@@ -675,20 +675,26 @@ test("a rendition written behind another advertises delay", async () => {
 
 		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-		// A sibling that already wrote media up to now.
-		new Estimator().write(Nano.toMicro(Nano(now())), order);
-
-		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
+		// A sibling that stays 100ms ahead of the frames written, with a clock origin that keeps
+		// timestamps nonnegative. The encoder holds two frames, so each push writes the frame captured
+		// two before it.
+		const sibling = new Estimator();
 		const start = Nano.toMicro(Nano(now())) - 100_000;
-		for (let index = 0; index < 4; index++) {
+		const push = async (index: number) => {
+			sibling.write(start + 100_000 + (index - 2) * 20_000, order, true);
 			await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
-		}
+		};
+		for (let index = 0; index < 4; index++) await push(index);
 		await feed.drain();
 
 		expect(env.written).toEqual([
 			[100_000, 1],
 			[120_000, 1],
 		]);
+		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+
+		for (let index = 4; index < 60; index++) await push(index);
+		await feed.drain();
 		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
 	} finally {
 		clock.close();
@@ -1164,7 +1170,7 @@ test("replayed raw audio raises no catalog delay", async () => {
 			await clock.advance(Nano.fromMilli(Milli(20)));
 		}
 		// Video already wrote up to the live edge.
-		new Estimator().write(150 * 20_000, broadcast.order);
+		new Estimator().write(150 * 20_000, broadcast.order, true);
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });

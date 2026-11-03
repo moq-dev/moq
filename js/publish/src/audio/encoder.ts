@@ -715,7 +715,7 @@ export class Encoder {
 						if (keyframe) live.start = timestamp;
 						live.producer.encode(frame, timestamp, keyframe);
 						const history = this.#history !== undefined && timestamp < this.#history;
-						if (!history && this.#estimator.write(frame.timestamp, order)) {
+						if (!history && this.#estimator.write(frame.timestamp, order, keyframe)) {
 							this.#estimate.set({ ...this.#estimator.estimate });
 						}
 					},
