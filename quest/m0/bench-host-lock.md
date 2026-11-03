@@ -52,4 +52,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Find and fix the relay's per-frame CPU growth since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the bisect that overlapped
-- [Log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md) - the profile whose runs were voided
