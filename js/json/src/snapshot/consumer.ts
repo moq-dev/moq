@@ -20,6 +20,10 @@ const GAPS: Moq.StreamCode[] = [
  * and {@link latest} skips to the newest state, for a caller that only wants the current value.
  * What {@link latest} skips is gone, so a later {@link next} resumes after it.
  * When something else already owns the track, use the {@link Decoder} directly.
+ *
+ * A snapshot is superseded the moment a newer one exists, so the consumer always reads at a zero
+ * `delay.max`, whatever the subscription asked for: a group is skipped once a newer one arrives,
+ * and a lower group the subscription still owes never holds up a newer one.
  */
 export class Consumer<T> {
 	#track: Moq.Track.Ordered;
@@ -29,6 +33,12 @@ export class Consumer<T> {
 	#framesRead = 0;
 
 	constructor(config: Consumer.Config<T>) {
+		// The default subscription's budget is zero.
+		const zero = Moq.Track.Subscription.default().delay?.max;
+		const current = config.track.subscription.peek();
+		if (current?.delay?.max !== zero) {
+			config.track.update({ ...current, delay: { ...current?.delay, max: zero } });
+		}
 		this.#track = config.track.ordered();
 		this.#decoder = new Decoder(config);
 	}
@@ -36,12 +46,9 @@ export class Consumer<T> {
 	/**
 	 * Get the next state in order, or `undefined` once the track ends.
 	 *
-	 * Yields one state per frame and finishes a group before starting the next, buffering every
-	 * state the reader has not reached yet. A group the subscription's `delay.max` proves too old
-	 * is skipped, counting media time and wall time, or wall time alone for an untimed track. The
-	 * default subscription's zero keeps only the newest group, so a playhead reader sets `delay.max`
-	 * to how far it trails the live edge. Use {@link latest} to skip straight to the head. A group lost to a
-	 * gap resyncs from the next one.
+	 * Yields one state per frame from the group it is reading, and skips every group a newer one
+	 * supersedes. Use {@link latest} to skip straight to the head. A group lost to a gap resyncs
+	 * from the next one.
 	 */
 	next(): Promise<Timed<T> | undefined> {
 		return this.#read(false);
@@ -138,6 +145,7 @@ export class Consumer<T> {
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
 	export type Config<T> = Pick<CodecConfig<T>, "schema"> & {
+		/** The track to read, whose `delay.max` the consumer sets to zero. */
 		track: Moq.Track.Subscriber;
 	};
 }

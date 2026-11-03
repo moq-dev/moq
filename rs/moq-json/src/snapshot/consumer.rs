@@ -29,6 +29,10 @@ pub struct Config {
 /// yields each reconstructed state and its frame timestamp, or skips to the newest with `latest`.
 /// When something else already owns the track, use the [`Decoder`]
 /// directly.
+///
+/// A snapshot is superseded the moment a newer one exists, so the consumer always reads at a
+/// zero [`max`](moq_net::track::Delay::max) delay: a group is skipped once a newer one arrives,
+/// and a lower group the subscription still owes never holds up a newer one.
 pub struct Consumer<T> {
 	track: moq_net::track::Ordered,
 	group: Option<moq_net::group::Consumer>,
@@ -39,10 +43,19 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
+	/// Sets the subscription's [`max`](moq_net::track::Delay::max) delay to zero, whatever the
+	/// caller asked for; its other preferences, such as ranges and priority, stay.
 	/// A [`compress`](moq_net::track::Info::compress)ed track reads the same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
+		let mut track = track.ordered();
+		let mut subscription = track.subscription();
+		if subscription.delay.max != Some(std::time::Duration::ZERO) {
+			subscription.delay.max = Some(std::time::Duration::ZERO);
+			// Only an ended track refuses, and then there is nothing left to bound.
+			let _ = track.update(subscription);
+		}
 		Self {
-			track: track.ordered(),
+			track,
 			group: None,
 			decoder: Decoder::new(config),
 			frames_read: 0,
@@ -57,18 +70,15 @@ impl<T: DeserializeOwned> Consumer<T> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	/// Poll for each state in order, retaining the subscription's drift budget.
+	/// Poll for each state in order, skipping every group a newer one has superseded.
 	///
-	/// Finish the current group before taking the next. Lost groups resynchronize from a
-	/// later snapshot. A timed playhead reader sets its subscription's `max_delay` to its
-	/// distance behind live; the default zero budget keeps only groups not yet superseded.
+	/// Finish the current group's buffered frames before taking the next. Lost groups
+	/// resynchronize from a later snapshot.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		self.poll_read(waiter, false)
 	}
 
 	/// Skip to the newest buffered state and its timestamp, or wait for a new one.
-	///
-	/// See [`Self::poll_latest`] for how a nonzero `max_delay` delays it.
 	pub async fn latest(&mut self) -> Result<Option<moq_net::Timed<T>>>
 	where
 		T: Unpin,
@@ -80,11 +90,6 @@ impl<T: DeserializeOwned> Consumer<T> {
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
-	///
-	/// It reads groups in order, so on a received track with a nonzero `max_delay` it first
-	/// waits for a lower group the subscription still owes, up to that budget, and with no
-	/// limit until the gap resolves, even when a newer group is buffered. A reader that only
-	/// wants the newest state keeps the default zero budget.
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		self.poll_read(waiter, true)
 	}
@@ -185,10 +190,7 @@ mod timestamps {
 				.produce()
 				.create_track("data", info)
 				.unwrap();
-			let mut subscriber = track.subscribe(None);
-			let mut subscription = subscriber.subscription();
-			subscription.delay.max = None;
-			subscriber.update(subscription).unwrap();
+			let subscriber = track.subscribe(None);
 			let mut producer = crate::snapshot::Producer::new(track, crate::snapshot::Config::default());
 			let mut consumer = Consumer::<serde_json::Value>::new(subscriber, Default::default());
 			let mut newest = Consumer::<serde_json::Value>::new(producer.consume(), Default::default());
@@ -204,9 +206,6 @@ mod timestamps {
 				if n == 1 {
 					producer.cut().unwrap();
 				}
-			}
-			producer.finish().unwrap();
-			for (n, ticks) in times.into_iter().enumerate() {
 				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&kio::Waiter::noop()) else {
 					panic!("missing state {n}")
 				};
@@ -215,6 +214,7 @@ mod timestamps {
 				assert_eq!(at.value(), ticks);
 				assert_eq!(at.scale(), scale);
 			}
+			producer.finish().unwrap();
 			assert!(matches!(
 				consumer.poll_next(&kio::Waiter::noop()),
 				Poll::Ready(Ok(None))

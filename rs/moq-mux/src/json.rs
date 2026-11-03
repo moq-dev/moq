@@ -384,8 +384,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// The mode the publisher chose.
 	///
-	/// [`Mode::Snapshot`] is lossy: groups may be skipped once superseded beyond the subscription
-	/// drift budget. [`Mode::Stream`] preserves every record a reader keeps up with; one that falls
+	/// [`Mode::Snapshot`] is lossy: a group is skipped once a newer one supersedes it. [`Mode::Stream`] preserves every record a reader keeps up with; one that falls
 	/// behind a group's retained tail sees `Evicted`. Check this when the application can only
 	/// work with one of them.
 	pub fn mode(&self) -> &Mode {

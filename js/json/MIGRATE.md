@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Snapshot consumers always read at a zero delay
+
+`Snapshot.Consumer` sets its subscription's `delay.max` to zero, replacing whatever the subscriber asked for.
+`next()` now skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes.
+A reader that set `delay.max` to replay a snapshot track's history or trail a playhead gets only the newest group: read the track's groups yourself and feed them to a `Snapshot.Decoder`, or publish it as a `Window` or `Stream` track when every state must survive.
+
 ### Compression moves to the track
 
 The `Compression` type, every `compression` option, `Desync`, `Stream.Decoder.reset`, and `Window.DecoderConfig` are gone, along with the `@moq/flate` dependency.

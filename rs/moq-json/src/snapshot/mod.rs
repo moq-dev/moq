@@ -1,9 +1,9 @@
 //! Lossy latest-value JSON publishing over [`moq-net`](moq_net) tracks.
 //!
 //! One value updated over time. `Consumer::next` yields each state with its frame timestamp,
-//! in order within the subscription's drift budget; `Consumer::latest` skips to the newest
-//! state. Superseded groups may be lost, so use [`stream`](crate::stream) when every record
-//! must survive. A playhead reader sets `max_delay` to its distance behind the live edge.
+//! in order, skipping every group a newer one supersedes; `Consumer::latest` skips to the
+//! newest state. Superseded groups are lost, so use [`stream`](crate::stream) or
+//! [`window`](crate::window) when every record must survive.
 //!
 //! On the wire the value is published as a series of groups, where each group is
 //! self-contained: its first frame is a full snapshot and any following frames are
@@ -225,10 +225,7 @@ mod test {
 
 	#[test]
 	fn next_preserves_intermediate_states() {
-		let (mut producer, mut track) = producer(cfg(true));
-		let mut subscription = track.subscription();
-		subscription.delay.max = None;
-		track.update(subscription).unwrap();
+		let (mut producer, track) = producer(cfg(true));
 		for n in [1, 2, 3] {
 			producer
 				.update(&json!({ "padding": "same-long-value-so-deltas-stay-in-one-group", "n": n }))
