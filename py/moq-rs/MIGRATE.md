@@ -4,15 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.max_delay` is `delay`, a `moq.Delay`: pass `delay=moq.Delay(max=...)` for the old `max_delay=...`, and `moq.Delay(max=None)` for no subscriber limit.
+`media.Delay` moves to `moq.Delay`, a dataclass whose `min` and `max` default to zero; `min=None` leaves the target latency unstated. The decoder outputs' `delay` defaults to `Delay()` instead of `None`.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `list[str]` instead of `list[str] | None`. Remove `None` checks and pass `captures=[]` when constructing an announcement for a filter without wildcards. Rebuild with the matching generated bindings and native library.
 
 ### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`audio.DecoderOutput` replaces `max_delay` and the playout `delay: timedelta | None` with `delay: media.Delay | None` and `estimate: bool = True`.
-`video.DecoderOutput.max_delay` is `delay: media.Delay | None`.
-`media.Delay(min=..., max=...)`: `max` (`None` for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts.
+`audio.DecoderOutput` replaces `max_delay` and the playout `delay: timedelta | None` with `delay: Delay` and `estimate: bool = True`.
+`video.DecoderOutput.max_delay` is `delay: Delay`.
+`Delay(min=..., max=...)`: `max` (`None` for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts.
 A fixed audio playout delay `d` is `delay=Delay(min=d, max=...)` with `estimate=False`.
 
 ### Compression moves to the track
