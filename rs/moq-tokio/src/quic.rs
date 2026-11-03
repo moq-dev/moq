@@ -20,6 +20,8 @@ mod backend;
 pub use backend::Error;
 #[cfg(feature = "quic")]
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
+#[cfg(feature = "quic")]
+pub mod demux;
 #[cfg(feature = "driver")]
 pub mod driver;
 
@@ -35,7 +37,7 @@ pub mod web;
 /// Parsed from, and serialized as, a hex string. Its length must match the load
 /// balancer's configured server-ID length.
 #[serde_with::serde_as]
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
@@ -67,6 +69,35 @@ pub(crate) struct LoadBalancer {
 	pub id: ServerId,
 	/// Number of random nonce bytes appended to each connection ID.
 	pub nonce: usize,
+	/// Forwarding to the other servers behind this one's address.
+	pub forward: Option<Forward>,
+}
+
+/// Resolved QUIC-LB forwarding, every setting present.
+#[cfg(feature = "quic")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Forward {
+	/// The forward socket's address.
+	pub bind: std::net::SocketAddr,
+	/// The shared key file.
+	pub key: PathBuf,
+	/// The peer map file.
+	pub peers: PathBuf,
+}
+
+/// A congestion controller of the application's own, built fresh for each connection.
+///
+/// Implement [`crate::congestion::Factory`] and install it with [`Config::controller`].
+#[cfg(feature = "driver")]
+#[derive(Clone)]
+pub struct Controller(pub std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>);
+
+#[cfg(feature = "driver")]
+impl std::fmt::Debug for Controller {
+	/// Opaque: a factory carries no description of its own.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("Controller(..)")
+	}
 }
 
 /// The congestion control family for a QUIC connection.
@@ -105,23 +136,26 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 ///
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
 /// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
-/// credit as it reads, it bounds only the unread data. It has to be at least
-/// moq-net's `transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement
-/// cap plus framing, so 64 MiB would be refused; 128 MiB also holds two maximum-size frames
-/// at once, and lets a relay-to-relay session sustain several Gbps at intercontinental RTTs.
-pub const DEFAULT_RECEIVE_WINDOW: u64 = 128 << 20;
+/// credit as it reads, it bounds only the unread data. It has to be at least moq-net's
+/// `transport::MIN_RECEIVE_WINDOW`, one 1 MiB segment. 4 MiB sustains about 270 Mbps at a
+/// 100 ms RTT, room for any one viewer or publisher, and lets a session pause two group
+/// streams for slow readers (half the window, a stream window each).
+pub const DEFAULT_RECEIVE_WINDOW: u64 = 4 << 20;
 #[cfg(feature = "_transport")]
 const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
 ///
 /// Stream credit returns as bytes are read, whether or not their message is complete,
-/// so this only paces one stream: enough for a single group stream to reach a few
-/// hundred Mbps at a 100 ms RTT.
-pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
+/// so this only paces one stream: enough for a single group stream to reach about
+/// 67 Mbps at a 100 ms RTT. It is also what a stream paused for a slow reader holds.
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 1 << 20;
 
 /// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
-pub const DEFAULT_SEND_WINDOW: u64 = 16 << 20;
+///
+/// Matches [`DEFAULT_RECEIVE_WINDOW`], the most a peer with the defaults takes in flight, so
+/// a slow peer's connection buffers no more than it could receive.
+pub const DEFAULT_SEND_WINDOW: u64 = 4 << 20;
 
 /// Default idle timeout before an inactive connection is dropped.
 ///
@@ -223,9 +257,19 @@ pub struct Config {
 	)]
 	pub congestion_control: Option<CongestionControl>,
 
+	/// A congestion controller of your own for every connection, in place of
+	/// [`congestion_control`](Self::congestion_control)'s families.
+	///
+	/// Code-only, since a controller has no text form: no flag or setting reaches it.
+	/// The QUIC backend runs it, and the iroh and io_uring runtimes refuse it.
+	#[cfg(feature = "driver")]
+	#[serde(skip)]
+	#[usage(skip)]
+	pub controller: Option<Controller>,
+
 	/// Connection-wide receive window, in bytes: how much data the peer may have
 	/// in flight or in incomplete messages across every stream at once. Defaults to
-	/// 128 MiB, and must fit the largest message a session assembles, just over 64 MiB.
+	/// 4 MiB, and must fit the largest unit a session assembles, one 1 MiB segment.
 	///
 	/// When incomplete messages fill it, the least urgent stream is cancelled. iroh
 	/// returns credit as it reads, so there it bounds only unread data.
@@ -242,7 +286,7 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
+	/// Per-stream receive window, in bytes. Defaults to 1 MiB.
 	///
 	/// Stream credit returns as bytes are read, whether or not their message is
 	/// complete, so a smaller window only adds round trips to a large frame. The
@@ -257,7 +301,7 @@ pub struct Config {
 	pub stream_receive_window: Option<u64>,
 
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
-	/// allows. Defaults to 16 MiB.
+	/// allows. Defaults to 4 MiB.
 	///
 	/// This bounds the transport send buffer.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -604,6 +648,8 @@ impl Config {
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
+			#[cfg(feature = "driver")]
+			controller: self.controller.clone(),
 			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
 			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
 			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
@@ -648,6 +694,9 @@ pub struct Resolved {
 	pub mtu_discovery: bool,
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
+	/// The application's own congestion controller, in place of the family.
+	#[cfg(feature = "driver")]
+	pub controller: Option<Controller>,
 	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
 	///
 	/// The windows are resolved here rather than by each backend, whose own defaults
@@ -694,6 +743,23 @@ impl Resolved {
 	#[cfg_attr(not(feature = "iroh"), allow(dead_code, reason = "only the `iroh` feature uses it"))]
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
+	}
+
+	/// Whether an application's own congestion controller is installed.
+	///
+	/// Compiled in every feature set, unlike the `controller` field, so a runtime
+	/// that cannot run one, such as the relay's io_uring workers, can refuse it
+	/// whichever features unify onto this crate.
+	#[cfg(feature = "driver")]
+	pub fn has_controller(&self) -> bool {
+		self.controller.is_some()
+	}
+
+	/// Whether an application's own congestion controller is installed: never,
+	/// since a build without the `driver` feature has no way to install one.
+	#[cfg(not(feature = "driver"))]
+	pub fn has_controller(&self) -> bool {
+		false
 	}
 
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than

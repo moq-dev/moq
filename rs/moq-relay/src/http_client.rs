@@ -101,6 +101,7 @@ mod tests {
 				PrivateKeyDer::Pkcs8(key.serialize_der().into()),
 			)
 			.unwrap();
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		for mode in ["insecure", "root", "fingerprint"] {
 			let mut mesh = moq_tokio::tls::Connect::default();
 			match mode {
@@ -114,36 +115,52 @@ mod tests {
 				_ => unreachable!(),
 			}
 			for trusted in [false, true] {
-				let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 				let auth = crate::auth::Config {
 					root: if trusted { vec![root.clone()] } else { Vec::new() },
 					url: Some(format!("https://{}/", listener.local_addr().unwrap()).parse().unwrap()),
 					..Default::default()
 				};
 				let auth = auth.init("relay", &mesh, false).unwrap();
-				let serve = async {
-					let (stream, _) = listener.accept().await.unwrap();
-					if let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(Arc::new(server.clone()))
-						.accept(stream)
-						.await
-					{
-						read_request(&mut stream).await;
-						let body = r#"{"publish":["**"],"subscribe":["**"]}"#;
-						let response = format!(
-							"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-							body.len()
-						);
-						stream.write_all(response.as_bytes()).await.unwrap();
-					}
-				};
 				let admit = auth.admit(auth.request(moq_auth::Transport::Quic, "/"));
-				let (admitted, ()) = tokio::join!(admit, serve);
+				let (admitted, request) = tokio::join!(admit, serve_auth(&listener, &server));
 				assert_eq!(admitted.is_ok(), trusted, "mesh {mode}, auth root {trusted}");
+				if let Ok(lease) = admitted {
+					let request = request.unwrap();
+					assert_eq!(request.event, moq_auth::Event::Connect);
+					// Drain the lease's End before another admission uses this listener.
+					let reported = lease.reported();
+					drop(lease);
+					let ((), ended) = tokio::join!(reported, serve_auth(&listener, &server));
+					let ended = ended.unwrap();
+					assert_eq!(ended.id, request.id);
+					assert!(matches!(ended.event, moq_auth::Event::End { .. }));
+				} else {
+					assert!(request.is_none(), "untrusted TLS must fail before HTTP");
+				}
 			}
 		}
 	}
 
-	async fn read_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) {
+	async fn serve_auth(listener: &tokio::net::TcpListener, tls: &rustls::ServerConfig) -> Option<moq_auth::Request> {
+		let (stream, _) = listener.accept().await.unwrap();
+		let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(Arc::new(tls.clone()))
+			.accept(stream)
+			.await
+		else {
+			return None;
+		};
+		let request = read_request(&mut stream).await;
+		let body = r#"{"publish":["**"],"subscribe":["**"]}"#;
+		let response = format!(
+			"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+			body.len()
+		);
+		stream.write_all(response.as_bytes()).await.unwrap();
+		stream.shutdown().await.unwrap();
+		Some(request)
+	}
+
+	async fn read_request(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> moq_auth::Request {
 		let mut request = Vec::new();
 		loop {
 			let mut data = [0; 4096];
@@ -164,7 +181,7 @@ mod tests {
 				.parse()
 				.unwrap();
 			if request.len() >= end + 4 + length {
-				return;
+				return serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
 			}
 		}
 	}

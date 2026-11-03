@@ -40,7 +40,7 @@ function netTrack(name: string, timed = true): NetTrack.Producer {
 }
 
 function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {
-	return net.subscribe({ maxDelay: Milli(60_000) });
+	return net.subscribe({ delay: { max: Milli(60_000) } });
 }
 
 interface Pair {
@@ -236,7 +236,7 @@ test("a broadcast speaks semantic names and puts physical names on the wire", as
 	const consumer = await new Protected.Consumer(
 		net.consume(),
 		generation.credential.consume(generation.epoch),
-	).subscribe("video", { maxDelay: Milli(60_000) });
+	).subscribe("video", { delay: { max: Milli(60_000) } });
 	const group = video.appendGroup();
 	await group.writeFrame(ms(1), text("frame"));
 	group.finish();

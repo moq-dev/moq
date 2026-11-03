@@ -1,4 +1,4 @@
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 
 /** The publisher's optional media snapshot track in this broadcast. */
 export const StatsSchema = z.object({

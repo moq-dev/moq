@@ -125,6 +125,16 @@ ci-select $BASE="":
 ci-select-platform $BASE="":
     sh/dispatch.sh ci-platform "$BASE" --query
 
+# Check every supported source file; exclusions live in biome.jsonc.
+biome *args:
+    bun install --frozen-lockfile
+    bun biome check --error-on-warnings {{ args }} .
+
+# Apply Biome's fixes; installs without a frozen lockfile, like the other fixers.
+biome-fix:
+    bun install
+    bun biome check --error-on-warnings --write .
+
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"
@@ -133,6 +143,10 @@ fix $BASE="":
 [positional-arguments]
 oss-scanner *args:
     sh/oss-scanner.sh "$@"
+
+# Set every eligible package to one minor at a release cut; omit to check.
+version TARGET="":
+    python3 sh/version.py {{ if TARGET == "" { "" } else { quote(TARGET) } }}
 
 # Build the packages.
 build:

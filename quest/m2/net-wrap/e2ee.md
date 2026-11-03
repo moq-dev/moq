@@ -58,6 +58,38 @@ the reverse (decided 2026-10-20, maintainer):
   without changing moq-net's `track(name)`; propose the encoding in the PR.
   Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
   `.z` sibling rule.
+- Datagram header allowance (decided 2026-10-31, maintainer, a follow-up
+  of [moq-dev/moq#7435](https://github.com/moq-dev/moq/pull/7435)):
+  `MAX_DATAGRAM_HEADER` (`rs/moq-e2ee/src/limits.rs`,
+  `js/e2ee/src/limits.ts`; 28 after #7435, lite-07's Type plus three 9-byte
+  varints) also counts the optional lite datagram fields: the relayed fields
+  the lite `ietf` extension adds, and moq-net's Inflated Size header field,
+  which a compressed physical track's datagram carries outside the AEAD
+  (`rs/moq-net/src/lite/datagram.rs`). Without them a maximum-size protected
+  datagram can encode past the 1200-byte body and be dropped. That header
+  field is not the wrapper's own inflated size above, which sits inside the
+  authenticated payload and counts against the plaintext budget instead.
+  Today a caller's `track::Info` reaches the physical track unchanged, so it
+  can be compressed. Once the wrapper creates the physical track
+  uncompressed, the header field never appears and the allowance needs only
+  the `ietf` fields. Of those, the relay state, object ID, priority, and
+  status have a fixed worst case, but `encode_datagram`
+  (`rs/moq-net/src/lite/ietf.rs`) also writes the forwarded properties
+  block, which may run to `MAX_OBJECT_EXTENSIONS` (64 KiB,
+  `rs/moq-net/src/ietf/group.rs`), so no fixed allowance covers it, and the
+  lite publisher drops a datagram whose body exceeds 1200 bytes
+  (`rs/moq-net/src/lite/publisher.rs`). Choose during implementation between
+  capping the properties a hop forwards on a protected datagram (and
+  counting that cap) or documenting that relay properties are outside the
+  allowance, so such a datagram may be dropped, and record the choice in the
+  PR. Sealing and opening share
+  `MAX_DATAGRAM_PAYLOAD` today (`rs/moq-e2ee/src/track.rs`,
+  `js/e2ee/src/track.ts`), so a wider allowance would also make `open`
+  refuse a datagram an older sender sealed under the narrower one. Split
+  the seal and open limits, or pick the limit by wire version, so a
+  receiver still opens anything that fits the body. Update the e2ee
+  draft's plaintext bound and the `moq-e2ee-00` vectors with it, covering
+  both limits and a datagram with non-empty relay properties.
 - Ranges: every moq-net range starts at a group's first frame
   ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)), so the wrapper reads each physical group whole
   and inflates from frame 0.

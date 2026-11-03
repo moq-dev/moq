@@ -213,6 +213,22 @@ pub struct Config {
 	/// frame labelled differently with [`Error::ColorMismatch`] rather than
 	/// mislabel it.
 	pub color: Option<Color>,
+	/// Scale frames that arrive at another size to the encoded size, rather than
+	/// refusing them. `None` (the default) refuses them.
+	///
+	/// The scale runs wherever the encoder does, which for a
+	/// [`Sink`](super::Sink) is its own thread: a caller fanning one decoded
+	/// picture out to several encoders (a transcode ladder) hands each the
+	/// native frame and keeps the per-encoder pixel work off its own threads.
+	/// On Apple platforms a `Sink` encodes inline, so the scale runs on the
+	/// caller there. External Vulkan inputs the backend scales on the GPU are
+	/// left to it.
+	///
+	/// A scaled frame keeps its source's space, and an unlabelled one is labelled
+	/// with what [`Color::infer`] guesses for its original size. Set
+	/// [`color`](Self::color) to match, or a frame scaled across 576 lines is
+	/// refused with [`Error::ColorMismatch`].
+	pub resize: Option<crate::resize::Config>,
 	/// External Vulkan input device, required before opening a GPU-only encoder.
 	/// `None` retains selection for CPU and native decoder/capture surfaces.
 	#[cfg(target_os = "linux")]
@@ -233,6 +249,7 @@ impl Config {
 			kind: Kind::Auto,
 			preset: Preset::default(),
 			color: None,
+			resize: None,
 			#[cfg(target_os = "linux")]
 			input: None,
 		}
@@ -264,21 +281,15 @@ impl Config {
 	/// Fails when this machine cannot encode the config at all, which makes it a fail-fast check:
 	/// better here than on the first frame of a track that is already advertised.
 	pub async fn probe(&self) -> Result<hang::catalog::VideoConfig, Error> {
-		Ok(self.probe_sink().await?.0)
-	}
-
-	/// [`probe`](Self::probe), handing back the throwaway encoder so the caller can ask it more
-	/// before dropping it.
-	pub(crate) async fn probe_sink(&self) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
 		// Mid-gray, since the picture only has to make the encoder emit its parameter sets.
 		let size = self.size();
 		let i420 = crate::I420::new(size, vec![0x80u8; crate::I420::len(size)?])?;
 		let frame = Frame::new(crate::Surface::I420(i420), moq_net::Timestamp::from_micros(0)?);
-		self.probe_frame(frame).await
+		Ok(self.probe_frame(frame).await?.0)
 	}
 
-	/// [`probe_sink`](Self::probe_sink), encoding `frame` rather than a CPU picture, so the probe
-	/// also proves the encoder reads that kind of surface.
+	/// [`probe`](Self::probe), encoding `frame` rather than a CPU picture and handing back the
+	/// throwaway encoder, so the probe also proves the encoder reads that kind of surface.
 	pub(crate) async fn probe_frame(&self, frame: Frame) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
 		// A `Sink` rather than an `Encoder`: this runs on whatever executor thread the caller is on,
 		// and the Windows backend's COM apartment has to be opened and closed on one thread.
@@ -357,6 +368,8 @@ pub struct Encoder {
 	/// rather than applied immediately because the caller decides a group
 	/// boundary before it has the frame that opens it.
 	pending_cut: bool,
+	/// How to scale a frame at another size, if at all; see [`Config::resize`].
+	resize: Option<crate::resize::Config>,
 	#[cfg(target_os = "linux")]
 	input: Option<crate::frame::vulkan::Device>,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
@@ -382,6 +395,7 @@ impl Encoder {
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
 			pending_cut: false,
+			resize: config.resize,
 			#[cfg(target_os = "linux")]
 			input: config.input,
 			_thread_bound: PhantomData,
@@ -490,7 +504,8 @@ impl Encoder {
 	/// (NVDEC -> NVENC never leaves the GPU, a `CVPixelBuffer` goes straight to
 	/// VideoToolbox); anything else falls back to a CPU I420 upload. The frame must
 	/// already be at the encoder's resolution, except external Vulkan inputs
-	/// which the backend scales on the GPU. Scale other surfaces with
+	/// which the backend scales on the GPU. [`Config::resize`] scales the rest
+	/// here; without it, scale them with
 	/// [`Frame::resize`](crate::Frame::resize), which
 	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) lets a
 	/// hardware decoder make a no-op.
@@ -512,6 +527,14 @@ impl Encoder {
 		};
 		#[cfg(not(target_os = "linux"))]
 		let external = false;
+		let resized;
+		let frame = match self.resize {
+			Some(config) if !external && frame.size() != self.size => {
+				resized = frame.resize(self.size, &config)?;
+				&resized
+			}
+			_ => frame,
+		};
 		let size = frame.size();
 		if !external && size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -691,6 +714,20 @@ mod tests {
 			return;
 		};
 		assert!(matches!(encoder.encode(&gray_frame(640, 480, 0)), Err(Error::Codec(_))));
+	}
+
+	/// An encoder told to resize scales a frame at another size itself, so a
+	/// [`Sink`](super::super::Sink) does that work on its own thread.
+	#[test]
+	fn encode_resizes_when_configured() {
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
+		config.resize = Some(crate::resize::Config::default());
+		let Ok(mut encoder) = Encoder::new(&config) else {
+			return;
+		};
+		let mut frames = encoder.encode(&gray_frame(640, 480, 0)).unwrap();
+		frames.extend(encoder.finish().unwrap());
+		assert!(!frames.is_empty());
 	}
 
 	/// A transposed frame is why the encoder compares the shape rather than the
@@ -1138,6 +1175,7 @@ mod tests {
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
 			pending_cut: false,
+			resize: config.resize,
 			#[cfg(target_os = "linux")]
 			input: None,
 			_thread_bound: PhantomData,
@@ -1579,21 +1617,23 @@ mod tests {
 		};
 		let rate = crate::FrameRate::new(30, 1).unwrap();
 		let red = [255u8, 0, 0];
+		// Only the height picks the guess, so the frames are narrow to keep the codec and the
+		// scaler cheap.
 		for (source, rung, color) in [
 			// The source's own guess, scaled across 576 lines.
-			(Size::new(1280, 720), Size::new(640, 480), Color::BT709),
+			(Size::new(160, 720), Size::new(80, 480), Color::BT709),
 			// Spaces neither size would guess.
-			(Size::new(1280, 720), Size::new(1920, 1080), Color::BT601),
+			(Size::new(160, 720), Size::new(240, 1080), Color::BT601),
 			(
-				Size::new(640, 480),
-				Size::new(1280, 720),
+				Size::new(80, 480),
+				Size::new(160, 720),
 				Color::BT709.with_range(Range::Full),
 			),
 			// HDR survives the round trip with its primaries and curve.
-			(Size::new(1280, 720), Size::new(640, 480), hdr(Transfer::Pq)),
+			(Size::new(160, 720), Size::new(80, 480), hdr(Transfer::Pq)),
 			(
-				Size::new(640, 480),
-				Size::new(1280, 720),
+				Size::new(80, 480),
+				Size::new(160, 720),
 				hdr(Transfer::Hlg).with_range(Range::Full),
 			),
 		] {

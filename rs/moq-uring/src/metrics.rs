@@ -1,12 +1,13 @@
-//! Per-worker counters: buffer-pool health, batch effectiveness, ring traffic,
-//! and scheduling.
+//! Per-worker counters and gauges: buffer-pool health and size, batch
+//! effectiveness, ring traffic, and scheduling.
 //!
 //! A worker is a thread that never yields to anything an ops surface can see,
 //! so these are how its health leaves the thread. Every write is a relaxed
-//! atomic add on the worker's own thread and every read is a relaxed load from
-//! whichever thread scrapes, which makes a [`Snapshot`] a cheap, slightly
-//! skewed reading rather than a consistent instant. Rates and ratios are what
-//! these are for; two counters in one snapshot may be a few operations apart.
+//! atomic add or subtract on the worker's own thread and every read is a
+//! relaxed load from whichever thread scrapes, which makes a [`Snapshot`] a
+//! cheap, slightly skewed reading rather than a consistent instant. Rates and
+//! ratios are what these are for; two fields in one snapshot may be a few
+//! operations apart.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +21,24 @@ impl Counter {
 		// Relaxed: the writer is one thread and readers want a magnitude, not
 		// an ordering against the operation being counted.
 		self.0.fetch_add(count, Ordering::Relaxed);
+	}
+
+	fn get(&self) -> u64 {
+		self.0.load(Ordering::Relaxed)
+	}
+}
+
+/// One level that rises and falls, such as the bytes a pool holds.
+#[derive(Default)]
+pub(crate) struct Gauge(AtomicU64);
+
+impl Gauge {
+	pub(crate) fn add(&self, count: u64) {
+		self.0.fetch_add(count, Ordering::Relaxed);
+	}
+
+	pub(crate) fn sub(&self, count: u64) {
+		self.0.fetch_sub(count, Ordering::Relaxed);
 	}
 
 	fn get(&self) -> u64 {
@@ -89,8 +108,9 @@ impl Histogram {
 	}
 }
 
-/// The counters themselves, shared by the worker, its sockets, its timers,
-/// and its park word.
+/// The counters and gauges themselves, shared by the worker, its sockets, its
+/// timers, and its park word. Each socket adds its pools to the gauges as they
+/// grow and subtracts them when it drops, so the gauges sum every live socket.
 #[derive(Default)]
 pub(crate) struct Counters {
 	pub rx_datagrams: Counter,
@@ -104,6 +124,7 @@ pub(crate) struct Counters {
 	pub completions: Counter,
 	pub enters: Counter,
 	pub turns: Counter,
+	pub passes: Counter,
 	pub sq_full_enters: Counter,
 	sqes: Distribution,
 	cqes: Distribution,
@@ -112,6 +133,10 @@ pub(crate) struct Counters {
 	pub timers_armed: Counter,
 	pub timers_fired: Counter,
 	pub timers_cancelled: Counter,
+	pub rx_pool_bytes: Gauge,
+	pub rx_pool_in_use_bytes: Gauge,
+	pub tx_pool_bytes: Gauge,
+	pub tx_pool_in_use_bytes: Gauge,
 }
 
 impl Counters {
@@ -124,12 +149,12 @@ impl Counters {
 	}
 }
 
-/// A worker's counters, readable from any thread.
+/// A worker's counters and gauges, readable from any thread.
 ///
 /// Hand one to [`crate::Config::metrics`] to keep a copy the process can scrape
 /// while the worker runs, or take the worker's own through
-/// [`crate::Handle::metrics`]. Clones share one set of counters, so give each
-/// worker its own.
+/// [`crate::Handle::metrics`]. Clones share one set, so give each worker its
+/// own.
 #[derive(Clone, Default)]
 pub struct Metrics(Arc<Counters>);
 
@@ -142,7 +167,7 @@ impl Metrics {
 		Self(counters)
 	}
 
-	/// Read every counter.
+	/// Read every counter and gauge.
 	pub fn snapshot(&self) -> Snapshot {
 		Snapshot {
 			rx_datagrams: self.0.rx_datagrams.get(),
@@ -156,6 +181,7 @@ impl Metrics {
 			completions: self.0.completions.get(),
 			enters: self.0.enters.get(),
 			turns: self.0.turns.get(),
+			passes: self.0.passes.get(),
 			sq_full_enters: self.0.sq_full_enters.get(),
 			sqes: self.0.sqes.snapshot(),
 			cqes: self.0.cqes.snapshot(),
@@ -164,6 +190,10 @@ impl Metrics {
 			timers_armed: self.0.timers_armed.get(),
 			timers_fired: self.0.timers_fired.get(),
 			timers_cancelled: self.0.timers_cancelled.get(),
+			rx_pool_bytes: self.0.rx_pool_bytes.get(),
+			rx_pool_in_use_bytes: self.0.rx_pool_in_use_bytes.get(),
+			tx_pool_bytes: self.0.tx_pool_bytes.get(),
+			tx_pool_in_use_bytes: self.0.tx_pool_in_use_bytes.get(),
 		}
 	}
 }
@@ -174,7 +204,8 @@ impl std::fmt::Debug for Metrics {
 	}
 }
 
-/// A reading of one worker's counters, all cumulative since it started.
+/// A reading of one worker's counters, cumulative since it started, and its
+/// gauges, each the level at the moment it was read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Snapshot {
@@ -211,6 +242,10 @@ pub struct Snapshot {
 	pub enters: u64,
 	/// Drive-loop turns, including the final poll that completes the root future.
 	pub turns: u64,
+	/// Passes over the woken tasks. A turn runs passes until one wakes nothing
+	/// or [`crate::Config::passes`] have run, so this over `turns` is the
+	/// passes a turn takes, and how close the budget is to binding.
+	pub passes: u64,
 	/// Enters forced by a full submission queue.
 	pub sq_full_enters: u64,
 	/// Submission entries accepted by each enter, including zero.
@@ -227,6 +262,21 @@ pub struct Snapshot {
 	pub timers_fired: u64,
 	/// Timers dropped or re-armed before their deadline.
 	pub timers_cancelled: u64,
+	/// Gauge: receive buffer bytes allocated across the worker's live
+	/// sockets. Pools grow under load and never shrink, so this holds the
+	/// high-water mark. Mostly reserved rather than resident: RSS grows by
+	/// the pages receives have written.
+	pub rx_pool_bytes: u64,
+	/// Gauge: the part of `rx_pool_bytes` in buffers holding a packet the
+	/// application has not dropped yet, unavailable to the kernel.
+	pub rx_pool_in_use_bytes: u64,
+	/// Gauge: send buffer bytes allocated across the worker's live sockets,
+	/// growing like `rx_pool_bytes`. Mostly reserved rather than resident:
+	/// RSS grows by the pages sends have written.
+	pub tx_pool_bytes: u64,
+	/// Gauge: the part of `tx_pool_bytes` in buffers being filled or in
+	/// flight to the kernel.
+	pub tx_pool_in_use_bytes: u64,
 }
 
 impl Snapshot {

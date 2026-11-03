@@ -40,4 +40,4 @@ so it can move only once the generated archive publishes, after this quest;
 ## Required
 
 - [Breaking release cut](/quest/m2/release/cut.md) - the hand-written 0.7 ships with this client and these docs as its proof
-- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - the generated C type names settle before consumers are written against them
+- [Switch to rust2's exporter](/quest/m2/ffi-exporter.md) - the generated C type names settle before consumers are written against them
