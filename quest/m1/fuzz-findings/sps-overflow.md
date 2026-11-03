@@ -13,7 +13,11 @@ do not panic and release builds do not wrap into wrong dimensions. The
 The fuzzers found:
 
 - h264-parser 0.4.2 `sps.rs:186,197,204`: `(pic_width_in_mbs_minus1 + 1) * 16`
-  and the crop subtraction overflow on large exp-Golomb values.
+  and the crop subtraction overflow on large exp-Golomb values. Since
+  [moq-dev/moq#7398](https://github.com/moq-dev/moq/pull/7398), moq-mux parses
+  the H.264 SPS with `h264-reader` and no longer uses h264-parser;
+  [rechecking the SPS target on h264-reader](/quest/m2/sps-fuzz-h264-reader.md)
+  decides whether the H.264 half of this quest remains.
 - scuffle-h265 0.2.2 `sps/mod.rs:303,305` (`ctb_log2_size_y - min_tb_log2_size_y`
   in a `range_check!`) and `sps/scaling_list.rs:90`
   (`matrix_id - scaling_list_pred_matrix_id_delta`): subtract overflow. The
@@ -24,9 +28,9 @@ The fuzzers found:
 
 Validate the SPS fields in moq-mux before calling the parser, refusing an
 SPS that would reach those lines (decided 2026-10-30, maintainer). moq-mux
-already reads SPS bits itself with `h264_parser::bitreader` (the H.265 head
-in `codec/h265/sps.rs`, and `codec/annexb.rs`). SPS parsing stays on the
-crates moq-mux uses now, h264-parser for H.264 and scuffle-h265 plus
+already reads SPS bits itself with `h264_reader::rbsp::BitReader` (the H.265
+head in `codec/h265/sps.rs`, and `codec/annexb.rs`). SPS parsing stays on the
+crates moq-mux uses now, h264-reader for H.264 and scuffle-h265 plus
 `codec/h265/sps.rs` for H.265; it does not move to mp4-atom, which stays
 box-level.
 

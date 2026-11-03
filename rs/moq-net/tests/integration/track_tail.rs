@@ -118,7 +118,7 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 	let reader = kio::clock::sim::spawn(async move {
 		let subscription = moq_net::track::Subscription::default()
 			.with_range(0..)
-			.with_max_delay(max_delay);
+			.with_delay(moq_net::track::Delay::default().with_max(max_delay));
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -477,7 +477,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 		let reader = kio::clock::sim::spawn(async move {
 			let subscription = moq_net::track::Subscription::default()
 				.with_range(0..)
-				.with_max_delay(TIMEOUT);
+				.with_delay(moq_net::track::Delay::default().with_max(TIMEOUT));
 			let mut sub = remote
 				.track("video")
 				.unwrap()

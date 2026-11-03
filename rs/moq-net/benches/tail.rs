@@ -34,8 +34,10 @@ impl Held {
 			.map(|i| {
 				let mut track = broadcast.create_track(format!("bench{i}"), None).unwrap();
 				// A budget wide enough that no cached group is skipped as stale.
-				let mut reader =
-					track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+				let mut reader = track.subscribe(
+					track::Subscription::default()
+						.with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+				);
 				track.start_at(0).unwrap();
 				let end = track::Position::group(groups as u64 + 1);
 				moq_net::fuzz::received(&track);

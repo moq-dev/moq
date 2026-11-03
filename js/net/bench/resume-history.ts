@@ -20,7 +20,6 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import type { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
-import * as Epoch from "../src/epoch.ts";
 import { ALPN_06 } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer as OriginProducer } from "../src/origin.ts";
@@ -36,13 +35,16 @@ const url = new URL("https://localhost/resume-history");
 type History = "stable" | "churn";
 type Access = "lookup" | "fetch" | "subscribe";
 
-/** Full collections, each from a fresh task so no frame of the caller keeps a target. */
+/** Full collections with no stack heap pointers, so dead stack slots cannot pin a target. */
 async function collect(): Promise<void> {
-	const gc = (globalThis as { gc?: () => void }).gc;
+	const gc = (globalThis as { gc?: (options: { type: "major"; execution: "async" }) => Promise<void> }).gc;
 	if (!gc) throw new Error("resume-history needs a precise collector: run it with bench/browser/micro.ts");
 	for (let pass = 0; pass < 3; pass++) {
-		await new Promise<void>((resolve) => setTimeout(resolve, 0));
-		gc();
+		// V8's synchronous gc scans the embedder stack conservatively even from a fresh task.
+		// Async gc runs with StackState::kNoHeapPointers, including while tracing is enabled.
+		const collected = gc({ type: "major", execution: "async" });
+		if (!(collected instanceof Promise)) throw new Error("resume-history needs Chromium's asynchronous gc");
+		await collected;
 	}
 }
 
@@ -113,7 +115,7 @@ async function read(front: Front, tracks: string[], access: Access, payloads: We
 			await track.info();
 			continue;
 		}
-		const subscriber = access === "subscribe" ? track.subscribe({ maxDelay: MAX_DELAY }) : undefined;
+		const subscriber = access === "subscribe" ? track.subscribe({ delay: { max: MAX_DELAY } }) : undefined;
 		const group = subscriber ? await subscriber.recvGroup() : await track.fetchGroup(0);
 		const frame = await group?.readFrame();
 		group?.close();
@@ -215,7 +217,7 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 	const paths = Array.from({ length: fronts }, (_, index) => Path.from(`room/${index}`));
 	const broadcasts: BroadcastProducer[] = paths.map((path) => {
 		const publication = publisher.createBroadcast(path);
-		publication.announce({ epoch: Epoch.mint() });
+		publication.announce();
 		return publication.broadcast;
 	});
 	const payload = new Uint8Array(PAYLOAD).fill(7);

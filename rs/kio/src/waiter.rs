@@ -169,9 +169,9 @@ impl Waiter {
 	/// the task until `poll` returns, and drops it if `poll` polled the set since.
 	/// Otherwise the executor polls the task again for a wake its own poll took.
 	///
-	/// Use it once, around a task's outermost poll. Only the innermost batch holds
-	/// wakes, so one nested inside (around a [`Tasks`](crate::Tasks) child, say)
-	/// lets its siblings' wakes of the owner through, and costs polls.
+	/// Use it around a task's outermost poll. Batches nest: a child task polled
+	/// inside may open its own, and a wake of this waiter's sets from inside the
+	/// child's batch is still held for this one.
 	pub fn batch<R>(&self, poll: impl FnOnce() -> R) -> R {
 		crate::task::Polling::run(&self.waker, poll)
 	}
@@ -607,8 +607,11 @@ mod tests {
 			waiter.register(&mut list);
 		}
 
+		// Miri takes over twenty minutes for the full run; a thousand rounds still far
+		// outnumber the bound.
+		let rounds = if cfg!(miri) { 1_000 } else { 100_000 };
 		let mut seed = 1u64;
-		for _ in 0..100_000 {
+		for _ in 0..rounds {
 			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
 			let i = (seed >> 33) as usize % LIVE;
 			waiters[i] = Waiter::noop();

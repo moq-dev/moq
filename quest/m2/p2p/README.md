@@ -71,8 +71,7 @@ off by default, and used only when the application lists it.
 
 ### Policy is the application's
 
-`Peers` takes the shared origin, a reconnect-safe relay auth handle for
-[peer grants](/quest/m2/p2p/peer-grant.md), plus:
+`Peers` takes the shared origin, plus:
 
 - `enabled`: an explicit on/off signal, off by default;
 - `prefix`: the reserved prefix, `.p2p/` under the session root by default;
@@ -119,12 +118,19 @@ Routing is the [cluster routing line](/quest/m1/cluster-routing/README.md)'s:
 every session speaks per-node ROUTEs and path-less ANNOUNCEs, and the
 application priority followed by total cost picks the direct link or relay.
 
-A routing node id is declared by its origin and unverified; recognizing it
-needs the key proof [Peer grants](/quest/m2/p2p/peer-grant.md) owns
-(decided 2026-10-26, maintainer, dropping receiver-stamped per-session
-identities). Switching between a CDN and a direct path resumes only across
-a matching explicit epoch. [Signaling and policy](/quest/m2/p2p/signal.md)
-owns the open question of what key maps announces to roster peers.
+A routing node id is declared by its origin and unverified (decided
+2026-10-26, maintainer, dropping receiver-stamped per-session identities).
+Switching between a CDN and a direct path resumes only across a matching
+explicit epoch.
+
+Decided 2026-11-02 (maintainer, /quest-unblock): P2P trusts its peers. Joining the prefix takes the
+relay's token, so a peer is as trusted as any publisher that token admits,
+and a direct session serves without a peer grant or key proof. Peer grants and
+P2P identity planning are dropped until a real use case asks for proof. Each
+peer's roster `<id>` is its public key, like an iroh endpoint id; nothing proves
+it yet. Which roster peer serves an announce stays the application's explicit
+selection. If identity or signing is wanted later, moq-lite-07's route
+identity becomes a public key, independent of P2P.
 
 Decided 2026-10-13: priority then total cost selects among authorized routes;
 a direct connection does not always win. A watching tab never re-serves what
@@ -155,14 +161,12 @@ Extractor declaration checks, which analyze only published packages since
 
 ## Required
 
-- [Peer grants](/quest/m2/p2p/peer-grant.md) - the relay issues a key-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
 - [Signaling and policy](/quest/m2/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
 - [Native pairs over ICE and QUIC](/quest/m2/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
 - [moq-cli joins](/quest/m2/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
 - [Peer route policy](/quest/m2/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
 - [Watch opts in](/quest/m2/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route
 - [Harness](/quest/m2/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
-- [Plan P2P identity](/quest/m2/p2p/identity-plan.md) - condition: the maintainer settles the roster key, exploring moq-e2ee signing first
 
 ## Related
 
