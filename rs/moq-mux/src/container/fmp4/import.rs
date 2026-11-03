@@ -78,6 +78,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	buffer: BytesMut,
 	body: Option<Body>,
 
+	// A refused chunk may contain unread bytes, so no later chunk can resume its framing.
+	failed: Option<crate::Error>,
+
 	// A segment boundary (a styp or an explicit `cut()`) waiting to land on the next fragment.
 	pending_cut: bool,
 
@@ -276,6 +279,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			buffer: BytesMut::new(),
 			body: None,
+			failed: None,
 			pending_cut: false,
 			segment: 0,
 			declared: false,
@@ -302,6 +306,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// it follows the same segmentation as video. A passthrough video track rolls there as well,
 	/// while an unwrapped one opens a group at each sync sample.
 	pub fn cut(&mut self) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		self.pending_cut = true;
 		Ok(())
 	}
@@ -349,10 +356,28 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples, is refused before it is
 	/// held.
 	///
-	/// A refused box or fragment publishes nothing more, and the rest of its body is discarded.
-	/// The rest of the refused call's input is not read, so input fed in box-aligned chunks (such
-	/// as one HLS segment per call) resumes at the next call.
-	pub fn decode(&mut self, mut data: &[u8]) -> Result<()> {
+	/// A decode error is terminal: later decodes, cuts, seeks and discontinuities return the same
+	/// error without reading input or changing the tracks.
+	/// The refusing call may leave bytes unread, so even box-aligned callers must replace the
+	/// importer to resume. [`finish`](Self::finish) still ends the tracks with what was accepted.
+	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
+		let result = self.drain(data);
+		if let Err(err) = &result {
+			if let Some(Body::Media(mut mdat)) = self.body.take() {
+				mdat.abort(moq_net::Error::MalformedTrack);
+			}
+			self.buffer = BytesMut::new();
+			self.moof = None;
+			self.deferred = Deferred::default();
+			self.failed = Some(err.clone());
+		}
+		result
+	}
+
+	fn drain(&mut self, mut data: &[u8]) -> Result<()> {
 		loop {
 			let Some(body) = self.body.take() else {
 				let needed = if self.buffer.len() >= 4 && self.buffer[..4] == [0, 0, 0, 1] {
@@ -393,22 +418,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						Ok(Body::Skip(header.size))
 					}
 				};
-				match body {
-					Ok(body) => self.body = Some(body),
-					Err(err) => {
-						// Nothing of a refused box is held or published. Discard its body, including
-						// what this call carries, so framing resumes at the next box.
-						let count = header.size.unwrap_or(data.len()).min(data.len());
-						let remaining = header.size.map(|size| size - count);
-						if self.moof.is_some() {
-							self.moof_span = self.moof_span.saturating_add(count);
-						}
-						if remaining != Some(0) {
-							self.body = Some(Body::Skip(remaining));
-						}
-						return Err(err);
-					}
-				}
+				self.body = Some(body?);
 				continue;
 			};
 			match body {
@@ -435,8 +445,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					data = &data[count..];
 					remaining -= count;
 					if remaining == 0 {
-						// Release the held body before parsing, so a refused box leaves no partial
-						// header behind for the next one.
 						let body = std::mem::take(&mut self.buffer).freeze();
 						self.end_metadata(kind, body, header_size)?;
 					} else {
@@ -455,15 +463,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						*remaining -= count;
 					}
 					if let Err(err) = written {
-						// The fragment is refused: its open frames fail, and the rest of its mdat is
-						// discarded so framing resumes at the next box.
 						mdat.abort(moq_net::Error::MalformedTrack);
-						if mdat.remaining != Some(0) {
-							self.body = Some(Body::Skip(mdat.remaining));
-						}
-						if let Err(settle) = self.settle() {
-							tracing::warn!(%settle, "failed to apply a control deferred by a refused fMP4 fragment");
-						}
 						return Err(err);
 					}
 					let published = mdat.chunks.is_empty();
@@ -1698,7 +1698,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	///
 	/// A fragment whose samples are still arriving was truncated: its open frames abort, failing
 	/// their groups, every track still finishes, and this returns
-	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof).
+	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof). After a decode error, this ends the
+	/// accepted media without reading more input; it does not clear that error for later decodes.
 	pub fn finish(&mut self) -> Result<()> {
 		// No input follows, so the buffer that waited for the rest of an atom is done.
 		self.buffer = BytesMut::new();
@@ -1765,6 +1766,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A fragment whose samples are still arriving owns its groups until its last sample, so the
 	/// seek waits for it to finish publishing.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		if self.publishing() {
 			self.deferred.seek = Some(sequence);
 			return Ok(());
@@ -1797,6 +1801,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// rewinds, before publishing any of it. Like [`seek`](Self::seek), it waits for a fragment
 	/// still arriving to finish publishing.
 	pub fn discontinuity(&mut self) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		if self.publishing() {
 			self.deferred.discontinuity = true;
 			return Ok(());
@@ -1973,12 +1980,9 @@ mod tests {
 			let err = import.decode(&header).unwrap_err();
 			assert!(matches!(err, crate::Error::Cmaf(Error::BackwardsDataOffset)), "{err:?}");
 			assert!(consumer.recv_group().now_or_never().is_none());
-			// The refused mdat is discarded rather than parsed as boxes.
-			import.decode(&[0xA5; 8]).unwrap();
-			import.decode(&media_header(id, 1024, &[0], 4, Some(4))).unwrap();
-			import.decode(&[0xA5; 4]).unwrap();
+			assert_eq!(import.decode(&[0xA5; 8]).unwrap_err().to_string(), err.to_string());
 			import.finish().unwrap();
-			assert!(consumer.recv_group().now_or_never().is_some());
+			assert!(consumer.recv_group().now_or_never().unwrap().unwrap().is_none());
 		}
 	}
 
@@ -1991,6 +1995,33 @@ mod tests {
 		.encode(&mut header)
 		.unwrap();
 		header
+	}
+
+	/// The refusing call can also carry a prefix of the next box. None of that input may
+	/// disappear behind a successful decode, regardless of where the caller splits it.
+	#[test]
+	fn a_refusal_is_terminal_across_chunk_boundaries() {
+		let mut data = box_header(b"mdat", Some(4));
+		data.extend_from_slice(&[0xA5; 4]);
+		data.extend_from_slice(&box_header(b"styp", Some(0)));
+		for split in 8..=data.len() {
+			let mut import = importer();
+			let first = import.decode(&data[..split]).unwrap_err().to_string();
+			assert_eq!(
+				import.decode(&data[split..]).unwrap_err().to_string(),
+				first,
+				"split: {split}"
+			);
+			assert_eq!(import.cut().unwrap_err().to_string(), first);
+			assert_eq!(import.seek(100).unwrap_err().to_string(), first);
+			assert_eq!(import.discontinuity().unwrap_err().to_string(), first);
+			import.finish().unwrap();
+			assert_eq!(import.decode(&[]).unwrap_err().to_string(), first);
+			assert_eq!(
+				import.decode(&box_header(b"free", Some(0))).unwrap_err().to_string(),
+				first
+			);
+		}
 	}
 
 	#[test]
@@ -2008,12 +2039,9 @@ mod tests {
 					matches!(err, crate::Error::Cmaf(Error::MetadataTooLarge { size: refused, .. }) if refused == size),
 					"{kind:?}: {err:?}"
 				);
-				// Its body is discarded as it arrives, across segments.
-				for _ in 0..256 {
-					import.cut().unwrap();
-					import.decode(&[0xA5; 1024]).unwrap();
-					assert!(import.buffer.is_empty(), "{kind:?}: {} held bytes", import.buffer.len());
-				}
+				assert_eq!(import.decode(&[0xA5; 1024]).unwrap_err().to_string(), err.to_string());
+				assert!(import.buffer.is_empty());
+				assert!(import.body.is_none());
 			}
 		}
 	}
@@ -2077,12 +2105,10 @@ mod tests {
 			);
 			assert!(import.moof.is_none());
 			assert!(import.buffer.is_empty());
-			// With no moof, the mdat after it is refused and discarded.
-			let err = import.decode(&box_header(b"mdat", Some(4))).unwrap_err();
-			assert!(matches!(err, crate::Error::Cmaf(Error::NoMoof)), "{err:?}");
-			import.decode(&[0xA5; 4]).unwrap();
-			import.decode(&media_header(id, 0, &[0], 4, Some(4))).unwrap();
-			import.decode(&[0xA5; 4]).unwrap();
+			assert_eq!(
+				import.decode(&box_header(b"mdat", Some(4))).unwrap_err().to_string(),
+				err.to_string()
+			);
 			import.finish().unwrap();
 		}
 
@@ -2136,7 +2162,8 @@ mod tests {
 	}
 
 	fn replay(output: &Output<()>) -> moq_net::track::Subscriber {
-		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		match output {
 			Output::Audio(output) => output.subscribe(replay),
 			Output::Passthrough(output) => output.track.subscribe(replay),
@@ -2223,7 +2250,7 @@ mod tests {
 	}
 
 	#[test]
-	fn refused_fragment_discards_its_mdat() {
+	fn refused_fragment_ends_its_import() {
 		const SIZE: usize = 64;
 		for passthrough in [false, true] {
 			let (mut import, id, _) = initialized(passthrough);
@@ -2237,19 +2264,13 @@ mod tests {
 			import
 				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
-			import.decode(&[0xA5; SIZE / 2]).unwrap_err();
-			// The rest of the refused mdat is discarded rather than parsed as boxes.
-			import.decode(&[0xA5; SIZE / 2]).unwrap();
-			import
-				.decode(&media_header(id, 96_000, &[0], SIZE as u32, Some(SIZE)))
-				.unwrap();
-			import.decode(&[0xA5; SIZE]).unwrap();
-			import.finish().unwrap();
+			let err = import.decode(&[0xA5; SIZE / 2]).unwrap_err();
 			assert_eq!(
-				groups(&mut consumer),
-				[(0, Some(1)), (1, Some(1))],
-				"passthrough: {passthrough}"
+				import.decode(&[0xA5; SIZE / 2]).unwrap_err().to_string(),
+				err.to_string()
 			);
+			import.finish().unwrap();
+			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
 		}
 	}
 }

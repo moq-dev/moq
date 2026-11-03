@@ -50,11 +50,17 @@ metadata library and links its static library without compiling Rust. Without
 an explicit directory, a release pin in `cpp/moq/FFI_VERSION` selects the default
 input; `just cpp package` fetches it with the checked-in SHA-256 hashes and fails
 if it cannot verify it. Direct CMake builds and `just cpp check` build the
-current checkout unless given an explicit native directory. The package is
+current checkout unless given an explicit native directory. A source build
+with `-DMOQ_FFI_QLOG=ON` adds moq-ffi's `qlog` feature, so
+`moq::qlog_supported()` reports true and `QuicConfig::qlog` writes traces; it builds
+in its own cargo target directory, and a prebuilt input refuses it. The package is
 `moq-cpp`. It and the C package, `moq-c`, each link in their own copy of the
 Rust core, so a program links one of the two, never both.
 
 ## Example
+
+Announcement captures are a required vector of wildcard matches, empty when
+the filter has no wildcards.
 
 Every fallible call returns `moq::expected`, and nothing throws. The samples
 unwrap results with this helper, which stops the program on an error; a real
@@ -122,6 +128,9 @@ use one source timeline; omitting it keeps an independent offset. A timebase bel
 its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
 anywhere, so a raw byte stream needs no other importer.
 `moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample.
+Media times are exact `moq::Timestamp{value, scale}` records, `value` units at `scale` units
+per second, and read back at the track's timescale, so a 90 kHz tick republishes unchanged.
+A raw `moq::Frame` with `std::nullopt` is untimed.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -130,19 +139,17 @@ anywhere, so a raw byte stream needs no other importer.
 auto publication = ok(session->publish()->create_broadcast("my-stream.hang"));
 auto broadcast = publication->broadcast(); // fill tracks here; announce on the publication
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
-ok(audio->write_frame({packet, 20'000}));
+ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
-ok(video->write({0, rgba}));
-moq::AnnounceRoute route;
-route.epoch = moq::mint_epoch(); // a fresh epoch per run
-ok(publication->announce(route));
+ok(video->write({{0, 30'000}, rgba}));
+ok(publication->announce({})); // each broadcast mints a fresh instance
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded video track takes `lower` in its `VideoInit` too, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `set_enabled(false)` after a `discontinuity()`, and `set_enabled(true)` on the keyframe that resumes it.
 
 ## Futures
 
@@ -220,6 +227,8 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
+A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
+
 ## Authorization
 
 On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `session->grants()` returns a `GrantConsumer`: `grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects, and `changed()` waits for the next one until `cancel()`.
@@ -233,17 +242,17 @@ Set `ClientConfig::tokens` instead of putting the credential in the URL. The fir
 ## Shutdown
 
 `session->shutdown()` requests a drain immediately; `session->closed().get()` waits up to one second and reports its result.
-Application delivery requires explicitly selecting `moq-lite-07-wip` on both
-peers; older Lite versions (including default lite-06) and IETF wait only for
-transport ACKs. Finish or abort live tracks first.
+moq-lite-05 and newer wait for the peer to receive finished tails; older Lite
+versions and IETF wait only for transport ACKs. Finish or abort live tracks first.
 
 To end a broadcast cleanly, finish every track, then call `catalog->finish()` on
 its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.
 The broadcast stays announced and keeps serving the finished tracks, so a
 subscriber still catching up can drain them, until `broadcast->close()` takes it
 offline. How long to keep it up is yours to decide. A track still open at the
-close, or released without a finish, ends with `Unroutable`, which readers take
-as the publisher leaving.
+close, or released without a finish, ends with `Unroutable` (`Internal` over
+moq-transport, which has no such code). Readers follow a publisher's runs by
+announcement, not by that error: see [identity and recovery](/concept/identity).
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

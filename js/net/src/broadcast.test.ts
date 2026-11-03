@@ -318,21 +318,21 @@ test("a request exposes the aggregate subscription options", async () => {
 
 	consumer.track("video").subscribe({
 		priority: 3,
-		maxDelay: Milli(100),
-		groups: { start: { included: 10 }, end: { excluded: 20 } },
+		delay: { max: Milli(100) },
+		ranges: [{ start: { absolute: 10 }, end: { absolute: 20 } }],
 	});
 	consumer.track("video").subscribe({
 		priority: 7,
-		maxDelay: Milli(250),
-		groups: { start: { included: 0 }, end: { excluded: 30 } },
+		delay: { max: Milli(250) },
+		ranges: [{ start: { absolute: 0 }, end: { absolute: 30 } }],
 	});
 
 	const request = await pendingRequest(consumer);
 	expect(request?.subscription).toEqual({
 		priority: 7,
-		maxDelay: Milli(250),
+		delay: { min: Milli.zero, max: Milli(250) },
 		order: "descending",
-		groups: { start: { included: 0 }, end: { excluded: 30 } },
+		ranges: [{ start: { absolute: 0 }, end: { absolute: 30 } }],
 	});
 	expect(request?.priority).toBe(7);
 });
@@ -442,11 +442,11 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 
 	const a = broadcast
 		.track("video")
-		.subscribe({ maxDelay: Milli(5000) })
+		.subscribe({ delay: { max: Milli(5000) } })
 		.ordered();
 	const b = broadcast
 		.track("video")
-		.subscribe({ maxDelay: Milli(5000) })
+		.subscribe({ delay: { max: Milli(5000) } })
 		.ordered();
 
 	producer.writeFrame(textFrame("hello"));
@@ -478,7 +478,7 @@ test("a read throws Evicted at a shed front, then resyncs to the next group", as
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const sub = broadcast
 		.track("video")
-		.subscribe({ maxDelay: Milli(5000) })
+		.subscribe({ delay: { max: Milli(5000) } })
 		.ordered();
 
 	// Group 0 sheds its front without aborting the writer.
@@ -503,16 +503,18 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		clock.jump(Nano.fromMilli(Milli(10_000)));
 
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(1000) });
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-		// A subscriber that never reads. Its sink must not grow without bound.
-		const stalled = broadcast.track("video").subscribe();
+		// A subscriber that never reads. Its sink must not grow without bound. No max delay,
+		// so only eviction (not a skip of a superseded group) can drop the old group.
+		const stalled = broadcast.track("video").subscribe({ delay: { max: null } });
 
 		producer.writeFrame(textFrame("old"));
 
-		// Advance past the cache window and write again to trigger a prune. The old
-		// (closed, aged-out) group is dropped from the stalled sink, not retained.
-		clock.jump(Nano.fromMilli(Milli(2_000)));
+		// Advance past the cache window, plus the scan slice a prune may lag by, and write
+		// again to trigger a prune. The old (closed, aged-out) group is dropped from the
+		// stalled sink, not retained.
+		clock.jump(Nano.fromMilli(Milli(30_000 + 30_000 / 8)));
 		producer.writeFrame(textFrame("fresh"));
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
@@ -557,7 +559,7 @@ test("a finished track is still served from its cache", async () => {
 	const late = broadcast
 		.consume()
 		.track("track1")
-		.subscribe({ maxDelay: Milli(5000) })
+		.subscribe({ delay: { max: Milli(5000) } })
 		.ordered();
 	expect(await late.readString()).toBe("last");
 	expect(await late.nextGroup()).toBeUndefined();

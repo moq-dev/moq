@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::congestion::{Bbr3Config, ScreamConfig};
+use crate::congestion::{bbr3, scream};
 
 const FPS: u64 = 30;
 /// Frames per group, each group on its own stream: a keyframe every two seconds
@@ -114,7 +114,7 @@ enum Media {
 /// One run's controller, media and path
 #[derive(Clone)]
 struct Scenario {
-	controller: Arc<dyn ControllerFactory + Send + Sync>,
+	controller: Arc<dyn Factory + Send + Sync>,
 	media: Media,
 	/// The rate the session probes up to; zero for none
 	probe_target: u64,
@@ -162,7 +162,7 @@ struct Group {
 }
 
 fn run(scenario: &Scenario) -> Outcome {
-	let _guard = subscribe_at(tracing::Level::INFO);
+	let _guard = subscribe();
 	entropy::reseed(scenario.seed);
 	let path = &scenario.path;
 	let mut server = server_config();
@@ -409,8 +409,8 @@ fn ms(d: Duration) -> f64 {
 	d.as_secs_f64() * 1e3
 }
 
-fn scream() -> Arc<ScreamConfig> {
-	Arc::new(ScreamConfig::default())
+fn scream() -> Arc<scream::Config> {
+	Arc::new(scream::Config::default())
 }
 
 /// The cellular-step preset with media that follows the estimate: SCReAMv2 holds a smaller queue
@@ -431,7 +431,7 @@ fn smaller_queue_than_bbr3() {
 		run(&scenario).report(&path)
 	};
 	let scream = report(scream());
-	let bbr3 = report(Arc::new(Bbr3Config::default()));
+	let bbr3 = report(Arc::new(bbr3::Config::default()));
 	info!(?scream, ?bbr3, "cellular-step");
 	for (i, p) in ["p50", "p95"].into_iter().enumerate() {
 		assert!(
@@ -484,20 +484,20 @@ fn probe_recovers_a_stopped_rung() {
 fn compare() {
 	const SEEDS: ops::RangeInclusive<u64> = 1..=4;
 	let reduce_jitter = {
-		let mut config = ScreamConfig::default();
+		let mut config = scream::Config::default();
 		config.reduce_jitter(true);
 		Arc::new(config)
 	};
 	let target_30ms = {
-		let mut config = ScreamConfig::default();
+		let mut config = scream::Config::default();
 		config.qdelay_target(Duration::from_millis(30));
 		Arc::new(config)
 	};
-	let controllers: [(&str, Arc<dyn ControllerFactory + Send + Sync>); 4] = [
+	let controllers: [(&str, Arc<dyn Factory + Send + Sync>); 4] = [
 		("scream", scream()),
 		("scream reduce_jitter", reduce_jitter),
 		("scream target 30ms", target_30ms),
-		("bbr3", Arc::new(Bbr3Config::default())),
+		("bbr3", Arc::new(bbr3::Config::default())),
 	];
 
 	println!(

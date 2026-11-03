@@ -2,6 +2,128 @@
 
 use criterion::{criterion_group, criterion_main};
 
+#[cfg(all(target_os = "linux", feature = "quic"))]
+#[path = "../tests/integration/support.rs"]
+mod support;
+
+/// A request and its reply traverse demux, connection and application tasks.
+/// Sweep connections and reply bytes so batching cannot hide a fanout cost.
+#[cfg(all(target_os = "linux", feature = "quic"))]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "benchmarks measure themselves on the host clock"
+)]
+fn request_reply(c: &mut criterion::Criterion) {
+	use std::{net::UdpSocket, num::NonZeroUsize, time::Instant};
+
+	use criterion::Throughput;
+	use moq_uring::{Config, Worker, quic, udp};
+
+	const ALPN: &str = "worker-turns";
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let certs = support::certs().expect("certificates");
+	let tls = quic::Identity::open(&certs.cert, &certs.key)
+		.expect("identity")
+		.server(&[ALPN], quic::server::ClientAuth::None)
+		.expect("tls");
+	let mut group = c.benchmark_group("worker_request_reply");
+	for connections in [1, 16] {
+		for bytes in [64, 256 * 1024] {
+			for passes in [1, 4] {
+				let mut config = Config::default();
+				config.passes = NonZeroUsize::new(passes).unwrap();
+				let mut worker = Worker::new(config).expect("worker");
+				let handle = worker.handle();
+				let socket = || {
+					handle
+						.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+						.expect("socket")
+				};
+				let server = quic::Endpoint::new(
+					socket(),
+					quic::endpoint::Config::default().with_server(quic::server::Config::new(tls.clone())),
+				)
+				.expect("server");
+				let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client");
+				let mut dial = quic::client::Config::default();
+				dial.alpn = vec![ALPN.to_owned()];
+				dial.verify = false;
+				for _ in 0..connections {
+					let server = server.clone();
+					handle.spawn(async move {
+						let conn = server.accept().await.expect("accept");
+						let (mut send, mut recv) = conn.accept_bi().await.expect("stream");
+						let reply = bytes::Bytes::from(vec![0x5a; bytes]);
+						let mut request = [0; 64];
+						while recv.read_exact(&mut request).await.is_ok() {
+							send.write_all(reply.clone()).await.expect("reply");
+						}
+					});
+				}
+				let (mut streams, _held) = worker
+					.block_on(async {
+						let mut streams = Vec::new();
+						let mut held = Vec::new();
+						for _ in 0..connections {
+							let conn = client
+								.connect(&dial, server.local_addr(), "localhost")
+								.await
+								.expect("dial");
+							streams.push(conn.open_bi(Default::default()).await.expect("stream"));
+							held.push(conn);
+						}
+						(streams, held)
+					})
+					.expect("worker");
+				let id = format!("connections-{connections}/bytes-{bytes}/passes-{passes}");
+				group.throughput(Throughput::Bytes((connections * (64 + bytes)) as u64));
+				let mut reply = vec![0; bytes];
+				let completed = kio::Queue::bounded(1);
+				group.bench_function(id.clone(), |b| {
+					b.iter_custom(|rounds| {
+						let mut running = std::mem::take(&mut streams);
+						let mut answer = std::mem::take(&mut reply);
+						let done = completed.clone();
+						handle.spawn(async move {
+							for _ in 0..rounds {
+								for (send, _) in &mut running {
+									send.write_all(&[0xa5; 64][..]).await.expect("request");
+								}
+								for (_, recv) in &mut running {
+									recv.read_exact(&mut answer).await.expect("reply");
+								}
+							}
+							done.try_push((running, answer)).expect("complete");
+						});
+						let before = handle.metrics().snapshot();
+						let start = Instant::now();
+						(streams, reply) = worker
+							.block_on(kio::wait(|waiter| completed.poll_pop(waiter)))
+							.expect("worker")
+							.expect("measurement");
+						let elapsed = start.elapsed();
+						let after = handle.metrics().snapshot();
+						assert!(reply.iter().all(|byte| *byte == 0x5a));
+						eprintln!(
+							"{id} rounds={rounds} turns={} passes={} enters={} rx_datagrams={}",
+							after.turns - before.turns,
+							after.passes - before.passes,
+							after.enters - before.enters,
+							after.rx_datagrams - before.rx_datagrams,
+						);
+						elapsed
+					});
+				});
+			}
+		}
+	}
+	group.finish();
+}
+
+#[cfg(not(all(target_os = "linux", feature = "quic")))]
+fn request_reply(_: &mut criterion::Criterion) {}
+
 #[cfg(target_os = "linux")]
 fn benchmark(c: &mut criterion::Criterion) {
 	use std::net::UdpSocket;
@@ -86,5 +208,5 @@ fn local_thread_check(_: &mut criterion::Criterion) {}
 #[cfg(not(target_os = "linux"))]
 fn benchmark(_: &mut criterion::Criterion) {}
 
-criterion_group!(benches, benchmark, local_thread_check);
+criterion_group!(benches, benchmark, request_reply, local_thread_check);
 criterion_main!(benches);

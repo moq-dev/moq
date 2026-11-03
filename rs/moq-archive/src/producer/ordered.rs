@@ -165,7 +165,7 @@ impl Ordered {
 
 #[cfg(test)]
 mod tests {
-	use moq_net::track::{Order, Range, Subscription};
+	use moq_net::track::{Delay, Order, Range, Subscription};
 	use moq_net::{broadcast, track};
 
 	use super::*;
@@ -188,7 +188,7 @@ mod tests {
 	async fn ordered(broadcast: &broadcast::Producer, next: Option<u64>) -> Ordered {
 		let subscription = Subscription::default()
 			.with_order(Order::Ascending)
-			.with_max_delay(MAX_DELAY)
+			.with_delay(Delay::default().with_max(MAX_DELAY))
 			.with_ranges([Range::oldest()]);
 		let subscriber = broadcast
 			.consume()

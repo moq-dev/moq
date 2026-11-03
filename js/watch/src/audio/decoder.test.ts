@@ -6,9 +6,11 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { supportCacheKey } from "../support-probe";
 import { type Delay, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
+import { decoderConfigKey } from "./config";
 import type { Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
@@ -316,13 +318,15 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	// The catalog broadcast's instance, identified by its `closed` handle.
 	const active = new Signal({ closed: {} });
 	const broadcast = new Signal<Broadcast | undefined>({
-		in: { enabled },
+		in: { enabled, name: new Signal(Moq.Path.from("watched")) },
 		out: { catalog, active },
 		relativeBroadcast,
 	} as unknown as Broadcast);
 
 	const delay = new Signal<Delay>(initial);
-	const source = new Source({ broadcast, supported: async () => true });
+	const supportProbes = mock(async () => true);
+	Object.assign(supportProbes, { [supportCacheKey]: decoderConfigKey });
+	const source = new Source({ broadcast, supported: supportProbes });
 	const buffer = new Signal(Milli(buffered ? 1000 : 0));
 	const sync = new Sync({ delay, buffer });
 	// The decoder's own switch, which a mute or pause turns off.
@@ -343,6 +347,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	};
 
 	return {
+		supportProbes,
 		delay,
 		buffer,
 		sync,
@@ -718,10 +723,15 @@ describe("Decoder across a rendition's absence", () => {
 			await microtasks();
 			expect(playback.track()).toBe("audio");
 			expect(contexts).toHaveLength(1);
+			drain(playback.rings()[0]);
+			await microtasks();
+			expect(contexts[0].state).toBe("suspended");
 
 			playback.restore();
 			await microtasks();
 			expect(playback.track()).toBe("audio");
+			expect(contexts[0].state).toBe("running");
+			expect(playback.supportProbes).toHaveBeenCalledTimes(1);
 			const before = playback.inserted().length;
 			const timestamps = await playback.play(6);
 
@@ -1059,7 +1069,7 @@ async function livePlayback(burst: number) {
 	let producer = new Moq.Broadcast.Producer();
 	const media = new Signal<Moq.Broadcast.Consumer>(producer.consume());
 	const broadcast = new Signal<Broadcast | undefined>({
-		in: { enabled: new Signal(true) },
+		in: { enabled: new Signal(true), name: new Signal(Moq.Path.from("watched")) },
 		out: { catalog, active: new Signal({ closed: {} }) },
 		relativeBroadcast: (effect: Effect) => effect.get(media),
 	} as unknown as Broadcast);
@@ -1451,7 +1461,7 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 	const logged = spyOn(console, "warn").mockImplementation(() => {});
 	const source = new Source({
 		broadcast: {
-			in: { enabled: new Signal(true) },
+			in: { enabled: new Signal(true), name: new Signal(Moq.Path.from("watched")) },
 			out: {
 				catalog: new Signal({
 					audio: {

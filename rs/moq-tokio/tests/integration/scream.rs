@@ -21,7 +21,7 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use kio::clock::Instant;
-use moq_congestion::{self as congestion, Controller, ControllerFactory};
+use moq_congestion::{self as congestion, Controller, Factory};
 use moq_tokio::quic::driver;
 
 const FPS: u64 = 30;
@@ -103,12 +103,20 @@ impl Controller for Recording {
 		self.inner.burst()
 	}
 
-	fn metrics(&self) -> congestion::ControllerMetrics {
+	fn metrics(&self) -> congestion::Metrics {
 		self.inner.metrics()
 	}
 
 	fn probes(&self) -> bool {
 		self.inner.probes()
+	}
+
+	fn paces_probe(&self) -> bool {
+		self.inner.paces_probe()
+	}
+
+	fn on_probe_target(&mut self, bytes_per_second: u64) {
+		self.inner.on_probe_target(bytes_per_second)
 	}
 
 	fn clone_box(&self) -> Box<dyn Controller> {
@@ -117,18 +125,14 @@ impl Controller for Recording {
 			log: self.log.clone(),
 		})
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-		self
-	}
 }
 
 struct Recorder {
-	inner: Arc<dyn ControllerFactory + Send + Sync>,
+	inner: Arc<dyn Factory + Send + Sync>,
 	log: Arc<Mutex<Vec<(Instant, Duration)>>>,
 }
 
-impl ControllerFactory for Recorder {
+impl Factory for Recorder {
 	fn build(self: Arc<Self>, init: congestion::Init) -> Box<dyn Controller> {
 		Box::new(Recording {
 			inner: self.inner.clone().build(init),
@@ -208,10 +212,9 @@ async fn run(preset: &moq_shaper::Preset) -> Run {
 		.dangerous()
 		.with_custom_certificate_verifier(Arc::new(crate::receive_credit::AnyCert))
 		.with_no_client_auth();
-	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-	let mut client = driver::client::Config::new(Arc::new(quic));
+	let mut client = driver::client::Config::new(Arc::new(tls));
 	client.transport.congestion = Arc::new(Recorder {
-		inner: Arc::new(congestion::ScreamConfig::default()),
+		inner: Arc::new(congestion::scream::Config::default()),
 		log: log.clone(),
 	});
 	client.transport.receive_timestamps = std::num::NonZeroU32::new(32);

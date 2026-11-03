@@ -97,8 +97,8 @@ enum Family {
 
 /// The track-publishing handles of one broadcast.
 ///
-/// Closing the broadcast ends every child still open with `Unroutable`, the way a reader sees a
-/// publisher leave, and frees its handle. A finished track stops being served once its last
+/// Closing the broadcast ends every child still open with `Unroutable` (`Internal` to a
+/// moq-transport reader), and frees its handle. A finished track stops being served once its last
 /// producer drops, and a `*_finish` call frees its handle, so the broadcast keeps the finished
 /// producer here instead: a subscriber arriving after the end still finds the track until
 /// [`State::publish_close`].
@@ -252,8 +252,8 @@ impl<T> std::ops::DerefMut for Kept<T> {
 	}
 }
 
-// Legacy C data methods stamp writes on one fixed broadcast clock without retaining
-// another catalog handle after a failed stream retires its listing.
+// C data methods stamp a write the caller left unstamped on one fixed broadcast clock,
+// without retaining another catalog handle after a failed stream retires its listing.
 struct Data<T> {
 	producer: T,
 	clock: moq_mux::Clock,
@@ -1134,8 +1134,13 @@ impl Publish {
 		self.groups.insert(group)
 	}
 
-	/// Write a single-frame group to a raw track with an explicit timestamp.
-	pub fn track_frame(&mut self, track: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
+	/// Write a single-frame group to a raw track, `None` when untimed.
+	pub fn track_frame(
+		&mut self,
+		track: Id,
+		timestamp: Option<moq_net::Timestamp>,
+		payload: &[u8],
+	) -> Result<(), Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
 		track.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
@@ -1146,9 +1151,13 @@ impl Publish {
 	/// The payload must be at most [`moq_net::MAX_DATAGRAM_PAYLOAD`] bytes. Datagrams are
 	/// delivered only on transports and wire versions with a datagram channel; there is no
 	/// group fallback.
-	pub fn track_datagram(&mut self, track: Id, timestamp_us: u64, payload: &[u8]) -> Result<u64, Error> {
+	pub fn track_datagram(
+		&mut self,
+		track: Id,
+		timestamp: Option<moq_net::Timestamp>,
+		payload: &[u8],
+	) -> Result<u64, Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
 		Ok(track.append_datagram(timestamp, bytes::Bytes::copy_from_slice(payload))?)
 	}
 
@@ -1280,10 +1289,15 @@ impl Publish {
 	}
 
 	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
-	pub fn json_snapshot_update(&mut self, json: Id, value: serde_json::Value) -> Result<(), Error> {
+	pub fn json_snapshot_update(
+		&mut self,
+		json: Id,
+		value: serde_json::Value,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let json = &mut self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?.data;
-		json.producer
-			.update(moq_net::Timed::from(&value).at(json.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| json.clock.now());
+		json.producer.update(moq_net::Timed::from(&value).at(at))?;
 		Ok(())
 	}
 
@@ -1309,11 +1323,15 @@ impl Publish {
 	}
 
 	/// Append one record to a JSON stream track.
-	pub fn json_stream_append(&mut self, stream: Id, value: serde_json::Value) -> Result<(), Error> {
+	pub fn json_stream_append(
+		&mut self,
+		stream: Id,
+		value: serde_json::Value,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let producer = self.json_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
-		producer
-			.producer
-			.append(moq_net::Timed::from(&value).at(producer.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| producer.clock.now());
+		producer.producer.append(moq_net::Timed::from(&value).at(at))?;
 		Ok(())
 	}
 
@@ -1351,20 +1369,28 @@ impl Publish {
 	}
 
 	/// Append one record to the back of a JSON window.
-	pub fn json_window_push(&mut self, window: Id, value: serde_json::Value) -> Result<(), Error> {
+	pub fn json_window_push(
+		&mut self,
+		window: Id,
+		value: serde_json::Value,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window
-			.producer
-			.push(moq_net::Timed::from(&value).at(window.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| window.clock.now());
+		window.producer.push(moq_net::Timed::from(&value).at(at))?;
 		Ok(())
 	}
 
 	/// Drop `count` records from the front of a JSON window, clamped to what it holds.
-	pub fn json_window_pop(&mut self, window: Id, count: u64) -> Result<(), Error> {
+	pub fn json_window_pop(
+		&mut self,
+		window: Id,
+		count: u64,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window
-			.producer
-			.pop(moq_net::Timed::from(count).at(window.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| window.clock.now());
+		window.producer.pop(moq_net::Timed::from(count).at(at))?;
 		Ok(())
 	}
 
@@ -1390,8 +1416,13 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Write a frame into a raw group with an explicit timestamp.
-	pub fn group_frame(&mut self, group: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
+	/// Write a frame into a raw group, `None` when untimed.
+	pub fn group_frame(
+		&mut self,
+		group: Id,
+		timestamp: Option<moq_net::Timestamp>,
+		payload: &[u8],
+	) -> Result<(), Error> {
 		let group = self.groups.get_mut(group).ok_or(Error::GroupNotFound)?;
 		group.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
@@ -1551,11 +1582,11 @@ mod children_tests {
 		}
 		let json = serde_json::Value::Null;
 		assert!(matches!(
-			state.publish.json_snapshot_update(json_snapshot, json.clone()),
+			state.publish.json_snapshot_update(json_snapshot, json.clone(), None),
 			Err(Error::TrackNotFound)
 		));
 		assert!(matches!(
-			state.publish.json_stream_append(json_stream, json),
+			state.publish.json_stream_append(json_stream, json, None),
 			Err(Error::TrackNotFound)
 		));
 	}
@@ -1607,12 +1638,7 @@ mod supervision_tests {
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin.requests("room").unwrap();
 		let pending = origin.consume().request("room/first", None);
-		let prepared = claim
-			.requested_broadcast()
-			.await
-			.unwrap()
-			.prepare(moq_net::Epoch::mint())
-			.unwrap();
+		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
 		let mut publish = Publish::default();
 		let first = publish
 			.create((prepared.broadcast().clone(), Default::default()))
@@ -1636,12 +1662,7 @@ mod supervision_tests {
 		publish.unannounce(publication).unwrap();
 
 		let pending = origin.consume().request("room/second", None);
-		let prepared = claim
-			.requested_broadcast()
-			.await
-			.unwrap()
-			.prepare(moq_net::Epoch::mint())
-			.unwrap();
+		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
 		publish
 			.create((prepared.broadcast().clone(), Default::default()))
 			.unwrap();

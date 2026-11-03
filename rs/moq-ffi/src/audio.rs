@@ -14,6 +14,7 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
+use crate::media::MoqTimestamp;
 
 /// Raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 ///
@@ -193,8 +194,8 @@ pub struct MoqAudioDecoderOutput {
 /// PCM in the configured `output_format`.
 #[derive(uniffi::Record)]
 pub struct MoqAudioFrame {
-	/// Presentation timestamp of the first sample, in microseconds.
-	pub timestamp_us: u64,
+	/// Presentation timestamp of the first sample.
+	pub timestamp: MoqTimestamp,
 	/// The samples, in the configured PCM layout.
 	pub data: Vec<u8>,
 }
@@ -215,36 +216,31 @@ pub enum MoqAudioRead {
 	/// or a packet's timestamp did not continue the previous one. What follows does not
 	/// continue what came before.
 	Gap {
-		/// The furthest presentation point already read, in microseconds.
-		timestamp_us: u64,
+		/// The furthest presentation point already read.
+		timestamp: MoqTimestamp,
 		/// An upper bound on how long until the next frame resumes.
 		duration: Duration,
 	},
 	/// The publisher stopped its encoder: it paused, switched source, or finished.
 	///
-	/// Frames that follow and start before `end_us` are the stopped encoder's remaining
+	/// Frames that follow and start before `end` are the stopped encoder's remaining
 	/// media; the first frame at or past it comes from a fresh encoder.
 	End {
-		/// Where the stopped encoder's media stops, in microseconds.
-		end_us: u64,
+		/// Where the stopped encoder's media stops.
+		end: MoqTimestamp,
 	},
 }
 
-impl TryFrom<moq_audio::decode::Read> for MoqAudioRead {
-	type Error = MoqError;
-
-	fn try_from(read: moq_audio::decode::Read) -> Result<Self, MoqError> {
-		use crate::consumer::timestamp_us;
-		Ok(match read {
+impl From<moq_audio::decode::Read> for MoqAudioRead {
+	fn from(read: moq_audio::decode::Read) -> Self {
+		match read {
 			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
 			moq_audio::decode::Read::Gap { timestamp, duration } => Self::Gap {
-				timestamp_us: timestamp_us(timestamp)?,
+				timestamp: timestamp.into(),
 				duration: crate::ffi::duration(duration.into()),
 			},
-			moq_audio::decode::Read::End { end } => Self::End {
-				end_us: timestamp_us(end)?,
-			},
-		})
+			moq_audio::decode::Read::End { end } => Self::End { end: end.into() },
+		}
 	}
 }
 
@@ -362,11 +358,7 @@ impl MoqAudioEncoder {
 impl From<moq_audio::Frame> for MoqAudioFrame {
 	fn from(f: moq_audio::Frame) -> Self {
 		Self {
-			// The binding surface carries plain microseconds, so flatten the
-			// scaled `Timestamp` here. Saturating rather than erroring: this is a
-			// frame we already decoded, and a u64 overflow needs a timestamp
-			// ~580,000 years out.
-			timestamp_us: u64::try_from(f.timestamp.as_micros()).unwrap_or(u64::MAX),
+			timestamp: f.timestamp.into(),
 			data: f.data.to_vec(),
 		}
 	}
@@ -376,10 +368,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 	type Error = moq_audio::Error;
 
 	fn try_from(f: MoqAudioFrame) -> Result<Self, Self::Error> {
-		Ok(Self::new(
-			f.data.into(),
-			moq_net::Timestamp::from_micros(f.timestamp_us)?,
-		))
+		Ok(Self::new(f.data.into(), f.timestamp.try_into()?))
 	}
 }
 
@@ -393,7 +382,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// passed at publish time.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
@@ -570,7 +559,7 @@ impl ConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqAudioRead>, MoqError> {
 		let read = self.consumer.read().await;
 		self.delay.store(nanos(self.consumer.delay()), Ordering::Relaxed);
-		read?.map(MoqAudioRead::try_from).transpose()
+		Ok(read?.map(MoqAudioRead::from))
 	}
 }
 
@@ -662,9 +651,11 @@ impl MoqAudioConsumer {
 		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
 		// dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_audio.broadcast.clone();
-		let epoch = catalog_audio.epoch.clone();
+		let instance = catalog_audio.instance.clone();
 		let cfg = audio_config(catalog_audio)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
+		let resolved = broadcast
+			.resolve_inner(reference.as_deref(), instance.as_deref())
+			.await?;
 
 		let mut config = moq_audio::decode::Options::default();
 		config.output.format = output.format.into();
@@ -703,7 +694,7 @@ mod tests {
 		MoqAudio {
 			label: None,
 			broadcast: None,
-			epoch: None,
+			instance: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,
@@ -794,7 +785,7 @@ mod tests {
 			// A partial codec frame makes finish publish the final packet and lookahead.
 			audio
 				.write(MoqAudioFrame {
-					timestamp_us: 0,
+					timestamp: MoqTimestamp { value: 0, scale: 1 },
 					data: vec![0.1_f32; 860].into_iter().flat_map(f32::to_ne_bytes).collect(),
 				})
 				.unwrap();

@@ -14,11 +14,10 @@
 //! Checked against Ericsson's BSD-licensed reference, `ScreamV2Tx.cpp` in
 //! <https://github.com/EricssonResearch/scream>.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use crate::pacer::{Pacer, Rate};
-use crate::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
+use crate::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
 use crate::{Duration, Instant};
 
 /// equivalent to MIN_REF_WND: the smallest reference window, in bytes
@@ -50,7 +49,7 @@ const VIRTUAL_RTT: Duration = Duration::from_millis(25);
 const QDELAY_AVG_G: f64 = 1.0 / 4.0;
 
 /// equivalent to QDELAY_MIN_MAX_AVG_G: the gain pulling the queue delay's tracked maximum down and
-/// its minimum up, with [`ScreamConfig::reduce_jitter`]
+/// its minimum up, with [`Config::reduce_jitter`]
 const QDELAY_MIN_MAX_AVG_G: f64 = 1.0 / 16.0;
 
 /// equivalent to QDELAY_DEV_AVG_G: the gain of the queue delay's averaged spread
@@ -90,12 +89,12 @@ const BASE_HISTORY: usize = 10;
 
 /// Configuration for the [`Scream`] congestion controller
 #[derive(Debug, Clone)]
-pub struct ScreamConfig {
+pub struct Config {
     qdelay_target: Duration,
     reduce_jitter: bool,
 }
 
-impl ScreamConfig {
+impl Config {
     /// The queue delay the controller holds below: it backs off from half of it, harder the
     /// closer the averaged delay comes to it.
     ///
@@ -115,7 +114,7 @@ impl ScreamConfig {
     }
 }
 
-impl Default for ScreamConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             qdelay_target: Duration::from_millis(60),
@@ -124,7 +123,7 @@ impl Default for ScreamConfig {
     }
 }
 
-impl ControllerFactory for ScreamConfig {
+impl Factory for Config {
     fn build(self: Arc<Self>, init: Init) -> Box<dyn Controller> {
         Box::new(Scream::new(self, init))
     }
@@ -135,7 +134,7 @@ impl ControllerFactory for ScreamConfig {
 /// Needs the peer's receive timestamps: without them it sees no queue and backs off only on loss.
 #[derive(Debug, Clone)]
 pub struct Scream {
-    config: Arc<ScreamConfig>,
+    config: Arc<Config>,
     /// equivalent to MSS: the path's datagram size
     mss: f64,
     /// When the controller was built, which every packet's send time is counted from, as the
@@ -169,11 +168,11 @@ pub struct Scream {
     qdelay_avg: Duration,
     /// equivalent to last_update_qdelay_avg_time
     last_qdelay_avg_update: Instant,
-    /// equivalent to qdelay_max_avg, with [`ScreamConfig::reduce_jitter`]
+    /// equivalent to qdelay_max_avg, with [`Config::reduce_jitter`]
     qdelay_max_avg: Duration,
-    /// equivalent to qdelay_min_avg, with [`ScreamConfig::reduce_jitter`]
+    /// equivalent to qdelay_min_avg, with [`Config::reduce_jitter`]
     qdelay_min_avg: Duration,
-    /// equivalent to qdelay_dev_avg, with [`ScreamConfig::reduce_jitter`]
+    /// equivalent to qdelay_dev_avg, with [`Config::reduce_jitter`]
     qdelay_dev_avg: Duration,
     /// equivalent to ref_wnd_delay_scale: 1 on a steady path, falling to 0 as the queue delay
     /// varies by [`QDELAY_DEV_THRESHOLD`]
@@ -196,7 +195,7 @@ pub struct Scream {
 }
 
 impl Scream {
-    fn new(config: Arc<ScreamConfig>, init: Init) -> Self {
+    fn new(config: Arc<Config>, init: Init) -> Self {
         let mut scream = Self {
             mss: f64::from(init.mtu),
             epoch: init.now,
@@ -225,7 +224,7 @@ impl Scream {
             probing: false,
             pacer: Pacer::new(
                 init.rtt,
-                MIN_REF_WND as u64,
+                (MIN_REF_WND as u64).max(2 * u64::from(init.mtu)),
                 init.mtu,
                 init.max_pacing_rate,
                 init.now,
@@ -491,7 +490,9 @@ impl Controller for Scream {
     fn window(&self) -> u64 {
         let overhead = REF_WND_OVERHEAD_MIN
             + (REF_WND_OVERHEAD_MAX - REF_WND_OVERHEAD_MIN) * self.ref_wnd_delay_scale;
-        (self.ref_wnd * overhead) as u64
+        // At least two datagrams of the path: the draft's 3000-byte minimum, sized for 1200 to
+        // 1500-byte packets, would block every send of a larger one
+        ((self.ref_wnd * overhead) as u64).max(2 * self.mss as u64)
     }
 
     fn pace(&mut self, now: Instant, bytes: u64) -> Option<Instant> {
@@ -503,8 +504,8 @@ impl Controller for Scream {
             .delay(self.srtt, bytes, self.mss as u16, now, rate)
     }
 
-    fn metrics(&self) -> ControllerMetrics {
-        ControllerMetrics {
+    fn metrics(&self) -> Metrics {
+        Metrics {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate()),
@@ -519,10 +520,6 @@ impl Controller for Scream {
 
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
     }
 }
 
@@ -588,7 +585,7 @@ mod tests {
     const PROPAGATION: Duration = Duration::from_millis(20);
     const TICK: Duration = Duration::from_millis(1);
 
-    fn scream(now: Instant, config: ScreamConfig) -> Scream {
+    fn scream(now: Instant, config: Config) -> Scream {
         Scream::new(
             Arc::new(config),
             Init {
@@ -636,7 +633,7 @@ mod tests {
     }
 
     impl Path {
-        fn new(rate: f64, media: Option<f64>, config: ScreamConfig) -> Self {
+        fn new(rate: f64, media: Option<f64>, config: Config) -> Self {
             let now = Instant::now();
             Self {
                 scream: scream(now, config),
@@ -732,7 +729,7 @@ mod tests {
     /// Media that follows the estimate fills a 2 Mbit/s path while its queue stays under the target
     #[test]
     fn fills_the_path_with_little_queue() {
-        let mut path = Path::new(250_000.0, None, ScreamConfig::default());
+        let mut path = Path::new(250_000.0, None, Config::default());
         path.run(Duration::from_secs(10));
         let (delivered, mut queue) = path.run(Duration::from_secs(10));
         let throughput = delivered as f64 / 10.0;
@@ -748,7 +745,7 @@ mod tests {
     /// under the target
     #[test]
     fn follows_a_capacity_drop() {
-        let mut path = Path::new(250_000.0, None, ScreamConfig::default());
+        let mut path = Path::new(250_000.0, None, Config::default());
         path.run(Duration::from_secs(10));
         path.rate = 125_000.0;
         let mut fell = None;
@@ -776,7 +773,7 @@ mod tests {
     fn ignores_the_peer_basis() {
         let mut windows = Vec::new();
         for basis in [Duration::ZERO, Duration::from_secs(3600)] {
-            let mut path = Path::new(250_000.0, None, ScreamConfig::default());
+            let mut path = Path::new(250_000.0, None, Config::default());
             path.basis = path.now - basis;
             path.run(Duration::from_secs(10));
             windows.push(path.scream.window());
@@ -788,7 +785,7 @@ mod tests {
     /// delay's bounded history keeps from building into a backoff
     #[test]
     fn tolerates_clock_drift() {
-        let mut path = Path::new(1_000_000.0, Some(125_000.0), ScreamConfig::default());
+        let mut path = Path::new(1_000_000.0, Some(125_000.0), Config::default());
         path.drift_ppm = 100.0;
         path.run(Duration::from_secs(10));
         let reacted = path.scream.last_reaction;
@@ -810,7 +807,7 @@ mod tests {
     /// of the path, and it may probe while no queue builds
     #[test]
     fn app_limited_window_tracks_the_media() {
-        let mut path = Path::new(1_000_000.0, Some(100_000.0), ScreamConfig::default());
+        let mut path = Path::new(1_000_000.0, Some(100_000.0), Config::default());
         path.run(Duration::from_secs(10));
         let window = path.scream.ref_wnd;
         path.run(Duration::from_secs(10));
@@ -850,7 +847,7 @@ mod tests {
     /// Probing stops once a queue builds, and the controller backs off
     #[test]
     fn stops_probing_on_a_queue() {
-        let mut path = Path::new(250_000.0, None, ScreamConfig::default());
+        let mut path = Path::new(250_000.0, None, Config::default());
         path.run(Duration::from_secs(10));
         path.rate = 62_500.0;
         path.run(Duration::from_millis(500));
@@ -879,7 +876,7 @@ mod tests {
     fn loss_backs_off_once() {
         let ms = |ms| Duration::from_millis(ms);
         let now = Instant::now();
-        let mut scream = scream(now, ScreamConfig::default());
+        let mut scream = scream(now, Config::default());
         scream.ref_wnd = 100_000.0;
         lose(&mut scream, now + ms(50), now + ms(1));
         assert_eq!(scream.ref_wnd, 100_000.0 * BETA_LOSS);
@@ -900,7 +897,7 @@ mod tests {
     #[test]
     fn backoff_holds_growth_at_the_new_inflection() {
         let now = Instant::now();
-        let mut scream = scream(now, ScreamConfig::default());
+        let mut scream = scream(now, Config::default());
         scream.ref_wnd = 100_000.0;
         scream.ref_wnd_i = 50_000.0;
         scream.max_bytes_in_flight = 100_000;

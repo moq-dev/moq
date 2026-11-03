@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Path } from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import * as Echo from "./echo";
 import * as Stats from "./stats";
 
