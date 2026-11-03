@@ -66,7 +66,7 @@ fn build_h264_avc3<E: CatalogExt>(
 	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
-	let frames = split.decode(init, None)?;
+	let frames = split.initialize(init)?;
 	import.decode(frames)?;
 	Ok((split, import))
 }
@@ -96,7 +96,7 @@ fn build_h265<E: CatalogExt>(
 	let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
-	let frames = split.decode(init, None)?;
+	let frames = split.initialize(init)?;
 	import.decode(frames)?;
 	Ok((split, import))
 }
@@ -643,7 +643,7 @@ impl TrackStream {
 				ref mut import,
 			} => {
 				import.initialize(data)?;
-				let frames = split.decode(data, None)?;
+				let frames = split.initialize(data)?;
 				import.decode(frames)?;
 			}
 			TrackStreamKind::Hev1 {
@@ -651,7 +651,7 @@ impl TrackStream {
 				ref mut import,
 			} => {
 				import.initialize(data)?;
-				let frames = split.decode(data, None)?;
+				let frames = split.initialize(data)?;
 				import.decode(frames)?;
 			}
 			TrackStreamKind::Av01 {
@@ -1399,6 +1399,27 @@ mod tests {
 				"{format}, seek={seek}"
 			);
 		}
+
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let mut stream = TrackStream::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(format, init.clone()),
+		)
+		.unwrap();
+		for _ in 0..2 {
+			stream.seek(7).unwrap();
+		}
+		stream.decode(&keyframe).unwrap();
+		stream.finish().unwrap();
+		let frame = first_frame(&consumer, "video").await;
+		assert!(frame.keyframe, "{format}: streaming seek");
+		assert_eq!(
+			frame.payload.as_ref(),
+			[init.as_slice(), &keyframe].concat(),
+			"{format}: streaming seek"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]

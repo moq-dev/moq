@@ -32,6 +32,8 @@ pub struct Split {
 #[derive(Default)]
 struct Au {
 	chunks: BytesMut,
+	/// The complete sequence-header OBU within this pending unit, never retained across pictures.
+	sequence_header: Option<std::ops::Range<usize>>,
 	contains_keyframe: bool,
 	contains_frame: bool,
 }
@@ -103,6 +105,8 @@ impl Split {
 			// A sequence header anchors a keyframe; the importer parses the config.
 			ObuType::SequenceHeader => {
 				self.current.contains_keyframe = true;
+				let start = self.current.chunks.len();
+				self.current.sequence_header = Some(start..start + obu_data.len());
 			}
 			ObuType::TemporalDelimiter => {
 				self.maybe_start_frame(pts)?;
@@ -146,6 +150,7 @@ impl Split {
 		let pts = pts.ok_or(Error::MissingTimestamp)?;
 		let keyframe = self.current.contains_keyframe;
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
+		self.current.sequence_header = None;
 		self.started = true;
 		self.current.contains_keyframe = false;
 		self.current.contains_frame = false;
@@ -165,8 +170,14 @@ impl Split {
 	/// timestamp. Before the first picture, a prefix with no frame keeps its init
 	/// sequence header.
 	pub fn reset(&mut self) {
-		if self.started || self.current.contains_frame || !self.current.contains_keyframe {
-			self.current = Au::default();
+		let current = std::mem::take(&mut self.current);
+		if !self.started
+			&& !current.contains_frame
+			&& let Some(sequence) = current.sequence_header
+		{
+			self.current.chunks.extend_from_slice(&current.chunks[sequence]);
+			self.current.sequence_header = Some(0..self.current.chunks.len());
+			self.current.contains_keyframe = true;
 		}
 		// Drop any buffered partial OBU too, so pre-reset bytes can't leak into the next unit.
 		self.tail.clear();
@@ -313,7 +324,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn reset_keeps_headers_but_discards_pictures_and_queued_frames() {
 		let mut split = Split::new();
-		assert!(split.decode(&seq_header(), ts()).unwrap().is_empty());
+		assert!(
+			split
+				.decode(&cat(&[td(), seq_header(), obu(5, &[1, 2])]), ts())
+				.unwrap()
+				.is_empty()
+		);
 		// A partial frame OBU must not be joined to the post-reset input.
 		assert!(split.decode(&[0x32, 0x04, 0x00], ts()).unwrap().is_empty());
 		split.reset();

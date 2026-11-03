@@ -223,21 +223,6 @@ pub(crate) enum InBandCodec {
 }
 
 impl InBandCodec {
-	/// Whether an unterminated Annex-B tail holds a parameter set rather than picture data.
-	pub(crate) fn parameter_set_tail(self, tail: &[u8]) -> bool {
-		let Ok(Some(start)) = after_start_code(tail) else {
-			return false;
-		};
-		let Some(&header) = tail.get(start) else {
-			return false;
-		};
-		header & 0x80 == 0
-			&& self
-				.parameter_sets()
-				.iter()
-				.any(|(kind, _)| *kind == self.nal_type(&[header]))
-	}
-
 	/// The parameter-set NAL types, each referencing only those before it.
 	fn parameter_sets(self) -> &'static [(u8, &'static str)] {
 		match self {

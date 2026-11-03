@@ -27,9 +27,7 @@ pub struct Split {
 	/// NAL here until the next start code arrives or [`flush`](Self::flush) drains it.
 	tail: BytesMut,
 	current: Au,
-	/// Once a picture has completed, resets discard the whole pending access unit.
-	started: bool,
-	/// Retained VPS NALs from the latest keyframe that carried them, re-injected
+	/// Retained VPS NALs from the init or latest keyframe that carried them, re-injected
 	/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
 	/// different set, so a mid-stream reinit drops the superseded ones.
 	vps: ParameterSets,
@@ -80,13 +78,28 @@ impl Split {
 		Self {
 			tail: BytesMut::new(),
 			current: Au::default(),
-			started: false,
 			vps: ParameterSets::new(),
 			sps: ParameterSets::new(),
 			pps: ParameterSets::new(),
 			zero: None,
 			pending: Vec::new(),
 		}
+	}
+
+	/// Consume a complete init buffer, retaining its parameter sets before any picture arrives.
+	pub(crate) fn initialize(&mut self, data: &[u8]) -> Result<Vec<crate::container::Frame>> {
+		let mut frames = self.decode(data, None)?;
+		frames.extend(self.flush(None)?);
+		if !self.current.vps_seen.is_empty() {
+			self.vps.clone_from(&self.current.vps_seen);
+		}
+		if !self.current.sps_seen.is_empty() {
+			self.sps.clone_from(&self.current.sps_seen);
+		}
+		if !self.current.pps_seen.is_empty() {
+			self.pps.clone_from(&self.current.pps_seen);
+		}
+		Ok(frames)
 	}
 
 	/// Decode a buffer where frame boundaries are unknown, returning the access
@@ -228,7 +241,6 @@ impl Split {
 		}
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
-		self.started = true;
 		let keyframe = self.current.contains_idr;
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
@@ -245,21 +257,12 @@ impl Split {
 		Ok(())
 	}
 
-	/// Drop any in-flight picture, and any frame completed but not yet returned.
+	/// Drop any in-flight access unit, and any frame completed but not yet returned.
 	///
-	/// Pre-reset NALs would otherwise leak into a later frame with the wrong
-	/// timestamp, and a frame queued before a failed [`decode`](Self::decode) would
-	/// surface on the next call. The parameter-set cache is kept so subsequent
-	/// keyframes stay self-contained. Before the first picture, a prefix with no
-	/// slice keeps its init parameter sets, including a final parameter-set NAL
-	/// waiting for a start code.
+	/// The retained parameter sets, including those supplied by the init, survive.
 	pub fn reset(&mut self) {
-		if self.started || self.current.contains_slice {
-			self.current = Au::default();
-			self.tail.clear();
-		} else if !InBandCodec::H265.parameter_set_tail(&self.tail) {
-			self.tail.clear();
-		}
+		self.current = Au::default();
+		self.tail.clear();
 		self.pending.clear();
 	}
 
@@ -339,7 +342,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn reset_keeps_headers_but_discards_pictures_and_queued_frames() {
 		let mut split = Split::new();
-		assert!(decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS]), ts()).is_empty());
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS])).unwrap().is_empty());
 		assert!(split.decode(&annexb(&[&[0x02, 0x01]]), ts()).unwrap().is_empty());
 		split.reset();
 		let next = moq_net::Timestamp::from_micros(1_000).unwrap();
@@ -362,6 +365,21 @@ mod tests {
 		assert_eq!(frames[0].payload, annexb(&[VPS, SPS, PPS, IDR]));
 		assert!(frames[0].keyframe);
 		assert_eq!(frames[0].timestamp, next);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn reset_discards_damaged_prefix_before_first_picture() {
+		let mut split = Split::new();
+		assert!(
+			split
+				.decode(&annexb(&[AUD, VPS, SPS, PPS, PREFIX_SEI, &[0x80, 0x01], AUD]), ts())
+				.is_err()
+		);
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[AUD, TRAIL]), ts());
+		assert_eq!(frames.len(), 1);
+		assert!(!frames[0].keyframe);
+		assert_eq!(frames[0].payload, annexb(&[AUD, TRAIL]));
 	}
 
 	/// Length-prefix each NAL with a 4-byte big-endian length: the hvc1 wire shape.
