@@ -50,7 +50,7 @@ paths diverged.
 
 1. Route copies become successive writers into the logical `TrackState`,
    the only cache. Every writer is of the instance the subscription started
-   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs)
+   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-instances)
    never feeds it (the route rule in `rs/moq-net/AGENTS.md`), so its readers
    end with an error once their instance's routes are gone. Same-epoch routes
    carry identical content, so a later writer's duplicate sequence is

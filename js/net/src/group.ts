@@ -1120,7 +1120,7 @@ export class Consumer {
 	}
 
 	/**
-	 * Settles with a `StreamError` of code `Old` once the subscription's `maxDelay` gives up
+	 * Settles with a `StreamError` of code `Old` once the subscription's `delay.max` gives up
 	 * on this group, even after every frame was read or the group closed: a publisher still
 	 * writing or draining it races its writes against this, and against {@link closed}
 	 * settling with an error, and abandons the stream once either does. Peek it synchronously

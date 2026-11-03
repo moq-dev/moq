@@ -66,14 +66,15 @@ These land with the next breaking release.
   Neither side reads the other's shape, so upgrade HLS exporters and their
   publishers together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
-  publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
-  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport carries no epoch;
+  instance, or a higher epoch of the same one, now serves the prefix. lite-06's
+  `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it always meant. Elsewhere,
   a restart is still an end then a start.
-- **Publisher epochs ride the route** (#4942). moq-lite 07 carries the epoch
-  after the path in `ANNOUNCE_START`, `TRACK`, `SUBSCRIBE`, and `FETCH`.
-  Routes without an epoch no longer resume across routes, so default lite-06
-  sessions, including cluster GOAWAY redials, lose seamless cross-route
-  failover until lite-07 is the default.
+- **Publisher instances ride the route.** moq-lite 07 carries the instance and
+  epoch after the path in `ANNOUNCE_START` and `ANNOUNCE_RESTART`, and the
+  pinned instance in `TRACK`, `TRACKS`, `SUBSCRIBE`, and `FETCH`. Older wires
+  carry none, so the receiving session mints an instance per announcement:
+  default lite-06 sessions, including cluster GOAWAY redials, lose seamless
+  cross-route failover until lite-07 is the default.
 - **Route cost is one value** (#4661). Upgraded nodes write lite-06's cold
   cost at 2^62-1, so an older relay that still ranks on `(warm, cold)` breaks
   equal-warm ties against routes that crossed an upgraded node. It is only a
