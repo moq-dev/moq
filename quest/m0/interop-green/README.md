@@ -31,10 +31,10 @@ Already owned: the intermittent media-matrix timestamp-gap cells
 (`cpp -> js-native-node`, `go -> c`, browser `rust -> js` timeouts) belong to
 [test flakes](/quest/m0/test-flakes-2/README.md), with
 [moq-dev/moq#6990](https://github.com/moq-dev/moq/pull/6990) open. So does
-the fallback audio stall, which runs
+the fallback audio stall, which hit on
+`moq-lite-07-wip` in
 [41495461904](https://github.com/moq-dev/moq/actions/runs/41495461904) and
-[41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824)
-hit on `moq-lite-07-wip`; see
+[41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824); see
 [the IETF22 fallback quest](/quest/m0/test-flakes-2/ietf22-fallback.md).
 
 Every child has landed. Video passed its scheduled
