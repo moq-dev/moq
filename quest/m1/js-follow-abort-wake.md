@@ -16,7 +16,7 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 - ✅ m1
 - m2
 
-Found by [moq-dev/moq#7693](https://github.com/moq-dev/moq/pull/7693): the
+Found by [moq-dev/moq#7693](https://github.com/moq-dev/moq/pull/7693) (merged): the
 pending read stays parked until the next read throws the error, while a
 pending `nextGroup()` wakes on both paths.
 
@@ -37,5 +37,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [moq-boy's status loop stops on an errored track](/quest/m1/moq-boy-status-loop.md) - #7693, where this surfaced
 - [Resume redesign](/quest/m2/resume-redesign.md) - would replace this code later

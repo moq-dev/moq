@@ -6,8 +6,9 @@ JS keeps names that collide with `Object.prototype` (`__proto__`,
 `constructor`, `toString`) wherever it keys renditions or catalog members
 by name, the way Rust does:
 
-- `js/msf/src/catalog.ts`'s `ext` map keeps a `__proto__` key as an own
-  property, like `moq-msf`'s `Catalog::ext`.
+- `js/msf/src/catalog.ts`'s exported `CatalogSchema` keeps a `__proto__`
+  `ext` key as an own property, as its `decode` already does, like
+  `moq-msf`'s `Catalog::ext`.
 - `js/publish` registers a rendition named `__proto__` or `constructor`
   instead of refusing it as "rendition already registered", and its catalog
   and stats builders publish it.
@@ -28,17 +29,18 @@ Both gaps are the same bug as hang's catalog maps, fixed by
 a plain object keyed by an untrusted name. Planned as one quest (maintainer, from #7498's
 iterate, 2026-11-03).
 
-- **MSF `ext`.** It parses with `z.record` (around line 76), which drops a
-  `__proto__` key; the encoder already writes one as an own property. Use the
-  parser hang's maps use since #7498 (`renditions()`/`section()` in
-  `js/hang/src/catalog/section.ts`, or its pattern if `js/msf` can't depend on
-  hang) and add the case to the parity corpus.
+- **MSF `ext`.** `decode` and `encode` already keep a `__proto__` member
+  (null-prototype maps; `catalog.test.ts`'s "round-trips a __proto__
+  extension member as data"). Only the exported `CatalogSchema` (around line
+  69) still declares `ext` as a `z.record`, which drops it for a caller that
+  parses with the schema directly. Give it the same null-prototype parse, or
+  stop exporting it as a parser if nothing outside `js/msf` should use it.
 - **js/publish.** `#renditions` and `#records` in
   `js/publish/src/broadcast.ts` (around lines 147 and 163) are plain
   objects, so `this.#renditions.peek()[name]` finds `Object.prototype`'s
   member and throws "already registered". Key them with a `Map` (or
   null-prototype objects) and carry that through the catalog and stats
   builders that read them, so the published catalog keeps the name.
-- Test `__proto__`, `constructor`, and `toString` in each place.
+- Test `__proto__`, `constructor`, and `toString` in each place that changes.
 
 Public API: none. Wire: none.
