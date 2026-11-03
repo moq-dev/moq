@@ -12,6 +12,38 @@ waits, and a widening re-offers what its new budget covers. On lite-07 this
 restores "growing means I want it": a group reported dropped under a
 narrower budget is served after a widening, as a cold relay would.
 
+## Waiting
+
+- Maintainer: settle the JS run memory policy. The 2026-11-02 implementation
+  audit found that `js/net/src/group.ts` applies its 32 MiB limit to each
+  group's frame tail, not to track metadata or cursor runs. A mock-time
+  probe retained 64, 256, and 1,024 disjoint OLD runs with zero cached groups
+  and zero elapsed time. Unknown gaps prevent coalescing or folding these
+  into a cursor's final floor; idle expiry alone does not bound a flood
+  inside its window. Choose shared byte accounting for JS cache metadata
+  and runs, with eviction and the planned fold-or-`TooFarBehind` behavior
+  (recommended; settle its budget and ownership), or a different ownership
+  or backpressure bound that also covers drop-only tracks. The previous
+  assertion that every run sits between cached sequences is false when
+  drops name groups this relay never cached, a required case of this quest.
+- Maintainer: settle how a received stale drop identifies its judged range
+  after SUBSCRIBE_UPDATE changes ranges without changing Max Age. A drop
+  sent under the old broad range can arrive after the relay requests a
+  narrower aggregate range; that reader now covers the aggregate but not
+  the range used for the verdict. Mock-time cursors over groups at 0, 1,
+  and 2 seconds confirm the difference: at a zero-millisecond budget
+  (wire Max Age 1) the open range serves group 2, whereas a range capped
+  before group 1 serves group 0. Max Age alone cannot distinguish an old
+  broad-range verdict from a new one.
+  Choose an explicit range-terms identifier echoed in stale drops and
+  treat superseded identifiers as unknown without keeping unbounded term
+  history (recommended; settle the lite-07 fields), or conservatively
+  qualify drops against all possibly judged ranges and refill whenever
+  that cannot prove applicability. The latter must specify how to bound
+  that state and when a reader is guaranteed a prompt verdict. This is
+  separate from the settled budget tag and from the deferred lite-ranges
+  design work. No wire or production change has been implemented.
+
 ## Plan
 
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
@@ -57,7 +89,8 @@ disposition record to this quest.
     (`Edge::cap`), so a narrower reader treats the run as unknown and fills
     it by range, where the upstream judges it under that narrower range.
     The cost is an extra range request, only for narrower readers, when a
-    stale drop arrives.
+    stale drop arrives. This qualification is incomplete when an update
+    changes the aggregate range; settle the range-terms item under `Waiting`.
   - A missing run this relay judges itself is dropped for a reader under
     whose own budget and range `TrackState::drifted` convicts it. `drifted`
     judges a missing sequence by its successor here, and every sequence in
@@ -165,13 +198,11 @@ byte accounting like a group: the Rust `Pool` through a `Charge` at a fixed
 per-run cost. Under pressure the pool evicts the oldest runs as it evicts
 groups, and a run older than the cache's retention window is forgotten, so
 the set never outgrows what the pool would hold, with no new constant. An
-evicted run's sequences become unknown again. `js/net` has no byte pool and
-gets no new cap: its shared and per-cursor runs expire with the same idle
-window as the groups they sit between, and expiry applies the same
-fold-or-`TooFarBehind` rule as a Rust eviction. The implementation audit below
-found that neither a cached-sequence count nor the existing group-tail limit
-bounds drop-only runs; the JS memory policy needs the maintainer's decision
-under `Waiting` before implementation.
+evicted run's sequences become unknown again. `js/net` has no byte pool;
+its run memory policy is open under `Waiting`. Neither a cached-sequence
+count nor its existing per-group frame-tail limit bounds drop-only runs.
+Expiry and eviction must preserve the same fold-or-`TooFarBehind` behavior
+as Rust.
 
 Only a final run folds into a cursor's floor: a delivered run, a run
 skipped at the track's max age bound (no widening reaches past it), or a
@@ -222,7 +253,9 @@ Test on mock time through a relay:
 - A reader whose range is narrower than the relay's aggregate range is not
   settled by a received stale drop: it fills G by range and gets G or a
   drop judged under its own range, while a reader covering the aggregate
-  range is settled at once.
+  range is settled at once. Add the in-flight broad-range drop after a
+  narrowing from the range-terms item under `Waiting`; its qualification
+  remains open.
 - On lite-07, a cursor that delivered F, reported its neighbour G stale
   while G stayed cached, and delivered H, gets only G after a widening that
   covers all three: G is re-offered and F and H are never resent.
@@ -234,8 +267,9 @@ Test on mock time through a relay:
 - A flood of fragmented runs stays within the pool in Rust, evicting the
   oldest shared runs first, and a sequence whose shared run was evicted is
   judged locally or filled by range, never waited on indefinitely. In
-  `js/net` the same flood holds at most one run more than its cached
-  sequences, and the runs expire with the idle window.
+  `js/net`, include a drop-only flood with no cached groups and check the
+  bound chosen under `Waiting`, including eviction or expiry of a
+  nonfinal cursor run. That memory-policy decision blocks this assertion.
 - A single run spanning billions of sequences is settled by each cursor in
   one step, whether dropped, skipped by a wider reader, or evicted and
   judged again.
@@ -301,37 +335,6 @@ Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149)
 a cancelled fetch below a track's end still holds the end open until the cache
 expiry scan removes it, so how fast a subscription ends depends on expiry
 timing. Settle it here, where cancelled and expired runs get a reason.
-
-## Waiting
-
-- Maintainer: settle the JS run memory policy. The 2026-11-02 implementation
-  audit found that `js/net/src/group.ts` applies its 32 MiB limit to each
-  group's frame tail, not to track metadata or cursor runs. A mock-time
-  probe retained 64, 256, and 1,024 disjoint OLD runs with zero cached groups
-  and zero elapsed time. Unknown gaps prevent coalescing or folding these
-  into a cursor's final floor; idle expiry alone does not bound a flood
-  inside its window. Choose shared byte accounting for JS cache metadata
-  and runs, with eviction and the planned fold-or-`TooFarBehind` behavior
-  (recommended; settle its budget and ownership), or a different ownership
-  or backpressure bound that also covers drop-only tracks. The previous
-  assertion that every run sits between cached sequences is false when
-  drops name groups this relay never cached, a required case of this quest.
-- Maintainer: settle how a received stale drop identifies its judged range
-  after SUBSCRIBE_UPDATE changes ranges without changing Max Age. A drop
-  sent under the old broad range can arrive after the relay requests a
-  narrower aggregate range; that reader now covers the aggregate but not
-  the range used for the verdict. Mock-time cursors over groups at 0, 1,
-  and 2 seconds confirm the difference: at Max Age 0 the open range serves
-  group 2, whereas a range capped before group 1 serves group 0. Max Age
-  alone cannot distinguish an old broad-range verdict from a new one.
-  Choose an explicit range-terms identifier echoed in stale drops and
-  treat superseded identifiers as unknown without keeping unbounded term
-  history (recommended; settle the lite-07 fields), or conservatively
-  qualify drops against all possibly judged ranges and refill whenever
-  that cannot prove applicability. The latter must specify how to bound
-  that state and when a reader is guaranteed a prompt verdict. This is
-  separate from the settled budget tag and from the deferred lite-ranges
-  design work. No wire or production change has been implemented.
 
 ## Related
 
