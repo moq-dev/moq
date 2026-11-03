@@ -9,6 +9,20 @@ for every version. It never replays the cache from group 0.
 
 ## Plan
 
+Decided 2026-11-03 (maintainer, /quest-complete): ✅ land after
+[HLS export on a declared grid](/quest/m0/hls-media-grid.md). The rule
+(a pending join floors at request time) stays as implemented in
+[moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737). The one failing
+test, `a_cursor_records_a_publisher_without_fetch`, fails because
+moq-mux's `hls::Lend` subscribes to `video0` to build the `video0.hls` record
+track before the recorder's media SUBSCRIBE exists, so groups 0 to 2 predate
+that request. The HLS grid quest deletes the `<track>.hls` record tracks and has
+the recorder read media tracks directly, which removes that early subscription.
+Not chosen: the recorder naming a floor from its records (deleted with the
+records); applying the rule only to upstream copies (still replays a local
+cache to a first pre-05 subscriber); relaxing the test. Once the HLS grid lands,
+merge main and confirm the recorder test passes unchanged.
+
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
 [moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328).
@@ -54,24 +68,8 @@ other late-resolving consumer.
 Implementation: [moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737)
 implements this rule in Rust (`SubscribeServe` for lite-03 through lite-05,
 the track model, and a front's splice) and JS. The rule holds in every
-`moq-net` and JS test, but the HLS recorder test still fails; see Waiting.
+`moq-net` and JS test, but the HLS recorder test still fails until the HLS grid lands; see the decision above.
 
-## Waiting
+## Required
 
-- Maintainer: the decided rule cannot pass
-  `a_cursor_records_a_publisher_without_fetch` unchanged. A trace of the
-  lite-03 run shows the publisher writes media groups 0 to 2 as soon as
-  moq-mux's `hls::Lend` subscribes to `video0` for the records track
-  (`video0.hls`). That is before the recorder's media subscription exists on
-  either session. The recorder's lite-03 media SUBSCRIBE then reaches the
-  publisher with group 2 already its newest, so the rule floors it at 2 and
-  segment 0 is never sent. Base main passes only because it floors a pending
-  logical track at 0, which is the cache replay this quest removes. Options:
-  (1) the recorder names its floor: moq-hls subscribes to media from the group
-  its first wanted record names, so the SUBSCRIBE carries a Group Start
-  (recommended; nothing then depends on when the SUBSCRIBE arrives);
-  (2) apply the rule only to received copies (an in-flight upstream request),
-  so a publisher serving its own producer through a pending front keeps base
-  main's zero floor, which still replays a local cache to a first pre-05
-  subscriber; (3) relax the recorder test's expectation for lite-03/04.
-  Check: the chosen option passes the recorder test and the held-answer test.
+- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - removes the record-track subscription that captures media before the recorder's own SUBSCRIBE
