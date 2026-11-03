@@ -150,8 +150,7 @@ pub(crate) async fn dial(
 		.with_custom_certificate_verifier(Arc::new(AnyCert))
 		.with_no_client_auth();
 	tls.alpn_protocols = vec![version.alpn().as_bytes().to_vec()];
-	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-	let mut client = driver::client::Config::new(Arc::new(quic));
+	let mut client = driver::client::Config::new(Arc::new(tls));
 	client.transport = transport;
 
 	let endpoint =
@@ -174,7 +173,7 @@ pub(crate) fn rand_seed() -> u64 {
 			.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
 			.as_nanos() as u64,
 	};
-	println!("MOQ_SHAPER_SEED={seed}");
+	eprintln!("MOQ_SHAPER_SEED={seed}");
 	seed
 }
 
@@ -432,8 +431,7 @@ async fn reversed(version: &str) -> Reversed {
 		.with_single_cert(vec![cert.der().clone()], key.into())
 		.expect("tls");
 	tls.alpn_protocols = vec![alpn.clone()];
-	let quic = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic config");
-	let mut config = driver::server::Config::new(Arc::new(quic));
+	let mut config = driver::server::Config::new(Arc::new(tls));
 	config.transport = transport(WINDOW as u64);
 	let server = driver::endpoint::Endpoint::new(
 		driver::endpoint::Config::default().with_server(config),
@@ -447,13 +445,12 @@ async fn reversed(version: &str) -> Reversed {
 		.with_custom_certificate_verifier(Arc::new(AnyCert))
 		.with_no_client_auth();
 	tls.alpn_protocols = vec![alpn];
-	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
 	let client = driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
 		.expect("client endpoint");
 	let (conn, accepted) = tokio::join!(
 		async {
 			client
-				.connect(&driver::client::Config::new(Arc::new(quic)), addr, "localhost")
+				.connect(&driver::client::Config::new(Arc::new(tls)), addr, "localhost")
 				.expect("connect")
 				.await
 				.expect("handshake")
@@ -809,8 +806,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.with_single_cert(vec![cert.der().clone()], key.into())
 		.expect("tls");
 	tls.alpn_protocols = vec![web::ALPN.as_bytes().to_vec()];
-	let quic = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic config");
-	let mut config = driver::server::Config::new(Arc::new(quic));
+	let mut config = driver::server::Config::new(Arc::new(tls));
 	config.transport = transport(WINDOW as u64);
 	let endpoint = driver::endpoint::Endpoint::new(
 		driver::endpoint::Config::default().with_server(config),
@@ -1092,7 +1088,7 @@ async fn benchmark_receive_windows() {
 		("loopback", None, BENCH_BYTES),
 		("bufferbloat", Some(bufferbloat(BENCH_BLOAT.0)), BENCH_BLOAT.1),
 	];
-	println!("path,axis,streams,frame,window_mib,stream_window,peak_mib,mib_per_s,p50_ms,p99_ms,overflowed");
+	println!("path,axis,streams,frame,window_mib,stream_window,peak_bytes,mib_per_s,p50_ms,p99_ms,overflowed_packets");
 	for (cell, (path, profile, bytes)) in cells.flat_map(|cell| paths.clone().map(|path| (cell, path))) {
 		let mut runs = Vec::with_capacity(RUNS);
 		for _ in 0..RUNS {
@@ -1113,13 +1109,12 @@ async fn benchmark_receive_windows() {
 		let throughput = median(runs.iter().map(|run| run.throughput).collect());
 		let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
 		println!(
-			"{path},{},{},{},{},{},{:.1},{:.0},{:.2},{:.2},{overflowed}",
+			"{path},{},{},{},{},{},{peak:.0},{:.0},{:.2},{:.2},{overflowed}",
 			cell.axis,
 			cell.streams,
 			cell.frame,
 			cell.window >> 20,
 			if cell.follow { "follow" } else { "finite" },
-			peak / (1 << 20) as f64,
 			throughput / (1 << 20) as f64,
 			percentile(50),
 			percentile(99),

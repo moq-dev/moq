@@ -16,27 +16,13 @@ pub(crate) struct MtuDiscovery {
 }
 
 impl MtuDiscovery {
-	pub(crate) fn new(
-		initial_plpmtu: u16,
-		min_mtu: u16,
-		peer_max_udp_payload_size: Option<u16>,
-		config: mtu::Config,
-	) -> Self {
+	pub(crate) fn new(initial_plpmtu: u16, min_mtu: u16, config: mtu::Config) -> Self {
 		debug_assert!(
 			initial_plpmtu >= min_mtu,
 			"initial_max_udp_payload_size must be at least {min_mtu}"
 		);
 
-		let mut mtud = Self::with_state(initial_plpmtu, min_mtu, Some(EnabledMtuDiscovery::new(config)));
-
-		// We might be migrating an existing connection to a new path, in which case the transport
-		// parameters have already been transmitted, and we already know the value of
-		// `peer_max_udp_payload_size`
-		if let Some(peer_max_udp_payload_size) = peer_max_udp_payload_size {
-			mtud.on_peer_max_udp_payload_size_received(peer_max_udp_payload_size);
-		}
-
-		mtud
+		Self::with_state(initial_plpmtu, min_mtu, Some(EnabledMtuDiscovery::new(config)))
 	}
 
 	/// MTU discovery will be disabled and the current MTU will be fixed to the provided value
@@ -523,7 +509,7 @@ mod tests {
 
 	fn default_mtud() -> MtuDiscovery {
 		let config = mtu::Config::default();
-		MtuDiscovery::new(1_200, 1_200, None, config)
+		MtuDiscovery::new(1_200, 1_200, config)
 	}
 
 	fn completed(mtud: &MtuDiscovery) -> bool {
@@ -646,7 +632,7 @@ mod tests {
 			upper_bound: 9_000,
 			..mtu::Config::default()
 		};
-		let mut mtud = MtuDiscovery::new(1_200, 1_200, None, config);
+		let mut mtud = MtuDiscovery::new(1_200, 1_200, config);
 		let now = Instant::now();
 		drive_to_completion(&mut mtud, now, 1_500);
 
@@ -709,7 +695,8 @@ mod tests {
 
 	#[test]
 	fn mtu_discovery_with_previous_peer_max_udp_payload_size_clamps_upper_bound() {
-		let mut mtud = MtuDiscovery::new(1500, 1_200, Some(1400), mtu::Config::default());
+		let mut mtud = MtuDiscovery::new(1500, 1_200, mtu::Config::default());
+		mtud.on_peer_max_udp_payload_size_received(1400);
 
 		assert_eq!(mtud.current_mtu, 1400);
 		assert_eq!(mtud.state.as_ref().unwrap().peer_max_udp_payload_size, 1400);
@@ -749,7 +736,7 @@ mod tests {
 			upper_bound: 10_000,
 			..mtu::Config::default()
 		};
-		let mut mtud = MtuDiscovery::new(1_200, 1_200, None, config);
+		let mut mtud = MtuDiscovery::new(1_200, 1_200, config);
 
 		let probed_sizes = drive_to_completion(&mut mtud, Instant::now(), 1500);
 
@@ -768,7 +755,7 @@ mod tests {
 			upper_bound: MAX_UDP_PAYLOAD,
 			..mtu::Config::default()
 		};
-		let mut mtud = MtuDiscovery::new(1200, 1200, None, config);
+		let mut mtud = MtuDiscovery::new(1200, 1200, config);
 
 		drive_to_completion(&mut mtud, Instant::now(), u16::MAX);
 
@@ -782,7 +769,7 @@ mod tests {
 			upper_bound: MAX_UDP_PAYLOAD,
 			..mtu::Config::default()
 		};
-		let mut mtud = MtuDiscovery::new(1200, 1200, None, config);
+		let mut mtud = MtuDiscovery::new(1200, 1200, config);
 
 		let now = Instant::now();
 		let mut iterations = 0;

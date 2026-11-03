@@ -1,40 +1,41 @@
-# [M] Backport the joined-head FETCH race fix to release
+# [S] Ship the joined-head FETCH race backport
 
 ## Goal
 
-A relay on `release` no longer FETCHes the head of a group that its own
-SUBSCRIBE is already bringing. In that race the fetched objects can land first,
-so the relay caches the group as fetched, refuses the live tail stream that ends
-it as `duplicate`, and leaves live readers waiting on the group until they time
-out. This ports fix 2 of
-[moq-dev/moq#7135](https://github.com/moq-dev/moq/pull/7135) and ships it in a
-`moq-net` patch release.
+The `release` relay no longer races its subscription's joining head with a
+cache-miss FETCH, and the fix reaches users in a `moq-net` patch release.
+Public API and wire stay unchanged.
 
 ## Plan
 
-Decided 2026-10-30 (maintainer): port only the relay fix. Why: #7135's other
-fix, the JS publisher answering an `INCLUDE_PROPERTIES=0` FETCH without
-timestamps, cannot happen on `release`, whose `js/net/src/ietf/publisher.ts`
-`runFetch` refuses every FETCH.
+[moq-dev/moq#7135](https://github.com/moq-dev/moq/pull/7135) merged on `main`.
+The relay fix is hand-ported in [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680), targeting `release`.
 
-Decided 2026-10-30 (maintainer): m0, beside the other `release` backports.
-Why: it is an intermittent relay hang on the shipped line.
+The race reproduced on `release`: both joined-head miss tests sent an extra
+FETCH while the subscription's own fill was still outstanding. The older-history
+control fetched immediately. The port preserves those cases and covers reader
+cancellation and track abort using release's paused-time harness.
 
-`release` has the same machinery as main before #7135: the joining-head
-`Fill` in `rs/moq-net/src/ietf/subscriber.rs` and the group FETCH that fills a
-cache miss (`run_group_fetch`). It has no `rs/moq-net/src/model/track/fill.rs`,
-so the fix is hand-ported, not cherry-picked. Port the behavior: a cache miss
-for the joined group waits until the subscription's own head arrives or its
-request settles, then the cache answers it; a failed head request still falls
-back to a FETCH. Only that group waits, so older history still FETCHes at once,
-and the wait ends when no reader wants the group or the track aborts. Port
-#7135's subscriber tests that cover this alongside it.
+Decided 2026-10-30 and reaffirmed 2026-11-01 (maintainer): port only the relay
+fix. Release's JS publisher refuses every FETCH, so the old publisher timestamp
+bug cannot happen there. The settled main PR also carries only the relay fix.
 
-Start by reproducing the race on `release` with one of those tests. If
-`release` cannot hit it, delete this quest and say why in the PR.
+The port uses release's existing per-group requests and joining `Fill`; it
+imports none of main's range-fill or subscription-widening machinery. The
+joined group waits for its own head or a settled fill, the cache answers a head
+that arrives, and a remaining miss still FETCHes. Older history does not wait.
 
-Public API: none. Wire: none.
+Local review also exposed a pending miss no longer being polled during the
+PUBLISH_DONE grace. The backport adds that poll and a paused-time reproduction.
+Main's corresponding grace also omits it. Land that main-side correction before
+the backport, following the main-first backport rule.
 
-## Required
+After the backport lands, use the existing patch-release process. Package
+version bumps, tags, and publication are separate from this implementation
+attempt. Verify that the published `moq-net` patch contains the backport, then
+remove this quest and its links.
 
-- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - lands the fix this quest ports, on main
+## Waiting
+
+- moq-dev/moq: land the PUBLISH_DONE grace correction on main before [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680) lands; the backport contains the release-side poll and a paused-time reproduction.
+- Maintainer: review and merge [moq-dev/moq#7680](https://github.com/moq-dev/moq/pull/7680) after the release checks pass, then publish the `moq-net` patch through the normal release process; verify its source contains the joined-head wait.

@@ -35,15 +35,17 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
 }
 
 /**
- * A media section's renditions, refusing the catalog if any one is malformed.
+ * A catalog map keyed by ID (renditions, data tracks, contributions), refusing the catalog if any
+ * entry is malformed.
  *
- * Each rendition must parse with `schema`; the issue names the rendition. An unknown container
+ * Each entry must parse with `schema`; the issue names the entry. An unknown container
  * or extension field is not malformed, so it never refuses the catalog. Mirrors the Rust
  * `deserialize_renditions`.
  *
- * @param schema - one rendition's schema.
+ * @param schema - one entry's schema.
+ * @param kind - what an entry is, naming it in the issue (`rendition`, `contribution`).
  */
-export function renditions<T extends z.ZodMiniType>(schema: T) {
+export function renditions<T extends z.ZodMiniType>(schema: T, kind = "rendition") {
 	return z.pipe(
 		// Not `z.record`, which would drop an ID like `__proto__` that JSON.parse keeps as its own.
 		z.custom<Record<string, unknown>>(
@@ -57,7 +59,7 @@ export function renditions<T extends z.ZodMiniType>(schema: T) {
 				else
 					ctx.issues.push({
 						code: "custom",
-						message: `malformed rendition ${id}: ${result.error.message}`,
+						message: `malformed ${kind} ${id}: ${result.error.message}`,
 						input: value,
 					});
 			}

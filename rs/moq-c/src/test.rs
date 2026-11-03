@@ -25,6 +25,7 @@ const TEN_SECONDS: moq_delay = moq_delay {
 	min_us: 0,
 	max_us: 10_000_000,
 	max_unlimited: false,
+	min_unstated: false,
 };
 
 /// Convert a positive `i32` return value to `u32`, panicking on error.
@@ -131,7 +132,8 @@ impl Callback {
 	}
 
 	fn recv(&self) -> i32 {
-		self.rx.recv_timeout(TIMEOUT).expect("callback timed out")
+		// Delivery depends on the runtime and codec threads; nextest guards hangs.
+		self.rx.recv().expect("callback channel closed")
 	}
 
 	/// Wait for the terminal callback (code <= 0) the task delivers after close
@@ -236,7 +238,8 @@ impl Drop for Callback {
 
 /// FFI callback that forwards the status code through an `mpsc::Sender`.
 extern "C" fn channel_callback(user_data: *mut c_void, code: i32) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<i32>) };
+	// Terminal delivery lets the receiver free user_data and its channel while send still runs.
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<i32>) }.clone();
 	let _ = tx.send(code);
 }
 
@@ -295,7 +298,7 @@ impl Drop for States {
 }
 
 extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connection_state) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) };
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) }.clone();
 	let state = unsafe { &*state };
 	let mut protocol = moq_protocol_error {
 		scope: 0,
@@ -1766,8 +1769,10 @@ fn publish_track_invalid_broadcast() {
 
 	let subscription = moq_subscription {
 		priority: 1,
-		max_delay_us: 0,
-		max_delay_present: false,
+		delay: moq_delay {
+			max_unlimited: true,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -1990,8 +1995,10 @@ fn raw_track_publish_consume() {
 	// finish draining if the second becomes visible while the callback runs.
 	let subscription = moq_subscription {
 		priority: 0,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -2224,8 +2231,10 @@ fn raw_track_subscription_options_and_update() {
 	];
 	let subscription = moq_subscription {
 		priority: 5,
-		max_delay_us: 25_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 25_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2254,15 +2263,20 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(read_timestamp(frame.timestamp), Some(micros(20_000)));
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-	let widened = [moq_range {
-		end: moq_anchor {
-			group: 3,
-			..ranges[0].end
+	// Widen the bounded range but keep the open one, so the read stays open for the cancel.
+	let widened = [
+		moq_range {
+			end: moq_anchor {
+				group: 3,
+				..ranges[0].end
+			},
+			..ranges[0]
 		},
-		..ranges[0]
-	}];
+		ranges[1],
+	];
 	let update = moq_subscription {
 		ranges: widened.as_ptr(),
+		ranges_len: widened.len(),
 		..subscription
 	};
 	assert_eq!(unsafe { moq_consume_track_update(consumer, &update) }, 0);
@@ -2335,8 +2349,10 @@ fn raw_track_time_anchor() {
 	}];
 	let subscription = moq_subscription {
 		priority: 5,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2433,8 +2449,10 @@ fn raw_track_update_refuses_time_on_untimed() {
 	}];
 	let update = moq_subscription {
 		priority: 3,
-		max_delay_us: 1_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 1_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2490,8 +2508,10 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	};
 	let subscribe = |ranges: &[moq_range]| moq_subscription {
 		priority: 0,
-		max_delay_us: 60_000_000,
-		max_delay_present: true,
+		delay: moq_delay {
+			max_us: 60_000_000,
+			..moq_delay::default()
+		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
@@ -2998,42 +3018,189 @@ fn json_window_refreshes_a_bounded_checkpoint() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Cancelling a JSON consumer whose subscription the publisher has not answered still delivers
-/// the terminal callback, for every JSON mode.
-#[test]
-fn json_cancel_while_subscribing() {
-	type Consumer = unsafe extern "C" fn(u32, *const c_char, usize, ffi::moq_status_callback, *mut c_void) -> i32;
-	let consumers: [(&[u8], Consumer); 3] = [
-		(b"snapshot", moq_consume_json_snapshot),
-		(b"stream", moq_consume_json_stream),
-		(b"window", moq_consume_json_window),
-	];
+/// Every consumer that subscribes by name, with its cancel.
+type NamedConsumer = (
+	&'static [u8],
+	fn(u32, &[u8], *mut c_void) -> i32,
+	extern "C" fn(u32) -> i32,
+);
 
+const NAMED_CONSUMERS: [NamedConsumer; 5] = [
+	(
+		b"raw",
+		|consume, name, user_data| unsafe {
+			moq_consume_track(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				std::ptr::null(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_track_cancel,
+	),
+	(
+		b"datagrams",
+		|consume, name, user_data| unsafe {
+			moq_consume_datagrams(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_datagrams_cancel,
+	),
+	(
+		b"snapshot",
+		|consume, name, user_data| unsafe {
+			moq_consume_json_snapshot(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_json_cancel,
+	),
+	(
+		b"stream",
+		|consume, name, user_data| unsafe {
+			moq_consume_json_stream(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_json_cancel,
+	),
+	(
+		b"window",
+		|consume, name, user_data| unsafe {
+			moq_consume_json_window(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_json_cancel,
+	),
+];
+
+/// Cancelling a consumer whose subscription the publisher has not answered still delivers the
+/// terminal callback.
+#[test]
+fn named_consumers_cancel_while_subscribing() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"json-cancel-subscribing");
+	let broadcast = publish_broadcast(origin, b"cancel-subscribing");
 	// Unknown tracks become requests, which leave each subscribe pending until answered.
 	let request_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 	let consume = consume_local(broadcast);
 
-	for (name, consumer) in consumers {
+	for (name, consumer, cancel) in NAMED_CONSUMERS {
 		let cb = Callback::new();
-		let task = id(unsafe {
-			consumer(
-				consume,
-				name.as_ptr() as *const c_char,
-				name.len(),
-				Some(channel_callback),
-				cb.ptr,
-			)
-		});
+		let task = id(consumer(consume, name, cb.ptr));
 		let request = id(request_cb.recv());
 
-		assert_eq!(moq_consume_json_cancel(task), 0);
+		assert_eq!(cancel(task), 0);
 		assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
 		assert_eq!(moq_track_request_free(request), 0);
 	}
 
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn catalog_cancel_while_subscribing() {
+	// A bare moq-net broadcast has no catalog track, so its subscribe waits on the handler.
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let mut requests = broadcast.requests();
+	let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
+
+	let cb = Callback::new();
+	let catalog = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), cb.ptr) });
+	let _unanswered = crate::ffi::RUNTIME.block_on(requests.requested_track()).unwrap();
+
+	assert_eq!(moq_consume_catalog_cancel(catalog), 0);
+	assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
+	assert_eq!(moq_consume_close(consume), 0);
+}
+
+#[test]
+fn media_consumers_cancel_while_subscribing() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-cancel-subscribing");
+
+	// Catalog renditions with no track behind them, so each media subscribe becomes a request.
+	let (video_name, video_codec) = ("video", "vp8");
+	let video = moq_video_config {
+		preference: 0,
+		name: video_name.as_ptr() as *const c_char,
+		name_len: video_name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: video_codec.as_ptr() as *const c_char,
+		codec_len: video_codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	let (audio_name, audio_codec) = ("audio", "opus");
+	let audio = moq_audio_config {
+		name: audio_name.as_ptr() as *const c_char,
+		name_len: audio_name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: audio_codec.as_ptr() as *const c_char,
+		codec_len: audio_codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48000,
+		channel_count: 2,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+
+	let request_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+	let consume = consume_local(broadcast);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog = id(catalog_cb.recv());
+
+	type Media = unsafe extern "C" fn(u32, u32, *const moq_delay, ffi::moq_status_callback, *mut c_void) -> i32;
+	let consumers: [(Media, extern "C" fn(u32) -> i32); 2] = [
+		(moq_consume_video, moq_consume_video_cancel),
+		(moq_consume_audio, moq_consume_audio_cancel),
+	];
+	for (consumer, cancel) in consumers {
+		let cb = Callback::new();
+		let task = id(unsafe { consumer(catalog, 0, std::ptr::null(), Some(channel_callback), cb.ptr) });
+		let request = id(request_cb.recv());
+
+		assert_eq!(cancel(task), 0);
+		assert_eq!(cb.recv_terminal(), 0, "a cancelled subscribe ends cleanly");
+		assert_eq!(moq_track_request_free(request), 0);
+	}
+
+	assert_eq!(moq_consume_catalog_free(catalog), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
@@ -3100,8 +3267,10 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 0,
-		max_delay_us: 0,
-		max_delay_present: false,
+		delay: moq_delay {
+			max_unlimited: true,
+			..moq_delay::default()
+		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: 0,
@@ -3665,7 +3834,7 @@ impl Drop for ProtocolCallback {
 }
 
 extern "C" fn protocol_callback(user_data: *mut c_void, code: i32) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<(i32, Option<moq_protocol_error>)>) };
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<(i32, Option<moq_protocol_error>)>) }.clone();
 	let mut out = moq_protocol_error {
 		scope: 0,
 		code: 0,
@@ -4823,8 +4992,10 @@ struct Gate {
 
 extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
 	let gate = unsafe { &*(user_data as *const Gate) };
-	let _ = gate.tx.send(code);
+	// The receiver may free gate as soon as it receives the terminal code.
 	let hold = gate.hold.lock().unwrap().take();
+	let tx = gate.tx.clone();
+	let _ = tx.send(code);
 	if let Some(hold) = hold {
 		let _ = hold.recv();
 	}
@@ -6357,16 +6528,27 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.quic.resolve().keylog.is_none());
 }
 
-/// `moq_subscription_defaults` reads back as moq-net's defaults, while a zeroed struct
-/// sets no subscriber limit.
+/// `moq_subscription_defaults` and a zeroed struct both read back as moq-net's defaults, and
+/// the flags reach the unstated minimum and the unlimited max.
 #[test]
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = unsafe { crate::api::parse_subscription(&moq_subscription_defaults()) }.unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
 
-	let zeroed: moq_subscription = unsafe { std::mem::zeroed() };
-	let zeroed = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
-	assert_eq!(zeroed.delay.max, None);
+	let mut zeroed: moq_subscription = unsafe { std::mem::zeroed() };
+	assert_eq!(
+		unsafe { crate::api::parse_subscription(&zeroed) }.unwrap(),
+		moq_net::track::Subscription::default()
+	);
+
+	zeroed.delay = moq_delay {
+		min_us: 5,
+		max_us: 5,
+		max_unlimited: true,
+		min_unstated: true,
+	};
+	let flagged = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
+	assert_eq!(flagged.delay, moq_net::track::Delay { min: None, max: None });
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,

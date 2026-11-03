@@ -804,7 +804,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		}
 		await feed.drain();
 	};
-	let announced: Moq.Origin.Requesting | undefined;
+	let announced: Moq.Origin.Following | undefined;
 	try {
 		await configuring;
 		await settle();
@@ -820,9 +820,9 @@ test("audio failure stays local through demand changes and capture format re-arm
 		await settle();
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
-		expect(siblingTrack.appendGroup().sequence).toBe(0);
+		expect(siblingTrack.appendGroup().sequence).toBe(0n);
 		await push(0, 1);
-		expect((await subscriber.largest())?.group).toBe(0);
+		expect((await subscriber.largest())?.group).toBe(0n);
 		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
 		expect((await catalog.latest())?.value.audio?.renditions.audio?.enabled).not.toBe(false);
@@ -850,7 +850,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(LaggingAudioEncoder.instances).toHaveLength(instances);
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
-		expect(siblingTrack.appendGroup().sequence).toBe(1);
+		expect(siblingTrack.appendGroup().sequence).toBe(1n);
 
 		const reconfiguring = configured();
 		capture.out.format.set({ sampleRate: 48_000, channelCount: 2 });
@@ -865,12 +865,12 @@ test("audio failure stays local through demand changes and capture format re-arm
 		recovered = net.track(config.track).subscribe();
 		await settle();
 		await push(3, 2);
-		expect((await recovered.largest())?.group).toBe(0);
+		expect((await recovered.largest())?.group).toBe(0n);
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
-		expect(siblingTrack.appendGroup().sequence).toBe(2);
+		expect(siblingTrack.appendGroup().sequence).toBe(2n);
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();
@@ -1010,7 +1010,7 @@ test.each([undefined, false, true])(
 			if (!frame) throw new Error("expected a frame");
 			const [timestamp] = Moq.Varint.decode(frame.payload);
 			// Buffered audio is encoded ahead of the live input on the capture clock.
-			expect(group.sequence).toBe(0);
+			expect(group.sequence).toBe(0n);
 			expect(timestamp).toBe(0);
 
 			// Losing demand preserves the epoch and resumes raw retention.

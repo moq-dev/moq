@@ -139,10 +139,9 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
   the thread-per-core workers (`--runtime-workers`, the default once
   [Shard by default](/quest/m2/perf/shard-default.md) lands) and link workers over an
   in-memory transport (`moq_net::transport::memory`),
-  never real QUIC. The replica spike (results below)
-  replicates the data plane and shares announcements; the
-  [cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md)
-  shares nothing. A measured win reopens sharding through `/quest-plan`; a
+  never real QUIC. The replica spike replicates the data plane and shares
+  announcements; the cluster spike shares nothing (both results below). A
+  measured win reopens sharding through `/quest-plan`; a
   no-win restores the rule.
 - Spikes are draft PRs that never merge; their numbers and recommendation
   land here. The in-memory transport merges for real.
@@ -222,7 +221,7 @@ eviction, scoped to `GroupState`'s frames with the above as its expected
 win, and no longer waits on the spikes: they change how much it wins, not
 the storage Front eviction needs. `TrackState` arrival order moved to
 [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md), which
-still waits on them.
+waited on them until both reported (below).
 A 2026-10-22 staging CDN chat profile (default tokio runtime, `f57c0aad`,
 DWARF stacks, 36% incomplete) put waiter registration at 1.97% self-time, the
 fourth-largest site, on a 501-connection chat shape. It agrees with this
@@ -364,11 +363,111 @@ user instructions per frame at 4 and 16 workers. If sharding reopens,
 replicate per track on demand: never on the publisher's own worker, and only above a per-worker fan-out
 threshold, serving the rest from the shared origin. Rerun this comparison
 with the version counter (landed above), since it attacks the same 16-worker chat `TrackState` waits without
-the hop. Weigh it against the
-[Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md)
-before `/quest-plan`.
+the hop. Weigh it against the cluster spike (below) before `/quest-plan`.
+
+Cluster spike (2026-11-01,
+[moq-dev/moq#7534](https://github.com/moq-dev/moq/pull/7534), prototype at
+[`ddd8b042`](https://github.com/moq-dev/moq/commit/ddd8b042ab82c7a4d53957e31fe35942957b7dfb),
+not merged): each tokio worker builds its own `Cluster` (origin, cache pool,
+origin driver) on its thread, and the workers link in a full mesh of
+moq-lite-06 memory sessions that publish and subscribe like a dialed
+cluster peer, so announcements, routes, and groups all cross workers
+through moq-lite. Measured with `just bench-profile lock`, both arms on the
+same build in the same session, plus `perf stat` instruction counts
+(user and kernel, both core types) over the same 5 s steady window. The host
+stayed loaded (load average 15 to 25), so instructions per delivered frame
+rank the arms and wall-clock numbers only corroborate. Workers pinned
+(`runtime.pin`) unless noted; two pinned passes (three for pinned chat
+`base`), one unpinned.
+
+Thousand instructions per delivered frame, `base` (today's shared origin) to
+`cluster`:
+
+| shape | 1 worker | 4 workers | 16 workers | 16 workers, unpinned |
+| --- | --- | --- | --- | --- |
+| chat | 189 to 175 | 219 to 185 (-15%) | 236 to 190 (-20%) | 309 to 191 (-38%) |
+| fanout | 188 to 188 | 204 to 200 (-2%) | 255 to 244 (-4%) | 221 to 244 (+10%) |
+
+Unpinned at 4 workers: chat 229 to 185, fanout 206 to 202. Cells are
+medians of the passes; one worker runs the same code in both arms (one
+cluster, no links), and chat saturates it, so that column is noise.
+
+- Lock wait goes to zero: every pinned and unpinned `cluster` run measured
+  0 to 2 ms against `base`'s 22 to 710 ms (chat, 4 workers), 2,096 to
+  3,159 ms (chat, 16), 106 to 172 ms (fanout, 4), and 669 to 774 ms
+  (fanout, 16). `base` chat's unpinned lock capture failed three times
+  (perf saw nonalternating switch records), so that cell has no wait number.
+- Relay CPU, chat, pinned: 1.5 to 1.7 cores at 4 workers fell to 1.1, and
+  1.8 to 2.4 at 16 fell to 1.2 to 1.3 (unpinned 16: 2.6 to 1.3). Unpinned 4
+  workers measured 1.7 in both arms, so CPU time only corroborates the
+  instruction counts. Fanout stays under 0.08 cores either way.
+- The saving is kernel instructions (futex) and off-CPU wait. User
+  instructions stay flat for chat, but rise 19% for fanout at 16 workers
+  (173 to 205 thousand per frame): a one-frame group costs about 140
+  thousand user instructions per hop, and fanout's 64 subscribers give each
+  of the 15 hops only four readers to amortize it over. Chat's 2,000
+  subscribers amortize it to nothing.
+- Resident memory at 16 workers rose 14 MiB for fanout (43 to 57 MiB) and
+  20 MiB for chat (507 to 527 MiB): 16 origins and cache pools, 120 links.
+- Glass-to-glass p50 stayed within the generator's millisecond resolution.
+  In process (`spike_announce`, below), a one-frame group read on another
+  worker arrives 75 to 175 us (p50) and 0.26 to 1.6 ms (p99) after its
+  write, against 14 to 44 us for a reader on the writing worker.
+
+The control plane is where it loses. `spike_announce` meshes W origin
+threads the same way (on cores 8 to 23, away from the relay runs) and
+announces 1,000 broadcasts spread over the workers; heap is a counting
+allocator's live bytes once every worker has every broadcast:
+
+| workers | heap per broadcast | allocations per broadcast | announce delay p50 / p99 | 1,000 broadcasts converge |
+| --- | --- | --- | --- | --- |
+| 1 | 4.9 KB | 64 | - | 5 to 18 ms |
+| 2 | 10.9 KB | 140 | 12 to 18 / 32 to 250 us | 8 to 14 ms |
+| 4 | 45 KB | 690 to 730 | 20 to 22 / 63 to 230 us | 31 to 40 ms |
+| 8 | 202 to 203 KB | 3,260 to 3,270 | 70 to 80 / 240 to 380 us | 107 to 166 ms |
+| 16 | 881 to 889 KB | 14,600 to 16,500 | 290 to 380 / 1,170 to 1,330 us | 0.5 to 0.9 s |
+
+The heap repeats across runs and grows with W squared: per worker it is
+5.4, 11.3, 25.3, and 55.4 KB per broadcast at 2, 4, 8, and 16 workers, about
+3.7 KB more per peer. That fits each worker keeping a route per peer, since
+a full mesh re-announces every route to every peer (not checked route by
+route). At 16 workers a relay with 10,000 broadcasts would hold about 9 GB of
+announce state that a shared origin holds in 49 MB.
+[Cluster route memory](/quest/m2/perf/cluster-route-memory.md) breaks that
+per-route state down and shrinks it, profiles the hop's group cost, and
+fixes the `bench-profile lock` failures both spikes hit.
+
+Findings: the data-plane half is a win wherever a track fans out to many
+subscribers per worker (chat), and a wash or a loss where it does not
+(fanout). Sharing nothing through today's full mesh then costs W-squared
+announce state and propagation, which grows past any data-plane saving at
+relay broadcast counts.
+
+Decided (maintainer, 2026-11-01, cluster spike):
+
+- ✅ A conditional win. Relay-per-thread is planned through `/quest-plan`,
+  on the condition that the worker mesh never re-announces peer routes to
+  peers. Each worker then learns a broadcast once, from the worker that
+  ingested it, which cuts announce state to about one route per worker
+  instead of one per peer.
+- That changes cluster routing semantics: today a relay re-announces every
+  route it learned to every other peer, and hop chains prevent loops. How
+  routes from outside the relay (other relays' peer links) reach every
+  worker without re-announce is for the planning to settle.
+  [Routes and announces](/quest/m1/cluster-routing/routes.md) plans a
+  per-connection `proxy` preference (decided 2026-10-14, relays default on)
+  that decides whether a connection is sent routes learned from other
+  connections; a worker link with it off is this condition.
+- The cost is unmeasured. The spike measured only the full mesh; nobody has
+  measured announce state, propagation, or the data plane with
+  no-re-announce.
+- The replica spike (above) has since reported its own conditional win. It
+  keeps one shared announce table and replicates only the data plane, so it
+  chases the same data-plane win, which these numbers bound, at a different
+  control-plane cost. Weighing the two is for the planning to settle.
+- Rejected: calling relay-per-thread a no-win and leaving sharding to the
+  replica spike alone, and restoring the no-sharding rule now.
 
 ## Required
 
-- [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win
