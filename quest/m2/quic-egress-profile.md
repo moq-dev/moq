@@ -39,7 +39,28 @@ Then, only where the profile shows a cost:
 
 - `sendmmsg` in `moq_sock::udp` behind the existing GSO path, submitting every
   train ready across connections in one call, falling back to per-train
-  `sendmsg` on partial failure the way the GSO fallback does.
+  `sendmsg` on partial failure the way the GSO fallback does. A prototype on
+  the tokio driver gives the profile a starting point. At a 1280-byte payload
+  on one core, about 17 trains went per `sendmmsg`, server CPU fell 8 to 13%
+  for small-object sessions and 16 to 21% for audio-rate ones, and median
+  latency rose 0.3 ms. Its shape:
+  - `UdpSocketState::try_send_many` on Linux sends up to 64 transmits in one
+    call, each with its own segment size, ECN, and source-address cmsgs. It
+    returns how many the kernel took, and retries an `EIO` or `EINVAL` on the
+    first transmit alone through `try_send`, so GSO halting still applies.
+  - The driver copies each train into a per-socket queue, bounded in bytes,
+    and one task per socket yields once and then flushes the queue.
+  - Handshake packets bypass the queue. `handle_unreachable` acts only during
+    a handshake, and a queued send's error never reaches it, so a dial to an
+    unreachable address would wait out the handshake timeout instead of
+    failing with `NO_VIABLE_PATH`.
+  - A rebind wraps the new socket the same way. Dropping the queue flushes it
+    and closes the socket synchronously, so `close` still sends its
+    CONNECTION_CLOSE frames and frees the port.
+
+  Open: whether batching is opt-in in the driver's config or on by default,
+  given the latency cost, and whether moq-uring, which already submits every
+  train in one ring enter, needs any of it.
 - A `BufFactory`-style seam on `SendBuffer` in `moq-quic` that takes buffers
   from a pool sized from the send window and returns them on ACK. Design it
   with [the I/O boundary redesign](/quest/m2/quic-io-boundary.md), which
