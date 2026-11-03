@@ -485,6 +485,20 @@ def test_track_info_keeps_native_default_priority():
     assert moq.TrackInfo(timescale=90_000)._ffi().priority == native
 
 
+def test_track_info_max_age():
+    """An omitted max age is 30 s, and the unlimited flag sets no limit and reads back."""
+    broadcast = moq.BroadcastProducer()
+    cases = [
+        (None, timedelta(seconds=30), False),
+        (moq.TrackInfo(max_age=timedelta(seconds=2)), timedelta(seconds=2), False),
+        (moq.TrackInfo(max_age=timedelta(seconds=2), max_age_unlimited=True), None, True),
+    ]
+    for i, (info, max_age, unlimited) in enumerate(cases):
+        got = broadcast.publish_track(f"t{i}", info).consume().info()
+        assert (got.max_age, got.max_age_unlimited) == (max_age, unlimited)
+    broadcast.close()
+
+
 def test_default_subscription_skips_superseded_groups_at_once():
     """A bare record carries moq-net's zero delay too; only an explicit None leaves a bound unset."""
     assert moq.Subscription.default() == moq.Subscription()

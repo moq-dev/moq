@@ -280,10 +280,11 @@ class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint. It breaks
-    ties between subscriptions of equal subscriber priority. ``max_age`` is how long the
-    publisher caches a non-latest group, ``None`` for no limit. ``refresh`` is how many
-    times its first frame a group's later bytes may grow before a joining subscriber
-    asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
+    ties between subscriptions of equal subscriber priority. ``max_age`` is how long a
+    superseded group stays fresh, ``None`` for the 30 s default; ``max_age_unlimited``
+    ignores it and sets no publisher limit. ``refresh`` is how many times its first
+    frame a group's later bytes may grow before a joining subscriber asks for a new
+    group, ``None`` to never ask. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
     ``compress`` DEFLATEs each group on the wire to peers that support it; readers
     always see the original frames.
@@ -291,6 +292,7 @@ class TrackInfo:
 
     priority: int = 0
     max_age: timedelta | None = None
+    max_age_unlimited: bool = False
     refresh: int | None = None
     timescale: int | None = None
     compress: bool = False
@@ -299,6 +301,7 @@ class TrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
             max_age=self.max_age,
+            max_age_unlimited=self.max_age_unlimited,
             refresh=self.refresh,
             timescale=self.timescale,
             compress=self.compress,
@@ -309,6 +312,7 @@ class TrackInfo:
         return TrackInfo(
             priority=info.priority,
             max_age=info.max_age,
+            max_age_unlimited=info.max_age_unlimited,
             refresh=info.refresh,
             timescale=info.timescale,
             compress=info.compress,

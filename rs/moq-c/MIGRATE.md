@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info`, or one with `max_age_present` false, now advertises a 30 s max age instead of no publisher limit.
+Set the new `max_age_unlimited`, which overrides `max_age_us`, where you relied on `max_age_present` false meaning no limit. It sits in the padding after `max_age_present`, so the struct keeps its layout, but recompile against the regenerated `moq.h` so a struct filled field by field initializes it.
+
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.

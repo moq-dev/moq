@@ -150,6 +150,10 @@ track's timescale, a microsecond one unless `moq_track_info.timescale` sets
 another, and `moq_consume_track_frame` points `moq_frame.timestamp` at the
 timestamp read, valid until the frame is freed, or NULL on an untimed track.
 
+A zeroed `moq_track_info`, like a NULL one, advertises a 30 s max age: how long
+a superseded group stays fresh. Set `max_age_present` and `max_age_us` for
+another age, or `max_age_unlimited` for no publisher limit.
+
 JSON window pushes and pops accept an optional `const moq_timestamp *timestamp`,
 like snapshot updates and stream appends. It is when the edit occurred,
 converted to the track's milliseconds; pass NULL to stamp the broadcast clock.

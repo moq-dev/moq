@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A null `MoqTrackInfo.max_age`, and a null `MoqTrackInfo`, now advertise a 30 s max age instead of no publisher limit. Set the new `max_age_unlimited`, which overrides `max_age`, where you relied on null meaning no limit.
+A received track's `info()` sets `max_age_unlimited` when its publisher advertised no limit, so the record republishes unchanged.
+
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `MoqJsonSnapshotProducer::update`, `MoqJsonStreamProducer::append`, and `MoqJsonWindowProducer::push` and `pop` take a required `MoqTimestamp` instead of an optional one that defaulted to null. Stamp it on the broadcast clock, read with `MoqMediaCatalogProducer::now`, so the data shares the media's epoch.

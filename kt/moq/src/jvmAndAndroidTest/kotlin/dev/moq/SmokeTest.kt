@@ -375,6 +375,21 @@ class SmokeTest {
     }
 
     @Test
+    fun `an omitted max age is 30 s and the unlimited flag sets none`() {
+        BroadcastProducer().use { broadcast ->
+            val omitted = broadcast.publishTrack("omitted", null).consume(null).info()
+            assertEquals(java.time.Duration.ofSeconds(30), omitted.maxAge)
+            val unlimited =
+                broadcast
+                    .publishTrack("unlimited", TrackInfo(maxAgeUnlimited = true))
+                    .consume(null)
+                    .info()
+            assertNull(unlimited.maxAge)
+            assertTrue(unlimited.maxAgeUnlimited)
+        }
+    }
+
+    @Test
     fun `catalog handle closes with its broadcast`() {
         val broadcast = BroadcastProducer()
         val catalog = CatalogProducer(broadcast)

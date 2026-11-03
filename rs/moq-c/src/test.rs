@@ -1761,6 +1761,7 @@ fn publish_track_invalid_broadcast() {
 		priority: 1,
 		max_age_us: 0,
 		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -1796,6 +1797,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 		priority: 0,
 		max_age_us: 0,
 		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: true,
 		refresh: 0,
@@ -1805,6 +1807,37 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+/// A zeroed struct gets the 30 s default, and the unlimited flag wins over a stated age.
+#[test]
+fn track_info_max_age() {
+	let zeroed = || moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_present: false,
+		max_age_unlimited: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
+
+	assert_eq!(max_age(zeroed()), Some(moq_net::track::Info::DEFAULT_MAX_AGE));
+	let zero = moq_track_info {
+		max_age_present: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(zero), Some(Duration::ZERO));
+	let unlimited = moq_track_info {
+		max_age_us: 5_000_000,
+		max_age_present: true,
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(unlimited), None);
 }
 
 /// Raw frames, datagrams, and JSON values read back exactly the timestamp written: a 90 kHz
@@ -2186,6 +2219,7 @@ fn raw_track_subscription_options_and_update() {
 		priority: 3,
 		max_age_us: 1_000_000,
 		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2321,6 +2355,7 @@ fn raw_track_time_anchor() {
 		priority: 3,
 		max_age_us: 1_000_000,
 		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -3265,6 +3300,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		priority: 0,
 		max_age_us: 0,
 		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -4013,6 +4049,7 @@ fn track_demand_reports_the_wanted_group() {
 		priority: 0,
 		max_age_us: 0,
 		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,

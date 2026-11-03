@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`TrackInfo.max_age=None`, the default, and an omitted `TrackInfo` now advertise a 30 s max age instead of no publisher limit. Pass `max_age_unlimited=True`, which overrides `max_age`, where you relied on `None` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
+
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of an optional `timestamp=` keyword. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale=1_000)`; one without is refused.

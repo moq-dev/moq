@@ -577,6 +577,38 @@ func TestInsertDatagramAndLargest(t *testing.T) {
 	}
 }
 
+// An omitted max age is 30 s, and MaxAgeUnlimited sets no limit and reads back.
+func TestTrackInfoMaxAge(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	two := 2 * time.Second
+	cases := []struct {
+		info      *moq.TrackInfo
+		maxAge    time.Duration
+		unlimited bool
+	}{
+		{nil, 30 * time.Second, false},
+		{&moq.TrackInfo{MaxAge: &two}, two, false},
+		{&moq.TrackInfo{MaxAge: &two, MaxAgeUnlimited: true}, 0, true},
+	}
+	for i, c := range cases {
+		track, err := broadcast.PublishTrack(fmt.Sprint(i), c.info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumer, err := track.Consume(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := consumer.Info()
+		if got.MaxAgeUnlimited != c.unlimited || (got.MaxAge == nil) != c.unlimited || (got.MaxAge != nil && *got.MaxAge != c.maxAge) {
+			t.Errorf("case %d: Info() = %+v, want max age %v, unlimited %v", i, got, c.maxAge, c.unlimited)
+		}
+	}
+}
+
 func TestBroadcastConsumerClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

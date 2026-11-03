@@ -540,6 +540,17 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
+    func testTrackInfoMaxAge() throws {
+        let broadcast = try BroadcastProducer()
+        let omitted = try broadcast.publishTrack(name: "omitted").consume().info()
+        XCTAssertEqual(omitted.maxAge, 30)
+        let info = TrackInfo(maxAgeUnlimited: true)
+        let unlimited = try broadcast.publishTrack(name: "unlimited", info: info).consume().info()
+        XCTAssertNil(unlimited.maxAge)
+        XCTAssertTrue(unlimited.maxAgeUnlimited)
+        try broadcast.close()
+    }
+
     func testRawTrackTimestamps() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))

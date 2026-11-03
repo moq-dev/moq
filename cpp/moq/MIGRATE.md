@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+An unset `moq::TrackInfo::max_age`, and a `std::nullopt` info, now advertise a 30 s max age instead of no publisher limit. Set the new `max_age_unlimited`, which overrides `max_age`, where you relied on `std::nullopt` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
+
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `moq::JsonSnapshotProducer::update`, `moq::JsonStreamProducer::append`, and `moq::JsonWindowProducer::push` and `pop` take a required `moq::Timestamp` instead of an optional one. Stamp it from `moq::MediaCatalogProducer::now()`, the broadcast clock every track shares. Their constructors refuse a track created without a `timescale`. Regenerate bindings and rebuild with the matching native library.

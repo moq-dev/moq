@@ -46,6 +46,7 @@ fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
 		priority: 0,
 		max_age: None,
+		max_age_unlimited: false,
 		refresh: None,
 		timescale: Some(1_000_000),
 		compress: false,
@@ -1235,6 +1236,7 @@ async fn raw_track_datagram_roundtrip() {
 			Some(MoqTrackInfo {
 				priority: 0,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: None,
 				timescale: Some(1_000_000),
 				compress: false,
@@ -1267,6 +1269,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		max_age: Some(Duration::from_millis(2_500)),
+		max_age_unlimited: false,
 		refresh: Some(2),
 		timescale: Some(90_000),
 		compress: true,
@@ -1277,6 +1280,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info();
 	assert_eq!(got.priority, 7);
 	assert_eq!(got.max_age, Some(Duration::from_millis(2_500)));
+	assert!(!got.max_age_unlimited);
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
 	assert!(got.compress);
@@ -1351,6 +1355,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 				Some(MoqTrackInfo {
 					priority: 0,
 					max_age: None,
+					max_age_unlimited: false,
 					refresh: None,
 					timescale: Some(timestamp.scale),
 					compress: false,
@@ -1454,6 +1459,7 @@ async fn json_snapshot_roundtrip() {
 	let info = MoqTrackInfo {
 		priority: 0,
 		max_age: None,
+		max_age_unlimited: false,
 		timescale: Some(1_000_000),
 		refresh: None,
 		compress: true,
@@ -1527,6 +1533,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compress: false,
@@ -1754,6 +1761,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compress: false,

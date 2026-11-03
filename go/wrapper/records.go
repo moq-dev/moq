@@ -142,18 +142,21 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 }
 
 // TrackInfo holds publisher-side track properties: priority, how long a
-// non-latest group is cached (nil for no limit), how many times its first frame
-// a group's later bytes may grow before a joining subscriber asks for a new group
-// (nil never asks), and the timescale in ticks per second (nil means untimed on
-// both publish and receive). Priority is higher first; the zero Priority is the
-// midpoint a nil TrackInfo uses. Compress DEFLATEs each group on the wire to peers
-// that support it; readers always see the original frames.
+// superseded group stays fresh (nil for the 30 s default), how many times its
+// first frame a group's later bytes may grow before a joining subscriber asks for
+// a new group (nil never asks), and the timescale in ticks per second (nil means
+// untimed on both publish and receive). Priority is higher first; the zero
+// Priority is the midpoint a nil TrackInfo uses. Compress DEFLATEs each group on
+// the wire to peers that support it; readers always see the original frames.
 type TrackInfo struct {
-	Priority  int8
-	MaxAge    *time.Duration
-	Refresh   *uint32
-	Timescale *uint64
-	Compress  bool
+	Priority int8
+	MaxAge   *time.Duration
+	// MaxAgeUnlimited ignores MaxAge and sets no publisher limit, leaving only the
+	// cache to bound how long a superseded group is served.
+	MaxAgeUnlimited bool
+	Refresh         *uint32
+	Timescale       *uint64
+	Compress        bool
 }
 
 func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
@@ -161,21 +164,23 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		return nil, nil
 	}
 	return &ffi.MoqTrackInfo{
-		Priority:  info.Priority,
-		MaxAge:    info.MaxAge,
-		Refresh:   info.Refresh,
-		Timescale: info.Timescale,
-		Compress:  info.Compress,
+		Priority:        info.Priority,
+		MaxAge:          info.MaxAge,
+		MaxAgeUnlimited: info.MaxAgeUnlimited,
+		Refresh:         info.Refresh,
+		Timescale:       info.Timescale,
+		Compress:        info.Compress,
 	}, bridge.NonNegative(info.MaxAge, "max age")
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 	return TrackInfo{
-		Priority:  info.Priority,
-		MaxAge:    info.MaxAge,
-		Refresh:   info.Refresh,
-		Timescale: info.Timescale,
-		Compress:  info.Compress,
+		Priority:        info.Priority,
+		MaxAge:          info.MaxAge,
+		MaxAgeUnlimited: info.MaxAgeUnlimited,
+		Refresh:         info.Refresh,
+		Timescale:       info.Timescale,
+		Compress:        info.Compress,
 	}
 }
 

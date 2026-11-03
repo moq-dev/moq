@@ -67,6 +67,22 @@ void main() {
     broadcast.close();
   });
 
+  test('an omitted max age is 30 s and the unlimited flag sets none', () {
+    final broadcast = BroadcastProducer();
+    final omitted = broadcast
+        .publishTrack(name: 'omitted', info: null)
+        .consume(subscription: null)
+        .info();
+    expect(omitted.maxAge, const Duration(seconds: 30));
+    final unlimited = broadcast
+        .publishTrack(name: 'unlimited', info: TrackInfo(maxAgeUnlimited: true))
+        .consume(subscription: null)
+        .info();
+    expect(unlimited.maxAge, isNull);
+    expect(unlimited.maxAgeUnlimited, isTrue);
+    broadcast.close();
+  });
+
   test('a default subscription skips superseded groups at once', () {
     for (final subscription in [defaultSubscription(), Subscription()]) {
       expect(subscription.delay.min, Duration.zero);

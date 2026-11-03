@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A nil `TrackInfo.MaxAge`, and a nil `*TrackInfo`, now advertise a 30 s max age instead of no publisher limit. Set the new `MaxAgeUnlimited`, which overrides `MaxAge`, where you relied on nil meaning no limit. A received track's `Info()` sets it when its publisher advertised no limit.
+
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `json.SnapshotProducer.Update`, `json.StreamProducer.Append`, and `json.WindowProducer.Push` / `Pop` take a `moq.Timestamp` instead of a `*moq.Timestamp`, so there is no untimed write. Stamp it from `media.CatalogProducer.Now()`, the broadcast clock every track shares. Their track needs a `TrackInfo.Timescale`; one without is refused.
