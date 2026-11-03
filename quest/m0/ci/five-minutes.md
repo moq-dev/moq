@@ -115,6 +115,12 @@ The first FFI attempt exposed two base-branch failures:
   `GRADLE_CMD` override set to the dev shell's absolute Gradle executable;
   the table is conditional on that configuration, not a passing default run.
 
+Final local validation also reproduced a namespace-probe race: a raw path
+flake copied ignored CMake output while another lane replaced a generated
+`render` file. The probe now uses Git's tracked source selection, excluding
+build output. It still reports the host builder's namespace failure, allowing
+the existing local skip; strict CI continues to require a capable builder.
+
 What remains:
 
 - Admission still makes the measured net route exceed 5 minutes despite its
