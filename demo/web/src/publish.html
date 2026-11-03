@@ -29,7 +29,9 @@
 				cost of an extra encode + decode.
 			-->
 			<moq-publish-ui>
-				<moq-publish id="publish" name="me.hang" announce="source">
+				<!-- `stats` reports what each rendition sends, and `echo-path` asks viewers to report
+				     what they receive under `viewers/`: read both with `moq export report` and `moq export echo`. -->
+				<moq-publish id="publish" name="me.hang" announce="source" stats echo-path="viewers">
 					<canvas style="width: 100%; height: auto; border-radius: 4px;"></canvas>
 				</moq-publish>
 			</moq-publish-ui>

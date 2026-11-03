@@ -32,7 +32,3 @@ This README's own work, after the children:
   threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The paired bench baseline builds](/quest/m0/nightly/bench-baseline-build.md) - the next scheduled Nightly's paired bench jobs build their baseline and compare, or the baseline moves outside the checkout

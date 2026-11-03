@@ -143,7 +143,7 @@ impl Fixture {
 		});
 
 		let (url, handle) = if websocket {
-			let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+			let cluster = crate::spawn_cluster(cluster::Options::default());
 			let mut server_config = moq_tokio::listen::Config::default();
 			server_config.bind = Some("[::]:0".parse().unwrap());
 			server_config.tls.generate = vec!["localhost".into()];
@@ -169,7 +169,7 @@ impl Fixture {
 			let server = config.init(Default::default()).expect("server init");
 			let mut server = server.listen().await.expect("listen");
 			let port = server.tcp_local_addr().expect("TCP listener is configured").port();
-			let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+			let cluster = crate::spawn_cluster(cluster::Options::default());
 			let sessions = sessions.clone();
 			let handle = tokio::spawn(async move {
 				let mut id = 0;

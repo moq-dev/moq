@@ -5,36 +5,27 @@ import type { Format } from "./format";
 import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame, ReceivedFrame } from "./types";
 
-/** How far behind the live edge a {@link Consumer} plays, in milliseconds. Mirrors Rust's `Delay`. */
-export interface Delay {
-	/**
-	 * The target latency: the playout or jitter-buffer delay a player holds behind the live edge
-	 * (default: 0).
-	 *
-	 * The start is the group covering the live edge less `min`, plus any {@link ConsumerProps.warmup},
-	 * waiting for it when the newest group arrives first. Consumer-only: it never reaches the
-	 * subscription. A `min` past `max` starts at `max`, since the publisher serves nothing older.
-	 */
-	min?: Milli;
-	/**
-	 * How stale a group may get before it is skipped (default: 0), or `null` for no limit.
-	 *
-	 * Measured as the span from the oldest buffered frame to the newest, so it bounds how long a
-	 * late group is waited for. A missing sequence also expires this much monotonic time after
-	 * the first group past it arrived, even when the next group is a marker on a paused track.
-	 * The local half of the subscription's `maxDelay`; both measure the same budget, one on the wire
-	 * and one as frames are read. It bounds lateness only: it never moves the start.
-	 */
-	max?: Milli | null;
-}
-
 /** Options for constructing a {@link Consumer}. */
 export interface ConsumerProps {
 	/** The container format used to decode each MoQ frame. */
 	format: Format;
-	/** How far behind the live edge to play (default: zero for both bounds). See {@link Delay}. */
+	/**
+	 * How far behind the live edge to play (default: zero for both bounds). See `Moq.Track.Delay`.
+	 *
+	 * The start is the group covering the live edge less `min`, plus any {@link ConsumerProps.warmup}, waiting
+	 * for it when the newest group arrives first; an unstated (`null`) `min` reads as zero. A `min`
+	 * past `max` starts at `max`, since the publisher serves nothing older. `max` is measured as
+	 * the span from the oldest buffered frame to the newest, so it bounds how long a late group is
+	 * waited for. A missing sequence also expires this much monotonic time after the first group
+	 * past it arrived, even when the next group is a marker on a paused track. It is the local
+	 * half of the subscription's `delay.max`; both measure the same budget, one on the wire and one
+	 * as frames are read. It bounds a join's lateness too: a backlog that landed before the first
+	 * read starts at the first group whose first frame is within it, plus any warmup, of the
+	 * newest content, though the start keeps the group covering the live edge less `min` and the
+	 * warmup.
+	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
-	delay?: GetterInit<Delay>;
+	delay?: GetterInit<Moq.Track.Delay>;
 	/**
 	 * Cap the bytes of decoded frames held ahead of the reader, counting the whole wire payload they
 	 * share and each frame's and group's own overhead (default: {@link DEFAULT_MAX_BUFFER}). Mirrors
@@ -55,7 +46,7 @@ export interface ConsumerProps {
 	 *
 	 * Put the max delay plus the warmup on the subscription, since the publisher skips what falls
 	 * outside that budget. The start is no later than the group covering the live edge less
-	 * {@link Delay.min} and the warmup: one that starts at or before that point. Both default to zero,
+	 * `delay.min` and the warmup: one that starts at or before that point. Both default to zero,
 	 * which the newest group covers, so the start waits for nothing. Otherwise groups can arrive
 	 * newest first, so when none that arrived covers that point the start waits for an earlier one,
 	 * until one covers it, group 0 arrived, the track finishes, the max buffer fills, or the newest
@@ -158,7 +149,7 @@ function continues(prev: Group, next: Group | undefined): next is Group {
 }
 
 // The max delay in microseconds, infinite when unlimited.
-function maxMicros(delay: Delay): number {
+function maxMicros(delay: Moq.Track.Delay): number {
 	return delay.max === null ? Number.POSITIVE_INFINITY : Micro.fromMilli(delay.max ?? Milli.zero);
 }
 
@@ -166,7 +157,7 @@ function maxMicros(delay: Delay): number {
 export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#format: Format;
-	#delay: Getter<Delay>;
+	#delay: Getter<Moq.Track.Delay>;
 	#maxBuffer: number;
 	// How much further than the min delay the start reaches, and the age skip tolerates while warming.
 	#warmup: Milli;
@@ -511,11 +502,21 @@ export class Consumer {
 
 			const age = max - min;
 			if (age <= threshold) break;
-			// Until the reader warms, a group may cover the start's reach though it began before it: it is
-			// stale only once its successor starts a whole budget behind the newest content.
+			// Until the reader warms, a group may cover the start's reach though it began before it.
 			if (this.#warming()) {
 				const nextStart = this.#groups[1].start;
-				if (nextStart === undefined || max - nextStart < threshold) break;
+				if (nextStart === undefined) break;
+				if (this.#edge === undefined) {
+					// Before the first item, a backlog that landed whole starts within the budget, so only
+					// the group covering the live edge less the reach is kept: one whose successor starts
+					// past that point. Rust's start skip, in `Consumer::poll_event_once`, measures the same.
+					const target = this.#startTarget(this.#reach(this.#delay.peek()));
+					if (target !== undefined && nextStart > target) break;
+				} else if (max - nextStart < threshold) {
+					// Once reading began, it is stale only once its successor starts a whole budget behind
+					// the newest content.
+					break;
+				}
 			}
 
 			this.#groups.shift();
@@ -906,7 +907,7 @@ export class Consumer {
 
 	// How far behind the live edge the start reaches, in microseconds: the min delay plus the warmup.
 	// The publisher serves nothing older than the max delay, so a min delay past it reaches no further.
-	#reach(delay: Delay): number {
+	#reach(delay: Moq.Track.Delay): number {
 		return Math.min(Micro.fromMilli(delay.min ?? Milli.zero), maxMicros(delay)) + Micro.fromMilli(this.#warmup);
 	}
 

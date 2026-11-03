@@ -23,7 +23,7 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 - Bisect `cdff3c8f95..main` on chat over io_uring first (the largest rise and the tightest ranges), with a step size that keeps each build's cost bounded, then confirm the culprits on video and on the tokio workers. A rise that shows on io_uring but not on the tokio workers is attributed on its own, not folded into a shared culprit.
 - Attribute each step with `perf record` at a fixed period, as #7505 did, before deciding fix or accept. Record accepted costs in the epic's Plan with the feature they pay for.
 - Commit the driver this needs as a deterministic mode of `just bench-profile` or `just bench-runtime` (pinned cores, instructions per delivered frame, fixed-period samples) instead of another throwaway script; #7505's driver on `bench/relay.sh` was not committed.
-- [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md) covers the bimodal futex cost on the fanout workload; don't fix it twice. A bisect step that lands on the same lock goes there.
+- [moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493) fixed the bimodal futex cost on the fanout workload; don't fix it twice. A bisect step that lands on the same lock starts from that PR's lock counts.
 
 Public API: none expected. Wire: none.
 
