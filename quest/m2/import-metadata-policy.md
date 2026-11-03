@@ -22,4 +22,4 @@ Public API: possibly new `pub const` bounds and a shared refusal error in moq-mu
 
 ## Related
 
-- [fMP4 metadata at its bounds parses in bounded memory and linear time](/quest/m2/media-fuzz.md) - measured what fMP4's bounds let a `moof` or `moov` build, and sets the bounds this policy documents
+- [fMP4 sample plans, trun counts, and trak counts are bounded](/quest/m1/fmp4-metadata-limits.md) - measured what fMP4's bounds let a `moof` or `moov` build, and sets the bounds this policy documents

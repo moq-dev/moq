@@ -1,16 +1,28 @@
-# [M] fMP4 metadata at its bounds parses in bounded memory and linear time
+# [M] fMP4 sample plans, trun counts, and trak counts are bounded
 
 ## Goal
 
 An fMP4 `moov` or `moof` that fits the importer's bounds
 (`fmp4::MAX_HELD_BYTES`, `fmp4::MAX_FRAGMENT_SAMPLES`) parses and plans in
 memory near `MAX_HELD_BYTES` and in time linear in its size, rather than
-hundreds of megabytes or minutes of CPU. Each case below has a test that
-asserts its bound.
+hundreds of megabytes or minutes of CPU: a `moof`'s sample plan is bounded
+in bytes, a `trun`'s sample count is refused before mp4-atom expands it, and
+a `moov`'s tracks are bounded and cost linear time. Each case below has a
+test that asserts its bound.
 
 ## Plan
 
-Decided 2026-10-31 (maintainer, from
+Decided 2026-11-03 (maintainer, on
+[moq-dev/moq#7313](https://github.com/moq-dev/moq/pull/7313)): the fixes land
+here, in m1, not in #7313, because 116 bytes cost 584 MB on any fMP4 or HLS
+ingest.
+
+- ✅ Land #7313 as-is, with the fixes in an m1 quest
+- Land #7313 as-is, with the fixes staying in m2
+- Fix all three in #7313
+- Accept the numbers
+
+Earlier, decided 2026-10-31 (maintainer, from
 [moq-dev/moq#7232](https://github.com/moq-dev/moq/pull/7232)): measure the
 parse amplification #7232's bounds allow, and fix each case or accept it with
 the number. [moq-dev/moq#7313](https://github.com/moq-dev/moq/pull/7313)
@@ -42,13 +54,13 @@ live heap. Every one needs a fix:
   revisits every earlier track (catalog renditions, track creation, or
   enrollment), make it linear, and bound the tracks a `moov` declares.
 
-The bounds are moq-mux's public consts, and
+The bounds are moq-mux's public consts. This quest sets their values;
 [one policy for oversized container metadata](/quest/m2/import-metadata-policy.md)
-documents them, so settle the values with that quest.
+documents them later with MKV's.
 
 Public API: possibly new or changed `pub const` bounds in moq-mux. Wire: none.
 
 ## Related
 
-- [One policy for oversized container metadata](/quest/m2/import-metadata-policy.md) - documents the importer bounds these fixes set
+- [One policy for oversized container metadata](/quest/m2/import-metadata-policy.md) - documents the importer bounds this quest sets
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the bugs the media fuzz targets found
