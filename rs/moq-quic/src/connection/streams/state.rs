@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
 	Dir, Instant, MAX_STREAM_COUNT, Rate, Side, StreamId, TransportError, VarInt,
-	coding::BufMutExt,
+	coding::{BufMutExt, FrameBuf},
 	connection::ConnectionTag,
 	connection::rate::Bucket,
 	connection::stats::{CreditStats, FrameStats},
@@ -35,65 +35,14 @@ pub(crate) struct WrittenFrames {
 	pub(crate) datagrams: u64,
 }
 
-/// Wrapper around `Recv` that facilitates reusing `Recv` instances
-#[derive(Debug)]
-pub(super) enum StreamRecv {
-	/// A `Recv` that is ready to be opened
-	Free(Box<Recv>),
-	/// A `Recv` that has been opened
-	Open(Box<Recv>),
-}
-
-impl StreamRecv {
-	/// Returns a reference to the inner `Recv` if the stream is open
-	pub(super) fn as_open_recv(&self) -> Option<&Recv> {
-		match self {
-			Self::Open(r) => Some(r),
-			_ => None,
-		}
-	}
-
-	// Returns a mutable reference to the inner `Recv` if the stream is open
-	pub(super) fn as_open_recv_mut(&mut self) -> Option<&mut Recv> {
-		match self {
-			Self::Open(r) => Some(r),
-			_ => None,
-		}
-	}
-
-	fn inner_mut(&mut self) -> &mut Recv {
-		match self {
-			Self::Free(r) | Self::Open(r) => r,
-		}
-	}
-
-	// Returns the inner `Recv`
-	pub(super) fn into_inner(self) -> Box<Recv> {
-		match self {
-			Self::Free(r) | Self::Open(r) => r,
-		}
-	}
-
-	// Reinitialize the stream so the inner `Recv` can be reused
-	pub(super) fn free(self, initial_max_data: u64) -> Self {
-		match self {
-			Self::Free(_) => unreachable!("Self::Free on reinit()"),
-			Self::Open(mut recv) => {
-				recv.reinit(initial_max_data);
-				Self::Free(recv)
-			}
-		}
-	}
-}
-
 pub(crate) struct StreamsState {
 	pub(super) side: Side,
 	// Set of streams that are currently open, or could be immediately opened by the peer
 	pub(super) send: FxHashMap<StreamId, Option<Box<Send>>>,
 	/// How each send stream whose state is gone ended, until the application releases its ID
 	pub(super) ends: FxHashMap<StreamId, End>,
-	pub(super) recv: FxHashMap<StreamId, Option<StreamRecv>>,
-	pub(super) free_recv: Vec<StreamRecv>,
+	/// Receive state by stream, `None` until a frame or the application first touches it
+	pub(super) recv: FxHashMap<StreamId, Option<Box<Recv>>>,
 	pub(super) next: [u64; 2],
 	/// Maximum number of locally-initiated streams that may be opened over the lifetime of the
 	/// connection so far, per direction
@@ -184,6 +133,9 @@ pub(crate) struct StreamsState {
 	/// new stream starts with whatever [`stream_receive_window`](Self::stream_receive_window)
 	/// became since
 	pub(super) initial_stream_receive_window: u64,
+	/// The largest stream receive window ever in force, which bounds the credit a stream may
+	/// still hold after the window shrinks
+	peak_stream_receive_window: u64,
 
 	// Pertinent state from the TransportParameters supplied by the peer
 	initial_max_stream_data_uni: VarInt,
@@ -218,7 +170,6 @@ impl StreamsState {
 			send: FxHashMap::default(),
 			ends: FxHashMap::default(),
 			recv: FxHashMap::default(),
-			free_recv: Vec::new(),
 			next: [0, 0],
 			max: [0, 0],
 			max_remote: [max_remote_bi.into(), max_remote_uni.into()],
@@ -255,6 +206,7 @@ impl StreamsState {
 			send_window,
 			stream_receive_window: stream_receive_window.into(),
 			initial_stream_receive_window: stream_receive_window.into(),
+			peak_stream_receive_window: stream_receive_window.into(),
 			initial_max_stream_data_uni: 0u32.into(),
 			initial_max_stream_data_bidi_local: 0u32.into(),
 			initial_max_stream_data_bidi_remote: 0u32.into(),
@@ -529,15 +481,14 @@ impl StreamsState {
 		}
 		let recv = self.recv.get(&id)?;
 		// Present but unopened: the peer may send on it, starting at offset 0
-		Some(recv.as_ref().and_then(|r| r.as_open_recv()).map_or(0, |r| r.data_end))
+		Some(recv.as_ref().map_or(0, |r| r.data_end))
 	}
 
 	/// Whether MAX_STREAM_DATA frames could be sent for stream `id`
 	pub(crate) fn can_send_flow_control(&self, id: StreamId) -> bool {
 		self.recv
 			.get(&id)
-			.and_then(|s| s.as_ref())
-			.and_then(|s| s.as_open_recv())
+			.and_then(|s| s.as_deref())
 			.is_some_and(|s| s.can_send_flow_control())
 	}
 
@@ -559,7 +510,7 @@ impl StreamsState {
 
 	pub(in crate::connection) fn write_control_frames(
 		&mut self,
-		buf: &mut Vec<u8>,
+		buf: &mut impl FrameBuf,
 		pending: &mut Retransmits,
 		retransmits: &mut ThinRetransmits,
 		stats: &mut FrameStats,
@@ -630,12 +581,7 @@ impl StreamsState {
 				break;
 			};
 			pending.max_stream_data.remove(&id);
-			let Some(rs) = self
-				.recv
-				.get_mut(&id)
-				.and_then(|s| s.as_mut())
-				.and_then(|s| s.as_open_recv_mut())
-			else {
+			let Some(rs) = self.recv.get_mut(&id).and_then(|s| s.as_deref_mut()) else {
 				continue;
 			};
 			if !rs.can_send_flow_control() {
@@ -740,7 +686,7 @@ impl StreamsState {
 	/// below the path MTU can be, steps aside for what fits behind it instead, since
 	/// [`Self::can_send_frames`] promised a frame and control frames alone would leave the
 	/// packet short.
-	pub(crate) fn write_frames(&mut self, buf: &mut Vec<u8>, payload: Range<usize>, fair: bool) -> WrittenFrames {
+	pub(crate) fn write_frames(&mut self, buf: &mut impl FrameBuf, payload: Range<usize>, fair: bool) -> WrittenFrames {
 		let max_buf_size = payload.end;
 		let mut written = WrittenFrames::default();
 		while buf.len() + frame::Stream::SIZE_BOUND < max_buf_size {
@@ -1115,10 +1061,22 @@ impl StreamsState {
 		self.unblock();
 	}
 
+	/// The connection receive window now in force.
+	pub(crate) fn receive_window(&self) -> u64 {
+		self.receive_window
+	}
+
+	/// The most credit one receive stream may hold: the largest window ever in force, since
+	/// credit already granted outlives a shrink.
+	pub(crate) fn peak_stream_receive_window(&self) -> u64 {
+		self.peak_stream_receive_window
+	}
+
 	/// Set the receive window of each stream, which applies as each stream's credit is next
 	/// extended: credit already granted cannot be taken back.
 	pub(crate) fn set_stream_receive_window(&mut self, window: u64) {
 		self.stream_receive_window = window;
+		self.peak_stream_receive_window = self.peak_stream_receive_window.max(window);
 	}
 
 	/// Set the receive_window and returns whether the receive_window has been
@@ -1146,8 +1104,7 @@ impl StreamsState {
 		debug_assert_eq!(id.initiator(), self.side);
 		assert!(self.send.insert(id, None).is_none());
 		if id.dir() == Dir::Bi {
-			let recv = self.free_recv.pop();
-			assert!(self.recv.insert(id, recv).is_none());
+			assert!(self.recv.insert(id, None).is_none());
 		}
 	}
 
@@ -1166,8 +1123,7 @@ impl StreamsState {
 
 		for i in self.next_remote[dir_idx]..=id.index() {
 			let tid = StreamId::new(!self.side, id.dir(), i);
-			let recv = self.free_recv.pop();
-			assert!(self.recv.insert(tid, recv).is_none());
+			assert!(self.recv.insert(tid, None).is_none());
 			if id.dir() == Dir::Bi {
 				assert!(self.send.insert(tid, None).is_none());
 			}
@@ -1363,14 +1319,17 @@ impl StreamsState {
 		self.waits.freed(id);
 	}
 
-	/// Recycle a receive stream's state, returning any credit its lease still holds, as when a
+	/// Drop a receive stream's state, returning any credit its lease still holds, as when a
 	/// plain read ends a stream a lease read from.
 	///
+	/// Nothing is recycled: a recycled `Recv` and its chunk index would stay allocated per peak
+	/// concurrent stream for the connection's lifetime, and reusing one saved only 0.1 to 0.3% of
+	/// the instructions a burst costs (`benches/receive_bursts.rs`).
+	///
 	/// Returns whether a `MAX_DATA` frame should be enqueued for that credit.
-	pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: StreamRecv) -> ShouldTransmit {
-		let transmit = self.discard_lease(id, &mut recv.inner_mut().lease);
+	pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: Box<Recv>) -> ShouldTransmit {
+		let transmit = self.discard_lease(id, &mut recv.lease);
 		self.unlooked.remove(&id);
-		self.free_recv.push(recv.free(self.initial_stream_receive_window));
 		self.stream_freed(id, StreamHalf::Recv);
 		transmit
 	}
@@ -1394,14 +1353,8 @@ fn rate_step(bucket: &Bucket) -> u64 {
 }
 
 #[inline]
-pub(super) fn get_or_insert_recv(opt: &mut Option<StreamRecv>, initial_max_data: u64) -> &mut Recv {
-	*opt = opt.take().map(|s| match s {
-		StreamRecv::Free(recv) => StreamRecv::Open(recv),
-		s => s,
-	});
-	opt.get_or_insert_with(|| StreamRecv::Open(Recv::new(initial_max_data)))
-		.as_open_recv_mut()
-		.unwrap()
+pub(super) fn get_or_insert_recv(opt: &mut Option<Box<Recv>>, initial_max_data: u64) -> &mut Recv {
+	opt.get_or_insert_with(|| Recv::new(initial_max_data))
 }
 
 #[cfg(test)]
@@ -2952,6 +2905,17 @@ mod tests {
 		assert!(should_transmit.should_transmit());
 	}
 
+	/// A stream may still hold credit granted under a larger window, so the bound reported to
+	/// the application never falls when the window shrinks.
+	#[test]
+	fn stream_receive_window_reports_its_peak() {
+		let mut server = make(Side::Server);
+		let initial = server.peak_stream_receive_window();
+		server.set_stream_receive_window(initial * 4);
+		server.set_stream_receive_window(initial / 2);
+		assert_eq!(server.peak_stream_receive_window(), initial * 4);
+	}
+
 	#[test]
 	fn shrink_receive_window() {
 		let mut server = make(Side::Server);
@@ -4133,10 +4097,19 @@ mod tests {
 		assert_eq!(client.credit_stats().leased, 2 * WINDOW, "taken credit stays held");
 		assert!(matches!(wait(&mut client, ids[0], 1), Err(recv::Error::Blocked)));
 		assert_eq!(client.credit_stats().evicted, 1, "waits for the stop");
+		// A reader watching for a reset instead of reading learns of it too.
+		assert_eq!(
+			recv(&mut client, &mut pending, ids[1]).received_reset(),
+			Err(recv::Error::Evicted)
+		);
 		assert_eq!(wait(&mut client, ids[1], 1), Err(recv::Error::Evicted));
 
 		// The stop pays the debt alone, so eviction resumes with the other stream.
 		let _ = stop(&mut client, ids[1], 0);
+		assert_eq!(
+			recv(&mut client, &mut pending, ids[1]).received_reset(),
+			Err(recv::Error::Closed)
+		);
 		assert_eq!(client.local_max_data, max_data);
 		assert_eq!(client.credit_stats().evicted, 2);
 		assert_eq!(readable(&mut client), [ids[0]]);

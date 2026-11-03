@@ -32,7 +32,6 @@ use crate::{
 	cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
 	congestion::{self, Controller, Factory, Metrics},
 	connection::{Connection, Error as ConnectionError},
-	crypto::rustls::QuicServerConfig,
 	endpoint::{Accepting, ConnectionHandle, DatagramEvent, Dial, Endpoint, Incoming, Received},
 	frame::FrameStruct,
 	packet::{Header, InitialHeader, PacketNumber},
@@ -370,13 +369,10 @@ fn close_before_a_client_certificate_leaves_ends() {
 				PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
 			)
 			.unwrap();
-		let mut client = client::Config::new(Arc::new(crypto::rustls::QuicClientConfig::try_from(client).unwrap()));
+		let mut client = client::Config::new(Arc::new(client));
 		client.transport = cubic_transport();
 
-		let mut pair = Pair::new(
-			Default::default(),
-			server::Config::new(Arc::new(QuicServerConfig::try_from(server).unwrap())),
-		);
+		let mut pair = Pair::new(Default::default(), server::Config::new(Arc::new(server)));
 		let client_ch = connect_before_the_finished_leaves(&mut pair, client);
 
 		let now = pair.time;
@@ -545,6 +541,13 @@ fn server_stateless_reset() {
 	// Force the server to generate the smallest possible stateless reset
 	pair.client.connections.get_mut(&client_ch).unwrap().ping();
 	info!("resetting");
+	pair.drive_client();
+	pair.drive_server();
+	// The client recognizes the reset before handling it, and not just any short header.
+	let (_, _, reset) = pair.client.inbound.back().unwrap();
+	assert!(pair.client.endpoint.is_stateless_reset(pair.server.addr, reset));
+	assert!(!pair.client.endpoint.is_stateless_reset(pair.server.addr, &[0x40; 64]));
+	assert!(!pair.client.endpoint.is_stateless_reset(pair.client.addr, reset));
 	pair.drive();
 	assert_matches!(
 		pair.client_conn_mut(client_ch).poll(),
@@ -902,14 +905,12 @@ fn export_keying_material() {
 	// client keying material
 	let mut client_buf = [0u8; 64];
 	pair.client_conn_mut(client_ch)
-		.crypto_session()
 		.export_keying_material(&mut client_buf, LABEL, CONTEXT)
 		.unwrap();
 
 	// server keying material
 	let mut server_buf = [0u8; 64];
 	pair.server_conn_mut(server_ch)
-		.crypto_session()
 		.export_keying_material(&mut server_buf, LABEL, CONTEXT)
 		.unwrap();
 
@@ -1076,7 +1077,6 @@ fn reject_missing_client_cert() {
 		)
 		.with_single_cert(vec![cert], PrivateKeyDer::from(key))
 		.unwrap();
-	let config = QuicServerConfig::try_from(config).unwrap();
 
 	let mut pair = Pair::new(Default::default(), server::Config::new(Arc::new(config)));
 
@@ -1362,19 +1362,12 @@ fn alpn_success() {
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeConfirmed));
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::Connected));
 
-	let hd = pair
-		.client_conn_mut(client_ch)
-		.crypto_session()
-		.handshake_data()
-		.unwrap()
-		.downcast::<crypto::rustls::HandshakeData>()
-		.unwrap();
-	assert_eq!(hd.protocol.unwrap(), &b"bar"[..]);
-	assert_eq!(
-		hd.protocol_version.unwrap().downcast_ref::<rustls::ProtocolVersion>(),
-		Some(&rustls::ProtocolVersion::TLSv1_3)
-	);
-	assert!(hd.cipher_suite.unwrap().downcast_ref::<rustls::CipherSuite>().is_some());
+	let client = pair.client_conn_mut(client_ch).handshake_data().unwrap();
+	assert_eq!(client.alpn.as_deref(), Some(&b"bar"[..]));
+	assert_eq!(client.server_name, None);
+	let server = pair.server_conn_mut(server_ch).handshake_data().unwrap();
+	assert_eq!(server.alpn.as_deref(), Some(&b"bar"[..]));
+	assert_eq!(server.server_name.as_deref(), Some("localhost"));
 }
 
 #[test]
@@ -4347,6 +4340,49 @@ fn connect_detects_mtu() {
 }
 
 #[test]
+fn migrate_without_mtud_respects_peer_max_udp_payload_size() {
+	let _guard = subscribe();
+	const INITIAL_MTU: u16 = 16000;
+	const PEER_MAX: u16 = 1200;
+	let transport = || transport::Config {
+		initial_mtu: INITIAL_MTU,
+		mtu: None,
+		..transport::Config::default()
+	};
+	let endpoint = endpoint::Config {
+		max_udp_payload_size: PEER_MAX,
+		..endpoint::Config::default()
+	};
+	let factory = Arc::new(MtuRecorderFactory::default());
+	let mut server_config = server_config();
+	server_config.transport = transport::Config {
+		congestion: factory.clone(),
+		..transport()
+	};
+	let mut client_config = client_config();
+	client_config.transport = transport();
+	let mut pair = Pair::new(endpoint, server_config);
+	let (client_ch, server_ch) = pair.connect_with(client_config);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+
+	// Moving to another IP, unlike a NAT rebinding, builds the server a fresh path.
+	pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive();
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+	// The new path's controller starts at the peer's limit too, not at the initial MTU
+	assert_eq!(
+		*factory.0.lock().unwrap(),
+		[
+			MtuEvent::Build(INITIAL_MTU),
+			MtuEvent::Update(PEER_MAX),
+			MtuEvent::Build(PEER_MAX),
+		]
+	);
+}
+
+#[test]
 fn migrate_detects_new_mtu_and_respects_original_peer_max_udp_payload_size() {
 	let _guard = subscribe();
 
@@ -5318,6 +5354,131 @@ fn min_mtu_respects_peer_max_udp_payload_size() {
 	pair.finish_connect(client_ch, server_ch);
 }
 
+/// A path MTU above the default controller's 1200-based initial window still lets the first
+/// Initial leave: a window smaller than one datagram would block it, and no ACK would ever come.
+#[test]
+fn handshake_with_initial_mtu_above_initial_window() {
+	let _guard = subscribe();
+	const MTU: u16 = 16000;
+	let transport = || transport::Config {
+		initial_mtu: MTU,
+		mtu: None,
+		..transport::Config::default()
+	};
+	let endpoint = endpoint::Config {
+		max_udp_payload_size: MTU,
+		..endpoint::Config::default()
+	};
+	let mut server_config = server_config();
+	server_config.transport = transport();
+	let mut client_config = client_config();
+	client_config.transport = transport();
+	let mut pair = Pair::new(endpoint, server_config);
+	pair.mtu = MTU.into();
+	let (client_ch, server_ch) = pair.connect_with(client_config);
+	assert_eq!(pair.client_conn_mut(client_ch).path_mtu(), MTU);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), MTU);
+}
+
+/// The MTU a congestion controller learned, as the transport reported it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MtuEvent {
+	/// A controller was built for a path at this MTU
+	Build(u16),
+	/// A controller was told the path MTU changed
+	Update(u16),
+}
+
+type MtuLog = Arc<Mutex<Vec<MtuEvent>>>;
+
+/// Records the MTU its controller starts at and every update after.
+#[derive(Clone)]
+struct MtuRecorder(MtuLog);
+
+impl Controller for MtuRecorder {
+	fn on_sent(&mut self, _sent: congestion::Sent) -> congestion::Packet {
+		Default::default()
+	}
+
+	fn on_ack(&mut self, _ack: congestion::Ack<'_>) {}
+
+	fn on_loss(&mut self, _loss: congestion::Loss<'_>) {}
+
+	fn on_ce(&mut self, _ce: congestion::Ce) {}
+
+	fn on_mtu_update(&mut self, new_mtu: u16) {
+		self.0.lock().unwrap().push(MtuEvent::Update(new_mtu));
+	}
+
+	fn window(&self) -> u64 {
+		u64::MAX / 2
+	}
+
+	fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+		None
+	}
+
+	fn metrics(&self) -> Metrics {
+		Metrics::default()
+	}
+
+	fn clone_box(&self) -> Box<dyn Controller> {
+		Box::new(self.clone())
+	}
+}
+
+/// Shares one log among every controller it builds, one per path.
+#[derive(Default)]
+struct MtuRecorderFactory(MtuLog);
+
+impl Factory for MtuRecorderFactory {
+	fn build(self: Arc<Self>, init: congestion::Init) -> Box<dyn Controller> {
+		self.0.lock().unwrap().push(MtuEvent::Build(init.mtu));
+		Box::new(MtuRecorder(self.0.clone()))
+	}
+}
+
+/// A peer `max_udp_payload_size` below the initial MTU reaches the congestion controller, which
+/// sizes its minimum window and pacing burst by the path MTU.
+#[test]
+fn peer_max_udp_payload_size_reaches_controller() {
+	let _guard = subscribe();
+	const INITIAL_MTU: u16 = 1452;
+	const PEER_MAX: u16 = 1280;
+
+	let factory = Arc::new(MtuRecorderFactory::default());
+	let mut config = server_config();
+	config.transport = transport::Config {
+		min_mtu: INITIAL_MTU,
+		mtu: None,
+		congestion: factory.clone(),
+		..transport::Config::default()
+	};
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(config),
+			..endpoint::Config::default()
+		},
+		true,
+	)
+	.unwrap();
+	let client = Endpoint::new(
+		endpoint::Config {
+			max_udp_payload_size: PEER_MAX,
+			..endpoint::Config::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(client, server);
+	let (_, server_ch) = pair.connect_with(client_config());
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+	assert_eq!(
+		*factory.0.lock().unwrap(),
+		[MtuEvent::Build(INITIAL_MTU), MtuEvent::Update(PEER_MAX)]
+	);
+}
+
 /// Verify that UDP datagrams are padded to MTU if specified in the transport config.
 #[test]
 fn pad_to_mtu() {
@@ -5758,7 +5919,8 @@ fn application_close_in_initial_is_rejected() {
 	// connection ID, which travels in the clear, so anyone who observes the handshake can do this.
 	let keys = server_config()
 		.crypto
-		.initial_keys(Version::from_wire(version).unwrap(), orig_dst_cid);
+		.initial_keys(Version::from_wire(version).unwrap(), orig_dst_cid)
+		.unwrap();
 	let number = PacketNumber::U8(0);
 	let header = Header::Initial(InitialHeader {
 		dst_cid: client_cid,
@@ -6107,6 +6269,64 @@ fn send_quantum_bounds_the_gso_batch() {
 		datagrams <= QUANTUM_DATAGRAMS,
 		"batched {datagrams} datagrams, over the {QUANTUM_DATAGRAMS} the send quantum allows"
 	);
+}
+
+/// A jumbo-frame MTU must not let a GSO train outgrow what one IPv4 UDP send can carry, however
+/// many datagrams the caller offers.
+#[test]
+fn gso_train_fits_one_udp_send() {
+	const MTU: u16 = 9000;
+
+	let _guard = subscribe();
+	let endpoint_config = || endpoint::Config {
+		max_udp_payload_size: MTU,
+		..endpoint::Config::default()
+	};
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(server_config()),
+			..endpoint_config()
+		},
+		true,
+	)
+	.unwrap();
+	let client = Endpoint::new(endpoint_config(), true).unwrap();
+	let mut pair = Pair::new_from_endpoint(client, server);
+	pair.mtu = usize::from(MTU);
+
+	let mut client_cfg = client_config();
+	client_cfg.transport = transport::Config {
+		initial_mtu: MTU,
+		mtu: None,
+		// Neither window, pacer, nor send quantum bounds the train, so only the byte cap bounds it.
+		congestion: Arc::new(FixedQuantumController { send_quantum: u64::MAX }),
+		..transport::Config::default()
+	};
+	let (client_ch, _) = pair.connect_with(client_cfg);
+
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s)
+		.write(&mut &[42; 256 * 1024][..])
+		.unwrap();
+
+	let now = pair.time;
+	let conn = pair.client_conn_mut(client_ch);
+	assert_eq!(conn.path_mtu(), MTU);
+	let mut buf = Vec::new();
+	let mut full = false;
+	while let Some(transmit) = conn.poll_transmit(now, 64, &mut buf) {
+		assert!(
+			transmit.size <= MAX_TRANSMIT_SIZE,
+			"a {} byte train exceeds one IPv4 UDP send",
+			transmit.size
+		);
+		full |= transmit.size > MAX_TRANSMIT_SIZE - usize::from(MTU);
+		buf.clear();
+	}
+	assert!(full, "no train came close to the limit, so the test proves nothing");
 }
 
 /// A congestion callback, as the transport reported it. Packets are named by send time, which

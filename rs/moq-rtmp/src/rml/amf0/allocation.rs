@@ -1,4 +1,7 @@
-//! Allocation accounting for synchronous receive-path tests.
+//! Allocation accounting for synchronous receive-path tests and the `amf0` fuzz target.
+//!
+//! A binary opts in by registering [`Counting`] as its `#[global_allocator]`: this crate's unit
+//! tests do below, and the `fuzz/` target does too.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -7,7 +10,7 @@ thread_local! {
 	static USAGE: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
 }
 
-struct Counting;
+pub struct Counting;
 
 // All memory operations still use System. Const TLS keeps accounting from
 // allocating recursively and isolates concurrent tests on other threads.
@@ -35,9 +38,11 @@ unsafe impl GlobalAlloc for Counting {
 	}
 }
 
+#[cfg(test)]
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
+/// Run `run`, returning the peak heap it held on this thread. Not reentrant.
 pub fn measure<T>(run: impl FnOnce() -> T) -> (T, usize) {
 	USAGE.with(|usage| usage.set(Some((0, 0))));
 	let result = run();

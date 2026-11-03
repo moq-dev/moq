@@ -6,6 +6,7 @@
 
 mod ebml;
 mod export;
+mod hvcc;
 mod import;
 
 pub use export::*;
@@ -102,6 +103,14 @@ pub enum Error {
 		/// The operation requiring that private data.
 		purpose: &'static str,
 	},
+
+	/// A TrackEntry's CodecPrivate came before its CodecID, which decides how it is read.
+	#[error("MKV CodecPrivate before CodecID is unsupported")]
+	CodecPrivateBeforeCodecId,
+
+	/// The CodecPrivate holds more than the codec's supported configuration.
+	#[error("{0} CodecPrivate is outside its supported configuration")]
+	UnsupportedCodecPrivate(String),
 
 	/// The HEVCDecoderConfigurationRecord is malformed.
 	#[error("invalid HEVCDecoderConfigurationRecord")]
