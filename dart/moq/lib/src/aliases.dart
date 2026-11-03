@@ -169,8 +169,7 @@ extension type Subscription._(MoqSubscription _subscription)
 /// moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once.
 ///
 /// A null subscription and a bare `Subscription()` mean the same.
-Subscription defaultSubscription() =>
-    Subscription._(moqSubscriptionDefaults());
+Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
 typedef Range = MoqRange;

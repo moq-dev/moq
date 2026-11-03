@@ -181,16 +181,14 @@ typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
  */
 typealias Route = uniffi.moq.MoqRoute
 
-/**
- * Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering.
- */
+/** Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
 
 /**
- * How far behind the live edge a subscriber or decoder plays: `min` is the target latency and
- * where a cold join starts, null to leave it unstated (a decoder plays it as zero), and `max`, null
- * for no subscriber limit, is how far a non-latest group may fall behind before it is skipped. A
- * `min` past `max` starts at `max`.
+ * How far behind the live edge a subscriber or decoder plays: `min` is the target latency and where
+ * a cold join starts, null to leave it unstated (a decoder plays it as zero), and `max`, null for
+ * no subscriber limit, is how far a non-latest group may fall behind before it is skipped. A `min`
+ * past `max` starts at `max`.
  */
 typealias Delay = uniffi.moq.MoqDelay
 

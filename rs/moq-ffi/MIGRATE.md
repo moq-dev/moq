@@ -9,7 +9,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 `MoqSubscription.max_delay` is `delay: MoqDelay`, the record the decoder outputs take: set `delay.max` to the old `max_delay`.
 `MoqDelay.min` is `Option<Duration>`: null leaves the target latency unstated, which a decoder plays as zero, while `moq_subscription_defaults()` states zero. Wrap a decoder's `min: d` as `Some(d)`.
-Kotlin and Swift name both fields; the Dart, Go, and C wrappers make an omitted bound zero.
+Kotlin and Swift name both fields, and the Python, Go, and Dart wrappers default an omitted one to zero. A bare generated C or C++ record leaves both unset, so start from `moq_subscription_defaults()` there.
 
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 

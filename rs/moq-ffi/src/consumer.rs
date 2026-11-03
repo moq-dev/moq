@@ -20,8 +20,8 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 /// it starts, and how late it may fall.
 ///
 /// [`moq_subscription_defaults`] carries moq-net's default, zero for both. Uniffi can't default
-/// a duration, so Kotlin and Swift name both fields; the wrappers for the other bindings make
-/// an omitted field zero.
+/// a duration, so Kotlin and Swift name both fields, the Python, Go, and Dart wrappers default
+/// an omitted one to zero, and a bare C or C++ record leaves both unset.
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and

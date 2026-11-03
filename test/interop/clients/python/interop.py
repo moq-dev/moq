@@ -260,9 +260,7 @@ async def _decode_audio(
         consumer,
         id,
         audio,
-        moq.audio.DecoderOutput(
-            format=moq.audio.SampleFormat.F32, delay=moq.Delay(max=MAX_DELAY)
-        ),
+        moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.Delay(max=MAX_DELAY)),
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0
