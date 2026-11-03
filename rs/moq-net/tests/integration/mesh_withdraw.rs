@@ -441,8 +441,9 @@ async fn cross_node_close_without_hold_reannounces() {
 	assert_eq!(client, [Kind::End, Kind::Start, Kind::End]);
 }
 
-/// Relay 3 hears a broadcast published on relay 0 first over the longer path
-/// through relays 2 and 4, then 300 ms later over the shorter one through relay 1.
+/// Relay 3 hears a broadcast published on relay 0 first over the longer, faster
+/// path through relays 2 and 4 (3 hops, 30 ms), then 280 ms later over the
+/// shorter, slower one through relay 1 (2 hops, 310 ms).
 #[rustfmt::skip]
 const LATE_BETTER_PATH: &[Link] = &[
 	((0, 1), ms(10)), ((1, 3), ms(300)), ((0, 2), ms(10)), ((2, 4), ms(10)), ((4, 3), ms(10)),
