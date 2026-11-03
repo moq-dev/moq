@@ -26,6 +26,11 @@ while (true) {
 }
 ```
 
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.maxDelay` is `delay`, a `Delay`, and a bare `Subscription()` is moq-net's defaults again: pass `delay: Delay(max: maxDelay)`, and `Delay(max: null)` for no subscriber limit.
+`media.Delay` moves to `package:moq/moq.dart`. `Delay` and `Subscription` are extension types over the generated records, so they pass wherever those are taken; `Delay` defaults `min` and `max` to zero, and an explicit null `min` leaves the target latency unstated.
+
 ### `Transport.iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 Native sessions no longer arrive over iroh, so `Transport` loses its `iroh` value. Drop the case, and regenerate bindings and rebuild with the matching native library.
@@ -36,8 +41,8 @@ Native sessions no longer arrive over iroh, so `Transport` loses its `iroh` valu
 
 ### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: media.Delay?` and `estimate: bool = true`.
-`video.DecoderOutput.maxDelay` is `delay: media.Delay?`.
+`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: Delay?` and `estimate: bool = true`.
+`video.DecoderOutput.maxDelay` is `delay: Delay?`.
 `Delay(min: ..., max: ...)`: `max` (null for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
 A fixed audio playout delay `d` is `delay: Delay(min: d, max: ...)` with `estimate: false`.
 
@@ -68,7 +73,6 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 
 The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 `audio.EncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` defaults to null, so a `Subscription()` that omits it gets no staleness limit instead of moq-net's 0: start from `defaultSubscription()`, or pass `maxDelay: Duration.zero`, for the old default.
 A negative `Duration` throws `ArgumentError` wherever it crosses into the native library.
 
 ### Connection state

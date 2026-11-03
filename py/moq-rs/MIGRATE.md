@@ -16,15 +16,20 @@ Another publisher instance taking a path over keeps it present and is not listed
 Later calls return `None` when the path goes offline, or, when following an `instance`, when another instance takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
 Stop reading the previous broadcast on `None` and call `available()` again. A caller that only awaits the first broadcast can assert it is not `None`.
 
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.max_delay` is `delay`, a `moq.Delay`: pass `delay=moq.Delay(max=...)` for the old `max_delay=...`, and `moq.Delay(max=None)` for no subscriber limit.
+`media.Delay` moves to `moq.Delay`, a dataclass whose `min` and `max` default to zero; `min=None` leaves the target latency unstated. The decoder outputs' `delay` defaults to `Delay()` instead of `None`.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `list[str]` instead of `list[str] | None`. Remove `None` checks and pass `captures=[]` when constructing an announcement for a filter without wildcards. Rebuild with the matching generated bindings and native library.
 
 ### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`audio.DecoderOutput` replaces `max_delay` and the playout `delay: timedelta | None` with `delay: media.Delay | None` and `estimate: bool = True`.
-`video.DecoderOutput.max_delay` is `delay: media.Delay | None`.
-`media.Delay(min=..., max=...)`: `max` (`None` for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts.
+`audio.DecoderOutput` replaces `max_delay` and the playout `delay: timedelta | None` with `delay: Delay` and `estimate: bool = True`.
+`video.DecoderOutput.max_delay` is `delay: Delay`.
+`Delay(min=..., max=...)`: `max` (`None` for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts.
 A fixed audio playout delay `d` is `delay=Delay(min=d, max=...)` with `estimate=False`.
 
 ### Compression moves to the track

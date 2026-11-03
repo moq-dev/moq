@@ -35,6 +35,12 @@ for {
 }
 ```
 
+### Subscriptions take a `moq.Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.MaxDelay` is `Delay moq.Delay`, and the zero `Subscription{}` is moq-net's defaults, the same as `DefaultSubscription()`: set `Delay.Max` to the old `*MaxDelay`, and `Delay.MaxUnlimited` where `MaxDelay` was nil.
+`media.Delay` is `moq.Delay`, a struct of its own whose zero value states zero for both: `Min` and `Max` are `time.Duration`, `MinUnstated` leaves the target latency unstated, and `MaxUnlimited` sets no limit.
+`audio.DecoderOutput.Delay` and `video.DecoderOutput.Delay` are a `moq.Delay` value instead of a `*media.Delay`; the zero value is what nil meant.
+
 ### `media.VideoInit` is a struct
 
 `media.VideoInit` is its own struct rather than an alias of the generated record, so its new `Lower` field takes a `*media.TrackProducer`. A composite literal with `Format`, `Data`, `Label`, and `Hint` compiles unchanged; build one that way where you converted a generated `MoqVideoInit`.
@@ -48,7 +54,7 @@ for {
 `audio.DecoderOutput` replaces `MaxDelay` and the playout `Delay *time.Duration` with `Delay *media.Delay` and `Estimate *bool` (nil estimates).
 `video.DecoderOutput.MaxDelay` is `Delay *media.Delay`.
 `media.Delay{Min, Max}`: `Max` (nil for no limit) is the old `MaxDelay`, and `Min` is the playout delay, where a cold join starts.
-A fixed audio playout delay `d` is `Delay: &media.Delay{Min: d, Max: &max}` with `Estimate` set to false.
+A fixed audio playout delay `d` is `Delay: moq.Delay{Min: d, Max: max}` with `Estimate` set to false.
 
 ### Compression moves to the track
 

@@ -18,10 +18,9 @@ Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling.
 
 `moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
 
-### A subscription without `max_delay_present` has no limit
+### Subscriptions take a `moq_delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
-A `moq_subscription` with `max_delay_present` false sets no subscriber limit, leaving the publisher's max age alone to bound it, instead of moq-net's default of zero.
-Start from `moq_subscription_defaults()`, or set `max_delay_present`, where you relied on a zeroed struct; a NULL pointer still means the defaults.
+`moq_subscription.max_delay_us` and `max_delay_present` are `moq_delay delay`. A zeroed `moq_subscription` is moq-net's defaults, the same as `moq_subscription_defaults()` and a NULL pointer: set `delay.max_us` to the old `max_delay_us`, and `delay.max_unlimited` for no subscriber limit. `delay.min_unstated` leaves the target latency unstated.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 

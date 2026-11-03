@@ -6,6 +6,11 @@
 
 `moq::Following::available()` resolves to a null `std::shared_ptr<moq::BroadcastConsumer>` once the path goes offline (or, for a follow pinned to an instance, once another instance takes it over), then the next broadcast when something serves the path again. The first call is never null. Check for null before using a later result, and treat it like the previous instance ending.
 
+### Subscriptions take a `moq::Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`moq::Subscription::max_delay` is `moq::Delay delay`: set `delay.max` to the old `max_delay`, or start from `moq::subscription_defaults()`.
+`moq::Delay::min` is a `std::optional`: `std::nullopt` leaves the target latency unstated, which a decoder plays as zero. A bare `moq::Subscription{}` leaves both bounds unset, so its `delay.max` still sets no subscriber limit.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `moq::Announce.captures` is `std::vector<std::string>` instead of an optional vector. Remove optional checks and dereferences; an empty vector means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.

@@ -47,8 +47,8 @@ type Packet = ffi.MoqVideoPacket
 type DecoderOutput struct {
 	Resize *media.Dimensions
 	// Delay.Min is the playout delay, where a cold join starts; Delay.Max is how far a stalled
-	// group may fall behind before it is skipped. nil is zero for both.
-	Delay   *media.Delay
+	// group may fall behind before it is skipped. The zero Delay is zero for both.
+	Delay   moq.Delay
 	Surface bool
 	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.
 	// A live player sets media.DecodeStartLatest so a reopened decoder skips the cached backlog.
@@ -61,14 +61,8 @@ func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
 	if o.Start != 0 {
 		start = &o.Start
 	}
-	out := ffi.MoqVideoDecoderOutput{Resize: o.Resize, Delay: o.Delay, Surface: o.Surface, Start: start}
-	if o.Delay == nil {
-		return out, nil
-	}
-	if err := bridge.NonNegative(&o.Delay.Min, "video min delay"); err != nil {
-		return out, err
-	}
-	return out, bridge.NonNegative(o.Delay.Max, "video max delay")
+	delay, err := bridge.Delay(o.Delay)
+	return ffi.MoqVideoDecoderOutput{Resize: o.Resize, Delay: &delay, Surface: o.Surface, Start: start}, err
 }
 
 // Producer encodes raw pictures and publishes them as a track in a broadcast's catalog.

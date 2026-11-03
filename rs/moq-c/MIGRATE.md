@@ -13,6 +13,11 @@ Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling.
 `moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
 Recompile callers against the regenerated `moq.h`.
 
+### Subscriptions take a `moq_delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`moq_subscription.max_delay_us` and `max_delay_present` are `moq_delay delay`. A zeroed `moq_subscription` is moq-net's defaults again, the same as `moq_subscription_defaults()` and a NULL pointer: set `delay.max_us` to the old `max_delay_us`, and `delay.max_unlimited` where `max_delay_present` was false.
+`moq_delay` gains `min_unstated`, after `max_unlimited`, which leaves the target latency unstated; the struct keeps its layout, and a zeroed one still states zero.
+
 ### JSON window edits take an optional timestamp
 
 `moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
@@ -29,11 +34,6 @@ Recompile callers against the regenerated `moq.h`.
 `moq_consume_video` and `moq_consume_audio` take `const moq_delay *delay` in place of `uint64_t max_delay_us`; NULL is the default.
 `moq_video_decoder_output.max_delay_us` and `moq_audio_decoder_output.max_delay_us` are `moq_delay delay`, which changes both structs' layout.
 Set `delay.max_us` to the old `max_delay_us`, `delay.max_unlimited` for no limit, and `delay.min_us` to your playout delay, where a cold join starts. A zeroed `moq_delay` is zero for both.
-
-### A subscription without `max_delay_present` has no limit
-
-A `moq_subscription` with `max_delay_present` false sets no subscriber limit, leaving the publisher's max age alone to bound it, instead of moq-net's default of zero.
-Start from `moq_subscription_defaults()`, or set `max_delay_present`, where you relied on a zeroed struct; a NULL pointer still means the defaults.
 
 ### Compression moves to the track
 

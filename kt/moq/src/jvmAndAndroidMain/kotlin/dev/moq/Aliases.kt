@@ -168,16 +168,21 @@ typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
  */
 typealias Route = uniffi.moq.MoqRoute
 
-/**
- * Tunes how a track subscription is delivered: priority, latency budget, ranges, and group
- * ordering.
- */
+/** Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
 
 /**
- * moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once. A null
- * subscription means the same; `copy` this one to change a field. A `Subscription(...)` must name
- * `maxDelay`, where null sets no subscriber limit.
+ * How far behind the live edge a subscriber or decoder plays: `min` is the target latency and where
+ * a cold join starts, null to leave it unstated (a decoder plays it as zero), and `max`, null for
+ * no subscriber limit, is how far a non-latest group may fall behind before it is skipped. A `min`
+ * past `max` starts at `max`.
+ */
+typealias Delay = uniffi.moq.MoqDelay
+
+/**
+ * moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at
+ * once. A null subscription means the same; `copy` this one to change a field. A
+ * `Subscription(...)` must name `delay`.
  */
 fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
     uniffi.moq.moqSubscriptionDefaults()
