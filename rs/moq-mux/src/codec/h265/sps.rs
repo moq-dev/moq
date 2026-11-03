@@ -256,7 +256,7 @@ fn skip_sub_layers(
 
 /// Parse an SPS NAL unit with scuffle_h265, once [`check`] has walked it.
 ///
-/// Every scuffle_h265 SPS parse goes through here, so no hostile SPS reaches its overflows.
+/// Every scuffle_h265 SPS parse in moq-mux goes through here, so no hostile SPS reaches its overflows.
 pub(crate) fn parse_full(nal: &[u8]) -> std::io::Result<scuffle_h265::SpsRbsp> {
 	check(nal)?;
 	Ok(SpsNALUnit::parse(&mut &nal[..])?.rbsp)
