@@ -35,7 +35,7 @@ const MAX_GROUP = BigInt(MAX_U53);
 
 /** Refuse a group that is not in `0..=2^53-1`. */
 export function checkGroup(value: bigint): void {
-	if (value < 0n || value > MAX_GROUP) throw new Failure("identity");
+	if (typeof value !== "bigint" || value < 0n || value > MAX_GROUP) throw new Failure("identity");
 }
 
 /** Refuse a frame that is not an integer in `0..=2^32-1`. */

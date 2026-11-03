@@ -11,6 +11,7 @@ import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replac
 import { Queue } from "./queue.ts";
 import type { Timestamp } from "./time.ts";
 import { MAX_FRAME_BYTES, SEGMENT_BYTES } from "./util/limits.ts";
+import { checkSequence } from "./util/sequence.ts";
 
 // A live tail budget, including a conservative charge for each frame's object and queue slot.
 const TAIL_BYTES = 32 * 1024 * 1024;
@@ -339,6 +340,7 @@ export class Producer {
 	#admits?: ((start: Timestamp) => () => void)[];
 
 	constructor(sequence: bigint) {
+		checkSequence(sequence);
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
 		this.#demand = makeDemand(sequence, this.#wanted, this.#state);

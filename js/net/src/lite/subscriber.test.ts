@@ -1857,7 +1857,12 @@ test.each([
 			await pool.withdraw();
 			await drainReactions();
 			expect(track.closed.peek()).toBeUndefined();
-			await respond(subscribe, version, [{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(0n) }], true);
+			await respond(
+				subscribe,
+				version,
+				[{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(0n) }],
+				true,
+			);
 			expect(await track.closed).toBeNull();
 		} else {
 			await pool.replace();
@@ -2289,8 +2294,11 @@ test.each(
 		const before = counters.map((counter) => counter.count());
 		expect(before).toHaveLength(3);
 		expect(before.every((count) => count > 0)).toBe(true);
-		for (let sequence = 0; sequence < 50; sequence++) {
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence }), await groupStream(sequence, version));
+		for (let sequence = 0n; sequence < 50n; sequence++) {
+			await subscriber.runGroup(
+				new Group({ subscribe: 0n, sequence }),
+				await groupStream(Number(sequence), version),
+			);
 			await drainReactions();
 		}
 		// Quiet subscription and demand signals must not retain a listener per received group.
@@ -2391,9 +2399,9 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 			got.push([group?.sequence, frame?.payload.length, frame?.timestamp?.value]);
 		}
 		expect(got).toEqual([
-			[3, 1, 2000],
-			[4, 1, 1000],
-			[5, 1, 500],
+			[3n, 1, 2000],
+			[4n, 1, 1000],
+			[5n, 1, 500],
 		]);
 		expect((await track.info()).timescale).toBe(Timescale.MILLI);
 		expect(track.closed.peek()).toBeUndefined();
@@ -2460,7 +2468,7 @@ test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, Version.DRAFT_07, [{ start: new SubscribeStart(starts) }]);
+		await respond(request, Version.DRAFT_07, [{ start: new SubscribeStart(starts.map(BigInt)) }]);
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
@@ -2533,7 +2541,7 @@ test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", asyn
 		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
 		expect(await reader.u53()).toBe(StreamId.Subscribe);
 		const msg = await Subscribe.decode(reader, version);
-		expect(msg.ranges).toEqual([{ start: { absolute: 0 }, end: { absolute: 3 } }]);
+		expect(msg.ranges).toEqual([{ start: { absolute: 0n }, end: { absolute: 3n } }]);
 		expect(track.closed.peek()).toBeUndefined();
 		expect(closes).toEqual([]);
 	} finally {
@@ -2657,7 +2665,10 @@ test.each([
 					controller.close();
 				},
 			});
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), new Reader(group, undefined, version));
+			await subscriber.runGroup(
+				new Group({ subscribe: 0n, sequence: 0n }),
+				new Reader(group, undefined, version),
+			);
 		} else if (legacy) {
 			// Lite-03 says nothing about which groups are owed, so only a stream still being read is.
 			const group = new ReadableStream<Uint8Array>({ start: frame });
@@ -2678,9 +2689,9 @@ test.each([
 // The FIN may answer the bounded range before the publisher read an update that widened it, so
 // the copy asks again for the demand rather than end clean short of it or fail its readers.
 test.each([
-	["an open widening after SUBSCRIBE_START", { start: { absolute: 0 } }, true, false],
-	["a bounded widening without SUBSCRIBE_START", { start: { absolute: 0 }, end: { absolute: 5 } }, false, false],
-	["a widening the publisher stopped reading", { start: { absolute: 0 }, end: { absolute: 5 } }, false, true],
+	["an open widening after SUBSCRIBE_START", { start: { absolute: 0n } }, true, false],
+	["a bounded widening without SUBSCRIBE_START", { start: { absolute: 0n }, end: { absolute: 5n } }, false, false],
+	["a widening the publisher stopped reading", { start: { absolute: 0n }, end: { absolute: 5n } }, false, true],
 ] as const)("a lite-07 FIN short of %s subscribes again on the same track", async (_, range, start, stopped) => {
 	const clock = new Manual();
 	const installed = clock.install();
@@ -2797,7 +2808,7 @@ test.each([
 });
 
 // Only a failed write defers to the responses: an update the wire can't carry still fails the
-// track. Lite-05 sends the start group plus one, past the largest u53 here.
+// track. Lite-05 sends the start group plus one, past the largest u62 here.
 test("an update whose bound the wire can't carry fails the track", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
@@ -2807,7 +2818,7 @@ test("an update whose bound the wire can't carry fails the track", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], Version.DRAFT_05);
 		await (await opened(1)).reading;
-		track.update({ ranges: [{ start: { absolute: Number.MAX_SAFE_INTEGER } }] });
+		track.update({ ranges: [{ start: { absolute: 2n ** 62n - 1n } }] });
 		expect(await track.closed).toBeInstanceOf(RangeError);
 	} finally {
 		track.close();

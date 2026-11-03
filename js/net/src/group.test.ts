@@ -211,13 +211,13 @@ test("wanted reflects mirror demand until the last reader leaves", async () => {
 	expect(wanted.peek()).toBe(false);
 });
 
-function pair(sequence: number) {
+function pair(sequence: bigint) {
 	const producer = new Producer(sequence);
 	return { producer, consumer: producer.consume() };
 }
 
 test("closing a consumer releases only that handle", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	const other = producer.consume();
 	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
 
@@ -234,7 +234,7 @@ test("closing a consumer releases only that handle", async () => {
 });
 
 test("closing a consumer ends its own parked reads", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	const other = producer.consume();
 	const reading = consumer.readFrame();
 	const waiting = consumer.readable();
@@ -260,7 +260,7 @@ test("closing a consumer ends its own parked reads", async () => {
 });
 
 test("a released consumer ignores a later abort", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	const reading = consumer.readFrame();
 	consumer.close();
 	producer.abort(new Error("upstream"));
@@ -301,7 +301,7 @@ test("empty frames consume tail storage without a frame count ceiling", async ()
 });
 
 test("a closed group rejects a further write without discarding committed frames", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	for (let i = 0; i < 9000; i++) {
 		producer.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
 	}
@@ -315,7 +315,7 @@ test("a closed group rejects a further write without discarding committed frames
 });
 
 test("an abort after finish keeps the clean outcome", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
 	producer.finish();
 	producer.abort(new Error("boom"));
@@ -326,7 +326,7 @@ test("an abort after finish keeps the clean outcome", async () => {
 });
 
 test("a read that starts later skips frames below it instead of returning them", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 
 	for (let i = 0; i < 10; i++) {
 		producer.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.now() });
@@ -340,7 +340,7 @@ test("a read that starts later skips frames below it instead of returning them",
 });
 
 test("a group with no eviction reads every frame without error", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
 	producer.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
 	producer.finish();
@@ -351,7 +351,7 @@ test("a group with no eviction reads every frame without error", async () => {
 });
 
 test("tryReadFrame drains buffered frames then returns undefined", () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	producer.writeFrame(textFrame("a"));
 	producer.writeFrame(textFrame("b"));
 
@@ -362,7 +362,7 @@ test("tryReadFrame drains buffered frames then returns undefined", () => {
 });
 
 test("tryReadFrameSequence reports per-frame sequence numbers", () => {
-	const { producer, consumer } = pair(7);
+	const { producer, consumer } = pair(7n);
 	producer.writeFrame(textFrame("a"));
 	producer.writeFrame(textFrame("b"));
 
@@ -372,7 +372,7 @@ test("tryReadFrameSequence reports per-frame sequence numbers", () => {
 });
 
 test("readFrameSequence reports per-frame sequence numbers", async () => {
-	const { producer, consumer } = pair(7);
+	const { producer, consumer } = pair(7n);
 	producer.writeFrame(textFrame("a"));
 	producer.writeFrame(textFrame("b"));
 
@@ -381,7 +381,7 @@ test("readFrameSequence reports per-frame sequence numbers", async () => {
 });
 
 test("done distinguishes a finished group from one that is merely empty", () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	// Open and empty: not done (more frames may arrive), and tryReadFrame is undefined.
 	expect(consumer.tryReadFrame()).toBeUndefined();
 	expect(consumer.done).toBe(false);
@@ -398,7 +398,7 @@ test("done distinguishes a finished group from one that is merely empty", () => 
 });
 
 test("a previously obtained closed handle peeks source closure synchronously", () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	const closed = consumer.closed;
 
 	producer.finish();
@@ -407,7 +407,7 @@ test("a previously obtained closed handle peeks source closure synchronously", (
 });
 
 test("readable resolves once a frame is buffered", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	// No frame yet: readable() must stay pending for an empty, open group.
 	const readable = consumer.readable();
 	let settled = false;
@@ -424,7 +424,7 @@ test("readable resolves once a frame is buffered", async () => {
 });
 
 test("readable resolves once the group closes, even with nothing buffered", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	const readable = consumer.readable();
 	producer.finish();
 	await readable; // resolves on close so callers don't wait forever
@@ -512,7 +512,7 @@ test("done ignores replayed frames an adopted copy buffers", async () => {
 });
 
 test("buffered frames are still readable after the group closes", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	producer.writeFrame(textFrame("a"));
 	producer.finish();
 
@@ -866,7 +866,7 @@ test("a stalled group whose copy then fails asks again with the failure", async 
 });
 
 test("a drained unfinished group fails with Old when its budget gives up", async () => {
-	const { producer, consumer } = pair(0);
+	const { producer, consumer } = pair(0n);
 	producer.writeFrame(textFrame("a"));
 	const expired = new Signal(false);
 	hooks.expireGroup(consumer, { expired: () => expired.peek(), changed: [expired] });

@@ -332,7 +332,7 @@ test("a request exposes the aggregate subscription options", async () => {
 		priority: 7,
 		delay: { min: Milli.zero, max: Milli(250) },
 		order: "descending",
-		ranges: [{ start: { absolute: 0 }, end: { absolute: 30 } }],
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 30n } }],
 	});
 	expect(request?.priority).toBe(7);
 });

@@ -849,13 +849,13 @@ test("a group stream whose FIN never completes is reset when the group expires",
 			server,
 		);
 
-		const write = (sequence: number) => {
+		const write = (sequence: bigint) => {
 			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
 			group.finish();
 		};
 
-		write(0);
+		write(0n);
 		await closeStarted;
 		// The newest group is never stale, however long its FIN takes.
 		await clock.advance(Nano.fromMilli(Milli(budget * 2)));
@@ -863,7 +863,7 @@ test("a group stream whose FIN never completes is reset when the group expires",
 
 		// Its successor presents no further, so only the wall clock since it arrived convicts
 		// group 0, after the track has ended.
-		write(1);
+		write(1n);
 		track.finish();
 		track.close();
 		await clock.advance(Nano.fromMilli(Milli(budget - 1)));
@@ -933,19 +933,19 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 		await SubscribeOk.decode(client.reader, VERSION);
 
 		// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
-		const write = (sequence: number) => {
+		const write = (sequence: bigint) => {
 			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
 			group.finish();
 		};
 
-		write(0);
+		write(0n);
 		await closeStarted;
-		write(1);
+		write(1n);
 		// A later group, so a verdict that forgot group 1 would wait for this one's deadline.
 		const later = Milli(10_000);
 		await clock.advance(Nano.fromMilli(later));
-		write(2);
+		write(2n);
 		track.finish();
 		track.close();
 
@@ -1018,18 +1018,18 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 			server,
 		);
 
-		const write = (sequence: number, ms: number) => {
+		const write = (sequence: bigint, ms: number) => {
 			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
 			group.finish();
 		};
-		write(0, 0);
+		write(0n, 0);
 		await opening;
 
 		// A group beyond the edge, so group 0's reach (where group 1 begins) is provably past
 		// the budget: a successor alone never convicts it.
-		write(1, 10_000);
-		write(2, 20_000);
+		write(1n, 10_000);
+		write(2n, 20_000);
 		open();
 
 		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
@@ -2154,7 +2154,7 @@ const TRACK_ENDED_STATUS = 0x2;
 /** A group stream the publisher opened, decoded down to its objects. */
 interface ServedGroup {
 	/** The group's sequence number. */
-	sequence: number;
+	sequence: bigint;
 	/** Whether the header claimed the stream starts at the group's first object. */
 	firstObject: boolean;
 	/** Whether the header claimed the stream's FIN ends the group (END_OF_GROUP). */
@@ -2292,7 +2292,7 @@ async function readGroup(stream: ReadableStream<Uint8Array> | Reader): Promise<S
 }
 
 /** Read a stream carrying only an END_OF_TRACK object, returning the group it names. */
-async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<number> {
+async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<bigint> {
 	const reader = new Reader(stream, undefined, V22);
 	const header = await GroupMessage.decode(reader, V22);
 	expect(header.flags.hasEnd).toBe(false);
@@ -2387,13 +2387,13 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 		// The request forwarded upstream carries the model's exclusive end, one past the
 		// filter's inclusive last group.
 		expect(track.subscription.peek()).toMatchObject({
-			ranges: [{ start: { absolute: 1 }, end: { absolute: 3 } }],
+			ranges: [{ start: { absolute: 1n }, end: { absolute: 3n } }],
 		});
 
 		const first = await nextUni(fx.uni);
 		if (!first) throw new Error("the filter's start group was never served");
 		expect(await readGroup(first)).toEqual({
-			sequence: 1,
+			sequence: 1n,
 			// The head was trimmed, so the stream does not start at the group's first object.
 			firstObject: false,
 			endOfGroup: true,
@@ -2406,7 +2406,7 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 		const second = await nextUni(fx.uni);
 		if (!second) throw new Error("the filter's end group was never served");
 		expect(await readGroup(second)).toEqual({
-			sequence: 2,
+			sequence: 2n,
 			firstObject: true,
 			// The filter ends at object 0 of 3, so the stream stops before the group does.
 			endOfGroup: false,
@@ -2440,7 +2440,7 @@ test.each([Version.DRAFT_22])("IETF %s: datagrams honor the absolute object rang
 		// Datagrams go out in arrival order, so the in-range one arrives last: receiving it
 		// first proves both out-of-range ones ahead of it were dropped.
 		for (const sequence of [0, 2, 1])
-			track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+			track.insertDatagram(BigInt(sequence), Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
 		const next = await reader.read();
 		if (next.done) throw new Error("the in-range datagram was never sent");
 		const datagram = await ObjectDatagram.decode(next.value, version);
@@ -2530,7 +2530,7 @@ test.each(["nextObject", "unfiltered"] as const)(
 			const live = await nextUni(fx.uni);
 			if (!live) throw new Error("the subscription never served the live tail");
 			expect(await readGroup(live)).toEqual({
-				sequence: 1,
+				sequence: 1n,
 				firstObject: false,
 				endOfGroup: true,
 				objects: [{ id: 2, payload: "1.2" }],
@@ -2570,7 +2570,7 @@ test("draft-22: a fill never rewinds an absolute live join", async () => {
 		const live = await nextUni(fx.uni);
 		if (!live) throw new Error("missing live group after the fill");
 		expect(await readGroup(live)).toEqual({
-			sequence: 1,
+			sequence: 1n,
 			firstObject: true,
 			endOfGroup: true,
 			objects: [{ id: 0, payload: "1.0" }],
@@ -2646,7 +2646,7 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 	try {
 		const served = await nextUni(fx.uni);
 		if (!served) throw new Error("the group stream never opened");
-		expect(await readGroup(served)).toEqual({ sequence: 0, firstObject: false, endOfGroup: false, objects: [] });
+		expect(await readGroup(served)).toEqual({ sequence: 0n, firstObject: false, endOfGroup: false, objects: [] });
 	} finally {
 		fx.close();
 		client.close();
@@ -2656,7 +2656,7 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	for (const sequence of [0, 3, 9]) {
+	for (const sequence of [0n, 3n, 9n]) {
 		const group = track.createGroup(sequence);
 		for (let i = 0; i < 2; i++)
 			group.writeFrame({ payload: new TextEncoder().encode(`${sequence}.${i}`), timestamp: Timestamp.now() });
@@ -3029,7 +3029,7 @@ test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DO
 	try {
 		const served = await nextUni(fx.uni);
 		if (!served) throw new Error("the requested group was never served");
-		expect((await readGroup(served)).sequence).toBe(0);
+		expect((await readGroup(served)).sequence).toBe(0n);
 
 		// Beyond the end, so it is never served, and it must not hold the subscription open.
 		writeGroup(track, 1); // group 1
@@ -3044,7 +3044,7 @@ test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DO
 		// Only the in-range group was ever served; the other stream marks the track's end.
 		const end = await nextUni(fx.uni);
 		if (!end) throw new Error("the track's end was never marked");
-		expect(await readEndOfTrack(end)).toBe(2);
+		expect(await readEndOfTrack(end)).toBe(2n);
 		expect(await opens(fx.uni.read(), clock)).toBe(false);
 	} finally {
 		fx.close();
@@ -3169,7 +3169,7 @@ for (const synchronous of [true, false]) {
 			const next = await fx.uni.read();
 			if (next.done) throw new Error("subscription ended after its first group failed");
 			const served = await readGroup(next.value);
-			expect(served.sequence).toBe(1);
+			expect(served.sequence).toBe(1n);
 			expect(served.objects).toEqual([{ id: 0, payload: "1.0" }]);
 			expect(create).toHaveBeenCalledTimes(2);
 		} finally {
@@ -3222,7 +3222,7 @@ test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", 
 		slot.resolve();
 		const served = await nextUni(fx.uni);
 		if (!served) throw new Error("the queued group was never served");
-		expect((await readGroup(served)).sequence).toBe(0);
+		expect((await readGroup(served)).sequence).toBe(0n);
 
 		expect(await response).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, V22);
@@ -3232,7 +3232,7 @@ test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", 
 
 		const end = await nextUni(fx.uni);
 		if (!end) throw new Error("the track's end was never marked");
-		expect(await readEndOfTrack(end)).toBe(1);
+		expect(await readEndOfTrack(end)).toBe(1n);
 	} finally {
 		fx.close();
 		client.close();
@@ -3596,7 +3596,7 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 				const payloads = group.objects.map((object) => object.payload);
 				expect(payloads).not.toContain("paused");
 				expect(payloads).not.toContain("before");
-				if (group.sequence === 2) {
+				if (group.sequence === 2n) {
 					expect(group.objects).toEqual([{ id: 0, payload: "after" }]);
 					break;
 				}
@@ -3904,10 +3904,12 @@ test("draft-22: a range update replaces the live subscription bounds", async () 
 			served.push(await readGroup(stream));
 		}
 		expect(
-			served.sort((a, b) => a.sequence - b.sequence).map(({ sequence, objects }) => ({ sequence, objects })),
+			served
+				.sort((a, b) => Number(a.sequence - b.sequence))
+				.map(({ sequence, objects }) => ({ sequence, objects })),
 		).toEqual([
-			{ sequence: 2, objects: [{ id: 1, payload: "2.1" }] },
-			{ sequence: 3, objects: [{ id: 0, payload: "3.0" }] },
+			{ sequence: 2n, objects: [{ id: 1, payload: "2.1" }] },
+			{ sequence: 3n, objects: [{ id: 0, payload: "3.0" }] },
 		]);
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, fx.version);
@@ -3915,7 +3917,7 @@ test("draft-22: a range update replaces the live subscription bounds", async () 
 		expect(done.streamCount).toBe(3n);
 		const end = await nextUni(fx.uni);
 		if (!end) throw new Error("missing exact track end after updated bounds");
-		expect(await readEndOfTrack(end)).toBe(5);
+		expect(await readEndOfTrack(end)).toBe(5n);
 	} finally {
 		client.close();
 		track.finish();
@@ -3945,7 +3947,7 @@ test("IETF draft-18: range updates preserve the shared subscription", async () =
 			await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, fx.version);
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
-			expect(track.subscription.peek()?.ranges).toEqual([{ start: { absolute: 6 }, end: { absolute: 8 } }]);
+			expect(track.subscription.peek()?.ranges).toEqual([{ start: { absolute: 6n }, end: { absolute: 8n } }]);
 		}
 	} finally {
 		client.close();
@@ -4022,7 +4024,7 @@ test("draft-22: an empty newer group is not an object in Largest or a relative f
 	);
 	try {
 		expect(ok.largest).toEqual({ groupId: 0n, objectId: 1n });
-		expect(track.largest()).toEqual({ group: 1, frame: 0 });
+		expect(track.largest()).toEqual({ group: 1n, frame: 0 });
 		const stream = await nextUni(fx.uni);
 		if (!stream) throw new Error("missing relative fill");
 		const served = await readFill(stream);
@@ -4215,7 +4217,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 		writeGroup(track, 1);
 		const next = await nextUni(fx.uni);
 		if (!next) throw new Error("missing group after narrowed range");
-		expect((await readGroup(next)).sequence).toBe(1);
+		expect((await readGroup(next)).sequence).toBe(1n);
 	} finally {
 		open.finish();
 		client.close();

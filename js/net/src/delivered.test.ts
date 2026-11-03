@@ -20,7 +20,7 @@ test("add joins neighbouring runs", () => {
 
 test("the extremes are sequences too", () => {
 	const delivered = new Delivered();
-	const max = Number.MAX_SAFE_INTEGER;
+	const max = BigInt(Number.MAX_SAFE_INTEGER);
 	expect(delivered.add(0n)).toBe(true);
 	expect(delivered.add(max)).toBe(true);
 	expect(delivered.add(max)).toBe(false);
@@ -32,7 +32,7 @@ test("the extremes are sequences too", () => {
 
 test("forgetBelow closes the gaps under the floor", () => {
 	const delivered = new Delivered();
-	for (const sequence of [3, 5, 6, 9, 12]) delivered.add(sequence);
+	for (const sequence of [3n, 5n, 6n, 9n, 12n]) delivered.add(sequence);
 	expect(delivered.aboveGap()).toBe(3n);
 	delivered.forgetBelow(0n);
 	expect(delivered.runs).toBe(4);
@@ -58,7 +58,7 @@ test("forgetBelow closes the gaps under the floor", () => {
 
 test("a run joins every run it touches, leaving the gaps around it", () => {
 	const delivered = new Delivered();
-	for (const sequence of [2, 5, 9]) delivered.add(sequence);
+	for (const sequence of [2n, 5n, 9n]) delivered.add(sequence);
 	delivered.addRun(4n, 9n);
 	expect(delivered.runs).toBe(2);
 	expect(delivered.gaps(0n, 12n)).toEqual([

@@ -17,3 +17,10 @@ export function saturatingSub(a: bigint, b: bigint): bigint {
 
 /** An exclusive end past every group a wire can carry (2^64), which an open run ends at. */
 export const UNBOUNDED = 1n << 64n;
+
+/** Refuse a group sequence that is not a non-negative bigint, which a plain JS caller can pass. */
+export function checkSequence(sequence: bigint): bigint {
+	if (typeof sequence !== "bigint") throw new TypeError(`group sequence must be a bigint: ${String(sequence)}`);
+	if (sequence < 0n) throw new RangeError(`group sequence must be non-negative: ${sequence}`);
+	return sequence;
+}

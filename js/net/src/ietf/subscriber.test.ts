@@ -819,7 +819,7 @@ function encodeStamped(properties: number[]): Uint8Array {
 }
 
 /** A group stream header whose objects carry extensions. */
-function stampedGroup(groupId: number): GroupMessage {
+function stampedGroup(groupId: bigint): GroupMessage {
 	return new GroupMessage({
 		trackAlias: ALIAS,
 		groupId,
@@ -834,7 +834,7 @@ test("a track without TIMESCALE arrives untimed, even if an object carries a Tim
 	expect((await track.info()).timescale).toBeUndefined();
 
 	// Property 0x10 (Timestamp) = 5, with no units to read it in.
-	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped([0x10, 5]), VERSION));
+	await subscriber.handleGroup(stampedGroup(0n), new Reader(undefined, encodeStamped([0x10, 5]), VERSION));
 	const group = await track.ordered().nextGroup();
 	const frame = await group?.readFrame();
 	expect(frame?.payload).toEqual(new Uint8Array([42]));
@@ -847,7 +847,7 @@ test("an object-scope Timescale is never applied", async () => {
 	expect((await track.info()).timescale).toBe(Timescale.MICRO);
 
 	// Property 0x08 (Timescale) = 1 per second, then 0x10 (Timestamp) = 5 as a type delta of 8.
-	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped([0x08, 1, 0x08, 5]), VERSION));
+	await subscriber.handleGroup(stampedGroup(0n), new Reader(undefined, encodeStamped([0x08, 1, 0x08, 5]), VERSION));
 	const group = await track.ordered().nextGroup();
 	const frame = await group?.readFrame();
 	expect(frame?.timestamp?.scale).toBe(Timescale.MICRO);
@@ -860,7 +860,7 @@ test("an object without a Timestamp on a TIMESCALE track is malformed", async ()
 	const reader = new Reader(undefined, encodeStamped([]), VERSION);
 	const stop = spyOn(reader, "stop");
 
-	await subscriber.handleGroup(stampedGroup(0), reader);
+	await subscriber.handleGroup(stampedGroup(0n), reader);
 
 	expect(stop).toHaveBeenCalledTimes(1);
 	const err = stop.mock.calls[0][0];
@@ -874,7 +874,7 @@ test("an object without a Timestamp on a TIMESCALE track is malformed", async ()
 test("a compact END_OF_TRACK at object 5 with properties is subgroup 5, refused without ending the track", async () => {
 	for (const version of [Version.DRAFT_18]) {
 		const { subscriber, track } = await subscribeTrack({ version });
-		const header = stampedGroup(0);
+		const header = stampedGroup(0n);
 		header.flags.hasSubgroupObject = true;
 		// Object ID 5, one unknown integer property, an empty payload, then END_OF_TRACK.
 		const reader = new Reader(undefined, new Uint8Array([5, 2, 0x20, 7, 0, 4]), version);
@@ -937,7 +937,7 @@ test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
 		largest: { groupId: 7n, objectId: 3n },
 	}).encode(peer.writer, VERSION);
 	// Only the group carries over, since Object IDs are not frame ordinals.
-	expect(await track.largest()).toEqual({ group: 7, frame: 0 });
+	expect(await track.largest()).toEqual({ group: 7n, frame: 0 });
 	track.close();
 });
 
@@ -1262,7 +1262,7 @@ test.each([
 
 	// This tests stream framing, independent of gaps below these groups. An ordered
 	// subscription with this budget would wait for the unreceived groups 0..2.
-	for (const sequence of expected) expect((await track.recvGroup())?.sequence).toBe(sequence);
+	for (const sequence of expected) expect((await track.recvGroup())?.sequence).toBe(BigInt(sequence));
 	track.close();
 });
 

@@ -196,7 +196,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.ranges?.[0]?.start?.absolute === 1) resolveProducer?.(producer);
+				if (subscription?.ranges?.[0]?.start?.absolute === 1n) resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -216,7 +216,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 		// The negotiated lite-06 cannot state a minimum.
 		delay: { min: null, max: Milli(250) },
 		order: "descending",
-		ranges: [{ start: { absolute: 1 }, end: { absolute: 9 } }],
+		ranges: [{ start: { absolute: 1n }, end: { absolute: 9n } }],
 	});
 
 	const updated = producer.subscription.changed();
@@ -229,7 +229,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 		priority: 8,
 		delay: { min: null, max: Milli(500) },
 		order: "descending",
-		ranges: [{ start: { absolute: 2 }, end: { absolute: 12 } }],
+		ranges: [{ start: { absolute: 2n }, end: { absolute: 12n } }],
 	});
 
 	subscriber.close();
@@ -295,7 +295,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.ranges?.[0]?.start?.absolute === 1) resolveProducer?.(producer);
+				if (subscription?.ranges?.[0]?.start?.absolute === 1n) resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -332,11 +332,11 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 });
 
 test("integration: lite applies initial and updated group bounds", async () => {
-	const GROUP_COUNT = 6;
-	const INITIAL_START_GROUP = 1;
-	const INITIAL_END_GROUP = 3; // exclusive: groups 1 and 2
-	const UPDATED_GROUP = 4;
-	const UPDATED_END_GROUP = 5; // exclusive: group 4
+	const GROUP_COUNT = 6n;
+	const INITIAL_START_GROUP = 1n;
+	const INITIAL_END_GROUP = 3n; // exclusive: groups 1 and 2
+	const UPDATED_GROUP = 4n;
+	const UPDATED_END_GROUP = 5n; // exclusive: group 4
 	const REPLAY_LATENCY_MS = 5000;
 	const PENDING_ASSERT_MS = 20;
 	const UPDATE_TIMEOUT_MS = 1000;
@@ -350,7 +350,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().finish();
+	for (let sequence = 0n; sequence < GROUP_COUNT; sequence++) producer.appendGroup().finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote
@@ -362,7 +362,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		.ordered();
 	try {
 		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_START_GROUP);
-		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP - 1);
+		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP - 1n);
 
 		// A bounded read ends once its window is read, as in Rust.
 		expect(await subscriber.nextGroup()).toBeUndefined();
@@ -374,7 +374,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		});
 		const updated = (pending: Promise<unknown>) =>
 			withTimeout(pending, Nano.fromMilli(Milli(UPDATE_TIMEOUT_MS)), "updated group bound timed out");
-		expect(((await updated(subscriber.nextGroup())) as { sequence: number } | undefined)?.sequence).toBe(
+		expect(((await updated(subscriber.nextGroup())) as { sequence: bigint } | undefined)?.sequence).toBe(
 			UPDATED_GROUP,
 		);
 		expect(await updated(subscriber.nextGroup())).toBeUndefined();
@@ -487,9 +487,9 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 			})
 			.ordered();
 		// Covering the ranges ends the subscription upstream, and the read with its window.
-		const got: number[] = [];
-		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1);
-		expect(got).toEqual([1, 2, 7, 8]);
+		const got: bigint[] = [];
+		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1n);
+		expect(got).toEqual([1n, 2n, 7n, 8n]);
 		expect(await reader.nextGroup()).toBeUndefined();
 		reader.close();
 	} finally {
@@ -514,10 +514,10 @@ test("integration: lite-07 keeps a covered bounded subscription's copy", async (
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	for (const sequence of [0, 1, 2, 4, 5]) producer.createGroup(sequence).finish();
+	for (const sequence of [0n, 1n, 2n, 4n, 5n]) producer.createGroup(sequence).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const bounded = (end: number) =>
+	const bounded = (end: bigint) =>
 		remote.track("video").subscribe({
 			delay: { max: Milli(60_000) },
 			order: "ascending",
@@ -525,23 +525,23 @@ test("integration: lite-07 keeps a covered bounded subscription's copy", async (
 		});
 	// Arrival reads, as the Rust test's: an ordered one would wait out the missing group 3.
 	const read = async (reader: ReturnType<typeof bounded>, count: number) => {
-		const got: number[] = [];
-		for (let i = 0; i < count; i++) got.push((await reader.recvGroup())?.sequence ?? -1);
+		const got: bigint[] = [];
+		for (let i = 0; i < count; i++) got.push((await reader.recvGroup())?.sequence ?? -1n);
 		return got;
 	};
 	try {
-		const reader = bounded(3);
-		expect(await read(reader, 2)).toEqual([1, 2]);
+		const reader = bounded(3n);
+		expect(await read(reader, 2)).toEqual([1n, 2n]);
 		// The publisher's demand ends with the covered subscription, and the read with its window.
 		while (producer.subscription.peek() !== undefined) await producer.subscription.changed();
 		expect(await reader.recvGroup()).toBeUndefined();
 
-		const again = bounded(3);
-		expect(await read(again, 2)).toEqual([1, 2]);
+		const again = bounded(3n);
+		expect(await read(again, 2)).toEqual([1n, 2n]);
 		expect(producer.subscription.peek()).toBeUndefined();
 
-		const wider = bounded(6);
-		expect(await read(wider, 4)).toEqual([1, 2, 4, 5]);
+		const wider = bounded(6n);
+		expect(await read(wider, 4)).toEqual([1n, 2n, 4n, 5n]);
 		reader.close();
 		again.close();
 		wider.close();
@@ -581,9 +581,9 @@ test("integration: lite-07 serves a time range", async () => {
 				ranges: [{ start: { time: Timestamp.fromMillis(2500) }, end: { time: Timestamp.fromMillis(5000) } }],
 			})
 			.ordered();
-		const got: number[] = [];
-		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1);
-		expect(got).toEqual([2, 3, 4, 5]);
+		const got: bigint[] = [];
+		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1n);
+		expect(got).toEqual([2n, 3n, 4n, 5n]);
 		reader.close();
 
 		// An untimed track refuses it.

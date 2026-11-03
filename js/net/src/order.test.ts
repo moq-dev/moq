@@ -81,8 +81,8 @@ function writeGroup(track: TrackProducer): GroupProducer {
 
 // Receiving a group means its stream header was written, which the publisher does only after
 // ranking the stream.
-async function receive(subscriber: TrackSubscriber, count: number): Promise<number[]> {
-	const sequences: number[] = [];
+async function receive(subscriber: TrackSubscriber, count: number): Promise<bigint[]> {
+	const sequences: bigint[] = [];
 	for (let i = 0; i < count; i++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended early");

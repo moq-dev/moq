@@ -80,11 +80,11 @@ test("changing grace reuses ages without reopening folded gaps", () => {
 test.each([0, 1, 4, 32, 128])("rolling expiration keeps only %i pending gaps", (retained) => {
 	const ledger = new Ledger();
 	for (let arrival = 0; arrival < retained * 4 + 8; arrival++) {
-		ledger.account(arrival * 2, arrival * 2 + 1, at(arrival));
+		ledger.account(BigInt(arrival * 2), BigInt(arrival * 2 + 1), at(arrival));
 		ledger.expire(at(arrival), Milli(retained));
 		const folded = Math.max(0, arrival - retained) * 2 + 1;
-		expect(ledger.covers(0n, folded)).toBe(true);
-		expect(ledger.gaps(0n, arrival * 2 + 1).length).toBe(Math.min(arrival, retained));
+		expect(ledger.covers(0n, BigInt(folded))).toBe(true);
+		expect(ledger.gaps(0n, BigInt(arrival * 2 + 1)).length).toBe(Math.min(arrival, retained));
 	}
 });
 
@@ -96,14 +96,15 @@ test("shuffled arrivals and bulk merges agree with the accounted sequence set", 
 		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
 		const start = seed % 4096;
 		const end = start + (i < 512 ? 1 : 32);
-		ledger.account(start, end, at(i));
+		ledger.account(BigInt(start), BigInt(end), at(i));
 		for (let n = start; n < end; n++) sequences.add(n);
 		ledger.expire(at(i), Milli(2000));
 	}
 	const gaps = ledger.gaps(0n, 4128n);
 	for (let i = 0; i < 4128; i++) {
-		expect(ledger.covers(i, i + 1)).toBe(sequences.has(i));
-		expect(gaps.some((gap) => gap.start <= i && i < gap.end)).toBe(!sequences.has(i));
+		const sequence = BigInt(i);
+		expect(ledger.covers(sequence, sequence + 1n)).toBe(sequences.has(i));
+		expect(gaps.some((gap) => gap.start <= sequence && sequence < gap.end)).toBe(!sequences.has(i));
 	}
 	ledger.account(0n, 4128n, at(1024));
 	ledger.expire(at(4000), Milli(2000));

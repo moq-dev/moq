@@ -43,7 +43,7 @@ import {
 } from "./internal.ts";
 import { CACHE_EXPIRY, grace, Ledger } from "./ledger.ts";
 import { Timescale, type Timestamp } from "./time.ts";
-import { max, min } from "./util/sequence.ts";
+import { checkSequence, max, min } from "./util/sequence.ts";
 import {
 	type Holdings,
 	hasTime,
@@ -566,6 +566,11 @@ export class Consumer {
 
 	/** Fetch a single group by sequence without holding a live subscription. */
 	fetchGroup(sequence: bigint, options?: FetchGroupOptions): Promise<GroupConsumer> {
+		try {
+			checkSequence(sequence);
+		} catch (err) {
+			return Promise.reject(err);
+		}
 		if (options?.maxDelay !== undefined) {
 			options = { ...options, maxDelay: wireMillis("maxDelay", options.maxDelay) };
 		}
@@ -1684,6 +1689,7 @@ export class Producer {
 
 	#insertDatagram(datagram: Datagram, inflated?: number): void {
 		const { sequence, timestamp, payload } = datagram;
+		checkSequence(sequence);
 		this.#writable(sequence);
 		this.#checkDatagram(timestamp);
 		if (payload.length > MAX_DATAGRAM_BYTES || (inflated ?? 0) > MAX_DATAGRAM_BYTES)
