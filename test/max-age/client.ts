@@ -39,7 +39,7 @@ try {
 		for (;;) {
 			const event = await announcements.next();
 			assert(event, "announcements closed");
-			if (event.kind === "start" && event.prefix === "age") break;
+			if (event.kind === "present" && event.prefix === "age") break;
 		}
 		const request = origin.consume().request(Path.from("age"));
 		let broadcast = request.active.peek();
