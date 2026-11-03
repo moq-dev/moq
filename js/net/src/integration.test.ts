@@ -207,13 +207,14 @@ test("integration: lite subscription options and updates reach the publisher", a
 	// A floor of group 1, a concrete group on every draft.
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
-		maxDelay: Milli(250),
+		delay: { max: Milli(250) },
 		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
 	const producer = await accepted;
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
-		maxDelay: Milli(250),
+		// The negotiated lite-06 cannot state a minimum.
+		delay: { min: null, max: Milli(250) },
 		order: "descending",
 		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
@@ -221,12 +222,12 @@ test("integration: lite subscription options and updates reach the publisher", a
 	const updated = producer.subscription.changed();
 	subscriber.update({
 		priority: 8,
-		maxDelay: Milli(500),
+		delay: { max: Milli(500) },
 		groups: { start: { included: 2 }, end: { excluded: 12 } },
 	});
 	expect(await updated).toEqual({
 		priority: 8,
-		maxDelay: Milli(500),
+		delay: { min: null, max: Milli(500) },
 		order: "descending",
 		groups: { start: { included: 2 }, end: { excluded: 12 } },
 	});
@@ -256,14 +257,14 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age 
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ maxDelay: Milli(250) });
+	const subscriber = remote.track("video").subscribe({ delay: { max: Milli(250) } });
 	const producer = await accepted;
 	// Without the negotiated parameter the publisher keeps its whole backlog instead.
-	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(250));
+	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(250));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ maxDelay: Milli(500) });
-	expect((await updated)?.maxDelay).toBe(Milli(500));
+	subscriber.update({ delay: { max: Milli(500) } });
+	expect((await updated)?.delay?.max).toBe(Milli(500));
 
 	subscriber.close();
 	remote.close();
@@ -273,7 +274,7 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age 
 	server.abort();
 });
 
-test("integration: lite carries a fractional maxDelay as a whole millisecond", async () => {
+test("integration: lite carries a fractional delay as a whole millisecond", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -304,7 +305,9 @@ test("integration: lite carries a fractional maxDelay as a whole millisecond", a
 	const remote = wireOf(client).consume(Path.from("test"));
 	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
 	// nothing resubscribes. The publisher must see the budget rounded up instead.
-	const subscriber = remote.track("video").subscribe({ maxDelay: Milli(38.75), groups: { start: { included: 1 } } });
+	const subscriber = remote
+		.track("video")
+		.subscribe({ delay: { max: Milli(38.75) }, groups: { start: { included: 1 } } });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -313,11 +316,11 @@ test("integration: lite carries a fractional maxDelay as a whole millisecond", a
 	});
 
 	const producer = await Promise.race([accepted, failed]);
-	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(39));
+	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(39));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ maxDelay: Milli(500.25), groups: { start: { included: 1 } } });
-	expect((await Promise.race([updated, failed]))?.maxDelay).toBe(Milli(501));
+	subscriber.update({ delay: { max: Milli(500.25) }, groups: { start: { included: 1 } } });
+	expect((await Promise.race([updated, failed]))?.delay?.max).toBe(Milli(501));
 
 	subscriber.close();
 	remote.close();
@@ -353,7 +356,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const subscriber = remote
 		.track("video")
 		.subscribe({
-			maxDelay: Milli(REPLAY_LATENCY_MS),
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
 			groups: { start: { included: INITIAL_START_GROUP }, end: { excluded: INITIAL_END_GROUP } },
 		})
 		.ordered();
@@ -365,7 +368,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		expect(await Promise.race([pending, sleepMs(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
 
 		subscriber.update({
-			maxDelay: Milli(REPLAY_LATENCY_MS),
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
 			groups: { start: { included: UPDATED_GROUP }, end: { excluded: UPDATED_END_GROUP } },
 		});
 		expect(
@@ -405,7 +408,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 	try {
 		// Bounds that meet cannot go on the wire: the nearest encoding inverts the range.
 		const empty = video.subscribe({
-			maxDelay: Milli(REPLAY_LATENCY_MS),
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
 			groups: { start: { included: 2 }, end: { excluded: 2 } },
 		});
 		await expect(
@@ -416,13 +419,13 @@ test("integration: lite refuses an empty requested range on open and on update",
 		// A live subscription whose demand later collapses to nothing fails the same way.
 		const live = video
 			.subscribe({
-				maxDelay: Milli(REPLAY_LATENCY_MS),
+				delay: { max: Milli(REPLAY_LATENCY_MS) },
 				groups: { start: { included: 1 }, end: { excluded: 2 } },
 			})
 			.ordered();
 		expect((await live.nextGroup())?.sequence).toBe(1);
 		live.update({
-			maxDelay: Milli(REPLAY_LATENCY_MS),
+			delay: { max: Milli(REPLAY_LATENCY_MS) },
 			groups: { start: { included: 3 }, end: { excluded: 3 } },
 		});
 		await expect(

@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Subscription::max_delay` is `delay: track::Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
+
+`track::Subscription` carries a `track::Delay { min, max }` in place of `max_delay`, and `with_max_delay(d)` is `with_delay(Delay)`.
+`Delay::max` is the old `max_delay`, unchanged. `Delay::min` is the subscriber's target latency, or `None` when a peer whose wire cannot carry it (moq-lite before 07, moq-transport) left it unstated. Both default to `Some(Duration::ZERO)`.
+moq-lite-07 SUBSCRIBE and SUBSCRIBE\_UPDATE carry `min`, and a track's aggregate subscription takes the smallest stated one.
+
+```rust
+// Before
+Subscription::default().with_max_delay(d);
+subscription.max_delay;
+// After
+Subscription::default().with_delay(Delay::default().with_max(d));
+subscription.delay.max;
+```
+
+`group::Fetch::max_delay` is unchanged.
+
 ### Local readiness takes the next frame ([#7624](https://github.com/moq-dev/moq/pull/7624))
 
 `group::Producer::poll_ready(waiter)` and `ready()` take the next frame's `&frame::Info`: `poll_ready(waiter, &info)` and `ready(&info).await`.
@@ -25,7 +42,7 @@ When every one of a subscription's `ranges` has an end, `track::Subscriber::recv
 This holds for a track read from its own producer's cache. A track read through an origin's routes, such as a remote broadcast's, still waits past its ranges for now, so a reader there stops once it has the groups it asked for rather than waiting for `None`.
 A reader that wants to widen its ranges later keeps one open, such as `Range::groups(n..)`, and narrows its reads with `with_range`, whose cap never ends a read.
 A group another reader's fetch or fill cached is now handed to every subscriber whose ranges hold it, not only fetches.
-A missing group the live feed may still deliver is waited for at most one second before it is asked of a fill or named dropped, when neither the readers' `max_delay` nor the track's max age bounds the wait. Before, a reader with `max_delay: None` on a track with no max age waited for it until the track ended.
+A missing group the live feed may still deliver is waited for at most one second before it is asked of a fill or named dropped, when neither the readers' `delay.max` nor the track's max age bounds the wait. Before, a reader with `max_delay: None` on a track with no max age waited for it until the track ended.
 Over moq-transport, a subscription to a copy the session holds no upstream subscription for, such as one only fetched so far, whose ranges all end below the publisher's reported Largest Object, is served by FETCH without subscribing upstream. Each missing group is asked at once and a refusal is final, since nothing else would deliver it.
 
 ### `broadcast::Demand` reads like `track::Demand`

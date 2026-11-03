@@ -1163,7 +1163,8 @@ impl Rendition {
 		waiter: &kio::Waiter,
 	) -> Poll<Option<moq_net::track::Subscribing>> {
 		let track = std::task::ready!(self.media.poll_track(binding, waiter));
-		let subscription = moq_net::track::Subscription::default().with_max_delay(FEED_MAX_DELAY);
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
 		Poll::Ready(track.map(|(_, track)| track.subscribe(subscription).into_inner()))
 	}
 

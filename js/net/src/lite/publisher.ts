@@ -908,7 +908,10 @@ export class Publisher {
 		const track = front.track(msg.track).subscribe({
 			priority: msg.priority,
 			order: msg.order,
-			maxDelay: Milli(servingMaxDelay(this.version, msg.maxDelay)),
+			delay: {
+				max: Milli(servingMaxDelay(this.version, msg.maxDelay)),
+				min: msg.minDelay === undefined ? null : Milli(msg.minDelay),
+			},
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
@@ -1018,7 +1021,10 @@ export class Publisher {
 					track.update({
 						priority: update.priority,
 						order: update.order,
-						maxDelay: Milli(servingMaxDelay(this.version, update.maxDelay)),
+						delay: {
+							max: Milli(servingMaxDelay(this.version, update.maxDelay)),
+							min: update.minDelay === undefined ? null : Milli(update.minDelay),
+						},
 						groups: {
 							start: update.startGroup === undefined ? undefined : { included: update.startGroup },
 							end: end === undefined ? undefined : { excluded: end },

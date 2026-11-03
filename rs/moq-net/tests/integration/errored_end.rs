@@ -5,6 +5,7 @@
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8>>)>, Option<Error>) {
 	let subscription = Subscription::default()
 		.with_range(0..)
-		.with_max_delay(Duration::from_secs(30));
+		.with_delay(Delay::default().with_max(Duration::from_secs(30)));
 	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")

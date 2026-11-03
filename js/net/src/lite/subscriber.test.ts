@@ -1293,7 +1293,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 		const track = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ priority: 3, maxDelay: Milli(10_000) });
+			.subscribe({ priority: 3, delay: { max: Milli(10_000) } });
 		try {
 			await opened(0);
 			await streams[0].reading;
@@ -2374,7 +2374,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	// Old enough to keep every group, however far behind the newest start.
-	const track = broadcast.track("video").subscribe({ maxDelay: Milli(60_000) });
+	const track = broadcast.track("video").subscribe({ delay: { max: Milli(60_000) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2410,7 +2410,7 @@ test("a lite-07 rewind is refused", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ maxDelay: Milli(60_000) });
+	const track = broadcast.track("video").subscribe({ delay: { max: Milli(60_000) } });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2635,7 +2635,7 @@ test.each([
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe({
-		maxDelay: Milli.zero,
+		delay: { max: Milli.zero },
 		groups: { start: { included: 0 }, end: { excluded: 1 } },
 	});
 	try {
@@ -2651,7 +2651,7 @@ test.each([
 					}),
 				)
 			: undefined;
-		track.update({ maxDelay: Milli.zero, groups });
+		track.update({ delay: { max: Milli.zero }, groups });
 		await refused;
 		await drainReactions();
 

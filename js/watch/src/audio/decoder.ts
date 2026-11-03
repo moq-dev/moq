@@ -5,6 +5,7 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import {
 	type Computed,
+	Derived,
 	Effect,
 	type Getter,
 	getter,
@@ -168,7 +169,7 @@ export class Decoder {
 	#subscribeMaxDelay = new Signal<Milli>(Milli.zero);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
-	#delay = new Signal<Container.Delay>({});
+	#delay = new Signal<Moq.Track.Delay>({});
 
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Milli | undefined>(undefined);
@@ -533,7 +534,7 @@ export class Decoder {
 				broadcast: active,
 				track: Catalog.track(track, identity),
 				priority: Catalog.PRIORITY.audio,
-				maxDelay: this.#subscribeMaxDelay,
+				delay: new Derived([this.sync.out.delay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
 			});
 			if (!sub) {
 				this.#retire();
