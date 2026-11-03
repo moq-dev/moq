@@ -95,6 +95,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Bindings size profile](/quest/m2/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [Value merge-patch diff](/quest/m2/json-value-diff.md) - benchmarks decide between moq-json's generic serializer diff, a ported `Value` diff, and compression alone
 - [Measure what a catalog republish costs per rendition edit](/quest/m2/catalog-republish-cost.md) - bench whole-catalog re-serialization across track counts, then decide deltas or a bound
+- [A JSON snapshot consumer resyncs after a bad frame](/quest/m2/json-snapshot-resync.md) - a decode failure drops the group with a typed error, so `@moq/room` and moq-boy resume at the next snapshot
 - [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
