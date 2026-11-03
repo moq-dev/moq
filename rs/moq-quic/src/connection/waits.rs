@@ -75,6 +75,9 @@ pub(crate) struct Waits {
 	open: [WaiterList; 2],
 	/// For a received datagram
 	datagram: WaiterList,
+	/// For something to transmit: the driver, woken by whatever the application queues
+	transmit: WaiterList,
+	handshake_data: Latch,
 	connected: Latch,
 	confirmed: Latch,
 	/// For the connection to be lost, which every other wait also hears
@@ -141,6 +144,23 @@ impl Waits {
 		self.datagram.wake();
 	}
 
+	/// Register `waiter` for something to transmit
+	pub(crate) fn register_transmit(&mut self, waiter: &Waiter) {
+		waiter.register(&mut self.transmit);
+	}
+
+	/// The application queued something to transmit
+	///
+	/// Cheap once woken: the list stays empty until the driver finds nothing to send again.
+	pub(crate) fn wake_transmit(&mut self) {
+		self.transmit.wake();
+	}
+
+	/// The handshake's negotiated parameters became available
+	pub(crate) fn handshake_data(&mut self) {
+		self.handshake_data.set();
+	}
+
 	/// The handshake completed
 	pub(crate) fn connected(&mut self) {
 		self.connected.set();
@@ -149,6 +169,12 @@ impl Waits {
 	/// The handshake was confirmed
 	pub(crate) fn confirmed(&mut self) {
 		self.confirmed.set();
+	}
+
+	/// Ready once the handshake's parameters are available, or with the error once the connection
+	/// was lost first
+	pub(crate) fn poll_handshake_data(&mut self, waiter: &Waiter) -> Poll<Result<(), Error>> {
+		Self::poll_latch(&mut self.handshake_data, &self.lost, waiter)
 	}
 
 	/// Ready once the handshake completed, or with the error once the connection was lost first
@@ -205,6 +231,9 @@ impl Waits {
 			list.wake();
 		}
 		self.datagram.wake();
+		// A close still owes the peer its CONNECTION_CLOSE.
+		self.transmit.wake();
+		self.handshake_data.waiters.wake();
 		self.connected.waiters.wake();
 		self.confirmed.waiters.wake();
 		self.closed.wake();
