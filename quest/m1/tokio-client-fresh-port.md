@@ -19,7 +19,7 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 
 [moq-dev/moq#7688](https://github.com/moq-dev/moq/pull/7688) fixes this for
 the relay's cluster dials only
-([Mesh dials recover from a stuck flow](/quest/m1/mesh-fresh-port.md)).
+([Mesh dials recover from a stuck flow](https://github.com/moq-dev/moq/pull/7688)).
 
 - Reuse #7688's rebinding where it fits; choose N and record why.
 - An explicit nonzero bind port is never changed.
@@ -31,4 +31,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Mesh dials recover from a stuck flow](/quest/m1/mesh-fresh-port.md) - the cluster-dial half
+- [Mesh dials recover from a stuck flow](https://github.com/moq-dev/moq/pull/7688) - the cluster-dial half

@@ -28,6 +28,6 @@ which moved moq-auth to rind and implements `mesh::Signer` for
 Public API: none expected, unless a ready-made key type is exposed (as
 `mesh::Signer` names rind's). Wire: none.
 
-## Required
+## Related
 
-- [moq-crypto replaces moq-sign and moq-e2ee](/quest/m1/moq-crypto.md) - creates the crate (moq-dev/moq#7702)
+- [moq-crypto replaces moq-sign and moq-e2ee](https://github.com/moq-dev/moq/pull/7702) - creates the crate (moq-dev/moq#7702)

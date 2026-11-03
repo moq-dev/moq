@@ -24,11 +24,8 @@ what NetEQ does"), milestone:
 - m2
 
 This is the native half. The browser half is
-[Time stretch](/quest/m2/watch-audio-time-stretch.md) on `main` today;
-#7679, still open, folds it into
-[Watch](/quest/m1/audio-jitter-target/watch.md) in m1 and scopes native
-playback out of Watch. Wherever the browser stretch lives when this starts,
-it shares the algorithm and vectors below.
+[Watch](/quest/m1/audio-jitter-target/watch.md) in m1, which scopes native
+playback out. It shares the algorithm and vectors below.
 Today the native ring (`rs/moq-audio/src/ring.rs`) pads a dry ring with
 silence back up to its latency and trims when the writer runs ahead, so
 jitter and drift cost a glitch.
@@ -74,5 +71,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - the browser stretch sharing this algorithm and its vectors, which #7679 folds into Watch
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, and the browser stretch's home once #7679 lands
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target and stretch, sharing this algorithm and its vectors

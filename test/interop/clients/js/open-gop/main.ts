@@ -86,6 +86,7 @@ window.runRecovery = async (packets) => {
 	});
 	const catalog = new Signal<Catalog.Root>({ video: { renditions: { video: config } } });
 	const broadcast = new Signal<Broadcast | undefined>({
+		in: { name: new Signal(Moq.Path.from("open-gop")) },
 		out: { catalog, active: new Signal(media) },
 		relativeBroadcast: () => media,
 	} as unknown as Broadcast);

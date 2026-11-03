@@ -31,4 +31,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - the Rust model's own seed 12345 failure
+- [The Rust resume model fix](https://github.com/moq-dev/moq/pull/7705) - the Rust model's own seed 12345 failure

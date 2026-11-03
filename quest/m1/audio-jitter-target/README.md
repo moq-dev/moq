@@ -11,9 +11,8 @@ at once got a target far too shallow to play through the next flush. One
 written algorithm, cited by both implementations, produces the same target from
 the same arrival trace.
 
-Boundaries: convergence still uses skip-ahead and silence, so playing slightly
-faster or slower to converge stays [Time
-stretch](/quest/m2/watch-audio-time-stretch.md). No packet loss concealment.
+Boundaries: converging by playing slightly faster or slower is the browser's
+[Watch](/quest/m1/audio-jitter-target/watch.md) quest. No packet loss concealment.
 Video keeps its own target; making the audio playhead the clock is [A/V
 clock](/quest/m1/av-clock.md).
 
@@ -32,7 +31,10 @@ remains separately scoped in m2, except native time-stretch: decided
 [moq-dev/moq#7679](https://github.com/moq-dev/moq/pull/7679)), `moq play`
 copies NetEq's stretch in m1 as
 [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md), sharing
-one algorithm and its vectors with the browser's.
+one algorithm and its vectors with the browser's. The 2026-11-03 proof run
+found the 0.95 quantile leaves about six re-stalls a minute on real paths by design; decided
+2026-11-03 (maintainer), Watch closes that by time stretch rather than a deeper
+target.
 
 What the line still owes once Watch lands: its recorded trace replayed through
 the native decode path too, asserting the same target series the browser's
@@ -41,14 +43,10 @@ native playback against its budgets.
 
 ## Required
 
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser plays the measured real-microphone rows with zero steady-state underruns by time-stretching the ring
 - [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - `moq play` copies NetEq's accelerate and preemptive expand, sharing the browser's algorithm and vectors, so its native rows reach zero steady-state underruns
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - post-cap nightlies confirm AAC bursty discards about as much audio as Opus bursty and the first row no longer stalls, and every browser row's budgets are re-measured from them
 
 ## Closes
 
 - [#2812](https://github.com/moq-dev/moq/issues/2812) - the iOS stutter report the same estimator fixes
-
-## Related
-
-- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - inaudible convergence, on top of this
