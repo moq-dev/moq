@@ -81,8 +81,8 @@ throttled one:
 nix develop --command just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
 ```
 
-It reports offered and lost datagrams, bottleneck queue drops, QUIC DATAGRAM frames,
-reordered arrivals and append-to-receive latency per viewer, and fails if the loopback
+It reports offered and lost datagrams, bottleneck queue drops, QUIC DATAGRAM frames
+that delivered no datagram, reordered arrivals and append-to-receive latency per viewer, and fails if the loopback
 viewer loses any. It runs nightly.
 
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
