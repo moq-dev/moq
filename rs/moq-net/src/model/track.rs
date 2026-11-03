@@ -5049,11 +5049,13 @@ impl Consumer {
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
 		let (state, subscription) = self.resolve(Some(&subscription.into().unwrap_or_default()));
 		let subscription = subscription.expect("a subscription was requested");
+		if let Some(newest) = TrackState::requested(&state) {
+			subscription.set_requested(newest);
+		}
 
 		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
-			requested: TrackState::requested(&state),
 			state,
 			subscription,
 			stats: self.stats.clone(),
@@ -5599,8 +5601,6 @@ pub struct Subscribing {
 	name: Arc<str>,
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Consumer<TrackState>,
-	/// The newest sequence when requested, if the track had resolved; see [`TrackState::requested`].
-	requested: Option<Option<u64>>,
 	subscription: Preferences,
 	stats: stats::Scope,
 }
@@ -5612,7 +5612,7 @@ impl Subscribing {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			state: self.state.clone(),
-			requested: self.requested,
+			requested: self.subscription.requested(),
 			stats: self.stats.clone(),
 		}
 	}
@@ -5642,7 +5642,8 @@ impl Subscribing {
 			info,
 			inner,
 			requested: self
-				.requested
+				.subscription
+				.requested()
 				.unwrap_or_else(|| TrackState::request_answered(&self.state)),
 			delivered: Delivered::default(),
 			stats: self.stats.clone(),

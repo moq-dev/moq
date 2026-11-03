@@ -51,4 +51,27 @@ other late-resolving consumer.
 - Rerun `just ci`. Check whether the old-version finite-finish and CLI FETCH
   interop failures reproduce on base main, and record them as pre-existing if so.
 
-Implementation: [moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737).
+Implementation: [moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737)
+implements this rule in Rust (`SubscribeServe` for lite-03 through lite-05,
+the track model, and a front's splice) and JS. The rule holds in every
+`moq-net` and JS test, but the HLS recorder test still fails; see Waiting.
+
+## Waiting
+
+- Maintainer: the decided rule cannot pass
+  `a_cursor_records_a_publisher_without_fetch` unchanged. A trace of the
+  lite-03 run shows the publisher writes media groups 0 to 2 as soon as
+  moq-mux's `hls::Lend` subscribes to `video0` for the records track
+  (`video0.hls`). That is before the recorder's media subscription exists on
+  either session. The recorder's lite-03 media SUBSCRIBE then reaches the
+  publisher with group 2 already its newest, so the rule floors it at 2 and
+  segment 0 is never sent. Base main passes only because it floors a pending
+  logical track at 0, which is the cache replay this quest removes. Options:
+  (1) the recorder names its floor: moq-hls subscribes to media from the group
+  its first wanted record names, so the SUBSCRIBE carries a Group Start
+  (recommended; nothing then depends on when the SUBSCRIBE arrives);
+  (2) apply the rule only to received copies (an in-flight upstream request),
+  so a publisher serving its own producer through a pending front keeps base
+  main's zero floor, which still replays a local cache to a first pre-05
+  subscriber; (3) relax the recorder test's expectation for lite-03/04.
+  Check: the chosen option passes the recorder test and the held-answer test.
