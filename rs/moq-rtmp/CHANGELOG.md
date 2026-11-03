@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.20](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.3.19...moq-rtmp-v0.3.20) - 2026-11-03
+
+### Other
+
+- backport main's benchmark cases to release for the pre-cut pairing
+
 ## [0.3.19](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.3.18...moq-rtmp-v0.3.19) - 2026-10-30
 
 ### Other

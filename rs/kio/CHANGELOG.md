@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4](https://github.com/moq-dev/moq/compare/kio-v0.6.3...kio-v0.6.4) - 2026-11-03
+
+### Other
+
+- backport main's benchmark cases to release for the pre-cut pairing
+
 ## [0.6.3](https://github.com/moq-dev/moq/compare/kio-v0.6.2...kio-v0.6.3) - 2026-10-22
 
 ### Fixed
