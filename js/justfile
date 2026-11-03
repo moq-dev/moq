@@ -22,11 +22,12 @@ default:
 # No package reads `import.meta.env`, so no app environment variable can reach a
 # bundle through one: a bare reference makes Vite inline every `VITE_*` value.
 
-# Lint, type-check, format, and build all packages.
+# Lint the repository, type-check, and build all packages.
 check:
+    just --justfile ../justfile biome
     python3 ../sh/js/workspace.py check --all
 
-# Check changed workspace packages and their transitive dependents.
+# Type-check and build changed workspace packages and their transitive dependents.
 check-changed list:
     python3 ../sh/js/workspace.py check '{{ list }}'
 
@@ -38,11 +39,14 @@ workers:
 audit:
     bash ../sh/js/audit.sh
 
-# Auto-fix lint and formatting issues in workspaces, harnesses, docs and demos, then rebuild
-# the changed packages (or `--all`) to regenerate their committed API reports.
-fix list="--all":
+# Fix repository lint and rebuild all packages to update their API reports.
+fix:
+    just --justfile ../justfile biome-fix
+    just fix-changed --all
+
+# Rebuild changed workspace packages (or `--all`) to update their API reports.
+fix-changed list:
     bun install
-    bun biome check --write . ../bench/browser ../test ../doc ../demo
     MOQ_API_REPORT=update python3 ../sh/js/workspace.py build '{{ list }}'
 
 # Run all unit tests.

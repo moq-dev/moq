@@ -17,6 +17,7 @@ Decided 2026-10-30 (maintainer, follow-up planning): m1, because it breaks the p
   - C: `max_delay_present` is false in a zeroed struct.
 
   Each one's omitted or zeroed form becomes 0, and unlimited stays expressible. Dart defaults the parameter to `Duration.zero`, so an explicit `null` stays unlimited. Go's nil and C's unset `present` can't mean both, so each gains an explicit unlimited flag in the delay, as `moq_delay.max_unlimited` already does for decoders; the PR names it.
+- **Not datagram subscriptions:** a datagram track's request carries only a priority and takes no `Delay` ([Datagram tracks](/quest/m1/datagram-tracks/README.md), maintainer 2026-11-01).
 - Update `doc/lib/{py,swift,kt,go,dart,c,cpp}` and add MIGRATE notes under `## Unreleased` for each breaking binding change.
 
 Public API: breaking in every binding. Wire: none.

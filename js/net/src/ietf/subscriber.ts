@@ -21,16 +21,7 @@ import {
 import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import {
-	finalSequence,
-	groupBounds,
-	hiddenBelow,
-	hooks,
-	maxDelayOf,
-	scopeCaptures,
-	scopeHead,
-	scopeOverlaps,
-} from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
@@ -43,6 +34,7 @@ import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
+import { wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
@@ -1288,10 +1280,9 @@ export class Subscriber {
 		// The live join starts at the publisher's edge, whatever floor the demand asked for.
 		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
 		// still arrive after a higher one's.
-		const groups = request.subscription.groups;
 		hooks.startTrack(producer, {
 			start: ok.largest ? Number(ok.largest.groupId) : 0,
-			requested: groups?.start === undefined ? undefined : groupBounds(groups).start,
+			requested: wireSpan(request.subscription.ranges ?? [{}]).start,
 		});
 		staged.commit();
 		state.fill?.(subscription);

@@ -155,7 +155,7 @@ impl Endpoint {
 		} = received;
 		// Partially decode packet or short-circuit if unable
 		let datagram_len = data.len();
-		let mut event = match PartialDecode::new(
+		let event = match PartialDecode::new(
 			data,
 			&FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
 			self.config.grease_quic_bit,
@@ -213,20 +213,6 @@ impl Endpoint {
 				return None;
 			}
 		};
-
-		// Drop leading early packets before routing or buffering, preserving a coalesced
-		// handshake packet after them.
-		while event.first_decode.is_0rtt() {
-			let data = event.remaining.take()?;
-			let (first_decode, remaining) = PartialDecode::new(
-				data,
-				&FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
-				self.config.grease_quic_bit,
-			)
-			.ok()?;
-			event.first_decode = first_decode;
-			event.remaining = remaining;
-		}
 
 		let addresses = FourTuple { remote, local_ip };
 		let dst_cid = event.first_decode.dst_cid();
