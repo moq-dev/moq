@@ -41,6 +41,7 @@ serde_json = { workspace = true }
 # test-util (tokio::time::pause/advance) is test-only and is NOT supported on
 # wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 # Model checks for the kio-backed model layer (tests/loom.rs). `cfg(loom)` is only
 # set by `just rs loom`, and the whole test file compiles away without it.

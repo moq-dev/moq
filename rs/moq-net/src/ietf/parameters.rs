@@ -55,10 +55,27 @@ pub enum ParameterBytes {
 	Unknown(u64),
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct Parameters {
 	vars: HashMap<ParameterVarInt, u64>,
 	bytes: HashMap<ParameterBytes, Vec<u8>>,
+}
+
+impl std::fmt::Debug for Parameters {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Parameters")
+			.field("vars", &self.vars)
+			// Values can carry credentials, so only their lengths.
+			.field(
+				"bytes",
+				&self
+					.bytes
+					.iter()
+					.map(|(kind, value)| (kind, value.len()))
+					.collect::<Vec<_>>(),
+			)
+			.finish()
+	}
 }
 
 impl Decode<Version> for Parameters {

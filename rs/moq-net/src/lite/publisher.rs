@@ -324,7 +324,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 					// malformed GOAWAY must not tear down the session it is trying to drain.
 					let mut cx = Context::from_waker(waiter.waker());
 					let msg = ready!(stream.reader.poll_decode::<lite::Goaway>(&mut cx))?;
-					tracing::info!(uri = %msg.uri, "received goaway");
+					tracing::info!(uri_len = msg.uri.len(), "received goaway");
 
 					let uri = msg.uri.into_owned();
 					let goaway = crate::goaway::Goaway {
@@ -337,7 +337,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						// A second Goaway stream is a protocol violation. The control loop only
 						// logs per-stream errors, so close the session here rather than letting a
 						// peer silently replace a redirect an observer may already be acting on.
-						tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
+						tracing::warn!(uri_len = uri.len(), "duplicate GOAWAY received; closing session");
 						self.shared
 							.session
 							.clone()

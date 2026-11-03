@@ -82,7 +82,8 @@ impl<T: Message> Decode<Version> for T {
 					Ok(result)
 				}
 				Err(e) => {
-					tracing::warn!(%e, ?raw, "decode failed");
+					// A malformed message can contain credentials too.
+					tracing::warn!(%e, "decode failed");
 					Err(e)
 				}
 			}

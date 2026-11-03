@@ -155,7 +155,7 @@ impl std::fmt::Display for Role {
 /// lite-05+ only. The two endpoints' SETUP messages are independent: neither side
 /// blocks on the peer's before opening other streams, but a stream whose encoding
 /// depends on a negotiated capability (e.g. PROBE) must wait for it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Setup {
 	/// The probe capability this endpoint supports. [`ProbeLevel::None`] when absent.
 	pub probe: ProbeLevel,
@@ -182,6 +182,22 @@ pub struct Setup {
 	/// filter applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
+}
+
+impl std::fmt::Debug for Setup {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Setup")
+			.field("probe", &self.probe)
+			// Native transports carry the JWT in this request target.
+			.field(
+				"path",
+				&self.path.as_deref().map(|path| path.split('?').next().unwrap()),
+			)
+			.field("role", &self.role)
+			.field("cost", &self.cost)
+			.field("hop", &self.hop)
+			.finish()
+	}
 }
 
 impl Message for Setup {

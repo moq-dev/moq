@@ -152,6 +152,11 @@ fn webtransport_echo_end_to_end() {
 			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			assert_eq!(request.url().path(), "/echo");
 			assert_eq!(request.url().query(), Some("token=abc"));
+			let debug = format!("{request:?}");
+			assert!(
+				debug.contains("/echo") && !debug.contains("token=abc"),
+				"query leaked: {debug}"
+			);
 			assert_eq!(request.protocols(), [PROTO.to_string()]);
 			let mut session = request
 				.respond(quic::web::Response::default().with_protocol(PROTO))
