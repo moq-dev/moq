@@ -3550,12 +3550,7 @@
 				}
 			}
 		},
-		"text": [
-			"",
-			"__proto__",
-			"constructor",
-			"toString"
-		]
+		"text": ["", "__proto__", "constructor", "toString"]
 	},
 	{
 		"name": "text malformed __proto__ refuses the catalog",
@@ -3605,12 +3600,7 @@
 				}
 			}
 		},
-		"json": [
-			"",
-			"__proto__",
-			"constructor",
-			"toString"
-		]
+		"json": ["", "__proto__", "constructor", "toString"]
 	},
 	{
 		"name": "json malformed __proto__ refuses the catalog",
@@ -3660,12 +3650,7 @@
 				}
 			}
 		},
-		"binary": [
-			"",
-			"__proto__",
-			"constructor",
-			"toString"
-		]
+		"binary": ["", "__proto__", "constructor", "toString"]
 	},
 	{
 		"name": "binary malformed __proto__ refuses the catalog",
@@ -3713,12 +3698,7 @@
 				}
 			}
 		},
-		"contributions": [
-			"",
-			"__proto__",
-			"constructor",
-			"toString"
-		]
+		"contributions": ["", "__proto__", "constructor", "toString"]
 	},
 	{
 		"name": "contribution malformed __proto__ refuses the catalog",
