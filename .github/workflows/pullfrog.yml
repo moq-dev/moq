@@ -33,6 +33,8 @@ jobs:
         uses: pullfrog/pullfrog@895164fc90f5c493e72693c919c6cf269af158eb # v0.1.110
         with:
           prompt: ${{ inputs.prompt }}
+          effort: medium
+          timeout: 1h
         env:
           # add at least one provider API key
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
