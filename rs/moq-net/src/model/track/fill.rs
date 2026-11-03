@@ -1324,7 +1324,7 @@ impl TrackState {
 			}
 		}
 		for groups in dropped.iter() {
-			self.drop_groups(groups.clone(), err.clone());
+			self.drop_groups(groups.clone(), super::Hole::drop(err.clone()));
 		}
 	}
 }

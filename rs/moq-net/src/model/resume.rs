@@ -895,7 +895,7 @@ impl Subscriber {
 		&mut self,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
-	) -> Poll<(std::ops::Range<u64>, StreamError)> {
+	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
 		self.reader().poll_drop(delivered, waiter)
 	}
 
@@ -1095,7 +1095,7 @@ struct Reader {
 	out: Vec<(u64, Weak<()>)>,
 	/// Runs the serving copy gave up that the reader has yet to report; see
 	/// [`Reader::poll_drop`].
-	drops: RangeMap<u64, StreamError>,
+	drops: RangeMap<u64, track::Hole>,
 }
 
 impl Reader {
@@ -1849,16 +1849,16 @@ impl Reader {
 	/// through its [`Recover`]. A copy it replaced may still deliver what is under its bound,
 	/// so a run there waits until that copy no longer feeds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn poll_drop(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Poll<(std::ops::Range<u64>, StreamError)> {
+	fn poll_drop(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Poll<(std::ops::Range<u64>, track::Hole)> {
 		let mut given_up = Vec::new();
 		if let Poll::Ready(Some(sub)) = self.poll_serving(waiter) {
 			while let Poll::Ready(run) = sub.poll_drop(waiter) {
 				given_up.push(run);
 			}
 		}
-		for (run, err) in given_up {
-			if !route_failed(&Error::Stream(err.clone())) {
-				self.drops.insert(run, err);
+		for (run, hole) in given_up {
+			if !route_failed(&Error::Stream(hole.error())) {
+				self.drops.insert(run, hole);
 			}
 		}
 		let covered: Vec<_> = self
@@ -3631,8 +3631,8 @@ mod test {
 	/// Every run the reader gives up right now.
 	fn dropped(sub: &mut track::Subscriber) -> Vec<(std::ops::Range<u64>, StreamError)> {
 		let mut runs = Vec::new();
-		while let Poll::Ready(run) = sub.poll_drop(&kio::Waiter::noop()) {
-			runs.push(run);
+		while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
+			runs.push((run, hole.error()));
 		}
 		runs
 	}

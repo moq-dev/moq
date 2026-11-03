@@ -22,7 +22,16 @@ import {
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import { hiddenBelow, hooks, maxDelayOf, minDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import {
+	hiddenBelow,
+	hooks,
+	maxDelayOf,
+	minDelayOf,
+	scopeCaptures,
+	scopeHead,
+	scopeOverlaps,
+	skipHole,
+} from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame } from "../payload.ts";
@@ -147,6 +156,9 @@ interface SubscribeEntry {
 	starts?: (bigint | undefined)[];
 	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
 	updated?: boolean;
+	// The range terms id of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop judged
+	// under an earlier one is no verdict on the current terms. Undefined is the SUBSCRIBE's 0.
+	terms?: bigint;
 	// Set by the subscribe stream's FIN before lite-05, the track's only end there.
 	finished?: boolean;
 	// Settles once the subscribe stream's responses are read to its FIN or reset, which
@@ -1814,8 +1826,19 @@ export class Subscriber {
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups, so they are accounted for without a
 				// stream, and a reader of one still arriving ends with the drop's error now.
-				entry.tail.account(resp.drop.start, resp.drop.end + 1n);
-				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1n, resp.drop.cause(this.version));
+				const { start, end, maxAge, terms } = resp.drop;
+				entry.tail.account(start, end + 1n);
+				// A stale verdict under terms an update has since replaced says nothing of the
+				// current ones: the groups are unknown, and a reader that wants one fills it.
+				if (maxAge !== undefined && terms < (entry.terms ?? 0n)) continue;
+				hooks.dropTrackGroups(entry.track, start, end + 1n, {
+					error: resp.drop.cause(this.version),
+					stale: maxAge,
+				});
+			} else if ("skip" in resp) {
+				// Never produced, so nothing is waited for and no reader ends.
+				entry.tail.account(resp.skip.start, resp.skip.end + 1n);
+				hooks.dropTrackGroups(entry.track, resp.skip.start, resp.skip.end + 1n, skipHole());
 			}
 		}
 	}
@@ -1962,7 +1985,13 @@ export class Subscriber {
 				startGroup: span.start,
 				endGroup: inclusiveGroupEnd(span.end),
 				ranges: hasRanges(this.version) ? toWireRanges(ranges, entry.scale) : undefined,
+				terms: (entry.terms ?? 0n) + 1n,
 			});
+			// A stale drop judged under the previous terms may still be in flight, and this update
+			// may move the range it was judged against, so the runs held as stale become unknown
+			// again: a reader fills them rather than trust an old verdict.
+			entry.terms = update.terms;
+			hooks.supersedeStale(entry.track);
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the

@@ -15318,7 +15318,7 @@ mod stitch_tests {
 			run.track.broadcast().pool.poll(now + crate::ledger::GRACE, &waiter);
 			assert_eq!(
 				reader.poll_drop(&waiter),
-				Poll::Ready((1..3, crate::StreamError::NotFound)),
+				Poll::Ready((1..3, crate::track::Hole::drop(crate::StreamError::NotFound))),
 				"{version}"
 			);
 			assert!(reader.poll_drop(&waiter).is_pending(), "each drop is reported once");

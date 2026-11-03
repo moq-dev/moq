@@ -3,6 +3,7 @@ use crate::transport::poll::Session as _;
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
 
+use crate::model::track::Hole;
 use crate::{SessionError, announce, frame, group, origin, track};
 use rangemap::{RangeMap, RangeSet};
 use std::{
@@ -2262,6 +2263,7 @@ impl Request for SubscribeServe {
 					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
+					run.terms = msg.terms;
 					if let Some(update) = update {
 						run.update(update);
 					}
@@ -3963,7 +3965,8 @@ struct GroupOutcomes {
 	#[cfg(test)]
 	opened: std::sync::atomic::AtomicU64,
 	unencodable: Mutex<Option<Error>>,
-	dropped: Mutex<Vec<lite::SubscribeDrop>>,
+	/// Groups whose stream failed, with why, for the control stream to name.
+	dropped: Mutex<Vec<(u64, StreamError)>>,
 }
 
 impl Subscription {
@@ -4113,7 +4116,9 @@ struct TrackRun {
 	// The first servable group, held until the source resolves where its feed starts.
 	first: Option<group::Consumer>,
 	// Groups given up before the start resolved, which it must not name, with why.
-	skipped: RangeMap<u64, StreamError>,
+	skipped: RangeMap<u64, Hole>,
+	// The range terms id of the SUBSCRIBE or latest SUBSCRIBE_UPDATE, which a drop echoes.
+	terms: u64,
 	end_sent: bool,
 	// Lite-07 with every range bounded: the subscription ends once nothing in its ranges is
 	// left to deliver, rather than parking for an update to widen it.
@@ -4152,8 +4157,12 @@ impl TrackRun {
 		// flow through the SUBSCRIBE_UPDATE arm below.
 		let groups = bounds.groups();
 		let cap = groups.end().map_or(Bound::Unbounded, Bound::Excluded);
-		// The FIN of a covered subscription is the wire's to send, below.
-		let track = track.with_range((Bound::Included(floor), cap)).parked();
+		// The FIN of a covered subscription is the wire's to send, below. A lite-07 widening
+		// re-offers what was reported stale.
+		let mut track = track.with_range((Bound::Included(floor), cap)).parked();
+		if ctx.version.has_skip() {
+			track = track.reoffers_reported();
+		}
 
 		let emit_range = ctx.version.has_track_stream();
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
@@ -4175,6 +4184,7 @@ impl TrackRun {
 			start: None,
 			first: None,
 			skipped: RangeMap::new(),
+			terms: 0,
 			end_sent: false,
 			served,
 			datagrams,
@@ -4201,6 +4211,7 @@ impl TrackRun {
 		// The update moves the cursor and the bounds the track side judges against, which
 		// notifies nothing it parked on.
 		Idle::disarm(&mut self.idle);
+		self.terms = upd.terms;
 		// Every update restates the wanted group. Past our largest it is a join, which
 		// repeats the pending ask; at or below it the group already exists.
 		if upd
@@ -4359,8 +4370,13 @@ impl TrackRun {
 
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
-			for dropped in dropped {
-				writer.buffer(&lite::SubscribeResponse::Drop(dropped))?;
+			for (sequence, err) in dropped {
+				// A stream expired under this subscription's budget is a stale verdict.
+				let hole = match err {
+					StreamError::Old => Hole::stale(self.track.budget()),
+					err => Hole::drop(err),
+				};
+				writer.buffer(&self.hole(sequence..=sequence, &hole))?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -4449,9 +4465,12 @@ impl TrackRun {
 		) {
 			match res? {
 				Recv::Group(group) => {
+					self.owe_unreported();
 					// Never a second stream for a sequence this subscription already accounted
 					// for (served, sent as a datagram, or dropped): a group re-created after its
-					// DROP stays dropped, since the subscriber may settle before it arrives.
+					// DROP stays dropped, since the subscriber may settle before it arrives. A
+					// stale drop a lite-07 widening reversed is owed again (see
+					// `Self::owe_unreported`).
 					if self
 						.served
 						.as_ref()
@@ -4468,13 +4487,13 @@ impl TrackRun {
 						if self.emit_range && self.start.is_none() {
 							// At u64::MAX no later group can resolve a start past this one.
 							if let Some(end) = sequence.checked_add(1) {
-								self.skipped.insert(sequence..end, StreamError::NotFound);
+								self.skipped.insert(sequence..end, Hole::drop(StreamError::NotFound));
 							}
 						} else if self.start.is_some()
 							&& let Some(end) = sequence.checked_add(1)
 						{
 							// Lite-05+ names it now; a no-op on other versions.
-							self.drop_range(sequence..end, &StreamError::NotFound, writer)?;
+							self.drop_range(sequence..end, &Hole::drop(StreamError::NotFound), writer)?;
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
@@ -4541,12 +4560,15 @@ impl TrackRun {
 		if !self.emit_range {
 			return Ok(false);
 		}
-		let Poll::Ready((range, err)) = self.track.poll_drop(waiter) else {
+		let polled = self.track.poll_drop(waiter);
+		// A widening judged inside that poll may owe a stale drop again, before it is redone.
+		self.owe_unreported();
+		let Poll::Ready((range, hole)) = polled else {
 			return Ok(false);
 		};
 		match self.start {
-			None => self.skipped.insert(range, err),
-			Some(_) => self.drop_range(range, &err, writer)?,
+			None => self.skipped.insert(range, hole),
+			Some(_) => self.drop_range(range, &hole, writer)?,
 		}
 		Ok(true)
 	}
@@ -4593,6 +4615,18 @@ impl TrackRun {
 		}
 	}
 
+	/// Owe again what this subscription reported stale and a widening reversed: lite-07
+	/// re-offers a group it still holds and drops again, under the new terms, one it cannot
+	/// serve. Earlier versions' drops are final, so their cursor takes nothing back.
+	fn owe_unreported(&mut self) {
+		let unreported = self.track.take_unreported();
+		if let Some(served) = &mut self.served {
+			for run in unreported {
+				served.remove(run);
+			}
+		}
+	}
+
 	/// Record `sequence` as served, for [`Self::drop_unserved`].
 	fn mark_served(&mut self, sequence: u64) {
 		let Some(served) = &mut self.served else {
@@ -4603,12 +4637,12 @@ impl TrackRun {
 		}
 	}
 
-	/// Drop, with `err`, whatever part of `range` this subscription has not been served or
-	/// dropped yet.
+	/// Give up, as `hole` says, whatever part of `range` this subscription has not been
+	/// served or given up yet.
 	fn drop_range(
 		&mut self,
 		range: Range<u64>,
-		err: &StreamError,
+		hole: &Hole,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
 		let Some(served) = &mut self.served else {
@@ -4618,12 +4652,31 @@ impl TrackRun {
 			return Ok(());
 		}
 		let gaps: Vec<_> = served.gaps(&range).collect();
+		served.extend(gaps.iter().cloned());
 		for gap in gaps {
-			served.insert(gap.clone());
-			let drop = lite::SubscribeDrop::new(gap.start..=gap.end - 1, err, self.ctx.version);
-			writer.buffer(&lite::SubscribeResponse::Drop(drop))?;
+			let msg = self.hole(gap.start..=gap.end - 1, hole);
+			writer.buffer(&msg)?;
 		}
 		Ok(())
+	}
+
+	/// The message naming `groups` given up as `hole`: lite-07 skips what was never
+	/// produced, and earlier versions drop it as not found.
+	fn hole(&self, groups: std::ops::RangeInclusive<u64>, hole: &Hole) -> lite::SubscribeResponse {
+		let version = self.ctx.version;
+		match hole {
+			Hole::Skip if version.has_skip() => lite::SubscribeResponse::Skip(lite::SubscribeSkip {
+				start: *groups.start(),
+				end: *groups.end(),
+			}),
+			hole => lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(
+				groups,
+				&hole.error(),
+				hole.stale_budget(),
+				self.terms,
+				version,
+			)),
+		}
 	}
 
 	/// Name every sequence from the start to the end that this subscription never got. The
@@ -4646,7 +4699,13 @@ impl TrackRun {
 		// A cap below the end bounds what the subscriber is owed, as on its side.
 		let fin = final_sequence(fin);
 		let end = self.track.subscription().end().map_or(fin, |end| end.min(fin));
-		self.drop_range(start..end, &StreamError::NotFound, writer)
+		// The track's own publisher knows a group it never reported is one it never produced;
+		// a relay cannot tell what its source held.
+		let hole = match self.track.is_received() {
+			false => Hole::Skip,
+			true => Hole::drop(StreamError::NotFound),
+		};
+		self.drop_range(start..end, &hole, writer)
 	}
 }
 
@@ -4699,8 +4758,8 @@ impl TrackRun {
 		}))?;
 		// The subscriber now owes itself everything from the start, so a range given up
 		// above it is named as it would have been after the start.
-		for (range, err) in skipped.iter() {
-			self.drop_range(range.start.max(start)..range.end, err, writer)?;
+		for (range, hole) in skipped.iter() {
+			self.drop_range(range.start.max(start)..range.end, hole, writer)?;
 		}
 		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an
@@ -5305,9 +5364,12 @@ impl GroupServe {
 	/// that never got a stream has none, so the control stream names it with that error.
 	fn settle_failed(&self, err: &Error) {
 		if self.ctx.version.has_track_stream() {
-			let drop =
-				lite::SubscribeDrop::new(self.sequence..=self.sequence, &StreamError::from(err), self.ctx.version);
-			self.ctx.outcomes.dropped.lock().unwrap().push(drop);
+			self.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.push((self.sequence, StreamError::from(err)));
 		}
 	}
 }
@@ -6187,6 +6249,7 @@ mod serve_group_test {
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			order: Order::Descending,
+			terms: 0,
 		};
 		run.update(update(Some(0)));
 		assert_eq!(track.demand().wanted(), Some(0), "stale request is not a join");
@@ -6251,6 +6314,7 @@ mod serve_group_test {
 			max_delay: Duration::ZERO,
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		});
 		{
 			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -6366,6 +6430,7 @@ mod serve_group_test {
 				max_delay: Duration::from_secs(3600),
 				min_delay: None,
 				ranges: vec![lite::Range::span(Some(5), 2, Some(7), Some(3))],
+				terms: 0,
 			});
 
 			track
@@ -6532,6 +6597,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(3600),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		});
 		let second = track
 			.append_datagram(Timestamp::from_millis(2).unwrap(), b"b".as_slice())
@@ -6659,9 +6725,10 @@ mod serve_group_test {
 		}
 	}
 
-	/// A skipped sequence is accounted for by DROP rather than a stream count.
+	/// A sequence the publisher never produced is accounted for by SKIP rather than a stream
+	/// count.
 	#[kio::test]
-	async fn lite07_end_drops_skipped_sequences() {
+	async fn lite07_end_skips_sequences_never_produced() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -6677,12 +6744,9 @@ mod serve_group_test {
 		track.finish().unwrap();
 		run.await.unwrap();
 
-		// SUBSCRIBE_START with the range starting at 0, a DROP for the skipped group 1
-		// with NOT_FOUND (0x33), which the end gives up on at once, and SUBSCRIBE_END at 3.
-		assert_eq!(
-			*log.writes.lock().unwrap(),
-			[0, 4, 1, 0, 1, 1, 2, 3, 1, 1, 0x33, 1, 2, 3, 0]
-		);
+		// SUBSCRIBE_START with the range starting at 0, a SKIP for group 1, which the end
+		// gives up on at once, and SUBSCRIBE_END at 3.
+		assert_eq!(*log.writes.lock().unwrap(), [0, 4, 1, 0, 1, 1, 3, 2, 1, 1, 1, 2, 3, 0]);
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
@@ -6737,10 +6801,11 @@ mod serve_group_test {
 		drops
 	}
 
-	/// A stale group already named in SUBSCRIBE_DROP stays dropped once SUBSCRIBE_UPDATE
-	/// widens the max age past it: the subscriber may have settled it already.
+	/// A stale group already named in SUBSCRIBE_DROP stays dropped before lite-07 once
+	/// SUBSCRIBE_UPDATE widens the max age past it, since those subscribers settle a drop for
+	/// good. Lite-07 re-offers it, and only it: the groups served around it are never resent.
 	#[kio::test]
-	async fn a_reported_stale_drop_survives_a_widened_max_age() {
+	async fn a_widened_max_age_reoffers_a_reported_stale_drop_on_lite07_alone() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -6769,12 +6834,22 @@ mod serve_group_test {
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				order: Order::Descending,
+				terms: 1,
 			});
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let (opened, why) = match version {
+				Version::Lite07 => (5, "the reported stale groups are re-offered, and nothing else"),
+				_ => (3, "no stream for a dropped group"),
+			};
 			assert_eq!(
 				run.ctx.outcomes.opened.load(Ordering::Relaxed),
-				3,
-				"{version:?}: no stream for a dropped group"
+				opened,
+				"{version:?}: {why}"
+			);
+			assert_eq!(
+				drops(&mut writer, &log, version).await,
+				[(1, 2)],
+				"{version:?}: no drop again"
 			);
 		}
 	}
@@ -6924,6 +6999,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(60),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			terms: 0,
 		});
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(2, 2)]);
@@ -7328,6 +7404,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(60),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			terms: 0,
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -7369,6 +7446,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(1),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			terms: 0,
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -7415,6 +7493,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(1),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
+			terms: 0,
 		};
 		run.update(update(5));
 		{
@@ -7460,6 +7539,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(10),
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
+			terms: 0,
 		};
 		run.update(update(5));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -7506,6 +7586,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(60),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		});
 		write_group(&mut track, 5, 5);
 		assert_eq!(settle(&mut run), 1, "served a group below the latest");
@@ -7536,6 +7617,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(60),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		});
 
 		write_group(&mut track, 0, 0);
@@ -7673,6 +7755,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(30),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		});
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "the finished group is the live edge");
@@ -7703,6 +7786,7 @@ mod serve_group_test {
 			max_delay: Duration::from_secs(30),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		});
 		relay.settle();
 		assert_eq!(relay.opened(), 3, "group 0 is cached and now in range");
@@ -7730,6 +7814,7 @@ mod serve_group_test {
 			max_delay: Duration::ZERO,
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(7), 0, None, None)],
+			terms: 0,
 		};
 		relay.run.update(update);
 		relay.settle();
@@ -7861,8 +7946,9 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "group 1 is still opening");
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			// The DROP carries OLD (0x34).
-			[0, 4, 1, 0, 1, 1, 2, 3, 0, 0, 0x34, 1, 2, 2, 0],
+			// The DROP carries OLD (0x34), judged under a zero budget (Max Age 1) and the
+			// SUBSCRIBE's terms.
+			[0, 4, 1, 0, 1, 1, 2, 5, 0, 0, 0x34, 1, 0, 1, 2, 2, 0],
 			"the expired group is dropped and the end precedes stream credit"
 		);
 
@@ -7874,7 +7960,7 @@ mod serve_group_test {
 		run.await.unwrap();
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			[0, 4, 1, 0, 1, 1, 2, 3, 0, 0, 0x34, 1, 2, 2, 0]
+			[0, 4, 1, 0, 1, 1, 2, 5, 0, 0, 0x34, 1, 0, 1, 2, 2, 0]
 		);
 	}
 }
@@ -8563,6 +8649,7 @@ mod tests {
 						max_delay: Duration::ZERO,
 						min_delay: None,
 						ranges: vec![lite::Range::span(None, 0, None, None)],
+						terms: 0,
 					};
 					leave_request::<SubscribeServe>(version, &subscribe, wait, close).await;
 
@@ -8623,6 +8710,7 @@ mod tests {
 				max_delay: Duration::ZERO,
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
+				terms: 0,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
@@ -8840,6 +8928,7 @@ mod tests {
 			min_delay: None,
 			// A relay asks from its cached group, so the SUBSCRIBE is not a live-edge join.
 			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
+			terms: 0,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -8863,6 +8952,7 @@ mod tests {
 			max_delay: Duration::ZERO,
 			min_delay: None,
 			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
+			terms: 0,
 		};
 		session.push(&update(Some(2), 3).encode_bytes(version).unwrap());
 		session.push(&update(Some(2), 7).encode_bytes(version).unwrap());
@@ -8922,6 +9012,7 @@ mod tests {
 			max_delay: Duration::from_secs(3600),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		}
 	}
 
@@ -8961,6 +9052,7 @@ mod tests {
 			max_delay: Duration::from_secs(3600),
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -9383,6 +9475,7 @@ mod tests {
 				max_delay: Duration::ZERO,
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
+				terms: 0,
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
@@ -9495,6 +9588,7 @@ mod tests {
 				max_delay: Duration::ZERO,
 				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
+				terms: 0,
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
@@ -9633,6 +9727,7 @@ mod tests {
 			max_delay: Duration::ZERO,
 			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			terms: 0,
 		};
 		let mut script = Vec::new();
 		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)

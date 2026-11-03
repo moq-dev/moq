@@ -581,6 +581,27 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
+ * Whether holes split into SUBSCRIBE_SKIP, for sequences never produced, and SUBSCRIBE_DROP,
+ * for groups that existed, whose drop names the `Max Age` and range `Terms` a stale verdict was
+ * judged under; SUBSCRIBE and SUBSCRIBE_UPDATE carry those `Terms`. Added in lite-07; earlier
+ * versions name every hole in SUBSCRIBE_DROP.
+ */
+export function hasSkip(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
  * Whether SUBSCRIBE_END carries the error the track ended with, so an errored end keeps its
  * history across a hop. Added in lite-07; earlier versions can only reset.
  */

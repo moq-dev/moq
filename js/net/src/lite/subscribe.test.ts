@@ -13,6 +13,7 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
+	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 	toWireRanges,
@@ -195,10 +196,10 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 
 test("a lite-07 list decodes as the span covering it", async () => {
 	// Priority, order, max delay, and an unstated min delay as SubscribeUpdate writes them,
-	// then the ranges and an absent wanted group.
+	// then the ranges, the terms, and an absent wanted group.
 	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0 }))).slice(1, 5);
 	const update = (ranges: number[]) => {
-		const body = [...head, ...ranges, 0];
+		const body = [...head, ...ranges, 0, 0];
 		return SubscribeUpdate.decode(
 			new Reader(undefined, new Uint8Array([body.length, ...body]), Version.DRAFT_07),
 			Version.DRAFT_07,
@@ -327,10 +328,36 @@ test("SubscribeEnd carries its error on draft-07", async () => {
 test("SubscribeDrop is restored on draft-07", async () => {
 	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1n, end: 3n, error: 7 }) };
 	const wire = await encode(Version.DRAFT_07, drop);
-	expect(wire).toEqual(new Uint8Array([2, 3, 1, 3, 7]));
+	// A drop no budget reverses has a Max Age of 0.
+	expect(wire).toEqual(new Uint8Array([2, 5, 1, 3, 7, 0, 0]));
 	const got = await responseRoundtrip(Version.DRAFT_07, drop);
 	if (!("drop" in got)) throw new Error("expected drop");
 	expect([got.drop.start, got.drop.end, got.drop.error]).toEqual([1n, 3n, 7]);
+});
+
+test("a stale drop names its max age and terms on draft-07 alone", async () => {
+	for (const maxAge of [0, 300]) {
+		const drop = new SubscribeDrop({ start: 4n, end: 4n, error: 0x34, maxAge, terms: 2n });
+		const got = await responseRoundtrip(Version.DRAFT_07, { drop });
+		if (!("drop" in got)) throw new Error("expected drop");
+		expect([got.drop.maxAge, got.drop.terms]).toEqual([maxAge, 2n]);
+	}
+	const drop = new SubscribeDrop({ start: 4n, end: 4n, error: 0, maxAge: 300, terms: 2n });
+	expect(await encode(Version.DRAFT_06, { drop })).toEqual(new Uint8Array([2, 3, 4, 4, 0]));
+	const got = await responseRoundtrip(Version.DRAFT_06, { drop });
+	if (!("drop" in got)) throw new Error("expected drop");
+	expect([got.drop.maxAge, got.drop.terms]).toEqual([undefined, 0n]);
+});
+
+test("SubscribeSkip is type 3 on draft-07 alone", async () => {
+	const skip: SubscribeResponse = { skip: new SubscribeSkip({ start: 1n, end: 3n }) };
+	expect(await encode(Version.DRAFT_07, skip)).toEqual(new Uint8Array([3, 2, 1, 3]));
+	const got = await responseRoundtrip(Version.DRAFT_07, skip);
+	if (!("skip" in got)) throw new Error("expected skip");
+	expect([got.skip.start, got.skip.end]).toEqual([1n, 3n]);
+	await expect(encode(Version.DRAFT_06, skip)).rejects.toThrow();
+	const malformed = new Reader(undefined, new Uint8Array([2, 3, 1]), Version.DRAFT_07);
+	await expect(SubscribeSkip.decode(malformed)).rejects.toThrow("invalid skipped range");
 });
 
 test("SubscribeDrop is type 0x2 on draft-05 and 0x1 on draft-04", async () => {
@@ -457,7 +484,7 @@ test("wanted groups refuse malformed input before writing bytes", async () => {
 for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`SUBSCRIBE_DROP refuses reversed ranges while retaining empty ranges on ${version}`, async () => {
 		const malformed = new Reader(undefined, new Uint8Array([3, 3, 1, 0]), version);
-		await expect(SubscribeDrop.decode(malformed)).rejects.toThrow("invalid dropped range");
+		await expect(SubscribeDrop.decode(malformed, version)).rejects.toThrow("invalid dropped range");
 		await expect(encode(version, { drop: new SubscribeDrop({ start: 3n, end: 1n, error: 0 }) })).rejects.toThrow();
 		for (const [start, end] of [
 			[2n, 1n],

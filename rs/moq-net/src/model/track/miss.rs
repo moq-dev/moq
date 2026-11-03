@@ -93,8 +93,9 @@ pub(super) struct Misses {
 	refilled: RangeSet<u64>,
 }
 
-/// A run of misses the reader gives up, for the drop cursor to name.
-pub(super) type GivenUp = Vec<ops::Range<u64>>;
+/// A run of misses the reader gives up, for the drop cursor to name, with the budget it was
+/// judged stale under when that is why.
+pub(super) type GivenUp = Vec<(ops::Range<u64>, Option<Duration>)>;
 
 /// The joins whose fills changed their answer, recorded by each join's own waiter before it
 /// wakes the reader's task.
@@ -872,7 +873,7 @@ impl Misses {
 				self.filled.extend(held.clone());
 			}
 			for hole in holes(state, run.clone()) {
-				for hole in self.unclaimed(state, hole) {
+				for hole in self.unclaimed(state, hole, drift) {
 					let (unfed, awaited) = state.unfed(hole, now);
 					for run in unfed.iter() {
 						asks.insert(run.clone());
@@ -934,7 +935,7 @@ impl Misses {
 			.collect();
 		for run in stale {
 			asks.remove(run.clone());
-			self.give_up(run, given_up);
+			self.give_up_stale(run, drift.budget, given_up);
 		}
 		asks
 	}
@@ -961,8 +962,12 @@ impl Misses {
 			released.insert(run.clone());
 		}
 		self.release(&released);
+		// Below an old cache's floor is a boundary, not a drift verdict; above it, a stretch
+		// went stale under this reader's budget.
+		let floor = state.cache_floor(drift.budget);
 		for run in stale.iter() {
-			self.give_up(run.clone(), given_up);
+			self.give_up(run.start..run.end.min(floor), given_up);
+			self.give_up_stale(run.start.max(floor)..run.end, drift.budget, given_up);
 		}
 	}
 
@@ -1089,13 +1094,16 @@ impl Misses {
 		}
 	}
 
-	/// The part of `hole` nobody has a verdict on yet.
-	fn unclaimed(&self, state: &TrackState, hole: ops::Range<u64>) -> Vec<ops::Range<u64>> {
+	/// The part of `hole` nobody has a verdict on yet: a received stale run that does not
+	/// settle this reader is no verdict for it (see `Drift::settles`).
+	fn unclaimed(&self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> Vec<ops::Range<u64>> {
 		let mut left = RangeSet::new();
 		left.insert(hole.clone());
 		// Only what overlaps the hole, so judging every run costs each one the same.
-		for (run, _) in state.drops.overlapping(&hole) {
-			left.remove(run.clone());
+		for (run, gone) in state.drops.overlapping(&hole) {
+			if drift.settles(run.start.max(hole.start), gone) {
+				left.remove(run.clone());
+			}
 		}
 		for claimed in [&self.given_up, &self.wanted] {
 			for run in claimed.overlapping(&hole) {
@@ -1129,13 +1137,27 @@ impl Misses {
 		}
 	}
 
+	/// Judge `groups` again: a widening reversed the stale verdict they were given up with.
+	pub(super) fn retry(&mut self, groups: ops::Range<u64>) {
+		self.given_up.remove(groups);
+	}
+
 	pub(super) fn give_up(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
+		self.give_up_judged(groups, None, given_up);
+	}
+
+	/// Give up `groups` as stale under `budget`, a verdict a wider budget reverses.
+	fn give_up_stale(&mut self, groups: ops::Range<u64>, budget: Duration, given_up: &mut GivenUp) {
+		self.give_up_judged(groups, Some(budget), given_up);
+	}
+
+	fn give_up_judged(&mut self, groups: ops::Range<u64>, stale: Option<Duration>, given_up: &mut GivenUp) {
 		if groups.is_empty() {
 			return;
 		}
 		self.given_up.insert(groups.clone());
 		self.newly_gone.insert(groups.clone());
-		given_up.push(groups);
+		given_up.push((groups, stale));
 	}
 }
 
@@ -1438,6 +1460,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
+			covers_from: None,
 		};
 		let asks = misses.judge(
 			&state,
@@ -1580,6 +1603,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
+			covers_from: None,
 		};
 		let asks = misses.judge(
 			&state,
@@ -1630,7 +1654,7 @@ mod tests {
 			&waiter,
 		);
 		assert!(!asks.contains(&2), "a refused hole is not asked again");
-		assert_eq!(given_up, vec![2..3]);
+		assert_eq!(given_up, vec![(2..3, None)], "a refusal is no stale verdict");
 	}
 	#[kio::test]
 	async fn unchanged_probes_and_late_arrivals_keep_other_gap_deadlines() {
@@ -1653,6 +1677,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
+			covers_from: None,
 		};
 		assert!(
 			misses
@@ -1729,7 +1754,11 @@ mod tests {
 			&waiter,
 		);
 		assert!(asks.is_empty(), "the successor has aged past this reader's budget too");
-		assert_eq!(given_up, vec![3..4]);
+		assert_eq!(
+			given_up,
+			vec![(3..4, Some(drift.budget))],
+			"judged stale under the reader's budget"
+		);
 		assert!(misses.deferred.runs.is_empty());
 	}
 
@@ -1756,6 +1785,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
+			covers_from: None,
 		};
 		let full = |span| [span].into_iter().collect();
 		assert!(
@@ -1936,6 +1966,7 @@ mod tests {
 					budget,
 					bounded: false,
 					edge: state.drift_edge(&servable),
+					covers_from: None,
 				};
 				let expected = each(&misses, &state, &drift);
 				let found = misses.expired(&state, &drift, &kio::Waiter::noop());
@@ -2049,6 +2080,7 @@ mod tests {
 						budget,
 						bounded: false,
 						edge: state.drift_edge(&Servable::ALL),
+						covers_from: None,
 					};
 					let asks = misses.judge(
 						&state,

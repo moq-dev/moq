@@ -737,7 +737,7 @@ class Reader implements ResumeSource {
 				// A route failing is no verdict: another route may still deliver the group, and
 				// one it failed while buffered is handed out to continue through its recovery.
 				if (routeFailed(dropped.error)) continue;
-				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, dropped.error);
+				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, dropped);
 			}
 		}
 		this.#drops = this.#drops.filter((run) => !delivered.covers(run.start, run.end));
@@ -755,7 +755,7 @@ class Reader implements ResumeSource {
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);
-					return { kind: "drop", ...open, error: run.error };
+					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 				}
 			}
 		}

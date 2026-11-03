@@ -2465,6 +2465,7 @@ mod tests {
 			bounded: false,
 			updated: false,
 			_working: crate::session::Work::default().start(),
+			terms: 0,
 		})
 	}
 
@@ -2670,6 +2671,7 @@ mod tests {
 				bounded: false,
 				updated: false,
 				_working: crate::session::Work::default().start(),
+				terms: 0,
 			});
 			if update {
 				h.serve
@@ -3127,6 +3129,7 @@ mod tests {
 			bounded: false,
 			updated: false,
 			_working: crate::session::Work::default().start(),
+			terms: 0,
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -4156,6 +4159,8 @@ mod tests {
 					start: 2,
 					end: 2,
 					error: code.into(),
+					max_age: None,
+					terms: 0,
 				}),
 			] {
 				resp.encode(
@@ -7585,6 +7590,9 @@ struct SubStream {
 	/// Whether an update changed the ranges since the SUBSCRIBE, which a publisher may
 	/// FIN before reading.
 	updated: bool,
+	/// The range terms id of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop
+	/// judged under an earlier one is no verdict on the current terms.
+	terms: u64,
 	/// Holds the session busy for as long as the subscription is open.
 	_working: crate::session::Working,
 }
@@ -8093,7 +8101,7 @@ impl TrackServe {
 							if start_moved {
 								let _ = producer.start_at(active.start);
 							}
-							buffer_update(active)?;
+							buffer_update(active, producer)?;
 						}
 						Ok(Begin::None)
 					}
@@ -8345,9 +8353,15 @@ fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration
 	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
 }
 
-/// Buffer the current SUBSCRIBE parameters. The caller flushes.
-fn buffer_update(active: &mut SubStream) -> Result<(), Error> {
+/// Buffer the current SUBSCRIBE parameters under new range terms. The caller flushes.
+///
+/// A stale drop judged under earlier terms may still be in flight, and the update may have
+/// moved the range it was judged against, so the runs `serving` holds as stale become
+/// unknown again: a reader fills them by range rather than trust an old verdict.
+fn buffer_update(active: &mut SubStream, serving: &track::Producer) -> Result<(), Error> {
 	active.bounded |= bounded(&active.ranges);
+	active.terms += 1;
+	serving.supersede_stale();
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,
@@ -8355,6 +8369,7 @@ fn buffer_update(active: &mut SubStream) -> Result<(), Error> {
 		min_delay: active.min_delay,
 		ranges: active.ranges.clone(),
 		order: active.order,
+		terms: active.terms,
 	})
 }
 
@@ -8398,6 +8413,7 @@ impl Establish {
 			min_delay: self.subscription.delay.min,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
+			terms: 0,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -8452,6 +8468,7 @@ impl Establish {
 			wanted: None,
 			bounded: bounded(&self.ranges),
 			updated: false,
+			terms: 0,
 			_working: self.session.work().start(),
 		}
 	}
@@ -9535,7 +9552,7 @@ impl ServeLoop {
 							&& active.wanted != Some(wanted)
 						{
 							active.wanted = Some(wanted);
-							if let Err(err) = buffer_update(active) {
+							if let Err(err) = buffer_update(active, &self.serving) {
 								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 							continue;
@@ -9670,16 +9687,32 @@ impl ServeLoop {
 									// are accounted for without a stream, and a reader of
 									// one still arriving ends with the drop's error now.
 									lite::SubscribeResponse::Drop(dropped) => {
+										let groups = dropped.start..dropped.end.saturating_add(1);
 										if let Ok(mut tail) = active.tail.write() {
-											tail.account(
-												dropped.start..dropped.end.saturating_add(1),
-												serve.subscriber.runtime.now(),
-											);
+											tail.account(groups.clone(), serve.subscriber.runtime.now());
 										}
-										self.serving.drop_groups(
-											dropped.start..dropped.end.saturating_add(1),
-											dropped.error(serve.subscriber.version),
-										);
+										// A stale verdict under terms an update has since replaced
+										// says nothing of the current ones: the groups are unknown,
+										// and a reader that wants one fills it by range.
+										let superseded = dropped.terms < active.terms;
+										match dropped.max_age {
+											Some(_) if superseded => {}
+											stale => self.serving.give_up(
+												groups,
+												track::Hole::Drop {
+													error: dropped.error(serve.subscriber.version),
+													stale,
+												},
+											),
+										}
+									}
+									// Never produced, so nothing is waited for and no reader ends.
+									lite::SubscribeResponse::Skip(skipped) => {
+										let groups = skipped.start..skipped.end.saturating_add(1);
+										if let Ok(mut tail) = active.tail.write() {
+											tail.account(groups.clone(), serve.subscriber.runtime.now());
+										}
+										self.serving.skip_groups(groups);
 									}
 									// OK just resolves the range (the producer already orders
 									// groups).

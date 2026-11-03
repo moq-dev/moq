@@ -10,7 +10,7 @@ import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Datagram } from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
-import { toStreamCode } from "./error.ts";
+import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
@@ -175,26 +175,57 @@ export function removeRun<R extends Run>(runs: readonly R[], start: bigint, end:
 	);
 }
 
-/** A run of sequences given up, with the error they were given up with. */
-export interface DropRun extends Run {
+/**
+ * Why a group sequence will not be delivered. Mirrors the Rust `track::Hole`.
+ *
+ * lite-07 carries the two kinds in their own messages, SUBSCRIBE_SKIP and SUBSCRIBE_DROP;
+ * earlier versions name both in SUBSCRIBE_DROP.
+ */
+export interface Hole {
+	/** The error a reader waiting on the sequence ends with: NOT_FOUND for a skip. */
 	error: Error;
+	/** Never produced, such as a skipped sequence number: final, and it ends no reader. */
+	skip?: boolean;
+	/**
+	 * The budget in milliseconds a staleness verdict was judged under, undefined for a drop that
+	 * does not depend on it. Only a widening past it reverses the verdict.
+	 */
+	stale?: number;
+}
+
+/** A sequence never produced; see {@link Hole.skip}. */
+export function skipHole(): Hole {
+	return { error: new StreamError(StreamCode.NotFound, { message: "group never produced" }), skip: true };
+}
+
+/** A group judged stale under `budget` milliseconds. */
+export function staleHole(budget: number): Hole {
+	return { error: new StreamError(StreamCode.Old, { message: "group is past the budget" }), stale: budget };
+}
+
+/** A run of sequences given up, with why. */
+export interface DropRun extends Run, Hole {}
+
+/** Whether two holes say the same thing, so their runs may merge. */
+function sameHole(a: Hole, b: Hole): boolean {
+	return toStreamCode(a.error) === toStreamCode(b.error) && !a.skip === !b.skip && a.stale === b.stale;
 }
 
 /**
- * Sorted, disjoint `drops` with `[start, end)` given up with `error`, which replaces whatever
- * it overlaps. Neighbours given up with the same stream code merge, so a wide DROP stays one
- * run and a peer naming one sequence per DROP cannot grow the runs.
+ * Sorted, disjoint `drops` with `[start, end)` given up as `hole` says, which replaces whatever
+ * it overlaps. Neighbours given up alike merge, so a wide DROP stays one run and a peer naming
+ * one sequence per DROP cannot grow the runs.
  */
-export function insertDrop(drops: readonly DropRun[], start: bigint, end: bigint, error: Error): DropRun[] {
+export function insertDrop(drops: readonly DropRun[], start: bigint, end: bigint, hole: Hole): DropRun[] {
 	if (start >= end) return [...drops];
 	const next = removeRun(drops, start, end);
 	let at = 0;
 	while (at < next.length && next[at].start < start) at++;
-	next.splice(at, 0, { start, end, error });
+	next.splice(at, 0, { start, end, error: hole.error, skip: hole.skip, stale: hole.stale });
 	const merged: DropRun[] = [];
 	for (const run of next) {
 		const last = merged[merged.length - 1];
-		if (last && last.end === run.start && toStreamCode(last.error) === toStreamCode(run.error)) last.end = run.end;
+		if (last && last.end === run.start && sameHole(last, run)) last.end = run.end;
 		else merged.push({ ...run });
 	}
 	return merged;
@@ -226,7 +257,7 @@ export type Recv =
 	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
 	| { kind: "group"; group: GroupConsumer }
 	/** Sequences `[start, end)` this cursor gave up without serving, and why. */
-	| { kind: "drop"; start: bigint; end: bigint; error: Error }
+	| ({ kind: "drop"; start: bigint; end: bigint } & Hole)
 	/** Nothing readable, but the track is live and may produce more. */
 	| { kind: "idle" }
 	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
@@ -454,9 +485,14 @@ export const hooks: {
 	 * Record that the publisher gave up the groups `[start, end)` with `error`: none will
 	 * arrive, so a reader waiting on one moves past it, a group still arriving in them ends with
 	 * `error`, the declared end does not wait for them, and a relay serving this track forwards
-	 * the drop. Mirrors the Rust `drop_groups`; assigned by `track.ts`.
+	 * the drop. A skip ends no reader. Mirrors the Rust `give_up`; assigned by `track.ts`.
 	 */
-	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, error: Error) => void;
+	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, hole: Hole) => void;
+	/**
+	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
+	 * were replaced, so they are unknown again. Mirrors the Rust `supersede_stale`.
+	 */
+	supersedeStale: (producer: Producer) => void;
 	/** Mark a track as fed by a wire subscription, which owes missing groups. Assigned by `track.ts`. */
 	receiveTrack: (producer: Producer) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
@@ -592,6 +628,24 @@ export const hooks: {
 	 * below where SUBSCRIBE_START resolved never goes out, so a wider budget may still serve it.
 	 */
 	unreport: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	/**
+	 * The budget in milliseconds a subscriber judges staleness under: its max delay, clamped to the
+	 * track's max age. Mirrors the Rust crate-private `track::Subscriber::budget`.
+	 */
+	budget: (subscriber: Subscriber) => number;
+	/**
+	 * Have a widening re-offer what a subscriber reported stale through dispositions, as a wire
+	 * whose drops a widening reverses does. Returns the subscriber. Mirrors the Rust
+	 * crate-private `track::Subscriber::reoffers_reported`.
+	 */
+	reoffersReported: (subscriber: Subscriber) => Subscriber;
+	/** The runs a subscriber reported stale that a widening took back since the last call. */
+	takeUnreported: (subscriber: Subscriber) => Run[];
+	/**
+	 * Whether a subscriber reads a copy received from a remote publisher, which cannot tell a group
+	 * its source never produced from one it never received. A resumed reader always does.
+	 */
+	isReceived: (subscriber: Subscriber) => boolean;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -805,6 +859,21 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	unreport: () => {
+		throw new Error("track.ts not loaded");
+	},
+	supersedeStale: () => {
+		throw new Error("track.ts not loaded");
+	},
+	budget: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reoffersReported: () => {
+		throw new Error("track.ts not loaded");
+	},
+	takeUnreported: () => {
+		throw new Error("track.ts not loaded");
+	},
+	isReceived: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvDatagram: () => {

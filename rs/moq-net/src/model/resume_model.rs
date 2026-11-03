@@ -719,7 +719,7 @@ impl Model {
 					if reader.reading.contains_key(&group) {
 						return Err(fail(
 							index,
-							format!("dropped {range:?} ({err}) after handing out {group}"),
+							format!("dropped {range:?} ({err:?}) after handing out {group}"),
 						));
 					}
 				}

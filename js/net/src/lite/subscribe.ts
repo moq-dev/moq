@@ -23,9 +23,20 @@ import {
 	hasOrder,
 	hasRanges,
 	hasRefresh,
+	hasSkip,
 	resolvesStart,
 	Version,
 } from "./version.ts";
+
+/** Decode the range `Terms` after the ranges. A wire without the field decodes as 0. */
+async function decodeTerms(r: Reader, version: Version): Promise<bigint> {
+	return hasSkip(version) ? await r.u62() : 0n;
+}
+
+/** Encode the range `Terms`, dropping it on a wire without the field. */
+async function encodeTerms(w: Writer, version: Version, terms: bigint) {
+	if (hasSkip(version)) await w.u62(terms);
+}
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -430,6 +441,8 @@ export class SubscribeUpdate {
 	endFrame?: number;
 	/** See {@link Subscribe.ranges}. */
 	ranges?: WireRange[];
+	/** See {@link Subscribe.terms}: larger than the subscription's previous terms. */
+	terms: bigint;
 
 	constructor(props: {
 		priority: number;
@@ -442,6 +455,7 @@ export class SubscribeUpdate {
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
+		terms?: bigint;
 	}) {
 		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
 			throw new RangeError("wanted group must be non-negative");
@@ -455,6 +469,7 @@ export class SubscribeUpdate {
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
+		this.terms = props.terms ?? 0n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -469,6 +484,7 @@ export class SubscribeUpdate {
 				await w.u53(this.maxDelay);
 				await encodeMinDelay(w, version, this.minDelay);
 				await encodeSpan(w, version, this, this.ranges);
+				await encodeTerms(w, version, this.terms);
 				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
 				break;
 		}
@@ -485,6 +501,7 @@ export class SubscribeUpdate {
 				const maxDelay = await r.u53();
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
+				const terms = await decodeTerms(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
 				return new SubscribeUpdate({
 					wantedGroup: wanted === 0n ? undefined : wanted - 1n,
@@ -493,6 +510,7 @@ export class SubscribeUpdate {
 					maxDelay,
 					minDelay,
 					...span,
+					terms,
 				});
 			}
 		}
@@ -555,6 +573,13 @@ export class Subscribe {
 	 */
 	ranges?: WireRange[];
 
+	/**
+	 * The range terms id: every SUBSCRIBE_UPDATE carries a larger one, and a stale
+	 * {@link SubscribeDrop} echoes the one it was judged under. Lite-07+; earlier wires decode
+	 * as 0 and drop it on encode.
+	 */
+	terms: bigint;
+
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
@@ -569,6 +594,7 @@ export class Subscribe {
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
+		terms?: bigint;
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -583,6 +609,7 @@ export class Subscribe {
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
+		this.terms = props.terms ?? 0n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -603,6 +630,7 @@ export class Subscribe {
 				await encodeSpan(w, version, this, this.ranges);
 				break;
 		}
+		await encodeTerms(w, version, this.terms);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
@@ -621,6 +649,7 @@ export class Subscribe {
 				const maxDelay = await r.u53();
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
+				const terms = await decodeTerms(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
@@ -631,6 +660,7 @@ export class Subscribe {
 					maxDelay,
 					minDelay,
 					...span,
+					terms,
 				});
 			}
 		}
@@ -839,24 +869,53 @@ export class SubscribeEnd {
 	}
 }
 
-/// Indicates that one or more groups have been dropped.
-///
-/// Draft-03+; publishers send it on Draft-05 and later.
+/**
+ * Names groups that existed but will not be delivered: aborted or reset, evicted or expired with
+ * no copy left, or stale.
+ *
+ * Draft-03+; publishers send it on Draft-05 and later. Before lite-07 it also names sequences
+ * never produced, which lite-07 names in {@link SubscribeSkip}.
+ */
 export class SubscribeDrop {
 	start: bigint;
 	end: bigint;
 	error: number;
+	/**
+	 * The budget in milliseconds a stale verdict was judged under, undefined for a drop that does
+	 * not depend on it. Lite-07+, encoded as the value plus one; earlier wires decode as undefined.
+	 */
+	maxAge?: number;
+	/** The range terms id ({@link Subscribe.terms}) a stale verdict was judged under. Lite-07+. */
+	terms: bigint;
 
-	constructor(props: { start: bigint; end: bigint; error: number }) {
+	constructor(props: { start: bigint; end: bigint; error: number; maxAge?: number; terms?: bigint }) {
 		this.start = props.start;
 		this.end = props.end;
 		this.error = props.error;
+		this.maxAge = props.maxAge;
+		this.terms = props.terms ?? 0n;
 	}
 
-	/** Name `[start, end]` given up with `err`, as `version` carries it. */
-	static given(start: bigint, end: bigint, err: unknown, version: Version): SubscribeDrop {
-		// Before lite-07 the code is the application's, so it says nothing of why.
-		return new SubscribeDrop({ start, end, error: hasDropCode(version) ? toStreamCode(err) : 0 });
+	/**
+	 * Name `[start, end]` given up with `err`, as `version` carries it, judged under `maxAge` and
+	 * `terms` when the verdict depends on the budget.
+	 */
+	static given(
+		start: bigint,
+		end: bigint,
+		err: unknown,
+		version: Version,
+		judged?: { maxAge?: number; terms: bigint },
+	): SubscribeDrop {
+		const skip = hasSkip(version);
+		return new SubscribeDrop({
+			start,
+			end,
+			// Before lite-07 the code is the application's, so it says nothing of why.
+			error: hasDropCode(version) ? toStreamCode(err) : 0,
+			maxAge: skip ? judged?.maxAge : undefined,
+			terms: skip ? (judged?.terms ?? 0n) : 0n,
+		});
 	}
 
 	/**
@@ -872,25 +931,74 @@ export class SubscribeDrop {
 		return fromTransport({ source: "stream", streamErrorCode: this.error });
 	}
 
-	async #encode(w: Writer) {
+	async #encode(w: Writer, version: Version) {
 		if (this.start - this.end > 1n) throw new RangeError("invalid dropped range");
 		await w.u62(this.start);
 		await w.u62(this.end);
 		await w.u53(this.error);
+		if (hasSkip(version)) {
+			await w.u62(this.maxAge === undefined ? 0n : BigInt(this.maxAge) + 1n);
+			await w.u62(this.terms);
+		}
 	}
 
-	static async #decode(r: Reader): Promise<SubscribeDrop> {
-		const drop = new SubscribeDrop({ start: await r.u62(), end: await r.u62(), error: await r.u53() });
-		if (drop.start - drop.end > 1n) throw new ProtocolViolation("invalid dropped range");
-		return drop;
+	static async #decode(r: Reader, version: Version): Promise<SubscribeDrop> {
+		const start = await r.u62();
+		const end = await r.u62();
+		if (start - end > 1n) throw new ProtocolViolation("invalid dropped range");
+		const error = await r.u53();
+		let maxAge: number | undefined;
+		let terms = 0n;
+		if (hasSkip(version)) {
+			const age = await r.u62();
+			if (age > BigInt(Number.MAX_SAFE_INTEGER) + 1n) throw new RangeError("max age exceeds safe integer");
+			maxAge = age === 0n ? undefined : Number(age - 1n);
+			terms = await r.u62();
+		}
+		return new SubscribeDrop({ start, end, error, maxAge, terms });
+	}
+
+	async encode(w: Writer, version: Version): Promise<void> {
+		return Message.encode(w, (w) => this.#encode(w, version));
+	}
+
+	static async decode(r: Reader, version: Version): Promise<SubscribeDrop> {
+		return Message.decode(r, (r) => SubscribeDrop.#decode(r, version));
+	}
+}
+
+/**
+ * Names sequences the publisher never produced, such as skipped sequence numbers or ones past a
+ * cut: final, with no error, ending no reader. Lite-07+; earlier versions name them in a
+ * {@link SubscribeDrop}.
+ */
+export class SubscribeSkip {
+	start: bigint;
+	end: bigint;
+
+	constructor(props: { start: bigint; end: bigint }) {
+		this.start = props.start;
+		this.end = props.end;
+	}
+
+	async #encode(w: Writer) {
+		if (this.start - this.end > 1n) throw new RangeError("invalid skipped range");
+		await w.u62(this.start);
+		await w.u62(this.end);
+	}
+
+	static async #decode(r: Reader): Promise<SubscribeSkip> {
+		const skip = new SubscribeSkip({ start: await r.u62(), end: await r.u62() });
+		if (skip.start - skip.end > 1n) throw new ProtocolViolation("invalid skipped range");
+		return skip;
 	}
 
 	async encode(w: Writer): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<SubscribeDrop> {
-		return Message.decode(r, SubscribeDrop.#decode);
+	static async decode(r: Reader): Promise<SubscribeSkip> {
+		return Message.decode(r, SubscribeSkip.#decode);
 	}
 }
 
@@ -902,12 +1010,14 @@ export class SubscribeDrop {
  * - Draft-03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
  * - Draft-05+: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
  *   (SUBSCRIBE_OK was removed; acceptance is implicit).
+ * - Lite-07+: also `0x3` SUBSCRIBE_SKIP.
  */
 export type SubscribeResponse =
 	| { ok: SubscribeOk }
 	| { start: SubscribeStart }
 	| { end: SubscribeEnd }
-	| { drop: SubscribeDrop };
+	| { drop: SubscribeDrop }
+	| { skip: SubscribeSkip };
 
 export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse, version: Version): Promise<void> {
 	switch (version) {
@@ -926,7 +1036,7 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 				await resp.ok.encode(w, version);
 			} else if ("drop" in resp) {
 				await w.u53(0x1);
-				await resp.drop.encode(w);
+				await resp.drop.encode(w, version);
 			} else {
 				throw new Error("SUBSCRIBE_START/END not supported for this version");
 			}
@@ -941,7 +1051,10 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 				await resp.end.encode(w, version);
 			} else if ("drop" in resp) {
 				await w.u53(0x2);
-				await resp.drop.encode(w);
+				await resp.drop.encode(w, version);
+			} else if ("skip" in resp && hasSkip(version)) {
+				await w.u53(0x3);
+				await resp.skip.encode(w);
 			} else {
 				throw new Error("subscribe response not supported for this version");
 			}
@@ -961,7 +1074,7 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 				case 0x0:
 					return { ok: await SubscribeOk.decode(r, version) };
 				case 0x1:
-					return { drop: await SubscribeDrop.decode(r) };
+					return { drop: await SubscribeDrop.decode(r, version) };
 				default:
 					throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 			}
@@ -974,7 +1087,10 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 				case 0x1:
 					return { end: await SubscribeEnd.decode(r, version) };
 				case 0x2:
-					return { drop: await SubscribeDrop.decode(r) };
+					return { drop: await SubscribeDrop.decode(r, version) };
+				case 0x3:
+					if (!hasSkip(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
+					return { skip: await SubscribeSkip.decode(r) };
 				default:
 					throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 			}

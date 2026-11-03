@@ -1014,7 +1014,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(await sub.servedSequence()).toBe(0n);
 			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 
-			hooks.dropTrackGroups(sub.track, 1n, 3n, new StreamError(StreamCode(70), { message: "cut" }));
+			hooks.dropTrackGroups(sub.track, 1n, 3n, { error: new StreamError(StreamCode(70), { message: "cut" }) });
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
@@ -1027,7 +1027,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 
-	test(`lite ${version}: the end sweep's SUBSCRIBE_DROP carries ${version === Version.DRAFT_07 ? "NOT_FOUND" : "no code"}`, async () => {
+	test(`lite ${version}: the end sweep names a group never produced ${version === Version.DRAFT_07 ? "in SUBSCRIBE_SKIP" : "in SUBSCRIBE_DROP"}`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 5n });
 		try {
 			sub.serve(5n);
@@ -1037,12 +1037,20 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			sub.track.finish();
 			sub.track.close();
 			const codes: number[] = [];
+			const skips: bigint[][] = [];
 			for (;;) {
 				const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
 				if (!resp) break;
 				if ("drop" in resp) codes.push(resp.drop.error);
+				if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
 			}
-			expect(codes).toEqual([version === Version.DRAFT_07 ? StreamCode.NotFound : 0]);
+			// The track's own publisher never produced groups 2 through 4.
+			if (version === Version.DRAFT_07) {
+				expect(codes).toEqual([]);
+				expect(skips).toEqual([[2n, 4n]]);
+			} else {
+				expect(codes).toEqual([0]);
+			}
 		} finally {
 			await sub.close();
 		}
@@ -1367,7 +1375,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			if (skipped === "failed") group.abort(new Error("cut"));
 			else group.finish();
-			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7n, 8n, new Error("cut"));
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7n, 8n, { error: new Error("cut") });
 			sub.serve(6n);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");

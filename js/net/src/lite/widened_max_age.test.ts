@@ -10,7 +10,7 @@ import * as Path from "../path.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
-import { ALPN_07_WIP, Version } from "./version.ts";
+import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -62,3 +62,57 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	client.abort();
 	server.abort();
 });
+
+for (const [version, alpn] of [
+	[Version.DRAFT_06, ALPN_06],
+	[Version.DRAFT_07, ALPN_07_WIP],
+] as const) {
+	const reoffers = version === Version.DRAFT_07;
+	test(`a widened maxDelay ${reoffers ? "re-offers" : "keeps dropped"} the groups reported stale on ${alpn}`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const publication = origin.createBroadcast(Path.from("room"));
+		publication.announce();
+		const broadcast = publication.broadcast;
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const write = (sequence: number, millis: number) => {
+			const group = producer.createGroup(BigInt(sequence));
+			group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+			group.finish();
+		};
+		write(0, 0);
+
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ transport: pair.server, url, version, publish: origin.consume() }),
+		]);
+		const remote = wireOf(client).consume(Path.from("room"));
+		const reader = remote.track("video").subscribe({ delay: { max: Milli(1500) } });
+		expect(await received(reader, 1)).toEqual([0n]);
+		// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge, so they are reported
+		// stale after SUBSCRIBE_START.
+		for (const [sequence, millis] of [
+			[1, 1000],
+			[2, 2000],
+			[3, 3000],
+			[4, 6000],
+		]) {
+			write(sequence, millis);
+		}
+		expect(await received(reader, 2)).toEqual([3n, 4n]);
+
+		// Lite-07 re-offers only the groups reported stale; earlier subscribers settled them for good.
+		reader.update({ delay: { max: Milli(10_000) } });
+		if (reoffers) expect(await received(reader, 2)).toEqual([1n, 2n]);
+		producer.finish();
+		producer.close();
+		expect(await reader.recvGroup()).toBeUndefined();
+
+		reader.close();
+		remote.close();
+		broadcast.close();
+		origin.close();
+		client.abort();
+		server.abort();
+	});
+}

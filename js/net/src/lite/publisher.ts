@@ -20,7 +20,19 @@ import {
 import { stored } from "../flate/group.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
-import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
+import {
+	type DropRun,
+	finalSequence,
+	type Hole,
+	hiddenBelow,
+	hooks,
+	insertRun,
+	presented,
+	type Run,
+	removeRun,
+	runGaps,
+	skipHole,
+} from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
@@ -47,6 +59,8 @@ import {
 	SubscribeDrop,
 	SubscribeEnd,
 	SubscribeOk,
+	type SubscribeResponse,
+	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 } from "./subscribe.ts";
@@ -64,6 +78,7 @@ import {
 	hasProbeRtt,
 	hasRanges,
 	hasRouteCost,
+	hasSkip,
 	hasSynced,
 	hasTrackStream,
 	resolvesStart,
@@ -919,6 +934,8 @@ export class Publisher {
 		}
 		// Parked past a bounded window's end: the peer reads this stream's end as the track's.
 		const track = hooks.parked(consumer.subscribe(subscription(ranges)));
+		// A lite-07 widening re-offers what was reported stale; earlier versions' drops are final.
+		if (hasSkip(this.version)) hooks.reoffersReported(track);
 		serving(track);
 		if (timed) {
 			try {
@@ -1046,6 +1063,7 @@ export class Publisher {
 				served,
 				floor,
 				bounds,
+				terms: msg.terms,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1211,9 +1229,12 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: bigint;
 			bounds: FrameBounds;
+			/** The SUBSCRIBE's range terms id, which a stale drop echoes until an update replaces it. */
+			terms: bigint;
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
+		let terms = serving.terms;
 		// The read cursor's floor; the subscription's ranges cap it.
 		let floor = serving.floor;
 		const moveCursor = () => track.withRange({ start: { included: floor } });
@@ -1228,7 +1249,7 @@ export class Publisher {
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Dispositions before START refine its boundary; later ones must be named as drops.
-		const skipped: { start: bigint; end: bigint; error: Error }[] = [];
+		const skipped: DropRun[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: bigint | undefined;
 		// The first group and the edge seen before it was popped, held until the source
@@ -1236,15 +1257,21 @@ export class Publisher {
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
 		let endSent = false;
 
-		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
-		// yet, given up with `err`.
-		const drop = async (start: bigint, end: bigint, err: Error): Promise<boolean> => {
+		// The message naming `[start, end]` given up as `hole` says: lite-07 skips what was never
+		// produced, and earlier versions drop it as not found.
+		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse =>
+			hole.skip && hasSkip(this.version)
+				? { skip: new SubscribeSkip({ start, end }) }
+				: { drop: SubscribeDrop.given(start, end, hole.error, this.version, { maxAge: hole.stale, terms }) };
+
+		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
+		// served or given up yet.
+		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!served) return true;
 			for (const gap of runGaps(served, start, end)) {
 				insertRun(served, gap.start, gap.end);
-				const msg = SubscribeDrop.given(gap.start, gap.end - 1n, err, this.version);
-				if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
-					return false;
+				const msg = holeMessage(gap.start, gap.end - 1n, hole);
+				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
 			}
 			return true;
 		};
@@ -1313,7 +1340,7 @@ export class Publisher {
 						// What was given up below the start is never named, so a wider budget may serve it.
 						if (range.start < startSequence)
 							hooks.unreport(track, range.start, min(range.end, startSequence));
-						if (!(await drop(max(range.start, startSequence), range.end, range.error))) return false;
+						if (!(await drop(max(range.start, startSequence), range.end, range))) return false;
 					}
 					skipped.length = 0;
 				}
@@ -1340,6 +1367,7 @@ export class Publisher {
 							throw control.error;
 						case "update": {
 							const update = control.update;
+							terms = update.terms;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
 							// group, so an update that drops a named floor re-pins there too. On
@@ -1393,12 +1421,18 @@ export class Publisher {
 					? ({ kind: "group", group: first.group } as const)
 					: hooks.tryRecvGroup(track, emitRange);
 				first = undefined;
+				// A stale drop a lite-07 widening reversed is owed again: re-offered if still held,
+				// and dropped again under the new terms otherwise.
+				if (served) {
+					for (const run of hooks.takeUnreported(track))
+						served.splice(0, served.length, ...removeRun(served, run.start, run.end));
+				}
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!startSent) skipped.push({ start: recv.start, end: recv.end, error: recv.error });
-						else if (!(await drop(recv.start, recv.end, recv.error))) return false;
+						if (!startSent) skipped.push(recv);
+						else if (!(await drop(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
@@ -1485,7 +1519,11 @@ export class Publisher {
 						// Name every sequence from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startSequence !== undefined) {
-							const unserved = new StreamError(StreamCode.NotFound, { message: "group not served" });
+							// The track's own publisher knows a group it never reported is one it never
+							// produced; a relay cannot tell what its source held.
+							const unserved: Hole = hooks.isReceived(track)
+								? { error: new StreamError(StreamCode.NotFound, { message: "group not served" }) }
+								: skipHole();
 							// Only the groups inside the ranges are owed.
 							for (const run of hooks.servingRuns(track, startSequence, boundary())) {
 								if (!(await drop(run.start, run.end, unserved))) return false;
@@ -1503,6 +1541,13 @@ export class Publisher {
 				}
 
 				const group = recv.group;
+				// Never a second stream for a sequence this subscription already accounted for
+				// (served, sent as a datagram, or dropped): before lite-07 a subscriber settles a
+				// drop for good. A stale drop a lite-07 widening reversed is owed again above.
+				if (served && runGaps(served, group.sequence, group.sequence + 1n).length === 0) {
+					group.close();
+					continue;
+				}
 				const range = frameRange(bounds, group.sequence);
 
 				if (emitRange && !startSent) {
@@ -1559,7 +1604,14 @@ export class Publisher {
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					if (emitRange && failed instanceof Error) {
-						pendingDrops.push(SubscribeDrop.given(group.sequence, group.sequence, failed, this.version));
+						// A stream expired under this subscription's budget is a stale verdict.
+						const maxAge = toStreamCode(failed) === StreamCode.Old ? hooks.budget(track) : undefined;
+						pendingDrops.push(
+							SubscribeDrop.given(group.sequence, group.sequence, failed, this.version, {
+								maxAge,
+								terms,
+							}),
+						);
 						drops.update((revision) => revision + 1);
 					}
 				});

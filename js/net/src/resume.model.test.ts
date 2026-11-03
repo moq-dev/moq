@@ -391,7 +391,7 @@ class Model {
 					entry.writer.abort(giveUp());
 					entry.writer = undefined;
 				} else if (!entry) {
-					hooks.dropTrackGroups(copy.track, BigInt(op.group), BigInt(op.group + 1), giveUp());
+					hooks.dropTrackGroups(copy.track, BigInt(op.group), BigInt(op.group + 1), { error: giveUp() });
 				}
 				instance.givenUp.add(op.group);
 				break;

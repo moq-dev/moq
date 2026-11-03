@@ -12,39 +12,46 @@ waits, and a widening re-offers what its new budget covers. On lite-07 this
 restores "growing means I want it": a group reported dropped under a
 narrower budget is served after a widening, as a cold relay would.
 
-## Waiting
-
-- Maintainer: settle the JS run memory policy. The 2026-11-02 implementation
-  audit found that `js/net/src/group.ts` applies its 32 MiB limit to each
-  group's frame tail, not to track metadata or cursor runs. A mock-time
-  probe retained 64, 256, and 1,024 disjoint OLD runs with zero cached groups
-  and zero elapsed time. Unknown gaps prevent coalescing or folding these
-  into a cursor's final floor; idle expiry alone does not bound a flood
-  inside its window. Choose shared byte accounting for JS cache metadata
-  and runs, with eviction and the planned fold-or-`TooFarBehind` behavior
-  (recommended; settle its budget and ownership), or a different ownership
-  or backpressure bound that also covers drop-only tracks. The previous
-  assertion that every run sits between cached sequences is false when
-  drops name groups this relay never cached, a required case of this quest.
-- Maintainer: settle how a received stale drop identifies its judged range
-  after SUBSCRIBE_UPDATE changes ranges without changing Max Age. A drop
-  sent under the old broad range can arrive after the relay requests a
-  narrower aggregate range; that reader now covers the aggregate but not
-  the range used for the verdict. Mock-time cursors over groups at 0, 1,
-  and 2 seconds confirm the difference: at a zero-millisecond budget
-  (wire Max Age 1) the open range serves group 2, whereas a range capped
-  before group 1 serves group 0. Max Age alone cannot distinguish an old
-  broad-range verdict from a new one.
-  Choose an explicit range-terms identifier echoed in stale drops and
-  treat superseded identifiers as unknown without keeping unbounded term
-  history (recommended; settle the lite-07 fields), or conservatively
-  qualify drops against all possibly judged ranges and refill whenever
-  that cannot prove applicability. The latter must specify how to bound
-  that state and when a reader is guaranteed a prompt verdict. This is
-  separate from the settled budget tag and from the deferred lite-ranges
-  design work. No wire or production change has been implemented.
-
 ## Plan
+
+Decided 2026-11-03 (maintainer, /quest-unblock): `js/net` bounds run memory
+by porting Rust's per-broadcast `cache::Pool` to JS. One shared byte account
+per broadcast bills frames and drop-set runs (a fixed cost per run) under
+Rust's default budget, with eviction and the fold-into-floor or
+`TooFarBehind` behavior below, so Rust and JS mirror each other with no new
+setting. Reason: the 2026-11-02 audit found the existing 32 MiB limit in
+`js/net/src/group.ts` bounds only one group's frame tail, and a mock-time
+probe retained 64, 256, and 1,024 disjoint OLD runs with zero cached groups;
+a shared pool bounds drop-only tracks the same way in both languages. Not
+chosen: a per-track run cap; upstream backpressure.
+
+Decided 2026-11-03 (maintainer, /quest-unblock): range terms carry an
+explicit update id. Each lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE carries an
+increasing range-terms id, and a stale drop echoes the id it was judged
+under. A relay treats a drop whose id has been superseded as unknown and
+refills it by range, keeping no term history. Reason: a drop sent under an
+old broad range can arrive after SUBSCRIBE_UPDATE narrows the aggregate at
+the same budget (mock-time cursors over groups at 0, 1, and 2 seconds serve
+group 2 under the open range and group 0 under a range capped before group
+1), and `Max Age` alone cannot tell the two verdicts apart. Not chosen: a
+conservative refill with bounded remembered ranges; treating every range
+update as invalidating in-flight drops.
+
+Decided 2026-11-03 (maintainer, /quest-unblock): lite-07 splits its hole
+message by whether the group ever existed. `SUBSCRIBE_SKIP {Group Start,
+Group End}` names sequences the publisher never produced, such as skipped
+sequence numbers or ones past a cut: it has no error code, ends no reader,
+and is final. `SUBSCRIBE_DROP {Group Start, Group End, Error Code, Max Age,
+Terms}` names groups that existed but will not be delivered: an aborted or
+reset group, eviction or expiry with no copy left, and stale (OLD). It ends
+any held reader with its code; a stale drop carries the `Max Age` and the
+range-terms id it was judged under, so a widening can re-offer it. lite-06
+and older keep today's SUBSCRIBE_DROP on the wire. The split runs through
+moq-net's Rust and JS model and API, whose drop/skip naming follows it, and
+through the draft. Reason: a hole that never existed has no reader to end
+and no budget to qualify, so one message conflated a final, code-free
+verdict with a reversible, reader-ending one. Not chosen: stale in SKIP; a
+single message with a reason enum; renaming only.
 
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
