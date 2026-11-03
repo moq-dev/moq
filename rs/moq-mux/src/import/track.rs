@@ -1400,26 +1400,31 @@ mod tests {
 			);
 		}
 
-		let (broadcast, catalog) = new_broadcast();
-		let consumer = broadcast.consume();
-		let mut stream = TrackStream::video(
-			broadcast.reserve_track("video").unwrap(),
-			catalog.reserve(),
-			VideoInit::new(format, init.clone()),
-		)
-		.unwrap();
-		for _ in 0..2 {
-			stream.seek(7).unwrap();
+		for buffered in [false, true] {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let mut stream = TrackStream::video(
+				broadcast.reserve_track("video").unwrap(),
+				catalog.reserve(),
+				VideoInit::new(format, init.clone()),
+			)
+			.unwrap();
+			if buffered {
+				stream.decode(&keyframe).unwrap();
+			}
+			for _ in 0..2 {
+				stream.seek(7).unwrap();
+			}
+			stream.decode(&keyframe).unwrap();
+			stream.finish().unwrap();
+			let frame = first_frame(&consumer, "video").await;
+			assert!(frame.keyframe, "{format}: streaming seek");
+			assert_eq!(
+				frame.payload.as_ref(),
+				[init.as_slice(), &keyframe].concat(),
+				"{format}: streaming seek"
+			);
 		}
-		stream.decode(&keyframe).unwrap();
-		stream.finish().unwrap();
-		let frame = first_frame(&consumer, "video").await;
-		assert!(frame.keyframe, "{format}: streaming seek");
-		assert_eq!(
-			frame.payload.as_ref(),
-			[init.as_slice(), &keyframe].concat(),
-			"{format}: streaming seek"
-		);
 	}
 
 	#[tokio::test(start_paused = true)]

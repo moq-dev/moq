@@ -5,8 +5,9 @@
 //! and flags keyframes (a sequence header or a `KEY_FRAME`), and stamps
 //! wall-clock timestamps when the caller has none (stdin). It owns no track,
 //! catalog, or codec config. AV1 carries the sequence header inline ahead of
-//! keyframes, so unlike H.264/H.265 there is nothing to cache or re-insert; the
-//! importer parses the config out of the frames it emits.
+//! keyframes. Only the initial sequence header survives a reset before the first
+//! picture is emitted; there is no cache across pictures. The importer parses
+//! the config out of the frames it emits.
 
 use bytes::{Buf, Bytes, BytesMut};
 use scuffle_av1::{ObuHeader, ObuType};
@@ -167,12 +168,11 @@ impl Split {
 	/// Drop any in-flight picture, and any frame completed but not yet returned.
 	///
 	/// Pre-reset OBUs would otherwise leak into a later frame with the wrong
-	/// timestamp. Before the first picture, a prefix with no frame keeps its init
-	/// sequence header.
+	/// timestamp. Before the first picture is emitted, its complete init sequence
+	/// header survives even when the picture is discarded.
 	pub fn reset(&mut self) {
 		let current = std::mem::take(&mut self.current);
 		if !self.started
-			&& !current.contains_frame
 			&& let Some(sequence) = current.sequence_header
 		{
 			self.current.chunks.extend_from_slice(&current.chunks[sequence]);
@@ -330,6 +330,8 @@ mod tests {
 				.unwrap()
 				.is_empty()
 		);
+		// The first picture may be buffered, without a following delimiter to emit it.
+		assert!(split.decode(&key_frame(), ts()).unwrap().is_empty());
 		// A partial frame OBU must not be joined to the post-reset input.
 		assert!(split.decode(&[0x32, 0x04, 0x00], ts()).unwrap().is_empty());
 		split.reset();
