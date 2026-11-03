@@ -248,15 +248,15 @@ impl kio::Task for Child {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let completed = {
-			// Borrow the stored future through isolation: unwinding must leave its captures
-			// alive until the failure is published, including an origin driver's channels.
+			// Isolate polling without consuming the stored future; release it separately
+			// so a destructor panic cannot escape the child.
 			let mut isolated = std::pin::pin!(moq_tokio::panic::isolate(
 				self.future.as_mut().expect("polled before completion").as_mut()
 			));
 			ready!(waiter.poll_future(isolated.as_mut())).unwrap_or(Err(moq_tokio::Error::Panic))
 		};
-		// A driver drop wakes its readers. Publish a poll panic first, so those readers see
-		// the owner's failure rather than a producer disappearing without finishing.
+		// The remaining captures may wake readers when dropped. Publish the failure before
+		// releasing them; drivers also protect captures from the async state's unwind.
 		if matches!(&completed, Err(moq_tokio::Error::Panic)) {
 			self.complete(completed.clone());
 		}
