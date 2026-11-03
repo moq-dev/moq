@@ -213,6 +213,7 @@ impl Stream {
 
 	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
 	/// left as it was.
+	#[cfg(feature = "quic")]
 	pub(crate) fn poll_received_reset(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
 		let waiter = self.park.hold(cx);
 		self.reader.poll_received_reset(waiter)
