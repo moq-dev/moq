@@ -154,14 +154,20 @@ mod tests {
 		assert!(nodes.snapshot().nodes[0].connections.is_empty());
 		assert!(nodes.snapshot().nodes[0].last_connected_seconds_ago.is_some());
 		let other = nodes.dial(3, "https://peer.example");
-        observation.transport = Some(moq_tokio::Transport::Quic);
-        other.observe(4, &observation);
-        assert_eq!(nodes.snapshot().nodes.len(), 1, "canonical peers group together");
-        drop(dial);
-        let snapshot = nodes.snapshot();
-        assert_eq!(snapshot.nodes[0].connections[0].id, 4, "retiring one owner preserves the other");
-        assert_eq!(serde_json::to_value(snapshot).unwrap()["nodes"][0]["connections"][0]["transport"], "quic");
-        drop(other);
-        assert!(nodes.snapshot().nodes.is_empty());
+		observation.transport = Some(moq_tokio::Transport::Quic);
+		other.observe(4, &observation);
+		assert_eq!(nodes.snapshot().nodes.len(), 1, "canonical peers group together");
+		drop(dial);
+		let snapshot = nodes.snapshot();
+		assert_eq!(
+			snapshot.nodes[0].connections[0].id, 4,
+			"retiring one owner preserves the other"
+		);
+		assert_eq!(
+			serde_json::to_value(snapshot).unwrap()["nodes"][0]["connections"][0]["transport"],
+			"quic"
+		);
+		drop(other);
+		assert!(nodes.snapshot().nodes.is_empty());
 	}
 }
