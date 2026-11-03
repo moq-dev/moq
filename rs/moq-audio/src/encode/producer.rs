@@ -121,12 +121,12 @@ struct Terminal {
 /// [`encode`](Self::encode) to supply the layout it describes. Unlike a catalog
 /// [`Reserved`](moq_mux::catalog::Reserved) this does not withhold the catalog:
 /// subscribers see the broadcast without this rendition until it resolves.
-pub(crate) struct Reserved {
+struct Reserved {
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
 }
 
 impl Reserved {
-	pub(crate) fn new<E: CatalogExt>(
+	fn new<E: CatalogExt>(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		options: &Options,
@@ -156,7 +156,7 @@ impl Reserved {
 	///
 	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
 	/// codec rejects leaves the reservation intact for another input.
-	pub(crate) fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
+	fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
 		let remix = (input.layout != options.config.layout)
 			.then(|| Remix::new(input.layout, options.config.layout))
 			.transpose()?;
@@ -192,7 +192,7 @@ impl Reserved {
 	}
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
-	pub(crate) fn encode(self, registered: Registered) -> Producer {
+	fn encode(self, registered: Registered) -> Producer {
 		let retention = self.track.track().info().max_age.unwrap_or(hang::container::MAX_AGE);
 		let bitrate = registered.encoder.bitrate();
 		self.track.report_bitrate(bitrate);
@@ -227,37 +227,12 @@ impl Reserved {
 ///
 /// Proof that [`Reserved::register`] succeeded, so [`Reserved::encode`] takes no
 /// fallible step and cannot strand the track it consumes.
-pub(crate) struct Registered {
+struct Registered {
 	encoder: Encoder,
 	input: Input,
 	remix: Option<Remix>,
 	resampler: Option<Resampler>,
 	group_samples: u64,
-}
-
-/// What a capture publication needs while its layout is still undiscovered.
-#[cfg(feature = "capture")]
-impl Reserved {
-	/// The resolved track name, available before the layout is.
-	pub(crate) fn name(&self) -> &str {
-		self.track.name()
-	}
-
-	/// The underlying track producer, e.g. to watch subscriber state.
-	pub(crate) fn track(&self) -> &moq_net::track::Producer {
-		self.track.track()
-	}
-
-	/// Finalize a track that never got a rendition.
-	pub(crate) fn finish(&mut self) -> Result<(), Error> {
-		self.track.finish()?;
-		Ok(())
-	}
-
-	/// Abort a track that never got a rendition, so subscribers see `err`.
-	pub(crate) fn abort(self, err: moq_net::Error) {
-		self.track.abort(err);
-	}
 }
 
 impl Producer {

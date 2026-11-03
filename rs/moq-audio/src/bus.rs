@@ -238,18 +238,18 @@ impl Bus {
 		self.inner.level.take()
 	}
 
-	/// Capture an input device into the mix, described by `config` and
+	/// Feed an independent capture consumer into the mix,
 	/// controlled by `strip`.
 	///
-	/// Nothing opens until [`Capture::run`] is awaited, and the device's format
-	/// is whatever it offers: the channel adapts to it.
+	/// Drive [`Capture::run`] alongside the capture producer; the channel adapts
+	/// to the producer's fixed input format.
 	///
 	/// Requires the `capture` feature.
 	#[cfg(feature = "capture")]
-	pub fn capture(&self, config: crate::capture::Config, strip: Strip) -> Capture {
+	pub fn capture(&self, capture: crate::capture::Consumer, strip: Strip) -> Capture {
 		Capture {
 			bus: self.clone(),
-			config,
+			capture,
 			strip,
 		}
 	}
@@ -392,41 +392,28 @@ impl Meter {
 	}
 }
 
-/// An input device feeding a [`Bus`], built by [`Bus::capture`].
+/// A capture consumer feeding a [`Bus`], built by [`Bus::capture`].
 ///
 /// Requires the `capture` feature.
 #[cfg(feature = "capture")]
 pub struct Capture {
 	bus: Bus,
-	config: crate::capture::Config,
+	capture: crate::capture::Consumer,
 	strip: Strip,
 }
 
 #[cfg(feature = "capture")]
 impl Capture {
-	/// Capture into the mix until the device stops or fails, or until the
-	/// future is dropped, which releases the device.
+	/// Feed the mix until shared capture stops or fails, returning its error.
 	///
-	/// A device that cannot open or stops delivering returns its error rather
-	/// than being reopened behind the caller's back, so a source that went
-	/// silent says why. On macOS the future is `!Send`, because the permission
-	/// prompt and ScreenCaptureKit hold ObjC handles across an await, so run it
-	/// on a local task there.
+	/// Dropping this future removes only this bus channel.
 	pub async fn run(self) -> Result<(), Error> {
-		let mut stream = crate::capture::open(&self.config)
-			.await
-			.map_err(|failure| failure.into_error())?;
-		let layout = stream.layout();
-		let mut input = Input::new(layout.sample_rate, Layout::from_channels(layout.channels)?);
-		input.format = crate::Format::F32;
-		let mut channel = self.bus.channel(input, self.strip.clone())?;
-
-		// A gap needs nothing here: the bus has no timeline of its own to
-		// re-anchor, so the channel just plays on.
-		while let Some(samples) = stream.read().await.map_err(|failure| failure.into_error())? {
+		let mut capture = self.capture;
+		let mut channel = self.bus.channel(capture.input().clone(), self.strip)?;
+		loop {
+			let samples = capture.read().await?;
 			channel.push(&samples.data);
 		}
-		Ok(())
 	}
 }
 

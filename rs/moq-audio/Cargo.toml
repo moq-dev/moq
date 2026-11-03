@@ -143,6 +143,11 @@ tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
+name = "capture"
+harness = false
+required-features = ["capture"]
+
+[[bench]]
 name = "bus"
 harness = false
 required-features = ["bus"]
