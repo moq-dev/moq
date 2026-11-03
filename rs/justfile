@@ -231,25 +231,35 @@ c-tests:
 
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:
-    just rs net-features --all
-    just rs coroutines
-    just rs quic-features --all
-    just rs tokio-features --all
-    just rs media-features --all
-    bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
-    just rs relay-minimal
-    bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
-    just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
-    just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
-    bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
-    bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
+    #!/usr/bin/env bash
+    set -euo pipefail
+    failed=()
+    run() {
+        if ! "$@"; then failed+=("$*"); fi
+    }
+    run just rs net-features --all
+    run just rs coroutines
+    run just rs quic-features --all
+    run just rs tokio-features --all
+    run just rs media-features --all
+    run bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
+    run bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
+    run just rs relay-minimal
+    run bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
+    run just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
+    run just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
+    run bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
+    run bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
     # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
-    bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
-    bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
-    bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
-    bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
+    run bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
+    run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
+    run bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
+    run bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
+    if ((${#failed[@]})); then
+        printf 'features: failed: %s\n' "${failed[@]}" >&2
+        exit 1
+    fi
 
 # Compile and test the explicit-time model without async helpers or sessions.
 [positional-arguments]

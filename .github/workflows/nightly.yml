@@ -462,30 +462,35 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/nix
       - name: Rust cache
+        id: setup
         uses: ./.github/actions/rust-cache
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      # Independent checks keep running after a failure; the job still finishes red.
       - name: WebSocket fallback startup benchmark
         run: nix develop --command just js qmux-bench
 
       - name: Browser publisher fairness benchmark
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
       - name: Raw audio encoding benchmark
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just js raw-audio-bench
         shell: bash -leo pipefail {0}
       - name: Audio ring benchmark
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just js ring-bench
         shell: bash -leo pipefail {0}
       - name: Native headless playback
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test native-play
         shell: bash -leo pipefail {0}
         env:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test audio-quality --runtimes chromium --enforce --capture
         shell: bash -leo pipefail {0}
         env:
@@ -497,7 +502,7 @@ jobs:
       # stall voids about one AAC row in seven, which would fail most nights until
       # it is fixed. Kept beside the browser run so its ceilings can be re-measured.
       - name: Native audio quality
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test audio-quality --runtimes native
         shell: bash -leo pipefail {0}
         env:
@@ -506,7 +511,7 @@ jobs:
       # The run directory is the diagnosis: each process's log, the shaper's
       # counters, the raw samples, and every row's summary.
       - name: Keep the run
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: audio-quality-run

@@ -15,6 +15,56 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class FeaturesTest(unittest.TestCase):
+    def run_features(self, failures=()):
+        runner = shutil.which("just")
+        (ROOT / ".tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+            scratch = Path(directory)
+            calls = scratch / "calls"
+            for command in ("just", "cargo"):
+                stub = scratch / command
+                stub.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, sys\n"
+                    "call = [os.path.basename(sys.argv[0]), *sys.argv[1:]]\n"
+                    "with open(os.environ['FEATURE_CALLS'], 'a') as output:\n"
+                    "    output.write(json.dumps(call) + '\\n')\n"
+                    "sys.exit(call in json.loads(os.environ['FEATURE_FAILURES']))\n"
+                )
+                stub.chmod(0o755)
+            result = subprocess.run(
+                [runner, "rs", "features"],
+                cwd=ROOT,
+                env=dict(
+                    os.environ,
+                    PATH=f"{scratch}:{os.environ['PATH']}",
+                    FEATURE_CALLS=str(calls),
+                    FEATURE_FAILURES=json.dumps(failures),
+                    LOCAL_SUPERVISED="1",
+                    GITHUB_ACTIONS="false",
+                    BASH_ENV="/dev/null",
+                ),
+                capture_output=True,
+                text=True,
+            )
+            return result, [json.loads(line) for line in calls.read_text().splitlines()]
+
+    def test_independent_checks_run_after_multiple_failures(self):
+        passed, expected = self.run_features()
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        # Early, middle, and final failures must all survive subsequent successes.
+        for failures in ([expected[0], expected[len(expected) // 2]], [expected[-1]]):
+            with self.subTest(failures=failures):
+                failed, calls = self.run_features(failures)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertEqual(calls, expected)
+                summary = [line for line in failed.stderr.splitlines() if line.startswith("features: failed: ")]
+                self.assertEqual(len(summary), len(failures))
+                for failure in failures:
+                    self.assertTrue(any(" ".join(failure) in line for line in summary))
+
+
 class NightlyTest(unittest.TestCase):
     def run_group(self, group, fail="", cwd=ROOT, **environment):
         with tempfile.TemporaryDirectory() as directory:
