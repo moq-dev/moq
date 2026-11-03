@@ -1683,8 +1683,12 @@ impl<E: catalog::Catalog> Import<E> {
 	/// PCR/PTS rollover sets nothing and only moves the next PTS into the next era; neither is
 	/// a program break and neither reaches here.
 	fn timebase_break(&mut self) -> anyhow::Result<()> {
-		// First, so the salvage below cannot publish the first catalog with the old clock's rate.
-		self.rearm_mux_rate();
+		// A leading flag starts this instance's clock; it cannot invalidate a window not begun.
+		// Otherwise hold before salvage, which may resolve the final stream config.
+		let clocked = self.mux_rate.started();
+		if clocked {
+			self.rearm_mux_rate();
+		}
 		// The bytes still accumulating belong to the old clock, and their continuation is
 		// stamped on the new one, so cut every PES here rather than splicing across. This
 		// runs before the marker so a salvaged tail lands in the closing group, which the
@@ -1718,7 +1722,7 @@ impl<E: catalog::Catalog> Import<E> {
 		self.published = false;
 		self.liveness.discontinuity();
 		self.si.discontinuity();
-		if self.mux_rate.discontinuity() {
+		if clocked && self.mux_rate.discontinuity() {
 			self.record_mux_rate()?;
 		}
 		tracing::debug!("MPEG-TS system time-base discontinuity");
@@ -1727,6 +1731,9 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// The program clock changed, so the measured rate no longer holds.
 	fn reset_mux_rate(&mut self) -> anyhow::Result<()> {
+		if !self.mux_rate.started() {
+			return Ok(());
+		}
 		self.rearm_mux_rate();
 		if self.mux_rate.discontinuity() {
 			self.record_mux_rate()?;
