@@ -1,4 +1,4 @@
-# Nightly passes on main
+# [S] Nightly passes on main
 
 ## Goal
 
@@ -32,7 +32,3 @@ This README's own work, after the children:
   threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error

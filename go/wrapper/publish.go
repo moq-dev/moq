@@ -17,8 +17,9 @@ type BroadcastProducer struct {
 }
 
 // NewBroadcastProducer creates a standalone broadcast, not attached to any
-// origin: use it to serve a dynamic request ([BroadcastRequest.Accept]) or for
-// local pub/sub. To publish at a path, use [OriginProducer.CreateBroadcast].
+// origin: pass its [BroadcastProducer.Consume] result to [BroadcastRequest.Serve]
+// for a dynamic request, or use it for local pub/sub. To publish at a path, use
+// [OriginProducer.CreateBroadcast].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
@@ -61,9 +62,9 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 }
 
 // Close ends the broadcast for good: it retracts and serves no new tracks.
-// Tracks still open on it end with Unroutable, which readers take as the
-// publisher leaving, and their later calls fail with ErrClosed; finish a track
-// first to end it cleanly. Closing again is a no-op.
+// Tracks still open on it end with Unroutable (Internal to a moq-transport
+// reader), and their later calls fail with ErrClosed; finish a track first to
+// end it cleanly. Closing again is a no-op.
 func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }

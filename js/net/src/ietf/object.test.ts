@@ -22,7 +22,13 @@ test("a same-scale timestamp is written exactly, up to the largest a Timestamp h
 
 test("a timestamp is converted to the track's scale", () => {
 	expect(roundtrip(Timestamp.fromMillis(1234), Timescale.NANO)?.value).toBe(1_234_000_000);
-	expect(roundtrip(Timestamp.fromMicros(1_500), Timescale.MILLI)?.value).toBe(2);
+	// Rounded down, as Rust converts it.
+	expect(roundtrip(Timestamp.fromMicros(1_500), Timescale.MILLI)?.value).toBe(1);
+	// Exact for an aligned value, where float division gives 4611686020.999999.
+	expect(roundtrip(new Timestamp(4_611_686_021_000_000, Timescale.NANO), Timescale.MILLI)?.value).toBe(4_611_686_021);
+	// The same binary value at two scales encodes alike: 116 ms, as Rust converts it.
+	expect(roundtrip(new Timestamp(0.11699999999999999, Timescale.SECOND), Timescale.MILLI)?.value).toBe(116);
+	expect(roundtrip(new Timestamp(131730289100587, Timescale(1125899906842624)), Timescale.MILLI)?.value).toBe(116);
 });
 
 test("a conversion past what a Timestamp holds is refused before anything is written", () => {
@@ -72,7 +78,7 @@ test("a data stream's header goes out in one write, stream type included", async
 		// Every optional field present, with values past a one-byte varint.
 		const group = new Group({
 			trackAlias: 1_000_000n,
-			groupId: 70_000,
+			groupId: 70_000n,
 			subGroupId: 300,
 			publisherPriority: 200,
 			flags: {

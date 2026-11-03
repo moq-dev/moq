@@ -8,7 +8,7 @@ import { GivenUp } from "./given_up.ts";
 
 // A group whose budget verdict the test sets, and how many watches its drift input holds.
 function served() {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	const group = producer.consume();
 	const expired = new Signal(false);
 	let watching = 0;

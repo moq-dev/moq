@@ -11,7 +11,3 @@ Follow-up of [moq-dev/moq#7375](https://github.com/moq-dev/moq/pull/7375), which
 Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Give Apple the same threaded Sink as the other backends and delete the inline path and the stale comment. Needs a macOS host to verify: run the moq-video encoder tests and a transcode ladder with a forced CPU path, and record that the tokio worker stays free.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Transcode rungs](/quest/m2/transcode-rungs.md) - its PR, #7375, adds the encoder-side resize

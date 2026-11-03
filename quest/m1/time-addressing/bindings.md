@@ -10,9 +10,12 @@ failover, with each `doc/lib` page and the PR's Impact section saying how to mig
 
 Follow the cross-package sync table from `rs/moq-ffi` outward. Timestamps
 already cross the bindings as `{value, scale}`, so a start reuses that
-type. Decided 2026-10-27 (maintainer): every track is timed after the cut,
-so reads drop the `Option` that exact timestamps keeps for untimed. Only
-reads drop it here; producer arguments keep their optional timestamp.
+type. Decided 2026-11-03 (maintainer, replacing 2026-10-27's "producer arguments
+keep their optional timestamp"): every read and write carries a timestamp.
+Reads drop the `Option` that exact timestamps keeps for untimed, producer
+arguments take a required one, and nothing is wall-clock stamped. A
+scale-less track's frames carry their group's key. See
+[the model](/quest/m1/time-addressing/model.md).
 
 Public API: breaking in every binding. Wire: none.
 

@@ -190,7 +190,7 @@ class Upstream extends BroadcastConsumer {
 		const local = wireOf(this).fetchGroup;
 		if (!local) throw new Error("a produced broadcast always fetches");
 		overrideBroadcastWire(this, {
-			fetchGroup: (name, sequence, options) => fill(sequence, () => local(name, sequence, options)),
+			fetchGroup: (name, sequence, options) => fill(Number(sequence), () => local(name, sequence, options)),
 		});
 		this.#fill = fill;
 	}
@@ -256,11 +256,9 @@ interface Reader {
 	gone: boolean;
 	/** The subscription's group range. */
 	ranges: Range;
-	/**
-	 * The one group cursor reads honor. Unlike the Rust reader's two filters, a JS subscriber's
-	 * subscription range only seeds it: an update resets it to that range, and local bounds
-	 * replace it in either direction.
-	 */
+	/** The local bounds `withRange` last set, which narrow the subscription's range. */
+	local: Range;
+	/** The groups reads honor: the subscription's range within the local bounds. */
 	cursor: Range;
 	/** Every group handed out, in order. */
 	handed: number[];
@@ -290,6 +288,11 @@ function capped(reader: Reader): boolean {
 	return (reader.cursor?.[1] ?? GROUPS) < GROUPS;
 }
 
+function intersect(a: Range, b: Range): Range {
+	if (!a || !b) return a ?? b;
+	return [Math.max(a[0], b[0]), Math.min(a[1], b[1])];
+}
+
 function within(range: Range, group: number): boolean {
 	return range === undefined || (range[0] <= group && group < range[1]);
 }
@@ -306,11 +309,14 @@ function observed(reader: Reader): string {
 }
 
 function groups(range: Range): track.Groups {
-	return range ? { start: { included: range[0] }, end: { excluded: range[1] } } : {};
+	return range ? { start: { included: BigInt(range[0]) }, end: { excluded: BigInt(range[1]) } } : {};
 }
 
 function subscription(budget: Budget, range: Range): track.Subscription {
-	return { delay: { max: budget === "hour" ? HOUR : SHORT }, groups: range ? groups(range) : undefined };
+	return {
+		delay: { max: budget === "hour" ? HOUR : SHORT },
+		ranges: range ? [{ start: { absolute: BigInt(range[0]) }, end: { absolute: BigInt(range[1]) } }] : undefined,
+	};
 }
 
 function max(values: Iterable<number>): number | undefined {
@@ -385,7 +391,7 @@ class Model {
 					entry.writer.abort(giveUp());
 					entry.writer = undefined;
 				} else if (!entry) {
-					hooks.dropTrackGroups(copy.track, op.group, op.group + 1, giveUp());
+					hooks.dropTrackGroups(copy.track, BigInt(op.group), BigInt(op.group + 1), giveUp());
 				}
 				instance.givenUp.add(op.group);
 				break;
@@ -413,15 +419,21 @@ class Model {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
 				reader.ranges = op.range;
-				reader.cursor = op.range;
+				reader.cursor = intersect(op.range, reader.local);
 				reader.sub.update(subscription(reader.spec.budget, op.range));
+				// A read that ended at its range's end reads on once the range widens.
+				if (reader.end === null && !this.instances[reader.instance].ended) {
+					reader.end = undefined;
+					reader.carried = new Set();
+				}
 				this.poll(op.reader);
 				break;
 			}
 			case "bounds": {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
-				reader.cursor = op.range;
+				reader.local = op.range;
+				reader.cursor = intersect(reader.ranges, op.range);
 				(reader.ordered ?? reader.sub).withRange(groups(op.range));
 				this.poll(op.reader);
 				break;
@@ -446,10 +458,7 @@ class Model {
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		void (async () => {
 			for await (const request of serving.requested()) {
-				hooks.acceptRequest(
-					request,
-					Upstream.of(broadcast, (sequence, local) => this.fill(instance, slot, sequence, local)),
-				);
+				request.serve(Upstream.of(broadcast, (sequence, local) => this.fill(instance, slot, sequence, local)));
 			}
 		})();
 		publisher.routes[slot] = { track: producer, serving, broadcast, groups: new Map(), givenUp: new Set() };
@@ -466,7 +475,7 @@ class Model {
 		}
 		if (entry.written === 0 && !entry.writer) {
 			try {
-				entry.writer = copy.track.createGroup(group);
+				entry.writer = copy.track.createGroup(BigInt(group));
 			} catch {
 				return;
 			}
@@ -510,7 +519,7 @@ class Model {
 		if (copy.groups.has(sequence)) return local();
 		const written = publisher.written.get(sequence) ?? 0;
 		if (sequence >= GROUPS || written === 0) throw new NotFound(`group ${sequence}`);
-		const writer = copy.track.createGroup(sequence);
+		const writer = copy.track.createGroup(BigInt(sequence));
 		copy.groups.set(sequence, { written: 0, writer });
 		const group = writer.consume();
 		this.write(instance, slot, sequence, written);
@@ -566,6 +575,7 @@ class Model {
 			flag: false,
 			gone: false,
 			ranges: spec.range,
+			local: undefined,
 			cursor: spec.range,
 			handed: [],
 			reading: new Map(),
@@ -591,13 +601,20 @@ class Model {
 	}
 
 	/** Read everything `index` has ready, checking each step against the model. */
-	/** The track ended cleanly: a group landing below the end afterwards is not owed, since a reader stops at it. */
+	/**
+	 * The read ended cleanly, with the track or, for a bounded range, once that range is read and a
+	 * local cap holds nothing back: a group landing below the end afterwards is not owed, since a
+	 * reader stops at it.
+	 */
 	#endClean(index: number, reader: Reader): void {
 		const instance = this.instances[reader.instance];
-		if (!instance.ended) throw fail(index, "the track ended cleanly though no route declared an end");
+		if (!instance.ended && reader.ranges === undefined) {
+			throw fail(index, "the track ended cleanly though no route declared an end");
+		}
+		const covered = (group: number) => (instance.ended ? true : within(reader.ranges, group));
 		reader.carried = new Set();
 		for (let group = 0; group < GROUPS; group++) {
-			if (instance.live().every((copy) => complete(copy, group))) reader.carried.add(group);
+			if (covered(group) && instance.live().every((copy) => complete(copy, group))) reader.carried.add(group);
 		}
 	}
 
@@ -619,7 +636,7 @@ class Model {
 			}
 			if (recv.kind === "group") {
 				const group = recv.group;
-				const sequence = group.sequence;
+				const sequence = Number(group.sequence);
 				if (reader.reading.has(sequence)) {
 					throw fail(index, `group ${sequence} handed out twice: ${reader.handed}`);
 				}
@@ -651,14 +668,15 @@ class Model {
 		if (reader.spec.drops && !reader.spec.ordered) {
 			for (let drop = hooks.tryDrop(reader.sub); drop; drop = hooks.tryDrop(reader.sub)) {
 				for (let group = drop.start; group < drop.end; group++) {
-					if (reader.reading.has(group)) {
+					if (reader.reading.has(Number(group))) {
 						throw fail(
 							index,
 							`dropped ${drop.start}..${drop.end} (${drop.error}) after handing out ${group}`,
 						);
 					}
 				}
-				for (let group = drop.start; group < Math.min(drop.end, GROUPS); group++) reader.dropped.add(group);
+				for (let group = Number(drop.start); group < Math.min(Number(drop.end), GROUPS); group++)
+					reader.dropped.add(group);
 			}
 		}
 
@@ -669,7 +687,7 @@ class Model {
 
 	/** Read a group handed out to its end, checking each frame against the model. */
 	async #read(index: number, reader: Reader, reading: Reading): Promise<void> {
-		const sequence = reading.group.sequence;
+		const sequence = Number(reading.group.sequence);
 		for (;;) {
 			let frame: Frame | undefined;
 			try {
@@ -763,14 +781,23 @@ class Model {
 		const ended = reader.end === null || reader.parked;
 		if (reader.doomed) {
 			if (reader.end instanceof Error || ((ended || capped(reader)) && instance.ended)) return;
+			if (reader.end === null && reader.ranges !== undefined) return;
 			throw fail(index, `outlived its instance's routes: ${reader.end}`);
 		}
 		// What every live route carries in full.
 		const carried = (group: number) => instance.live().every((copy) => complete(copy, group));
+		// A read that ended its range owed every group in it, whatever its cap, but an ordered one
+		// passes what its floor keeps out once it reads past it.
+		const readRange = reader.end === null && !instance.ended;
+		const owes = (group: number) =>
+			readRange
+				? within(reader.ranges, group) &&
+					(!reader.spec.ordered || reader.local === undefined || group >= reader.local[0])
+				: covers(reader, group);
 		let owed: number[] = [];
 		for (let group = 0; group < GROUPS; group++) {
 			if (reader.floor !== undefined && group <= reader.floor) continue;
-			if (covers(reader, group) && carried(group)) owed.push(group);
+			if (owes(group) && carried(group)) owed.push(group);
 		}
 		if (reader.spec.ordered && before !== undefined) owed = owed.filter((group) => group > before);
 		if (ended) owed = owed.filter((group) => reader.carried.has(group));
@@ -795,7 +822,7 @@ class Model {
 		const ends =
 			(end === undefined && (!live || capped(reader))) ||
 			(end === null && live) ||
-			(end === null && !live && instance.ended);
+			(end === null && !live && (instance.ended || reader.ranges !== undefined));
 		if (!ends) problems += `track end ${end}; `;
 		if (problems === "") return;
 		throw fail(
@@ -900,6 +927,18 @@ test("regressions", async () => {
 				{ kind: "giveUp", instance: 1, slot: 2, group: 7 },
 			],
 			finish: true,
+		},
+		// Groups in range under the resume point that the local floor keeps out stay owed, so the
+		// read does not end once the copies read everything above them. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: 6, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 1, range: [0, 8] },
+				{ kind: "bounds", reader: 1, range: [3, 8] },
+			],
+			finish: false,
 		},
 		// Local bounds below the subscription's range leave no drops to report.
 		{

@@ -130,7 +130,7 @@ pub(crate) struct ExportSource {
 	after: Option<u64>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
-	/// OpusHead). Some once the codec config is available — from the catalog
+	/// OpusHead). Some once the codec config is available - from the catalog
 	/// `description`, or synthesized by the transform.
 	description: Option<Bytes>,
 	/// Video codec used to derive geometry from its configuration or keyframes.

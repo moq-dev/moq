@@ -46,19 +46,19 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   tracks. No ICE, STUN, or hole punching; the [P2P](/quest/m2/p2p/README.md)
   line is separate.
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not
-  the [routing identity](/quest/m1/cluster-routing/routes.md), which each
+  the [routing identity](/quest/m1/cluster-routing/routes/README.md), which each
   process declares fresh.
 - Addressing is announcement: each node publishes under `mesh/<id>/...`, and
   reaching an ID is subscribing there. There is no separate directory.
 - The token is the binding: enrollment proves the device key, then the
   coordinator issues a grant to publish `mesh/<id>/**` and subscribe
   `mesh/**`, plus publish on `mesh/*/*/.dial/<id>` so the node can dial
-  another's [socket](/quest/m2/socket/README.md) under its own id (amended
+  another's [socket](/quest/m1/socket/README.md) under its own id (amended
   2026-11-01). Relays need no new check. Membership is the coordinator's
   token only; a Tailnet-Lock analog was declined.
 - Protection is per broadcast, with levels that nest: identity (the token
   only), authentication (per-frame Ed25519 signatures, the default), and
-  later encryption (signed plus moq-e2ee, waiting on
+  later encryption (signed plus moq-crypto's e2ee, waiting on
   [mesh keys](/quest/m3/mesh-keys.md)).
 - Enrollment is automated, with no human in the loop (decided 2026-10-30): a
   device presents an enrollment key the owner created and then refreshes by
