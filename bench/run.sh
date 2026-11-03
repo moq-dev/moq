@@ -78,6 +78,12 @@ case $MODE in
             BASES+=("$(git rev-parse --verify "$value^{commit}")")
         done
         BASE=${BASES[*]}
+        # A client revision held fixed across bisect runs, so a newer client's behavior
+        # doesn't move the historical relays it drives.
+        GENERATOR=
+        if [[ -n ${BENCH_GENERATOR:-} ]]; then
+            GENERATOR=$(git rev-parse --verify "$BENCH_GENERATOR^{commit}")
+        fi
         PROFILE_RUNTIME=${BENCH_PROFILE_RUNTIME:-tokio-workers}
         if [[ ! $PROFILE_RUNTIME =~ ^(tokio-workers|io-uring-workers)$ ]]; then
             printf 'profile runtime must be tokio-workers or io-uring-workers, got %q\n' "$PROFILE_RUNTIME" >&2
@@ -106,8 +112,8 @@ case $MODE in
             printf 'BENCH_PROFILE_MODES=instructions runs alone, not with %q\n' "$PROFILE_MODES" >&2
             exit 1
         fi
-        if ((${#BASES[@]} > 1)) && [[ $PROFILE_MODES != instructions ]]; then
-            printf 'only BENCH_PROFILE_MODES=instructions accepts more than one BENCH_BASE revision\n' >&2
+        if { ((${#BASES[@]} > 1)) || [[ -n $GENERATOR ]]; } && [[ $PROFILE_MODES != instructions ]]; then
+            printf 'only BENCH_PROFILE_MODES=instructions accepts several BENCH_BASE revisions or BENCH_GENERATOR\n' >&2
             exit 1
         fi
         for value in $PROFILE_WORKERS; do
@@ -897,56 +903,72 @@ run_profiles() {
     done
 }
 
+# Check out one revision where it stays put, so Cargo's fingerprints survive and a
+# later bisect step reuses its build. It loads only its own Cargo configuration.
+revision_checkout() {
+    local sha=$1 label=$2 checkout=$TARGET/revisions/$1/checkout
+    if [[ $(git -C "$checkout" rev-parse HEAD 2>/dev/null) != "$sha" ]]; then
+        rm -rf "$checkout"
+        git worktree prune
+        git worktree add --detach "$checkout" "$sha" >/dev/null
+    fi
+    mkdir -p "$RUN/base-context/$label"
+    (cd "$checkout" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
+}
+
 # Count every base and the current tree in rotated order, so each round measures
-# all revisions back to back and no revision always runs first. The current
-# generator and sampler drive every relay, including old bases whose own harness
-# cannot select the io_uring runtime.
+# all revisions back to back and no revision always runs first. One generator and
+# sampler drive every relay, including old bases whose own harness cannot select
+# the io_uring runtime: BENCH_GENERATOR's, or else the current tree's.
 run_instructions() {
-    local label sha target round index next checkout
+    local label sha round index next generator built
+    # Measured revisions, then what gets built: those plus a generator measured nowhere.
     local -a labels=() targets=() checkouts=() builds=()
     for sha in ${BASES[@]+"${BASES[@]}"}; do
         label=base
         if ((${#BASES[@]} > 1)); then label=base-${sha:0:12}; fi
-        # A checkout that stays put keeps Cargo's fingerprints, so a later bisect step
-        # reuses this revision's build. It loads only its own Cargo configuration.
-        checkout=$TARGET/revisions/$sha/checkout
-        if [[ $(git -C "$checkout" rev-parse HEAD 2>/dev/null) != "$sha" ]]; then
-            rm -rf "$checkout"
-            git worktree prune
-            git worktree add --detach "$checkout" "$sha" >/dev/null
-        fi
-        mkdir -p "$RUN/base-context/$label"
-        (cd "$checkout" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
+        revision_checkout "$sha" "$label"
         labels+=("$label")
-        checkouts+=("$checkout")
+        checkouts+=("$TARGET/revisions/$sha/checkout")
         targets+=("$TARGET/revisions/$sha/profile")
     done
     labels+=(current)
     checkouts+=("$ROOT")
     # The working tree changes under one target; Cargo's fingerprints track it.
     targets+=("$TARGET/revisions/current/profile")
-    LOAD_BIN=${targets[-1]}/profiling/moq-bench
-    HOST_BIN=${targets[-1]}/profiling/moq-bench-host
+    local -a build_labels=("${labels[@]}") build_checkouts=("${checkouts[@]}") build_targets=("${targets[@]}")
+    generator=${targets[-1]}
+    if [[ -n $GENERATOR ]]; then
+        generator=$TARGET/revisions/$GENERATOR/profile
+        if [[ " ${BASES[*]} " != *" $GENERATOR "* ]]; then
+            revision_checkout "$GENERATOR" generator
+            build_labels+=(generator)
+            build_checkouts+=("$TARGET/revisions/$GENERATOR/checkout")
+            build_targets+=("$generator")
+        fi
+    fi
+    LOAD_BIN=$generator/profiling/moq-bench
+    HOST_BIN=$generator/profiling/moq-bench-host
 
-    # Fat LTO links on one thread, so revisions build side by side.
-    for ((index = 0; index < ${#labels[@]}; index++)); do
-        mkdir -p "$RUN/build"
+    # Fat LTO links on one thread, so revisions build side by side on every allowed CPU.
+    mkdir -p "$RUN/build"
+    for ((index = 0; index < ${#build_labels[@]}; index++)); do
         taskset -c "$ALLOWED_CPUS" bash -c "$(declare -f build_workers); build_workers \"\$@\"" _ \
-            "${checkouts[$index]}" "${targets[$index]}" profiling instructions \
-            >"$RUN/build/${labels[$index]}.log" 2>&1 &
+            "${build_checkouts[$index]}" "${build_targets[$index]}" profiling instructions \
+            >"$RUN/build/${build_labels[$index]}.log" 2>&1 &
         builds+=($!)
     done
-    for ((index = 0; index < ${#labels[@]}; index++)); do
+    for ((index = 0; index < ${#build_labels[@]}; index++)); do
         if ! wait "${builds[$index]}"; then
-            printf 'build failed for %s:\n' "${labels[$index]}" >&2
-            tail -n 40 "$RUN/build/${labels[$index]}.log" >&2
+            printf 'build failed for %s:\n' "${build_labels[$index]}" >&2
+            tail -n 40 "$RUN/build/${build_labels[$index]}.log" >&2
             return 1
         fi
-        tail -n 1 "$RUN/build/${labels[$index]}.log"
+        tail -n 1 "$RUN/build/${build_labels[$index]}.log"
     done
     if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
-        for target in "${targets[@]}"; do
-            check_uring "$target/profiling"
+        for built in "${build_targets[@]}"; do
+            check_uring "$built/profiling"
         done
     fi
     for ((round = 1; round <= ROUNDS; round++)); do

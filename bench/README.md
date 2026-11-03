@@ -290,7 +290,7 @@ BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_RUNTIME_ROUNDS=5 \
 BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 \
   nix develop --command just bench-profile instructions video 4 tokio-workers cdff3c8f95
 # A bisect step: every listed base and the current tree, rotated in each round.
-BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 \
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_GENERATOR=21d6da9fc1 \
   nix develop --command just bench-profile instructions chat 4 io-uring-workers "fe722cec9f 2d73eea67d e84ffb3de3"
 ```
 
@@ -302,7 +302,10 @@ mode runs alone. Each base keeps a detached worktree and target under
 `git worktree remove`. The revisions build side by side on every allowed CPU,
 since fat LTO links on one thread. Every round measures each base and the current tree back
 to back, rotating which goes first, for `BENCH_RUNTIME_ROUNDS` rounds (default
-3); the current generator drives them all. The revisions are each other's
+3); one generator drives them all. That is the current tree's unless
+`BENCH_GENERATOR` names a revision: hold it fixed across a bisect's runs, since
+client changes (flow control, subscription options) move what an old relay
+spends per frame. The revisions are each other's
 control, so there is no unprofiled run per revision. The run ends with each
 revision's median and range in `instructions-summary.json`, including the groups
 the generator confirmed lost between the reports bracketing each counter window
