@@ -46,6 +46,7 @@ default:
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
+    python3 interop/staging.test.py
     python3 ../rs/moq-gst/smoke.test.py
     python3 interop/report.test.py
     python3 interop/tone.test.py
@@ -65,7 +66,7 @@ harness:
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net -p moq-sign --lib \
+    just rs test -p moq-net -p moq-crypto --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
@@ -163,7 +164,9 @@ audio-quality *args:
 
 # Records the arrival traces under audio-quality/traces/ that the replay rows grade: the
 # public relay's bbb.hang, a local relay's AAC tone, and a browser microphone through the
-# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`.
+# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`; record a
+# real microphone with `--lanes relay-mic --mic-broadcast <name>`, published by hand to the
+# public relay's anon path.
 
 # Re-record the audio quality arrival traces.
 [positional-arguments]

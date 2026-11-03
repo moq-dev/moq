@@ -5,6 +5,8 @@
  * @module
  */
 
+import { max, min } from "./util/sequence.ts";
+
 /**
  * The group sequences a reader handed out, as runs of consecutive sequences.
  *
@@ -14,10 +16,10 @@
  */
 export class Delivered {
 	// First and last sequence of each run, inclusive, sorted and never adjacent to each other.
-	#runs: [number, number][] = [];
+	#runs: [bigint, bigint][] = [];
 
 	// The index of the run containing or preceding `sequence`, or -1 when none starts at or below it.
-	#below(sequence: number): number {
+	#below(sequence: bigint): number {
 		let lo = 0;
 		let hi = this.#runs.length;
 		while (lo < hi) {
@@ -29,40 +31,37 @@ export class Delivered {
 	}
 
 	/** Whether `sequence` was handed out, or is below the floor. */
-	has(sequence: number): boolean {
+	has(sequence: bigint): boolean {
 		const index = this.#below(sequence);
 		return index >= 0 && sequence <= this.#runs[index][1];
 	}
 
 	/** Whether every sequence in `[start, end)` was handed out, or is below the floor. */
-	covers(start: number, end: number): boolean {
+	covers(start: bigint, end: bigint): boolean {
 		if (start >= end) return true;
 		const index = this.#below(start);
-		return index >= 0 && end - 1 <= this.#runs[index][1];
+		return index >= 0 && end - 1n <= this.#runs[index][1];
 	}
 
 	/** Record `sequence` as handed out; `false` when it already was. */
-	add(sequence: number): boolean {
+	add(sequence: bigint): boolean {
 		if (this.has(sequence)) return false;
-		this.addRun(sequence, sequence + 1);
+		this.addRun(sequence, sequence + 1n);
 		return true;
 	}
 
 	/** Record every sequence in `[start, end)` as handed out. */
-	addRun(start: number, end: number): void {
+	addRun(start: bigint, end: bigint): void {
 		if (start >= end) return;
 		// The runs it overlaps or touches, `first` through `last`, merge into one.
-		let first = this.#below(start - 1);
-		if (first < 0 || this.#runs[first][1] < start - 1) first++;
+		let first = this.#below(start - 1n);
+		if (first < 0 || this.#runs[first][1] < start - 1n) first++;
 		const last = this.#below(end);
 		if (last < first) {
-			this.#runs.splice(first, 0, [start, end - 1]);
+			this.#runs.splice(first, 0, [start, end - 1n]);
 			return;
 		}
-		const merged: [number, number] = [
-			Math.min(start, this.#runs[first][0]),
-			Math.max(end - 1, this.#runs[last][1]),
-		];
+		const merged: [bigint, bigint] = [min(start, this.#runs[first][0]), max(end - 1n, this.#runs[last][1])];
 		this.#runs.splice(first, last - first + 1, merged);
 	}
 
@@ -70,40 +69,40 @@ export class Delivered {
 	union(other: Delivered): Delivered {
 		const union = new Delivered();
 		union.#runs = this.#runs.map(([first, last]) => [first, last]);
-		for (const [first, last] of other.#runs) union.addRun(first, last + 1);
+		for (const [first, last] of other.#runs) union.addRun(first, last + 1n);
 		return union;
 	}
 
 	/** The parts of `[start, end)` not handed out, in order. */
-	gaps(start: number, end: number): { start: number; end: number }[] {
-		const gaps: { start: number; end: number }[] = [];
+	gaps(start: bigint, end: bigint): { start: bigint; end: bigint }[] {
+		const gaps: { start: bigint; end: bigint }[] = [];
 		let next = start;
 		for (let index = Math.max(this.#below(start), 0); index < this.#runs.length && next < end; index++) {
 			const [first, last] = this.#runs[index];
-			if (first > next) gaps.push({ start: next, end: Math.min(first, end) });
-			next = Math.max(next, last + 1);
+			if (first > next) gaps.push({ start: next, end: min(first, end) });
+			next = max(next, last + 1n);
 		}
 		if (next < end) gaps.push({ start: next, end });
 		return gaps;
 	}
 
 	/** Count every sequence below `floor` as handed out. */
-	forgetBelow(floor: number): void {
-		if (floor <= 0) return;
+	forgetBelow(floor: bigint): void {
+		if (floor <= 0n) return;
 		// Every run starting at or below the floor joins it, including one starting right at it.
 		const index = this.#below(floor);
-		const last = Math.max(floor - 1, index >= 0 ? this.#runs[index][1] : 0);
-		this.#runs.splice(0, index + 1, [0, last]);
+		const last = max(floor - 1n, index >= 0 ? this.#runs[index][1] : 0n);
+		this.#runs.splice(0, index + 1, [0n, last]);
 	}
 
 	/**
 	 * The lowest sequence handed out above a gap: once it is past the reader's budget, so is
 	 * the gap, since group timestamps on a track never rewind.
 	 */
-	aboveGap(): number | undefined {
+	aboveGap(): bigint | undefined {
 		const first = this.#runs[0];
 		if (!first) return undefined;
-		return first[0] === 0 ? this.#runs[1]?.[0] : first[0];
+		return first[0] === 0n ? this.#runs[1]?.[0] : first[0];
 	}
 
 	/** How many runs it holds: one per gap, plus the floor. */

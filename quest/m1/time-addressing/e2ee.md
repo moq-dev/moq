@@ -8,8 +8,8 @@ the cut.
 
 ## Plan
 
-Update `drafts/draft-lcurley-moq-e2ee.md`, `rs/moq-e2ee`, and the JS side,
-which has landed: `js/e2ee/src/derive.ts` builds `nonce(group, frame)` (about
+Update `drafts/draft-lcurley-moq-e2ee.md`, `rs/moq-crypto`, and the JS side,
+which has landed: `js/crypto/src/e2ee/derive.ts` builds `nonce(group, frame)` (about
 line 156). The start is unique per track because starts strictly increase.
 Run `just drafts check`.
 

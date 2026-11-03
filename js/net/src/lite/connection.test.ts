@@ -32,6 +32,7 @@ import {
 	ALPN_06,
 	ALPN_07_WIP,
 	hasTrackStream,
+	keepsSubscribeOpen,
 	Version,
 	versionName,
 } from "./version.ts";
@@ -325,7 +326,12 @@ for (const [alpn, version] of [
 			const first = producer.appendGroup();
 			first.writeFrame(textFrame("first"));
 			first.finish();
-			expect(await (await track.nextGroup())?.readString()).toBe("first");
+			// A frame can arrive while its sender still yields on the write. Drain the setup group
+			// before a zero-delay subscription supersedes its still-unfinished sender.
+			const received = await track.nextGroup();
+			expect(await received?.readString()).toBe("first");
+			expect(await received?.readString()).toBeUndefined();
+			received?.close();
 
 			fin.enable();
 			const last = producer.appendGroup();
@@ -526,15 +532,17 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 		track: "video",
 		priority: 0,
 		maxDelay: 10_000,
-		startGroup: 0,
+		startGroup: 0n,
 	}).encode(subscriber.writer, version);
 
 	// Finish the track only once it is served: a track closed before anyone subscribed is gone.
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 	producer.finish();
 	producer.close();
-	// SUBSCRIBE_END, then the publisher's FIN.
-	await subscriber.reader.readAll();
+	// SUBSCRIBE_END, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
+	if (keepsSubscribeOpen(version)) {
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+	} else await subscriber.reader.readAll();
 
 	let closed = false;
 	void pair.server.closed.then(() => {
@@ -641,7 +649,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 		fin.enable();
 		const fetch = await Stream.open(pair.client, { version });
 		await fetch.writer.u53(StreamId.Fetch);
-		await new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0 }).encode(
+		await new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0n }).encode(
 			fetch.writer,
 			version,
 		);
@@ -705,12 +713,13 @@ test("close waits for a request served while withdrawals are in flight", async (
 			track: "video",
 			priority: 0,
 			maxDelay: 10_000,
-			startGroup: 0,
+			startGroup: 0n,
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 		producer.finish();
 		producer.close();
-		await subscriber.reader.readAll();
+		// SUBSCRIBE_END; lite-07 keeps the stream open past it.
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 
 		// The withdrawal completes, but the subscription still waits for the subscriber's FIN.
 		fin.release();
@@ -886,15 +895,15 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 						sub = stream;
 					}
 				}
-				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0]) }, version);
+				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0n]) }, version);
 
 				let group: GroupMessage;
 				if (violation === "a partial group") {
 					// A received tail uses its wire position even without a locally retained prefix.
-					group = new GroupMessage({ subscribe: 0n, sequence: 0, frameStart: 5 });
+					group = new GroupMessage({ subscribe: 0n, sequence: 0n, frameStart: 5 });
 				} else {
-					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2) }, version);
-					group = new GroupMessage({ subscribe: 0n, sequence: 2 });
+					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2n) }, version);
+					group = new GroupMessage({ subscribe: 0n, sequence: 2n });
 				}
 				const writer = await Writer.open(pair.server, { version });
 				await writer.u53(DataType.Group);

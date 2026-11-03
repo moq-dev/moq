@@ -57,7 +57,8 @@ export class SupportProbe<Config extends { codec: string }> {
 
 		effect.set(this.#pending, true, false);
 		effect.spawn(async () => {
-			const available: Record<string, Config> = {};
+			// A Map, since assigning an ID like `__proto__` into a plain object sets its prototype instead.
+			const available = new Map<string, Config>();
 
 			for (const [name, config] of Object.entries(renditions)) {
 				const key = cacheKey(config);
@@ -86,14 +87,14 @@ export class SupportProbe<Config extends { codec: string }> {
 				// Torn down: stop probing and publish nothing, since the rerun redoes this.
 				if (effect.abort.aborted) return;
 
-				if (isSupported) available[name] = config;
+				if (isSupported) available.set(name, config);
 			}
 
-			if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
+			if (available.size === 0 && Object.keys(renditions).length > 0) {
 				console.warn(`[Source] no supported ${this.#kind} renditions found:`, renditions);
 				this.error.set(new DOMException(`no supported ${this.#kind} renditions`, "NotSupportedError"));
 			}
-			publish(available);
+			publish(Object.fromEntries(available));
 			this.#pending.set(false);
 		});
 	}

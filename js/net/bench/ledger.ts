@@ -17,20 +17,26 @@ export function run(): void {
 					[sequences[i], sequences[j]] = [sequences[j], sequences[i]];
 				}
 			}
+			// Converted before the timer, so the loop measures only the ledger.
+			const keys =
+				order === "rolling"
+					? Array.from({ length: count * 2 }, (_, i) => BigInt(i * 2))
+					: sequences.map((sequence) => BigInt(sequence));
 			const ledger = new Ledger();
 			const grace = Milli(count);
 			const start = performance.now();
 			for (let i = 0; i < count * (order === "rolling" ? 2 : 1); i++) {
-				const sequence = order === "rolling" ? i * 2 : sequences[i];
+				const sequence = keys[i];
 				const at = order === "rolling" ? Instant(Nano.fromMilli(Milli(i))) : Instant.zero;
-				ledger.account(sequence, sequence + 1, at);
+				ledger.account(sequence, sequence + 1n, at);
 				ledger.expire(at, grace);
-				if (!ledger.covers(sequence, sequence + 1)) throw new Error("arrival missing");
+				if (!ledger.covers(sequence, sequence + 1n)) throw new Error("arrival missing");
 			}
 			const arrivals = count * (order === "rolling" ? 2 : 1);
 			console.log(`${count},${order},${(((performance.now() - start) * 1e6) / arrivals).toFixed(0)}`);
 			ledger.expire(Instant(Nano.fromMilli(Milli(count * 3))), grace);
-			if (!ledger.covers(0, arrivals * 2 - 1) || ledger.hasGaps()) throw new Error("expiration incomplete");
+			if (!ledger.covers(0n, BigInt(arrivals * 2 - 1)) || ledger.hasGaps())
+				throw new Error("expiration incomplete");
 		}
 	}
 }
