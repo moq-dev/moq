@@ -101,6 +101,8 @@ int main(void) {
               MOQ_ERROR_TIMESTAMP_OVERFLOW);
     }
     CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), NULL) == MOQ_ERROR_MOQ);
+    // A JSON write is never stamped for you.
+    CHECK(moq_publish_json_stream_append((uint32_t)json, doc, strlen(doc), NULL) == MOQ_ERROR_INVALID_POINTER);
 
     CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c) > 0);
     WAIT_FOR(&c, c.broadcast);

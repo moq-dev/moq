@@ -16,7 +16,7 @@ fn read_all(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, rec
 			Err(e) => break e,
 		}
 	};
-	let _ = chunks.finalize();
+	chunks.finalize();
 	(data, end)
 }
 
@@ -75,7 +75,7 @@ fn received_reset_on_closed_streams() {
 		let mut chunks = recv.read().unwrap();
 		assert!(chunks.next(usize::MAX).unwrap().is_some());
 		assert_eq!(chunks.next(usize::MAX), Ok(None));
-		let _ = chunks.finalize();
+		chunks.finalize();
 	}
 	assert!(pair.server_recv(server_ch, s).received_reset().is_err());
 }
@@ -92,7 +92,7 @@ fn chunks_end_in_reset() {
 		let mut recv = pair.server_recv(server_ch, s);
 		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(2).unwrap().unwrap().bytes, &b"he"[..]);
-		let _ = chunks.finalize();
+		chunks.finalize();
 	}
 	pair.client_send(client_ch, s).reset(CODE).unwrap();
 	pair.drive();
@@ -102,7 +102,7 @@ fn chunks_end_in_reset() {
 	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Reset(CODE)));
 	// The end repeats until the chunks are finalized
 	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Reset(CODE)));
-	let _ = chunks.finalize();
+	chunks.finalize();
 	assert_eq!(pair.server_recv(server_ch, s).read().err(), Some(recv::Error::Closed));
 }
 
@@ -119,7 +119,7 @@ fn chunks_end_in_finished() {
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, &b"hello"[..]);
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 	assert_eq!(pair.server_recv(server_ch, s).read().err(), Some(recv::Error::Closed));
 }
 

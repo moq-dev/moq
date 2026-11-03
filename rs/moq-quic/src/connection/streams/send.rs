@@ -460,6 +460,9 @@ impl<'a> Stream<'a> {
 	/// kept for the connection's life.
 	pub fn release(self) {
 		if self.state.ends.remove(&self.id).is_some() {
+			if self.state.ends.capacity() > self.state.ends.len().saturating_mul(4) {
+				self.state.ends.shrink_to_fit();
+			}
 			return;
 		}
 		let max_data = self.state.max_send_data(self.id);

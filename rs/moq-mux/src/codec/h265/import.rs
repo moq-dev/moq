@@ -99,17 +99,10 @@ impl Import {
 
 	/// Resolve the config from any SPS in the buffer.
 	fn initialize_hev1(&mut self, buf: &[u8]) -> Result<()> {
-		let mut scan = Bytes::copy_from_slice(buf);
-		let mut nals = NalIterator::new(&mut scan);
-		while let Some(nal) = nals.next().transpose()? {
+		for nal in crate::codec::annexb::complete_nals(buf)? {
 			if is_sps(&nal) {
 				self.seed_sps(&nal)?;
 			}
-		}
-		if let Some(nal) = nals.flush()?
-			&& is_sps(&nal)
-		{
-			self.seed_sps(&nal)?;
 		}
 		Ok(())
 	}

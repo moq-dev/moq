@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `UnsupportedConfigMoqException` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.update`, `json.StreamProducer.append`, and `json.WindowProducer.push` / `pop` take a `required MoqTimestamp timestamp` on the broadcast clock instead of an optional one. Read it with `MoqMediaCatalogProducer(broadcast: broadcast).now()`. Their track needs a timescale, such as `MoqTrackInfo(timescale: 1000)`; one without is refused.
+
+### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.maxDelay` is `delay`, a `Delay`, and a bare `Subscription()` is moq-net's defaults again: pass `delay: Delay(max: maxDelay)`, and `Delay(max: null)` for no subscriber limit.
+`media.Delay` moves to `package:moq/moq.dart`. `Delay` and `Subscription` are extension types over the generated records, so they pass wherever those are taken; `Delay` defaults `min` and `max` to zero, and an explicit null `min` leaves the target latency unstated.
+
 ### `Transport.iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 Native sessions no longer arrive over iroh, so `Transport` loses its `iroh` value. Drop the case, and regenerate bindings and rebuild with the matching native library.
@@ -14,8 +27,8 @@ Native sessions no longer arrive over iroh, so `Transport` loses its `iroh` valu
 
 ### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
-`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: media.Delay?` and `estimate: bool = true`.
-`video.DecoderOutput.maxDelay` is `delay: media.Delay?`.
+`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: Delay?` and `estimate: bool = true`.
+`video.DecoderOutput.maxDelay` is `delay: Delay?`.
 `Delay(min: ..., max: ...)`: `max` (null for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
 A fixed audio playout delay `d` is `delay: Delay(min: d, max: ...)` with `estimate: false`.
 
@@ -46,7 +59,6 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 
 The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 `audio.EncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` defaults to null, so a `Subscription()` that omits it gets no staleness limit instead of moq-net's 0: start from `defaultSubscription()`, or pass `maxDelay: Duration.zero`, for the old default.
 A negative `Duration` throws `ArgumentError` wherever it crosses into the native library.
 
 ### Connection state
@@ -142,6 +154,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `origin.dynamic_(prefix:)` takes no route, and `update` is gone.
 Replace `request.accept(broadcast:)` with `request.prepare()`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.serve(broadcast: producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 
