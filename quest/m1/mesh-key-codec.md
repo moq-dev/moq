@@ -45,6 +45,20 @@ Public API: breaking for moq-auth (`mesh::EndpointId` becomes
 
 ## Waiting
 
+- Maintainer: choose the dependency boundary after local review of
+  [moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733). The direct
+  dependency proposed in that draft makes published `moq-auth` require
+  `moq-sign`, whose manifest sets `publish = false`. It also makes auth compile
+  net and aws-lc-rs just for the public key, while auth itself verifies on rind.
+  Option 1 (recommended): move the existing `PublicKey` and codec to a small
+  publishable leaf crate and re-export the same type from signing; settle the
+  crate name before implementation. Option 2: make the existing signing crate
+  publishable with a key-only dependency path, gating its net and aws-lc-rs
+  dependencies. Keep the rename in
+  [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702) independent and do
+  not settle its timestamp-export decision here. A maintainer comment choosing
+  the boundary and naming clears this wait; implement it, rerun checks, and
+  review the resulting head before completion.
 - Maintainer: settle the extra methods on the removed `EndpointId` before
   completing [moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733).
   It exposed `publish()` and raw `verify(message, signature)`, while signing's
