@@ -741,7 +741,7 @@ test("subscriber maxAge and maxDelay are refused before defaults or updates take
 		expect(producer.subscription.peek()).toEqual(original);
 	}
 
-	// Publisher retention keeps its distinct maxAge field.
+	// The publisher's own staleness bound keeps its distinct maxAge field.
 	producer.accept({ maxAge: Milli(500) });
 	track.close();
 	producer.finish();
@@ -1537,7 +1537,7 @@ test("the ordered cursor sheds a stale backlog", async () => {
 	}
 });
 
-test("the budget is clamped to the publisher's window", async () => {
+test("the budget is clamped to the publisher's maxAge", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(1500) });
 	const track = producer.subscribe({ delay: { max: Milli(60_000) } });
 
@@ -1547,8 +1547,8 @@ test("the budget is clamped to the publisher's window", async () => {
 		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
 	}
 
-	// Asking to tolerate a minute cannot reach back further than the publisher keeps a group
-	// live, the same clamp delivery applies.
+	// Asking to tolerate a minute cannot reach back past the publisher's maxAge, the same
+	// clamp delivery applies.
 	expect((await track.recvGroup())?.sequence).toBe(1);
 });
 
@@ -1683,7 +1683,7 @@ test("a handed-out group still expires while its first frame is stalled", async 
 	}
 });
 
-test("committing track info wakes a group newly outside the retention window", async () => {
+test("committing track info wakes a group newly past the publisher's maxAge", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ delay: { max: Milli(10_000) } });
 	const source = producer.appendGroup();
@@ -1791,10 +1791,11 @@ test("a drained group finishes cleanly after the live edge advances", async () =
 	expect(group.done).toBe(true);
 });
 
-// A stalled track keeps its newest group and gives up the ones before it by the wall clock:
+// A stalled track serves its newest group and skips the ones before it by the wall clock:
 // maxAge measures how long ago each group's successor arrived as well as media time, so a
-// publisher that stops writing cannot pin its superseded groups.
-test("a stalled track keeps only its newest group", () => {
+// publisher that stops writing cannot keep its superseded groups deliverable. The cache still
+// holds them, since two seconds is well inside its idle window: this is staleness, not eviction.
+test("a stalled track serves only its newest group", () => {
 	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(1000) });
 	try {

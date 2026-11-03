@@ -262,7 +262,7 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 - **Linux**: one binary that
 
   - `dlopen`s `libnvidia-encode` if an NVIDIA driver is present (no build dep),
-  - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev) — *intended*;
+  - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev) - *intended*;
     moq-vaapi 0.0.2 currently links libva instead, so this isn't realized yet
     (see #1837),
   - falls back to OpenH264 when its default feature is enabled and no GPU encoder is usable.
