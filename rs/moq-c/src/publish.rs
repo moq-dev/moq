@@ -525,14 +525,15 @@ impl Publish {
 		children.insert(&mut self.media, media, Child::Media)
 	}
 
-	/// `hls` is the longest span between the track's group starts, when known (see [`Reserved::with_hls_hint`]).
+	/// `interval` is the longest span between the track's group starts, when known (see
+	/// [`Reserved::with_interval`]).
 	///
-	/// [`Reserved::with_hls_hint`]: moq_mux::catalog::Reserved::with_hls_hint
+	/// [`Reserved::with_interval`]: moq_mux::catalog::Reserved::with_interval
 	pub fn audio(
 		&mut self,
 		broadcast: Id,
 		init: import::AudioInit,
-		hls: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> Result<Id, Error> {
 		let Broadcast {
 			producer: broadcast,
@@ -544,17 +545,17 @@ impl Publish {
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
-		let track = import::Track::audio(request, catalog.reserve().with_hls_hint(hls), init)?;
+		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
 		self.insert_media(track, children)
 	}
 
-	/// `hls` as in [`Self::audio`].
+	/// `interval` as in [`Self::audio`].
 	pub fn video(
 		&mut self,
 		broadcast: Id,
 		init: import::VideoInit,
-		hls: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> Result<Id, Error> {
 		let Broadcast {
 			producer: broadcast,
@@ -566,7 +567,7 @@ impl Publish {
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
-		let track = import::Track::video(request, catalog.reserve().with_hls_hint(hls), init)?;
+		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
 		self.insert_media(track, children)
 	}
@@ -606,8 +607,8 @@ impl Publish {
 	///
 	/// This ends the open group; the next frame starts a new one. Audio has no boundary of its own
 	/// (every frame is independently decodable), so this is the only thing that gives it groups:
-	/// call it per frame for one group (one QUIC stream) forwarded without waiting, or at a segment
-	/// cadence to align with video.
+	/// call it per frame for one group (one QUIC stream) forwarded without waiting, or less often
+	/// to batch frames into fewer groups.
 	pub fn media_cut(&mut self, media: Id) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 		track.cut(None)?;
@@ -1032,7 +1033,7 @@ impl Publish {
 		&mut self,
 		request: Id,
 		init: import::AudioInit,
-		hls: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> Result<Id, Error> {
 		let TrackRequest {
 			broadcast,
@@ -1040,7 +1041,7 @@ impl Publish {
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
-		let track = import::Track::audio(request, catalog.reserve().with_hls_hint(hls), init)?;
+		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
 		self.insert_media(track, children)
 	}
 
@@ -1049,7 +1050,7 @@ impl Publish {
 		&mut self,
 		request: Id,
 		init: import::VideoInit,
-		hls: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> Result<Id, Error> {
 		let TrackRequest {
 			broadcast,
@@ -1057,7 +1058,7 @@ impl Publish {
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
-		let track = import::Track::video(request, catalog.reserve().with_hls_hint(hls), init)?;
+		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
 		self.insert_media(track, children)
 	}
 

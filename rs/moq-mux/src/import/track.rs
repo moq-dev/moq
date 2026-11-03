@@ -210,9 +210,9 @@ macro_rules! import {
 /// Video groups by its own keyframes. Audio is independently decodable per frame, so it has no
 /// boundary of its own and accumulates into the current group until the caller draws one with
 /// [`cut`](Self::cut) or [`seek`](Self::seek). Cut per frame for the lowest latency (one group,
-/// one QUIC stream, forwarded without waiting), or at a segment cadence to align with video for
-/// HLS/DASH. An audio track that is never cut is one unbounded group, which strands late
-/// subscribers and the timeline alike, so this warns once when it sees that.
+/// one QUIC stream, forwarded without waiting), or less often to batch frames into fewer groups. An
+/// audio track that is never cut is one unbounded group, which strands late subscribers and the
+/// timeline alike, so this warns once when it sees that.
 pub struct Track {
 	kind: TrackKind,
 
@@ -452,7 +452,7 @@ impl Track {
 	/// Cut the current group at `end` without finishing the track.
 	///
 	/// This is how an audio track gets group boundaries at all: call it per frame for one group
-	/// per packet (the lowest latency), or at a segment cadence to align with video.
+	/// per packet (the lowest latency), or less often to batch frames into fewer groups.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.group_start = None;
 		import!(&mut self.kind, import => import.cut(end))

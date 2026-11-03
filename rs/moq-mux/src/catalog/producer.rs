@@ -1967,7 +1967,7 @@ mod test {
 		video
 	}
 
-	/// A hinted track declares its interval with its first snapshot.
+	/// A hinted track declares its hint, not what it measured, once a window has closed.
 	#[test]
 	fn a_hint_declares_the_join_interval() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1975,18 +1975,29 @@ mod test {
 		let net = broadcast
 			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let _video = catalog
+		let mut video = catalog
 			.reserve()
-			.with_interval(std::time::Duration::from_secs(2))
+			.with_interval(std::time::Duration::from_secs(4))
 			.video(
 				net,
 				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
 				VideoConfig::new(hang::catalog::VideoCodec::VP8),
 			)
 			.unwrap();
+		for start in [0, 1_000, 2_000] {
+			assert_eq!(catalog.snapshot().media.join, None, "nothing has measured a window yet");
+			video
+				.write(crate::container::Frame {
+					timestamp: moq_net::Timestamp::from_millis(start).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"keyframe"),
+					keyframe: true,
+				})
+				.unwrap();
+		}
 		assert_eq!(
 			catalog.snapshot().media.interval(),
-			Some(std::time::Duration::from_secs(2))
+			Some(std::time::Duration::from_secs(4))
 		);
 	}
 
@@ -2389,7 +2400,7 @@ mod test {
 			.unwrap();
 		assert_eq!(sent(&catalog), Some(0));
 		assert_eq!(catalog.clock().reading(wall).unwrap(), 0);
-		assert_eq!(wire(&catalog).clock, catalog.clock().wall());
+		assert_eq!(wire(&catalog).media.clock, catalog.clock().wall());
 	}
 
 	/// Fake this thread's host now a day past the moq epoch, returning a `media.clock` an hour
@@ -2412,7 +2423,7 @@ mod test {
 		let input = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		catalog.mutate(|c| c.media.clock = Some(input)).unwrap();
 
 		assert_eq!(catalog.snapshot().media.clock, Some(input), "advertised unchanged");
 		let clock = catalog.clock();
@@ -2432,7 +2443,7 @@ mod test {
 		);
 
 		// Re-applying the same mapping once fixed changes nothing.
-		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		catalog.mutate(|c| c.media.clock = Some(input)).unwrap();
 		assert_eq!(catalog.clock(), clock);
 	}
 
@@ -2444,7 +2455,7 @@ mod test {
 
 		let input = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut seed = Catalog::<()>::default();
-		seed.clock = Some(input);
+		seed.media.clock = Some(input);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default().with_catalog(seed.clone())).unwrap();
 		assert_eq!(catalog.snapshot().media.clock, Some(input));
@@ -2456,13 +2467,13 @@ mod test {
 			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
 			+ Duration::from_micros(input.wall.as_micros() as u64);
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
-		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
+		seed.media.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed.clone());
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
 		assert_eq!(catalog.clock(), fixed);
-		catalog.mutate(|c| c.clock = seed.clock).unwrap();
+		catalog.mutate(|c| c.media.clock = seed.media.clock).unwrap();
 		assert_eq!(catalog.snapshot().media.clock, Some(input));
 
 		// A different one is refused before any catalog track exists.
@@ -2485,12 +2496,12 @@ mod test {
 		let micro = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		catalog.mutate(|c| c.media.clock = Some(input)).unwrap();
 		assert_eq!(catalog.snapshot().media.clock, Some(micro));
 		assert_eq!(catalog.clock().wall(), Some(micro));
 
 		// The millisecond spelling of the fixed mapping is no change.
-		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		catalog.mutate(|c| c.media.clock = Some(input)).unwrap();
 		assert_eq!(catalog.snapshot().media.clock, Some(micro));
 	}
 
@@ -2502,7 +2513,7 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let own = catalog.current_clock().wall();
 		let refused = |catalog: &mut Producer, clock: Option<hang::catalog::Clock>| {
-			let err = catalog.mutate(|c| c.clock = clock).unwrap_err();
+			let err = catalog.mutate(|c| c.media.clock = clock).unwrap_err();
 			assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err}");
 			assert_eq!(catalog.snapshot().media.clock, own);
 		};
@@ -2571,7 +2582,7 @@ mod test {
 
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.video.renditions.contains_key("video0"));
-		assert_eq!(snapshot.clock, None, "publishing never invents a wall");
+		assert_eq!(snapshot.media.clock, None, "publishing never invents a wall");
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
 			panic!("the frame's group is published");
@@ -3414,6 +3425,7 @@ mod test {
 		super::super::Reading {
 			estimate: super::super::Estimate::default().with_delay(std::time::Duration::from_millis(ms)),
 			period: Some(std::time::Duration::from_millis(10)),
+			interval: None,
 		}
 	}
 

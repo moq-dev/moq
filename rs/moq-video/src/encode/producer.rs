@@ -98,7 +98,7 @@ impl Producer {
 	/// Publish a track carrying `rendition` into `broadcast`, registering it under
 	/// `reserved`, a [`catalog::Producer::reserve`](moq_mux::catalog::Producer::reserve)
 	/// that carries any per-track hint such as the encoder's GOP duration
-	/// ([`Reserved::with_hls_hint`](moq_mux::catalog::Reserved::with_hls_hint)).
+	/// ([`Reserved::with_interval`](moq_mux::catalog::Reserved::with_interval)).
 	/// The frames fed to [`publish`](Self::publish) must be in that
 	/// codec's framing, which is what the [`Encoder`](super::Encoder) the
 	/// rendition was probed from emits.
@@ -428,7 +428,7 @@ async fn publish_capture_from<E: CatalogExt, S: CaptureSource>(
 	// The importer consumes the track, so keep a handle to abort it if setup fails,
 	// then drop it so it never outlives the importer's.
 	let fallback = track.clone();
-	let mut producer = match Producer::with_track(track, catalog.reserve().with_hls_hint(gop), rendition) {
+	let mut producer = match Producer::with_track(track, catalog.reserve().with_interval(gop), rendition) {
 		Ok(producer) => producer,
 		Err(err) => {
 			let _ = fallback.abort(moq_net::Error::Transport(err.to_string()));
@@ -894,7 +894,7 @@ mod tests {
 
 		let mut producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_hls_hint(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -967,7 +967,7 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let mut producer = Producer::with_track(
 			track,
-			catalog.reserve().with_hls_hint(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -997,7 +997,7 @@ mod tests {
 		initial.kind = encoder::Kind::Software;
 		let mut producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_hls_hint(initial.gop.duration(initial.framerate)),
+			catalog.reserve().with_interval(initial.gop.duration(initial.framerate)),
 			initial.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1070,7 +1070,7 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let _producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_hls_hint(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1116,7 +1116,7 @@ mod tests {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::with_track(
 			track,
-			catalog.reserve().with_hls_hint(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1224,7 +1224,7 @@ mod tests {
 				probe.kind = encoder::Kind::Software;
 				let mut producer = Producer::with_track(
 					track,
-					catalog.reserve().with_hls_hint(probe.gop.duration(probe.framerate)),
+					catalog.reserve().with_interval(probe.gop.duration(probe.framerate)),
 					probe.probe().await.unwrap(),
 				)
 				.unwrap();
@@ -2028,7 +2028,7 @@ mod tests {
 				track,
 				catalog
 					.reserve()
-					.with_hls_hint(rendition.gop.duration(rendition.framerate)),
+					.with_interval(rendition.gop.duration(rendition.framerate)),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();
@@ -2134,7 +2134,7 @@ mod tests {
 				track,
 				catalog
 					.reserve()
-					.with_hls_hint(rendition.gop.duration(rendition.framerate)),
+					.with_interval(rendition.gop.duration(rendition.framerate)),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();

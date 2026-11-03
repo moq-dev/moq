@@ -843,41 +843,6 @@ mod tests {
 		producer.finish().unwrap();
 	}
 
-	#[tokio::test(start_paused = true)]
-	async fn hls_keeps_one_segment_across_buffered_demand_gaps() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let options = Options {
-			track: Some("audio".into()),
-			..Options::default()
-		};
-		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
-		producer.write(&pcm_frame(&vec![0.1; 1920], 1_000_000)).unwrap();
-		producer
-			.set_active(false, Timestamp::from_micros(1_020_000).unwrap())
-			.unwrap();
-		producer.write(&pcm_frame(&vec![0.1; 1920], 1_020_000)).unwrap();
-		producer
-			.set_active(true, Timestamp::from_micros(1_040_000).unwrap())
-			.unwrap();
-		producer.finish().unwrap();
-		let hls = catalog.snapshot().audio.renditions["audio"].hls.clone().unwrap();
-		catalog.finish().unwrap();
-		let mut records = moq_mux::hls::Consumer::subscribe(&consumer, &hls).await.unwrap();
-		let mut listed = Vec::new();
-		while let Some(event) = records.next().await.unwrap() {
-			match event {
-				moq_mux::hls::Event::Push { entry, .. } => listed.push(entry),
-				other => panic!("unexpected record event {other:?}"),
-			}
-		}
-		assert_eq!(listed.len(), 2, "one segment and its final stop: {listed:?}");
-		assert!(!listed[0].is_stop() && listed[1].is_stop());
-		assert_eq!(listed[0].pts.as_micros(), 1_000_000);
-		assert!(listed[1].pts.as_micros() >= 1_040_000);
-	}
-
 	/// Replay catches up behind the live edge another track already reached; advertising that as
 	/// delay would buffer playback by the retention for the rest of the broadcast.
 	#[tokio::test(start_paused = true)]
@@ -921,59 +886,6 @@ mod tests {
 			"{delay:?}"
 		);
 		other.finish().unwrap();
-	}
-
-	/// History that expires unencoded leaves the idle gap out of every HLS segment, as a
-	/// released microphone does: the resumed audio starts a segment of its own.
-	#[tokio::test(start_paused = true)]
-	async fn hls_stops_the_segment_where_retained_history_expired() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let options = Options {
-			track: Some("audio".into()),
-			..Options::default()
-		};
-		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
-		producer.write(&pcm_frame(&vec![0.1; 1920], 1_000_000)).unwrap();
-		producer
-			.set_active(false, Timestamp::from_micros(1_020_000).unwrap())
-			.unwrap();
-		// Capture runs on with nobody subscribed, past the default 30-second retention.
-		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
-		for index in 1..=1600 {
-			producer
-				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
-				.unwrap();
-			producer.set_active(false, at(index + 1)).unwrap();
-		}
-		loop {
-			producer.set_active(true, at(1601)).unwrap();
-			if !producer.backlog_ready() {
-				break;
-			}
-		}
-		producer.finish().unwrap();
-		let hls = catalog.snapshot().audio.renditions["audio"].hls.clone().unwrap();
-		catalog.finish().unwrap();
-		let mut records = moq_mux::hls::Consumer::subscribe(&consumer, &hls).await.unwrap();
-		let mut listed = Vec::new();
-		while let Some(event) = records.next().await.unwrap() {
-			match event {
-				moq_mux::hls::Event::Push { entry, .. } => listed.push(entry),
-				other => panic!("unexpected record event {other:?}"),
-			}
-		}
-		assert!(!listed[0].is_stop() && listed[1].is_stop(), "{listed:?}");
-		assert_eq!(listed[0].pts.as_micros(), 1_000_000);
-		assert!(
-			listed[1].pts.as_micros() <= 1_020_000,
-			"the idle gap joined a segment: {listed:?}"
-		);
-		// The replay resumes at the oldest retained frame, 30 seconds before demand returned.
-		assert!(!listed[2].is_stop(), "{listed:?}");
-		assert!(listed[2].pts.as_micros() >= 2_000_000, "{listed:?}");
-		assert!(listed.last().unwrap().is_stop(), "{listed:?}");
 	}
 
 	/// History expiring right before capture ends still marks the gap before the final partial frame.

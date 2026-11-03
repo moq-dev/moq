@@ -1399,7 +1399,7 @@ mod tests {
 			panic!("first catalog")
 		};
 		assert_eq!(
-			first.clock.unwrap().wall.as_micros(),
+			first.media.clock.unwrap().wall.as_micros(),
 			((1_735_689_600 - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128,
 		);
 	}
@@ -1436,7 +1436,7 @@ mod tests {
 				let state = control.live.as_ref().unwrap();
 				(
 					state.broadcast.consume(),
-					state.catalog.as_ref().unwrap().snapshot().clock.unwrap(),
+					state.catalog.as_ref().unwrap().snapshot().media.clock.unwrap(),
 				)
 			};
 			assert_eq!(

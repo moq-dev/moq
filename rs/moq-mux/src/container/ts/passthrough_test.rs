@@ -597,7 +597,7 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let clock = catalog.clock();
-	let fixed = catalog.snapshot().clock;
+	let fixed = catalog.snapshot().media.clock;
 	tokio::time::advance(Duration::from_secs(5)).await;
 	let before = clock.now().as_micros() as u64;
 	let shifted = import_onto(broadcast, catalog.clone(), &data, data.len(), None)
@@ -605,7 +605,7 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 		.unwrap();
 	let after = clock.now().as_micros() as u64;
 
-	assert_eq!(catalog.snapshot().clock, fixed, "the import never moves the clock");
+	assert_eq!(catalog.snapshot().media.clock, fixed, "the import never moves the clock");
 	let first = shifted.objects[0].micros;
 	assert!(
 		(before..=after).contains(&first),

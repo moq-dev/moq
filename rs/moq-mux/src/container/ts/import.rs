@@ -5960,26 +5960,6 @@ pub(super) mod test {
 		);
 	}
 
-	/// Where the only audio rendition's HLS records end, once the catalog finishes.
-	async fn hls_audio_end<E: crate::catalog::hang::CatalogExt>(
-		consumer: &moq_net::broadcast::Consumer,
-		catalog: &mut crate::catalog::Producer<E>,
-	) -> Option<Timestamp> {
-		catalog.finish().unwrap();
-		let snapshot = catalog.snapshot();
-		let hls = snapshot.audio.renditions.values().next().unwrap().hls.as_ref().unwrap();
-		let mut records = crate::hls::Consumer::subscribe(consumer, hls).await.unwrap();
-		let mut end = None;
-		while let Some(event) = records.next().await.unwrap() {
-			if let crate::hls::Event::Push { entry, .. } = event
-				&& entry.is_stop()
-			{
-				end = Some(entry.pts);
-			}
-		}
-		end
-	}
-
 	/// Read every retained frame of the single audio rendition in `catalog`.
 	async fn read_audio_frames<E: crate::catalog::hang::CatalogExt>(
 		consumer: &moq_net::broadcast::Consumer,
@@ -6337,7 +6317,7 @@ pub(super) mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -6361,11 +6341,6 @@ pub(super) mod test {
 			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
 			[0xAA, 0xBB].map(|fill| adts_frame(40, fill)[7..].to_vec()).to_vec(),
 			"the last frame was held for a confirmation that could never arrive"
-		);
-		// Both 1024-sample frames at 48 kHz, including the one completed by the EOF drain.
-		assert_eq!(
-			hls_audio_end(&consumer, &mut catalog).await,
-			Some(Timestamp::from_millis(1_042).unwrap())
 		);
 	}
 
@@ -6402,7 +6377,6 @@ pub(super) mod test {
 		let mono = [mp2_frame(0xAA), mp2_frame(0xBB)].concat();
 		import.decode(&audio_pes_packet(MP2_PID, 0, 90_000, &mono)).unwrap();
 		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let records = catalog.hls_tracks();
 		let both = [stereo(0xCC), stereo(0xDD)].concat();
 		import.decode(&audio_pes_packet(MP2_PID, 1, 180_000, &both)).unwrap();
 		import.decode(&audio_pes_packet(MP2_PID, 2, 270_000, &both)).unwrap();
@@ -6412,7 +6386,6 @@ pub(super) mod test {
 		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 		assert_ne!(name, &first, "the stereo frames publish under a new name");
 		assert_eq!(config.channel_count, 2);
-		assert_eq!(catalog.hls_tracks(), records, "the mono track's HLS records retire");
 		import.finish().unwrap();
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(frames[0].payload, stereo(0xCC), "the new track starts at the change");
@@ -6450,7 +6423,6 @@ pub(super) mod test {
 		));
 		import.decode(&mux.out).unwrap();
 		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let records = catalog.hls_tracks();
 
 		mux.out.clear();
 		for pts in [180_000, 270_000] {
@@ -6468,7 +6440,6 @@ pub(super) mod test {
 		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 		assert_ne!(name, &first, "the 44.1 kHz frames publish under a new name");
 		assert_eq!(config.sample_rate, 44_100);
-		assert_eq!(catalog.hls_tracks(), records, "the 48 kHz track's HLS records retire");
 		let recorded: Vec<_> = snapshot.ext.mpegts.tracks.keys().cloned().collect();
 		assert_eq!(
 			recorded,
@@ -6730,7 +6701,7 @@ pub(super) mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -6773,11 +6744,6 @@ pub(super) mod test {
 				}
 			)]),
 			"the drained frame was published without a trace"
-		);
-		// Both 1152-sample frames at 16 kHz, including the one completed by the EOF drain.
-		assert_eq!(
-			hls_audio_end(&consumer, &mut catalog).await,
-			Some(Timestamp::from_millis(1_144).unwrap())
 		);
 	}
 
@@ -7629,7 +7595,7 @@ pub(super) mod test {
 			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
 		)
 		.unwrap();
-		let provisional = catalog.snapshot().clock.expect("a clock");
+		let provisional = catalog.snapshot().media.clock.expect("a clock");
 		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
@@ -7642,7 +7608,7 @@ pub(super) mod test {
 		import
 			.decode(&audio_pes_packet(DATA_PID, 0, 3_600 * 90_000, &[0xDE, 0xAD]))
 			.unwrap();
-		let anchored = catalog.snapshot().clock.expect("a clock");
+		let anchored = catalog.snapshot().media.clock.expect("a clock");
 		assert_ne!(anchored, provisional, "the first PES anchors the clock");
 		assert!(clocks.drain().is_empty(), "rate measurement still holds the catalog");
 		import.finish().unwrap();
@@ -9657,7 +9623,7 @@ pub(super) mod test {
 	async fn damaged_opus_pes_is_not_half_published() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
 			.ensure_stream(
@@ -9683,11 +9649,6 @@ pub(super) mod test {
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
 		let frames = read_track(&consumer, &name, crate::container::Kind::Audio).await;
 		assert_eq!(frames.len(), 2, "no packet from the damaged PES is published");
-		// The last PES starts at 1.0667 s and holds one 20 ms packet, recorded in milliseconds.
-		assert_eq!(
-			hls_audio_end(&consumer, &mut catalog).await,
-			Some(Timestamp::from_millis(1_086).unwrap())
-		);
 	}
 
 	/// An aborted track is a feed-wide publishing failure, never a damaged media unit.
@@ -11372,7 +11333,6 @@ pub(super) mod test {
 		let state = |import: &super::Import<Ext>| {
 			let snapshot = catalog.snapshot();
 			(
-				catalog.hls_tracks(),
 				snapshot.ext.mpegts.tracks.len(),
 				import.streams.len() + import.sections.len() + import.listed.len() + import.retired_stats.len(),
 			)

@@ -965,11 +965,6 @@ mod tests {
 	use crate::catalog::hang::Container;
 	use moq_net::Timestamp;
 
-	/// A millisecond track: the frames written here carry timestamps.
-	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
-	}
-
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
 	/// born from their broadcast (no public `track::Producer::new`).
 	fn track_producer(

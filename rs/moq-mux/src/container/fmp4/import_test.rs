@@ -643,25 +643,13 @@ fn repeated_reinit_keeps_flat_state() {
 			let snapshot = catalog.snapshot();
 			assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
 			assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
-			assert_eq!(
-				catalog.hls_tracks(),
-				2,
-				"{label}: only the live generation keeps records"
-			);
-			// A finished generation's records are kept for a re-enrollment until its drop retires them.
 			if generation % 2 == 1 {
 				fmp4.finish().unwrap();
-				assert_eq!(catalog.hls_tracks(), 2, "{label}");
 			}
 			drop(fmp4);
 			let snapshot = catalog.snapshot();
 			assert!(snapshot.video.renditions.is_empty(), "{label}");
 			assert!(snapshot.audio.renditions.is_empty(), "{label}");
-			assert_eq!(
-				catalog.hls_tracks(),
-				0,
-				"{label}: a replaced generation retires its records"
-			);
 		}
 	}
 }
@@ -1671,73 +1659,16 @@ async fn test_msf_catalog_roundtrip() {
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
 }
 
-/// Subscribe to `track`'s HLS records, before the catalog may advertise them.
-async fn subscribe(consumer: &moq_net::broadcast::Consumer, track: &str) -> crate::hls::Consumer {
-	let hls = hang::catalog::Hls::new(hang::hls::default_name(track), std::time::Duration::ZERO);
-	crate::hls::Consumer::subscribe(consumer, &hls).await.unwrap()
-}
-
-/// Every segment a finished track's records listed, as `(first group, next segment's group)`.
-async fn groups(records: &mut crate::hls::Consumer) -> Vec<(u64, u64)> {
-	let mut entries = Vec::new();
-	while let Some(event) = records.next().await.unwrap() {
-		if let crate::hls::Event::Push { entry, .. } = event {
-			entries.push(entry);
-		}
+/// The sequence of every group a finished track published.
+async fn sequences(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64> {
+	let replay = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
+	let mut track = consumer.track(track).unwrap().subscribe(replay).await.unwrap().ordered();
+	let mut sequences = Vec::new();
+	while let Some(group) = track.next_group().await.unwrap() {
+		sequences.push(group.sequence);
 	}
-	assert!(
-		entries.last().is_some_and(|entry| entry.is_stop()),
-		"the track's end stops the last segment"
-	);
-	entries
-		.windows(2)
-		.filter(|pair| !pair[0].is_stop())
-		.map(|pair| (pair[0].group, pair[1].group))
-		.collect()
-}
-
-/// Passthrough writes groups by hand (no `container::Producer`), so the HLS recorders are fed
-/// directly. This guards that the import advertises both renditions' records in their entries and
-/// actually records their groups, the index the playlist export reads.
-#[tokio::test]
-async fn import_populates_the_hls_records() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-
-	let data = include_bytes!("test_data/bbb.mp4");
-	let buf = bytes::BytesMut::from(&data[..]);
-	// Trailing partial fragments may error; ignore.
-	let _ = fmp4.decode(&buf);
-	fmp4.finish().unwrap();
-
-	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.video.renditions.len(), 1, "bbb has one video rendition");
-	assert_eq!(snapshot.audio.renditions.len(), 1, "bbb has one audio rendition");
-	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
-	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-
-	// This short fixture ends before the first four-second segment closes, so finishing the import
-	// stops it and declares the minimum while the catalog stays live.
-	let four = std::time::Duration::from_secs(4);
-	assert_eq!(
-		snapshot.video.renditions[&video_name].hls.as_ref().unwrap().duration,
-		four
-	);
-	assert_eq!(
-		snapshot.audio.renditions[&audio_name].hls.as_ref().unwrap().duration,
-		four
-	);
-
-	// Subscribe while the producer is alive, then finish so the record tracks close and the
-	// readers terminate rather than blocking.
-	let mut video = subscribe(&consumer, &video_name).await;
-	let mut audio = subscribe(&consumer, &audio_name).await;
-	catalog.finish().unwrap();
-
-	assert_eq!(groups(&mut video).await[0].0, 0, "the first video group is sequence 0");
-	assert_eq!(groups(&mut audio).await[0].0, 0, "the first audio group is sequence 0");
+	sequences
 }
 
 // ---- Sample-duration handling in decode() ----
@@ -2129,17 +2060,16 @@ async fn segmented_source_groups_per_segment_in(passthrough: bool) {
 	);
 }
 
-/// Each declared segment is one group per track, and each track's HLS records list it as one
-/// segment. With audio grouping per fragment those records spanned many short groups, one FETCH
-/// round-trip each.
+/// Each declared segment is one group per track, rather than audio grouping per fragment, and the
+/// join interval is measured from those groups whether or not the import passes fragments through.
 #[tokio::test]
-async fn segmented_source_indexes_one_group_per_record() {
+async fn segmented_source_writes_one_group_per_segment() {
 	for passthrough in [false, true] {
-		segmented_source_indexes_one_group_per_record_in(passthrough).await;
+		segmented_source_writes_one_group_per_segment_in(passthrough).await;
 	}
 }
 
-async fn segmented_source_indexes_one_group_per_record_in(passthrough: bool) {
+async fn segmented_source_writes_one_group_per_segment_in(passthrough: bool) {
 	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -2151,10 +2081,6 @@ async fn segmented_source_indexes_one_group_per_record_in(passthrough: bool) {
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-
-	// Subscribe while the producer is alive so the readers terminate on finish rather than blocking.
-	let mut video = subscribe(&consumer, &video_name).await;
-	let mut audio = subscribe(&consumer, &audio_name).await;
 
 	for segment in 0..3u64 {
 		let base = segment * 1_000_000;
@@ -2176,25 +2102,29 @@ async fn segmented_source_indexes_one_group_per_record_in(passthrough: bool) {
 			fmp4.decode(&frag).unwrap();
 		}
 	}
+	assert_eq!(
+		catalog.snapshot().media.interval(),
+		Some(std::time::Duration::from_secs(1)),
+		"passthrough={passthrough}"
+	);
 	fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let expected = vec![(0, 1), (1, 2), (2, 3)];
-	assert_eq!(groups(&mut video).await, expected, "one video group per record");
+	assert_eq!(sequences(&consumer, &video_name).await, [0, 1, 2], "one video group per segment");
 	assert_eq!(
-		groups(&mut audio).await,
-		expected,
-		"one audio group per record, not one per fragment"
+		sequences(&consumer, &audio_name).await,
+		[0, 1, 2],
+		"one audio group per segment, not one per fragment"
 	);
 }
 
 /// Audio and video rarely start a segment at exactly the same timestamp: the boundary is nominal
-/// and each track begins at its own nearest sample. Each track starts its own HLS segment where it
-/// opens its group for a declared segment, so a skew between them moves no group into another one.
+/// and each track begins at its own nearest sample. Each track opens its own group for a declared
+/// segment, so a skew between them moves no fragment into another group.
 ///
 /// `video_offset_us` shifts video relative to audio, so the same source is exercised with audio
-/// leading and lagging. Returns each track's records as `(start group, end group)`.
-async fn records_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<(u64, u64)>, Vec<(u64, u64)>) {
+/// leading and lagging. Returns each track's group sequences.
+async fn groups_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<u64>, Vec<u64>) {
 	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -2206,8 +2136,6 @@ async fn records_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<(u64
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let mut video = subscribe(&consumer, &video_name).await;
-	let mut audio = subscribe(&consumer, &audio_name).await;
 
 	for segment in 0..3u64 {
 		let base = segment * 1_000_000;
@@ -2215,7 +2143,7 @@ async fn records_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<(u64
 		fmp4.decode(&styp()).unwrap();
 
 		// Audio first, so the segment transition is detected on the audio fragment and video's
-		// IDR lands after it. Two fragments each keeps the records unambiguous.
+		// IDR lands after it. Two fragments each keeps the groups unambiguous.
 		for offset in [0u64, 500_000] {
 			let frag = super::encode_fragment(
 				info(audio_id, audio_scale, segment as u32),
@@ -2236,16 +2164,19 @@ async fn records_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<(u64
 	fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
-	(groups(&mut video).await, groups(&mut audio).await)
+	(
+		sequences(&consumer, &video_name).await,
+		sequences(&consumer, &audio_name).await,
+	)
 }
 
 /// Video's IDR lands 20ms AFTER audio's first sample of the segment, the normal interleave.
 #[tokio::test]
 async fn audio_leading_video_still_indexes_one_group_each() {
-	let expected = vec![(0, 1), (1, 2), (2, 3)];
+	let expected = vec![0, 1, 2];
 	for passthrough in [false, true] {
 		assert_eq!(
-			records_with_skew(20_000, passthrough).await,
+			groups_with_skew(20_000, passthrough).await,
 			(expected.clone(), expected.clone())
 		);
 	}
@@ -2254,10 +2185,10 @@ async fn audio_leading_video_still_indexes_one_group_each() {
 /// Video's IDR lands 20ms BEFORE audio's first sample, the other side of the same skew.
 #[tokio::test]
 async fn audio_lagging_video_still_indexes_one_group_each() {
-	let expected = vec![(0, 1), (1, 2), (2, 3)];
+	let expected = vec![0, 1, 2];
 	for passthrough in [false, true] {
 		assert_eq!(
-			records_with_skew(-20_000, passthrough).await,
+			groups_with_skew(-20_000, passthrough).await,
 			(expected.clone(), expected.clone())
 		);
 	}
@@ -2634,11 +2565,9 @@ fn live_session(start_us: u64, frames: u64) -> Vec<u8> {
 struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	video: String,
-	/// The root clock the catalog advertised.
+	/// The `media.clock` the catalog advertised.
 	clock: hang::catalog::Clock,
 	arrival: std::ops::RangeInclusive<kio::clock::Wall>,
-	/// Where the video's first HLS segment starts.
-	record: moq_net::Timestamp,
 	/// Why a chunk was refused, if one was.
 	refused: Option<crate::Error>,
 }
@@ -2655,7 +2584,6 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 
 	let snapshot = catalog.snapshot();
 	let video = snapshot.video.renditions.keys().next().unwrap().clone();
-	let mut records = subscribe(&consumer, &video).await;
 
 	let before = kio::clock::wall();
 	let mut after = before;
@@ -2672,25 +2600,19 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let event = records.next().await.unwrap().expect("a record");
-	let crate::hls::Event::Push { entry, .. } = event else {
-		panic!("the first event was not a record");
-	};
-
 	let snapshot = catalog.snapshot();
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video,
-		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
-		record: entry.pts,
 		refused,
 	}
 }
 
 /// A feed an hour into its own decode timeline publishes that hour verbatim (the `tfdt` a
 /// decoder reads is untouched), and the catalog clock maps its first fragment to the arrival
-/// time. The HLS records list the same times, so a playlist names each segment's wall time.
+/// time, so a playlist names each segment's wall time.
 #[tokio::test]
 async fn import_publishes_decode_times_on_an_arrival_clock() {
 	let start = 3_600_000_000;
@@ -2699,15 +2621,11 @@ async fn import_publishes_decode_times_on_an_arrival_clock() {
 
 	let first = import.published[&import.video][0];
 	assert_eq!(first, start as u128, "the source's own decode time");
-	assert_eq!(
-		import.record.as_micros(),
-		first,
-		"the HLS records list the source's time"
-	);
 
 	// The advertised clock is micros, so allow its rounding.
 	let tick = std::time::Duration::from_micros(1);
-	let wall = import.clock.wall_clock(import.record).unwrap();
+	let first = moq_net::Timestamp::from_micros(first as u64).unwrap();
+	let wall = import.clock.wall_clock(first).unwrap();
 	assert!(
 		*import.arrival.start() - tick <= wall && wall <= *import.arrival.end() + tick,
 		"the first fragment is live on arrival"
@@ -2755,7 +2673,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	};
 	let mut stamps = data.as_ref().map(|stream| stream.consume());
 	let clock = catalog.clock();
-	let fixed = catalog.snapshot().clock;
+	let fixed = catalog.snapshot().media.clock;
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
@@ -2770,7 +2688,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.clock, fixed, "{earlier:?}: the import never moves the clock");
+	assert_eq!(snapshot.media.clock, fixed, "{earlier:?}: the import never moves the clock");
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
 	let video = &published[snapshot.video.renditions.keys().next().unwrap()];
 	// The offset rounds down to the track's own units.
@@ -2831,7 +2749,7 @@ async fn an_import_shifts_onto_an_explicit_clock() {
 	fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.clock, clock.wall());
+	assert_eq!(snapshot.media.clock, clock.wall());
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
 	let first = published[snapshot.video.renditions.keys().next().unwrap()][0];
 	assert!((before - TICK..=after).contains(&first), "{before} {first} {after}");
@@ -2903,7 +2821,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().clock.expect("a clock");
+	let provisional = catalog.snapshot().media.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
@@ -2911,7 +2829,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the moov alone publishes nothing");
 
 	fmp4.decode(&live_session(3_600_000_000, 20)).unwrap();
-	let anchored = catalog.snapshot().clock.expect("a clock");
+	let anchored = catalog.snapshot().media.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first fragment anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first fragment publishes the catalog");

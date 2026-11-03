@@ -4,8 +4,10 @@
 //! Each video and audio track a catalog mints joins as a [`Member`], carrying its hint (the GOP an
 //! encoder or ingest knows it writes) or, without one, the longest group its
 //! [`Estimator`](super::Estimator) measured over its first window of a second or a group, whichever
-//! is longer. Once every member present has one, the catalog declares the largest, unless the
-//! publisher already set `media.join` itself. The interval is the grid an HLS or DASH export numbers
+//! is longer. Nothing is declared before some track has written a whole window, so the tracks a
+//! publisher adds one at a time are all present, and then only once every member present has its
+//! interval: the catalog declares the largest, unless the publisher already set `media.join`
+//! itself. The interval is the grid an HLS or DASH export numbers
 //! segments on, so it is never changed once declared: a track that later reports a longer group
 //! overruns it, which the export tolerates, and a warning says so.
 
@@ -25,6 +27,8 @@ struct State {
 	/// Each present member's interval, `None` while it is still measuring.
 	members: BTreeMap<u64, Option<Duration>>,
 	next: u64,
+	/// Some track has written a whole window, so the publisher has had time to add its tracks.
+	measured: bool,
 	/// The interval declared, once declared.
 	declared: Option<Duration>,
 	/// A member's longer group was already warned about, so the warning does not repeat.
@@ -32,10 +36,10 @@ struct State {
 }
 
 impl State {
-	/// The interval to declare now, if this is the moment: nothing is declared yet, and every
-	/// present member has its interval.
+	/// The interval to declare now, if this is the moment: nothing is declared yet, some track has
+	/// written a whole window, and every present member has its interval.
 	fn ready(&mut self) -> Option<Duration> {
-		if self.declared.is_some() || self.members.is_empty() {
+		if self.declared.is_some() || !self.measured || self.members.is_empty() {
 			return None;
 		}
 		let interval = self.members.values().try_fold(Duration::ZERO, |max, interval| Some(max.max((*interval)?)))?;
@@ -63,7 +67,7 @@ impl Intervals {
 	/// Join with `hint`, the track's known longest group, or `None` to measure it.
 	pub fn join(&self, hint: Option<Duration>, declare: Declare) -> Member {
 		let hint = hint.filter(|hint| !hint.is_zero());
-		let (id, ready) = {
+		let id = {
 			let mut state = self.lock();
 			let id = state.next;
 			state.next += 1;
@@ -71,16 +75,14 @@ impl Intervals {
 			if let Some(hint) = hint {
 				state.check(hint);
 			}
-			(id, state.ready())
+			id
 		};
-		if let Some(interval) = ready {
-			declare(interval);
-		}
 		Member {
 			intervals: self.clone(),
 			id,
 			interval: hint,
 			hinted: hint.is_some(),
+			reported: None,
 			declare,
 		}
 	}
@@ -104,6 +106,8 @@ pub(crate) struct Member {
 	interval: Option<Duration>,
 	/// The interval is a hint, which no measurement replaces.
 	hinted: bool,
+	/// The longest group reported, so an unchanged report costs no lock.
+	reported: Option<Duration>,
 	declare: Declare,
 }
 
@@ -113,26 +117,30 @@ impl Member {
 		self.interval
 	}
 
-	/// Report the longest group measured so far. A hint is never replaced.
+	/// Report the longest group measured so far, once a window has closed. A hint is never
+	/// replaced, but its track's first window still counts toward the declaration.
 	pub fn report(&mut self, measured: Option<Duration>) {
 		let Some(measured) = measured.filter(|measured| !measured.is_zero()) else {
 			return;
 		};
-		if self.interval.is_some_and(|interval| interval >= measured) {
+		if self.reported.is_some_and(|reported| reported >= measured) {
 			return;
 		}
+		self.reported = Some(measured);
 		let ready = {
 			let mut state = self.intervals.lock();
+			state.measured = true;
 			state.check(measured);
-			if self.hinted {
-				return;
-			}
-			if let Some(slot) = state.members.get_mut(&self.id) {
+			if !self.hinted
+				&& let Some(slot) = state.members.get_mut(&self.id)
+			{
 				*slot = Some(slot.map_or(measured, |interval| interval.max(measured)));
 			}
 			state.ready()
 		};
-		self.interval = Some(measured);
+		if !self.hinted {
+			self.interval = Some(measured);
+		}
 		if let Some(interval) = ready {
 			(self.declare)(interval);
 		}
@@ -174,27 +182,20 @@ mod test {
 	}
 
 	#[test]
-	fn hints_declare_their_largest_at_once() {
+	fn nothing_is_declared_before_a_window_closes() {
 		let (declared, declare) = recorder();
 		let intervals = Intervals::default();
-		let _video = intervals.join(Some(secs(2.0)), declare());
-		assert_eq!(*declared.lock().unwrap(), [secs(2.0)]);
-		let _audio = intervals.join(Some(secs(4.0)), declare());
-		assert_eq!(*declared.lock().unwrap(), [secs(2.0)], "declared once, never raised");
-		assert_eq!(intervals.declared(), Some(secs(2.0)));
+		let mut audio = intervals.join(Some(secs(0.1)), declare());
+		let video = intervals.join(Some(secs(3.0)), declare());
+		assert!(declared.lock().unwrap().is_empty(), "the tracks have written nothing yet");
+		audio.report(Some(secs(0.02)));
+		assert_eq!(*declared.lock().unwrap(), [secs(3.0)], "the largest hint, not the first");
+		drop(video);
+		assert_eq!(intervals.declared(), Some(secs(3.0)), "fixed once declared");
 	}
 
 	#[test]
 	fn an_unmeasured_member_holds_the_declaration_back() {
-		let (declared, declare) = recorder();
-		let intervals = Intervals::default();
-		let _video = intervals.join(Some(secs(2.0)), declare());
-		let mut audio = intervals.join(None, declare());
-		// The video joined alone first, so it declared before the audio was present.
-		assert_eq!(*declared.lock().unwrap(), [secs(2.0)]);
-		audio.report(Some(secs(0.02)));
-		assert_eq!(*declared.lock().unwrap(), [secs(2.0)]);
-
 		let (declared, declare) = recorder();
 		let intervals = Intervals::default();
 		let mut audio = intervals.join(None, declare());
