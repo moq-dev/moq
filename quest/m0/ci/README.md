@@ -163,7 +163,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
 - [Binary release publishers run on their tag](/quest/m0/ci/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main
 - [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
-- [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"
 - [A jq error in the Rust selection fails the run](/quest/m0/ci/check-selection.md) - `just check`'s Rust selection fails the run when one of its jq filters errors, instead of selecting less
 - [Code scanning has no untriaged alert on main](/quest/m0/ci/code-scanning-triage.md) - every open code-scanning alert on `main`'s default branch is either fixed or dismissed with a reason and a comment that names the evidence
 - [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
