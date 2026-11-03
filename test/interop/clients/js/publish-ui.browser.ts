@@ -358,6 +358,79 @@ test("a camera holds both devices until its source clears or the element detache
 	}
 }, 30_000);
 
+test('capture="release" closes each device while it is muted or hidden', async () => {
+	const server = await createServer({
+		configFile: false,
+		root: `${import.meta.dir}/publish-ui`,
+		plugins: [worklet()],
+		server: { host: "127.0.0.1", port: 0 },
+	});
+	await server.listen();
+	const browser = await launch(["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]);
+	try {
+		const page = await browser.newPage();
+		await page.goto(server.resolvedUrls?.local[0] ?? "");
+		await page.getByRole("button", { name: /mute microphone/i }).waitFor();
+		const publication = await page.evaluateHandle(() => {
+			const publish = document.querySelector<MoqPublish>("moq-publish");
+			if (!publish) throw new Error("missing publish element");
+			publish.setAttribute("capture", "release");
+			return { publish };
+		});
+		expect(await publication.evaluate(({ publish }) => publish.capture)).toBe("release");
+		// Wait until the microphone and camera are each open or closed as given.
+		const opened = (audio: boolean, video: boolean) =>
+			page.waitForFunction(
+				([{ publish }, audio, video]) =>
+					!!publish.sources.audio.peek()?.out.source.peek() === audio &&
+					!!publish.sources.video.peek()?.out.source.peek() === video,
+				[publication, audio, video] as const,
+			);
+
+		// Muted and hidden from the start opens neither device.
+		await publication.evaluate(({ publish }) => {
+			publish.muted = true;
+			publish.invisible = true;
+			publish.source = "camera";
+		});
+		expect(
+			await publication.evaluate(({ publish }) =>
+				[publish.sources.audio.peek(), publish.sources.video.peek()].map((source) => source?.in.enabled.peek()),
+			),
+		).toEqual([false, false]);
+
+		await publication.evaluate(({ publish }) => {
+			publish.muted = false;
+			publish.invisible = false;
+		});
+		await opened(true, true);
+		const first = await captured(publication);
+
+		// Muting ends only the microphone; unmuting opens a new one.
+		await publication.evaluate(({ publish }) => {
+			publish.muted = true;
+		});
+		await page.waitForFunction((tracks) => tracks[0]?.readyState === "ended", first);
+		expect(await first.evaluate((tracks) => tracks[1]?.readyState)).toBe("live");
+		await publication.evaluate(({ publish }) => {
+			publish.muted = false;
+		});
+		await opened(true, true);
+		const second = await captured(publication);
+		expect(await second.evaluate((tracks) => tracks.map((track) => track?.readyState))).toEqual(["live", "live"]);
+
+		// Hiding ends only the camera.
+		await publication.evaluate(({ publish }) => {
+			publish.invisible = true;
+		});
+		await page.waitForFunction((tracks) => tracks[1]?.readyState === "ended", second);
+		expect(await second.evaluate((tracks) => tracks[0]?.readyState)).toBe("live");
+	} finally {
+		await browser.close();
+		await server.close();
+	}
+}, 30_000);
+
 test("watch property and UI state reflects without resetting a selected publish File", async () => {
 	const server = await createServer({
 		configFile: false,
