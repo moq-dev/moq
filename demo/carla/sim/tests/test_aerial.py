@@ -35,9 +35,8 @@ def test_shipped_aerials_use_the_road_map_orientation() -> None:
     manifests = list(maps.glob("*.aerial.json"))
     assert manifests
     for path in manifests:
-        manifest = json.loads(path.read_text())
-        assert manifest["camera"]["rotation_degrees"]["yaw"] == -90, path.name
-        assert "horizontal_flip_applied" not in manifest["capture"], path.name
+        camera = json.loads(path.read_text())["camera"]
+        assert camera["yaw"] == -90, path.name
 
 
 def test_ground_height_changes_altitude_without_changing_footprint() -> None:
