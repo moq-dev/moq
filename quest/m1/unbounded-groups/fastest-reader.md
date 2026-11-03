@@ -196,25 +196,66 @@ streams and FETCH answers, and ietf data streams waiting on their alias)
 below every other stream, and they watch `poll_reset`, which now reports an
 eviction, so an evicted stream is stopped and eviction resumes.
 
+Evidence added in the follow-up attempt (2026-11-02):
+
+- `two_relays_bound_their_cache_and_resume_without_a_hole` carries one 64 MiB
+  group through two session relays on lite-06, lite-07-wip, and
+  moq-transport-22. It parks the final reader, measures each relay's cache pool
+  charge, checks backpressure reaches a readiness-driven origin, then verifies
+  every payload byte and clean completion. The upstream cache includes sent
+  history within its 32 MiB tail; the downstream cache holds near 16 MiB.
+  These are cache charges, not transport buffers or process RSS.
+- `rs/qmux/benches/receive.rs` measures live requested heap bytes and verified
+  payload throughput at 4 MiB connection, 1 MiB stream, and 4 MiB send windows.
+  It independently sweeps TCP/WebSocket framing over bounded byte pipes,
+  qmux-00/01/02, 1/8/64 sessions, and 1/8 streams per session. Eight unread
+  512 KiB leases fill each receiver's connection window. Heap includes both
+  endpoints, drivers, stream tables, pipes, and receive backings, excluding
+  the runtime and shared source payload. Nightly's supplemental Rust leg runs
+  it. All 36 cases completed locally on the shared host. With 64 sessions and
+  eight streams each, live heap per session was 4,506,154-4,506,265 bytes for
+  TCP framing and 4,671,843-4,671,979 bytes for WebSocket framing across the
+  three versions, including both endpoints. Throughput point estimates were
+  2.75-3.85 GiB/s and 2.41-3.54 GiB/s respectively, with concurrent builds and
+  checks. These are observations, not a quiet-host regression verdict.
+  This isolates receive ownership; the broader MoQ transport/version
+  scenarios remain in [their quest](/quest/m2/bench-transport-sweep.md).
+- `websocket_upgrade_advertises_the_configured_receive_windows` reads actual
+  qmux transport parameters through the relay's own web listener and
+  `serve_ws`, before MoQ admission, for qmux-00/01/02. Nondefault operator
+  windows and stream limits must reach all advertised receive parameters.
+  No new public inspection API is needed.
+
 What remains:
 
-- A two-relay chain test with memory measured near the window.
-- Per-session retained bytes and throughput across many qmux sessions at the
-  chosen window, in the
-  [transport x version benches](/quest/m2/bench-transport-sweep.md).
-- A quiet-host comparison against the base of `group_read_frames`,
-  `group_contended`, and `group_relay_frames`, plus `group_paced` (a writer
-  parked at the window, over 1, 8, and 64 readers), which the first slice
-  added. The cursor's report is one relaxed load per frame or batch, and a
-  `fetch_max` only for the fastest reader. On the busy host that landed it,
-  runs swung by up to 50% either way between repeats.
-- A relay-level test that the operator's `[quic]` windows reach WebSocket
-  sessions end to end through the relay's own `serve_ws` path. Today it is
-  covered only at `websocket::accept` level, because an accepted session's
-  window is not visible outside moq-tokio.
+- A quiet-host comparison against the base of
+  [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) for
+  `group_read_frames`, `group_contended`, and `group_relay_frames`, plus
+  `group_paced` (a writer parked at the window, over 1, 8, and 64 readers).
+  The cursor's report is one relaxed load per frame or batch, and a
+  `fetch_max` only for the fastest reader. This attempt shares the host with
+  concurrent CI/Nix work, so its throughput measurements are descriptive,
+  not this comparison. The first implementation's busy-host repeats swung
+  by up to 50% either way.
+- Resolve the earlier ahead-window wording against the landed source:
+  `model::pace::AHEAD` and `group::Producer::poll_paced` use a fixed 16 MiB
+  cache pacing window, even with 1 MiB transport stream credit. The credit
+  reported by `receive_window` sizes the paused-credit reservation, not the
+  cache pacing threshold. The two-relay test records this current behavior;
+  it does not establish the earlier promise that ahead is capped by stream
+  receive credit.
 
 Decided 2026-11-02 (maintainer, follow-up planning after the 2026-11-02
 /quest-complete run): JS parity moves to
 [JS fastest-reader pacing](/quest/m2/js-fastest-reader.md) in m2, which waits
 on [browser receive credit](/quest/m2/browser-receive-credit.md), so the m1
 cut does not wait on browsers.
+
+## Waiting
+
+- Maintainer: provide a host without concurrent workloads, then run the paired
+  group benchmarks above against the pre-pacing base with repeated alternating
+  runs. Keep this quest and its PR draft until that comparison is recorded.
+- Maintainer: settle the ahead-window discrepancy: keep the decided
+  transport-sized cache window (recommended, then update ingest and its tests),
+  or accept the landed fixed 16 MiB cache window and correct the earlier Plan.

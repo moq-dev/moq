@@ -149,6 +149,27 @@ Both ends share one current-thread runtime, so its CPU covers sending and
 receiving alike. It is a local profiling tool rather than a nightly series: the
 `moq-net` session bench owns qmux's series.
 
+Measure qmux receive ownership at the relay client defaults (4 MiB connection,
+1 MiB stream, 4 MiB send):
+
+```bash
+nix develop --command cargo bench --locked --manifest-path rs/qmux/Cargo.toml --bench receive
+```
+
+`qmux_receive` sweeps TCP and WebSocket framing, every qmux version, 1/8/64
+sessions, and 1/8 streams per session. Both endpoints run on one thread over
+bounded in-memory byte pipes; this isolates framing and receive ownership from
+TLS, kernel sockets, and congestion. Each stream holds an unread 512 KiB lease,
+so eight together fill the connection window. The untimed output reports live
+requested heap bytes, including both endpoints, their tasks, the pipes, stream
+tables and receive backings, per session. The shared source payload and runtime
+are excluded. This measures retained allocations, not RSS; allocator counters
+also run during timing. Every timed round reads and checks all payload bytes,
+returns lease credit, and fills each stream again. Throughput counts delivered
+payload once. Nightly's supplemental Rust benchmark leg records the series and
+keeps the memory output with its raw results. The broader MoQ session transport
+and version sweep remains in [its quest](/quest/m2/bench-transport-sweep.md).
+
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
 

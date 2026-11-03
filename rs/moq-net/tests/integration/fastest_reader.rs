@@ -248,3 +248,98 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 		);
 	}
 }
+
+/// Backpressure crosses both relays, with one pacing window of unread payload per hop.
+/// The upstream copy also keeps sent history within its 32 MiB tail.
+/// Cache charges include frame slots and relay metadata, not transport buffers or RSS.
+#[kio::test]
+async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
+	use moq_net::{frame, transport::ReceiveWindow};
+
+	const FRAME: usize = 64 * 1024;
+	const TOTAL: usize = 64 * MB / FRAME;
+	for version in VERSIONS {
+		let publisher = origin(1);
+		let first = origin(2);
+		let second = origin(3);
+		let version = version.parse::<Version>().unwrap();
+		let upstream = peer(version, &publisher, &first).await;
+		let downstream = peer(version, &first, &second).await;
+		for pair in [&upstream, &downstream] {
+			pair.server_transport
+				.set_receive_window(Some(ReceiveWindow::new(4 * MB as u64, MB as u64)));
+		}
+		let broadcast = publisher.create_broadcast("chain").unwrap();
+		let track = broadcast
+			.create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let remote = second
+			.consume()
+			.follow("chain", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
+		let mut subscriber = remote
+			.track("data")
+			.unwrap()
+			.subscribe(
+				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+			)
+			.await
+			.unwrap();
+		crate::support::harness::subscribed(&track).await;
+		let mut group = track.append_group().unwrap();
+		let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let progress = written.clone();
+		let writer = kio::clock::sim::spawn(async move {
+			for index in 0..TOTAL {
+				let payload = Bytes::from(vec![(index % 251) as u8; FRAME]);
+				let info = frame::Info {
+					size: FRAME as u64,
+					timestamp: Some(Timestamp::ZERO),
+				};
+				group.ready(&info).await;
+				group.write_frame(Timestamp::ZERO, payload).unwrap();
+				progress.store(index + 1, std::sync::atomic::Ordering::Relaxed);
+			}
+			group.finish().unwrap();
+		});
+		let mut reader = subscriber.recv_group().await.unwrap().unwrap();
+		// Simulated time advances only once all drivers and the paced writer park.
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let parked = written.load(std::sync::atomic::Ordering::Relaxed);
+		assert!(parked < TOTAL, "{version}: no backpressure reached the producer");
+		// Frame slots count toward pacing too, so the last whole frame can fall short.
+		for (hop, relay, max) in [(1, &first, 32 * MB + FRAME), (2, &second, 16 * MB + FRAME)] {
+			let held = relay.config().pool.used();
+			assert!(
+				held >= (16 * MB - FRAME) as u64,
+				"{version}: hop {hop} never filled its window: {held}"
+			);
+			assert!(held < max as u64, "{version}: hop {hop} retained {held} bytes");
+			eprintln!("{version}: hop {hop} parked cache={held} B, origin wrote {parked} frames");
+		}
+		for index in 0..TOTAL {
+			let frame = kio::clock::timeout(TIMEOUT, reader.read_frame())
+				.await
+				.expect("chain stalled")
+				.unwrap()
+				.unwrap();
+			assert_eq!(
+				frame.payload,
+				Bytes::from(vec![(index % 251) as u8; FRAME]),
+				"{version}: frame {index}"
+			);
+			for relay in [&first, &second] {
+				assert!(
+					relay.config().pool.used() < 33 * MB as u64,
+					"{version}: live tail grew past its budget"
+				);
+			}
+		}
+		assert!(reader.read_frame().await.unwrap().is_none());
+		writer.await.unwrap();
+	}
+}
