@@ -19,7 +19,7 @@ fn produce(hop: u64) -> origin::Producer {
 /// A draft-18 peer declaring `u64::MAX` keeps its session and its place in the path.
 /// Forwarded on, the hop survives lite-07's leading-ones varint and becomes 0 on
 /// lite-06's QUIC varint, while the relay's own hop still follows it.
-#[moq_clock::test]
+#[kio::test]
 async fn widest_hop_crosses_each_varint_form() {
 	for (downstream, forwarded) in [("moq-lite-06", Hop::UNKNOWN.id()), ("moq-lite-07-wip", u64::MAX)] {
 		let source = produce(u64::MAX);
@@ -29,12 +29,12 @@ async fn widest_hop_crosses_each_varint_form() {
 		let _upstream = peer(upstream, &source, &relay).await;
 		let _downstream = peer(downstream.parse().unwrap(), &relay, &sink).await;
 		let _route = source.requests("room").unwrap();
-		moq_clock::sim::idle().await;
+		kio::clock::sim::idle().await;
 
 		let ids = |route: origin::Route| route.hops.iter().map(|hop| hop.id()).collect::<Vec<_>>();
-		let at_relay = relay.consume().routed("room").await.expect("relay learned the route");
+		let at_relay = crate::support::announced(&relay.consume(), "room").await;
 		assert_eq!(ids(at_relay), [u64::MAX], "{downstream}");
-		let at_sink = sink.consume().routed("room").await.expect("sink learned the route");
+		let at_sink = crate::support::announced(&sink.consume(), "room").await;
 		assert_eq!(ids(at_sink), [forwarded, 2], "{downstream}");
 	}
 }

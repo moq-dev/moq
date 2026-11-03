@@ -30,6 +30,8 @@ Decided with the maintainer on 2026-10-21:
   through every registered public relay), plus every cell of the runner's
   report with a moq.dev side: our clients, our docker relay, or
   `cdn.moq.dev`, including third-party clients failing against our relay.
+  Smoke's upstream runner job fails only on our clients against our relay,
+  so this audit is what catches every other red cell.
 - Sync new registry entries. The smoke workflow's upstream runner job runs
   the runner's HEAD, so check that newly registered clients and docker-only
   relays show up in its [report](https://git.moq.dev/interop-runner/),
@@ -116,8 +118,12 @@ Theirs, reported or waiting on others:
   fixed upstream; imquic's cells against `cdn.moq.dev` wait for the runner
   to rebuild its image.
   [meetecho/imquic#43](https://github.com/meetecho/imquic/issues/43)
-  (drops a data stream whose header spans reads) is owned by
-  [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md).
+  (drops a data stream whose header spans reads) is closed, and the
+  runner's moq-dev-js client writes the header in one write since
+  `@moq/net` 0.4.7
+  ([englishm/moq-interop-runner#179](https://github.com/englishm/moq-interop-runner/pull/179)):
+  `data-subgroup-basic` against imquic passes in all three cells of the
+  2026-10-31 nightly.
   [Eyevinn/moqlivemock#157](https://github.com/Eyevinn/moqlivemock/issues/157)
   is fixed and green.
 - Drafted in this run, posted only if the maintainer approved: MOQtail draft-18 never forwards
@@ -125,6 +131,11 @@ Theirs, reported or waiting on others:
   IPv6 address of `cdn.moq.dev` and needs an explicit port in an `https://`
   URL; and the runner lists moqxr as not run for lack of a published image.
   Search before filing again.
+- To file: cloudflare/moq-rs `SubscribeRecv::error` returns before setting
+  `closed` when `TrackWriter::close` fails because the track has no reader,
+  so a REQUEST_ERROR reaches the caller as `done` instead of not-found.
+  Smoke's Cloudflare probe holds its reader to avoid it
+  ([moq-dev/moq#7073](https://github.com/moq-dev/moq/pull/7073)).
 - Not reported, lower value: red5 subscribes the published prefix instead
   of the requested tuple namespace (no public repo); moqlivemock's relay
   refuses a SUBSCRIBE under an announced prefix; libquicr answers
@@ -145,11 +156,12 @@ and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 
 From the 2026-10-25 run: the runner's moq-dev-js `announce-subscribe` case times
 out against imquic on both 0.4.4 and the [moq-dev/moq#6769](https://github.com/moq-dev/moq/pull/6769)
-backport, so it predates that fix. Classify it.
+backport, so it predates that fix. It still times out on 0.4.6 and 0.4.7
+(2026-10-28, 3 runs each), and fails in all three moq-dev-js → imquic
+cells of the 2026-10-31 nightly. Classify it.
 
 ## Related
 
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - the runner's Rust client moves to the cut and its API
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
-- [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the runner cases whose red cells this audit classifies

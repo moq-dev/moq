@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use futures::TryStreamExt;
-use moq_clock::sleep;
+use kio::clock::sleep;
 use moq_net::track::Position;
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStoreExt;
@@ -63,7 +63,7 @@ async fn subscribed(track: &track::Producer) {
 }
 
 async fn finished(task: JoinHandle<Result<()>>) {
-	moq_clock::timeout(Duration::from_secs(1000), task)
+	kio::clock::timeout(Duration::from_secs(1000), task)
 		.await
 		.expect("the producer ends with its broadcast")
 		.unwrap()
@@ -730,7 +730,7 @@ async fn markers_wait_for_the_listing_to_end() {
 	last.write_frame(ms(1000), "b").unwrap();
 	last.write_frame(ms(1100), "c").unwrap();
 	// A mid-group end: frames 0 and 1 of group 1.
-	video.finish_at(Position { group: 1, frame: 2 }).unwrap();
+	video.finish_at(Position { group: 1, frame: 2 }, None).unwrap();
 	last.finish().unwrap();
 	settle().await;
 	sleep(SECOND).await;
@@ -748,6 +748,32 @@ async fn markers_wait_for_the_listing_to_end() {
 	// An error end is recorded, and the broadcast still completes.
 	assert_eq!(end(&store, "audio").await, Some(End::Error(64 + 7)));
 	assert!(complete(&store).await);
+}
+
+/// A track that ends with an error records that error, though every group below the end stays.
+#[tokio::test(start_paused = true)]
+async fn an_errored_end_records_its_error() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let mut video = broadcast.create_track("video", timed()).unwrap();
+	let task = spawn(&store, &broadcast, config());
+	subscribed(&video).await;
+	group(&video, 0, &[(0, "a")]);
+	group(&video, 1, &[(1000, "b")]);
+	video
+		.finish_at(Position::group(2), Some(moq_net::Error::App(7)))
+		.unwrap();
+	settle().await;
+	broadcast.close();
+	finished(task).await;
+
+	let frames: Vec<String> = contents(&objects(&store, "video", true).await)
+		.into_iter()
+		.flatten()
+		.flat_map(|(_, _, frames)| frames)
+		.collect();
+	assert_eq!(frames, ["0/a", "1000/b"]);
+	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 7)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -805,7 +831,7 @@ async fn a_re_added_track_is_stored_under_its_own_properties() {
 
 	second.finish().unwrap();
 	broadcast.close();
-	let err = moq_clock::timeout(Duration::from_secs(1000), task)
+	let err = kio::clock::timeout(Duration::from_secs(1000), task)
 		.await
 		.unwrap()
 		.unwrap()

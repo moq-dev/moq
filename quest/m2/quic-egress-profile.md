@@ -13,6 +13,11 @@ Decided in the 2026-09-30 audit: send batching, kernel pacing, and send
 buffer pools merged into this one measure-first quest, since all three are
 questions about the same egress path and share one profile.
 
+Decided 2026-10-30 (maintainer): the profile also covers moq-quic's
+ingress and egress (`just bench-profile cpu` on `io-uring-workers`), since
+[quic-io-boundary](/quest/m2/quic-io-boundary.md) waits on it to rank its
+candidates.
+
 Measure first, on the chat and fanout shapes with many connections, tokio
 workers versus io_uring workers, with the existing profiling captures:
 

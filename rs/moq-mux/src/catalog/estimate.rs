@@ -190,6 +190,14 @@ impl Estimator {
 		self.jitter.max = self.jitter.max.max(duration);
 	}
 
+	/// Everything measured so far, with what a catalog rendition needs to decide when to publish it.
+	pub(crate) fn reading(&self) -> Reading {
+		Reading {
+			estimate: self.estimate(),
+			period: self.framerate.shortest,
+		}
+	}
+
 	/// Everything measured so far.
 	///
 	/// Catalog-owned [`container::Producer`](crate::container::Producer) handles publish this
@@ -201,6 +209,21 @@ impl Estimator {
 			delay: (!self.delay.is_zero()).then_some(self.delay),
 			framerate: self.framerate.max,
 		}
+	}
+}
+
+/// An [`Estimate`] with the measurements that pace its publishing.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Reading {
+	pub estimate: Estimate,
+	/// The shortest advance between frames, which a published `jitter` or `delay` rises in whole
+	/// steps of when no framerate says the frame duration.
+	pub period: Option<Duration>,
+}
+
+impl From<Estimate> for Reading {
+	fn from(estimate: Estimate) -> Self {
+		Self { estimate, period: None }
 	}
 }
 
@@ -307,10 +330,16 @@ struct Framerate {
 	/// Frames written since the window opened.
 	frames: u64,
 	max: Option<f64>,
+	/// The shortest advance of the highest timestamp: a frame's duration, or a reordered group's
+	/// span of them.
+	shortest: Option<Duration>,
 }
 
 impl Framerate {
 	fn write(&mut self, ts: u128) {
+		if let Some(advance) = self.high.and_then(|high| elapsed(high, ts)) {
+			self.shortest = Some(self.shortest.map_or(advance, |shortest| shortest.min(advance)));
+		}
 		self.high = Some(self.high.map_or(ts, |high| high.max(ts)));
 		self.frames += 1;
 	}
@@ -349,6 +378,7 @@ impl Framerate {
 	fn discontinuity(&mut self) {
 		*self = Self {
 			max: self.max,
+			shortest: self.shortest,
 			..Self::default()
 		};
 	}

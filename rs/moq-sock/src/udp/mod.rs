@@ -77,15 +77,10 @@ mod log {
 	pub(crate) use tracing::{debug, error, info, trace, warn};
 }
 
-#[cfg(not(wasm_browser))]
 pub use imp::UdpSocketState;
 
 /// Number of UDP packets to send/receive at a time
-#[cfg(not(wasm_browser))]
 pub const BATCH_SIZE: usize = imp::BATCH_SIZE;
-/// Number of UDP packets to send/receive at a time
-#[cfg(wasm_browser)]
-pub const BATCH_SIZE: usize = 1;
 
 /// Metadata for a single buffer filled with bytes received from the network
 ///
@@ -272,10 +267,8 @@ pub fn is_unreachable_err(err: &io::Error) -> bool {
 /// On Unix, constructible via `From<T: AsFd>`. On Windows, constructible via `From<T:
 /// AsSocket>`.
 // Wrapper around socket2 to avoid making it a public dependency and incurring stability risk
-#[cfg(not(wasm_browser))]
 pub struct UdpSockRef<'a>(socket2::SockRef<'a>);
 
-#[cfg(not(wasm_browser))]
 impl UdpSockRef<'_> {
 	/// Configures the socket for non-blocking or blocking operation.
 	pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {

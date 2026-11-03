@@ -23,7 +23,7 @@ REQUIRED="moq-dev-rs"
 REQUIRED_EXPLICIT=0 # set by --required; the default only gates when --only selects it
 # Relays that speak moq-dev's WebSocket binding. Each of their http(s) endpoints
 # gains a ws(s) twin. Add a key here when that implementation actually serves it.
-WEBSOCKET_KEYS="moq-dev-rs"
+WEBSOCKET_KEYS="moq-dev-rs,stitcher-moq"
 ONLY=""
 JSON_OUT=""
 LOGS_OUT=""

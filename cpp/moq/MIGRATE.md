@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`moq::Announce.captures` is `std::vector<std::string>` instead of an optional vector. Remove optional checks and dereferences; an empty vector means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.
+
+### Decoder outputs take a `moq::Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`moq::AudioDecoderOutput` replaces `max_delay` and the playout `delay` with `std::optional<moq::Delay> delay` and `bool estimate = true`.
+`moq::VideoDecoderOutput::max_delay` is `std::optional<moq::Delay> delay`.
+`moq::Delay{min, max}`: `max` (`std::nullopt` for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `delay = moq::Delay{d, max}` with `estimate = false`.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` fails instead of collapsing it. Pass the canonical path, such as `room/cam`.

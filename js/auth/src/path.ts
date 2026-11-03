@@ -5,13 +5,33 @@
  * prefix arithmetic; everything beneath is a pattern from `@moq/pattern`, re-exported
  * from this package so a token minting service does not pull in the networking
  * stack. The normalization and boundary rules must stay identical to the Rust
- * `moq-auth` crate's `path` module, which mints and checks the same tokens.
+ * `moq-auth` crate's `path` module, which mints and checks the same tokens. Minting
+ * checks a root with {@link validate} instead, so a token never names a path no peer
+ * can spell.
  *
- * Every function below assumes its arguments are already {@link normalize}d.
+ * Every function below but {@link validate} assumes its arguments are already {@link normalize}d.
  *
  * @internal
  * @module
  */
+
+/** The most UTF-8 bytes a path may hold, matching `@moq/net`'s `Path.MAX_BYTES`. */
+const MAX_BYTES = 4096;
+
+const utf8 = new TextEncoder();
+
+/**
+ * Throw on a root `@moq/net`'s `Path.from` and `Path.decode` refuse: one longer than 4096
+ * bytes, with a leading, trailing, or doubled `/`, or with a `\` before anything but `\` or `/`.
+ */
+export function validate(root: string): void {
+	const invalid = (reason: string) => new Error(`invalid root ${JSON.stringify(root)} ${reason}`);
+	if (utf8.encode(root).length > MAX_BYTES) throw invalid(`is longer than ${MAX_BYTES} bytes`);
+	if (root.startsWith("/") || root.endsWith("/") || root.includes("//")) throw invalid("contains an empty segment");
+	if (/\\(?![\\/])/.test(root.replaceAll("\\\\", ""))) {
+		throw invalid("contains a `\\` that escapes neither `\\` nor `/`");
+	}
+}
 
 /**
  * Trim leading and trailing slashes and collapse consecutive ones, so all slashes

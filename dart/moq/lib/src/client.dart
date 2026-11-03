@@ -118,7 +118,7 @@ final class QuicConfig {
   /// How long an idle QUIC connection survives before it is dropped.
   final Duration? idleTimeout;
 
-  /// QUIC keep-alive ping interval; zero disables it.
+  /// QUIC keep-alive ping interval; zero uses the default.
   final Duration? keepAlive;
 
   /// UDP generic segmentation offload; null leaves the choice to the backend.
@@ -215,9 +215,10 @@ final class Moq {
 
   /// Create an unannounced broadcast at [path], invisible to everyone until announced.
   ///
-  /// Advertise it with `announce` after populating tracks. Create, `requests`
-  /// if tracks are served on demand, populate, then announce.
-  BroadcastProducer createBroadcast(String path) =>
+  /// Populate its `broadcast`, calling `requests` first if tracks are served
+  /// on demand, then advertise it with `announce`. Disposing the publication
+  /// keeps the route; closing the broadcast ends it.
+  Publication createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
   /// Discover routes matching [options]; prefixes stay relative to the origin.
@@ -229,13 +230,15 @@ final class Moq {
   }) => session.consume().announced(config: options._ffi);
 
   /// Follow the broadcast at exactly [path]: each `available()` resolves the
-  /// next publisher instance serving it, such as a restarted publisher.
-  AnnouncedBroadcast announcedBroadcast(String path) =>
-      session.consume().announcedBroadcast(path: path);
+  /// next instance serving it, such as a restarted publisher. Pass an
+  /// [instance] to follow only that stream.
+  Following follow(String path, {String? instance}) =>
+      session.consume().follow(path: path, instance: instance);
 
-  /// Resolve an existing broadcast at [path].
-  Future<BroadcastConsumer> requestBroadcast(String path) =>
-      session.consume().requestBroadcast(path: path);
+  /// Resolve one publisher instance of the broadcast at [path]. Pass an
+  /// [instance] to refuse any other stream.
+  Future<BroadcastConsumer> request(String path, {String? instance}) =>
+      session.consume().request(path: path, instance: instance);
 
   /// The session's bandwidth allocator.
   ///
@@ -263,9 +266,8 @@ final class Moq {
 
   /// Drain within one second, then stop the client.
   ///
-  /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
-  /// Lite versions, including the default lite-06, wait only for transport ACKs.
-  /// IETF also waits for transport ACKs.
+  /// `moq-lite-05` and newer wait for the peer to receive finished tails; older
+  /// Lite versions and IETF wait only for transport ACKs.
   Future<void> close() async {
     try {
       session.shutdown();

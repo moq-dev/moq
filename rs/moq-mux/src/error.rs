@@ -36,17 +36,9 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(#[from] moq_json::Error),
 
-	/// Error publishing or consuming opaque payloads over a track.
-	#[error("flate: {0}")]
-	Flate(#[from] moq_flate::Error),
-
 	/// A catalog entry declares a track mode this build does not implement.
 	#[error("unsupported track mode: {0}")]
 	UnsupportedMode(String),
-
-	/// A catalog entry declares a compression this build does not implement.
-	#[error("unsupported track compression: {0}")]
-	UnsupportedCompression(String),
 
 	/// A locally published track's catalog entry points at another broadcast.
 	#[error("a locally published track can't reference another broadcast")]
@@ -229,18 +221,18 @@ pub enum Error {
 	#[error("broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),
 
-	/// A reference's `epoch` names another publisher instance than the one serving its broadcast.
+	/// A reference's `instance` names another stream than the one serving its broadcast.
 	///
 	/// The served instance is the one the source resolved first for that path, so a later
 	/// reference cannot move it; the reference fails instead of reading other content.
-	#[error("broadcast {path} serves epoch {actual}, not the referenced {expected}")]
-	EpochMismatch {
+	#[error("broadcast {path} serves instance {actual}, not the referenced {expected}")]
+	InstanceMismatch {
 		/// The broadcast's path, relative to the origin root.
 		path: String,
-		/// The epoch the reference names.
-		expected: moq_net::Epoch,
-		/// The epoch the resolved broadcast serves.
-		actual: moq_net::Epoch,
+		/// The instance the reference names.
+		expected: moq_net::Instance,
+		/// The instance the resolved broadcast serves.
+		actual: moq_net::Instance,
 	},
 
 	/// A rendition tried to lower jitter already advertised to subscribers.
@@ -305,6 +297,9 @@ pub enum Error {
 	/// Another publisher instance replaced a followed broadcast, and stitching was off.
 	#[error("another publisher instance replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
 	Replaced(String),
+	/// A published rendition changed fields that require a new decoder configuration.
+	#[error("rendition `{0}` changed identity; publish it under a new track name")]
+	IdentityChanged(String),
 
 	/// A rendition moved to a track whose media goes back before what the export already read for it.
 	#[error(
@@ -323,7 +318,7 @@ pub enum Error {
 impl Error {
 	/// The error for a rendition whose container this build does not recognize.
 	pub(crate) fn unsupported_container(container: &hang::catalog::UnknownContainer) -> Self {
-		Self::UnsupportedContainer(container.kind().unwrap_or("<missing>").to_string())
+		Self::UnsupportedContainer(container.kind().to_string())
 	}
 
 	/// The reason a track this error aborts gives its subscribers. Only a transport error has a

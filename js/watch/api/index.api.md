@@ -80,11 +80,20 @@ export namespace Audio {
 		available: Signals.Signal<Record<string, Hang.Catalog.Audio.AudioConfig>>;
 		catalog: Signals.Signal<Hang.Catalog.Audio | undefined>;
 		config: Signals.Signal<Hang.Catalog.Audio.AudioConfig | undefined>;
+		error: Signals.Signal<Error | undefined>;
 		jitter: Signals.Signal<Clock.Milli | undefined>;
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
+		arrival?: {
+			timestamp: Clock.Milli;
+			wall: Clock.Wall;
+		};
 		bytesReceived: number;
+		errors: number;
+		late: number;
+		stalled: Clock.Milli;
+		stalls: number;
 		underruns: number;
 	}
 	export type Supported = (config: Hang.Catalog.Audio.AudioConfig) => Promise<boolean>;
@@ -96,17 +105,18 @@ export namespace Audio {
 export class Broadcast {
 	constructor(props?: Signals.Inputs<BroadcastInput>);
 	close(): void;
+	contribution(effect: Signals.Effect, id: string): Broadcast;
 	readonly in: Signals.Readonlys<BroadcastInput>;
 	readonly out: Signals.Readonlys<BroadcastOutput>;
 }
 
 export type BroadcastInput = {
-	announced: Signals.Getter<boolean>;
 	catalog: Signals.Getter<Hang.Catalog.Root | undefined>;
 	catalogFormat: Signals.Getter<CatalogFormat | undefined>;
 	enabled: Signals.Getter<boolean>;
+	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
-	origin: Signals.Getter<Net.Origin.Table | undefined>;
+	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 };
 
 export type BroadcastOutput = {
@@ -120,7 +130,7 @@ export { BufferedRange } from "@moq/hang/container";
 
 export { BufferedRanges } from "@moq/hang/container";
 
-export const CATALOG_FORMATS: readonly ["hang", "msf", "hangz", "manual"];
+export const CATALOG_FORMATS: readonly ["hang", "msf", "manual"];
 
 export type CatalogFormat = typeof CATALOG_FORMATS[number];
 
@@ -148,7 +158,6 @@ export class Player {
 }
 
 export type PlayerInput = {
-	announced: Signals.Getter<boolean>;
 	audio: {
 		muted: Signals.Getter<boolean>;
 		target: Signals.Getter<Audio.Target | undefined>;
@@ -159,8 +168,9 @@ export type PlayerInput = {
 	catalogFormat: Signals.Getter<CatalogFormat | undefined>;
 	delay: Signals.Getter<Delay>;
 	enabled: Signals.Getter<boolean>;
+	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
-	origin: Signals.Getter<Net.Origin.Table | undefined>;
+	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
 	probe: Signals.Getter<Net.Connection.Probe | undefined>;
 	text: {
@@ -309,8 +319,16 @@ export namespace Video {
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
+		arrival?: {
+			timestamp: Clock.Milli;
+			wall: Clock.Wall;
+		};
 		bytesReceived: number;
+		errors: number;
 		frameCount: number;
+		late: number;
+		stalled: Clock.Milli;
+		stalls: number;
 	}
 	export type Supported = (config: Hang.Catalog.Video.VideoConfig) => Promise<boolean>;
 	export type Target = {

@@ -1,4 +1,4 @@
-/** Follow a Rust server's GOAWAY redirect, retaining the reader since the epoch proves continuity. */
+/** Follow a Rust server's GOAWAY redirect by subscribing to its replacement announcement. */
 import assert from "node:assert/strict";
 import { Milli } from "@moq/clock";
 import * as Moq from "@moq/net";
@@ -18,7 +18,7 @@ const connection = new Reload({
 	goaway: { redirect: "follow" },
 });
 let replacementProbe: Moq.Track.Subscriber | undefined;
-const requests = [origin.request(Moq.Path.from("handover"), { announced: true })];
+const requests = [origin.follow(Moq.Path.from("handover"))];
 async function active(request: (typeof requests)[number]) {
 	let broadcast = request.active.peek();
 	while (!broadcast) {
@@ -28,7 +28,10 @@ async function active(request: (typeof requests)[number]) {
 	return broadcast;
 }
 try {
-	const track = (await active(requests[0])).track("video").subscribe({ groups: { start: { included: 0 } } });
+	const initial = await active(requests[0]);
+	// moq-transport carries no instance, so the session mints one for each announcement.
+	assert(initial.instance && Moq.Instance.isMinted(initial.instance), "moq-transport carries no instance");
+	let track = initial.track("video").subscribe({ groups: { start: { included: 0 } } });
 	try {
 		for (let sequence = 0; sequence < 3; sequence++) {
 			const group = await track.recvGroup();
@@ -73,11 +76,25 @@ try {
 				} finally {
 					probe.close();
 				}
+				let restarted = requests[0].active.peek();
+				while (restarted === undefined || restarted === initial) {
+					await requests[0].active.changed();
+					restarted = requests[0].active.peek();
+				}
+				assert(
+					restarted.instance &&
+						Moq.Instance.isMinted(restarted.instance) &&
+						restarted.instance !== initial.instance,
+					"the replacement announcement is another minted instance",
+				);
+				const next = restarted.track("video").subscribe({ groups: { start: { included: 2 } } });
+				track.close();
+				track = next;
 				process.stdout.write("replacement ready\n");
 			}
 		}
 		// The server only writes group 2 after this acknowledgement and closing `first`.
-		process.stdout.write("goaway resumed\n");
+		process.stdout.write("goaway restarted\n");
 	} finally {
 		track.close();
 	}

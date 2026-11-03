@@ -38,14 +38,19 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 }
 
 // Follow the announced broadcast: play it once it starts, play it afresh when another
-// publisher instance replaces it (a restart), and stop when it ends.
+// publisher instance replaces it (a restart), keep playing when a route takes it over in
+// place, and stop when it ends.
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
 	let mut announced = consumer.announced();
 	let mut playing: Option<tokio::task::JoinHandle<()>> = None;
 	while let Some(event) = announced.next().await {
 		match event {
+			// The same broadcast continued in place: nothing to do.
+			moq_net::announce::Event::Takeover { announce, predecessor } if predecessor == announce.prefix => {}
 			// The convention is that a publisher announces each broadcast's exact path.
-			moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
+			moq_net::announce::Event::Start(announce)
+			| moq_net::announce::Event::Restart(announce)
+			| moq_net::announce::Event::Takeover { announce, .. } => {
 				tracing::info!(path = %announce.prefix, "broadcast announced");
 				if let Some(old) = playing.take() {
 					old.abort();
@@ -72,9 +77,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 
 // Resolve an announced broadcast and read media frames.
 async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::Announce) -> anyhow::Result<()> {
-	let broadcast = consumer
-		.request_broadcast(&announce.prefix, announce.route.epoch)
-		.await?;
+	let broadcast = consumer.request(&announce.prefix, announce.route.instance).await?;
 
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast
@@ -108,7 +111,7 @@ async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_priority(1)
-				.with_max_delay(latency),
+				.with_delay(moq_net::track::Delay::default().with_max(latency)),
 		)
 		.await?;
 	let mut ordered =

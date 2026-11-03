@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Generate and grade programs clocked by audio or a dedicated PCR-only PID."""
+
 import argparse
 from collections import deque
 from pathlib import Path
@@ -23,8 +24,9 @@ def section(table, body):
 
 def clock_packet(route, ticks, counter):
     base, ext = divmod(ticks % klv.PCR_WRAP, 300)
-    stamp = bytes([base >> 25, base >> 17 & 255, base >> 9 & 255, base >> 1 & 255,
-                   (base & 1) << 7 | 0x7E | ext >> 8, ext & 255])
+    stamp = bytes(
+        [base >> 25, base >> 17 & 255, base >> 9 & 255, base >> 1 & 255, (base & 1) << 7 | 0x7E | ext >> 8, ext & 255]
+    )
     return bytes([0x47, route >> 8, route & 255, 0x20 | counter, 183, 0x10]) + stamp + b"\xff" * 176
 
 
@@ -91,9 +93,11 @@ def generate(kind, duration, bitrate, audio=b""):
 def units(data, pes):
     if pes:
         return [(unit.at, unit.data) for unit in klv.private_pes(data, {DATA})[DATA]]
-    return [(index * 188 + 188 - len(klv.payload(packet)) + 1 + klv.payload(packet)[0], value)
-            for index, packet in enumerate(klv.packets(data))
-            if klv.pid(packet) == DATA and (value := klv.single_section(packet)) is not None]
+    return [
+        (index * 188 + 188 - len(klv.payload(packet)) + 1 + klv.payload(packet)[0], value)
+        for index, packet in enumerate(klv.packets(data))
+        if klv.pid(packet) == DATA and (value := klv.single_section(packet)) is not None
+    ]
 
 
 def grade(source, capture, kind):
@@ -140,7 +144,9 @@ def main():
     parser.add_argument("--audio", type=Path)
     args = parser.parse_args()
     if args.command == "generate":
-        args.source.write_bytes(generate(args.kind, args.duration, args.bitrate, args.audio.read_bytes() if args.audio else b""))
+        args.source.write_bytes(
+            generate(args.kind, args.duration, args.bitrate, args.audio.read_bytes() if args.audio else b"")
+        )
     elif args.capture is None:
         parser.error("grade requires a capture")
     else:

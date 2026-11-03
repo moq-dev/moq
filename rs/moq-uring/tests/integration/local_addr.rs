@@ -8,8 +8,6 @@
 //! lanes add [`SECOND_V6`] to `lo`; without it the case skips loudly, and
 //! CI_STRICT makes CI refuse it.
 
-#![cfg(target_os = "linux")]
-
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::time::Duration;
@@ -177,14 +175,10 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let client = moq_tokio::quic::web::ClientBuilder::new()
-				.dangerous()
-				.with_no_certificate_verification()
-				.expect("client");
 			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{addr}/")).expect("url"),
 			);
-			moq_clock::timeout(TIMEOUT, client.connect(request))
+			kio::clock::timeout(TIMEOUT, crate::support::web_connect(request, Default::default()))
 				.await
 				.expect("handshake stalled")
 				.expect("connect");

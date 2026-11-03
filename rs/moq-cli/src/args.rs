@@ -31,6 +31,7 @@
 //!   the separator stays unconditional rather than context-sensitive.
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::publish::PublishFormat;
@@ -324,9 +325,15 @@ impl Invocation {
 		}
 
 		for command in &self.stages {
+			#[cfg(feature = "capture")]
+			if let Command::Import(import) = command
+				&& let ImportSource::Capture(capture) = &import.source
+			{
+				capture.validate()?;
+			}
 			if let Command::Import(import) = command
 				&& import.report
-				&& let Some(reason) = import.source.report_refusal()
+				&& let Some(reason) = import.source.catalog_refusal()
 			{
 				anyhow::bail!("--report names a track in the catalog the import builds, but {reason}");
 			}
@@ -366,6 +373,7 @@ impl Invocation {
 			let Command::Export(export) = command else {
 				continue;
 			};
+			export.select.validate()?;
 			if let Some(sink) = export.sink.report() {
 				anyhow::ensure!(
 					export.catalog_format.is_none(),
@@ -383,12 +391,10 @@ impl Invocation {
 				);
 			}
 			if export.echo.is_some() {
-				if export.sink.stdout().is_none()
+				if export.sink.container().is_none()
 					&& let Some(sink) = export.sink.ignores_selection()
 				{
-					anyhow::bail!(
-						"--echo reports what a stdout container export reads, and `export {sink}` is not one"
-					);
+					anyhow::bail!("--echo reports what a container export reads, and `export {sink}` is not one");
 				}
 				let msf = match export.catalog_format {
 					Some(format) => matches!(format, CatalogFormatArg::Msf),
@@ -402,15 +408,23 @@ impl Invocation {
 					"--echo follows the hang catalog's `echo` section, which the MSF catalog does not carry"
 				);
 			}
-			if let Some(stdout) = export.sink.stdout() {
+			if let Some(output) = export.sink.container().and_then(|container| container.output) {
+				// Refused before anything dials, rather than once the broadcast arrives.
+				anyhow::ensure!(
+					!output.exists(),
+					"--output {} already exists; pick a new file",
+					output.display()
+				);
+			}
+			if let Some(stdout) = export.sink.container() {
 				anyhow::ensure!(
 					stdout.follow.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
 					"--linger is gone, and following a broadcast's return needs an output that can mark the restart: only `export ts --follow` can"
 				);
 				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
 					anyhow::ensure!(
-						!export.select.no_video,
-						"--no-video leaves nothing for a video elementary stream; pick a container format"
+						export.select.video != Some(crate::subscribe::Mode::Off),
+						"--video off leaves nothing for a video elementary stream; pick a container format"
 					);
 					if let Some(flag) = export.select.audio_flag() {
 						anyhow::bail!("a video elementary stream has no audio; remove {flag}");
@@ -431,7 +445,7 @@ impl Invocation {
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
 		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
-		// and `announced` open their own session, and `auth` / `devices` never touch the network at all.
+		// and `announced` open their own session, and `auth` / `repair` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -542,10 +556,10 @@ impl MoqSide {
 		found
 	}
 
-	/// The cluster this process publishes and subscribes on. Built once; the
-	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
-	/// names the node.
-	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
+	/// The cluster this process publishes and subscribes on, with the driver that
+	/// must run for as long as it serves. Built once; the origin is its origin, whose
+	/// Hop ID is random per run unless `--cluster-id` names the node.
+	pub fn cluster(&self) -> anyhow::Result<(moq_relay::cluster::Cluster, moq_relay::cluster::Driver)> {
 		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
 
@@ -671,6 +685,8 @@ pub enum Command {
 	Announced(crate::announced::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
+	/// Finish a recording that a crash or second signal left unfinished.
+	Repair(crate::repair::Args),
 	/// Play a broadcast in a native window and speaker.
 	#[cfg(feature = "play")]
 	Play(crate::play::Args),
@@ -730,6 +746,7 @@ impl Command {
 			Self::Export(_) | Self::Subscribe(_) => "export",
 			Self::Announced(_) => "announced",
 			Self::Fetch(_) => "fetch",
+			Self::Repair(_) => "repair",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",
 			#[cfg(feature = "transcode")]
@@ -809,13 +826,14 @@ pub struct Import {
 	latency_max: Option<moq_tokio::cli::Duration>,
 
 	/// Name a media report track in the catalog's `stats` section and fill it with what each
-	/// track has written, about once a second while subscribed. The stdin imports only.
+	/// track has written, about once a second while subscribed. The stdin imports and capture
+	/// only.
 	#[usage(long)]
 	pub report: bool,
 
 	/// Solicit viewer feedback in the catalog: `export --echo <NAME>` publishes `<NAME>.echo`
 	/// under this prefix, resolved against the broadcast like a relative URL (`viewers` from
-	/// `room/event` is `room/viewers`). The stdin imports only.
+	/// `room/event` is `room/viewers`). The stdin imports and capture only.
 	#[usage(long, value_name = "PATH")]
 	pub echo_path: Option<String>,
 
@@ -832,6 +850,10 @@ impl Import {
 		}
 		if self.latency_max.is_some() {
 			found.flag("--latency-max", None, "--max-age");
+		}
+		#[cfg(feature = "capture")]
+		if let ImportSource::Capture(capture) = &self.source {
+			found.extend(capture.deprecated());
 		}
 		found
 	}
@@ -887,7 +909,8 @@ impl ImportSource {
 	}
 
 	/// Why the CLI can't add a section to this source's first catalog, or `None` when it can:
-	/// a stdin import's one catalog waits for its importer's tracks.
+	/// a stdin import's one catalog waits for its importer's tracks, and a capture's for its
+	/// encoders.
 	fn catalog_refusal(&self) -> Option<&'static str> {
 		match self {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
@@ -897,19 +920,9 @@ impl ImportSource {
 				Some("the gateway and archive imports build their own catalogs")
 			}
 			#[cfg(feature = "capture")]
-			Self::Capture(_) => Some("`import capture` publishes its catalog as its encoders start"),
+			Self::Capture(_) => None,
 			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
-	}
-
-	/// Why `--report` can't report this source, or `None` when it can: the CLI builds the one
-	/// catalog of a stdin import, whose tracks `moq-mux` counts.
-	fn report_refusal(&self) -> Option<&'static str> {
-		#[cfg(feature = "capture")]
-		if matches!(self, Self::Capture(_)) {
-			return Some("`import capture` encodes, and its encoders do not count yet");
-		}
-		self.catalog_refusal()
 	}
 
 	/// Why `--linger` can't apply to this source, or `None` when it can: only a source with a
@@ -1042,7 +1055,7 @@ pub struct Export {
 	#[usage(long = "catalog-format", value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
-	/// Rendition selection (`--video-name`, `--no-audio`, ...), refused by sinks that don't apply it.
+	/// Rendition selection (`--video-name`, `--audio off`, ...), refused by sinks that don't apply it.
 	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
 
@@ -1065,6 +1078,7 @@ impl Export {
 		}
 		match &self.sink {
 			ExportSink::Fmp4(args) => found.extend(args.container.deprecated()),
+			ExportSink::Mp4(args) => found.extend(args.fragmented.container.deprecated()),
 			ExportSink::Mkv(args) => found.extend(args.container.deprecated()),
 			ExportSink::Ts(args) => found.extend(args.deprecated()),
 			ExportSink::Flv(args) => found.extend(args.deprecated()),
@@ -1078,11 +1092,13 @@ impl Export {
 }
 
 /// The single sink draining the Origin on an export. The container formats write
-/// to stdout; the gateways bridge another protocol.
+/// to stdout, except `mp4`, which records to a file; the gateways bridge another protocol.
 #[derive(usage_rs::Subcommands, Clone)]
 pub enum ExportSink {
 	/// Fragmented MP4 / CMAF to stdout.
 	Fmp4(Fragmented),
+	/// Regular MP4 recorded to a file, which plays as fragmented MP4 if the recording is cut short.
+	Mp4(Recorded),
 	/// Matroska / WebM to stdout.
 	Mkv(BufferedFragmented),
 	/// MPEG-TS to stdout.
@@ -1113,7 +1129,7 @@ impl ExportSink {
 	/// The sink's name when it doesn't apply selection, so the selection flags would be ignored.
 	fn ignores_selection(&self) -> Option<&'static str> {
 		Some(match self {
-			Self::Fmp4(_) | Self::Mkv(_) | Self::Flv(_) | Self::H264(_) | Self::H265(_) => return None,
+			Self::Fmp4(_) | Self::Mp4(_) | Self::Mkv(_) | Self::Flv(_) | Self::H264(_) | Self::H265(_) => return None,
 			Self::Ts(_) => "ts",
 			Self::Hls(_) => "hls",
 			Self::Rtmp(_) => "rtmp",
@@ -1134,15 +1150,15 @@ impl ExportSink {
 		}
 	}
 
-	/// Whether this sink writes to stdout (the container formats and the report sinks).
+	/// Whether this sink writes to stdout (the container formats but `mp4`, and the report sinks).
 	pub fn is_stdout(&self) -> bool {
-		self.stdout().is_some() || self.report().is_some()
+		self.container().is_some_and(|container| container.output.is_none()) || self.report().is_some()
 	}
 
-	/// The stdout container format and its options, when this sink writes to
-	/// stdout. The fragment cap is fmp4/mkv-only and the mux rate is TS-only.
-	pub fn stdout(&self) -> Option<Stdout> {
-		let container = |format, container: &Container| Stdout {
+	/// The container format and its options, when this sink is one. The fragment cap is
+	/// fmp4/mp4/mkv-only and the mux rate is TS-only.
+	pub fn container(&self) -> Option<ContainerSink> {
+		let container = |format, container: &Container| ContainerSink {
 			format,
 			max_delay: container.max_delay.into(),
 			follow: container.linger.into(),
@@ -1150,8 +1166,9 @@ impl ExportSink {
 			fragment_duration: None,
 			mux_rate: None,
 			passthrough: false,
+			output: None,
 		};
-		let buffered = |format, args: &Buffered| Stdout {
+		let buffered = |format, args: &Buffered| ContainerSink {
 			format,
 			max_delay: args.delay.into(),
 			follow: args.linger.into(),
@@ -1159,17 +1176,23 @@ impl ExportSink {
 			fragment_duration: None,
 			mux_rate: None,
 			passthrough: false,
+			output: None,
 		};
 		Some(match self {
-			Self::Fmp4(args) => Stdout {
+			Self::Fmp4(args) => ContainerSink {
 				fragment_duration: args.fragment_duration.map(Into::into),
 				..container(SubscribeFormat::Fmp4, &args.container)
 			},
-			Self::Mkv(args) => Stdout {
+			Self::Mp4(args) => ContainerSink {
+				fragment_duration: args.fragmented.fragment_duration.map(Into::into),
+				output: Some(args.output.clone()),
+				..container(SubscribeFormat::Mp4, &args.fragmented.container)
+			},
+			Self::Mkv(args) => ContainerSink {
 				fragment_duration: args.fragment_duration.map(Into::into),
 				..buffered(SubscribeFormat::Mkv, &args.container)
 			},
-			Self::Ts(args) => Stdout {
+			Self::Ts(args) => ContainerSink {
 				format: SubscribeFormat::Ts,
 				max_delay: args.delay.into(),
 				follow: args.follow.into(),
@@ -1177,6 +1200,7 @@ impl ExportSink {
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
 				passthrough: args.passthrough,
+				output: None,
 			},
 			Self::Flv(args) => buffered(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
@@ -1186,8 +1210,8 @@ impl ExportSink {
 	}
 }
 
-/// A stdout sink's format and the options that apply to it.
-pub struct Stdout {
+/// A container sink's format and the options that apply to it.
+pub struct ContainerSink {
 	pub format: SubscribeFormat,
 	/// The staleness budget, also the FLV/MKV release delay and how far behind the source `ts`
 	/// runs (`--delay`).
@@ -1201,6 +1225,8 @@ pub struct Stdout {
 	pub mux_rate: Option<u64>,
 	/// Write the `m2ts` passthrough track back out (`ts` only).
 	pub passthrough: bool,
+	/// The file a recording writes (`mp4` only); the rest write to stdout.
+	pub output: Option<PathBuf>,
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
@@ -1350,6 +1376,20 @@ impl Transport {
 	}
 }
 
+/// A regular MP4 recording.
+#[derive(usage_rs::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Recorded {
+	#[usage(flatten)]
+	pub fragmented: Fragmented,
+
+	/// The file to record to, which must not exist yet. It plays as fragmented MP4 while
+	/// recording; the broadcast's end or the first SIGINT/SIGTERM finishes it as a regular
+	/// MP4, and a second signal exits at once, leaving it fragmented for `moq repair mp4`.
+	#[usage(long, value_name = "FILE", value_hint = usage_rs::ValueHint::FilePath)]
+	pub output: PathBuf,
+}
+
 /// The fMP4 stdout container with a fragment cap.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -1424,7 +1464,7 @@ mod tests {
 			let Command::Export(export) = &cli.stages[0] else {
 				panic!("not an export");
 			};
-			export.sink.stdout().unwrap().max_delay
+			export.sink.container().unwrap().max_delay
 		};
 		assert_eq!(stdout(&[]), Duration::from_secs(1));
 		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
@@ -1607,7 +1647,7 @@ mod tests {
 		let Command::Export(export) = &cli.stages[0] else {
 			panic!("not an export");
 		};
-		let stdout = export.sink.stdout().unwrap();
+		let stdout = export.sink.container().unwrap();
 		assert!(stdout.passthrough);
 		assert_eq!(stdout.max_delay, Duration::from_secs(2));
 		for flags in [&["--stitch"][..], &["--follow", "10s"], &["--mux-rate", "20000000"]] {
@@ -1620,26 +1660,108 @@ mod tests {
 		Invocation::try_parse_from(argv.iter().chain(flags).copied())
 	}
 
+	/// Capture policy values cannot leak into rendition selection or unsupported commands.
+	#[test]
+	fn media_modes_are_command_specific() {
+		// Each command and the arguments that follow its flags: export's selection flags
+		// come before the sink.
+		let mut commands = vec![(vec!["export"], vec!["fmp4"])];
+		if cfg!(feature = "play") {
+			commands.push((vec!["play"], vec![]));
+		}
+		if cfg!(feature = "capture") {
+			commands.push((vec!["import", "capture"], vec![]));
+		}
+		for (command, rest) in commands {
+			let argv = |flags: &[&'static str]| [vec!["moq"], command.clone(), flags.to_vec(), rest.clone()].concat();
+			for flag in ["--video", "--audio"] {
+				for mode in ["on", "off", "demand", "buffered", "always", "true"] {
+					let argv = argv(&[flag, mode]);
+					let supported =
+						matches!(mode, "on" | "off") || (command == ["import", "capture"] && mode == "demand");
+					assert_eq!(Invocation::try_parse_from(argv.clone()).is_ok(), supported, "{argv:?}");
+				}
+				let argv = argv(&[flag]);
+				assert!(
+					Invocation::try_parse_from(argv.clone()).is_err(),
+					"{argv:?} needs a value"
+				);
+			}
+			for flag in ["--no-video", "--no-audio", "--on-demand"] {
+				let argv = argv(&[flag]);
+				assert!(
+					Invocation::try_parse_from(argv.clone()).is_err(),
+					"{argv:?} was removed"
+				);
+			}
+		}
+	}
+
+	/// Capture's released `--no-*` spellings name their replacement instead of an unknown flag.
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_names_the_released_spellings() {
+		for (old, new) in [("--no-video", "--video off"), ("--no-audio", "--audio off")] {
+			let Err(err) = Invocation::try_parse_from(["moq", "import", "capture", old]) else {
+				panic!("{old} parsed");
+			};
+			let err = err.to_string();
+			assert!(err.contains(&format!("{old} -> {new}")), "{err}");
+		}
+	}
+
+	/// Explicit on still permits narrowing a role, and omission still keeps both roles.
+	#[test]
+	fn enabled_media_keep_their_rendition_filters() {
+		for flags in [
+			["fmp4"].as_slice(),
+			&[
+				"--video",
+				"on",
+				"--video-name",
+				"hd",
+				"--video-codec",
+				"h264",
+				"--audio",
+				"on",
+				"--audio-name",
+				"stereo",
+				"--audio-codec",
+				"opus",
+				"fmp4",
+			],
+		] {
+			let cli = export(flags).unwrap();
+			cli.validate().unwrap();
+			let Command::Export(export) = &cli.stages[0] else {
+				panic!("an export stage");
+			};
+			let selection = export.select.selection(None);
+			assert!(selection.has_video());
+			assert!(selection.has_audio());
+		}
+	}
+
 	/// Leaving a role out can't be combined with narrowing it, or with leaving the
 	/// other role out too.
 	#[test]
 	fn leaving_a_role_out_conflicts_with_selecting_it() {
 		for flags in [
-			["--no-video", "--video-name", "hd"].as_slice(),
-			&["--video-codec", "h264", "--no-video"],
-			&["--no-audio", "--audio-name", "stereo"],
-			&["--audio-codec", "opus", "--no-audio"],
-			&["--no-video", "--no-audio"],
-			&["--no-audio", "--no-video"],
+			["--video", "off", "--video-name", "hd"].as_slice(),
+			&["--video-codec", "h264", "--video", "off"],
+			&["--audio", "off", "--audio-name", "stereo"],
+			&["--audio-codec", "opus", "--audio", "off"],
+			&["--video", "off", "--audio", "off"],
+			&["--audio", "off", "--video", "off"],
 		] {
 			let flags = [flags, &["fmp4"]].concat();
-			assert!(export(&flags).is_err(), "{flags:?} must be refused");
+			assert!(export(&flags).unwrap().validate().is_err(), "{flags:?} must be refused");
 		}
 	}
 
 	#[test]
-	fn no_audio_selects_no_audio_role() {
-		let cli = export(&["--no-audio", "fmp4"]).unwrap();
+	fn audio_off_selects_no_audio_role() {
+		let cli = export(&["--audio", "off", "fmp4"]).unwrap();
 		cli.validate().unwrap();
 		let Command::Export(export) = &cli.stages[0] else {
 			panic!("an export stage");
@@ -1651,12 +1773,12 @@ mod tests {
 
 	/// A video elementary stream refuses leaving video out or selecting audio, before dialing.
 	#[test]
-	fn elementary_streams_refuse_no_video() {
+	fn elementary_streams_refuse_video_off() {
 		for format in ["h264", "h265"] {
-			let err = export(&["--no-video", format]).unwrap().validate().unwrap_err();
-			assert!(err.to_string().contains("--no-video"), "{format}: {err}");
-			export(&["--no-audio", format]).unwrap().validate().unwrap();
-			for flag in [["--audio-name", "stereo"], ["--audio-codec", "aac"]] {
+			let err = export(&["--video", "off", format]).unwrap().validate().unwrap_err();
+			assert!(err.to_string().contains("--video off"), "{format}: {err}");
+			export(&["--audio", "off", format]).unwrap().validate().unwrap();
+			for flag in [["--audio-name", "stereo"], ["--audio-codec", "aac"], ["--audio", "on"]] {
 				let err = export(&[flag.as_slice(), &[format]].concat())
 					.unwrap()
 					.validate()
@@ -1665,7 +1787,7 @@ mod tests {
 			}
 		}
 		for format in ["fmp4", "mkv", "flv"] {
-			export(&["--no-video", format]).unwrap().validate().unwrap();
+			export(&["--video", "off", format]).unwrap().validate().unwrap();
 		}
 	}
 
@@ -1686,10 +1808,12 @@ mod tests {
 			for flag in [
 				["--video-name", "hd"].as_slice(),
 				&["--video-codec", "h264"],
-				&["--no-video"],
+				&["--video", "off"],
+				&["--video", "on"],
 				&["--audio-name", "stereo"],
 				&["--audio-codec", "aac"],
-				&["--no-audio"],
+				&["--audio", "off"],
+				&["--audio", "on"],
 			] {
 				let err = export(&[flag, sink].concat()).unwrap().validate().unwrap_err();
 				assert!(err.to_string().contains(flag[0]), "{sink:?} {flag:?}: {err}");
@@ -1714,6 +1838,8 @@ mod tests {
 			] {
 				import(flags, source).validate().unwrap();
 			}
+			#[cfg(feature = "capture")]
+			import(flags, &["capture"]).validate().unwrap();
 			for source in [
 				["ts", "--program", "all"].as_slice(),
 				&["hls", "http://origin/master.m3u8"],
@@ -1958,14 +2084,14 @@ mod tests {
 	}
 
 	#[test]
-	fn independent_importers_cannot_select_a_shared_epoch() {
-		let epoch = hang::moq_net::Epoch::mint().to_string();
+	fn independent_importers_cannot_select_a_shared_instance() {
+		let instance = hang::moq_net::Instance::random().to_string();
 		let refused = Invocation::try_parse_from([
 			"moq",
 			"--connect",
 			"http://relay/anon",
-			"--epoch",
-			&epoch,
+			"--instance",
+			&instance,
 			"import",
 			"ts",
 		]);
@@ -2448,7 +2574,7 @@ mod tests {
 			let Command::Export(export) = &cli.stages[0] else {
 				panic!("expected export")
 			};
-			export.sink.stdout().unwrap().max_delay
+			export.sink.container().unwrap().max_delay
 		};
 
 		for format in ["fmp4", "h264", "h265"] {
@@ -2646,7 +2772,11 @@ mod tests {
 			Invocation::try_parse_from(argv).unwrap_or_else(|err| panic!("{flag:?}: {err}"))
 		};
 
-		for verb in [&["auth", "generate"][..], &["completion", "bash"]] {
+		for verb in [
+			&["auth", "generate"][..],
+			&["completion", "bash"],
+			&["repair", "mp4", "recording.mp4"],
+		] {
 			for flag in accept.iter().chain(dial) {
 				let err = parse(flag, verb).reject(verb[0]).unwrap_err().to_string();
 				assert!(err.contains(flag[0]), "{verb:?} {flag:?}: {err}");

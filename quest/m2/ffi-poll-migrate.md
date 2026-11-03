@@ -18,7 +18,7 @@ once this lands.
 
 - **No UniFFI change on this path**: dropping a future at
   `rust_future_cancel` (mozilla/uniffi-rs#2771) is optional in
-  [the fork](/quest/m2/uniffi-fork.md). Shape A has no read lane for an
+  [the exporter switch](/quest/m2/ffi-exporter.md). Shape A has no read lane for an
   unfreed future to hold, so this quest must not wait for it.
 - **What the spike found**: in Go, Shape A cut a ready `read_frame` from 2.3
   to 1.2 µs, and where every read parks it raised throughput 13 to 32 percent
@@ -50,7 +50,7 @@ once this lands.
 - **Still lost on cancel**: when a RustFuture finishes and the foreign side
   then drops it as cancelled (Python asyncio cancel, Go ctx), the result is
   gone. The spike measured this in both `Task` and Shape A. Keep the Go
-  wrapper's terminal cancel. [Foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md)
+  wrapper's terminal cancel. [Foreign poll](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md)
   fixes it later for the hot reads.
 - **What stays**: migrate an export only when it is pure kio polling over
   handle state. Anything that awaits tokio channels, codecs, or I/O keeps
@@ -76,5 +76,5 @@ get items in call order; sequence and arrival order are unchanged. Wire: none.
 
 ## Related
 
-- [Foreign poll for hot reads](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - the generated protocol that follows this, once the fork exists
-- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - moq-ffi spawns only its root at the binding boundary
+- [Foreign poll for hot reads](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - the generated protocol that follows this, once the fork exists
+- [moq-ffi spawns only its root](/quest/m1/poll-first/no-spawn/ffi.md) - one runtime-owned driver task holds every `Background` as `kio::Tasks` children

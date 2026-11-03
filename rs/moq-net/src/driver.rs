@@ -168,7 +168,6 @@ impl std::fmt::Debug for Driver {
 }
 
 // The relay and the bindings spawn drivers on multi-threaded runtimes.
-#[cfg(not(target_family = "wasm"))]
 const _: () = {
 	const fn assert_send<T: Send>() {}
 	assert_send::<Driver>();

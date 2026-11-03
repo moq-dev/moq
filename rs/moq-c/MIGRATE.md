@@ -4,6 +4,41 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON window edits take an optional timestamp
+
+`moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
+`const moq_timestamp *timestamp`. Pass `NULL` to keep stamping the broadcast
+clock, or a pointer to the edit's capture time, converted to track milliseconds.
+Recompile callers against the regenerated `moq.h`.
+
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
+
+### Media consumers take a `moq_delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`moq_consume_video` and `moq_consume_audio` take `const moq_delay *delay` in place of `uint64_t max_delay_us`; NULL is the default.
+`moq_video_decoder_output.max_delay_us` and `moq_audio_decoder_output.max_delay_us` are `moq_delay delay`, which changes both structs' layout.
+Set `delay.max_us` to the old `max_delay_us`, `delay.max_unlimited` for no limit, and `delay.min_us` to your playout delay, where a cold join starts. A zeroed `moq_delay` is zero for both.
+
+### A subscription without `max_delay_present` has no limit
+
+A `moq_subscription` with `max_delay_present` false sets no subscriber limit, leaving the publisher's max age alone to bound it, instead of moq-net's default of zero.
+Start from `moq_subscription_defaults()`, or set `max_delay_present`, where you relied on a zeroed struct; a NULL pointer still means the defaults.
+
+### Compression moves to the track
+
+`moq_json_snapshot_config.compression`, `moq_json_stream_config`, `moq_binary_config`, and the `moq_publish_binary_snapshot*` and `moq_publish_binary_stream*` functions are removed.
+`moq_publish_json_stream`, `moq_consume_json_snapshot`, and `moq_consume_json_stream` drop their `config` argument.
+JSON tracks are created with `compress` set, and a consumer reads one like a plain track. Publish opaque bytes on a raw track with `moq_publish_track`.
+
+### Authored configs keep their identity ([#7110](https://github.com/moq-dev/moq/pull/7110))
+
+`moq_publish_video_config` and `moq_publish_audio_config` return `MOQ_ERROR_MUX` for a repeat call that changes the rendition's `codec`, `description`, or `container`, or an audio `sample_rate` or `channel_count`.
+Publish media with a new identity under a new name, and remove the old rendition.
+Tracks published with `moq_publish_video` or `moq_publish_audio` take a new name such as `<name>/1` when the stream's decoder identity changes, so read the name from the catalog rather than caching it.
+A frame passed to `moq_encode_video_frame` that moves the rendition to a new track, such as a resume at a ceiling past the declared level, reserves bandwidth against the new track, so call `moq_encode_video_reservation` again rather than holding the first handle.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Every function taking a path, such as `moq_origin_create_broadcast` and `moq_origin_request`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
@@ -92,7 +127,7 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 ### A claim answers by publishing (#5678)
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
-`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer under the epoch you pass: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under that epoch.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
 ### `moq_track_info` gains `compress` (#5928)

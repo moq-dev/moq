@@ -5,7 +5,6 @@
 //! `publish`/`subscribe`, which 0.14 reads as granting nothing and refuses, rather
 //! than misreading an exact grant as a prefix.
 
-use base64::Engine;
 use moq_auth::{Algorithm, Claims, Key};
 
 fn patterns(texts: &[&str]) -> moq_auth::Patterns {
@@ -71,34 +70,36 @@ fn patterns_keep_the_published_auth_wire_shape() {
 	}
 }
 
+/// A capped role is an object every published verifier refuses in full, so an old
+/// relay never admits the paths while dropping the cap.
 #[test]
-fn capped_objects_are_refused_in_full_by_current_and_published_auth() {
+fn capped_roles_are_refused_in_full_by_published_auth() {
 	let key = Key::generate(Algorithm::HS256, None).unwrap();
 	let published = moq_auth_published::Key::from_str(&key.to_str().unwrap()).unwrap();
 	let legacy = moq_token::Key::from_str(&key.to_str().unwrap()).unwrap();
-	let jwk: serde_json::Value = serde_json::to_value(&key).unwrap();
-	let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
-		.decode(jwk["k"].as_str().unwrap())
-		.unwrap();
-	let signing = jsonwebtoken::EncodingKey::from_secret(&secret);
-	for role in ["publish", "subscribe"] {
-		for path in [serde_json::json!("alice/**"), serde_json::json!(["alice/**"])] {
-			let mut payload = serde_json::json!({"publish":["**"],"subscribe":["**"]});
-			payload[role] = serde_json::json!({"path":path,"rate":8_000_000});
-			let token = jsonwebtoken::encode(
-				&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-				&payload,
-				&signing,
-			)
-			.unwrap();
-			assert!(
-				key.verify(&token).is_err(),
-				"must not discard the restriction: {payload}"
-			);
-			assert!(published.verify(&token).is_err());
-			assert!(legacy.verify(&token).is_err());
-			assert!(serde_json::from_value::<moq_auth::Grant>(payload.clone()).is_err());
-			assert!(serde_json::from_value::<moq_auth_published::Grant>(payload).is_err());
-		}
+	let rate = moq_auth::Rate::from_bps(8_000_000).unwrap();
+	for publish in [true, false] {
+		// Subtrees alone would be written as legacy prefixes, which a cap must not be.
+		let mut claims = Claims::default()
+			.with_publish(patterns(&["alice/**"]))
+			.with_subscribe(patterns(&["**"]));
+		claims = match publish {
+			true => claims.with_publish_rate(rate),
+			false => claims.with_subscribe_rate(rate),
+		};
+		let token = key.sign(&claims).unwrap();
+		let verified = key.verify(&token).unwrap();
+		assert_eq!(
+			(verified.publish_rate, verified.subscribe_rate),
+			(claims.publish_rate, claims.subscribe_rate)
+		);
+		assert!(published.verify(&token).is_err(), "{claims:?}");
+		assert!(legacy.verify(&token).is_err(), "{claims:?}");
+
+		let mut grant = moq_auth::Grant::new(claims.publish.clone(), claims.subscribe.clone());
+		(grant.publish_rate, grant.subscribe_rate) = (claims.publish_rate, claims.subscribe_rate);
+		let wire = serde_json::to_value(&grant).unwrap();
+		assert_eq!(serde_json::from_value::<moq_auth::Grant>(wire.clone()).unwrap(), grant);
+		assert!(serde_json::from_value::<moq_auth_published::Grant>(wire).is_err());
 	}
 }

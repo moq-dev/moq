@@ -21,7 +21,7 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 	/// Adapt one of the backend's receive streams, freshly accepted or opened.
 	fn recv(stream: super::RecvStream<Self::RecvStream>) -> Self::Recv;
 
-	/// Open a request; iroh cannot inspect upstream noq credit and keeps waiting.
+	/// Open a request, waiting for stream credit like any open unless the backend can inspect it.
 	fn open_request(&self) -> impl std::future::Future<Output = super::RequestResult<Self>> + Send {
 		async { self.open_bi().await.map(Some) }
 	}
@@ -39,6 +39,12 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 	/// Receive streams evicted to free a stuck receive window, or `None` when the backend never
 	/// evicts.
 	fn streams_evicted(&self) -> Option<u64> {
+		None
+	}
+
+	/// The receive windows now in force, or `None` when the backend cannot say; see
+	/// [`poll::Session::receive_window`](moq_net::transport::poll::Session::receive_window).
+	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		None
 	}
 

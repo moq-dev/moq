@@ -1,6 +1,6 @@
 name: Android
 
-# Compiles moq-video for Android, which no merge queue job does.
+# Compiles moq-video for Android, which no landing worker does.
 # Its MediaCodec encoder and decoder, the `Surface::HardwareBuffer` variant and
 # the `frame::android` module are all `#[cfg(target_os = "android")]`, so every
 # Linux job compiles them to nothing, and a moq-net change that breaks them
@@ -14,7 +14,12 @@ name: Android
 # It also builds moq-ffi and asserts the `.so` imports `__android_log_*`, so a
 # build that stops linking logcat fails here.
 #
-# Narrow trigger, like wasm.yml. The filter is moq-video's in-repo dependency
+# The `emulator` job runs moq-video's ignored MediaCodec tests on an x86_64
+# emulator, through `just rs android-test`, the recipe a local phone or emulator
+# uses too. The emulator's software Codec2 H.264 pair is enough for them. Hosted
+# Linux runners expose KVM, so the emulator runs accelerated.
+#
+# Narrow trigger. The filter is moq-video's in-repo dependency
 # graph (`cargo metadata`, normal dependencies), plus moq-ffi and moq-tokio, which
 # own the logcat link, and the files that decide how it is built. A crate added
 # to that graph has to be added here too.
@@ -31,6 +36,7 @@ concurrency:
 
 env:
   CARGO_NDK_VERSION: 4.1.2
+  CARGO_HAKARI_VERSION: 0.9.39
 
 jobs:
   android:
@@ -58,5 +64,63 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
 
+      # The host dev-dependencies in the workspace-hack need the Nix shell's
+      # native libraries, which this cross-build deliberately runs without.
+      - name: Disable the workspace-hack
+        run: |
+          cargo install --locked "cargo-hakari@$CARGO_HAKARI_VERSION"
+          cargo hakari disable
+          cargo update --workspace
+
       - name: Check
         run: just rs android
+
+  emulator:
+    name: Android emulator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # Lets the recipe compile before the emulator is up to report its ABI.
+      ANDROID_ABI: x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Add the Android target
+        run: rustup target add x86_64-linux-android
+
+      - uses: ./.github/actions/just
+
+      - name: Install cargo-ndk
+        run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
+
+      # As in the `android` job.
+      - name: Disable the workspace-hack
+        run: |
+          cargo install --locked "cargo-hakari@$CARGO_HAKARI_VERSION"
+          cargo hakari disable
+          cargo update --workspace
+
+      # Compiled before the emulator boots, so a build failure doesn't hold one.
+      - name: Build
+        run: just rs android-test --no-run
+
+      # The runner's /dev/kvm is root-only; the emulator runs as the runner user.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # API 34's AOSP image: Codec2 software codecs since API 29, and no Google
+      # services to boot.
+      - name: Test
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          script: just rs android-test

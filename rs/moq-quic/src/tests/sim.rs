@@ -266,11 +266,10 @@ impl Peer {
 			};
 			let mut stream = conn.send_stream(id);
 			while sending.written < sending.spec.len {
-				let end = sending.spec.len.min(sending.written + 65_536);
-				let data = payload(index, sending.written..end);
-				match stream.write(&data) {
+				let end = sending.spec.len.min(sending.written + PAYLOAD_MAX);
+				match stream.write(&mut payload(index, sending.written..end)) {
 					Ok(written) => sending.written += written,
-					Err(WriteError::Blocked) => break,
+					Err(send::Error::Blocked) => break,
 					Err(error) => panic!("writing stream {index}: {error}"),
 				}
 			}
@@ -318,7 +317,7 @@ impl Peer {
 						let end = receiving.read + chunk.bytes.len();
 						prop_assert!(end <= len, "stream {index} ran past its {len} bytes");
 						prop_assert!(
-							chunk.bytes == payload(index, receiving.read..end),
+							is_payload(index, receiving.read, &chunk.bytes),
 							"stream {index} corrupted at {}",
 							receiving.read
 						);
@@ -331,7 +330,7 @@ impl Peer {
 						receiving.done = Some(now);
 						break;
 					}
-					Err(ReadError::Blocked) => break,
+					Err(recv::Error::Blocked) => break,
 					Err(error) => panic!("reading stream {index}: {error}"),
 				}
 			}
@@ -373,35 +372,52 @@ impl Peer {
 	}
 }
 
+/// The longest range `payload` serves
+const PAYLOAD_MAX: usize = 65_536;
+
 /// The bytes at `range` of stream `index`, distinct per stream and offset
-fn payload(index: usize, range: ops::Range<usize>) -> Vec<u8> {
-	range.map(|i| (i % 251) as u8 ^ (index as u8)).collect()
+///
+/// Each stream reads one cycle of prime length from its own rotation, so streams fewer than 251
+/// apart differ at every offset. Slicing a shared buffer keeps the per-step writes and checks from
+/// dominating the simulation.
+fn payload(index: usize, range: ops::Range<usize>) -> &'static [u8] {
+	static CYCLE: std::sync::LazyLock<Vec<u8>> =
+		std::sync::LazyLock::new(|| (0..251 + PAYLOAD_MAX).map(|i| (i % 251) as u8).collect());
+	let start = (index + range.start) % 251;
+	&CYCLE[start..][..range.len()]
+}
+
+/// Whether `bytes` are stream `index`'s payload from `offset`, however long the chunk
+fn is_payload(index: usize, offset: usize, bytes: &[u8]) -> bool {
+	bytes.chunks(PAYLOAD_MAX).enumerate().all(|(i, piece)| {
+		let start = offset + i * PAYLOAD_MAX;
+		piece == payload(index, start..start + piece.len())
+	})
 }
 
 fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 	entropy::reseed(case.seed);
-	let mut transport = TransportConfig::default();
-	transport
-		.stream_receive_window(case.limits.stream_window.into())
-		.receive_window(case.limits.window.into())
-		.max_concurrent_uni_streams(case.limits.max_streams.into())
-		.max_concurrent_bidi_streams(case.limits.max_streams.into())
-		.datagram_receive_buffer_size(Some(65_536))
-		.datagram_send_buffer_size(65_536)
-		.reset_stream_at(true);
-	let transport = Arc::new(transport);
+	let mut transport = transport::Config::default();
+	transport.limits.stream_receive_window = NonZeroU64::new(case.limits.stream_window.into());
+	transport.limits.receive_window = NonZeroU64::new(case.limits.window.into());
+	transport.limits.max_streams = NonZeroU64::new(case.limits.max_streams.into());
+	transport.datagram.receive_buffer = Some(65_536);
+	transport.datagram.send_buffer = 65_536;
+	transport.reset_stream_at = true;
 
 	let mut server_config = server_config();
 	server_config.transport = transport.clone();
 	let mut pair = Pair::new(Default::default(), server_config);
 	pair.latency = case.latency;
-	pair.to_server = case.to_server.clone();
-	pair.to_client = case.to_client.clone();
-	let start = pair.time;
 
 	let mut client_config = client_config();
 	client_config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(client_config);
+
+	// Workloads start connected; deterministic handshake tests own flight loss.
+	pair.to_server = case.to_server.clone();
+	pair.to_client = case.to_client.clone();
+	let start = pair.time;
 
 	let sends = |from_client: bool| {
 		case.streams
@@ -500,7 +516,7 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 		link.reorder = 0.0;
 	}
 	let now = pair.time;
-	pair.client_conn_mut(client_ch).close(now, VarInt(0), Bytes::new());
+	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
 	pair.drive();
 	let reason = loop {
 		match pair.server_conn_mut(server_ch).poll() {

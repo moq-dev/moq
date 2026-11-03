@@ -18,7 +18,7 @@ async fn respond_serves_a_route_rewritten_into_scope() {
 	let mut route = Route::parse(&format!("/tenant{media}")).expect("media route");
 	route.broadcast = route.broadcast.strip_prefix("tenant/").expect("scoped").to_string();
 
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	let body = loop {
 		let response = server.respond(&route, Some("jwt=abc")).await;
 		if response.status() == StatusCode::OK {
@@ -28,8 +28,8 @@ async fn respond_serves_a_route_rewritten_into_scope() {
 				break body;
 			}
 		}
-		assert!(moq_clock::now() < deadline, "media playlist never listed a segment");
-		moq_clock::sleep(std::time::Duration::from_millis(50)).await;
+		assert!(kio::clock::now() < deadline, "media playlist never listed a segment");
+		kio::clock::sleep(std::time::Duration::from_millis(50)).await;
 	};
 	assert!(body.contains(".mp4?jwt=abc\""), "{body}");
 	assert!(body.contains(".0.m4s?jwt=abc"), "{body}");
@@ -50,18 +50,15 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		let mut publisher = Publisher::new(&pair.publisher, "live", Default::default());
 
 		let origin = pair.subscriber.consume();
-		moq_clock::timeout(TIMEOUT, origin.routed("live"))
-			.await
-			.expect("announce timed out")
-			.expect("routed");
-		let remote = moq_clock::timeout(TIMEOUT, origin.request_broadcast("live", None))
+		let remote = kio::clock::timeout(TIMEOUT, origin.follow("live", None).unwrap().available())
 			.await
 			.expect("request timed out")
 			.expect("remote broadcast");
-		let broadcaster = Broadcaster::new(moq_mux::Source::new(origin, remote), Default::default());
+		let (broadcaster, driver) = Broadcaster::new(moq_mux::Source::new(origin, remote), Default::default()).unwrap();
+		tokio::spawn(driver.run());
 		// Recorded as soon as the catalog lists it with its records, as a recorder does.
 		let mut renditions = broadcaster.renditions();
-		let rendition = match moq_clock::timeout(TIMEOUT, renditions.next()).await {
+		let rendition = match kio::clock::timeout(TIMEOUT, renditions.next()).await {
 			Ok(Ok(Some(renditions::Event::Added(rendition)))) => rendition,
 			_ => panic!("{version}: the catalog never listed the rendition"),
 		};
@@ -73,7 +70,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 			while demand.wanted_changed().await?.is_none() {}
 			moq_net::Result::Ok(())
 		};
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			tokio::select! {
 				_ = next.as_mut() => panic!("{version}: a segment before any media"),
 				wanted = wanted => wanted.expect("track open"),
@@ -83,7 +80,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		.unwrap_or_else(|_| panic!("{version}: the cursor never subscribed"));
 
 		publisher.write(0, 5, 1);
-		let segment = moq_clock::timeout(TIMEOUT, next)
+		let segment = kio::clock::timeout(TIMEOUT, next)
 			.await
 			.unwrap_or_else(|_| panic!("{version}: no segment recorded"))
 			.unwrap_or_else(|err| panic!("{version}: {err}"))
@@ -119,12 +116,12 @@ async fn a_disconnected_publisher_on_the_catalog_broadcast_answers_404() {
 	let media = media_uri(&app, "live").await;
 	let first = segment(&listed(&app, &media, ".0.m4s").await, 0);
 
-	let remote = moq_clock::timeout(TIMEOUT, pair.subscriber.consume().request_broadcast("live", None))
+	let remote = kio::clock::timeout(TIMEOUT, pair.subscriber.consume().request("live", None))
 		.await
 		.expect("remote resolve timed out")
 		.expect("remote broadcast");
 	drop(publisher);
-	moq_clock::timeout(TIMEOUT, remote.closed())
+	kio::clock::timeout(TIMEOUT, remote.closed())
 		.await
 		.expect("publisher close timed out");
 
@@ -140,7 +137,7 @@ async fn lookups_ride_the_servers_scope_watch() {
 	other.announce(Default::default()).expect("announce other");
 
 	let server = pair.server();
-	let missing = moq_clock::timeout(TIMEOUT, server.broadcaster("room/missing"))
+	let missing = kio::clock::timeout(TIMEOUT, server.broadcaster("room/missing"))
 		.await
 		.expect("lookup timed out");
 	assert!(missing.is_none());
@@ -148,7 +145,7 @@ async fn lookups_ride_the_servers_scope_watch() {
 	// Nothing watches `room/other` on its own, yet the synced lookup already discovered it.
 	pair.subscriber
 		.consume()
-		.request_broadcast("room/other", None)
+		.request("room/other", None)
 		.await
 		.expect("discovered through the scope watch");
 }
@@ -174,12 +171,12 @@ async fn a_sibling_resolves_through_a_client_session() {
 		media.announce(Default::default()).expect("announce media");
 
 		let origin = pair.subscriber.consume();
-		let broadcast = moq_clock::timeout(TIMEOUT, origin.routed_broadcast("room/live"))
+		let broadcast = kio::clock::timeout(TIMEOUT, origin.follow("room/live", None).unwrap().available())
 			.await
 			.expect("catalog resolve timed out")
 			.expect("catalog broadcast");
 		let source = moq_mux::Source::new(origin, broadcast);
-		let sibling = moq_clock::timeout(
+		let sibling = kio::clock::timeout(
 			TIMEOUT,
 			source.resolve(Some(&moq_net::path::Relative::new("./source").unwrap()), None),
 		)
@@ -223,14 +220,21 @@ async fn a_disconnected_sibling_publisher_answers_404() {
 	let first = segment(&listed(&app, &uri, ".0.m4s").await, 0);
 
 	// Waited on rather than requested once: a client only asks about what it watches.
-	let remote_media = moq_clock::timeout(TIMEOUT, pair.subscriber.consume().routed_broadcast("room/source"))
-		.await
-		.expect("sibling resolve timed out")
-		.expect("sibling broadcast");
+	let remote_media = kio::clock::timeout(
+		TIMEOUT,
+		pair.subscriber
+			.consume()
+			.follow("room/source", None)
+			.unwrap()
+			.available(),
+	)
+	.await
+	.expect("sibling resolve timed out")
+	.expect("sibling broadcast");
 	// Only the sibling goes: the catalog keeps listing the rendition, so the request reaches the
 	// media fetch rather than missing the rendition.
 	media_broadcast.close();
-	moq_clock::timeout(TIMEOUT, remote_media.closed())
+	kio::clock::timeout(TIMEOUT, remote_media.closed())
 		.await
 		.expect("sibling close timed out");
 

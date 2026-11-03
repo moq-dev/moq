@@ -5,6 +5,23 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`MoqAnnounce.captures` is `Vec<String>` instead of `Option<Vec<String>>`. Remove optional checks and pass an empty list when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild the matching native library together.
+
+### Decoder outputs take a `MoqDelay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`MoqAudioDecoderOutput` replaces `max_delay` and the playout `delay: Option<Duration>` with `delay: Option<MoqDelay>` and `estimate: bool` (default `true`).
+`MoqVideoDecoderOutput::max_delay` is `delay: Option<MoqDelay>`.
+`MoqDelay { min, max }`: `max` (null for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts. A null `delay` is zero for both.
+A fixed audio playout delay `d` is `delay: MoqDelay { min: d, max }` with `estimate: false`; with `estimate` it floors the estimate instead.
+
+### Compression moves to the track
+
+The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes on a `MoqTrackProducer`.
+`MoqJsonSnapshotConfig` and `MoqJsonWindowConfig` lose `compression`, and `MoqJsonStreamConfig` is removed: set `compress` on the `MoqTrackInfo` you publish the track with instead.
+`MoqJsonStreamProducer::new` drops its config argument, and `MoqJsonSnapshotConsumer::new`, `MoqJsonStreamConsumer::new`, and `MoqJsonWindowConsumer::new` take only the track, reading a compressed track like a plain one.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Every method taking a path, such as `MoqOriginProducer::create_broadcast` and `MoqOriginConsumer::request_broadcast`, returns an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`.
@@ -36,9 +53,9 @@ It defaults to empty in every generated binding; a Rust struct literal adds `tok
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).
 The renamed fields are `MoqClientConfig.{timeout, race, resolution_delay}`, `MoqQuicConfig.{idle_timeout, keep_alive}`, `MoqWebSocketConfig.delay`, `MoqBackoff.{initial, max, timeout}`, `MoqConnectionStats.rtt`, `MoqGrant.expires`, `MoqTrackInfo.max_age`, `MoqSubscription.max_delay`, `MoqFetchGroupOptions.max_delay`, `MoqAudio.jitter`, `MoqAudioDecoderOutput.{max_delay, delay}`, and `MoqVideoDecoderOutput.max_delay`; the methods are `MoqFill::max_delay()` and `MoqAudioConsumer::delay()`.
 `MoqAudioEncoderOutput.frame_duration_us: u32` is `frame_duration: Option<Duration>`: pass null where you passed 0 for the codec's own frame.
-`MoqSubscription.max_delay` is required, because UniFFI cannot spell a duration literal: set it to zero where you relied on the old default.
-Kotlin, Swift, and Python fail to compile or raise until you pass it, but a C++ `moq::Subscription{}` or Dart `MoqSubscription()` that omits it silently gets no staleness limit instead of moq-net's 0.
-The Python wrapper's `Subscription` keeps its own `timedelta(0)` default, and Go is unchanged: a nil `*Subscription` still takes moq-net's 0.
+`MoqSubscription.max_delay` has no default, since UniFFI can't default a duration to 0: Kotlin and Swift must name it, `0` for moq-net's default or null for no subscriber limit.
+Dart, Go, and C can still omit it (Dart's optional parameter, Go's nil `*time.Duration`, a zeroed C struct), which means no subscriber limit; name it there too.
+Start from `moq_subscription_defaults()` where you relied on that default; a null subscription argument still means it.
 `MoqTrackConsumer::info()` no longer fails.
 A duration handed out saturates at `i64::MAX` nanoseconds (about 292 years), so C, C++, and Go hold every value.
 
@@ -63,9 +80,10 @@ settings. Regenerate bindings and rebuild the native library together.
 
 ### `announce` takes a `MoqAnnounceRoute`
 
-`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
+`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, instance, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
 `MoqRoute` is only what `MoqAnnounceConsumer` reports, so its fields lose their defaults, and `MoqError::InvalidRoute` is gone.
-To re-announce an observed route, copy its `cost` and `epoch`.
+Leave `instance` null to keep the one the broadcast minted; name a stable one only for a publisher that continues its group sequences across restarts, raising `epoch` on each.
+To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -113,11 +131,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
-`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `epoch` from it.
-Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+`MoqVideo` and `MoqAudio` gain `instance`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `instance: None`.
+`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `instance` from it.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another instance with `Mux`.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -133,8 +151,8 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
-`MoqBroadcastRequest::accept` is replaced by `prepare(epoch)`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
-Mint a fresh epoch per output run with `moq_mint_epoch()`. Dropping a prepared answer unpublished refuses the request.
+`MoqBroadcastRequest::accept` is replaced by `prepare()`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+Dropping a prepared answer unpublished refuses the request.
 
 ### `MoqTrackInfo` gains `compress` (#5928)
 

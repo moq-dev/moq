@@ -44,6 +44,44 @@ maintainer's `wrangler login`. Whether Editor alone passes wrangler's
 custom-domain check on every deploy is unproven until the first `release`
 run; [the deploy quest](../quest/m2/release/moq-sh-deploy.md) tracks it.
 
+## Write credentials
+
+Any branch pushed to this repository runs its own workflows with the
+repository's Actions secrets, so a credential that can write or publish lives
+in an Environment whose deployment policy admits only protected refs. A job
+names the Environment, and a branch that is not on the list fails to start it.
+
+| Environment | Deployable from | Holds |
+| --- | --- | --- |
+| `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
+| `publish` | `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
+| `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
+| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
+| `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
+| `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
+| `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |
+| `github-pages` | `main` | Nothing |
+
+`workflow_run`, schedule, and default dispatch jobs run as `main`, so no job
+that names `publish` runs that way: a tag's own run calls its publishers as
+reusable workflows or dispatches them with `--ref` naming the tag or `release`
+(`sh/gh/trigger-repo-publish.sh`). The `workflow_run` publishers that remain
+need only the moq-bot key and name `bot`. `publish` keeps admitting `main`
+until [the maintainer drops it](../quest/m0/ci/publish-release-only.md).
+A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the merge queue's
+build holds no secrets, and the queue watcher runs on the maintainer's host, outside Actions. A job that also runs dry on other refs names the Environment
+only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
+'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
+repository level.
+
+A tag policy only helps if the tag itself is protected, so the `release tags`
+ruleset ([below](#bootstrapping-the-nix-cache)) also covers `moq-ffi-v*`
+and `moq-dart-v*`. A `workflow_run` job that checks out the triggering commit
+first requires its `head_branch` to be such a tag at that commit, since a
+branch can share a release's name. JSR's GitHub trust checks only the repository, not an
+Environment, so `release-js` publishes to JSR with `JSR_TOKEN` instead and the
+JSR packages do not trust the repository.
+
 ## Bootstrapping a new package repository
 
 The CI workflows (`.github/workflows/apt-repo.yml`,
@@ -95,8 +133,8 @@ domain, and signing key already exist. To stand them up the first time:
      --file moq-keyring.asc --remote
    ```
 
-5. **Configure GitHub Actions secrets** (Settings -> Secrets and variables
-   -> Actions):
+5. **Configure GitHub Actions secrets** in the `publish` Environment (see
+   [Write credentials](#write-credentials)):
 
    - `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`: R2 API token with
      object read/write on both buckets.
@@ -109,19 +147,33 @@ After this, every release that publishes a `.deb` or `.rpm` (one of the
 triggers `apt-repo.yml` / `rpm-repo.yml`, which downloads the assets,
 regenerates the repository metadata, signs it, and uploads the diff.
 
+## The landing gate
+
+PRs land through GitHub's merge queue, one at a time with squash merges. Each
+`merge_group` build runs `just ci "$BASE"` against the group's base on the
+self-hosted runner `nixos-moq-ci` (label `moq-queue`, with its local caches and
+`/dev/kvm`), read-only and without secrets (`.github/workflows/queue.yml`). The
+main ruleset requires its `Queue` context and the merge queue, so only the
+queue (or the administrator bypass) lands on `main`. moq-dev/quest's queue
+watcher, `quest land watch`, runs on the maintainer's NixOS host
+([kixelated/nixos](https://github.com/kixelated/nixos), `modules/quest-land.nix`)
+with moq-bot's key: it comments on each PR the queue drops, runs the Codex
+fixer, and re-enqueues the result.
+See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landing.
+
 ## Bootstrapping the Rust build cache
 
 `.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket,
-namespaced per runner OS and architecture. Every job that runs on `main` or in
-its merge queue (`gh-readonly-queue/main/*`) writes what it compiles: a queued
-pull request is about to become `main`, so its code is trusted like `main`'s.
-Release pull request jobs only read (main pull requests run no cloud CI), and
+namespaced per runner OS and architecture. Hosted jobs on `main` write what
+they compile. The merge queue's self-hosted build uses its persistent local store and has no R2
+credentials.
+Pull request jobs only read (main PRs run Check only while ready), and
 fork pull requests, which get no secrets, build cold.
 
 The write key is what enforces that: it lives in a GitHub Environment that
 only those refs can deploy to, and each writer job names that Environment only
 when it runs on one of them. mbx on its own trusts only a push to a protected
-branch, which leaves out the queue and Nightly's schedule, so the action sets
+branch, which leaves out Nightly's schedule, so the action sets
 `MBX_REMOTE_TRUST_WRITES` for writers and the Environment is the only boundary.
 
 All of this runs once, by a maintainer. Steps 1, 2, and 4 are done, and step 3
@@ -147,8 +199,9 @@ is done for `main`.
    - `mbx-read`: **Object Read only**.
    - `mbx-write`: **Object Read & Write**.
 
-3. **Create the `cache-write` Environment**, deployable from `main` and its
-   merge queue only. A protected-branches policy would admit `release` as
+3. **Create the `cache-write` Environment**, deployable from `main` and the
+   protected release tags configured below.
+   A protected-branches policy would admit `release` as
    well, so name the branches instead:
 
    ```bash
@@ -157,12 +210,10 @@ is done for `main`.
    EOF
    gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
      -f name=main -f type=branch
-   gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
-     -f name='gh-readonly-queue/main/*' -f type=branch
    ```
 
-   Without the queue policy, every merge queue job that writes fails before
-   it starts, and the queue merges nothing.
+   The merge queue's `gh-readonly-queue/main/*` builds need no branch policy:
+   they run on the self-hosted runner and never deploy `cache-write`.
 
 4. **Store the keys under the same two names at both levels.** An Environment
    secret shadows a repository secret of the same name, so writers get the
@@ -207,8 +258,8 @@ ARTIFACTS_DIR=artifacts \
 Or trigger the GitHub Actions workflow manually:
 
 ```bash
-gh workflow run apt-repo.yml -f tag=moq-relay-v1.2.3
-gh workflow run rpm-repo.yml -f tag=moq-relay-v1.2.3
+gh workflow run apt-repo.yml --ref release -f tag=moq-relay-v1.2.3
+gh workflow run rpm-repo.yml --ref release -f tag=moq-relay-v1.2.3
 ```
 
 ## Bootstrapping the Nix cache
@@ -223,10 +274,18 @@ after upload; the next warm re-uploads what it still needs. `flake.nix`
 sets `fallback = true` because that expiry can remove a path before one that
 depends on it.
 
+The Worker logs R2 internal errors (10001) and service-unavailable errors
+(10043) and treats the failed read as a miss: the other bucket can still
+serve the path, and otherwise the 404 is non-cacheable so Nix builds from
+source.
+Other errors, including invalid object names, permissions, and bucket
+configuration, still fail the request. A failure after the archive body
+starts streaming remains a failed download, covered by `fallback`.
+
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
 the trust boundary, not the bucket keys. It lives in the `cache-write`
-Environment beside one R2 token for both buckets. Only `main`, the merge queue,
-and the five release tag patterns can deploy there; anything that can reach
+Environment beside one R2 token for both buckets. Only `main` and the five
+release tag patterns can deploy there; anything that can reach
 the key can sign any path, so a second Environment for releases would only
 guard the bucket. Readers need no secret.
 
@@ -246,7 +305,8 @@ done.
      "enforcement": "active",
      "conditions": {"ref_name": {"exclude": [], "include": [
        "refs/tags/moq-relay-v*", "refs/tags/moq-cli-v*", "refs/tags/moq-boy-v*",
-       "refs/tags/moq-c-v*", "refs/tags/moq-gst-v*"
+       "refs/tags/moq-c-v*", "refs/tags/moq-gst-v*",
+       "refs/tags/moq-ffi-v*", "refs/tags/moq-dart-v*"
      ]}},
      "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
      "bypass_actors": [

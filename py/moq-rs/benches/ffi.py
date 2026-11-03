@@ -10,7 +10,6 @@ import os
 import resource
 import time
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -66,12 +65,12 @@ async def read(case: Case, consumer: moq.TrackConsumer, payload: bytes, n: int) 
         frame = await group.read_frame()
         assert frame is not None, "group ended"
         assert frame.payload == payload, f"corrupt frame {f} of round {n}"
-        assert frame.timestamp == timedelta(microseconds=n * case.frames + f)
+        assert frame.timestamp == moq.Timestamp(n * case.frames + f, 1_000_000)
 
 
 async def throughput(case: Case, results: list[dict]) -> None:
     origin = moq.OriginProducer(cache_capacity_bytes=CACHE_BYTES)
-    broadcast = origin.create_broadcast("bench")
+    broadcast = origin.create_broadcast("bench").broadcast
     tracks = [broadcast.publish_track(str(p), moq.TrackInfo(timescale=1_000_000)) for p in range(case.publishers)]
     consumers = [track.consume() for track in tracks for _ in range(case.subscribers)]
     # A non-uniform payload, so a zero-filled or truncated copy fails the check.
@@ -83,7 +82,7 @@ async def throughput(case: Case, results: list[dict]) -> None:
         for track in tracks:
             group = track.append_group()
             for f in range(case.frames):
-                group.write_frame(payload, timedelta(microseconds=n * case.frames + f))
+                group.write_frame(payload, moq.Timestamp(n * case.frames + f, 1_000_000))
             group.finish()
         await asyncio.wait_for(asyncio.gather(*readers), ROUND_TIMEOUT)
 

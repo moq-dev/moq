@@ -28,23 +28,27 @@ async fn release(version: Version) {
 	let track = broadcast.create_track("t", None).unwrap();
 
 	let consumer = relay.consume();
-	consumer.routed("a/b").await.expect("routed");
-	let remote = consumer.request_broadcast("a/b", None).await.expect("resolves");
+	let remote = consumer
+		.follow("a/b", None)
+		.unwrap()
+		.available()
+		.await
+		.expect("resolves");
 	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
 	crate::support::wanted(track.demand()).await.unwrap();
 
 	broadcast.unannounce();
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	drop(sub);
 	drop(remote);
-	moq_clock::timeout(Duration::from_secs(600), crate::support::unwanted(track.demand()))
+	kio::clock::timeout(Duration::from_secs(600), crate::support::unwanted(track.demand()))
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the relay kept its upstream subscription"))
 		.unwrap();
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn unannounced_remote_track_releases_demand() {
 	for version in support::every_version() {
 		release(version).await;

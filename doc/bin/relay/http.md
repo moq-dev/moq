@@ -27,7 +27,9 @@ curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 
 With [stats](/concept/stats) enabled, `/fetch` and `/announced` count as requests
 on the token's tier and root. Fetched payload counts against its broadcast path;
-neither endpoint counts as a connected session.
+neither endpoint counts as a connected session. Both endpoints return private,
+non-cacheable responses. `/fetch` serves binary data, so save it to a file or
+parse it as the track's format.
 
 GET routes on the public router, including ones an embedder merges in, get a
 wildcard CORS origin unless the route sets its own. Tokens sent over plain HTTP
@@ -40,13 +42,25 @@ are visible on the wire, so use HTTPS in production.
 listen = "127.0.0.1:9101"
 ```
 
+The listener is unauthenticated and must stay on loopback or a trusted private
+network. Requests carrying an `Origin` header are refused. Ops tools must use
+the listener's literal IP and port, or `localhost` on loopback; other hostnames
+are refused to prevent DNS rebinding. A proxy must preserve that authority
+rather than forward the caller's `Host`.
+
 ### GET /metrics
 
-Prometheus text: payload bytes, frames, groups, announces, subscriptions, and
-viewers split by `tier` and `role`; requests and sessions by `tier`; and
-accept-loop counters per TCP listener. Payload counters accumulate for the
-node's lifetime and leave out the stats feed's own traffic. Host CPU and memory
-belong to a node exporter.
+OpenMetrics text, which Prometheus scrapes natively: payload bytes, frames,
+groups, announces, subscriptions, and viewers split by `tier` and `role`;
+requests and sessions by `tier`; and accept-loop counters per TCP listener. Payload counters accumulate for the
+node's lifetime and leave out the stats feed's own traffic. Every counter fed by
+sessions and requests, through the wire and control bytes below, counts only
+while [stats](/bin/relay/config#stats) are enabled. Host CPU and memory belong
+to a node exporter.
+
+`moq_relay_inflated_bytes_total` counts the bytes the relay inflated from
+[compressed tracks](/concept/compression) for readers that cannot carry
+compression, once per group however many share the copy.
 
 `moq_relay_wire_tx_bytes_total` and `moq_relay_wire_rx_bytes_total` sum the
 per-session [transport counters](/concept/stats#sessions) by `tier`, including
@@ -77,16 +91,22 @@ A few worth alerting on:
   [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
 - `moq_relay_panics_total`: bugs that closed one session instead of the
   relay. Each logs an error with the message and the session's span. A panic
-  in a task every session depends on (the origin, the cache governor, the
-  certificate reload) exits the relay instead.
+  in a long-lived task (the origin, the cache governor, the certificate reload,
+  the stats publisher) exits the relay instead.
 
 With `--runtime-io-uring`, each QUIC worker also reports `moq_relay_uring_*`
 counters under a `worker` label. Datagrams per enter and the SQE/CQE
 histograms show whether syscalls carry useful work. Compare turns and
 queue-pressure enters with throughput: flushing deferred work can remove
-empty busy turns, so enters/turn alone does not grade efficiency. The
+empty busy turns, so enters/turn alone does not grade efficiency.
+`moq_relay_uring_passes_total` over turns is how many passes over its woken
+tasks a turn runs; a ratio near the default budget of 4 shows heavy use of
+the pass budget but does not prove that work spilled into the next turn. The
 histograms include empty enters. A dead worker shows stuck zeros rather than
-disappearing.
+disappearing. The `*_pool_bytes` gauges are the UDP buffer space each worker
+has allocated; pools grow under load and keep their high-water size. Most of
+it is reserved rather than resident: RSS grows by the buffer pages datagrams
+have touched.
 
 ### GET /sessions
 

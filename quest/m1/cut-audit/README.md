@@ -42,33 +42,21 @@ internal and can ship after the cut:
 [moq-transport request leases](/quest/m2/ietf-request-lease.md),
 [group heads filled in place](/quest/m2/ietf-fill-refill.md),
 [one relay serve path](/quest/m2/relay-serve-path.md),
-[moqsrc pad actors](/quest/m2/moqsrc-pad-actor.md), and
-[publish rendition identity](/quest/m2/publish-publication.md). Other
+moqsrc pad actors and publish rendition identity (both since landed). Other
 redesign evidence went into the quests that already own the mechanism:
 [subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [drop set](/quest/m1/drop-set.md),
 [per-origin routes](/quest/m1/cluster-routing/routes.md),
 drafts 14-17 removal (since landed), and
 [buffered playback](/quest/m1/buffered-ascending.md). The audit recommends
-leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
+leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts-js.md).
 
 ## Required
 
-- [Counted field-less `trun` entries](/quest/m1/cut-audit/fmp4-sample-resolver.md) - a moof of field-less runs cannot materialize millions of sample entries
-- [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
-- [JS tracks end clean only on a deliberate finish](/quest/m1/cut-audit/js-close-cause.md) - local close, violations, and unanswered requests end with errors
-- [A description-less AAC rendition means one thing](/quest/m1/cut-audit/aac-description-less.md) - every player and exporter agrees on the frame format
-- [RTMP sessions follow one strict path](/quest/m1/cut-audit/rtmp-session-strict.md) - idle sockets, repeated requests, rewinds, and stalled servers are handled
-- [The export jitter buffer admits only frames due within its window](/quest/m1/cut-audit/jitter-admission.md) - a fast track is backpressured, not buffered without bound
-- [Peer-driven receive loops yield on a per-message budget](/quest/m1/cut-audit/peer-loop-budget.md) - small-message floods cannot monopolize a session driver
-- [Removing a stale front is O(1)](/quest/m1/cut-audit/weak-cache-remove.md) - a restart wave is linear under the origin lock
-- [Rust and JS accept the same catalogs](/quest/m1/cut-audit/catalog-parity.md) - one strictness, per rendition, with a shared fixture corpus
-- [Every relay runtime honors or refuses each listen setting](/quest/m1/cut-audit/uring-listen-config.md) - io_uring stops ignoring preferred addresses
-- [Lite's version gates, refusals, and draft text agree](/quest/m1/cut-audit/lite-wire-nits.md) - small wire and draft mismatches fixed
+- [Text and data sections keep a prototype-named ID](/quest/m1/cut-audit/catalog-proto-ids.md) - text and data entries keep the ID JS's `z.record` drops
 
 ## Related
 
-- [Release audit findings](/quest/m1/release-audit/README.md) - the 2026-10-22 audit this one follows
 - [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - would have caught the media parser findings here
 - [Announce interest streams share one route table](/quest/m2/announce-interest-memory.md) - the audit's inherited announce memory finding
 - [A parked read of a resumed group reads its budget without re-syncing](/quest/m2/recover-budget.md) - measure-first resume cost

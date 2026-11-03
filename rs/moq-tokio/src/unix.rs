@@ -242,14 +242,15 @@ pub(crate) struct PeerCred {
 ///
 /// The path is taken from the URL path, so use a triple slash for an absolute
 /// path: `unix:///run/moq/internal.sock`.
-pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Session> {
+pub(crate) async fn connect(url: Url, protocols: &[&str], session: &qmux::Config) -> Result<qmux::Session> {
 	let path = socket_path(&url).ok_or(Error::MissingPath)?;
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via Unix socket");
-	let mut config = crate::qmux_config();
+	let mut config = session.clone();
 	config.version = WIRE_VERSION;
 	config.protocol = qmux::Protocol::Negotiate(protocols.iter().map(|p| (*p).to_owned()).collect());
 	qmux::uds::connect(path, config)
 		.await
+		.map(crate::spawn_qmux)
 		.map_err(|err| Error::Connect(crate::error::message(err)))
 }
 
@@ -271,6 +272,8 @@ pub(crate) struct Listener {
 	path: PathBuf,
 	protocols: Vec<String>,
 	health: crate::accept::Health,
+	/// The settings each accepted qmux session starts with.
+	session: qmux::Config,
 }
 
 impl Listener {
@@ -298,16 +301,24 @@ impl Listener {
 			path,
 			protocols: Vec::new(),
 			health: crate::accept::Health::new("unix"),
+			session: crate::qmux_default(),
 		})
 	}
 
 	/// Report into `health` instead of the one this listener made for itself.
 	///
 	/// For an owner that has to hand the handle out *before* the listener exists:
-	/// [`crate::Server`] binds these lazily (they need a runtime), but an embedder
+	/// [`crate::Server`] binds these lazily (they bind asynchronously), but an embedder
 	/// registering them with a metrics endpoint does so at startup.
 	pub(crate) fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
 		self.health = health;
+		self
+	}
+
+	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
+	/// section, rather than its defaults.
+	pub(crate) fn with_quic(mut self, quic: &crate::quic::Resolved) -> Self {
+		self.session = crate::qmux_config(quic);
 		self
 	}
 
@@ -335,7 +346,7 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
 		let allow = allow.cloned();
-		let mut config = crate::qmux_config();
+		let mut config = self.session.clone();
 		config.version = WIRE_VERSION;
 		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		async move {
@@ -361,6 +372,7 @@ impl Listener {
 			}
 			let session = qmux::uds::accept(stream, config)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, cred))
 		}
@@ -376,7 +388,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						moq_clock::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}

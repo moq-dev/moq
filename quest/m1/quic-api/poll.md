@@ -1,4 +1,4 @@
-# [S] The QUIC drivers' waits poll
+# [M] The QUIC drivers' waits poll
 
 ## Goal
 
@@ -6,11 +6,17 @@ The stream, datagram, close, and accept waits in `moq_tokio::quic::driver`
 and moq-uring's driver have public `poll_*` forms taking `&self,
 &kio::Waiter`: `Connection::poll_open_uni`, `poll_open_bi`,
 `poll_accept_uni`, `poll_accept_bi`, `poll_recv_datagram` and `poll_closed`,
-`send::Stream::poll_closed` (today's `stopped`), and `Endpoint::poll_accept`.
+`send::Stream::poll_closed` and `send::Finished::poll_closed` (today's
+`stopped`, which both share), and `Endpoint::poll_accept`.
 `send::Stream::poll_acked`, which [poll_acked](/quest/m2/quic-ack-hook.md)
 adds, takes the same shape. The async methods are thin `kio::wait` wrappers,
-and `send::Finished` implements `Future`, resolving when every byte is
-acknowledged or the peer stops the stream. No `tokio::sync::Notify` is left
+and `send::Finished` implements `Future` over its `poll_closed`, resolving
+as `stopped()` does today: `Ok(None)` once the peer acknowledges the FIN and
+every byte, or after a local reset, `Ok(Some(code))` if the peer stopped it first, and `Err` if the
+connection is lost.
+moq-tokio's WebTransport `SendStream` needs the poll form, not just the
+`Future`: once finished, it answers moq-net's waiter-based `poll_closed` and
+still reports the peer's stop code. No `tokio::sync::Notify` is left
 in the driver.
 
 ## Plan
@@ -35,8 +41,7 @@ Decided 2026-10-25 (maintainer), replacing the 2026-10-23 shape:
   break, no longer holds: moq-net already re-exports kio, and moq-quic takes
   `&kio::Waiter` too. The caller owns the waiter, so a poll that is
   abandoned leaves nothing behind, and handles stay `&self`. moq-net's
-  `transport::poll` traits take the same shape
-  ([net-poll](/quest/m1/quic-api/net-poll.md)), so their native impls
+  `transport::poll` traits take the same shape, so their native impls
   forward without a `Park`.
 
 ```rust
@@ -48,6 +53,9 @@ impl Connection {
 impl send::Stream {
     pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, send::Error>>;
 }
+impl send::Finished {
+    pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, send::Error>>;
+}
 ```
 
 Keep the existing guarantees, such as draining accepted streams and
@@ -55,8 +63,28 @@ datagrams from a closed connection before its error (moq-quic's waits carry
 that now). The `Connecting` handshake, `Endpoint::wait_idle`, and
 `Endpoint::wait_all_draining` move off `Notify` too, but get no poll form
 until a caller needs one. Report the public API:
-new poll methods on `Connection`, `send::Stream` and `Endpoint`, with the
+new poll methods on `Connection`, `send::Stream`, `send::Finished` and
+`Endpoint`, with the
 async forms unchanged.
+
+Added 2026-11-01 (maintainer, follow-up planning after the 2026-11-01
+/quest-afk run), from [moq-dev/moq#7490](https://github.com/moq-dev/moq/pull/7490),
+which finishes [waits](/quest/m1/quic-api/waits.md):
+
+- **Remove `ShouldTransmit`.** Once moq-quic wakes the transmit waiter itself,
+  the `ShouldTransmit` that `Chunks::finalize` and the send lease methods
+  (`lease`, `poll_lease`, `restore`, `release` in
+  `rs/moq-quic/src/connection/streams/lease.rs`) return is ignored by every
+  consumer. Drop it from moq-quic's public API and its callers, as part of
+  this reshape, since moq-quic is unreleased.
+- **Test moq-tokio's close while the socket is blocked.** moq-tokio's driver
+  skips `poll_transmit` while the socket holds output back, so a local close
+  could not re-arm the closing period's timer; #7490's round 1 fixed it by
+  also parking the driver on the non-consuming `poll_closed`. No driver test
+  has a socket that holds sends back, so nothing covers it.
+  Add one (a test socket whose sends return `WouldBlock` until released) and
+  a test that a close behind it is still bounded, mirroring qmux's
+  `a_close_behind_a_stalled_peer_is_bounded`.
 
 ## Required
 
