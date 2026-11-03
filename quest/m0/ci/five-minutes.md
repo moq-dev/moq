@@ -2,14 +2,21 @@
 
 ## Goal
 
-`just check` and `just test` each finish in under 5 minutes of wall time for
-every diff-scoped run on the desktop with warm caches, counting time queued in
-`quest gate` admission. A worker agent then runs its own gate inside its
+`just check`, including its selected modules' test phases, finishes in under
+5 minutes of wall time for every diff-scoped run on the desktop with warm
+caches, counting time queued in `quest gate` admission. A worker agent then runs its own gate inside its
 5-minute prompt-cache window. Explicit full runs (`--all`, nightly, release)
 are exempt; work moved out of the diff-scoped gate goes to the merge queue or
 nightly with its coverage kept.
 
 ## Plan
+
+Decided 2026-11-03 (maintainer): the bound covers "`just check`, including its
+selected modules' test phases" ✅, not bare `just test` or a separately named
+set of cross-language suites. `just check` is the diff-scoped gate and already
+runs each selected module's tests; bare `just test` only lists the
+cross-language suites. The historical `just test` baseline row below is not
+compared with new measurements.
 
 Decided 2026-10-29 (user): sub-agents run with a 5-minute prompt cache and the
 coordinating session with a 1-hour one
@@ -128,11 +135,6 @@ What remains:
   command taking 227 s. The 2026-10-29 admission decision above remains with
   moq-dev/quest.
 - Repeat the default FFI route after the Gradle fix lands, without the override.
-- Name the test command in the goal before measuring it. The historical
-  `just test` row has no reproducible command selection attached to it.
-  Bare `just test` lists the cross-language suites and exits successfully;
-  `just check` already runs each selected module's unit tests. Do not compare
-  that row with a newly chosen suite.
 - Keep the dependency-build and cache work with
   [hakari](/quest/m0/ci/hakari.md). Decided 2026-10-30 (user): defer parallel
   Rust lint until that quest lands, then measure it. The slow-tests reduction
@@ -143,12 +145,6 @@ What remains:
   coverage tradeoff. Split a large independent lever into its own quest.
 
 ## Waiting
-
-- Maintainer: name the command covered by the `just test` goal. Recommended:
-  replace "`just check` and `just test` each" with "`just check`, including its
-  selected modules' test phases," because that is the diff-scoped gate.
-  Alternatively name the cross-language suites that also need the bound.
-  The historical test row's command selection has not been recovered.
 
 - moq-dev/quest: admission must keep the whole gate inside the worker's cache
   window; repeat the net measurement after its admission work lands.
