@@ -4339,6 +4339,49 @@ fn connect_detects_mtu() {
 }
 
 #[test]
+fn migrate_without_mtud_respects_peer_max_udp_payload_size() {
+	let _guard = subscribe();
+	const INITIAL_MTU: u16 = 16000;
+	const PEER_MAX: u16 = 1200;
+	let transport = || transport::Config {
+		initial_mtu: INITIAL_MTU,
+		mtu: None,
+		..transport::Config::default()
+	};
+	let endpoint = endpoint::Config {
+		max_udp_payload_size: PEER_MAX,
+		..endpoint::Config::default()
+	};
+	let factory = Arc::new(MtuRecorderFactory::default());
+	let mut server_config = server_config();
+	server_config.transport = transport::Config {
+		congestion: factory.clone(),
+		..transport()
+	};
+	let mut client_config = client_config();
+	client_config.transport = transport();
+	let mut pair = Pair::new(endpoint, server_config);
+	let (client_ch, server_ch) = pair.connect_with(client_config);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+
+	// Moving to another IP, unlike a NAT rebinding, builds the server a fresh path.
+	pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive();
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+	// The new path's controller starts at the peer's limit too, not at the initial MTU
+	assert_eq!(
+		*factory.0.lock().unwrap(),
+		[
+			MtuEvent::Build(INITIAL_MTU),
+			MtuEvent::Update(PEER_MAX),
+			MtuEvent::Build(PEER_MAX),
+		]
+	);
+}
+
+#[test]
 fn migrate_detects_new_mtu_and_respects_original_peer_max_udp_payload_size() {
 	let _guard = subscribe();
 
@@ -5308,6 +5351,131 @@ fn min_mtu_respects_peer_max_udp_payload_size() {
 	pair.drive();
 	let server_ch = pair.server.assert_accept();
 	pair.finish_connect(client_ch, server_ch);
+}
+
+/// A path MTU above the default controller's 1200-based initial window still lets the first
+/// Initial leave: a window smaller than one datagram would block it, and no ACK would ever come.
+#[test]
+fn handshake_with_initial_mtu_above_initial_window() {
+	let _guard = subscribe();
+	const MTU: u16 = 16000;
+	let transport = || transport::Config {
+		initial_mtu: MTU,
+		mtu: None,
+		..transport::Config::default()
+	};
+	let endpoint = endpoint::Config {
+		max_udp_payload_size: MTU,
+		..endpoint::Config::default()
+	};
+	let mut server_config = server_config();
+	server_config.transport = transport();
+	let mut client_config = client_config();
+	client_config.transport = transport();
+	let mut pair = Pair::new(endpoint, server_config);
+	pair.mtu = MTU.into();
+	let (client_ch, server_ch) = pair.connect_with(client_config);
+	assert_eq!(pair.client_conn_mut(client_ch).path_mtu(), MTU);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), MTU);
+}
+
+/// The MTU a congestion controller learned, as the transport reported it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MtuEvent {
+	/// A controller was built for a path at this MTU
+	Build(u16),
+	/// A controller was told the path MTU changed
+	Update(u16),
+}
+
+type MtuLog = Arc<Mutex<Vec<MtuEvent>>>;
+
+/// Records the MTU its controller starts at and every update after.
+#[derive(Clone)]
+struct MtuRecorder(MtuLog);
+
+impl Controller for MtuRecorder {
+	fn on_sent(&mut self, _sent: congestion::Sent) -> congestion::Packet {
+		Default::default()
+	}
+
+	fn on_ack(&mut self, _ack: congestion::Ack<'_>) {}
+
+	fn on_loss(&mut self, _loss: congestion::Loss<'_>) {}
+
+	fn on_ce(&mut self, _ce: congestion::Ce) {}
+
+	fn on_mtu_update(&mut self, new_mtu: u16) {
+		self.0.lock().unwrap().push(MtuEvent::Update(new_mtu));
+	}
+
+	fn window(&self) -> u64 {
+		u64::MAX / 2
+	}
+
+	fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+		None
+	}
+
+	fn metrics(&self) -> Metrics {
+		Metrics::default()
+	}
+
+	fn clone_box(&self) -> Box<dyn Controller> {
+		Box::new(self.clone())
+	}
+}
+
+/// Shares one log among every controller it builds, one per path.
+#[derive(Default)]
+struct MtuRecorderFactory(MtuLog);
+
+impl Factory for MtuRecorderFactory {
+	fn build(self: Arc<Self>, init: congestion::Init) -> Box<dyn Controller> {
+		self.0.lock().unwrap().push(MtuEvent::Build(init.mtu));
+		Box::new(MtuRecorder(self.0.clone()))
+	}
+}
+
+/// A peer `max_udp_payload_size` below the initial MTU reaches the congestion controller, which
+/// sizes its minimum window and pacing burst by the path MTU.
+#[test]
+fn peer_max_udp_payload_size_reaches_controller() {
+	let _guard = subscribe();
+	const INITIAL_MTU: u16 = 1452;
+	const PEER_MAX: u16 = 1280;
+
+	let factory = Arc::new(MtuRecorderFactory::default());
+	let mut config = server_config();
+	config.transport = transport::Config {
+		min_mtu: INITIAL_MTU,
+		mtu: None,
+		congestion: factory.clone(),
+		..transport::Config::default()
+	};
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(config),
+			..endpoint::Config::default()
+		},
+		true,
+	)
+	.unwrap();
+	let client = Endpoint::new(
+		endpoint::Config {
+			max_udp_payload_size: PEER_MAX,
+			..endpoint::Config::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(client, server);
+	let (_, server_ch) = pair.connect_with(client_config());
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), PEER_MAX);
+	assert_eq!(
+		*factory.0.lock().unwrap(),
+		[MtuEvent::Build(INITIAL_MTU), MtuEvent::Update(PEER_MAX)]
+	);
 }
 
 /// Verify that UDP datagrams are padded to MTU if specified in the transport config.
