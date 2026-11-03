@@ -177,6 +177,7 @@ case "$1" in
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
         javascript audio-support just js audio-support-bench
+        javascript pattern just js pattern-bench
         javascript clock just js clock-bench
         ;;
     # The binding benchmark's runners at a token budget, so they keep working at this
