@@ -8827,7 +8827,7 @@ struct ServeLoop {
 	held: Option<HeldTrack>,
 	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_FINISH: once it
 	/// settles the copy finishes and FINs, while demand and responses keep flowing meanwhile.
-	finishing: Option<Settle>,
+	finishing: Option<(u64, Settle)>,
 	/// A pipelined subscription whose group streams stay parked until the responses that
 	/// beat the accept are read, as they would have been without the wait: a
 	/// SUBSCRIBE_START says where the feed starts before its first group does.
@@ -9193,7 +9193,7 @@ impl ServeLoop {
 				// Lite-07 keeps the stream open past it, so its tail starts now rather
 				// than at a FIN, while demand and responses keep flowing.
 				if serve.subscriber.version.keeps_subscribe_open() {
-					self.finishing = Some(Self::settle(serve, &self.serving, active));
+					self.finishing = Some((active.id, Self::settle(serve, &self.serving, active)));
 				}
 			}
 			// SUBSCRIBE_START names where each range's delivery starts,
@@ -9289,9 +9289,15 @@ impl ServeLoop {
 	/// Whether the tail of a lite-07 subscription the publisher finished has settled, so the
 	/// copy can FIN it: every owed group accounted for, or the grace passed.
 	fn poll_finishing(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let (Some(settle), Sub::Active(active)) = (&mut self.finishing, &self.sub) else {
+		let (Some((id, settle)), Sub::Active(active)) = (&mut self.finishing, &self.sub) else {
 			return Poll::Pending;
 		};
+		// The tail belongs to the subscription that received SUBSCRIBE_FINISH, not one that
+		// replaced it after the demand left and came back.
+		if *id != active.id {
+			self.finishing = None;
+			return Poll::Pending;
+		}
 		// Nothing says which groups are owed until SUBSCRIBE_START says where delivery starts,
 		// so until then only the grace settles.
 		let owed = match active.awaits_start() {
