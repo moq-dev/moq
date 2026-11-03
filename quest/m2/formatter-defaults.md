@@ -11,7 +11,9 @@ even if the evaluation keeps Biome.
 ## Plan
 
 Remove style overrides, including indentation, line widths, and quoting, from
-formatter configuration, command flags, and EditorConfig. Keep lint rules,
+formatter configuration and command flags. Make EditorConfig mirror each
+selected formatter's defaults, including spaces for YAML and Markdown
+frontmatter, instead of imposing a custom global style. Keep lint rules,
 parser capabilities, and exclusions that protect generated, vendored, or
 byte-sensitive files. Use the selected formatter's defaults where a language
 has no single standard style; do not invent a replacement repository style.
