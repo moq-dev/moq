@@ -168,11 +168,10 @@ the set never outgrows what the pool would hold, with no new constant. An
 evicted run's sequences become unknown again. `js/net` has no byte pool and
 gets no new cap: its shared and per-cursor runs expire with the same idle
 window as the groups they sit between, and expiry applies the same
-fold-or-`TooFarBehind` rule as a Rust eviction. A run sits between cached
-sequences, so there are at most about one per cached sequence (alternating
-drop and arrival), and JS run state grows no faster than the JS cache
-itself. The JS byte bound for both is the 32 MiB group tail that
-[moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) landed.
+fold-or-`TooFarBehind` rule as a Rust eviction. The implementation audit below
+found that neither a cached-sequence count nor the existing group-tail limit
+bounds drop-only runs; the JS memory policy needs the maintainer's decision
+under `Waiting` before implementation.
 
 Only a final run folds into a cursor's floor: a delivered run, a run
 skipped at the track's max age bound (no widening reaches past it), or a
@@ -302,6 +301,37 @@ Found 2026-10-28 by [moq-dev/moq#7149](https://github.com/moq-dev/moq/pull/7149)
 a cancelled fetch below a track's end still holds the end open until the cache
 expiry scan removes it, so how fast a subscription ends depends on expiry
 timing. Settle it here, where cancelled and expired runs get a reason.
+
+## Waiting
+
+- Maintainer: settle the JS run memory policy. The 2026-11-02 implementation
+  audit found that `js/net/src/group.ts` applies its 32 MiB limit to each
+  group's frame tail, not to track metadata or cursor runs. A mock-time
+  probe retained 64, 256, and 1,024 disjoint OLD runs with zero cached groups
+  and zero elapsed time. Unknown gaps prevent coalescing or folding these
+  into a cursor's final floor; idle expiry alone does not bound a flood
+  inside its window. Choose shared byte accounting for JS cache metadata
+  and runs, with eviction and the planned fold-or-`TooFarBehind` behavior
+  (recommended; settle its budget and ownership), or a different ownership
+  or backpressure bound that also covers drop-only tracks. The previous
+  assertion that every run sits between cached sequences is false when
+  drops name groups this relay never cached, a required case of this quest.
+- Maintainer: settle how a received stale drop identifies its judged range
+  after SUBSCRIBE_UPDATE changes ranges without changing Max Age. A drop
+  sent under the old broad range can arrive after the relay requests a
+  narrower aggregate range; that reader now covers the aggregate but not
+  the range used for the verdict. Mock-time cursors over groups at 0, 1,
+  and 2 seconds confirm the difference: at Max Age 0 the open range serves
+  group 2, whereas a range capped before group 1 serves group 0. Max Age
+  alone cannot distinguish an old broad-range verdict from a new one.
+  Choose an explicit range-terms identifier echoed in stale drops and
+  treat superseded identifiers as unknown without keeping unbounded term
+  history (recommended; settle the lite-07 fields), or conservatively
+  qualify drops against all possibly judged ranges and refill whenever
+  that cannot prove applicability. The latter must specify how to bound
+  that state and when a reader is guaranteed a prompt verdict. This is
+  separate from the settled budget tag and from the deferred lite-ranges
+  design work. No wire or production change has been implemented.
 
 ## Related
 
