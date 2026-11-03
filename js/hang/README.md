@@ -11,9 +11,9 @@ Core media library for [Media over QUIC](https://moq.dev/) (MoQ). Provides share
 
 ## Features
 
-- **Catalog** — JSON track describing other tracks and their codec properties (audio, video, chat, location, etc.)
-- **Container** — Media framing in two formats: CMAF (fMP4) and Legacy (varint-timestamp + raw codec bitstream)
-- **Utilities** — Hex encoding, Opus and AAC audio polyfill ([`@moq/libav`](../libav)), latency computation, browser detection workarounds
+- **Catalog** - JSON track describing other tracks and their codec properties (audio, video, chat, location, etc.)
+- **Container** - Media framing in two formats: CMAF (fMP4) and Legacy (varint-timestamp + raw codec bitstream)
+- **Utilities** - Hex encoding, Opus and AAC audio polyfill ([`@moq/libav`](../libav)), latency computation, browser detection workarounds
 
 Browser support detection is provided by [`<moq-watch-support>`](../watch) and [`<moq-publish-support>`](../publish).
 
@@ -32,10 +32,10 @@ bun add @moq/hang
 ```typescript
 import * as Hang from "@moq/hang";
 
-// Catalog — describes tracks and their codec properties
+// Catalog - describes tracks and their codec properties
 import * as Catalog from "@moq/hang/catalog";
 
-// Container — Legacy and LOC framing
+// Container - Legacy and LOC framing
 import * as Container from "@moq/hang/container";
 
 // CMAF decoding is a separate synchronous module, loaded only when needed.
@@ -53,10 +53,10 @@ import * as Publish from "@moq/publish";
 
 ## Related Packages
 
-- **[@moq/watch](../watch)** — Subscribe to and render MoQ broadcasts
-- **[@moq/publish](../publish)** — Publish media to MoQ broadcasts
-- **[@moq/net](../lite)** — Core pub/sub transport protocol
-- **[@moq/signals](../signals)** — Reactive signals library
+- **[@moq/watch](../watch)** - Subscribe to and render MoQ broadcasts
+- **[@moq/publish](../publish)** - Publish media to MoQ broadcasts
+- **[@moq/net](../lite)** - Core pub/sub transport protocol
+- **[@moq/signals](../signals)** - Reactive signals library
 
 ## License
 

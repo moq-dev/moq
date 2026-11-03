@@ -35,9 +35,9 @@ for await (const { value, at } of consumer) {
 ```
 
 `next()` buffers every state it has not yielded and skips a group once the
-subscription's `maxDelay` proves it stale. The budget counts media time and
+subscription's `delay.max` proves it stale. The budget counts media time and
 wall time, or wall time alone for an untimed track. The default subscription's
-zero keeps only the newest group, so subscribe with a `maxDelay` covering how
+zero keeps only the newest group, so subscribe with a `delay.max` covering how
 far the playhead trails the live edge. Use `latest()` to skip straight to the head.
 
 A stream rides one group with no record-count or cumulative byte limit. The

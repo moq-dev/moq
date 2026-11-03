@@ -498,7 +498,10 @@ async fn record(profile: Profile) -> Recording {
 		let mut track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(300)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(300))),
+			)
 			.await
 			.unwrap();
 		let mut groups = Vec::new();

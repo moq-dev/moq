@@ -16,22 +16,23 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 
 - A service is the iroh ALPN analog: a name under `mesh/<id>/`.
 - Decided 2026-11-01 (maintainer, socket planning interview): an `Endpoint`
-  wraps [sockets](/quest/m2/socket/rust.md). A service is a `Listener` at
+  wraps [sockets](/quest/m1/socket/rust.md). A service is a `Listener` at
   `mesh/<id>/<service>`, `connect` dials it with the caller's own endpoint ID,
   and `accept` reads the remote endpoint ID from the `.dial/<id>` segment,
   which the grant pins. Extend `moq auth`'s mesh grant with publish on
   `mesh/*/*/.dial/<id>`, and update `doc/bin/relay/auth.md`.
 - Streams are [byte streams](/quest/m2/stream/rust.md) at the protection
   level the service declares: identity reads `moq-net` directly, and
-  authentication, the mesh default, reads through `moq-sign` against the
+  authentication, the mesh default, reads through `moq_crypto::sign` against the
   `PublicKey` parsed from the path it subscribes to: the listener's
   `mesh/<id>/` for a dialer, and the `.dial/<id>` segment for a listener.
-- The secret key comes from `moq_sign::SecretKey::load_or_generate`.
-- The [daemon](/quest/m2/mesh/daemon.md) is built on this API, so a process
-  either embeds an `Endpoint` or talks to the local daemon's relay.
+- The secret key comes from `moq_crypto::sign::SecretKey::load_or_generate`.
+- A mesh daemon (Kixel's, outside this repository, decided 2026-11-02) is
+  built on this API, so a process either embeds an `Endpoint` or talks to a
+  local [mesh relay node](/quest/m2/mesh/node.md).
 - Write a short porting note into the [guide](/quest/m2/mesh/guide.md).
 
 ## Required
 
-- [Rust sockets](/quest/m2/socket/rust.md) - the dial and accept this wraps
+- [Rust sockets](/quest/m1/socket/rust.md) - the dial and accept this wraps
 - [Rust byte streams](/quest/m2/stream/rust.md) - the stream this API returns

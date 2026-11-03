@@ -121,12 +121,12 @@ struct Terminal {
 /// [`encode`](Self::encode) to supply the layout it describes. Unlike a catalog
 /// [`Reserved`](moq_mux::catalog::Reserved) this does not withhold the catalog:
 /// subscribers see the broadcast without this rendition until it resolves.
-pub(crate) struct Reserved {
+struct Reserved {
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
 }
 
 impl Reserved {
-	pub(crate) fn new<E: CatalogExt>(
+	fn new<E: CatalogExt>(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		options: &Options,
@@ -155,8 +155,8 @@ impl Reserved {
 	/// Build the encoder for `input` and register the rendition describing it.
 	///
 	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
-	/// codec rejects leaves the reservation intact for another input.
-	pub(crate) fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
+	/// codec rejects leaves the track intact to abort with that error.
+	fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
 		let remix = (input.layout != options.config.layout)
 			.then(|| Remix::new(input.layout, options.config.layout))
 			.transpose()?;
@@ -177,7 +177,13 @@ impl Reserved {
 			)?)
 		};
 
-		self.track.set(encoder.catalog())?;
+		let mut catalog = encoder.catalog();
+		// A resampler holds input past the frame it completes, so its frames trail by more than their
+		// own duration: measure the delay rather than state the encoder's zero.
+		if resampler.is_some() {
+			catalog.delay = None;
+		}
+		self.track.set(catalog)?;
 
 		let group_samples = options.group_duration.as_nanos() * u128::from(encoder.codec_rate());
 		let group_samples = u64::try_from(group_samples.div_ceil(1_000_000_000)).unwrap_or(u64::MAX);
@@ -192,8 +198,10 @@ impl Reserved {
 	}
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
-	pub(crate) fn encode(self, registered: Registered) -> Producer {
+	fn encode(self, registered: Registered) -> Producer {
 		let retention = self.track.track().info().max_age.unwrap_or(hang::container::MAX_AGE);
+		let bitrate = registered.encoder.bitrate();
+		self.track.report_bitrate(bitrate);
 
 		Producer {
 			backlog: Backlog::new(
@@ -203,7 +211,7 @@ impl Reserved {
 			),
 			active: true,
 			reset_pending: false,
-			bitrate: registered.encoder.bitrate(),
+			bitrate,
 			encoder: Some(registered.encoder),
 			input: registered.input,
 			remix: registered.remix,
@@ -225,37 +233,12 @@ impl Reserved {
 ///
 /// Proof that [`Reserved::register`] succeeded, so [`Reserved::encode`] takes no
 /// fallible step and cannot strand the track it consumes.
-pub(crate) struct Registered {
+struct Registered {
 	encoder: Encoder,
 	input: Input,
 	remix: Option<Remix>,
 	resampler: Option<Resampler>,
 	group_samples: u64,
-}
-
-/// What a capture publication needs while its layout is still undiscovered.
-#[cfg(feature = "capture")]
-impl Reserved {
-	/// The resolved track name, available before the layout is.
-	pub(crate) fn name(&self) -> &str {
-		self.track.name()
-	}
-
-	/// The underlying track producer, e.g. to watch subscriber state.
-	pub(crate) fn track(&self) -> &moq_net::track::Producer {
-		self.track.track()
-	}
-
-	/// Finalize a track that never got a rendition.
-	pub(crate) fn finish(&mut self) -> Result<(), Error> {
-		self.track.finish()?;
-		Ok(())
-	}
-
-	/// Abort a track that never got a rendition, so subscribers see `err`.
-	pub(crate) fn abort(self, err: moq_net::Error) {
-		self.track.abort(err);
-	}
 }
 
 impl Producer {
@@ -268,8 +251,14 @@ impl Producer {
 		options: &Options,
 	) -> Result<Self, Error> {
 		let mut reserved = Reserved::new(broadcast, catalog, options)?;
-		let registered = reserved.register(input, options)?;
-		Ok(reserved.encode(registered))
+		match reserved.register(input, options) {
+			Ok(registered) => Ok(reserved.encode(registered)),
+			Err(err) => {
+				// A subscriber may already be waiting on the track; give it the real cause.
+				reserved.track.abort(moq_net::Error::Transport(err.to_string()));
+				Err(err)
+			}
+		}
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.
@@ -319,6 +308,7 @@ impl Producer {
 			return Err(err.into());
 		}
 		self.bitrate = encoder.bitrate();
+		self.track.report_bitrate(self.bitrate);
 		Ok(())
 	}
 
@@ -404,49 +394,72 @@ impl Producer {
 
 	/// Encode and publish every full frame in `pending`, keeping any partial
 	/// trailing frame for the next call.
+	///
+	/// Frames are read in place and the remainder moves to the front once, so a
+	/// large batch costs linear rather than quadratic copying.
 	fn publish_full_frames(&mut self, anchor_us: u64) -> Result<(), Error> {
 		let frame_samples = self.encoder()?.frame_size() * self.encoder()?.codec_channels() as usize;
-		while self.pending.len() >= frame_samples {
-			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
-			let timestamp = Self::timestamp(
-				anchor_us,
-				self.frames_produced,
-				self.encoder()?.folded_delay(),
-				self.encoder()?.codec_rate(),
-			)?;
-			self.frames_produced += self.encoder()?.frame_size() as u64;
-			let end = Self::timestamp(anchor_us, self.frames_produced, 0, self.encoder()?.codec_rate())?;
-			let raw = Raw {
-				samples: chunk,
-				timestamp,
-				end,
-				reset: std::mem::take(&mut self.reset_pending),
-				discontinuity: std::mem::take(&mut self.pending_discontinuity),
-			};
-			if self.active && self.backlog.is_empty() {
-				self.encode_raw(raw)?;
-			} else {
-				self.backlog.push(raw);
-			}
+		// Taken so each frame can be borrowed while `self` encodes it; restored below on every path.
+		let mut pending = std::mem::take(&mut self.pending);
+		let mut consumed = 0;
+		let mut result = Ok(());
+		while result.is_ok() && pending.len() - consumed >= frame_samples {
+			let frame = &pending[consumed..consumed + frame_samples];
+			// A frame that fails is consumed too, so it is never encoded twice.
+			consumed += frame_samples;
+			result = self.publish_frame(anchor_us, frame);
 		}
+		pending.drain(..consumed);
+		self.pending = pending;
+		result
+	}
 
+	/// Stamp one codec frame, then encode it now or keep it in the backlog.
+	fn publish_frame(&mut self, anchor_us: u64, samples: &[f32]) -> Result<(), Error> {
+		let timestamp = Self::timestamp(
+			anchor_us,
+			self.frames_produced,
+			self.encoder()?.folded_delay(),
+			self.encoder()?.codec_rate(),
+		)?;
+		self.frames_produced += self.encoder()?.frame_size() as u64;
+		let end = Self::timestamp(anchor_us, self.frames_produced, 0, self.encoder()?.codec_rate())?;
+		let reset = std::mem::take(&mut self.reset_pending);
+		let discontinuity = std::mem::take(&mut self.pending_discontinuity);
+		if self.active && self.backlog.is_empty() {
+			return self.encode_frame(samples, timestamp, reset, discontinuity);
+		}
+		// Only a frame that waits needs its own copy.
+		self.backlog.push(Raw {
+			samples: samples.to_vec(),
+			timestamp,
+			end,
+			reset,
+			discontinuity,
+		});
 		Ok(())
 	}
 
-	fn encode_raw(&mut self, raw: Raw) -> Result<(), Error> {
+	fn encode_frame(
+		&mut self,
+		samples: &[f32],
+		timestamp: Timestamp,
+		reset: bool,
+		discontinuity: bool,
+	) -> Result<(), Error> {
 		// A break before anything was published, such as history expiring before the first
 		// subscriber, has nothing to separate.
-		if raw.discontinuity && !self.decoder_boundary {
+		if discontinuity && !self.decoder_boundary {
 			self.track.discontinuity()?;
 			self.decoder_boundary = true;
 		}
 		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
-		if raw.reset {
+		if reset {
 			encoder.reset();
 		}
-		let packet = encoder.encode(&raw.samples)?;
+		let packet = encoder.encode(samples)?;
 		self.activity = packet.activity;
-		self.publish(packet, raw.timestamp)?;
+		self.publish(packet, timestamp)?;
 		self.decoder_boundary = false;
 		Ok(())
 	}
@@ -463,7 +476,7 @@ impl Producer {
 		// One codec frame per turn lets capture keep draining while catching up.
 		if active && let Some(raw) = self.backlog.pop() {
 			self.track.history(raw.timestamp);
-			self.encode_raw(raw)?;
+			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
 		}
 		Ok(())
 	}
@@ -573,7 +586,7 @@ impl Producer {
 		self.active = true;
 		while let Some(raw) = self.backlog.pop() {
 			self.track.history(raw.timestamp);
-			self.encode_raw(raw)?;
+			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
 		}
 		if self.reset_pending
 			&& let Some(encoder) = self.encoder.as_mut()
@@ -680,9 +693,31 @@ mod tests {
 		}
 	}
 
+	/// The catalog's stats follow the encoder's target from the first rendition on.
+	#[tokio::test]
+	async fn stats_follow_the_target_bitrate() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".into()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+		let reported = || catalog.stats().remove("audio").and_then(|stats| stats.bitrate);
+		assert_eq!(reported(), Some(producer.bitrate().as_bps()));
+
+		let initial = producer.bitrate();
+		producer
+			.set_bitrate(moq_net::bandwidth::Rate::from_bps(initial.as_bps() / 2))
+			.unwrap();
+		assert_ne!(producer.bitrate(), initial);
+		assert_eq!(reported(), Some(producer.bitrate().as_bps()));
+	}
+
 	#[tokio::test]
 	#[ignore = "measures real codec CPU; run with just rs bench-playback"]
 	async fn benchmark_raw_audio() {
+		println!("tracks,retention_secs,always_on,idle_ms,catchup_ms");
 		for tracks in [1, 8] {
 			for seconds in [1, 30] {
 				for active in [true, false] {
@@ -723,7 +758,9 @@ mod tests {
 					}
 					let catchup = start.elapsed();
 					println!(
-						"tracks={tracks} retention={seconds}s always_on={active}: idle={idle:?} catchup={catchup:?}"
+						"{tracks},{seconds},{active},{:.3},{:.3}",
+						idle.as_secs_f64() * 1e3,
+						catchup.as_secs_f64() * 1e3
 					);
 					for producer in &mut producers {
 						producer.finish().unwrap();
@@ -767,7 +804,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		let mut reader =
@@ -952,7 +992,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+			)
 			.await
 			.unwrap();
 		let mut reader =
@@ -1159,6 +1202,82 @@ mod tests {
 		}
 	}
 
+	/// Batching cannot change what is published: every packet, timestamp, group boundary
+	/// and the flushed tail match whether PCM arrives a frame at a time or in one burst,
+	/// with or without resampling.
+	#[tokio::test]
+	async fn batch_size_does_not_change_the_published_track() {
+		for input_rate in [48_000u32, 44_100] {
+			let input = Input::new(input_rate, Layout::Stereo);
+			// Not a whole number of codec frames, so finish flushes a partial tail.
+			let frames = input_rate as usize + 123;
+			let samples: Vec<f32> = (0..frames * 2)
+				.map(|index| (index as f32 * 0.01).sin() * 0.25)
+				.collect();
+			let mut reference = None;
+			for batch in [1, 7, 959, 961, 1921, 4410, frames] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog =
+					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+				let consumer = broadcast.consume();
+				let mut options = Options {
+					track: Some("audio".to_string()),
+					config: Config::from_input(super::super::Codec::Pcm, &input),
+					..Options::default()
+				};
+				options.config.sample_rate = 48_000;
+				let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
+				let track = consumer
+					.track("audio")
+					.unwrap()
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+					)
+					.await
+					.unwrap();
+				let mut reader = moq_mux::container::Consumer::new(
+					track,
+					moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+				);
+
+				for (index, chunk) in samples.chunks(batch * 2).enumerate() {
+					let at = (index * batch) as u64 * 1_000_000 / input_rate as u64;
+					producer.write(&pcm_frame(chunk, 1_000_000 + at)).unwrap();
+				}
+				producer.finish().unwrap();
+
+				let mut published = Vec::new();
+				while let Some(read) = reader.read().await.unwrap() {
+					published.push(match read {
+						moq_mux::container::Read::Frame { group, frame } => (
+							format!("{group} {:?} {}", frame.timestamp, frame.keyframe),
+							frame.payload,
+						),
+						other => (format!("{other:?}"), Bytes::new()),
+					});
+				}
+				if input_rate == 48_000 {
+					// PCM at the codec rate publishes exactly the input, its final frame zero-padded.
+					let payload: Vec<u8> = published.iter().flat_map(|(_, payload)| payload.to_vec()).collect();
+					let expected: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+					assert_eq!(
+						payload.len(),
+						expected.len().next_multiple_of(1920 * 4),
+						"batch={batch}"
+					);
+					assert_eq!(payload[..expected.len()], expected[..], "batch={batch}");
+					assert!(payload[expected.len()..].iter().all(|&byte| byte == 0), "batch={batch}");
+				}
+				assert_eq!(
+					&published,
+					reference.get_or_insert_with(|| published.clone()),
+					"{input_rate} Hz, batch={batch}"
+				);
+			}
+		}
+	}
+
 	/// A resampled publisher used to end its track early: `finish` flushed the
 	/// encoder's own buffer but left the resampler holding its last partial chunk,
 	/// plus the audio its filter runs behind on.
@@ -1185,7 +1304,10 @@ mod tests {
 			consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
@@ -1468,7 +1590,10 @@ mod tests {
 			let mut track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 
@@ -1510,7 +1635,10 @@ mod tests {
 			let mut track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 			for index in 0..packets * 2 {
@@ -1619,7 +1747,10 @@ mod tests {
 			let track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 			let mut reader = moq_mux::container::Consumer::new(
@@ -1670,7 +1801,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		let mut reader =
@@ -1784,6 +1918,23 @@ mod tests {
 			let _producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
 			let published = catalog.snapshot().audio.renditions.remove("audio").unwrap();
 			assert_eq!(published, Encoder::new(&options.config).unwrap().catalog(), "{codec:?}");
+		}
+	}
+
+	/// A resampler holds input past the frame it completes, so a resampled rendition leaves its
+	/// delay to measurement instead of stating the encoder's zero.
+	#[tokio::test]
+	async fn a_resampled_rendition_measures_its_delay() {
+		for (rate, delay) in [(48_000, Some(Duration::ZERO)), (44_100, None)] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let options = Options {
+				track: Some("audio".into()),
+				..Options::default()
+			};
+			let input = Input::new(rate, crate::Layout::Stereo);
+			let _producer = Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
+			assert_eq!(catalog.snapshot().audio.renditions["audio"].delay, delay, "{rate} Hz");
 		}
 	}
 }

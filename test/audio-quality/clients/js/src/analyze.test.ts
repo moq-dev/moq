@@ -97,6 +97,13 @@ describe("analyze", () => {
 		});
 	});
 
+	test("the player's own underruns are its counter's rise across the window", () => {
+		// Three counted by the end of the warmup, then three more inside the window.
+		const samples = clean().map((s, i) => ({ ...s, playerUnderruns: i < 100 ? 3 : 6 }));
+		expect(analyze(input(samples)).metrics).toMatchObject({ player_underruns_total: 3 });
+		expect(analyze(input(clean())).metrics.player_underruns_total).toBeNull();
+	});
+
 	test("a gap that is the ring stalling is not an underrun", () => {
 		const samples = clean();
 		samples[100] = {

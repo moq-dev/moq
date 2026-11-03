@@ -561,6 +561,14 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(lease.has_remaining()))
 	}
 
+	/// Poll until the stream fails without reading it: reset, evicted, or its session closed.
+	/// For a stream left unread until a control message says how to read it, so a failure
+	/// still ends it. See [`RecvStream::poll_reset`].
+	pub(crate) fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let err = ready!(self.stream.poll_reset(waiter));
+		Poll::Ready(self.version.transport_error(err))
+	}
+
 	/// Rank the stream for eviction under receive pressure. See [`RecvStream::set_priority`].
 	pub fn set_priority(&mut self, priority: i64) {
 		self.stream.set_priority(priority);
@@ -572,6 +580,12 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		// negotiated protocol's registry. A session code, or the other protocol's, would be
 		// read against the wrong table and mean something else.
 		self.stream.stop(self.version.encode_stream_code(&err.into()));
+	}
+
+	/// Send STOP_SENDING with `code`, for a condition no [`StreamError`] names, which the
+	/// caller has already looked up in the negotiated protocol's registry.
+	pub(crate) fn stop(&mut self, code: u32) {
+		self.stream.stop(code);
 	}
 
 	/// Cast the reader to a different version, used during version negotiation.

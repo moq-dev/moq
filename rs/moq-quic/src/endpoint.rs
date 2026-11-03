@@ -155,7 +155,7 @@ impl Endpoint {
 		} = received;
 		// Partially decode packet or short-circuit if unable
 		let datagram_len = data.len();
-		let mut event = match PartialDecode::new(
+		let event = match PartialDecode::new(
 			data,
 			&FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
 			self.config.grease_quic_bit,
@@ -213,20 +213,6 @@ impl Endpoint {
 				return None;
 			}
 		};
-
-		// Drop leading early packets before routing or buffering, preserving a coalesced
-		// handshake packet after them.
-		while event.first_decode.is_0rtt() {
-			let data = event.remaining.take()?;
-			let (first_decode, remaining) = PartialDecode::new(
-				data,
-				&FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
-				self.config.grease_quic_bit,
-			)
-			.ok()?;
-			event.first_decode = first_decode;
-			event.remaining = remaining;
-		}
 
 		let addresses = FourTuple { remote, local_ip };
 		let dst_cid = event.first_decode.dst_cid();
@@ -457,7 +443,11 @@ impl Endpoint {
 
 		// Decoding refused every other version.
 		let version = Version::from_wire(header.version)?;
-		let crypto = server_config.crypto.initial_keys(version, dst_cid);
+		let Some(crypto) = server_config.crypto.initial_keys(version, dst_cid) else {
+			// Without the suite there is no key to protect even a close with.
+			warn!("dropping initial: the server's TLS provider lacks TLS13_AES_128_GCM_SHA256");
+			return None;
+		};
 
 		if let Err(reason) = self.early_validate_first_packet(header) {
 			return Some(DatagramEvent::Response(self.initial_close(
@@ -1406,7 +1396,7 @@ impl Drop for AcceptDropGuard {
 /// Errors in the parameters being used to create a new connection
 ///
 /// These arise before any I/O has been performed.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ConnectError {
 	/// The endpoint can no longer create new connections
@@ -1430,6 +1420,9 @@ pub enum ConnectError {
 	/// The client configuration is invalid
 	#[error("invalid client config: {0}")]
 	Config(#[from] ConfigError),
+	/// rustls refused the client config, such as one without TLS 1.3
+	#[error("TLS config: {0}")]
+	Tls(rustls::Error),
 }
 
 /// Error type for attempting to accept an [`Incoming`]
@@ -1495,11 +1488,14 @@ impl Accepting {
 		} = &args;
 		let pref_addr_cid = args.side_args.pref_addr_cid();
 
-		let tls = server_crypto.start_session(version, &params);
-		let mut conn = Connection::new(tls, args);
-		let result = conn
-			.handle_first_packet(now, remote, ecn, packet_number, packet, rest)
-			.map(|()| conn);
+		let result = server_crypto
+			.start_session(version, &params)
+			.map_err(ConnectionError::TransportError)
+			.and_then(|tls| {
+				let mut conn = Connection::new(tls, args);
+				conn.handle_first_packet(now, remote, ecn, packet_number, packet, rest)
+					.map(|()| conn)
+			});
 
 		Accepted {
 			incoming_idx,

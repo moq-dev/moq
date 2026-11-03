@@ -17,6 +17,7 @@ import type { Broadcast } from "../broadcast";
 import { hlsHint, watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
+import type { RenditionStats } from "../rendition";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -34,6 +35,12 @@ export interface Stats {
 
 	/** Total keyframes encoded while serving. Divide frames by this for the average GOP length. */
 	keyframes: number;
+
+	/** Total captured frames skipped while serving because the encoder still had a frame queued. */
+	skipped: number;
+
+	/** The bitrate the encoder targets now, in bits per second, or undefined while none is resolved. */
+	bitrate?: number;
 }
 
 // TODO support signals?
@@ -58,7 +65,9 @@ export interface Config {
 
 	/**
 	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
-	 * group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	 * group's deltas outweigh the track's refresh ratio. Each track's catalog `hls` duration,
+	 * declared when the track is created, bounds its GOPs: a live change past it, including to
+	 * infinite, is capped there until a new track declares again. (default: 2000 milliseconds)
 	 */
 	keyframeInterval?: Milli;
 
@@ -116,7 +125,8 @@ export type EncoderOutput = {
 	// True while encoding: enabled and the rendition has a track, which with the broadcast's
 	// `onDemand` also takes a subscriber.
 	active: Signal<boolean>;
-	// Cumulative output totals (frames, bytes, keyframes) measured while serving.
+	// Cumulative output totals (frames, bytes, keyframes, skipped) measured while serving, and the
+	// target bitrate.
 	stats: Signal<Stats>;
 };
 
@@ -158,7 +168,7 @@ export class Encoder {
 		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
 		resolved: new Signal<VideoEncoderConfig | undefined>(undefined),
 		active: new Signal<boolean>(false),
-		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0 }),
+		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0, skipped: 0 }),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
@@ -278,6 +288,10 @@ export class Encoder {
 		this.#signals.run(this.#runSettingsRecovery.bind(this));
 		this.#signals.run(this.#runCaptureRecovery.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
+		this.#signals.run((effect) => {
+			const bitrate = effect.get(this.#out.resolved)?.bitrate;
+			this.#out.stats.update((stats) => ({ ...stats, bitrate }));
+		});
 	}
 
 	// The current slot, read through `effect`.
@@ -347,6 +361,7 @@ export class Encoder {
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
+		effect.proxy<RenditionStats | undefined>(rendition.stats, this.out.stats);
 
 		// Encode while enabled and the broadcast hands over the track (with `onDemand`, a subscriber is attached).
 		effect.run((effect) => {
@@ -406,12 +421,15 @@ export class Encoder {
 		// The largest group demand asked for that a keyframe already answers, including one still in
 		// the encoder. A join over the refresh ratio asks for one past the largest, which the next frame
 		// opens; any other join is served by a group already written, encoded with or without demand.
-		let answered: number | undefined;
+		let answered: bigint | undefined;
 		const answer = () => {
 			const wanted = demand.wanted.peek();
-			if (wanted !== undefined) answered = Math.max(answered ?? 0, wanted);
+			if (wanted !== undefined && (answered === undefined || wanted > answered)) answered = wanted;
 		};
-		const covered = () => Math.max(answered ?? -1, track.largest()?.group ?? -1);
+		const covered = () => {
+			const largest = track.largest()?.group ?? -1n;
+			return answered !== undefined && answered > largest ? answered : largest;
+		};
 		let tearingDown = false;
 
 		effect.spawn(async () => {
@@ -431,6 +449,7 @@ export class Encoder {
 					}
 
 					this.#out.stats.update((stats) => ({
+						...stats,
 						frames: stats.frames + 1,
 						bytes: stats.bytes + frame.byteLength,
 						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
@@ -439,7 +458,7 @@ export class Encoder {
 					producer.encode(frame, frame.timestamp as Micro, key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
-					if (this.#estimator.write(frame.timestamp, order)) {
+					if (this.#estimator.write(frame.timestamp, order, key)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -496,7 +515,10 @@ export class Encoder {
 							// A pending input means the codec is saturated. Keep capture live instead of
 							// growing a stale encode queue whose lateness becomes permanent catalog delay.
 							// Drop before answering a keyframe request or advancing the frame-rate cursor.
-							if (encoder.encodeQueueSize > 0) continue;
+							if (encoder.encodeQueueSize > 0) {
+								this.#out.stats.update((stats) => ({ ...stats, skipped: stats.skipped + 1 }));
+								continue;
+							}
 
 							// This doesn't need to be reactive.
 							const config = this.config.peek();
@@ -514,7 +536,11 @@ export class Encoder {
 							}
 							lastEncoded = frame.timestamp as Micro;
 
-							const interval = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							// The catalog's declared duration is the track's longest GOP, fixed when the track
+							// was created, so a live raise past it stops there.
+							const requested = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							const declared = hls?.hls.peek()?.duration;
+							const interval = declared === undefined ? requested : Milli(Math.min(requested, declared));
 
 							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
 							// caller asked for one, or a join wants a group past the largest. No spacing: the

@@ -94,19 +94,11 @@ impl Import {
 	}
 
 	fn initialize_avc3(&mut self, data: &[u8]) -> Result<()> {
-		// Resolve the config from any SPS in the seed buffer. Scan a clone so the
-		// caller's buffer is left intact for the splitter to consume.
-		let mut scan = Bytes::copy_from_slice(data);
-		let mut nals = NalIterator::new(&mut scan);
-		while let Some(nal) = nals.next().transpose()? {
+		// Resolve the config from any SPS in the seed buffer.
+		for nal in crate::codec::annexb::complete_nals(data)? {
 			if is_sps(&nal) {
 				self.seed_sps(&nal)?;
 			}
-		}
-		if let Some(nal) = nals.flush()?
-			&& is_sps(&nal)
-		{
-			self.seed_sps(&nal)?;
 		}
 		Ok(())
 	}
@@ -171,6 +163,18 @@ impl Import {
 	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
 		self.catalog.set_enabled(&mut self.track, enabled)?;
 		Ok(())
+	}
+
+	/// Report frames the encoder feeding this track skipped. See
+	/// [`Producer::report_skipped`](crate::container::Producer::report_skipped).
+	pub fn report_skipped(&self, frames: u64) {
+		self.track.report_skipped(frames);
+	}
+
+	/// Report the target bitrate of the encoder feeding this track. See
+	/// [`Producer::report_bitrate`](crate::container::Producer::report_bitrate).
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		self.track.report_bitrate(bitrate);
 	}
 
 	/// Close the current group and open the next one at `sequence`.
@@ -714,7 +718,7 @@ mod tests {
 		];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		// recovery-point SEI (payload type 6), then a non-IDR I-slice (type 1).
-		let sei: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+		let sei: &[u8] = &[0x06, 0x06, 0x01, 0x84, 0x80];
 		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
 
 		let mut annexb = BytesMut::new();

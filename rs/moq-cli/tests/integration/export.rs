@@ -89,7 +89,7 @@ struct Relay {
 }
 
 /// A public relay on ephemeral loopback ports that also accepts lite-07, the version that
-/// carries epochs, for a client that opts in with `--connect-version`. Its generated
+/// carries instances, for a client that opts in with `--connect-version`. Its generated
 /// certificate is trusted blindly, since nothing but loopback reaches it.
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
@@ -252,7 +252,7 @@ fn import(relay: &Relay) -> (Child, JoinHandle<ChildStdin>) {
 	import_with(relay, &[])
 }
 
-/// [`import`] with `global` flags, such as the session version or the epoch.
+/// [`import`] with `global` flags, such as the session version.
 fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>) {
 	import_as(relay, global, TS)
 }
@@ -514,13 +514,13 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 	assert_eq!(unflagged(after), Vec::<u16>::new(), "every PID flags the break");
 }
 
-/// One publisher reconnects within the follow, continuing its capture under the same epoch
+/// One publisher reconnects within the follow, continuing its capture under the same instance
 /// and program before delivering a clean final finish.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn the_same_instance_within_the_follow_continues() {
 	let relay = relay().await;
-	let epoch = moq_net::Epoch::mint();
+	let instance = moq_net::Instance::random();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("demo").unwrap();
@@ -530,7 +530,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 		.unwrap();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
@@ -565,7 +565,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	export.output_past(0).await;
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
 	let old = relay.origin.request("demo", None).await.unwrap();
-	assert_eq!(old.info().epoch.as_ref(), Some(&epoch));
+	assert_eq!(old.info().instance.as_ref(), Some(&instance));
 	let clock = catalog.snapshot().clock;
 	connection.abort(moq_net::Error::Cancel);
 	connection.closed().await.unwrap();
@@ -578,7 +578,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		.await
 		.expect("the relay observes the returning publication")
 		.unwrap();
-	assert_eq!(back.info().epoch.as_ref(), Some(&epoch));
+	assert_eq!(back.info().instance.as_ref(), Some(&instance));
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
 	for chunk in chunks {
 		pace.tick().await;
@@ -687,7 +687,7 @@ async fn a_standby_before_its_pmt_leaves_the_exports_running() {
 	a_standby_before_its_tracks(&[], TS).await;
 }
 
-/// lite-07 carries the epoch, so this is the version on which the relay queries the standby.
+/// lite-07 carries the instance, so this is the version on which the relay queries the standby.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_standby_before_its_pmt_leaves_the_exports_running_on_lite_07() {
@@ -1056,15 +1056,18 @@ async fn redundant_failover(bufferbloat: bool) {
 	}
 }
 
-/// The epoch of the next route announced for the path.
-async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epoch {
+/// The instance of the next route announced for the path.
+async fn next_instance(announced: &mut moq_net::announce::Consumer) -> moq_net::Instance {
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
 				moq_net::announce::Event::Start(announce)
 				| moq_net::announce::Event::Restart(announce)
 				| moq_net::announce::Event::Takeover { announce, .. } => {
-					return announce.route.epoch.expect("a lite-07 importer announces its epoch");
+					return announce
+						.route
+						.instance
+						.expect("a lite-07 importer announces its instance");
 				}
 				_ => continue,
 			}
@@ -1075,7 +1078,7 @@ async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epo
 }
 
 /// `export ts --passthrough` follows no restart: it stays on the passthrough importer it
-/// resolved while a backup on its own epoch starts, and ends once that importer goes.
+/// resolved while a backup on its own instance starts, and ends once that importer goes.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
@@ -1084,15 +1087,15 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let mut announced = relay.origin.scope("", &demo).unwrap().announced();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
-	let incumbent = next_epoch(&mut announced).await;
+	let incumbent = next_instance(&mut announced).await;
 	let mut export = export_with(&relay, &["--connect-version", LITE_07], &["--passthrough"]);
 	export.output_past(0).await;
 
 	let mut second = redundant_import(&relay, &feed, &["--passthrough"]);
 	assert_ne!(
-		next_epoch(&mut announced).await,
+		next_instance(&mut announced).await,
 		incumbent,
-		"the backup mints its own epoch"
+		"the backup mints its own instance"
 	);
 	let mark = export.output.lock().unwrap().len();
 	export.output_past(mark).await;
@@ -1109,6 +1112,70 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	);
 	second.kill().await.unwrap();
 	feeding.abort();
+}
+
+/// `repair mp4` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
+/// it alone once finished.
+#[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
+async fn a_killed_mp4_recording_is_repaired() {
+	let relay = relay().await;
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	let mut recording = moq(&relay, &[])
+		.args(["export", "mp4", "--output"])
+		.arg(&path)
+		.spawn()
+		.expect("spawn export");
+	let (mut publisher, feeding) = import(&relay);
+
+	kio::clock::timeout(TIMEOUT, async {
+		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
+			kio::clock::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.expect("the recording never grew");
+	recording.kill().await.unwrap();
+	let killed = std::fs::read(&path).unwrap();
+	assert_eq!(
+		boxes(&killed)[1].kind().to_string(),
+		"free",
+		"the killed recording is unfinished"
+	);
+
+	let repair = || async {
+		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
+			.args(["repair", "mp4"])
+			.arg(&path)
+			.output();
+		let output = kio::clock::timeout(TIMEOUT, output)
+			.await
+			.expect("repair never exited")
+			.unwrap();
+		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+		std::fs::read(&path).unwrap()
+	};
+	let repaired = repair().await;
+	let boxes = boxes(&repaired);
+	let kinds: Vec<String> = boxes.iter().map(|atom| atom.kind().to_string()).collect();
+	assert_eq!(kinds, ["ftyp", "mdat", "moov"]);
+	let Some(mp4_atom::Any::Moov(moov)) = boxes.last() else {
+		unreachable!();
+	};
+	assert_eq!(moov.trak.len(), 2, "video and audio");
+	// Only the reserved box changed before the moov, which replaces any partial fragment.
+	let reserved = u32::from_be_bytes(killed[..4].try_into().unwrap()) as usize;
+	let media = reserved + u64::from_be_bytes(repaired[reserved + 8..reserved + 16].try_into().unwrap()) as usize;
+	assert!(media <= killed.len());
+	assert_eq!(repaired[..reserved], killed[..reserved]);
+	assert_eq!(repaired[reserved + 16..media], killed[reserved + 16..media]);
+
+	assert_eq!(repair().await, repaired, "a finished recording is left alone");
+
+	let stdin = feeding.await.unwrap();
+	drop(stdin);
+	assert!(wait(&mut publisher).await.success());
 }
 
 /// The top-level boxes of an MP4 file, by kind.

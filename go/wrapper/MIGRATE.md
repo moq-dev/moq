@@ -4,12 +4,34 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `ErrUnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.Update`, `json.StreamProducer.Append`, and `json.WindowProducer.Push` / `Pop` take a `moq.Timestamp` instead of a `*moq.Timestamp`, so there is no untimed write. Stamp it from `media.CatalogProducer.Now()`, the broadcast clock every track shares. Their track needs a `TrackInfo.Timescale`; one without is refused.
+
+### Subscriptions take a `moq.Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.MaxDelay` is `Delay moq.Delay`, and the zero `Subscription{}` is moq-net's defaults, the same as `DefaultSubscription()`: set `Delay.Max` to the old `*MaxDelay`, and `Delay.MaxUnlimited` where `MaxDelay` was nil.
+`media.Delay` is `moq.Delay`, a struct of its own whose zero value states zero for both: `Min` and `Max` are `time.Duration`, `MinUnstated` leaves the target latency unstated, and `MaxUnlimited` sets no limit.
+`audio.DecoderOutput.Delay` and `video.DecoderOutput.Delay` are a `moq.Delay` value instead of a `*media.Delay`; the zero value is what nil meant.
+
+### `media.VideoInit` is a struct
+
+`media.VideoInit` is its own struct rather than an alias of the generated record, so its new `Lower` field takes a `*media.TrackProducer`. A composite literal with `Format`, `Data`, `Label`, and `Hint` compiles unchanged; build one that way where you converted a generated `MoqVideoInit`.
+
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`Announce.Captures` is `[]string` instead of `*[]string`. Remove pointer checks and dereferences; an empty slice means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.
+
 ### Decoder outputs take a `media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `audio.DecoderOutput` replaces `MaxDelay` and the playout `Delay *time.Duration` with `Delay *media.Delay` and `Estimate *bool` (nil estimates).
 `video.DecoderOutput.MaxDelay` is `Delay *media.Delay`.
 `media.Delay{Min, Max}`: `Max` (nil for no limit) is the old `MaxDelay`, and `Min` is the playout delay, where a cold join starts.
-A fixed audio playout delay `d` is `Delay: &media.Delay{Min: d, Max: &max}` with `Estimate` set to false.
+A fixed audio playout delay `d` is `Delay: moq.Delay{Min: d, Max: max}` with `Estimate` set to false.
 
 ### Compression moves to the track
 
@@ -57,8 +79,8 @@ the matching generated bindings and native library.
 
 ### `Announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
-`Route` is only what announcements report. To re-announce an observed route, copy its `Cost` and `Epoch`.
+`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Instance, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
+`Route` is only what announcements report. To re-announce an observed route, copy its `Cost`, and its `Instance` only when forwarding that same stream; leave `Instance` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -105,11 +127,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `media.ContainerFormatFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.
-`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Epoch` from it.
-Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another epoch.
+`ffi.MoqVideo` and `ffi.MoqAudio` gain `Instance`, the publisher instance their `Broadcast` reference names.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Instance` from it.
+Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another instance.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -125,7 +147,8 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
-Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.Serve(consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to close.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
 ### `TrackInfo` gains `Compress` (#5928)

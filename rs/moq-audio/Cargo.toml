@@ -68,6 +68,7 @@ pulseaudio = ["cpal?/pulseaudio"]
 aec = ["capture", "playback"]
 
 [dependencies]
+bitstream-io = { workspace = true }
 bytes = { workspace = true }
 # Pure-Rust cross-platform audio I/O. Optional: only the `capture` and
 # `playback` features need it. Encode stays on unsafe-libopus, so a build
@@ -139,6 +140,20 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+workspace-hack = { path = "../workspace-hack" }
+
+# The batching bench counts the instructions each case retires.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+perf-event2 = "0.7.4"
+
+[[bench]]
+name = "batches"
+harness = false
+
+[[bench]]
+name = "capture"
+harness = false
+required-features = ["capture"]
 
 [[bench]]
 name = "bus"

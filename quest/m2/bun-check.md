@@ -8,10 +8,11 @@ Every workspace package's `check` script, and the bench typechecks in
 
 ## Plan
 
-Waits on nixpkgs shipping bun 1.4.4 or later (nixpkgs-unstable carried 1.4.2
-on 2026-10-22). `bun check` arrived in 1.4.3, but 1.4.4 adds the
-`--no-script` the `check` scripts below need and fixes 1.4.3's false errors.
-Bump `flake.lock` then; no bun overlay before it (decided 2026-10-22).
+nixpkgs-unstable carries bun 1.4.4 as of 2026-11-02 (checked in
+/quest-unblock), so start with a `flake.lock` bump; `main`'s dev shell still
+has 1.4.2. `bun check` arrived in 1.4.3, but 1.4.4 adds the `--no-script` the
+`check` scripts below need and fixes 1.4.3's false errors. No bun overlay
+(decided 2026-10-22).
 
 Measured 2026-10-22, bun 1.4.4 against TypeScript 7.0.2 on `main`: identical
 errors and exit codes on all 33 `tsc` invocations in the `check` scripts and

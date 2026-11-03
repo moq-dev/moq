@@ -18,9 +18,9 @@ default = ["async"]
 async = ["dep:futures", "kio/async", "kio/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
-# session views of an origin to the viewers bench, and the lite publisher's run loop to the
-# publisher bench, through the hidden `fuzz` module. Off by
-# default and hidden from the docs.
+# session views of an origin to the viewers bench, the lite publisher's run loop to the
+# publisher bench, and a lite-07 publisher's frame bounds to the ranges bench, through the
+# hidden `fuzz` module. Off by default and hidden from the docs.
 fuzz = ["async"]
 
 [dependencies]
@@ -42,7 +42,6 @@ slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
@@ -57,7 +56,7 @@ serde_json = { workspace = true }
 # (tokio::time::pause/advance) is test-only, so it must not leak into the normal
 # dependency feature set.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
-tracing-test = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 # Thread and process CPU timing in the session benchmark.
 [target.'cfg(unix)'.dev-dependencies]
@@ -121,6 +120,12 @@ required-features = ["fuzz"]
 # Reaches the private frame ingest through the hidden `fuzz` module.
 [[bench]]
 name = "frame"
+harness = false
+required-features = ["fuzz"]
+
+# Reaches a lite-07 publisher's frame bounds through the hidden `fuzz` module.
+[[bench]]
+name = "ranges"
 harness = false
 required-features = ["fuzz"]
 

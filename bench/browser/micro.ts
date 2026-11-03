@@ -2,6 +2,7 @@
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium, type Page } from "playwright";
+import { collections, GC_CATEGORIES, rendererPid, traceEvents } from "./trace.ts";
 import { workspace } from "./workspace.ts";
 
 const { values, positionals } = parseArgs({
@@ -14,8 +15,21 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-const expectedRows = ({ frames: 26, drift: 36, ledger: 12, "resume-history": 72 } as Record<string, number>)[benchmark];
-if (expectedRows === undefined) throw new Error("--bench must be frames, drift, ledger, or resume-history");
+// Each entry is named in full, so sh/gh/test-inventory.py sees this harness run it.
+const benchmarks: Record<string, { entry: string; rows: number }> = {
+	frames: { entry: "js/net/bench/frames.ts", rows: 26 },
+	drift: { entry: "js/net/bench/drift.ts", rows: 36 },
+	ledger: { entry: "js/net/bench/ledger.ts", rows: 12 },
+	bandwidth: { entry: "js/net/bench/bandwidth.ts", rows: 44 },
+	replay: { entry: "js/net/bench/replay.ts", rows: 72 },
+	"resume-history": { entry: "js/net/bench/resume-history.ts", rows: 72 },
+	buffered: { entry: "js/hang/bench/buffered.ts", rows: 36 },
+	pattern: { entry: "js/pattern/bench/algebra.ts", rows: 12 },
+};
+const selected = Object.hasOwn(benchmarks, benchmark) ? benchmarks[benchmark] : undefined;
+if (!selected) throw new Error(`--bench must be one of: ${Object.keys(benchmarks).join(", ")}`);
+// The fixture directory, relative to each checkout; buffered drives @moq/hang's container consumer.
+const dir = benchmark === "buffered" ? "js/hang/bench" : "js/net/bench";
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -27,10 +41,8 @@ for (const argument of positionals.length ? positionals : ["current=.", "aa=."])
 }
 const scripts = new Map<string, string>();
 for (const [name, root] of roots) {
-	const entry =
-		benchmark === "frames"
-			? resolve(root, "js/net/bench/frames.ts")
-			: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
+	// Only frames is bundled from each variant; the rest import each variant's `../src/` below.
+	const entry = resolve(benchmark === "frames" ? root : resolve(import.meta.dir, "../.."), selected.entry);
 	const result = await Bun.build({
 		entrypoints: [entry],
 		target: "browser",
@@ -41,23 +53,26 @@ for (const [name, root] of roots) {
 				setup(build) {
 					// Internal modules have no package export, so select each variant's own explicitly.
 					build.onResolve({ filter: /^\.\.\/src\// }, ({ path, importer }) =>
-						importer.endsWith(`/js/net/bench/${benchmark}.ts`)
-							? { path: resolve(root, "js/net/bench", path) }
-							: undefined,
+						importer.endsWith(`/${dir}/${benchmark}.ts`) ? { path: resolve(root, dir, path) } : undefined,
 					);
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|resume-history)\.ts$/ }, async ({ path }) => {
-						const source = await Bun.file(path).text();
-						if (benchmark !== "frames")
-							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
-						const marker =
-							'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
-						const parts = source.split(marker);
-						if (parts.length !== 2) throw new Error("frames benchmark entry moved");
-						return {
-							loader: "ts",
-							contents: `${parts[0]}globalThis.measure = async () => {${marker}\n${parts[1]}\n};`,
-						};
-					});
+					build.onLoad(
+						{
+							filter: /\/bench\/(frames|drift|ledger|bandwidth|replay|resume-history|buffered|algebra)\.ts$/,
+						},
+						async ({ path }) => {
+							const source = await Bun.file(path).text();
+							if (benchmark !== "frames")
+								return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
+							const marker =
+								'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
+							const parts = source.split(marker);
+							if (parts.length !== 2) throw new Error("frames benchmark entry moved");
+							return {
+								loader: "ts",
+								contents: `${parts[0]}globalThis.measure = async () => {${marker}\n${parts[1]}\n};`,
+							};
+						},
+					);
 				},
 			},
 		],
@@ -78,8 +93,13 @@ const server = Bun.serve({
 			});
 		}
 		if (!scripts.has(name)) return new Response("unknown variant", { status: 404 });
+		// Cross-origin isolated, so performance.now() resolves 5 us instead of 100 us.
 		return new Response(`<script type="module" src="/${name}.js"></script>`, {
-			headers: { "Content-Type": "text/html" },
+			headers: {
+				"Content-Type": "text/html",
+				"Cross-Origin-Opener-Policy": "same-origin",
+				"Cross-Origin-Embedder-Policy": "require-corp",
+			},
 		});
 	},
 });
@@ -90,6 +110,18 @@ const browser = await chromium.launch({
 	args: benchmark === "resume-history" ? ["--js-flags=--expose-gc", "--enable-precise-memory-info"] : [],
 });
 const samples: { round: number; variant: string; rows: string[] }[] = [];
+const traced: { variant: string; rows: string[] }[] = [];
+// Main-thread GC across one whole run per variant, from a traced pass after the timed rounds.
+const gc: Record<string, ReturnType<typeof collections>> = {};
+const save = () =>
+	Bun.write(
+		values.out,
+		JSON.stringify(
+			{ benchmark, browser: browser.version(), warmup: 1, roots: Object.fromEntries(roots), samples, traced, gc },
+			null,
+			2,
+		),
+	);
 try {
 	const pages = new Map<string, Page>();
 	const rows = new Map<string, string[]>();
@@ -98,41 +130,55 @@ try {
 		pages.set(name, page);
 		rows.set(name, []);
 		page.on("console", (message) => {
-			if (/^(lite|ietf|\d+),/.test(message.text())) rows.get(name)?.push(message.text());
+			if (/^(lite|ietf|steady|lookahead|sparse|burst|\d+),/.test(message.text()))
+				rows.get(name)?.push(message.text());
 		});
 		page.on("pageerror", (error) => {
 			console.error(error);
 			void page.close();
 		});
 		await page.goto(`http://127.0.0.1:${server.port}/${name}`);
+		if (!(await page.evaluate("crossOriginIsolated"))) throw new Error(`${name} page is not cross-origin isolated`);
 		await page.waitForFunction(() => typeof (globalThis as unknown as { measure: unknown }).measure === "function");
 		await page.evaluate("globalThis.measure()");
 		console.log(`warmed ${name}`);
 	}
+	// One run of `variant`'s page, requiring every row.
+	const measure = async (variant: string) => {
+		rows.set(variant, []);
+		await pages.get(variant)?.evaluate("globalThis.measure()");
+		const measured = rows.get(variant) ?? [];
+		if (measured.length !== selected.rows) throw new Error(`incomplete rows: ${variant}`);
+		return measured;
+	};
 	for (let round = 0; round < rounds; round++) {
 		const names = [...roots.keys()];
 		if (round % 2) names.reverse();
 		for (const variant of names) {
-			rows.set(variant, []);
-			await pages.get(variant)?.evaluate("globalThis.measure()");
-			const measured = rows.get(variant);
-			if (measured?.length !== expectedRows) throw new Error(`incomplete rows: ${variant}`);
-			samples.push({ round, variant, rows: measured });
-			await Bun.write(
-				values.out,
-				JSON.stringify(
-					{ benchmark, browser: browser.version(), warmup: 1, roots: Object.fromEntries(roots), samples },
-					null,
-					2,
-				),
-			);
+			samples.push({ round, variant, rows: await measure(variant) });
+			await save();
 			console.log(`measured ${round} ${variant}`);
 		}
+	}
+	// Traced apart from the timed rounds, so tracing overhead never enters a timing.
+	for (const [variant, page] of pages) {
+		if (benchmark !== "replay" && benchmark !== "resume-history") continue;
+		await browser.startTracing(page, { categories: GC_CATEGORIES });
+		let buffer: Buffer | undefined;
+		try {
+			traced.push({ variant, rows: await measure(variant) });
+		} finally {
+			buffer = await browser.stopTracing();
+		}
+		const events = traceEvents(buffer);
+		gc[variant] = collections(events, rendererPid(events, page.url()));
+		await save();
+		console.log(`traced ${variant}`);
 	}
 	// Reachability is exact here, so a retired route still reachable fails the run, once every
 	// variant's samples are written for comparison.
 	if (benchmark === "resume-history") {
-		const retaining = samples.filter(({ rows }) =>
+		const retaining = [...samples, ...traced].filter(({ rows }) =>
 			rows.some((row) =>
 				row
 					.split(",")
