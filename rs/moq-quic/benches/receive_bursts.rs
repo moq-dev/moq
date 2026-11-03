@@ -13,7 +13,8 @@
 //! `server_` columns are what dropping the server's connections frees: when new, when quiet after
 //! one burst, and when quiet after the resume and a repeat burst. `kept_b` is what quiet holds over
 //! new, per stream of the burst. The CPU columns time the server; the allocation counts include the
-//! clients', which a receive change leaves alone. `teardown_b` is what the case leaks.
+//! clients'. `quiet_delta_b` and `repeat_delta_b` keep the exact difference from cold, so table
+//! rounding cannot hide a small retained allocation. `teardown_b` is what the case leaks.
 //!
 //! Criterion then times the server's side of a burst on a connection that already freed the
 //! previous one's streams, so the cost of allocating fresh receive state for each stream shows.
@@ -267,7 +268,7 @@ fn server_heap(mut pair: Pair) -> isize {
 
 fn table() {
 	println!(
-		"mode conns streams packets peak_kib server_cold_kib server_quiet_kib kept_b resume_allocs resume_cpu_us repeat_allocs repeat_cpu_us server_repeat_kib teardown_b rss_kib"
+		"mode conns streams packets peak_kib server_cold_kib server_quiet_kib kept_b resume_allocs resume_cpu_us repeat_allocs repeat_cpu_us server_repeat_kib quiet_delta_b repeat_delta_b teardown_b rss_kib"
 	);
 	let kib = |bytes: isize| bytes / 1024;
 	for mode in Mode::ALL {
@@ -299,7 +300,7 @@ fn table() {
 
 					let kept = (quiet - cold) / (conns * streams) as isize;
 					println!(
-						"{} {conns} {streams} {packets} {} {} {} {kept} {resume_allocs} {} {repeat_allocs} {} {} {teardown} {}",
+						"{} {conns} {streams} {packets} {} {} {} {kept} {resume_allocs} {} {repeat_allocs} {} {} {} {} {teardown} {}",
 						mode.name(),
 						kib(peak),
 						kib(cold),
@@ -307,6 +308,8 @@ fn table() {
 						resume_cpu.as_micros(),
 						repeat_cpu.as_micros(),
 						kib(repeat),
+						quiet - cold,
+						repeat - cold,
 						rss_kib(),
 					);
 				}
