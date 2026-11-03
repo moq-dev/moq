@@ -38,7 +38,7 @@ changes with [moq-dev/moq#7667](https://github.com/moq-dev/moq/pull/7667).
 
 ## Waiting
 
-- moq-dev/moq: the full local gate must pass after the existing C/C++ pkg-config fix in [moq-dev/moq#7654](https://github.com/moq-dev/moq/pull/7654) and default Gradle discovery fix in [moq-dev/moq#7632](https://github.com/moq-dev/moq/pull/7632), on a Nix builder that permits user namespaces. The earlier gate also failed Dart's native-build freshness assertion; recheck it with the FFI build work in [moq-dev/moq#7666](https://github.com/moq-dev/moq/pull/7666), without importing those independent changes here.
+- moq-dev/moq: the full local gate must pass after the existing C/C++ pkg-config fix in [moq-dev/moq#7654](https://github.com/moq-dev/moq/pull/7654) and default Gradle discovery fix in [moq-dev/moq#7632](https://github.com/moq-dev/moq/pull/7632), on a Nix builder that permits user namespaces.
 
 ## Related
 
