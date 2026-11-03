@@ -7405,12 +7405,18 @@ impl Cursor {
 		}
 		let window = &self.filter.window;
 		self.poll(waiter, |state| {
-			let Some(owed) = state.owed(groups.clone(), window) else {
+			// An unjudgeable old gap cannot stand in for a fresh gap above the floor.
+			let floor = match drift.budget == Duration::MAX {
+				true => groups.start,
+				false => groups.start.max(state.live_floor.unwrap_or(0)),
+			};
+			if floor >= groups.end {
+				return Poll::Ready(Ok(()));
+			}
+			let Some(owed) = state.owed(floor..groups.end, window) else {
 				return Poll::Ready(Ok(()));
 			};
-			if state.unjudgeable(owed, drift.budget)
-				|| state.poll_drifted(owed, &drift.edge.servable, drift.budget, None, waiter)
-			{
+			if state.poll_drifted(owed, &drift.edge.servable, drift.budget, None, waiter) {
 				return Poll::Ready(Ok(()));
 			}
 			// The ledger may stop owing it before the budget gives up on it.
@@ -12281,6 +12287,32 @@ mod test {
 			.expect("the cache answers")
 			.expect("cached fetch");
 		assert!(fetched.read_frame().now_or_never().unwrap().unwrap().is_some());
+	}
+
+	/// An old gap below a resumed cache's floor never hides a fresh group still owed
+	/// above it: an ordered finite-budget reader must wait for that fresh group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unjudgeable_gap_does_not_hide_a_fresh_ordered_gap() {
+		let mut producer = track_producer("test", Info::default());
+		producer.received();
+		for sequence in [0, 4] {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_millis(400)))
+				.with_range(0..),
+		);
+		producer.set_live(Some(Position::group(8)), None);
+		for sequence in [6, 8] {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		assert_eq!(read_now(&mut reader, true), None, "group 5 is still owed");
+		framed(&producer, 5, 1).finish().unwrap();
+		assert_eq!(read_now(&mut reader, true), Some(Some(5)));
+		assert_eq!(read_now(&mut reader, true), Some(Some(6)));
 	}
 
 	/// An idle cache's old groups and the holes after them stay owed by unlimited reads.
