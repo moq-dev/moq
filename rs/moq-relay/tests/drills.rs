@@ -1009,9 +1009,11 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let mut config = relay_config();
 	config.quic = relay_quic();
 	config.connect = dial();
-	// Retry forever: a give-up after a slow impaired handshake would look exactly
-	// like the never-redialed regression, and a stall still fails the drill.
-	config.connect.backoff.timeout = Some((Duration::ZERO).into());
+	// Each cluster session dials from its own socket and gives up after this
+	// budget, then the cluster redials from a fresh port. Keep it long: cutting a
+	// slow impaired handshake short mid-flap adds a redial wait the drill's budget
+	// does not cover. A stall still fails the drill.
+	config.connect.backoff.timeout = Some((Duration::from_secs(10)).into());
 	if link == PeerLink::Transport {
 		config.connect.version = vec!["moq-transport-22".parse().expect("parse version")];
 	}

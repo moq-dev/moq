@@ -67,6 +67,24 @@ describe("replay", () => {
 		).toBe(0);
 	});
 
+	it("counts each run-dry the way the player's stats do", async () => {
+		// One frame 200 ms late against a 100 ms target: the ring runs dry once and re-stalls to refill.
+		const trace = paced(10, (i) => (i === 250 ? 230 : 30)).sort((a, b) => a.at - b.at);
+		const counted = async (arrivals: Arrival[]) => {
+			let last = 0;
+			for await (const { underruns } of replay(arrivals, {
+				rate: RATE,
+				config: CONFIG,
+				delay: Milli(100),
+				duration: observed(10),
+			}))
+				last = underruns;
+			return last;
+		};
+		expect(await counted(paced(10, () => 30))).toBe(0);
+		expect(await counted(trace)).toBe(1);
+	});
+
 	it("holds newer groups behind a missing one until the max delay gives up on it", async () => {
 		const trace = paced(10, () => 30).filter((arrival) => arrival.group !== 250);
 		// The consumer delivers in group order, so the ring runs dry for longer than the missing frame

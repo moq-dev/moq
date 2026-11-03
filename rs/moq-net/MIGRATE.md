@@ -33,6 +33,11 @@ let broadcast = consumer.follow(path, None)?.available().await?.expect("the firs
 
 Relays and stats that forward every route change call `consumer.routes()`, a hidden `origin::Routes` stream of `origin::RouteEvent`, which keeps the old five variants.
 
+### `group::on_track` is `track::Info::rescale` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+The free function `moq_net::group::on_track(timestamp, timescale)` is removed.
+Call `rescale(timestamp)` on the track's `Info` instead (`track.info().rescale(timestamp)` on a producer); it returns the same result and the same `Error::TimestampMismatch`.
+
 ### `Subscription::max_delay` is `delay: track::Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `track::Subscription` carries a `track::Delay { min, max }` in place of `max_delay`, and `with_max_delay(d)` is `with_delay(Delay)`.
