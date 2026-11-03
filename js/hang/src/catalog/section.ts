@@ -43,8 +43,9 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
  * `deserialize_renditions`.
  *
  * @param schema - one entry's schema.
+ * @param kind - what an entry is, naming it in the issue (`rendition`, `contribution`).
  */
-export function renditions<T extends z.ZodMiniType>(schema: T) {
+export function renditions<T extends z.ZodMiniType>(schema: T, kind = "rendition") {
 	return z.pipe(
 		// Not `z.record`, which would drop an ID like `__proto__` that JSON.parse keeps as its own.
 		z.custom<Record<string, unknown>>(
@@ -58,7 +59,7 @@ export function renditions<T extends z.ZodMiniType>(schema: T) {
 				else
 					ctx.issues.push({
 						code: "custom",
-						message: `malformed rendition ${id}: ${result.error.message}`,
+						message: `malformed ${kind} ${id}: ${result.error.message}`,
 						input: value,
 					});
 			}

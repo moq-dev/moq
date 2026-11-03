@@ -82,7 +82,7 @@ export const RootSchema = z.looseObject({
 	json: section(JsonSchema, "tracks"),
 	binary: section(BinarySchema, "tracks"),
 	// A new key, so a malformed entry fails the catalog, the same as Rust.
-	contributions: z.optional(renditions(ContributionSchema)),
+	contributions: z.optional(renditions(ContributionSchema, "contribution")),
 });
 
 /** The root catalog object: the media sections, the clock, the data track sections, plus any app extensions. */
