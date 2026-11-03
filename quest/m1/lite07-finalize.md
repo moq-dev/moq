@@ -35,8 +35,8 @@ owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land. Decided 2026-10-25: no routing identity proof
-gates the cut; the key and its proof belong to Peer grants, and lite-07
-routing identities stay declared and unverified. Decided 2026-10-26
+gates the cut, and lite-07 routing identities stay declared and unverified
+(2026-11-02: peer grants are dropped and no key proof is planned). Decided 2026-10-26
 (maintainer): receivers do not stamp per-session identities either, since
 that splits one origin into several identities across a relay mesh.
 

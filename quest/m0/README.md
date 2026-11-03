@@ -37,4 +37,5 @@ since cutting segments from first-frame pts waits on nothing in m1.
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
 - [Backport the dot-segment and auth-redirect refusals](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths and its auth client refuses redirects
 - [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the catalog's `hls` field and record tracks go away, and the export numbers segments on `media.join.interval` from media tracks
+- [Agents use quest's worktree hooks](/quest/m0/quest-worktree-hooks.md) - adopt `quest worktree hook` once it's shown to coexist with T3 Code's worktrees
 - [HLS lists contributions](/quest/m0/hls-contributions.md) - an HLS master lists each catalog contribution's renditions, and a contribution's media is subscribed only while players fetch it
