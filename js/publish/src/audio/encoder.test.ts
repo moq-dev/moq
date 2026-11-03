@@ -93,6 +93,8 @@ class LaggingAudioEncoder {
 	#base: number | undefined;
 	#encoded = 0;
 	#probe = false;
+	// Configured this tick: the probe flushes at once, while the live pipeline flushes only before a break.
+	#fresh = false;
 	#config?: AudioEncoderConfig;
 	#error: AudioEncoderInit["error"];
 
@@ -110,7 +112,9 @@ class LaggingAudioEncoder {
 	configure(config: AudioEncoderConfig): void {
 		this.state = "configured";
 		this.#config = config;
+		this.#fresh = true;
 		queueMicrotask(() => {
+			this.#fresh = false;
 			if (!this.#probe) LaggingAudioEncoder.onConfigure?.(config);
 		});
 	}
@@ -144,10 +148,12 @@ class LaggingAudioEncoder {
 	}
 
 	async flush(): Promise<void> {
-		this.#probe = true;
-		if (this.#config) LaggingAudioEncoder.probes.push(structuredClone(this.#config));
-		const index = LaggingAudioEncoder.instances.indexOf(this);
-		if (index !== -1) LaggingAudioEncoder.instances.splice(index, 1);
+		if (this.#fresh) {
+			this.#probe = true;
+			if (this.#config) LaggingAudioEncoder.probes.push(structuredClone(this.#config));
+			const index = LaggingAudioEncoder.instances.indexOf(this);
+			if (index !== -1) LaggingAudioEncoder.instances.splice(index, 1);
+		}
 		for (const chunk of this.#held.splice(0)) this.#emit(chunk);
 	}
 
@@ -380,11 +386,12 @@ test("an on-demand gap marks where submitted audio ends and drops the chunks hel
 });
 
 // A pause with a subscriber attached breaks the timeline just as losing demand does: a subscriber
-// that stays across it, or joins during it, must not read the audio before it as live.
-test("disabling with a subscriber attached marks where submitted audio ends", async () => {
+// that stays across it, or joins during it, must not read the audio before it as live. The codec
+// keeps its configuration, so the audio it still held is flushed out before the marker.
+test("disabling with a subscriber attached flushes the held audio, then marks where it ends", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
-	const { enabled, feed, written, writes } = env;
+	const { enabled, feed, written } = env;
 
 	let index = 0;
 	const push = async (count: number) => {
@@ -396,25 +403,22 @@ test("disabling with a subscriber attached marks where submitted audio ends", as
 
 	await push(4); // two written, two held
 
-	const marked = new Promise<void>((resolve) => {
-		writes.onWrite = resolve;
-	});
 	enabled.set(false);
-	await marked;
-	writes.onWrite = undefined;
+	await settle();
 
 	await push(2); // nothing publishing
-	const resumed = configured();
 	enabled.set(true);
-	await resumed;
-	await push(3); // a fresh AudioEncoder, so one written and two held
+	await push(3); // the restarted codec, so one written and two held
 
 	expect(written).toEqual([
 		[20_000, 1],
 		[40_000, 1],
+		[60_000, 1],
+		[80_000, 1],
 		[100_000, 0],
 		[140_000, 1],
 	]);
+	expect(LaggingAudioEncoder.instances).toHaveLength(1);
 });
 
 // A muted rendition stays in the catalog, so a viewer deselects it with a one-field delta instead of
@@ -473,13 +477,18 @@ test("re-enabling with a changed sample rate probes again", async () => {
 
 	enabled.set(false);
 	await settle();
+	// A disabled rendition keeps its codec ready, so the new format probes at once.
+	let configuring = configured();
 	capture.out.format.set({ sampleRate: 24_000, channelCount: 1 });
-
-	const configuring = configured();
-	enabled.set(true);
-	const config = await configuring;
-	expect(config.sampleRate).toBe(24_000);
+	// The old config keeps the codec running, resampling, until the probe resolves the new one.
+	for (let config = await configuring; config.sampleRate !== 24_000; config = await configuring) {
+		configuring = configured();
+	}
 	expect(LaggingAudioEncoder.probes.map((probe) => probe.sampleRate)).toEqual([48_000, 24_000]);
+	expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+
+	enabled.set(true);
+	await settle();
 	expect(encoder.out.catalog.peek()).toMatchObject({ sampleRate: 24_000 });
 	expect(encoder.out.catalog.peek()?.enabled).toBeUndefined();
 });
@@ -489,7 +498,7 @@ test("re-enabling with a changed sample rate probes again", async () => {
 test("audio resumed after a multi-second mute carries its capture timestamps", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
-	const { enabled, feed, written, writes } = env;
+	const { enabled, feed, written } = env;
 
 	const push = async (start: number, count: number) => {
 		for (let i = 0; i < count; i++) {
@@ -500,23 +509,19 @@ test("audio resumed after a multi-second mute carries its capture timestamps", a
 
 	await push(20_000, 4); // two written, two held
 
-	const marked = new Promise<void>((resolve) => {
-		writes.onWrite = resolve;
-	});
 	enabled.set(false);
-	await marked;
-	writes.onWrite = undefined;
+	await settle();
 
 	// Capture keeps running through a five-second mute.
 	await push(100_000, 250);
-	const resumed = configured();
 	enabled.set(true);
-	await resumed;
 	await push(5_100_000, 4); // two written, two held
 
 	expect(written).toEqual([
 		[20_000, 1],
 		[40_000, 1],
+		[60_000, 1],
+		[80_000, 1],
 		[100_000, 0],
 		[5_100_000, 1],
 		[5_120_000, 1],
@@ -572,7 +577,7 @@ test("a push completing several frames keeps the encoder running", async () => {
 test("a group duration packs frames until the minimum and restarts after a break", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup(new Order(), undefined, Milli(100));
-	const { enabled, feed, written, groups, appended, writes } = env;
+	const { enabled, feed, written, groups, appended } = env;
 
 	let index = 0;
 	const push = async (count: number) => {
@@ -589,24 +594,18 @@ test("a group duration packs frames until the minimum and restarts after a break
 	expect(groups).toEqual([5, 2]);
 	expect(appended[0].closed.peek()).toBeNull();
 
-	const marked = new Promise<void>((resolve) => {
-		writes.onWrite = resolve;
-	});
 	enabled.set(false);
-	await marked;
-	writes.onWrite = undefined;
+	await settle();
 
-	const resumed = configured();
 	enabled.set(true);
-	await resumed;
-	await push(4); // a fresh AudioEncoder, so two written and two held
+	await push(4); // the restarted codec, so two written and two held
 
 	expect(written.map(([timestamp]) => timestamp)).toEqual([
-		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 200_000, 200_000, 220_000,
+		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 160_000, 180_000, 200_000, 200_000, 220_000,
 	]);
-	// 120ms opens the next group, closing the five frames at 20-100ms. The break ends the
-	// 120-140ms group early, so resumed frames start a fresh group after the marker.
-	expect(groups).toEqual([5, 2, 1, 2]);
+	// 120ms opens the next group, closing the five frames at 20-100ms. The break flushes 160-180ms
+	// into that group and ends it early, so resumed frames start a fresh group after the marker.
+	expect(groups).toEqual([5, 4, 1, 2]);
 });
 
 test("default audio groups carry twenty milliseconds", async () => {
@@ -1259,4 +1258,132 @@ test("Opus description is probed with the exact live config before advertising",
 	expect(voice.opus).toMatchObject({ application: "voip", signal: "voice" });
 	expect(LaggingAudioEncoder.probes.at(-1)).toEqual(voice);
 	expect(env.encoder.out.catalog.peek()?.description).toBe(Buffer.from(JSON.stringify(voice)).toString("hex"));
+});
+
+// A disable stops taking capture, but the audio retained before it stays reachable: a subscriber
+// arriving while disabled still gets it encoded, and otherwise it expires on its own.
+test.each([false, true])("audio retained before a disable is encoded on demand (expired: %p)", async (expire) => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const enabled = new Signal(true);
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("disabled.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, enabled, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		for (let index = 0; index < 4; index++) {
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+			await clock.advance(Nano.fromMilli(Milli(20)));
+		}
+		enabled.set(false);
+		await settle();
+		// Disabling encodes nothing eagerly.
+		expect(encoder.out.stats.peek().frames).toBe(0);
+		if (expire) await clock.advance(Nano.fromMilli(Milli(1100)));
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
+		await settle();
+		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+		expect(encoder.out.active.peek()).toBe(false);
+		if (expire) {
+			expect(encoder.out.stats.peek().frames).toBe(0);
+			return;
+		}
+		// The codec is flushed after the history, since nothing follows it while disabled.
+		expect(encoder.out.stats.peek().frames).toBe(4);
+		const reader = late.ordered();
+		for (let index = 0; index < 4; index++) {
+			const group = await reader.nextGroup();
+			const frame = await group?.readFrame();
+			if (!frame) throw new Error("expected retained frame");
+			expect(Moq.Varint.decode(frame.payload)[0]).toBe(index * 20_000);
+			group?.close();
+		}
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
+// Re-enabled before anyone wanted it, the retained audio stays ahead of the break: all of it is
+// encoded and flushed before the marker, then the resumed audio starts a fresh epoch.
+test("audio retained across a disable and re-enable is served before the break", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const enabled = new Signal(true);
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("resumed.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, enabled, capture: fakeCapture(feed) as never });
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const push = async (start: number, count: number) => {
+			for (let index = 0; index < count; index++) {
+				await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Nano.fromMilli(Milli(20)));
+			}
+		};
+		await push(0, 4);
+		enabled.set(false);
+		await settle();
+		await push(80_000, 2); // dropped while disabled
+		enabled.set(true);
+		await settle();
+		await push(200_000, 3);
+		expect(encoder.out.stats.peek().frames).toBe(0);
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
+		await settle(20);
+		// The four retained frames are flushed before the marker, then the restarted codec holds two.
+		expect(encoder.out.stats.peek().frames).toBe(5);
+		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Micro(80_000)]);
+		const reader = late.ordered();
+		const read: [number, number][] = [];
+		while (read.length < 6) {
+			const group = await reader.nextGroup();
+			const frame = await group?.readFrame();
+			if (!frame) throw new Error("expected a frame");
+			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
+			read.push([timestamp, payload.byteLength]);
+			group?.close();
+		}
+		expect(read).toEqual([
+			[0, 1],
+			[20_000, 1],
+			[40_000, 1],
+			[60_000, 1],
+			[80_000, 0],
+			[200_000, 1],
+		]);
+	} finally {
+		discontinuity.mockRestore();
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
 });
