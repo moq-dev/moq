@@ -269,6 +269,53 @@ def report(directory, load):
     (directory / "instructions.json").write_text(json.dumps(result, indent=2) + "\n")
 
 
+def lost(rows, start, end):
+    """Groups the generator confirmed lost between the reports bracketing the window."""
+    before = [row for row in rows if row["timestamp_ms"] <= start]
+    after = [row for row in rows if row["timestamp_ms"] >= end]
+    if not before or not after:
+        raise ValueError("generator reports do not bracket the counter window")
+    return after[0]["groups_lost"] - before[-1]["groups_lost"]
+
+
+def summarize(run, labels):
+    """Print each revision's median and range across rounds, and keep them beside the evidence."""
+    from statistics import median
+
+    result = {}
+    for label in labels:
+        cells = []
+        for path in sorted((run / "relay" / label).glob("round-*/instructions-*/*/instructions/instructions.json")):
+            cell = json.loads(path.read_text())
+            rows = [json.loads(line) for line in (path.parent.parent / "load.jsonl").read_text().splitlines()]
+            cells.append(
+                dict(
+                    cell=str(path.relative_to(run)),
+                    instructions_per_frame=cell["instructions_per_frame"],
+                    cycles_per_frame=cell["cycles_per_frame"],
+                    recv_fps=cell["recv_fps"],
+                    groups_lost=lost(rows, cell["window_start_ms"], cell["window_end_ms"]),
+                )
+            )
+        if not cells:
+            raise ValueError(f"no instruction cells for {label}")
+        result[label] = dict(
+            cells=cells,
+            **{
+                key: dict(median=median(c[key] for c in cells), min=min(c[key] for c in cells), max=max(c[key] for c in cells))
+                for key in ("instructions_per_frame", "cycles_per_frame", "recv_fps", "groups_lost")
+            },
+        )
+    (run / "instructions-summary.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(f"\n{'revision':<20} {'kinstr/frame [min-max]':>26} {'kcycles/frame':>14} {'recv fps [min-max]':>24} {'lost':>5}")
+    for label, row in result.items():
+        i, c, f = row["instructions_per_frame"], row["cycles_per_frame"], row["recv_fps"]
+        print(
+            f"{label:<20} {i['median'] / 1e3:>9.1f} [{i['min'] / 1e3:.1f}-{i['max'] / 1e3:.1f}] "
+            f"{c['median'] / 1e3:>14.1f} {f['median']:>9.0f} [{f['min']:.0f}-{f['max']:.0f}] {row['groups_lost']['max']:>5}"
+        )
+
+
 def validate_data(path):
     """Reject lost or throttled samples before expensive symbolization."""
     data = path.read_bytes()
@@ -307,12 +354,17 @@ def main():
     report_args = sub.add_parser("report")
     report_args.add_argument("directory", type=Path)
     report_args.add_argument("load", type=Path)
+    summarize_args = sub.add_parser("summarize")
+    summarize_args.add_argument("run", type=Path)
+    summarize_args.add_argument("labels", nargs="+")
     args = parser.parse_args()
     try:
         if args.command == "check":
             settings(args.workers)
         elif args.command == "capture":
             capture(args.pid, args.directory, args.delay, args.duration)
+        elif args.command == "summarize":
+            summarize(args.run, args.labels)
         else:
             report(args.directory, args.load)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:

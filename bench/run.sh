@@ -70,10 +70,12 @@ case $MODE in
         BASE=
         ;;
     --profile)
-        BASE=${BENCH_BASE:-}
-        if [[ -n $BASE ]]; then
-            BASE=$(git rev-parse --verify "$BASE^{commit}")
-        fi
+        # Instructions mode accepts several space-separated bases, rotated with current in each round.
+        BASES=()
+        for value in ${BENCH_BASE:-}; do
+            BASES+=("$(git rev-parse --verify "$value^{commit}")")
+        done
+        BASE=${BASES[*]}
         PROFILE_RUNTIME=${BENCH_PROFILE_RUNTIME:-tokio-workers}
         if [[ ! $PROFILE_RUNTIME =~ ^(tokio-workers|io-uring-workers)$ ]]; then
             printf 'profile runtime must be tokio-workers or io-uring-workers, got %q\n' "$PROFILE_RUNTIME" >&2
@@ -97,6 +99,15 @@ case $MODE in
                 exit 1
             fi
         done
+        # Instruction counts pair revisions in rotated rounds, so they run on their own.
+        if [[ " $PROFILE_MODES " == *' instructions '* && $PROFILE_MODES != instructions ]]; then
+            printf 'BENCH_PROFILE_MODES=instructions runs alone, not with %q\n' "$PROFILE_MODES" >&2
+            exit 1
+        fi
+        if ((${#BASES[@]} > 1)) && [[ $PROFILE_MODES != instructions ]]; then
+            printf 'only BENCH_PROFILE_MODES=instructions accepts more than one BENCH_BASE revision\n' >&2
+            exit 1
+        fi
         for value in $PROFILE_WORKERS; do
             if [[ ! $value =~ ^[1-9][0-9]{0,2}$ ]] || ((value > 256)); then
                 printf 'profile workers must be integers from 1 to 256, got %q\n' "$value" >&2
@@ -167,6 +178,7 @@ fi
 RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
 printf 'Benchmark evidence: %s\n' "$RUN"
 WORKTREE=
+WORKTREES=()
 RELAY_PID=
 HOST_PID=
 LOAD_PID=
@@ -192,10 +204,11 @@ cleanup() {
         kill "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
     fi
-    if [[ -n $WORKTREE ]]; then
-        git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
-        rmdir "$WORKTREE" 2>/dev/null || true
-    fi
+    local worktree
+    for worktree in ${WORKTREE:+"$WORKTREE"} ${WORKTREES[@]+"${WORKTREES[@]}"}; do
+        git -C "$ROOT" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+        rmdir "$worktree" 2>/dev/null || true
+    done
     # Close both pipe writers before waiting for the owned log copiers.
     if [[ -n $STDOUT_PID ]]; then
         exec 1>&3 2>&4
@@ -851,19 +864,17 @@ run_profiles() {
     done
     generate_certificate
 
-    if [[ " $PROFILE_MODES " == *' instructions '* ]]; then
-        # Keep each bisect revision's artifacts instead of overwriting one base target.
-        CURRENT_TARGET=$TARGET/revisions/$(git rev-parse HEAD)
-        BASE_TARGET=$TARGET/revisions/$BASE
+    if [[ $PROFILE_MODES == instructions ]]; then
+        run_instructions
+        return
     fi
 
     if [[ -n $BASE ]]; then
-        mkdir -p "$ROOT/.tmp"
-        checkout_base "$BASE" "$ROOT/.tmp"
+        checkout_base "$BASE"
         mkdir -p "$RUN/base-context"
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" --profile)
     fi
-    local label checkout target round index
+    local label checkout target
     local -a revisions=(current)
     if [[ -n $BASE ]]; then revisions=(base current); fi
     for mode in $PROFILE_MODES; do
@@ -881,22 +892,52 @@ run_profiles() {
             if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
                 check_uring "$target/profiling"
             fi
-            if [[ $mode != instructions ]]; then
-                run_profile "$mode" "$label" "$target/profiling/moq-relay"
-            fi
+            run_profile "$mode" "$label" "$target/profiling/moq-relay"
         done
-        if [[ $mode == instructions ]]; then
-            # Pair in alternating order rather than measuring every base run before current.
-            for ((round = 1; round <= ROUNDS; round++)); do
-                for ((index = 0; index < ${#revisions[@]}; index++)); do
-                    label=${revisions[$(((index + round - 1) % ${#revisions[@]}))]}
-                    target=$CURRENT_TARGET/profile
-                    if [[ $label == base ]]; then target=$BASE_TARGET/profile; fi
-                    run_profile "$mode" "$label/round-$round" "$target/profiling/moq-relay"
-                done
-            done
-        fi
     done
+}
+
+# Count every base and the current tree in rotated order, so each round measures
+# all revisions back to back and no revision always runs first. The current
+# generator and sampler drive every relay, including old bases whose own harness
+# cannot select the io_uring runtime.
+run_instructions() {
+    local label sha target round index next worktree
+    local -a labels=() targets=()
+    # Each revision keeps its own target, so a later bisect step reuses its build.
+    build_workers "$ROOT" "$TARGET/revisions/$(git rev-parse HEAD)/profile" profiling instructions
+    LOAD_BIN=$TARGET/revisions/$(git rev-parse HEAD)/profile/profiling/moq-bench
+    HOST_BIN=$TARGET/revisions/$(git rev-parse HEAD)/profile/profiling/moq-bench-host
+    for sha in ${BASES[@]+"${BASES[@]}"}; do
+        label=base
+        if ((${#BASES[@]} > 1)); then label=base-${sha:0:12}; fi
+        # Nested in the checkout's ignored scratch space, loading only its own Cargo config.
+        mkdir -p "$ROOT/.tmp"
+        checkout_base "$sha" "$ROOT/.tmp"
+        worktree=$WORKTREE
+        WORKTREES+=("$worktree")
+        WORKTREE=
+        mkdir -p "$RUN/base-context/$label"
+        (cd "$worktree" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
+        target=$TARGET/revisions/$sha/profile
+        build_workers "$worktree" "$target" profiling instructions
+        labels+=("$label")
+        targets+=("$target")
+    done
+    labels+=(current)
+    targets+=("$TARGET/revisions/$(git rev-parse HEAD)/profile")
+    if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
+        for target in "${targets[@]}"; do
+            check_uring "$target/profiling"
+        done
+    fi
+    for ((round = 1; round <= ROUNDS; round++)); do
+        for ((index = 0; index < ${#labels[@]}; index++)); do
+            next=$(((index + round - 1) % ${#labels[@]}))
+            run_profile instructions "${labels[$next]}/round-$round" "${targets[$next]}/profiling/moq-relay"
+        done
+    done
+    python3 "$ROOT/bench/instructions.py" summarize "$RUN" "${labels[@]}"
 }
 
 # Each profiled run follows an unprofiled control on the same binary, so the
@@ -929,7 +970,11 @@ run_profile() {
             ;;
     esac
     for workers in $PROFILE_WORKERS; do
-        run_workload "$label/control-$mode-$workers" "$relay" "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$workers"
+        # Instruction counts compare revisions under the same profiler, so the paired
+        # revisions are the control instead of an unprofiled run of each.
+        if [[ $mode != instructions ]]; then
+            run_workload "$label/control-$mode-$workers" "$relay" "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$workers"
+        fi
         PROFILE=$mode
         run_workload "$label/$mode-$workers" "$relay" "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$workers"
         PROFILE=
@@ -937,7 +982,8 @@ run_profile() {
         profiled=$RUN/relay/$label/$mode-$workers/$PROFILE_WORKLOAD
         case $mode in
             instructions)
-                cat "$profiled/instructions/instructions.json"
+                jq -r '"\(.instructions_per_frame / 1000 | round) kinstr/frame at \(.recv_fps | round) fps"' \
+                    "$profiled/instructions/instructions.json"
                 ;;
             lock)
                 jq -r -s '[
