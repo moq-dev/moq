@@ -129,14 +129,17 @@ module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-form
 # the libobs headers it compiles against.
 module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
-# The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
-# fails a check that reads a cross-tree input this pattern misses.
-# demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-# Root Nix inputs own the browser version every npm Playwright pin matches.
 # The bun lane exists because `bun install` relinks the root workspace's
 # packages even when nothing changed, so a concurrent install or import of
-# them fails.
-module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
+# them fails. Biome checks the whole repository. It registers before js so
+# that fix runs it first, since Biome can fix sources that the package build
+# rejects, such as a type-only export.
+module biome '' \
+    tools='bun' lane=bun fix
+# The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
+# fails a check that reads a cross-tree input this pattern misses.
+# Root Nix inputs own the browser version every npm Playwright pin matches.
+module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3' lane=bun fix
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
@@ -366,6 +369,7 @@ step() {
             }
             ;;
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
+        check:biome) just biome ;;
         check:markdown)
             bun install --frozen-lockfile
             sh/markdown.sh check
@@ -383,7 +387,8 @@ step() {
         test:py) just py test ;;
         test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
-        fix:js) just js fix "$js_list" ;;
+        fix:js) just js fix-changed "$js_list" ;;
+        fix:biome) just biome-fix ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix
