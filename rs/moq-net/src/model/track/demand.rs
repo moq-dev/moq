@@ -227,7 +227,15 @@ impl Preferences {
 	}
 
 	pub(super) fn update(&self, next: Subscription) -> crate::Result<()> {
+		self.update_with(|current| *current = next)
+	}
+
+	/// Change the preferences in place under the write lock, so an update another handle
+	/// makes meanwhile is kept rather than overwritten with a stale copy.
+	pub(super) fn update_with(&self, change: impl FnOnce(&mut Subscription)) -> crate::Result<()> {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
+		let mut next = value.clone();
+		change(&mut next);
 		if *value == next {
 			return Ok(());
 		}

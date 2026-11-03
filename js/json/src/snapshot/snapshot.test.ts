@@ -238,6 +238,33 @@ test("reads skip a group the subscription still owes", async () => {
 	}
 });
 
+// An update that undoes the consumer's pin before the microtask ends nets no change, so the signal
+// notifies nobody, not even a read already waiting on the subscription. The pin still holds.
+test("reads skip an owed group when an update undoes the pin in the same microtask", async () => {
+	for (const max of [Milli(1_000), null]) {
+		const track = new Track.Producer("test").accept({});
+		hooks.receiveTrack(track);
+		const put = (sequence: bigint) => {
+			const group = track.createGroup(sequence);
+			group.writeFrame({ payload: new TextEncoder().encode(`{"n":${sequence}}`) });
+			group.finish();
+		};
+		put(0n);
+
+		// Starting past group 0, both reads wait on group 1 from the first poll.
+		const subscription = { delay: { max }, ranges: [{ start: { absolute: 1n } }] };
+		const subscribers = [track.subscribe(subscription), track.subscribe(subscription)];
+		const [latest, next] = subscribers.map((subscriber) => new Consumer<Value>({ track: subscriber }));
+		const reads = [latest.latest(), next.next()];
+		for (const subscriber of subscribers) subscriber.update(subscription);
+
+		await sleep(Nano.fromMilli(Milli(1)));
+		put(2n);
+		expect((await Promise.all(reads)).map((state) => state?.value)).toEqual([{ n: 2 }, { n: 2 }]);
+		track.close();
+	}
+});
+
 test("live consumer sees each update", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });

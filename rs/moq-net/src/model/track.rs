@@ -9078,6 +9078,27 @@ impl Subscriber {
 			self.consume().refuse_subscription(&subscription)?;
 		}
 		channel.update(subscription)?;
+		self.synced();
+		Ok(())
+	}
+
+	/// Set this subscriber's [`max`](Delay::max) delay, keeping the rest of its preferences.
+	///
+	/// Unlike passing [`Self::subscription`] back to [`Self::update`], the change applies in
+	/// place, so a [`Control`] updating another preference meanwhile keeps its change.
+	/// Returns [`Error::Closed`] if the track already ended.
+	pub fn set_max_delay(&mut self, max: Option<Duration>) -> Result<()> {
+		let channel = match &self.inner {
+			Inner::Plain(cursor) => &cursor.subscription,
+			Inner::Resume(resume, _) => resume.subscription(),
+		};
+		channel.update_with(|subscription| subscription.delay.max = max)?;
+		self.synced();
+		Ok(())
+	}
+
+	/// Bring the read side up to date with preferences this handle just changed.
+	fn synced(&mut self) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
@@ -9086,7 +9107,6 @@ impl Subscriber {
 			// sources even while nobody reads.
 			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
-		Ok(())
 	}
 
 	/// Poll for the track's largest location within [`Self::with_range`]: the current one, then each newer one, and `None` once the track ends.
@@ -9312,6 +9332,12 @@ impl Ordered {
 	/// Returns [`Error::Closed`] if the track already ended.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
 		self.inner.update(subscription)
+	}
+
+	/// Set this subscriber's [`max`](Delay::max) delay, keeping the rest of its preferences;
+	/// see [`Subscriber::set_max_delay`].
+	pub fn set_max_delay(&mut self, max: Option<Duration>) -> Result<()> {
+		self.inner.set_max_delay(max)
 	}
 
 	/// Block until the track declares its end, returning the exclusive end position.
@@ -14770,6 +14796,27 @@ mod test {
 
 		let aggregate = producer.subscription().expect("expected an active subscription");
 		assert_eq!(aggregate.priority, 7);
+	}
+
+	#[test]
+	fn set_max_delay_keeps_a_controls_change() {
+		let producer = track_producer("test", Info::timed());
+		let asked = Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1)));
+		let mut subscriber = producer.subscribe(asked.clone()).ordered();
+		let control = subscriber.control();
+
+		// Another handle changes the priority after this side last read its preferences.
+		let stale = subscriber.subscription();
+		control.update(asked.with_priority(7)).unwrap();
+		subscriber.set_max_delay(Some(Duration::ZERO)).unwrap();
+
+		let expected = Subscription::default()
+			.with_priority(7)
+			.with_delay(Delay::default().with_max(Duration::ZERO));
+		assert_eq!(subscriber.subscription(), expected);
+		assert_eq!(producer.subscription(), Some(expected));
+		// Writing back the copy read before the change would have lost it.
+		assert_eq!(stale.priority, 0);
 	}
 
 	#[test]

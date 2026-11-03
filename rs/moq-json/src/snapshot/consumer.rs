@@ -60,12 +60,11 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// Hold the subscription's max delay at zero, keeping the rest of it.
 	fn pin_delay(&mut self) {
-		let mut subscription = self.track.subscription();
-		if subscription.delay.max != Some(std::time::Duration::ZERO) {
-			subscription.delay.max = Some(std::time::Duration::ZERO);
-			// Refused only when the track has ended or its ranges name time on an untimed
-			// track; neither is this reader's to fix.
-			let _ = self.track.update(subscription);
+		const ZERO: Option<std::time::Duration> = Some(std::time::Duration::ZERO);
+		if self.track.subscription().delay.max != ZERO {
+			// In place, so a retained handle's concurrent change to the ranges or priority stays.
+			// Refused only once the track has ended, which leaves nothing to read anyway.
+			let _ = self.track.set_max_delay(ZERO);
 		}
 	}
 

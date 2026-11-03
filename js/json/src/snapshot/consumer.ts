@@ -36,17 +36,23 @@ export class Consumer<T> {
 		this.#track = config.track.ordered();
 		this.#pin();
 		// A retained handle can update the subscription while a read waits; put the zero back at
-		// once, which also wakes a read that update left holding at an owed group. Writes coalesce
-		// per microtask, so an update undone in the same one never notifies: #read pins as well.
+		// once, which also wakes a read that update left holding at an owed group.
 		this.#track.subscription.subscribe(() => this.#pin());
 		this.#decoder = new Decoder(config);
 	}
 
 	// Hold the subscription's max delay at zero, the default subscription's, keeping the rest of it.
+	//
+	// A signal notifies only the net change across a microtask, so an update that undoes a pin
+	// before that microtask ends notifies nobody: not the subscriber above, nor a read waiting on
+	// the subscription inside `@moq/net`. Every pin that writes checks again a microtask later,
+	// after that update could have run.
 	#pin(): void {
 		const zero = Moq.Track.Subscription.default().delay?.max;
 		const current = this.#track.subscription.peek();
-		if (current?.delay?.max !== zero) this.#track.update({ ...current, delay: { ...current?.delay, max: zero } });
+		if (current?.delay?.max === zero) return;
+		this.#track.update({ ...current, delay: { ...current?.delay, max: zero } });
+		queueMicrotask(() => this.#pin());
 	}
 
 	/**
@@ -75,7 +81,6 @@ export class Consumer<T> {
 
 	async #read(skip: boolean): Promise<Timed<T> | undefined> {
 		for (;;) {
-			this.#pin();
 			if (skip) {
 				// Jump to the newest group the reader already has; a newer one supersedes the rest.
 				// Taking groups, not the track's largest position, ignores datagrams (which share
