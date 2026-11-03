@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `group::on_track` is `track::Info::rescale` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+The free function `moq_net::group::on_track(timestamp, timescale)` is removed.
+Call `rescale(timestamp)` on the track's `Info` instead (`track.info().rescale(timestamp)` on a producer); it returns the same result and the same `Error::TimestampMismatch`.
+
 ### `Subscription::max_delay` is `delay: track::Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `track::Subscription` carries a `track::Delay { min, max }` in place of `max_delay`, and `with_max_delay(d)` is `with_delay(Delay)`.
@@ -308,7 +313,8 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 Answer each `origin::Request` with `request.prepare()?`, fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under a fresh instance of its own and returns its producer.
 Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
-`Request::accept`, `Producer::dynamic_route`, and `Dynamic::update_route` are crate-private (#6496): only the built-in sessions answer with a broadcast they already hold.
+`Producer::requests_route` and `Requests::update_route` remain crate-private (#6496).
+`Request::serve(consumer)` additively exposes the former private `accept`: answer with a held broadcast without announcing an exact route. The prefix route promises the same bytes and continuous sequences at each served path; start a new prefix route for different content, or prepare and publish an independent job.
 Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
 
 ### Anchors can name a time (#6074)

@@ -42,4 +42,4 @@ report any required surface change. No independent wire extension planned.
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - shared candidate and identity model
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - shared candidate and identity model

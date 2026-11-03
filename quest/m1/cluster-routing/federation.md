@@ -18,8 +18,9 @@ Use authenticated, namespace-scoped admission: the CDN scopes the local
 relay's connection to a path prefix, and identities it sends, its own and its
 local publishers', are qualified, so a forger or a misconfigured uplink only
 affects its own scope (decided 2026-10-14; see
-[Routes and announces](/quest/m1/cluster-routing/routes.md)). Open: how
-those identities are keyed, owned by routes. Without a key, a scoped forger
+[Routes and announces](/quest/m1/cluster-routing/routes/README.md)). Open: how
+those identities are keyed, owned by
+[Route session integration](/quest/m1/cluster-routing/routes/session.md). Without a key, a scoped forger
 declaring a victim's id captures claims outside its scope
 (`forged_identity_hijacks_claims_outside_the_forgers_scope`). The scope
 itself (`hash(scope, id)`) was rejected 2026-10-15, and the grant's
@@ -62,7 +63,7 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - identity, scoped claims, reachability, and export policy
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - identity, scoped claims, reachability, and export policy
 
 ## Related
 
