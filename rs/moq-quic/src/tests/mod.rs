@@ -5324,6 +5324,32 @@ fn min_mtu_respects_peer_max_udp_payload_size() {
 	pair.finish_connect(client_ch, server_ch);
 }
 
+/// A path MTU above the default controller's 1200-based initial window still lets the first
+/// Initial leave: a window smaller than one datagram would block it, and no ACK would ever come.
+#[test]
+fn handshake_with_initial_mtu_above_initial_window() {
+	let _guard = subscribe();
+	const MTU: u16 = 16000;
+	let transport = || transport::Config {
+		initial_mtu: MTU,
+		mtu: None,
+		..transport::Config::default()
+	};
+	let endpoint = endpoint::Config {
+		max_udp_payload_size: MTU,
+		..endpoint::Config::default()
+	};
+	let mut server_config = server_config();
+	server_config.transport = transport();
+	let mut client_config = client_config();
+	client_config.transport = transport();
+	let mut pair = Pair::new(endpoint, server_config);
+	pair.mtu = MTU.into();
+	let (client_ch, server_ch) = pair.connect_with(client_config);
+	assert_eq!(pair.client_conn_mut(client_ch).path_mtu(), MTU);
+	assert_eq!(pair.server_conn_mut(server_ch).path_mtu(), MTU);
+}
+
 /// Verify that UDP datagrams are padded to MTU if specified in the transport config.
 #[test]
 fn pad_to_mtu() {
