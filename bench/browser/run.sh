@@ -10,7 +10,7 @@
 #   base     BASE's checkout, when given
 #
 # The run directory is always kept: report.json, gzipped Chrome traces, and the
-# relay log. See bench/README.md.
+# relay log and page consoles. See bench/README.md.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -92,7 +92,7 @@ for benchmark in frames drift ledger bandwidth replay resume-history; do
     bun micro.ts --bench "$benchmark" --rounds 1 --out "$HARNESS_RUN/$benchmark.json" \
         current="$WORKSPACE" aa="$WORKSPACE"
 done
-bun test ./fixture.test.ts ./summary.test.ts
+bun test ./fixture.test.ts ./summary.test.ts ./consoles.browser.ts
 variants=(current="$WORKSPACE" aa="$WORKSPACE" copy="$WORKSPACE:copy")
 names=current,aa,copy
 if [[ -n $BASE_COMMIT ]]; then
