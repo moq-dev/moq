@@ -32,13 +32,25 @@ impl<C> Task<C> {
 	}
 }
 
-impl NonZeroSlab<Task> {
+/// A task's callback, which receives the task's result once it ends.
+pub(crate) trait Terminal: Copy + Send + 'static {
+	/// Deliver the terminal result.
+	fn terminal(&self, res: Result<(), Error>);
+}
+
+impl Terminal for OnStatus {
+	fn terminal(&self, res: Result<(), Error>) {
+		self.call(res);
+	}
+}
+
+impl<C: Terminal> NonZeroSlab<Task<C>> {
 	/// Spawn `run` with its close receiver, then deliver its result as the terminal callback.
 	///
 	/// `slab` finds this slab again from the task, so it can remove its own entry.
 	pub fn spawn<F>(
 		&mut self,
-		callback: OnStatus,
+		callback: C,
 		slab: fn(&mut State) -> &mut Self,
 		run: impl FnOnce(oneshot::Receiver<()>) -> F,
 	) -> Result<Id, Error>
@@ -55,7 +67,7 @@ impl NonZeroSlab<Task> {
 			// Pull the entry out from under the lock so the callback never runs while held.
 			let entry = slab(&mut State::lock()).remove(id);
 			if let Some(entry) = entry {
-				entry.callback.call(res);
+				entry.callback.terminal(res);
 			}
 		});
 

@@ -240,6 +240,34 @@ extern "C" fn channel_callback(user_data: *mut c_void, code: i32) {
 	let _ = tx.send(code);
 }
 
+/// What [follow_channel_callback] forwards for `MOQ_FOLLOW_EVENT_OFFLINE`, so follow tests read
+/// one channel of codes: a handle, this, or a terminal code. Test-only: the ABI reports
+/// offline as its own event.
+const FOLLOW_OFFLINE: i32 = i32::MAX;
+
+/// The code a follow event forwards as, checking that each event carries what it promises.
+fn follow_code(event: moq_follow_event, code: i32) -> i32 {
+	match event {
+		moq_follow_event::MOQ_FOLLOW_EVENT_ONLINE => {
+			assert!(code > 0, "online carries a handle, got {code}");
+			code
+		}
+		moq_follow_event::MOQ_FOLLOW_EVENT_OFFLINE => {
+			assert_eq!(code, 0, "offline carries no code");
+			FOLLOW_OFFLINE
+		}
+		moq_follow_event::MOQ_FOLLOW_EVENT_END => {
+			assert!(code <= 0, "end carries a terminal code, got {code}");
+			code
+		}
+	}
+}
+
+/// [channel_callback] for [moq_origin_follow], forwarding through [follow_code].
+extern "C" fn follow_channel_callback(user_data: *mut c_void, event: moq_follow_event, code: i32) {
+	channel_callback(user_data, follow_code(event, code));
+}
+
 /// FFI callback for tests that only inspect the registrar's immediate return code.
 extern "C" fn ignore_callback(_user_data: *mut c_void, _code: i32) {}
 
@@ -3692,7 +3720,7 @@ fn announce_under_a_new_instance_restarts() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			follow_cb.ptr,
 		)
 	});
@@ -4615,7 +4643,7 @@ fn follow_local() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
@@ -4778,7 +4806,7 @@ fn follow_close_cancels() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
@@ -4815,7 +4843,7 @@ fn follow_delivers_a_restart() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
@@ -4854,7 +4882,7 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
@@ -4887,7 +4915,7 @@ fn follow_delivers_a_held_takeover_once() {
 	follow_delivers_a_takeover_once("live");
 }
 
-/// `moq_origin_request` and `moq_origin_follow` share one signature.
+/// The signature of `moq_origin_request`.
 type Resolve = unsafe extern "C" fn(
 	u32,
 	*const c_char,
@@ -4944,11 +4972,22 @@ fn an_instance_pins_request_and_follow() {
 	// follower delivers it while it still serves, and nothing for the winner.
 	let second = publish_run(origin, "live");
 	let cb = Callback::new();
-	let task = id(resolve_pinned(moq_origin_follow, origin, &instance, &cb));
+	let path = b"live";
+	let task = id(unsafe {
+		moq_origin_follow(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			instance.as_ptr() as *const c_char,
+			instance.len(),
+			Some(follow_channel_callback),
+			cb.ptr,
+		)
+	});
 	let delivered = id(cb.recv());
 	let tx = unsafe { &*(cb.ptr as *const mpsc::Sender<i32>) }.clone();
-	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX).unwrap() });
-	assert_eq!(cb.recv(), i32::MAX, "the follower delivered another instance");
+	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX - 1).unwrap() });
+	assert_eq!(cb.recv(), i32::MAX - 1, "the follower delivered another instance");
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
@@ -4972,7 +5011,7 @@ fn follow(origin: u32, path: &[u8], cb: &Callback) -> u32 {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	})
@@ -4983,6 +5022,11 @@ fn follow(origin: u32, path: &[u8], cb: &Callback) -> u32 {
 struct Gate {
 	tx: mpsc::Sender<i32>,
 	hold: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
+}
+
+/// [gated_callback] for [moq_origin_follow], forwarding through [follow_code].
+extern "C" fn gated_follow_callback(user_data: *mut c_void, event: moq_follow_event, code: i32) {
+	gated_callback(user_data, follow_code(event, code));
 }
 
 extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
@@ -5016,7 +5060,7 @@ fn follow_delivers_the_instance_again_after_an_end() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(gated_callback),
+			Some(gated_follow_callback),
 			&*gate as *const Gate as *mut c_void,
 		)
 	});
@@ -5034,7 +5078,7 @@ fn follow_delivers_the_instance_again_after_an_end() {
 		run.announce(route.clone()).unwrap();
 	}
 	release.send(()).unwrap();
-	assert_eq!(recv(), MOQ_FOLLOW_OFFLINE, "the gap is reported before the return");
+	assert_eq!(recv(), FOLLOW_OFFLINE, "the gap is reported before the return");
 	let again = id(recv());
 
 	assert_eq!(moq_consume_close(first), 0);
@@ -7362,7 +7406,7 @@ fn server_accepts_a_session() {
 			path.len(),
 			std::ptr::null(),
 			0,
-			Some(channel_callback),
+			Some(follow_channel_callback),
 			announced_cb.ptr,
 		)
 	});

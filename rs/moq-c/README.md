@@ -57,7 +57,7 @@ int32_t moq_origin_close(uint32_t origin);
 int32_t moq_origin_create_broadcast(uint32_t origin, const char *path, uintptr_t path_len, uint32_t *broadcast);
 int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_request_cancel(uint32_t task);
-int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *instance, uintptr_t instance_len, moq_follow_callback on_follow, void *user_data);
 int32_t moq_origin_follow_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);

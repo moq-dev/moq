@@ -267,14 +267,14 @@ static void start_audio(ctx_t *c, int32_t catalog) {
 }
 
 // Delivers a broadcast handle for each publisher instance serving the path, then
-// a terminal code (<= 0). Store the first positive handle and wake main; one frame
-// is all this client reads, so a later instance's handle is freed unread.
-static void on_broadcast(void *ud, int32_t broadcast) {
+// the follow's end. Store the first handle and wake main; one frame is all this
+// client reads, so a later instance's handle is freed unread.
+static void on_broadcast(void *ud, moq_follow_event event, int32_t broadcast) {
     ctx_t *c = (ctx_t *)ud;
     // Going offline is how a finished broadcast withdraws, and the stored handle's
     // tracks report their own end, so there is nothing to do here.
-    if (broadcast == MOQ_FOLLOW_OFFLINE) return;
-    if (broadcast <= 0) { // 0 = ended, negative = error
+    if (event == MOQ_FOLLOW_EVENT_OFFLINE) return;
+    if (event == MOQ_FOLLOW_EVENT_END) { // 0 = ended, negative = error
         if (c->finish.enabled) {
             if (broadcast < 0) fprintf(stderr, "finish broadcast error: %d %s\n", broadcast, moq_error());
             pthread_mutex_lock(&c->mu);
@@ -399,17 +399,17 @@ static void on_finish_health_frame(void *ud, int32_t frame) {
     moq_consume_track_frame_free((uint32_t)frame);
 }
 
-static void on_finish_health(void *ud, int32_t broadcast) {
+static void on_finish_health(void *ud, moq_follow_event event, int32_t broadcast) {
     ctx_t *c = ud;
     // The session that finished the broadcast must keep serving its health broadcast.
-    if (broadcast == MOQ_FOLLOW_OFFLINE) {
+    if (event == MOQ_FOLLOW_EVENT_OFFLINE) {
         pthread_mutex_lock(&c->mu);
         c->finish.failed = 1;
         pthread_cond_broadcast(&c->cv);
         pthread_mutex_unlock(&c->mu);
         return;
     }
-    if (broadcast <= 0) {
+    if (event == MOQ_FOLLOW_EVENT_END) {
         if (broadcast < 0) fprintf(stderr, "finish health broadcast error: %d %s\n", broadcast, moq_error());
         pthread_mutex_lock(&c->mu);
         c->finish.failed = 1;
