@@ -121,9 +121,10 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 /// must not read as a request to replay the whole cache on join.
 ///
 /// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
-/// resolved: anything written in between is newer, so it is delivered. A SUBSCRIBE on
-/// a copy still fetching upstream (or alongside its TRACK on lite-05) can arrive before
-/// any group is known: the newest once it resolves stands in, as for one sent after.
+/// resolved: anything written in between is newer, so it is delivered. On lite03-05, a
+/// SUBSCRIBE on a copy still fetching upstream (or alongside its TRACK on lite-05) can
+/// arrive before any group is known: the newest once it resolves stands in, as for one
+/// sent after. Lite01/02 keep a zero floor when no group was known on arrival.
 fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>) -> u64 {
 	if version.resolves_start() || start_group.is_some() {
 		return 0;
