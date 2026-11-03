@@ -8,11 +8,13 @@
 //!   [`Deadline`]s on a [`Deadlines`] queue, and tests step them with a
 //!   [`Manual`] clock.
 //! - Async code reads the ambient clock: [`now`], [`wall`], [`sleep`],
-//!   [`sleep_until`], [`timeout`], [`interval`], and [`drive`] resolve to the
-//!   current runtime's clock. That is tokio's (paused tokio included), the
+//!   [`sleep_until`], [`timeout`], [`interval`], and `drive` (with the `async`
+//!   feature) resolve to the current runtime's clock. That is tokio's (paused tokio included), the
 //!   simulator inside `sim::run`, and a [`Deadlines`] queue on a thread that
 //!   [entered](Deadlines::enter) it, which is how a runtime that reads the host
 //!   clock itself (an io_uring worker) becomes a backend.
+//! - [`Clock::current`] captures the ambient clock, so stamps taken through it
+//!   keep one timeline whichever thread or runtime takes them.
 //!
 //! The `runtime` feature arms timers on tokio's clock. Without it, reads fall back
 //! to std, and waiting on the host clock panics.
@@ -32,6 +34,7 @@
 //! The `serde` feature adds `serde::UnixSeconds`, matching existing integer
 //! Unix-second JSON encodings for wall times.
 
+mod captured;
 mod deadline;
 #[cfg(feature = "manual")]
 mod installed;
@@ -46,14 +49,17 @@ pub mod sim;
 mod timer;
 mod wall;
 
+pub use captured::Clock;
 pub use deadline::{Deadline, Deadlines, Entered};
 #[cfg(feature = "manual")]
 pub use installed::Installed;
 pub use instant::Instant;
 pub use manual::Manual;
 pub use random::{Rng, rng, seed};
+#[cfg(feature = "async")]
+pub use timer::drive;
 pub use timer::{
-	Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, interval_at, sleep, sleep_until, timeout,
+	Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, interval, interval_at, sleep, sleep_until, timeout,
 	timeout_at,
 };
 pub use wall::{OutOfRange, Wall, WallMap};

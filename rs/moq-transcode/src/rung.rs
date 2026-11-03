@@ -967,7 +967,7 @@ mod tests {
 		let fills = track.requests();
 		let ascending = |groups| {
 			moq_net::track::Subscription::default()
-				.with_max_delay(None)
+				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_range(groups)
 				.with_order(moq_net::track::Order::Ascending)
 		};
