@@ -30,7 +30,8 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)): given for an
   absolute start, and for a relative start the start the publisher resolved
   for this request. Every sequence in range arrives or is named by
-  SUBSCRIBE_DROP, so the read never waits on a group that won't come.
+  SUBSCRIBE_SKIP or SUBSCRIBE_DROP, so the read never waits on a group that
+  won't come.
 - Don't infer a relative start from the reported largest location: a
   frameless newest group counts when a relative end resolves but not in
   `largest()`, sparse moq-transport groups break the arithmetic, and a later
@@ -42,7 +43,7 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   cursor there.
 - The cursor is range-aware, not just floored: with disjoint ranges it skips
   straight across an unrequested gap (group 1, then 10 onward) instead of
-  waiting for the latency budget, since no SUBSCRIBE_DROP is owed there.
+  waiting for the latency budget, since no SUBSCRIBE_SKIP or SUBSCRIBE_DROP is owed there.
 - Once both land: set the ordered read's floor from those bounds in Rust and
   JS, then make JS discard groups below the cursor. Add a test mirroring
   Rust's: a reordered group below the floor is never yielded and no extra

@@ -149,7 +149,8 @@ per-frame CPU growth since #5926.
 - [Byte-stream renditions form a ladder](/quest/m1/stream-ladder.md) - moq-ffi stream producers link as `lower` and disable unfundable rungs like frame producers
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
-- [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
+- [JS cache pool](/quest/m1/js-cache-pool.md) - `js/net` bills cached frames and drop-set runs to a per-broadcast byte pool ported from Rust
+- [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
 - [A step back smaller than the delay keeps the TS export](/quest/m1/ts-small-step-back.md) - audio restarts instead of regressing; video stays within its declared depth
 - [release carries the fanout-threads bench](/quest/m1/release-fanout-bench.md) - a bench-only port of session_fanout_threads for the pre-cut pairing

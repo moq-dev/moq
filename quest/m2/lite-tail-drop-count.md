@@ -2,7 +2,7 @@
 
 ## Goal
 
-From lite-05 on, a moq-lite session's tail is complete once every group up to the end has arrived or been reported in SUBSCRIBE_DROP. The 1 s `ledger::GRACE` (`rs/moq-net/src/ledger.rs:19`) then no longer decides it, in Rust and JS.
+From lite-05 on, a moq-lite session's tail is complete once every group up to the end has arrived or been reported in SUBSCRIBE_SKIP or SUBSCRIBE_DROP. The 1 s `ledger::GRACE` (`rs/moq-net/src/ledger.rs:19`) then no longer decides it, in Rust and JS.
 
 ## Plan
 

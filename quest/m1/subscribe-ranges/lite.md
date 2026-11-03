@@ -143,7 +143,7 @@ were using QUIC FIN to signal that but that prevents updates in the future, so
 we should have a signal instead". Settled the same day:
 
 - No SUBSCRIBE_COVERED message: a subscriber judges a bounded range complete
-  from the groups it received, SUBSCRIBE_DROP, the Range Starts in
+  from the groups it received, SUBSCRIBE_SKIP and SUBSCRIBE_DROP, the Range Starts in
   SUBSCRIBE_OK, and SUBSCRIBE_FINISH. Drops and groups name absolute
   sequences, so the subscriber judges against its latest ranges and an update
   in flight changes nothing it has counted; the FIN's race with an unread

@@ -3,7 +3,8 @@
 ## Goal
 
 What each lite cursor is owed and what was dropped lives in the model, and
-lite `TrackRun` only translates it into SUBSCRIBE_START, SUBSCRIBE_DROP, and
+lite `TrackRun` only translates it into SUBSCRIBE_START, SUBSCRIBE_SKIP,
+SUBSCRIBE_DROP, and
 SUBSCRIBE_END per version. `skipped`, `served`, `first`, and the pre-06
 branches are deleted rather than layering lite-07 ranges on top, and on
 lite-07 a subscriber's end is "owed range covered and no stream active".

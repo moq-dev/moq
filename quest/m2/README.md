@@ -215,7 +215,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
 - [The memory bench finishes at 1 MiB frames](/quest/m2/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
 - [Audio's Latest start reaches back](/quest/m2/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
-- [moq-lite tails count drops](/quest/m2/lite-tail-drop-count.md) - SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
+- [moq-lite tails count drops](/quest/m2/lite-tail-drop-count.md) - SUBSCRIBE_SKIP and SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
 - [Re-run the SPS fuzzer on h264-reader](/quest/m2/sps-fuzz-h264-reader.md) - the H.264 SPS overflow is rechecked on the new parser
 - [Audio track changes are gapless](/quest/m2/gapless-audio-switch.md) - no silence beyond a frame on audio format or rendition changes, enforced by media QA
 - [PCM encodes in one pass](/quest/m2/pcm-bulk-encode.md) - the PCM encoder converts a frame in bulk instead of one sample at a time

@@ -69,7 +69,7 @@ it:
 - The cache key, the duplicate check, the hand-out-once record
   (`delivered.rs`), and slot stamps.
 - Successor, reach, expiry, the arrival ledger, tail accounting, fills and
-  misses, and SUBSCRIBE_DROP accounting. Successor and reach already scan the
+  misses, and SUBSCRIBE_SKIP and SUBSCRIBE_DROP accounting. Successor and reach already scan the
   cache by range, so they tolerate sparse keys; `delivered.rs` runs, fills,
   misses, and `subscription/window.rs` treat `sequence + 1` as the next group
   and must follow previous-start links instead.
@@ -78,7 +78,8 @@ it:
   refresh.
 - Not datagrams: they become their own track kind with their own sequence ([Datagram tracks](/quest/m1/datagram-tracks/README.md)).
 - The legacy codecs: lite GROUP, SUBSCRIBE and SUBSCRIBE_UPDATE bounds,
-  SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_DROP, FETCH, and
+  SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_SKIP,
+  SUBSCRIBE_DROP, FETCH, and
   every IETF Location, Filter, FETCH, Largest, and NEW_GROUP_REQUEST.
 
 ### Timestamps are required and legacy IDs pass through

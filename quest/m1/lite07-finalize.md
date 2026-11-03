@@ -62,8 +62,12 @@ The cut:
   treat a longer SETUP as a protocol violation" stays. The lite-07 changelog
   names that rejection, not only the cap.
 
-Decided 2026-10-20 (maintainer): [Drop set](/quest/m1/drop-set.md) joins
-Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Nothing
+Decided 2026-10-20 (maintainer): the drop set joined Required, because it
+adds `Max Age` to lite-07's SUBSCRIBE_DROP. That wire work, with
+SUBSCRIBE_SKIP and range `Terms`, landed in
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670); what remains of
+the drop set is memory accounting with no wire change, so it no longer gates
+the cut. Nothing
 else from the auth line gates the cut: its lite-07 wire work, the SETUP Token
 parameter, has landed, and the rest is API work that does not block the rename.
 
@@ -107,7 +111,6 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 ## Required
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - a relay fills a lite-07 upstream through the subscription
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - JS speaks lite-07 ranges
 - [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite FETCH is gone from lite-07, in Rust and JS

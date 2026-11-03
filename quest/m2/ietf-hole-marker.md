@@ -4,7 +4,8 @@
 
 A negotiated moq-transport extension (a new `drafts/draft-lcurley-moq-*`
 document) lets a publisher name each group it won't deliver on a SUBSCRIBE,
-like moq-lite's SUBSCRIBE_DROP: never produced, or dropped with its reason.
+like moq-lite's SUBSCRIBE_SKIP and SUBSCRIBE_DROP: never produced, or dropped
+with its reason.
 A relay's copy ingested over moq-transport then knows its holes ("null")
 instead of leaving them unknown ("undefined"). Our moq-transport publishers
 then answer a multi-group FETCH, and a multi-group draft-22 fill, whenever
@@ -12,8 +13,8 @@ the cache knows every group in the range: a local, moq-lite, or
 extension-carrying copy. Groups go out in order. End of Non-Existent Range
 (`0x8C`) marks only a proven hole: a group never produced, or a
 budget-independent drop (a cut, an origin's eviction or expiry). A stale
-drop judged under a narrower budget or range, as in
-[Drop set](/quest/m1/drop-set.md), proves nothing for a wider FETCH. That
+drop judged under a narrower budget or range, as lite-07's `Max Age` and
+`Terms` qualify it, proves nothing for a wider FETCH. That
 group is unknown, so the publisher fills it or the range is refused. Any
 other range stays refused, as
 [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)
@@ -59,9 +60,8 @@ Open, for this quest's interview:
 
 - The carrier: a message on the SUBSCRIBE's request stream (drafts 18 and 22
   give each request its own stream), or a status on a group stream.
-- Whether the drop names its budget, as lite-07's SUBSCRIBE_DROP `Max Age`
-  does in [Drop set](/quest/m1/drop-set.md), so a stale drop doesn't settle
-  a wider reader.
+- Whether the drop names its budget and terms, as lite-07's SUBSCRIBE_DROP
+  `Max Age` and `Terms` do, so a stale drop doesn't settle a wider reader.
 - How a publisher answering a range walks the drop set's runs in group
   order, and where FETCH_OK's End Location falls.
 
@@ -74,10 +74,6 @@ the extension is unchanged.
 
 Public API: none. Wire: a new negotiated SETUP option and its drop message.
 Our publishers answer multi-group FETCH and fills over known caches.
-
-## Required
-
-- [Drop set](/quest/m1/drop-set.md) - the per-track runs that say which groups are known holes
 
 ## Related
 

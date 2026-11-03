@@ -2795,10 +2795,12 @@ impl TrackState {
 		self.readable() || self.unfed && window.end().is_some()
 	}
 
-	/// Whether the live edge reached `fin`, or a received copy's tail decides it instead:
-	/// what it still misses up to `fin` is waited for only as long as the grace.
+	/// Whether the live edge reached `fin`, counting a gap up to it that was wholly given up
+	/// (skipped or dropped), or a received copy's tail decides it instead: what it still
+	/// misses up to `fin` is waited for only as long as the grace.
 	fn reaches(&self, fin: u64) -> bool {
-		self.edge() >= fin || self.tail.is_some()
+		let edge = self.edge();
+		edge >= fin || self.tail.is_some() || self.drops.gaps(&(edge..fin)).next().is_none()
 	}
 
 	/// Whether the largest can no longer advance while a producer is still held: the track
@@ -6905,9 +6907,11 @@ impl DropCursor {
 		}
 	}
 
-	/// Record `slot`, cached at `sequence`, if it holds a cut.
+	/// Record `slot`, cached at `sequence`, if it holds a cut no fetched copy covers: a
+	/// copy still serving the group's end delivers it, so it is never also dropped.
 	fn cut(&mut self, sequence: u64, slot: &Slot) {
 		if slot.visible
+			&& !slot.serves_end()
 			&& let Some(err) = slot.group.cut_error()
 			&& let Some(end) = sequence.checked_add(1)
 		{
@@ -18958,6 +18962,20 @@ mod test {
 			group.read_frame().await.unwrap().unwrap().payload,
 			bytes::Bytes::from_static(b"snapshot")
 		);
+	}
+
+	/// A group the publisher cut while a fetched copy still serves its end is delivered,
+	/// and never also reported dropped.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_cut_a_fetched_copy_covers_is_not_reported() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay());
+		let (live, _head) = live_group_with_head(&producer).await;
+		live.abort(Error::Stream(StreamError::App(5))).unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_drop(&waiter).is_pending(), "the copy covers the cut");
+		assert_eq!(drain_groups(&mut subscriber), [0]);
 	}
 
 	/// Reads land on the fetched head, so they keep the slot from expiring even though

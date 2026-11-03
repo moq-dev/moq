@@ -6,7 +6,8 @@ A moq-lite-07 SUBSCRIBE replaces FETCH. One subscription asks for any number
 of group ranges, past or live, bounded by group or by time, in ascending or
 descending order, and the
 publisher serves their union from one cursor without sending a group twice.
-Every sequence in range either arrives or is named by a SUBSCRIBE_DROP, so
+Every sequence in range either arrives or is named by a SUBSCRIBE_SKIP or
+SUBSCRIBE_DROP, so
 nothing blocks on a cache miss. Relays fill misses upstream with ranges, not
 one request per group, including over moq-transport where group numbers may be
 sparse. Lite FETCH is removed from lite-07.
@@ -28,9 +29,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   not accidentally give it the live SUBSCRIBE zero-delay default. SUBSCRIBE_UPDATE
   replaces the list. Lite FETCH is removed from
   lite-07; published versions keep it, answered through the same model.
-- **Holes.** SUBSCRIBE_DROP (restored in lite-07) names every sequence in the
-  requested ranges the publisher won't deliver: never existed, expired, or
-  refused upstream. On lite-01..06 datagram groups are always dropped in a past range (#4982); on lite-07 ranges never cover datagrams ([Datagram tracks](/quest/m1/datagram-tracks/README.md)). The
+- **Holes.** Lite-07 names every sequence in the requested ranges the
+  publisher won't deliver: SUBSCRIBE_SKIP one that never existed, and
+  SUBSCRIBE_DROP (restored in lite-07) one expired or refused upstream. On lite-01..06 datagram groups are always dropped in a past range (#4982); on lite-07 ranges never cover datagrams ([Datagram tracks](/quest/m1/datagram-tracks/README.md)). The
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's

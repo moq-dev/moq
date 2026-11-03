@@ -141,17 +141,11 @@ impl Live {
 					},
 					None,
 				)?;
-				// An empty group stores no object, yet the end only settles once the live edge
-				// reaches it. The sequence just below the end replays as the empty group a
-				// source most often ended with, and any before it as dropped.
+				// An empty group stores no object, so what the archive holds nothing for up to the
+				// end is not found here, and the end settles over it.
 				let fin = at.group + u64::from(at.frame != 0);
 				let from = self.next.unwrap_or(0);
-				if from < fin {
-					self.producer.drop_groups(from..fin - 1, moq_net::StreamError::NotFound);
-					self.producer
-						.create_group(group::Info { sequence: fin - 1 })?
-						.finish()?;
-				}
+				self.producer.drop_groups(from..fin, moq_net::StreamError::NotFound);
 			}
 			End::Error(code) => {
 				// After the newest stored sequence, keeping the history an abort would refuse.

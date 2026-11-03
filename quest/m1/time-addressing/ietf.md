@@ -26,9 +26,9 @@ TIMESCALE (0x08):
   moq-lite viewer therefore arrives without a frame PTS, which is accepted.
   Today's TIMESTAMP code (`ietf/group.rs`, `ietf/object.rs`,
   `ietf/max_age.rs`) is deleted or reduced to that pass-through.
-- **Prior Group ID Gap stays** as a best-effort SUBSCRIBE_DROP signal:
+- **Prior Group ID Gap stays** as a best-effort SUBSCRIBE_SKIP signal:
   egress sends the gap to the previous key, and ingest reads it as the
-  skipped IDs being dropped. A peer that sends none still works.
+  skipped IDs never produced. A peer that sends none still works.
 - **GROUP_END maps to END_OF_GROUP.** The supported drafts refuse properties
   on a status object (`check_status` in `rs/moq-net/src/ietf/object.rs`), so
   END_OF_GROUP stays bare and the end time is lost on this wire.
@@ -39,7 +39,8 @@ Decision prompts:
 - Timestamp property: ✅ stop, with LOC proxied only between moq-transport
   peers; keep reading but stop sending; keep the 2026-10-25 plan.
 - Prior Group ID Gap: drop it; ✅ keep it as a best-effort SUBSCRIBE_DROP
-  signal.
+  signal (a SUBSCRIBE_SKIP signal since lite-07 split never-produced holes
+  out, 2026-11-03).
 
 Test both directions over drafts 18, 20, and 22: IDs round-trip exactly
 through a relay, a gap reaches the subscriber as a drop, and LOC properties
