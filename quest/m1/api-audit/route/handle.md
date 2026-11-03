@@ -62,7 +62,7 @@ JS and the bindings identical.
   prefix route's `serve`, as today, where a standalone broadcast cannot be
   announced.
 - **Prefix routes.** A prefix route yields requests, and each one is
-  answered by `serve(consumer)` (from [serve](/quest/m1/api-audit/route/serve.md)),
+  answered by `serve(consumer)`,
   by `route(options)`, or by `reject`. `route(options)` creates the path's
   exact `Route`, which inherits the prefix route's instance by default so
   that the reader continues (see [announce takeover](/quest/m1/announce-takeover.md)).
@@ -105,10 +105,6 @@ Run `just check` and `just test interop --all`.
 
 Public API: breaking across moq-net, @moq/net, moq-ffi, moq-c and the
 wrappers. Wire: none.
-
-## Required
-
-- [Serve a held broadcast](/quest/m1/api-audit/route/serve.md) - the served answer this handle carries over
 
 ## Related
 

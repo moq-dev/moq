@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `json.SnapshotConsumer` reads at a zero `Delay.Max`, whatever the subscription asked for: `Next` skips every group a newer one supersedes, and `Latest` no longer waits for a lower group the track still owes. Publish a window or stream track when every state must survive.
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.Update`, `json.StreamProducer.Append`, and `json.WindowProducer.Push` / `Pop` take a `moq.Timestamp` instead of a `*moq.Timestamp`, so there is no untimed write. Stamp it from `media.CatalogProducer.Now()`, the broadcast clock every track shares. Their track needs a `TrackInfo.Timescale`; one without is refused.
+
 ### Subscriptions take a `moq.Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `Subscription.MaxDelay` is `Delay moq.Delay`, and the zero `Subscription{}` is moq-net's defaults, the same as `DefaultSubscription()`: set `Delay.Max` to the old `*MaxDelay`, and `Delay.MaxUnlimited` where `MaxDelay` was nil.
@@ -144,6 +148,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
 Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.Serve(consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to close.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
 ### `TrackInfo` gains `Compress` (#5928)

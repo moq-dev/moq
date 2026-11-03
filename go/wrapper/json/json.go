@@ -6,7 +6,10 @@
 // over a [moq.TrackConsumer] that has not read a group yet. The track can come
 // from a request as well as by name. Compression is the track's: publish JSON
 // with [moq.TrackInfo] Compress set, and a consumer reads it with no option of
-// its own. Import it under an alias next to encoding/json:
+// its own. Every write (a snapshot update, a stream append, a window push or
+// pop) takes a timestamp on the broadcast clock, the epoch every track in the
+// broadcast shares (read it with media.CatalogProducer.Now), so the track needs
+// a [moq.TrackInfo] Timescale; one without is refused. Import it under an alias next to encoding/json:
 //
 //	import moqjson "moq.dev/moq/json"
 package json
@@ -54,7 +57,8 @@ type SnapshotProducer struct {
 
 // NewSnapshotProducer publishes track as a lossy latest-value JSON track, advertised in
 // broadcast's catalog until it finishes. It takes over track, whose handle is closed
-// afterward, and fails if the catalog already carries the track's name.
+// afterward, and fails if the catalog already carries the track's name or track has no
+// timescale.
 func NewSnapshotProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProducer, options SnapshotOptions) (*SnapshotProducer, error) {
 	inner, err := ffi.NewMoqJsonSnapshotProducer(
 		bridge.BroadcastProducer(broadcast),
@@ -67,9 +71,9 @@ func NewSnapshotProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProdu
 	return &SnapshotProducer{inner: inner}, nil
 }
 
-// Update publishes value at timestamp on the broadcast clock; nil is untimed.
+// Update publishes value at timestamp on the broadcast clock.
 // It is a no-op when unchanged.
-func (p *SnapshotProducer) Update(value any, timestamp *moq.Timestamp) error {
+func (p *SnapshotProducer) Update(value any, timestamp moq.Timestamp) error {
 	encoded, err := stdjson.Marshal(value)
 	if err != nil {
 		return err
@@ -98,7 +102,8 @@ type StreamProducer struct {
 
 // NewStreamProducer publishes track as a lossless append-log JSON track, advertised in
 // broadcast's catalog until it finishes. It takes over track, whose handle is closed
-// afterward, and fails if the catalog already carries the track's name.
+// afterward, and fails if the catalog already carries the track's name or track has no
+// timescale.
 func NewStreamProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProducer) (*StreamProducer, error) {
 	inner, err := ffi.NewMoqJsonStreamProducer(bridge.BroadcastProducer(broadcast), bridge.TrackProducer(track))
 	if err != nil {
@@ -107,8 +112,8 @@ func NewStreamProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProduce
 	return &StreamProducer{inner: inner}, nil
 }
 
-// Append adds one JSON record at timestamp on the broadcast clock; nil is untimed.
-func (p *StreamProducer) Append(value any, timestamp *moq.Timestamp) error {
+// Append adds one JSON record at timestamp on the broadcast clock.
+func (p *StreamProducer) Append(value any, timestamp moq.Timestamp) error {
 	encoded, err := stdjson.Marshal(value)
 	if err != nil {
 		return err
@@ -224,8 +229,8 @@ type WindowProducer struct {
 // NewWindowProducer publishes track as a JSON window track. The window rolls to
 // new groups that restate the records it retains, so a reader can join at any
 // point; give the track a refresh ratio so a joiner past it gets a fresh group.
-// It takes over track, whose handle is closed afterward. It is not advertised in
-// the catalog, which has no window mode.
+// It takes over track, whose handle is closed afterward, and fails if track has
+// no timescale. It is not advertised in the catalog, which has no window mode.
 func NewWindowProducer(track *moq.TrackProducer, options WindowOptions) (*WindowProducer, error) {
 	inner, err := ffi.NewMoqJsonWindowProducer(
 		bridge.TrackProducer(track),
@@ -237,8 +242,8 @@ func NewWindowProducer(track *moq.TrackProducer, options WindowOptions) (*Window
 	return &WindowProducer{inner: inner}, nil
 }
 
-// Push appends one JSON record at timestamp on the broadcast clock; nil is untimed.
-func (p *WindowProducer) Push(value any, timestamp *moq.Timestamp) error {
+// Push appends one JSON record at timestamp on the broadcast clock.
+func (p *WindowProducer) Push(value any, timestamp moq.Timestamp) error {
 	encoded, err := stdjson.Marshal(value)
 	if err != nil {
 		return err
@@ -247,8 +252,8 @@ func (p *WindowProducer) Push(value any, timestamp *moq.Timestamp) error {
 }
 
 // Pop drops count records from the front of the window, clamped to what it holds,
-// at timestamp on the broadcast clock; nil is untimed.
-func (p *WindowProducer) Pop(count uint64, timestamp *moq.Timestamp) error {
+// at timestamp on the broadcast clock.
+func (p *WindowProducer) Pop(count uint64, timestamp moq.Timestamp) error {
 	return p.inner.Pop(count, timestamp)
 }
 
