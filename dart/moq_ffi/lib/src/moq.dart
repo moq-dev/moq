@@ -8346,7 +8346,7 @@ class TakeoverMoqAnnounceEvent extends MoqAnnounceEvent {
   }
 }
 
-enum MoqTransport { quic, iroh, webSocket, tcp, unix, webTransport }
+enum MoqTransport { quic, webSocket, tcp, unix, webTransport }
 
 class FfiConverterMoqTransport {
   static LiftRetVal<MoqTransport> read(Uint8List buf) {
@@ -8355,14 +8355,12 @@ class FfiConverterMoqTransport {
       case 1:
         return LiftRetVal(MoqTransport.quic, 4);
       case 2:
-        return LiftRetVal(MoqTransport.iroh, 4);
-      case 3:
         return LiftRetVal(MoqTransport.webSocket, 4);
-      case 4:
+      case 3:
         return LiftRetVal(MoqTransport.tcp, 4);
-      case 5:
+      case 4:
         return LiftRetVal(MoqTransport.unix, 4);
-      case 6:
+      case 5:
         return LiftRetVal(MoqTransport.webTransport, 4);
       default:
         throw UniffiInternalError(
@@ -22146,7 +22144,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqpublication_unannounce() != 21154) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_close() != 26090) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_close() != 21298) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_consume() != 27634) {
