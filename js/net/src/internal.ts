@@ -204,11 +204,19 @@ export function staleHole(budget: number): Hole {
 }
 
 /** A run of sequences given up, with why. */
-export interface DropRun extends Run, Hole {}
+export interface DropRun extends Run, Hole {
+	/** Copied into a cursor from the track's runs, which it folds in afresh on each change. */
+	received?: boolean;
+}
 
-/** Whether two holes say the same thing, so their runs may merge. */
-function sameHole(a: Hole, b: Hole): boolean {
-	return toStreamCode(a.error) === toStreamCode(b.error) && !a.skip === !b.skip && a.stale === b.stale;
+/** Whether two runs say the same thing, so they may merge. */
+function sameHole(a: DropRun, b: DropRun): boolean {
+	return (
+		toStreamCode(a.error) === toStreamCode(b.error) &&
+		!a.skip === !b.skip &&
+		a.stale === b.stale &&
+		!a.received === !b.received
+	);
 }
 
 /**
@@ -216,12 +224,17 @@ function sameHole(a: Hole, b: Hole): boolean {
  * it overlaps. Neighbours given up alike merge, so a wide DROP stays one run and a peer naming
  * one sequence per DROP cannot grow the runs.
  */
-export function insertDrop(drops: readonly DropRun[], start: bigint, end: bigint, hole: Hole): DropRun[] {
+export function insertDrop(
+	drops: readonly DropRun[],
+	start: bigint,
+	end: bigint,
+	hole: Hole & { received?: boolean },
+): DropRun[] {
 	if (start >= end) return [...drops];
 	const next = removeRun(drops, start, end);
 	let at = 0;
 	while (at < next.length && next[at].start < start) at++;
-	next.splice(at, 0, { start, end, error: hole.error, skip: hole.skip, stale: hole.stale });
+	next.splice(at, 0, { start, end, error: hole.error, skip: hole.skip, stale: hole.stale, received: hole.received });
 	const merged: DropRun[] = [];
 	for (const run of next) {
 		const last = merged[merged.length - 1];

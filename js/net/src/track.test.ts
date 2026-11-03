@@ -3878,6 +3878,40 @@ test("a superseded stale run is unknown again, and its group is handed out", () 
 	producer.close();
 });
 
+test("superseding withdraws a partly reported stale run", () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ delay: { max: Milli(500) }, ranges: [{ start: { absolute: 0n } }] });
+	hooks.dropTrackGroups(producer, 4n, 5n, { error: DROPPED });
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 4n, end: 5n });
+	hooks.dropTrackGroups(producer, 3n, 7n, staleHole(500));
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 3n, end: 4n, stale: 500 });
+	hooks.supersedeStale(producer);
+	// 5 and 6 are unknown again.
+	expect(hooks.tryDrop(reader)).toBeUndefined();
+	reader.close();
+	producer.finish();
+	producer.close();
+});
+
+test("a received stale run does not end a bounded reader", () => {
+	const producer = new TrackProducer("video").accept({});
+	hooks.receiveTrack(producer);
+	const reader = producer.subscribe({
+		delay: { max: Milli(5000) },
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+	});
+	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
+	// The groups are still wanted.
+	expect(hooks.tryRecvGroup(reader, false)).toEqual({ kind: "idle" });
+	producer.createGroup(0n).finish();
+	const recv = hooks.tryRecvGroup(reader, false);
+	expect(recv.kind === "group" ? recv.group.sequence : recv).toBe(0n);
+	if (recv.kind === "group") recv.group.close();
+	reader.close();
+	producer.finish();
+	producer.close();
+});
+
 test("a wide drop is held and reported as one run", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });

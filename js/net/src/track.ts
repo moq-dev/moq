@@ -2057,6 +2057,8 @@ export class Subscriber {
 	// since the owner last drained them.
 	#reoffersReported = false;
 	#unreported: Run[] = [];
+	// The budget the reported stale runs were last checked against: only a change can reverse one.
+	#reofferedAt?: number;
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -2336,7 +2338,9 @@ export class Subscriber {
 	// skipped groups, never the cache.
 	#reoffer(budget: number): void {
 		// A reported stale run reversed is judged again, and owed again by the wire.
-		if (this.#reoffersReported && this.#reportedStale.some((run) => (run.stale ?? budget) < budget)) {
+		const changed = this.#reofferedAt !== budget;
+		this.#reofferedAt = budget;
+		if (this.#reoffersReported && changed && this.#reportedStale.some((run) => (run.stale ?? budget) < budget)) {
 			for (const run of this.#reportedStale) {
 				if ((run.stale ?? budget) >= budget) continue;
 				this.#reported = removeRun(this.#reported, run.start, run.end);
@@ -2507,7 +2511,9 @@ export class Subscriber {
 		if (end === undefined) return false;
 		const held = this.#state.groups.peek();
 		const received = this.#state.received.peek();
-		const drops = this.#state.drops.peek();
+		// A bounded window never covers everything above a received stale run, so such a run
+		// does not settle it (see `settles`): the reader still wants those groups.
+		const drops = this.#state.drops.peek().filter((run) => run.stale === undefined);
 		const producer = this.#state.producer;
 		for (const run of this.#window.runs(this.#window.floor() ?? 0n, end)) {
 			let gaps = [run];
@@ -3118,10 +3124,13 @@ export class Subscriber {
 			seen.coversFrom !== coversFrom
 		) {
 			this.#dropsSeen = { drops, start, end, revision, budget, coversFrom };
+			// The track's runs are folded in afresh, so one it forgot, such as a stale run new terms
+			// superseded, or one that stopped settling this reader, leaves nothing behind.
+			this.#pending = this.#pending.filter((run) => !run.received);
 			for (const run of drops) {
 				// A received stale run that does not settle this reader is unknown to it.
 				if (!settles(run, budget, coversFrom)) continue;
-				this.#pending = insertDrop(this.#pending, run.start, run.end, run);
+				this.#pending = insertDrop(this.#pending, run.start, run.end, { ...run, received: true });
 			}
 		}
 		for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
