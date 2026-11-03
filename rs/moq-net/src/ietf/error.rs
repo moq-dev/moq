@@ -11,7 +11,7 @@
 //! both assign, but not all of it.
 
 use super::Version;
-use crate::{SessionError, StreamError};
+use crate::{Error, SessionError, StreamError};
 
 /// An implementation-specific error: the stream died on our side, with no registry entry
 /// for why.
@@ -34,12 +34,19 @@ const TOO_FAR_BEHIND: u32 = 0x5;
 
 /// The authorization token for the request has expired.
 ///
-/// Sent only on the streams of a subscription whose request token's grant lapsed, which no
-/// [`StreamError`] names: [`to_stream_code`] never returns it, and [`from_stream_code`]
-/// keeps it [`StreamError::Unknown`], so a relay passes an upstream's expiry on as
-/// INTERNAL_ERROR rather than telling its own subscriber that its token lapsed. The same
-/// 0x7 in drafts 18, 20, and 22.
+/// Sent only on the streams of a request whose own request token's grant lapsed (see
+/// [`token_expired`]), which no [`StreamError`] names: [`to_stream_code`] never returns it,
+/// and [`from_stream_code`] keeps it [`StreamError::Unknown`], so a relay passes an
+/// upstream's expiry on as INTERNAL_ERROR rather than telling its own peer that its token
+/// lapsed. The same 0x7 in drafts 18, 20, and 22.
 pub(crate) const EXPIRED_AUTH_TOKEN: u32 = 0x7;
+
+/// Whether `err`, ending a request's token grant, says the token expired: its deadline
+/// passing, or the acceptor revoking it as expired. Only such an end sends
+/// [`EXPIRED_AUTH_TOKEN`].
+pub(crate) fn token_expired(err: &Error) -> bool {
+	matches!(err, Error::Expired | Error::Session(SessionError::Expired))
+}
 
 /// The track's content could not be parsed.
 const MALFORMED_TRACK: u32 = 0x12;

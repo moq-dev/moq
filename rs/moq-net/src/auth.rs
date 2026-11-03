@@ -2599,6 +2599,10 @@ impl Gate {
 		let mut operation = std::pin::pin!(operation);
 		kio::wait(|waiter| {
 			std::task::ready!(self.poll_ready(waiter));
+			// Ahead of the gate it also closes, so a lapsed token is refused as expired.
+			if let Poll::Ready(refusal) = self.poll_token_ended(waiter) {
+				return Poll::Ready(Err(refusal.error));
+			}
 			if self.poll_denied(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
