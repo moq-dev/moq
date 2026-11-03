@@ -682,7 +682,7 @@ test("a rendition written behind another advertises delay", async () => {
 		const sibling = new Estimator();
 		const start = Nano.toMicro(Nano(now())) - 100_000;
 		const push = async (index: number) => {
-			sibling.write(start + 100_000 + (index - 2) * 20_000, order);
+			sibling.write(start + 100_000 + (index - 2) * 20_000, order, true);
 			await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
 		};
 		for (let index = 0; index < 4; index++) await push(index);
@@ -1171,7 +1171,7 @@ test("replayed raw audio raises no catalog delay", async () => {
 			await clock.advance(Nano.fromMilli(Milli(20)));
 		}
 		// Video already wrote up to the live edge.
-		new Estimator().write(150 * 20_000, broadcast.order);
+		new Estimator().write(150 * 20_000, broadcast.order, true);
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });

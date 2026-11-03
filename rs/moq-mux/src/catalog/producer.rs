@@ -1472,7 +1472,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.max_grp_sap_starting_type = sap_type;
 		track.max_obj_sap_starting_type = sap_type;
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
@@ -1505,7 +1505,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.max_grp_sap_starting_type = Some(1);
 		track.max_obj_sap_starting_type = Some(1);
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
@@ -1526,7 +1526,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		}
 		track.render_group = Some(1);
 		track.jitter = config.jitter;
-		track.delay = config.delay;
+		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 

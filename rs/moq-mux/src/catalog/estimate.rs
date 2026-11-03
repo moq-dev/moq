@@ -44,6 +44,9 @@ pub struct Estimate {
 	/// more, and the largest of those windows. Lateness only some frames have, such as B-frames
 	/// written after a later reference picture, is variable and left to `jitter` and the
 	/// receiver's own measurement.
+	///
+	/// Supplied as `Some(Duration::ZERO)`, it states the track trails nothing: nothing is measured,
+	/// and the catalog omits it, as it does an absent one.
 	pub delay: Option<Duration>,
 	/// The maximum frame rate in frames per second, when it is a standard one.
 	pub framerate: Option<f64>,
@@ -694,6 +697,23 @@ mod tests {
 			send(&mut audio, i * 20);
 		}
 		assert_eq!(audio.estimate().delay, Some(ms(100)));
+	}
+
+	/// A window closes at a cut once a second has passed, so a group longer than a second is a
+	/// window of its own: nothing is reported partway through it.
+	#[test]
+	fn a_window_lasts_a_group_when_the_group_is_longer_than_a_second() {
+		let [mut audio, mut video] = tracks();
+		// Video in two-second groups, cut where each opens, written 100 ms behind the audio.
+		for i in 0..250u64 {
+			send(&mut audio, 100 + i * 20);
+			if i % 100 == 0 {
+				video.cut(None);
+			}
+			video.write(micros(i * 20_000), 1);
+			let expected = (i >= 200).then_some(ms(100));
+			assert_eq!(video.estimate().delay, expected, "frame {i}");
+		}
 	}
 
 	/// Two renditions of one 50 fps source with two B-frames (I0 P60 B20 B40 P120 B80 B100 …) and

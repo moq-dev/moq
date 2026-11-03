@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 
-// The window `delay` is measured over before it is reported, in microseconds of the rendition's own
-// media. Mirrors `RATE_WINDOW` in `moq_mux::catalog::Estimator`.
+// The least a window lasts before `delay` is reported, in microseconds of the rendition's own media.
+// Mirrors `RATE_WINDOW` in `moq_mux::catalog::Estimator`.
 const WINDOW = 1_000_000;
 
 // The highest timestamp each rendition of one broadcast has written. A frame written behind media
@@ -38,8 +38,9 @@ export class Order {
 // `moq_mux::catalog::Estimator`, which measures it only for a rendition whose config supplies no
 // `delay` hint; the js/publish encoders supply none, so theirs is always measured.
 //
-// Each window of a second of the rendition's media measures the least its frames trailed the other
-// renditions, and the delay is the largest of those. A constant offset is in every window, so it
+// Each window measures the least the rendition's frames trailed the other renditions, and the delay
+// is the largest of those. A window closes at the first group to start once a second of media has
+// passed, so it lasts a second or a group, whichever is larger. A constant offset is in every window, so it
 // shows. Lateness only some frames have, such as B-frame reorder or an interleave, has a frame that
 // trails nothing in every window, so it never does: the receiver measures it, and counting it here
 // too would buffer it twice. Since a window has to close first, a rendition that starts on a frame
@@ -57,22 +58,29 @@ export class Estimator {
 		return { delay: this.#delay ? Catalog.u53(this.#delay) : undefined };
 	}
 
-	// Place a frame written at `timestamp` in the broadcast's `order`. Returns whether the delay rose.
-	write(timestamp: number, order: Order): boolean {
+	// Place a frame written at `timestamp` in the broadcast's `order`, `keyframe` when it starts a
+	// group. Returns whether the delay rose.
+	write(timestamp: number, order: Order, keyframe: boolean): boolean {
+		const rose = keyframe && this.#close();
+
 		// A frame with no other rendition to trail trails nothing, so a window holding frames from
 		// before another rendition joined never reports the trail of the few after it.
 		const behind = order.write(this, timestamp) ?? 0;
-		const trail = Math.min(this.#trail ?? behind, behind);
-		this.#trail = trail;
-
+		this.#trail = Math.min(this.#trail ?? behind, behind);
 		this.#high = Math.max(this.#high ?? timestamp, timestamp);
 		this.#open ??= this.#high;
+		return rose;
+	}
+
+	// Close the open window if it has lasted long enough, at the group boundary before a keyframe.
+	// Returns whether the delay rose.
+	#close(): boolean {
+		if (this.#high === undefined || this.#open === undefined || this.#trail === undefined) return false;
 		if (this.#high - this.#open < WINDOW) return false;
 
+		const delay = Math.ceil(this.#trail / 1000);
 		this.#open = this.#high;
 		this.#trail = undefined;
-
-		const delay = Math.ceil(trail / 1000);
 		if (delay <= this.#delay) return false;
 
 		this.#delay = delay;

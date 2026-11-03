@@ -1061,6 +1061,25 @@ mod tests {
 		}
 	}
 
+	/// A supplied zero delay is a statement, not a gap: measurement never replaces it, and the
+	/// catalog omits it on the wire, hang and MSF alike.
+	#[test]
+	fn a_supplied_zero_delay_is_never_measured() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		let mut supplied = config(None, None);
+		supplied.delay = Some(Duration::ZERO);
+		rendition.set(supplied).unwrap();
+		rendition
+			.estimate(Estimate::default().with_delay(Duration::from_millis(200)))
+			.unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["v"].delay, Some(Duration::ZERO));
+
+		let json = catalog.snapshot().to_json().unwrap();
+		assert!(!json.contains("delay"), "{json}");
+		let rendered = super::super::producer::to_msf(&catalog.snapshot(), &moq_net::Path::default());
+		assert!(rendered.tracks.iter().all(|track| track.delay.is_none()));
+	}
+
 	#[test]
 	fn published_delay_never_decreases() {
 		let (_broadcast, catalog, mut rendition) = video_track();
