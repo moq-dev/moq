@@ -3018,6 +3018,10 @@ mod tests {
 	/// The owed groups start at the floor the demand last asked for, which an update can move
 	/// either way after SUBSCRIBE_START answered the SUBSCRIBE.
 	#[kio::test]
+	#[expect(
+		clippy::single_range_in_vec_init,
+		reason = "the owed groups are a list of runs, often one"
+	)]
 	async fn the_owed_floor_follows_the_demand() {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
