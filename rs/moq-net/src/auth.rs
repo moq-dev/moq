@@ -2080,20 +2080,9 @@ impl Held {
 					})
 					.is_pending()
 			});
-			if self.deadline.poll(waiter).is_ready() {
-				if handover {
-					return Poll::Pending;
-				}
-				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
-			}
-			match self.verdict.poll_reply(waiter) {
-				Poll::Ready(None) if handover => return Poll::Pending,
-				Poll::Ready(None) => {
-					return Poll::Ready(Refusal::new(
-						Error::Session(SessionError::Unauthorized),
-						"grant dropped",
-					));
-				}
+			// A grant the acceptor sent is read before the deadline, so an extension that arrived
+			// before the old expiry keeps the request even when it is polled only after.
+			let ended = match self.verdict.poll_reply(waiter) {
 				Poll::Ready(Some(Reply::Grant(grant))) => {
 					if !self.kind.covers(&grant, self.path.as_str()) {
 						return Poll::Ready(Refusal::new(Error::Unauthorized, "request token no longer granted"));
@@ -2105,11 +2094,25 @@ impl Held {
 					// be waiting.
 					continue;
 				}
-				Poll::Ready(Some(Reply::Refuse { code, reason })) => {
-					return Poll::Ready(Refusal::new(Error::Session(code), &reason));
+				Poll::Ready(None) if handover => None,
+				Poll::Ready(None) => Some(Refusal::new(
+					Error::Session(SessionError::Unauthorized),
+					"grant dropped",
+				)),
+				Poll::Ready(Some(Reply::Refuse { code, reason })) => Some(Refusal::new(Error::Session(code), &reason)),
+				Poll::Pending => None,
+			};
+			// Any other end comes after an expiry that already passed, which it reports.
+			if self.deadline.poll(waiter).is_ready() {
+				if handover {
+					return Poll::Pending;
 				}
-				Poll::Pending => return Poll::Pending,
+				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
 			}
+			return match ended {
+				Some(refusal) => Poll::Ready(refusal),
+				None => Poll::Pending,
+			};
 		}
 	}
 }
@@ -4016,6 +4019,44 @@ mod request_token_tests {
 
 	/// A renewal the acceptor granted before the old deadline lapsed keeps the request, even
 	/// when the serve loop applies it only after the deadline.
+	/// An extension the acceptor sent before the old expiry keeps the request, even when the
+	/// request reads it only after that expiry passed.
+	#[kio::test]
+	async fn an_extension_read_after_the_old_expiry_keeps_the_request() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		let mut requests = handle.handle().requests();
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
+		let issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
+		let answered = verdict.grant().await.unwrap();
+		let request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			Ok(answered),
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
+		let pending = kio::wait(|waiter| Poll::Ready(request_grant.poll_ended(waiter).is_pending())).await;
+		assert!(pending, "the first grant stands");
+
+		// Extended before the old expiry, and read only after it.
+		let extended = grant_in(&runtime, 600);
+		let expires = extended.expires;
+		issued.update(extended);
+		kio::clock::sleep(Duration::from_secs(61)).await;
+
+		let pending = kio::wait(|waiter| Poll::Ready(request_grant.poll_ended(waiter).is_pending())).await;
+		assert!(pending, "the old expiry ended a request its acceptor had extended");
+		assert_eq!(request_grant.grant().expires, expires);
+
+		// The extension's own expiry still ends it.
+		kio::clock::sleep(Duration::from_secs(600)).await;
+		let ended = kio::wait(|waiter| Poll::Ready(request_grant.poll_ended(waiter))).await;
+		assert!(matches!(ended, Poll::Ready(refusal) if matches!(refusal.error, Error::Expired)));
+	}
+
 	#[kio::test]
 	async fn a_granted_renewal_outlives_the_old_deadline() {
 		let runtime = crate::time::sim();
