@@ -86,7 +86,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [E2EE](/quest/m2/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation
 - [Android capture](/quest/m2/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
-- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
 - [Latest readers use Range::live()](/quest/m2/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`
 - [Audio outlives video](/quest/m2/audio-bufferbloat-av.md) - under bufferbloat audio stays within budget while video may skip, rendered frames stay in sync, and native audio rows are enforced
 - [ViSQOL grading](/quest/m2/audio-visqol.md) - the nightly scores played audio against a reference clip and fails below measured floors

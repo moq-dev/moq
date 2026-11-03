@@ -651,7 +651,7 @@ pub struct moq_track_info {
 	pub priority: i8,
 
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
-	/// The publisher-side half of `moq_subscription.max_delay_us`.
+	/// The publisher-side half of `moq_subscription.delay.max_us`.
 	pub max_age_us: u64,
 	/// Whether `max_age_us` is set. When false, the publisher imposes no age limit.
 	pub max_age_present: bool,
@@ -708,31 +708,47 @@ pub enum moq_demand {
 	MOQ_DEMAND_UNWANTED = 2,
 }
 
-/// How far behind the live edge a media consumer plays.
+/// How far behind the live edge a subscriber or media consumer plays: where it starts, and how
+/// late it may fall.
 ///
-/// A zeroed struct is the default, and so is a null pointer where one is taken: start at
-/// the newest group and skip aggressively.
+/// A zeroed struct is moq-net's default, and so is a null pointer where one is taken: start at
+/// the newest group and skip a superseded one at once.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct moq_delay {
 	/// The target latency in microseconds: the playout or jitter-buffer delay held behind
-	/// the live edge, and where a cold join starts. The subscription carries it too, which
-	/// moq-lite-07 sends upstream. A `min_us` past the max starts at the max, since the
-	/// publisher serves nothing older.
+	/// the live edge, and where a cold join starts. moq-lite-07 sends it upstream. A
+	/// `min_us` past the max starts at the max, since the publisher serves nothing older.
+	/// Ignored when `min_unstated` is set.
 	pub min_us: u64,
-	/// How far a group may fall behind the live edge before it is skipped, in
-	/// microseconds. It bounds lateness only, never the start. Ignored when
-	/// `max_unlimited` is set.
+	/// How far a non-latest group may fall behind the live edge before it is skipped, in
+	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any
+	/// local buffering, and it caps every range. It bounds lateness only, never the start.
+	/// Ignored when `max_unlimited` is set.
 	pub max_us: u64,
-	/// No max: wait on a stalled group as long as anything could.
+	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
 	pub max_unlimited: bool,
+	/// Leave the minimum unstated. A media consumer plays it as zero, while the subscription
+	/// keeps it unstated, so it never pulls the aggregate across subscribers to zero.
+	pub min_unstated: bool,
 }
 
 impl From<moq_delay> for moq_net::track::Delay {
 	fn from(delay: moq_delay) -> Self {
 		Self {
-			min: Some(std::time::Duration::from_micros(delay.min_us)),
+			min: (!delay.min_unstated).then(|| std::time::Duration::from_micros(delay.min_us)),
 			max: (!delay.max_unlimited).then(|| std::time::Duration::from_micros(delay.max_us)),
+		}
+	}
+}
+
+impl From<moq_net::track::Delay> for moq_delay {
+	fn from(delay: moq_net::track::Delay) -> Self {
+		Self {
+			min_us: delay.min.map(micros).unwrap_or_default(),
+			max_us: delay.max.map(micros).unwrap_or_default(),
+			max_unlimited: delay.max.is_none(),
+			min_unstated: delay.min.is_none(),
 		}
 	}
 }
@@ -748,24 +764,19 @@ pub(crate) unsafe fn parse_delay(delay: *const moq_delay) -> moq_net::track::Del
 /// Subscriber-side raw track delivery preferences.
 ///
 /// A null [moq_consume_track] or [moq_consume_track_update] `subscription`
-/// pointer uses the moq-net defaults, which [moq_subscription_defaults] returns as a
-/// struct to change. A zeroed struct differs only in `max_delay_present`: it sets no
-/// subscriber limit.
+/// pointer uses the moq-net defaults, and so does a zeroed struct, which
+/// [moq_subscription_defaults] returns to change.
 #[repr(C)]
 pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention; the default 0 is
 	/// the midpoint.
 	pub priority: i8,
 
-	/// How far a non-latest group may fall behind the live edge before it is skipped, in microseconds.
-	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
-	/// It caps every range.
-	pub max_delay_us: u64,
-	/// Whether `max_delay_us` is set. When false, there is no subscriber limit, leaving the
-	/// publisher's max age alone to bound it.
-	pub max_delay_present: bool,
+	/// How far behind the live edge this subscriber plays: where a cold join starts, and how
+	/// late a non-latest group may fall before it is skipped.
+	pub delay: moq_delay,
 
-	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
+	/// The spans of the track to deliver, or NULL for everything `delay.max_us` still
 	/// considers fresh. A non-NULL pointer with `ranges_len` 0 asks for nothing.
 	///
 	/// A request to the publisher, aggregated across every subscriber, and this
@@ -852,9 +863,7 @@ pub(crate) unsafe fn parse_subscription(
 	let mut out = moq_net::track::Subscription::default()
 		.with_priority(subscription.priority)
 		.with_order(order);
-	let max_delay = std::time::Duration::from_micros(subscription.max_delay_us);
-	out =
-		out.with_delay(moq_net::track::Delay::default().with_max(subscription.max_delay_present.then_some(max_delay)));
+	out = out.with_delay(subscription.delay.into());
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges
@@ -1282,9 +1291,9 @@ pub extern "C" fn moq_qlog_supported() -> bool {
 	moq_tokio::qlog_supported()
 }
 
-/// A [moq_subscription] with moq-net's defaults, whose zero `max_delay_us` skips a
-/// superseded group at once. A NULL subscription pointer means the same; start from
-/// this struct to change a field.
+/// A [moq_subscription] with moq-net's defaults, whose zero `delay` starts at the newest
+/// group and skips a superseded one at once. A NULL subscription pointer or a zeroed struct
+/// means the same; start from this struct to change a field.
 ///
 /// Returned by value because there is nothing to fail.
 #[unsafe(no_mangle)]
@@ -1296,8 +1305,7 @@ pub extern "C" fn moq_subscription_defaults() -> moq_subscription {
 	};
 	moq_subscription {
 		priority: defaults.priority,
-		max_delay_us: defaults.delay.max.map(micros).unwrap_or_default(),
-		max_delay_present: defaults.delay.max.is_some(),
+		delay: defaults.delay.into(),
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: order as u32,
@@ -2077,8 +2085,9 @@ pub extern "C" fn moq_origin_requests_cancel(dynamic: u32) -> i32 {
 
 /// The path of a broadcast request delivered to a [moq_origin_requests] callback.
 ///
-/// The destination borrows the request's storage: copy it out before accept,
-/// reject, or [moq_broadcast_request_free].
+/// The destination borrows the request's storage: copy it out before
+/// [moq_broadcast_request_serve], [moq_broadcast_request_prepare],
+/// [moq_broadcast_request_reject], or [moq_broadcast_request_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -2090,6 +2099,27 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().origin.broadcast_request_path(request, dst)
+	})
+}
+
+/// Serve a held consumer under the prefix route's instance without announcing an exact route.
+///
+/// Every answer at this path must continue the same sequences and bytes. Start a new
+/// prefix route for different content, or prepare and publish a job with its own instance.
+/// Consumes the request handle; the consumer remains owned by the caller.
+/// Returns zero on success, or a negative error.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let broadcast = ffi::parse_id(broadcast)?;
+		let mut state = State::lock();
+		let broadcast = state.consume.broadcast(broadcast)?;
+		let (request, driver) = state.origin.broadcast_request_take(request)?;
+		driver.check()?;
+		request.serve(broadcast);
+		driver.check()?;
+		Ok(())
 	})
 }
 
@@ -2478,6 +2508,26 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 		// Bound first, so the global lock is released before the encoders end.
 		let closing = State::lock().publish_close(broadcast)?;
 		closing.run()
+	})
+}
+
+/// Read the broadcast clock's current time into `dst`.
+///
+/// Every track in a broadcast shares this clock's epoch, so stamp media frames and JSON writes
+/// from it. Reading it fixes the clock: a container importer whose first frame arrives later
+/// shifts onto it rather than moving it.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must be a valid pointer to a [moq_timestamp].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_catalog_now(broadcast: u32, dst: *mut moq_timestamp) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*dst = State::lock().publish.catalog_now(broadcast)?.into();
+		Ok(())
 	})
 }
 
@@ -3566,9 +3616,10 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 /// Publish a new value to a JSON snapshot track. `value` is a UTF-8 JSON document. A no-op if
 /// unchanged from the previous update.
 ///
-/// `timestamp` is when the value was captured, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
-/// with `MOQ_ERROR_MOQ` and publishes nothing.
+/// `timestamp` is when the value was captured on the broadcast clock (see
+/// [moq_publish_catalog_now]), converted to the track's millisecond timescale. NULL fails with
+/// `MOQ_ERROR_INVALID_POINTER`, and a timestamp too large for milliseconds with `MOQ_ERROR_MOQ`;
+/// either publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3586,7 +3637,7 @@ pub unsafe extern "C" fn moq_publish_json_snapshot_update(
 		let json = ffi::parse_id(json)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
 		State::lock().publish.json_snapshot_update(json, value, timestamp)
 	})
 }
@@ -3626,9 +3677,10 @@ pub unsafe extern "C" fn moq_publish_json_stream(broadcast: u32, name: *const c_
 
 /// Append one record to a JSON stream track. `value` is a UTF-8 JSON document.
 ///
-/// `timestamp` is when the value was captured, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
-/// with `MOQ_ERROR_MOQ` and publishes nothing.
+/// `timestamp` is when the value was captured on the broadcast clock (see
+/// [moq_publish_catalog_now]), converted to the track's millisecond timescale. NULL fails with
+/// `MOQ_ERROR_INVALID_POINTER`, and a timestamp too large for milliseconds with `MOQ_ERROR_MOQ`;
+/// either appends nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3646,7 +3698,7 @@ pub unsafe extern "C" fn moq_publish_json_stream_append(
 		let stream = ffi::parse_id(stream)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
 		State::lock().publish.json_stream_append(stream, value, timestamp)
 	})
 }
@@ -3701,9 +3753,9 @@ pub unsafe extern "C" fn moq_publish_json_window(
 
 /// Append one record to the back of a JSON window. `value` is a UTF-8 JSON document.
 ///
-/// `timestamp` is when the edit occurred, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
-/// with `MOQ_ERROR_MOQ` and publishes nothing.
+/// `timestamp` is when the edit occurred on the broadcast clock (see [moq_publish_catalog_now]),
+/// converted to the track's millisecond timescale. NULL fails with `MOQ_ERROR_INVALID_POINTER`,
+/// and a timestamp too large for milliseconds with `MOQ_ERROR_MOQ`; either publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3721,16 +3773,16 @@ pub unsafe extern "C" fn moq_publish_json_window_push(
 		let window = ffi::parse_id(window)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
 		State::lock().publish.json_window_push(window, value, timestamp)
 	})
 }
 
 /// Drop `count` records from the front of a JSON window, clamped to what it holds.
 ///
-/// `timestamp` is when the edit occurred, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
-/// with `MOQ_ERROR_MOQ` and publishes nothing.
+/// `timestamp` is when the edit occurred on the broadcast clock (see [moq_publish_catalog_now]),
+/// converted to the track's millisecond timescale. NULL fails with `MOQ_ERROR_INVALID_POINTER`,
+/// and a timestamp too large for milliseconds with `MOQ_ERROR_MOQ`; either publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3740,7 +3792,7 @@ pub unsafe extern "C" fn moq_publish_json_window_push(
 pub unsafe extern "C" fn moq_publish_json_window_pop(window: u32, count: u64, timestamp: *const moq_timestamp) -> i32 {
 	ffi::enter(move || {
 		let window = ffi::parse_id(window)?;
-		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? }.ok_or(Error::InvalidPointer)?;
 		State::lock().publish.json_window_pop(window, count, timestamp)
 	})
 }
@@ -4011,6 +4063,10 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 ///   `user_data` is never touched again, so release `user_data` there. The
 ///   terminal callback fires even after [moq_consume_video_cancel].
 ///
+/// The catalog rendition's `warmup` reaches that much further back for decoder history and
+/// increases the subscription's max delay by the same amount. The steady-state skip budget
+/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
+///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
@@ -4058,6 +4114,10 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 /// terminal callback fires even after [moq_consume_audio_cancel].
 /// `delay` is how far behind the live edge to play: where a cold join starts and when
 /// frames are skipped. NULL uses the defaults (see [moq_delay]).
+///
+/// The catalog rendition's `warmup` reaches that much further back for decoder history and
+/// increases the subscription's max delay by the same amount. The steady-state skip budget
+/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///

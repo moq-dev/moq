@@ -37,4 +37,4 @@ Wire: none.
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - a cost change costs one ROUTE per origin there, instead of a re-announce per broadcast
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - a cost change costs one ROUTE per origin there, instead of a re-announce per broadcast

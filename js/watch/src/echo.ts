@@ -160,8 +160,10 @@ export class Echo {
 
 	// What the decoders received of the renditions in the catalog of the broadcast at `base`.
 	#report(base: Moq.Path.Valid): Snapshot {
-		const renditions: Record<string, Received> = {};
-		for (const source of this.#sources) Object.assign(renditions, source.feedback(base));
+		// Not Object.assign, which sets the prototype for an ID like `__proto__` instead of copying it.
+		const renditions: Record<string, Received> = Object.fromEntries(
+			this.#sources.flatMap((source) => Object.entries(source.feedback(base))),
+		);
 		const rtt = this.in.probe.peek()?.rtt;
 		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt) }, renditions };
 	}

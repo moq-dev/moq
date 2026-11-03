@@ -657,7 +657,7 @@ impl Misses {
 		}) || self.budget != Some(drift.budget)
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
-		let low = state.live_floor.unwrap_or(0).max(key.0);
+		let low = key.0;
 		let top = newest.min(u64::MAX - 1);
 		let mut candidates = RangeSet::new();
 		if terms {
@@ -914,6 +914,17 @@ impl Misses {
 			state.cache.watch_wall(at, waiter);
 		}
 
+		// An old cache's floor is a boundary inside a missing run, not a drift verdict
+		// for that whole run. Discard only its prefix before asking for the fresh suffix.
+		let floor = state.cache_floor(drift.budget);
+		let old: Vec<_> = asks
+			.overlapping(&(0..floor))
+			.map(|run| run.start..run.end.min(floor))
+			.collect();
+		for run in old {
+			asks.remove(run.clone());
+			self.give_up(run, given_up);
+		}
 		// Starts never rewind, so a run whose newest group is stale under this reader's
 		// budget is stale throughout.
 		let stale: Vec<ops::Range<u64>> = asks
@@ -957,9 +968,20 @@ impl Misses {
 
 	/// What [`Self::expire`] gives up as stale, and what arrived live, parking `waiter`.
 	fn expired(&self, state: &TrackState, drift: &Drift, waiter: &kio::Waiter) -> (RangeSet<u64>, RangeSet<u64>) {
-		let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
+		let floor = state.cache_floor(drift.budget);
+		// A floor raised after this fill was asked can cut through its wanted run.
+		let mut stale: RangeSet<u64> = self
+			.wanted
+			.overlapping(&(0..floor))
+			.map(|run| run.start..run.end.min(floor))
+			.collect();
+		let mut arrived = RangeSet::new();
 		let servable = &drift.edge.servable;
-		let mut next = self.wanted.iter().next().map(|run| run.start);
+		let mut next = self
+			.wanted
+			.overlapping(&(floor..u64::MAX))
+			.next()
+			.map(|run| run.start.max(floor));
 		while let Some(from) = next {
 			let bound = state.arrival(from, servable).map(|slot| slot.group.sequence);
 			let drifted = state.poll_drifted(from, servable, drift.budget, None, waiter);
@@ -1320,6 +1342,77 @@ fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
 mod tests {
 	use super::super::{Delay, Servable, Subscription};
 	use super::*;
+
+	/// A refusal starts a deferred grace after the judge returned: either no handler
+	/// could take the fill, or one refused it later. Both must arm the gap's own deadline.
+	#[test]
+	fn a_refused_fill_wakes_at_the_live_gaps_deadline() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		#[derive(Default)]
+		struct Flag(AtomicBool);
+		impl Wake for Flag {
+			fn wake(self: Arc<Self>) {
+				self.0.store(true, Ordering::Relaxed);
+			}
+		}
+
+		for handled in [false, true] {
+			let broadcast = crate::broadcast::Info::default().produce();
+			let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
+			let pool = &broadcast.info().pool;
+			let opened = track.consume().now();
+			let noop = kio::Waiter::noop();
+			pool.poll(opened, &noop);
+			let budget = Duration::from_secs(1);
+			let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+			for sequence in [0, 2] {
+				track
+					.create_group(crate::group::Info { sequence })
+					.unwrap()
+					.finish()
+					.unwrap();
+			}
+			let requests = handled.then(|| track.requests());
+			let state = track.state.consume();
+			let fills = state.read().fills.clone();
+			let mut misses = Misses::default();
+			let mut given_up = Vec::new();
+			misses.ask(
+				&state,
+				&fills,
+				&RangeSet::from_iter(std::iter::once(1..2)),
+				&Asking {
+					priority: 0,
+					max_delay: Some(budget),
+					order: Order::Ascending,
+				},
+				&mut given_up,
+			);
+			let flag = Arc::new(Flag::default());
+			let waiter = kio::Waiter::new(flag.clone().into());
+			assert!(misses.resolve(&state, Some(budget), &mut given_up, &waiter).is_empty());
+			if let Some(requests) = requests {
+				pool.poll(opened + budget / 2, &noop);
+				let Poll::Ready(Ok(fill)) = requests.poll_requested_fill_group(&noop) else {
+					panic!("the queued fill");
+				};
+				fill.reject(Error::NotFound);
+				assert!(misses.resolve(&state, Some(budget), &mut given_up, &waiter).is_empty());
+			}
+			assert!(misses.refused.contains(&1));
+			assert!(given_up.is_empty(), "the live feed may still deliver the group");
+			flag.0.store(false, Ordering::Relaxed);
+			let deadline = opened + budget;
+			assert_eq!(pool.poll(deadline - Duration::from_micros(1), &noop), Some(deadline));
+			assert!(!flag.0.load(Ordering::Relaxed));
+			pool.poll(deadline, &noop);
+			assert!(
+				flag.0.load(Ordering::Relaxed),
+				"handled={handled}: the refusal's grace wakes the reader"
+			);
+		}
+	}
 
 	#[kio::test]
 	async fn a_recreated_accounted_group_clears_its_earlier_fill_refusal() {

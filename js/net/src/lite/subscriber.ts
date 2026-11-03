@@ -36,8 +36,9 @@ import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
+import { min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
-import { bounded, hasTime, rangesStart, Window, wireRanges, wireSpan } from "../window.ts";
+import { bounded, hasTime, rangesStart, sameRanges, Window, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	AnnounceHistory,
@@ -79,6 +80,7 @@ import {
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
+	keepsSubscribeOpen,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -136,16 +138,23 @@ interface SubscribeEntry {
 	// after the publisher ends it.
 	tail: Tail;
 	// The first group the SUBSCRIBE asked for, if any.
-	requested?: number;
+	requested?: bigint;
 	// The first group the publisher serves (SUBSCRIBE_START) and the track's exclusive end
 	// (SUBSCRIBE_END), once it declares them.
-	start?: number;
-	end?: number;
+	start?: bigint;
+	end?: bigint;
 	// Where SUBSCRIBE_START says each of `asked` starts on lite-07, undefined for one with
 	// nothing to deliver. It answers `asked` unless `updated`.
-	starts?: (number | undefined)[];
+	starts?: (bigint | undefined)[];
 	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
 	updated?: boolean;
+	// Whether SUBSCRIBE_START arrived, which `start` alone cannot say when no range starts.
+	started?: boolean;
+	// Whether our side is FINned, which lite-07 does once the tail settles past SUBSCRIBE_FINISH.
+	fin?: boolean;
+	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_END waits a fresh
+	// grace for what one sent meanwhile asks for.
+	sent?: number;
 	// Set by the subscribe stream's FIN before lite-05, the track's only end there.
 	finished?: boolean;
 	// Settles once the subscribe stream's responses are read to its FIN or reset, which
@@ -1222,8 +1231,8 @@ export class Subscriber {
 
 			// A settled lite-05+ tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
-			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
-			else stream.close();
+			if (tailSettled && waitsForSubscriberFin(this.version)) this.#fin(stream, entry);
+			else if (!entry.fin) stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${producer.name}`);
 
 			// A publisher that covered the range before reading an update widening it sent fewer
@@ -1515,7 +1524,7 @@ export class Subscriber {
 	async fetchGroup(
 		broadcast: Path.Valid,
 		track: string,
-		sequence: number,
+		sequence: bigint,
 		options: track.FetchGroupOptions = {},
 		consumed: Consumed = {},
 	): Promise<netGroup.Consumer> {
@@ -1532,7 +1541,7 @@ export class Subscriber {
 		// Different freshness budgets use independent streams: once a FETCH is on the
 		// wire its limit cannot be widened for a later, more tolerant caller. Equal
 		// budgets still coalesce and each caller keeps an independent mirror.
-		const key = JSON.stringify([consumed.id, broadcast, instance, track, sequence, options.maxDelay]);
+		const key = JSON.stringify([consumed.id, broadcast, instance, track, String(sequence), options.maxDelay]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {
@@ -1574,7 +1583,7 @@ export class Subscriber {
 		broadcast: Path.Valid,
 		consumed: Consumed,
 		track: string,
-		sequence: number,
+		sequence: bigint,
 		priority: number,
 		group: netGroup.Producer,
 		maxDelay?: Milli,
@@ -1634,7 +1643,7 @@ export class Subscriber {
 		broadcast: Path.Valid,
 		consumed: Consumed,
 		track: string,
-		sequence: number,
+		sequence: bigint,
 		priority: number,
 		group: netGroup.Producer,
 		deadline: Deadline,
@@ -1781,11 +1790,14 @@ export class Subscriber {
 					);
 				if (hasRanges(this.version)) entry.starts = resp.start.starts;
 				// The lowest range start is the first group served; none leaves nothing owed.
-				entry.start = resp.start.starts.reduce<number | undefined>(
+				entry.start = resp.start.starts.reduce<bigint | undefined>(
 					(lowest, start) =>
 						start === undefined || (lowest !== undefined && lowest <= start) ? lowest : start,
 					undefined,
 				);
+				entry.started = true;
+				// A lite-07 tail waits for SUBSCRIBE_START to say where delivery starts.
+				entry.tail.touch();
 				hooks.startTrack(entry.track, { start: entry.start ?? null, requested: entry.requested });
 				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
@@ -1810,13 +1822,34 @@ export class Subscriber {
 					}
 					console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
 				}
+				// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: FIN once the tail settles,
+				// and the publisher's FIN in reply ends this loop.
+				if (keepsSubscribeOpen(this.version)) void this.#finishTail(stream, entry).catch(() => {});
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups, so they are accounted for without a
 				// stream, and a reader of one still arriving ends with the drop's error now.
-				entry.tail.account(resp.drop.start, resp.drop.end + 1);
-				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1, resp.drop.cause(this.version));
+				entry.tail.account(resp.drop.start, resp.drop.end + 1n);
+				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1n, resp.drop.cause(this.version));
 			}
 		}
+	}
+
+	// Settle a lite-07 tail past SUBSCRIBE_END, then FIN. An update sent meanwhile asks for more,
+	// which waits a fresh grace rather than one that may have passed while a stream was read.
+	async #finishTail(stream: Stream, entry: SubscribeEntry): Promise<void> {
+		for (;;) {
+			const sent = entry.sent ?? 0;
+			await this.#settleTail(entry);
+			if ((entry.sent ?? 0) === sent) break;
+		}
+		this.#fin(stream, entry);
+	}
+
+	// FIN our side once, acknowledging a settled tail without cancelling the publisher's half.
+	#fin(stream: Stream, entry: SubscribeEntry): void {
+		if (entry.fin) return;
+		entry.fin = true;
+		stream.writer.close();
 	}
 
 	// Wait for the group streams the publisher still owes once it has ended the subscription.
@@ -1840,7 +1873,7 @@ export class Subscriber {
 	// the groups that arrived account for the demand since.
 	#demandCovered(entry: SubscribeEntry): boolean {
 		const demand = wireRanges(entry.track.subscription.peek()?.ranges ?? [{}]);
-		if (JSON.stringify(demand) === JSON.stringify(entry.asked)) return true;
+		if (sameRanges(demand, entry.asked)) return true;
 		// Without SUBSCRIBE_START nothing says which ranges the publisher read, so only the
 		// groups that arrived prove the demand covered.
 		return entry.start !== undefined && this.#covered(entry);
@@ -1858,10 +1891,20 @@ export class Subscriber {
 				? hasRanges(this.version)
 					? span.end
 					: undefined
-				: Math.min(entry.end, span.end ?? entry.end);
+				: min(entry.end, span.end ?? entry.end);
 		if (end === undefined) return false;
-		// Without SUBSCRIBE_START the publisher served no group at all.
-		if (entry.start === undefined) return true;
+		// Without SUBSCRIBE_START the publisher served no group at all, though lite-07 still
+		// answers with one once the track ends, unless nothing was asked below the end. One
+		// that started no range owes nothing either, unless an update since asked from a floor
+		// below the end, which lite-07's open stream still serves.
+		const floor = rangesStart(ranges);
+		let first = entry.start;
+		if (first === undefined) {
+			if (!keepsSubscribeOpen(this.version)) return true;
+			if (!entry.started) return !(end > (floor ?? 0n));
+			if (!entry.updated || floor === undefined || floor >= end) return true;
+			first = floor;
+		}
 		// Owed from the floor the demand last asked for, which an update can move either
 		// way, or where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE
 		// asked for below its SUBSCRIBE_START were accounted for when it arrived. Only the
@@ -1869,8 +1912,8 @@ export class Subscriber {
 		// While SUBSCRIBE_START answers these ranges, each is owed from the start it named, which
 		// accounts for a skipped prefix and resolves a relative or time start. Otherwise a time
 		// start resolved at the publisher, at the lowest start it named.
-		const starts = !entry.updated && JSON.stringify(ranges) === JSON.stringify(entry.asked) && entry.starts;
-		const start = starts ? entry.start : (rangesStart(ranges) ?? entry.start);
+		const starts = !entry.updated && sameRanges(ranges, entry.asked) && entry.starts;
+		const start = starts ? first : (floor ?? first);
 		const owed = starts
 			? ranges.flatMap((range, index) => {
 					const at = starts[index];
@@ -1915,7 +1958,7 @@ export class Subscriber {
 		// The wanted group is subscription state: an update announces each new one past our
 		// largest, and every later update restates it. Joins asking for the same group
 		// coalesce into that one update.
-		let sentWanted: number | undefined;
+		let sentWanted: bigint | undefined;
 		const demand = track.demand();
 		const edge = hooks.producerLargest(track);
 		for (;;) {
@@ -1943,12 +1986,12 @@ export class Subscriber {
 			if (ranges.length === 0) throw new Error(EMPTY_RANGE);
 			const span = wireSpan(ranges);
 
-			// A lowered floor owes groups nobody asked for until now.
+			// Changed ranges owe groups nobody asked for until now: below a lowered floor, or
+			// between ranges a widening joins while keeping the floor. Each gap they reach waits
+			// a fresh grace, which only delays giving up on one still owed.
 			const start = rangesStart(ranges);
-			if (start !== undefined) {
-				const floor = rangesStart(wireRanges(lastSent.ranges ?? [{}])) ?? entry.start;
-				entry.tail.demand(start, floor ?? Number.POSITIVE_INFINITY);
-			}
+			if (!sameRanges(ranges, wireRanges(lastSent.ranges ?? [{}])))
+				entry.tail.demand(start ?? entry.start ?? 0n, UNBOUNDED);
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/delay/etc.
@@ -1974,6 +2017,9 @@ export class Subscriber {
 			if (refresh !== undefined) sentWanted = refresh;
 			entry.bounded ||= bounded(ranges);
 			entry.updated = true;
+			entry.sent = (entry.sent ?? 0) + 1;
+			// A tail settling past SUBSCRIBE_END re-judges what the update now asks for.
+			entry.tail.touch();
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
@@ -1982,17 +2028,17 @@ export class Subscriber {
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
 		const ar = wireRanges(a.ranges ?? [{}]);
 		const br = wireRanges(b.ranges ?? [{}]);
-		let sameRanges: boolean;
-		if (hasRanges(this.version)) sameRanges = JSON.stringify(ar) === JSON.stringify(br);
+		let rangesEqual: boolean;
+		if (hasRanges(this.version)) rangesEqual = sameRanges(ar, br);
 		else {
 			const as = wireSpan(ar);
 			const bs = wireSpan(br);
 			// A lite-06 `Group Start` of 0 is no floor, so the two spell the same; a pre-06 wire tells
 			// them apart: omitted joins at the publisher's start, and 0 is group 0.
 			const start = resolvesStart(this.version)
-				? (span: typeof as) => span.start ?? 0
+				? (span: typeof as) => span.start ?? 0n
 				: (span: typeof as) => span.start;
-			sameRanges = start(as) === start(bs) && as.end === bs.end;
+			rangesEqual = start(as) === start(bs) && as.end === bs.end;
 		}
 		// A wire without `Group Order` cannot carry a change to it.
 		const sameOrder = !hasOrder(this.version) || (a.order ?? "descending") === (b.order ?? "descending");
@@ -2002,7 +2048,7 @@ export class Subscriber {
 			maxDelayOf(a) === maxDelayOf(b) &&
 			// A wire without `Subscriber Min Age` cannot carry a change to it.
 			(!hasMinDelay(this.version) || minDelayOf(a) === minDelayOf(b)) &&
-			sameRanges
+			rangesEqual
 		);
 	}
 
@@ -2130,7 +2176,7 @@ export class Subscriber {
 		const timestamp =
 			dg.timestamp === undefined ? undefined : new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
 		// A datagram's sequence is never owed a stream, so it never holds the tail open.
-		entry.tail.account(dg.sequence, dg.sequence + 1);
+		entry.tail.account(dg.sequence, dg.sequence + 1n);
 		hooks.writeDatagram(entry.track, { sequence: dg.sequence, timestamp, payload: dg.payload }, dg.inflated);
 	}
 

@@ -85,7 +85,7 @@ type Subscription = {
 	// says are still owed.
 	tail: Tail;
 	// The track's exclusive end, once an END_OF_TRACK declares it.
-	end?: number;
+	end?: bigint;
 	// The join of SUBSCRIBE_OK's Largest group, whose head a draft-18 joining FETCH or a
 	// draft-22 fill brings.
 	join?: Join;
@@ -1246,9 +1246,6 @@ export class Subscriber {
 		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("max cache duration exceeds safe milliseconds");
 		}
-		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
-			throw new RangeError("largest group exceeds safe integers");
-		}
 		// Staged until the answer is written in below, so no reader sees the track before its
 		// Largest and start.
 		const staged = hooks.stageRequest(request, {
@@ -1267,7 +1264,7 @@ export class Subscriber {
 		// group's head. With no Largest the track is empty and every group whole. A draft-22 fill
 		// is one of the subscription's own streams, so the Stream Count already waits for it.
 		if (ok.largest) {
-			subscription.join = new Join(Number(ok.largest.groupId), tail, { counted: msg.fill !== undefined });
+			subscription.join = new Join(ok.largest.groupId, tail, { counted: msg.fill !== undefined });
 		}
 		if (msg.fill) subscription.fetchIds.push(requestId);
 		state.subscription = subscription;
@@ -1275,13 +1272,13 @@ export class Subscriber {
 			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
 			// the group carries over: its first frame is the edge a reader can count on. It names
 			// no object, so a Next Object join served onward still starts at the group's first.
-			hooks.reportedGroup(producer, Number(ok.largest.groupId));
+			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
 		// The live join starts at the publisher's edge, whatever floor the demand asked for.
 		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
 		// still arrive after a higher one's.
 		hooks.startTrack(producer, {
-			start: ok.largest ? Number(ok.largest.groupId) : 0,
+			start: ok.largest ? ok.largest.groupId : 0n,
 			requested: wireSpan(request.subscription.ranges ?? [{}]).start,
 		});
 		staged.commit();

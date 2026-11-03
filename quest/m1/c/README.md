@@ -30,4 +30,3 @@ Public API: moq-c gains each m1 binding feature. Wire: none.
 ## Required
 
 - [API gaps](/quest/m1/c/api-gaps.md) - disabling pre-encoded simulcast rungs after the shared importer support lands
-- [moq-c's media consume applies the catalog warmup](/quest/m1/c/raw-consume-warmup.md) - `moq_consume_audio` and `moq_consume_video` start where the moq-ffi and Rust media consumers do

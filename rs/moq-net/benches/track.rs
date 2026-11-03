@@ -1915,7 +1915,7 @@ struct Fills {
 }
 
 impl Fills {
-	fn new(readers: usize, runs: u64) -> Self {
+	fn new(readers: usize, runs: u64, budget: Option<Duration>) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		let dynamic = track.requests();
@@ -1933,7 +1933,7 @@ impl Fills {
 			.chain([track::Range::groups(start..)]);
 		let subscription = track::Subscription::default()
 			.with_ranges(ranges)
-			.with_delay(track::Delay::default().with_max(AGED_BUDGET));
+			.with_delay(track::Delay::default().with_max(budget));
 		let readers = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
 		Self {
 			_broadcast: broadcast,
@@ -1975,17 +1975,23 @@ impl Fills {
 /// swept over the readers and the runs. Each reader must pay the same per run, so a cost
 /// that grows with the audience or the runs shows up as a slope.
 fn bench_fill(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_fill");
-	group.sample_size(10);
-	for readers in [1usize, 8, 64] {
-		for runs in [1u64, 64, 1024] {
-			group.throughput(Throughput::Elements(runs * readers as u64));
-			group.bench_function(BenchmarkId::new(format!("{readers}r"), runs), |b| {
-				b.iter_batched_ref(|| Fills::new(readers, runs), Fills::run, BatchSize::PerIteration);
-			});
+	for (name, budget) in [("track_fill", Some(AGED_BUDGET)), ("track_fill_unlimited", None)] {
+		let mut group = c.benchmark_group(name);
+		group.sample_size(10);
+		for readers in [1usize, 8, 64] {
+			for runs in [1u64, 64, 1024] {
+				group.throughput(Throughput::Elements(runs * readers as u64));
+				group.bench_function(BenchmarkId::new(format!("{readers}r"), runs), |b| {
+					b.iter_batched_ref(
+						|| Fills::new(readers, runs, budget),
+						Fills::run,
+						BatchSize::PerIteration,
+					);
+				});
+			}
 		}
+		group.finish();
 	}
-	group.finish();
 }
 
 /// Readers whose disjoint ranges all fall below where the feed starts, and the handler that

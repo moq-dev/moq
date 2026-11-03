@@ -6,7 +6,7 @@
 //! view complete as of a revision for the region they cover. Receivers merge
 //! every neighbor's view claim by claim, keeping whichever knowledge is newer,
 //! and keep showing an origin's claims while any route to it is usable or
-//! recovering. See `quest/m1/cluster-routing/routes.md`.
+//! recovering. See `quest/m1/cluster-routing/routes/README.md`.
 
 use std::collections::BTreeSet;
 

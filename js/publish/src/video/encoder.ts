@@ -421,12 +421,15 @@ export class Encoder {
 		// The largest group demand asked for that a keyframe already answers, including one still in
 		// the encoder. A join over the refresh ratio asks for one past the largest, which the next frame
 		// opens; any other join is served by a group already written, encoded with or without demand.
-		let answered: number | undefined;
+		let answered: bigint | undefined;
 		const answer = () => {
 			const wanted = demand.wanted.peek();
-			if (wanted !== undefined) answered = Math.max(answered ?? 0, wanted);
+			if (wanted !== undefined && (answered === undefined || wanted > answered)) answered = wanted;
 		};
-		const covered = () => Math.max(answered ?? -1, track.largest()?.group ?? -1);
+		const covered = () => {
+			const largest = track.largest()?.group ?? -1n;
+			return answered !== undefined && answered > largest ? answered : largest;
+		};
 		let tearingDown = false;
 
 		effect.spawn(async () => {
