@@ -797,7 +797,7 @@ pub struct Import {
 	/// live, it caps how far back a FETCH can still reach (and how long a subscriber may ask to
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
 	/// advertise segments that are still fetchable; lower it when nothing reads history. Media
-	/// tracks only -- the catalog and HLS records keep the 30s default, since they are read at the
+	/// tracks only -- the catalog and HLS records keep moq-net's zero default, since they are read at the
 	/// live edge, which never goes stale.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,

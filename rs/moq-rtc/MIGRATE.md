@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### `Config::max_age` of `None` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-`server::Config::max_age` and `client::Config::max_age` default to `Some(moq_net::track::Info::DEFAULT_MAX_AGE)` (30 s), and `None` now sets no publisher limit instead of keeping that default.
+`server::Config::max_age` and `client::Config::max_age` default to `Some(hang::container::MAX_AGE)` (30 s), and `None` now sets no publisher limit instead of keeping that default.
 Leave the field at its default unless you have a value.
 
 ### `moq_net::Path` has no lifetime

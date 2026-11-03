@@ -326,7 +326,7 @@ mod test {
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
 	}
 
-	/// A TRACK_INFO without a max age is a track with no publisher limit, never the 30 s an
+	/// A TRACK_INFO without a max age is a track with no publisher limit, never the zero an
 	/// authored track defaults to.
 	#[test]
 	fn a_received_track_without_a_max_age_has_no_limit() {
@@ -343,13 +343,13 @@ mod test {
 	#[test]
 	fn track_info_defaults_match_cross_language_wire_bytes() {
 		// The default authored track is untimed, which lite-05 declares as milliseconds, and
-		// advertises the 30 s default max age.
+		// advertises the default zero max age.
 		let info = TrackInfo::serve(&crate::track::Info::default(), Version::Lite05);
 		let mut buf = Vec::new();
 		info.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 
-		assert_eq!(buf, [0x08, 0x80, 0x00, 0x80, 0x00, 0x75, 0x30, 0x43, 0xe8]);
+		assert_eq!(buf, [0x05, 0x80, 0x00, 0x00, 0x43, 0xe8]);
 	}
 
 	#[test]

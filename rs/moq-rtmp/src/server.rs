@@ -610,7 +610,7 @@ impl<S: Stream> Publish<S> {
 
 	/// Set how long a superseded group of this publish's media tracks stays fresh, or
 	/// `None` for no publisher limit. Defaults to
-	/// [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE).
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
 	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
@@ -1197,7 +1197,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
+							max_age: Some(hang::container::MAX_AGE),
 							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 							linger: moq_mux::Linger::DEFAULT,
 						})));

@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### `with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-The ingest builders' `with_max_age` default to `moq_net::track::Info::DEFAULT_MAX_AGE` (30 s), and `None` now sets no publisher limit instead of keeping that default.
+The ingest builders' `with_max_age` still default to `hang::container::MAX_AGE` (30 s), but `None` now sets no publisher limit instead of keeping that default.
 Call `with_max_age` only when you have a value, as with `moq_mux::catalog::Config::with_max_age`.
 
 ### `moq_net::Path` has no lifetime

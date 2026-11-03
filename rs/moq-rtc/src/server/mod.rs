@@ -147,7 +147,7 @@ pub struct Config {
 	///
 	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. Defaults to
-	/// [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE), which suits a segmented
+	/// [`MAX_AGE`](hang::container::MAX_AGE), which suits a segmented
 	/// egress (HLS/DASH) reading the broadcast downstream: it may only advertise segments
 	/// that are still fetchable. Lower it when nothing reads history.
 	///
@@ -170,7 +170,7 @@ impl Default for Config {
 		Self {
 			ice_candidates: Vec::new(),
 			udp_bind: SocketAddr::from(([0, 0, 0, 0], 0)),
-			max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			linger: moq_mux::Linger::DEFAULT,
 		}

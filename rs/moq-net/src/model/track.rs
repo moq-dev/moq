@@ -131,12 +131,13 @@ pub struct Info {
 	/// group can't be waited for once it is stale. Reported in TRACK_INFO so
 	/// relays re-serve with the same bound.
 	///
-	/// An authored track defaults to [`Info::DEFAULT_MAX_AGE`]. `None` sets no publisher
-	/// limit, which an author requests explicitly with `with_max_age(None)` and which a
-	/// track received without one (an older moq-lite, or moq-transport without
-	/// MAX_CACHE_DURATION) keeps; the origin cache ceiling still applies.
-	/// `Some(Duration::ZERO)` serves only the live edge. Stale groups are skipped by readers;
-	/// reclaiming their bytes is the cache pool's [`expiry`](crate::cache::Pool::expiry) window.
+	/// An authored track defaults to `Some(Duration::ZERO)`: a superseded group is stale at once,
+	/// so only the live edge is served, and a publisher that wants a reader to reach history sets a
+	/// longer age, or `None`, explicitly. `None` sets no publisher limit: requested with
+	/// `with_max_age(None)`, and kept by a track received without one (an older moq-lite, or
+	/// moq-transport without MAX_CACHE_DURATION). A hop's cache still bounds what it keeps with
+	/// its own pool and ceiling. Stale groups are skipped by readers; reclaiming their bytes is
+	/// the cache pool's [`expiry`](crate::cache::Pool::expiry) window.
 	///
 	/// This is the `Publisher Max Age` on the wire, the publisher-side half of the
 	/// budget [`Delay::max`] sets for a subscriber.
@@ -212,13 +213,13 @@ impl PartialEq for Info {
 
 impl Eq for Info {}
 
-/// An authored track's defaults: untimed, [`Info::DEFAULT_MAX_AGE`], priority 0, uncompressed,
-/// never asking for a refresh.
+/// An authored track's defaults: untimed, a zero [`max_age`](Info::max_age) (the live edge only),
+/// priority 0, uncompressed, never asking for a refresh.
 impl Default for Info {
 	fn default() -> Self {
 		Self {
 			timescale: None,
-			max_age: Some(Self::DEFAULT_MAX_AGE),
+			max_age: Some(Duration::ZERO),
 			priority: DEFAULT_PRIORITY,
 			compress: false,
 			refresh: None,
@@ -229,13 +230,6 @@ impl Default for Info {
 }
 
 impl Info {
-	/// The [`max_age`](Self::max_age) an authored track gets unless its author sets one.
-	///
-	/// Long enough for a reader to fetch superseded groups for catch-up, a segmented egress
-	/// (HLS/DASH) to serve its playlist window, and a recorder to absorb reordering, without
-	/// delaying a live reader, whose own [`Delay::max`] defaults to zero.
-	pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30);
-
 	/// Set the per-frame timestamp scale, or `None` for an untimed track, returning `self`
 	/// for chaining.
 	///
@@ -12147,7 +12141,7 @@ mod test {
 
 	#[test]
 	fn optional_age_keeps_publisher_metadata_and_local_policy_separate() {
-		assert_eq!(Info::default().max_age, Some(Info::DEFAULT_MAX_AGE));
+		assert_eq!(Info::default().max_age, Some(Duration::ZERO));
 		assert_eq!(Info::timed().max_age, None);
 		for age in [None, Some(Duration::ZERO), Some(Duration::from_secs(30))] {
 			let producer = track_producer_capped("optional", Info::timed().with_max_age(age), Duration::from_secs(1));
@@ -13746,53 +13740,45 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![1, 2]);
 	}
 
-	/// An authored track keeps a superseded group fresh for [`Info::DEFAULT_MAX_AGE`] on the
-	/// media clock, so even a reader with no budget of its own reaches back at most that far,
-	/// while the newest group, a snapshot a late joiner bootstraps from, never goes stale.
+	/// An authored track's default zero max age serves only the live edge: a superseded group is
+	/// stale at once, even to a reader with no budget of its own, while the newest group, a
+	/// snapshot a late joiner bootstraps from, never goes stale. A longer history is the
+	/// publisher's explicit choice.
 	#[test]
 	#[cfg(feature = "async")]
-	fn the_default_max_age_bounds_timed_history() {
+	fn the_default_max_age_serves_only_the_live_edge() {
 		let history = || Subscription::default().with_delay(Delay::default().with_max(None));
-		let mut producer = track_producer("test", Info::default().with_timescale(Timescale::MILLI));
-		append_at(&mut producer, 0);
-		append_at(&mut producer, 1_000);
-		append_at(&mut producer, 30_999);
 
-		// Group 0's successor starts 29.999 s behind the edge: still fresh.
-		assert_eq!(drain(&mut producer.subscribe(history())), vec![0, 1, 2]);
+		// Timed: a successor at the same instant already supersedes.
+		let mut timed = track_producer("timed", Info::default().with_timescale(Timescale::MILLI));
+		append_at(&mut timed, 0);
+		append_at(&mut timed, 0);
+		assert_eq!(drain(&mut timed.subscribe(history())), vec![1]);
 
-		// A full 30 s behind, it is stale; group 1's successor trails the edge by 1 ms.
-		append_at(&mut producer, 31_000);
-		assert_eq!(drain(&mut producer.subscribe(history())), vec![1, 2, 3]);
+		// Untimed: the wall clock agrees, and an hour on the unchanged newest group still
+		// bootstraps a late joiner.
+		let mut untimed = track_producer("untimed", Info::default());
+		append_untimed(&mut untimed);
+		append_untimed(&mut untimed);
+		assert_eq!(drain(&mut untimed.subscribe(history())), vec![1]);
+		elapse(&untimed, Duration::from_secs(3600));
+		assert_eq!(drain(&mut untimed.subscribe(None)), vec![1]);
+		assert_eq!(drain(&mut untimed.subscribe(history())), vec![1]);
 
-		// Explicitly unlimited keeps it all.
+		// An explicit age keeps superseded groups fresh that long; explicit `None` keeps them all.
+		let mut explicit = track_producer(
+			"explicit",
+			Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(Duration::from_secs(30)),
+		);
 		let mut unlimited = track_producer("unlimited", Info::timed());
-		for millis in [0, 1_000, 30_999, 31_000] {
+		for millis in [0, 1_000, 31_000] {
+			append_at(&mut explicit, millis);
 			append_at(&mut unlimited, millis);
 		}
-		assert_eq!(drain(&mut unlimited.subscribe(history())), vec![0, 1, 2, 3]);
-	}
-
-	/// The wall clock judges an authored untimed track by the same default: a superseded group
-	/// stays fresh for 30 s after its successor arrived, and the newest group stays readable
-	/// to a late joiner however long it goes unchanged.
-	#[test]
-	#[cfg(feature = "async")]
-	fn the_default_max_age_bounds_untimed_history() {
-		let history = || Subscription::default().with_delay(Delay::default().with_max(None));
-		let mut producer = track_producer("test", Info::default());
-		append_untimed(&mut producer);
-		append_untimed(&mut producer);
-		elapse(&producer, Info::DEFAULT_MAX_AGE - Duration::from_millis(1));
-		assert_eq!(drain(&mut producer.subscribe(history())), vec![0, 1]);
-
-		elapse(&producer, Duration::from_millis(1));
-		assert_eq!(drain(&mut producer.subscribe(history())), vec![1]);
-
-		// An hour on, the unchanged newest group still bootstraps a late joiner.
-		elapse(&producer, Duration::from_secs(3600));
-		assert_eq!(drain(&mut producer.subscribe(None)), vec![1]);
-		assert_eq!(drain(&mut producer.subscribe(history())), vec![1]);
+		assert_eq!(drain(&mut explicit.subscribe(history())), vec![1, 2]);
+		assert_eq!(drain(&mut unlimited.subscribe(history())), vec![0, 1, 2]);
 	}
 
 	#[test]

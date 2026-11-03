@@ -39,7 +39,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			ice_candidates: Vec::new(),
-			max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 		}
 	}

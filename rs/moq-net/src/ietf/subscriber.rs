@@ -6520,7 +6520,7 @@ mod tests {
 
 	use super::*;
 
-	/// A publisher that sends no MAX_CACHE_DURATION sets no publisher limit, never the 30 s an
+	/// A publisher that sends no MAX_CACHE_DURATION sets no publisher limit, never the zero an
 	/// authored track defaults to; one that sends it keeps that value.
 	#[test]
 	fn a_received_track_keeps_its_max_cache_duration() {

@@ -12,7 +12,7 @@ const [address, protocol, mode] = process.argv.slice(2);
 if (!address || !protocol || !["publish", "subscribe"].includes(mode))
 	throw new Error("expected URL ALPN publish|subscribe");
 const origin = new Producer();
-// `null` is an explicit unlimited: an omitted max age is the 30 s authored default.
+// `null` is an explicit unlimited: an omitted max age is the zero authored default.
 const ages = [null, Milli(0), Milli(30_000)];
 if (mode === "publish") {
 	const broadcastPublication = origin.createBroadcast(Path.from("age"));

@@ -754,7 +754,7 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = Some(import.max_age.map_or(moq_net::track::Info::DEFAULT_MAX_AGE, Into::into));
+	let max_age = Some(import.max_age.map_or(hang::container::MAX_AGE, Into::into));
 	let linger = import.linger.map_or(moq_mux::Linger::DEFAULT, Into::into);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.

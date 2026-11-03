@@ -20,7 +20,7 @@ pub struct ImportTarget {
 	pub name: String,
 
 	/// How long a superseded group of the published media tracks stays fresh
-	/// (`--max-age`, else the authored default), or `None` for no publisher limit.
+	/// (`--max-age`, else hang's 30 s media max age), or `None` for no publisher limit.
 	pub max_age: Option<std::time::Duration>,
 
 	/// How long a cleanly ended broadcast stays up (`--linger`).

@@ -438,7 +438,7 @@ impl Default for Config<()> {
 	fn default() -> Self {
 		Self {
 			catalog: Catalog::default(),
-			max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			clock: None,
 			hls: Some(crate::hls::Config::default()),
@@ -478,7 +478,7 @@ impl<E: CatalogExt> Config<E> {
 
 	/// Set how long a superseded group of the media tracks minted under this catalog stays
 	/// fresh, or `None` for no publisher limit. Defaults to
-	/// [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE).
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
 	/// That default suits a segmented egress (HLS/DASH), which may only advertise segments a
 	/// FETCH can still reach. Lower it when nothing reads history; raise it for a deeper seek
@@ -1845,12 +1845,12 @@ mod test {
 	fn media_tracks_take_the_catalogs_max_age() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
-		// Unset, a catalog mints the authored default, sized so a segmented egress can serve a
+		// Unset, a catalog mints hang's media max age, sized so a segmented egress can serve a
 		// full playlist window.
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(
 			catalog.track_info(hang::catalog::PRIORITY.video).max_age,
-			Some(moq_net::track::Info::DEFAULT_MAX_AGE)
+			Some(hang::container::MAX_AGE)
 		);
 
 		// `None` is an explicit unlimited, not a request for the default.

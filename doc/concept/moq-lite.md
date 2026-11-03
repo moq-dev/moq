@@ -375,8 +375,10 @@ The publisher may declare a max age per track: how long a superseded group stays
 fresh. On the wire, omission sets no limit; zero makes a group stale as soon as
 its successor arrives. Relays preserve that declaration, and may still cap it
 lower under their own ceiling. The Rust and JS libraries give an authored track
-30 seconds unless it asks otherwise, so a segmented egress can still find its
-segments; a track can explicitly ask for no limit. Max age ages a group by the
+zero, the live edge only, unless its publisher asks for more or for no limit;
+media tracks declare 30 seconds, so a segmented egress can still find its
+segments. A relay bounds what it keeps with its own cache, not the publisher's
+default. Max age ages a group by the
 same two clocks as max delay and never makes the newest group stale. A fetch
 obeys the same bound, and may name a tighter max delay of its own.
 IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.

@@ -174,7 +174,7 @@ impl<S: Stream> Client<S> {
 			work,
 			app: app.to_string(),
 			max_delay: crate::DEFAULT_MAX_DELAY,
-			max_age: Some(moq_net::track::Info::DEFAULT_MAX_AGE),
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			linger: moq_mux::Linger::DEFAULT,
 			metadata: Default::default(),
@@ -193,7 +193,7 @@ impl<S: Stream> Client<S> {
 
 	/// Set how long a superseded group of the media tracks [`pull`](Self::pull) publishes
 	/// stays fresh, or `None` for no publisher limit. Defaults to
-	/// [`DEFAULT_MAX_AGE`](moq_net::track::Info::DEFAULT_MAX_AGE).
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
 	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a

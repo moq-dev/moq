@@ -204,7 +204,7 @@ impl Reserved {
 			.track()
 			.info()
 			.max_age
-			.unwrap_or(moq_net::track::Info::DEFAULT_MAX_AGE);
+			.unwrap_or(hang::container::MAX_AGE);
 		let bitrate = registered.encoder.bitrate();
 		self.track.report_bitrate(bitrate);
 

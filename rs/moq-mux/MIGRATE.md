@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### `catalog::Config::with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-`Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `moq_net::track::Info::DEFAULT_MAX_AGE` (30 s), `None` sets no publisher limit, and a value is that value.
+`Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `hang::container::MAX_AGE` (30 s), as before, `None` sets no publisher limit, and a value is that value.
 Callers that passed an optional override straight through call `with_max_age` only when it is set.
 
 ```rust
@@ -19,7 +19,7 @@ if let Some(max_age) = override_or_none {
 }
 ```
 
-The catalog and HLS record tracks now advertise the 30 s default instead of no limit.
+The catalog and HLS record tracks take moq-net's new zero default instead of no limit; their newest group restates them.
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

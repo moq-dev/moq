@@ -4,10 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `container::MAX_AGE` is `moq_net::track::Info::DEFAULT_MAX_AGE` ([#7729](https://github.com/moq-dev/moq/pull/7729))
+### The catalog track advertises a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-The media max age is moq-net's authored default, so `hang::container::MAX_AGE` is removed: use `moq_net::track::Info::DEFAULT_MAX_AGE`, the same 30 seconds.
-`container::track_info` and `Catalog::default_track_info` keep that default; the catalog track advertises 30 s where it advertised no limit.
+`Catalog::default_track_info` takes moq-net's new zero default, so the catalog track advertises the live edge only where it advertised no limit. A late joiner still reads the newest snapshot, which never goes stale.
+`container::track_info` still declares `container::MAX_AGE` (30 s) on media tracks.
 
 ### Compression moves to the track
 

@@ -4,11 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-`track::Info::default()` sets `max_age` to `Some(Info::DEFAULT_MAX_AGE)`, 30 seconds, instead of `None`.
-A superseded group now goes stale 30 s after its successor; the newest group never does.
-A track that relied on unlimited history requests it explicitly before it is created, with `with_max_age(None)`, or a longer window.
+`track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.
+A track that relied on unlimited history requests it explicitly before it is created, with `with_max_age(None)`, or sets a window, such as `hang::container::MAX_AGE` for media.
+A relay or cache bounds what it keeps with its own pool, not the publisher's default.
 Readers asking for history still set a sufficient `Delay::max` and range.
 Received metadata is unchanged: a track that arrives without a max age keeps `None`, and the wire is unchanged.
 

@@ -93,7 +93,9 @@ try {
 	if (role === "publish") {
 		const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
 		const broadcast = broadcastPublication.broadcast;
-		const track = broadcast.createTrack("tail", { compress, ...(status ? { priority: 2 } : {}) });
+		// `cached` and `late` read groups a newer one supersedes, which the default zero max age
+		// would leave stale.
+		const track = broadcast.createTrack("tail", { compress, maxAge: null, ...(status ? { priority: 2 } : {}) });
 		if (cached) write(track);
 		let head: Moq.Group.Producer | undefined;
 		if (late) {
