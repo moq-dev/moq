@@ -2256,15 +2256,20 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(read_timestamp(frame.timestamp), Some(micros(20_000)));
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-	let widened = [moq_range {
-		end: moq_anchor {
-			group: 3,
-			..ranges[0].end
+	// Widen the bounded range but keep the open one, so the read stays open for the cancel.
+	let widened = [
+		moq_range {
+			end: moq_anchor {
+				group: 3,
+				..ranges[0].end
+			},
+			..ranges[0]
 		},
-		..ranges[0]
-	}];
+		ranges[1],
+	];
 	let update = moq_subscription {
 		ranges: widened.as_ptr(),
+		ranges_len: widened.len(),
 		..subscription
 	};
 	assert_eq!(unsafe { moq_consume_track_update(consumer, &update) }, 0);
