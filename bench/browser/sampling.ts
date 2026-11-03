@@ -22,9 +22,18 @@ export function samplingFailure(shape: SamplingShape, before: Outcome, after: Ou
 	const expected = expectedEstimates(shape);
 	if (after.estimated !== expected) return `${after.estimated} of ${expected} expected estimates`;
 	// Every playing connection reads frames throughout the window.
-	if (shape.mode === "receive" && after.received - before.received < shape.connections)
-		return `received ${after.received - before.received} frames in the window`;
+	if (shape.mode === "receive") {
+		if (after.received.length !== shape.connections)
+			return `${after.received.length} of ${shape.connections} connections receiving`;
+		const stalled = after.received.filter((frames, index) => frames <= (before.received[index] ?? 0)).length;
+		if (stalled) return `${stalled} of ${shape.connections} connections received no frames in the window`;
+	}
 	return undefined;
+}
+
+/** Frames read across every connection. */
+export function total(received: number[]): number {
+	return received.reduce((sum, frames) => sum + frames, 0);
 }
 
 /** Why the resume cycles failed, or `undefined` when every cycle got its first slice. */

@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import type { Outcome } from "./page/stats.ts";
-import { expectedEstimates, resumeFailure, type SamplingShape, samplingFailure } from "./sampling.ts";
+import { expectedEstimates, resumeFailure, type SamplingShape, samplingFailure, total } from "./sampling.ts";
 
-const outcome = (estimated: number, connected = 4, received = 0): Outcome => ({
+const outcome = (estimated: number, connected = 4, received: number[] = []): Outcome => ({
 	connected,
 	estimated,
 	received,
@@ -30,13 +30,25 @@ test("an estimate where none can exist fails", () => {
 	expect(samplingFailure(shape, outcome(0), outcome(1))).toBe("1 of 0 expected estimates");
 });
 
-test("lost connections and stalled playback fail", () => {
+test("lost connections fail", () => {
 	expect(samplingFailure({ mode: "private", connections: 4, reservations: 0 }, outcome(0), outcome(0, 3))).toBe(
 		"3 of 4 connected",
 	);
+});
+
+test("one stalled reader fails even while the others keep playing", () => {
 	const receive: SamplingShape = { mode: "receive", connections: 4, reservations: 0 };
-	expect(samplingFailure(receive, outcome(0, 4, 10), outcome(0, 4, 13))).toBe("received 3 frames in the window");
-	expect(samplingFailure(receive, outcome(0, 4, 10), outcome(0, 4, 70))).toBeUndefined();
+	const before = outcome(0, 4, [10, 10, 10, 10]);
+	expect(samplingFailure(receive, before, outcome(0, 4, [70, 70, 70, 70]))).toBeUndefined();
+	expect(samplingFailure(receive, before, outcome(0, 4, [250, 10, 10, 10]))).toBe(
+		"3 of 4 connections received no frames in the window",
+	);
+	expect(samplingFailure(receive, before, outcome(0, 4, [70, 70, 70]))).toBe("3 of 4 connections receiving");
+});
+
+test("total sums every connection's frames", () => {
+	expect(total([1, 2, 3])).toBe(6);
+	expect(total([])).toBe(0);
 });
 
 test("a resume cycle that never got its slice fails", () => {

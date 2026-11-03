@@ -18,7 +18,7 @@ import type { Media } from "./page/media.ts";
 import type { Dial, Mode, Racing } from "./page/racing.ts";
 import type { Counts, Sampling } from "./page/stats.ts";
 import type { Delivery, Transport } from "./page/transport.ts";
-import { resumeFailure, type SamplingShape, samplingFailure } from "./sampling.ts";
+import { resumeFailure, type SamplingShape, samplingFailure, total } from "./sampling.ts";
 import { compare, type Row, summarize } from "./summary.ts";
 import { collections, GC_CATEGORIES, rendererPid, type TraceEvent, traceEvents } from "./trace.ts";
 
@@ -910,7 +910,7 @@ async function sampling(variant: string, shape: SamplingShape, round: number, pa
 			round,
 			pass,
 			delivered: {
-				frames: after.outcome.received - before.outcome.received,
+				frames: total(after.outcome.received) - total(before.outcome.received),
 				bytes: 0,
 				digest: after.outcome.estimated,
 			},
@@ -920,7 +920,7 @@ async function sampling(variant: string, shape: SamplingShape, round: number, pa
 				main_ms_per_s: rate((after.page.main_s - before.page.main_s) * 1000),
 				...Object.fromEntries(Object.entries(cpu).map(([name, value]) => [`${name}_per_s`, rate(value)])),
 				estimated: after.outcome.estimated,
-				received_fps: rate(after.outcome.received - before.outcome.received),
+				received_fps: rate(total(after.outcome.received) - total(before.outcome.received)),
 				...(pass === "counted" && { allocated_kib_per_s: rate(allocated / 1024) }),
 				...(events && gcMetrics(collections(events, opened.pid))),
 			},

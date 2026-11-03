@@ -34,8 +34,8 @@ export interface Outcome {
 	connected: number;
 	/** Reservations reporting a send-rate slice at the end of the window. */
 	estimated: number;
-	/** Frames the receive shape read during the whole run, every byte checked. */
-	received: number;
+	/** Frames each receive-shape connection read during the whole run, every byte checked. */
+	received: number[];
 	/** The transport the connections negotiated. */
 	transport: string;
 }
@@ -69,7 +69,7 @@ function counters(): Counts {
 const cleanup: (() => void)[] = [];
 let handles: Moq.Connection[] = [];
 let reservations: Moq.Bandwidth.Reservation[] = [];
-let received = 0;
+let received: number[] = [];
 let readers: Promise<void>[] = [];
 let lingering = false;
 
@@ -179,6 +179,7 @@ async function receive(config: Sampling): Promise<void> {
 		const broadcast = await active(request);
 		const subscriber = broadcast.track("data").subscribe({ delay: { max: Milli(1000) } });
 		cleanup.push(() => subscriber.close());
+		const reader = received.push(0) - 1;
 		readers.push(
 			(async () => {
 				for (;;) {
@@ -189,7 +190,7 @@ async function receive(config: Sampling): Promise<void> {
 						if (!got) continue;
 						const index = new DataView(got.payload.buffer, got.payload.byteOffset, 4).getUint32(0, true);
 						check(got.payload, RECEIVE_BYTES, index, true);
-						received++;
+						received[reader]++;
 					} finally {
 						group.close();
 					}
@@ -198,8 +199,7 @@ async function receive(config: Sampling): Promise<void> {
 		);
 	}
 	// The window starts once every connection is playing.
-	const want = received + handles.length;
-	while (received < want) await new Promise((resolve) => setTimeout(resolve, 10));
+	while (received.some((frames) => frames === 0)) await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
 async function originOf(connection: Moq.Connection): Promise<Moq.Origin.Table> {
@@ -229,7 +229,7 @@ function outcome(): Outcome {
 		// A closed handle no longer reports; the pooled connection behind it is still counted live.
 		connected: lingering ? handles.length : handles.filter((h) => h.status.peek() === "connected").length,
 		estimated: reservations.filter((reservation) => reservation.peek() !== undefined).length,
-		received,
+		received: [...received],
 		transport: handles[0]?.transport.peek() ?? "none",
 	};
 }
@@ -274,7 +274,7 @@ async function stop(): Promise<void> {
 	handles = [];
 	reservations = [];
 	readers = [];
-	received = 0;
+	received = [];
 	lingering = false;
 }
 
