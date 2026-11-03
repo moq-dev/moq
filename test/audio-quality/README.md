@@ -19,7 +19,7 @@ just test audio-quality --replays                              # the replays onl
 ```
 
 The matrix is runtime x codec x profile: 12 browser rows and 12 [native rows](#native-rows), about 30
-minutes, plus 4 [replay rows](#traces) of recorded arrivals. `--profiles`, `--runtimes`, and `--codecs` take comma-separated
+minutes, plus 5 [replay rows](#traces) of recorded arrivals. `--profiles`, `--runtimes`, and `--codecs` take comma-separated
 lists; `--seed` replays a given impairment. The table prints either way, and only `--enforce` (which
 the nightly job passes) turns a breach into a failed run.
 
@@ -132,6 +132,7 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 | `local-aac` | this harness's AAC publisher through a local relay: the shallow control |
 | `relay-mic` | `<moq-publish>` through the public relay: a real microphone with `--mic-broadcast` (the checked-in one is Chrome on a MacBook Air, its built-in microphone), otherwise headless Chromium's fake capture device |
 | `bursty-aac` | a nightly `bursty` AAC row's capture: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
+| `relay-mic-rtt40` | a page playing a real microphone (Chrome on a MacBook Air) through the public relay with 40 ms of added round trip: the steady-state re-stalls time stretch must remove |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
 PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group, duration]`,
@@ -205,11 +206,14 @@ row: it is a throttled or stalled context, and everything counted on it would be
 samples), `max`, `share` (of the window), or `last`. So "underruns: 3" and "underruns: 3/min" are
 different keys and are never graded against each other.
 
-**Counters.** The player publishes no count of its own underruns, so the page fans a listening
-AudioWorklet out from the player's output node. The player's render worklet copies what the ring
-holds into the front of each 128-sample quantum and leaves the rest zero, so the tap reads every
-quantum's fill level from the output itself:
+**Counters.** The page fans a listening AudioWorklet out from the player's output node. The
+player's render worklet copies what the ring holds into the front of each 128-sample quantum and
+leaves the rest zero, so the tap reads every quantum's fill level from the output itself. The
+player's own count, which its stats panel shows, is read alongside:
 
+- `player_underruns`: `audio.out.stats.underruns`, each time the ring ran dry mid-playback and
+  re-stalled to refill, plus each quantum it filled only part-way. The tap files the quanta after a
+  run-dry as stalled time, so `underruns` leaves those out and this counts them. Unset natively.
 - `underruns`: quanta the ring filled only partly, or not at all, while playing.
 - `short_quanta`: the underruns that were partly filled: the ring ran dry part-way through.
 - `underrun_episodes`: maximal runs of consecutive underruns, one audible gap each.
@@ -298,7 +302,7 @@ The harness is the reporter's, from #3477: fperex built it on their fork `fperex
 `debug/rt-audio` and `debug-findings-solution`), with the black-box probe, the analyzer's skip-ahead
 rule, the Playwright matrix over `moq-shaper`, the budget file graded under `--enforce`, and the
 nightly job. The harness and opt-in shaper features preserve that author's credit. The player and estimator
-changes remain separate: the underrun count comes from a tap on the output rather than a counter in the player, and
+changes remain separate: the underrun count comes from a tap on the output, read alongside the player's own counter, and
 the profiles now include the fork's batch, step, and order-preserving jitter treatments.
 
 ## Not covered
