@@ -26,9 +26,9 @@ routing, mix-minus, and offsets have one implementation with its own tests.
 - **Inputs:** a source's channel takes PCM as today, including a consumer of
   [one capture, many consumers](/quest/m1/audio-capture-fanout.md); gain and
   mute stay on its `Strip`.
-- **Breaking:** the single-mix `Bus` API changes shape, so moq-gst's sink and the
-  studio update with it, the migration is written in the changelog, and it
-  lands before the next cut.
+- **Breaking:** the single-mix `Bus` API changes shape. Its only consumer
+  outside moq-audio is the studio, which updates with it; the migration is
+  written in the changelog, and it lands before the next cut.
 
 ## Related
 
