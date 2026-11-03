@@ -352,7 +352,8 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 		.await
 		.expect("reader hung")
 	{
-		None | Some((_, Err(_))) => {}
+		Some((_, Err(_))) => {}
+		None => panic!("{version} {trigger:?}: route loss ended the subscription cleanly"),
 		Some((group, Ok((_, frame)))) => panic!(
 			"{version} {trigger:?}: resumed through another route at {group}:{}",
 			String::from_utf8_lossy(&frame)
@@ -437,7 +438,14 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	// while lite-07 carries ANNOUNCE_RESTART. An in-place update must fail here.
 	if version.alpn() == "moq-lite-07-wip" {
 		match announced.next().await.expect("announced") {
-			announce::Event::Restart(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+			announce::Event::Restart(announce) => {
+				assert_eq!(announce.prefix.as_str(), "live");
+				assert_eq!(
+					announce.route.instance,
+					broadcast_b.route().unwrap().instance,
+					"{version} {trigger:?}: restarted onto the wrong instance"
+				);
+			}
 			other => panic!("{version} {trigger:?}: expected a restart, got {other:?}"),
 		}
 	} else {
