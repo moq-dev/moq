@@ -28,23 +28,24 @@ and shutdown in `ffi.rs`, keeping demand waits `detached`. Recount the sites
 above against it before converting.
 
 The runtime-owned root and in-place call waits are implemented in
-[moq-dev/moq#7720](https://github.com/moq-dev/moq/pull/7720). Completion still
-requires separating foreign continuation dispatch from root polling, or an
-explicit decision to accept the resulting process-wide stalls. UniFFI wakes
-foreign code inline; one blocking accept continuation now holds the root and
-prevents another server from accepting. Keep the original two-callback JVM exit
-probe as evidence while this is resolved.
+[moq-dev/moq#7720](https://github.com/moq-dev/moq/pull/7720). UniFFI wakes
+foreign code inline, so a blocking host continuation woken by a child held the
+root and every other child.
+
+✅ Decided 2026-11-03 (maintainer, /quest-unblock): dispatch foreign wakes
+outside root polling. A runtime dispatch mechanism keeps a host continuation
+that resumes inline from ever running inside the root's poll of a child, so a
+blocking callback cannot stall the other background children, and every
+`Background` stays under the one root owner. Not chosen: requiring every
+binding to dispatch continuations; accepting and documenting process-wide
+stalls. Check: the unchanged two-callback JVM exit probe passes.
+
+This refines the "one runtime task" boundary of D4 on
+[moq-dev/moq#7519](https://github.com/moq-dev/moq/pull/7519): the root stays
+the only task that owns or polls background work. A wake the root raises for a
+parked host call is handed to the runtime's blocking pool, where a short-lived
+task only invokes the host's waker (coalesced per call, one per continuation in
+flight). It owns no state and polls no `Background`. Wakes from anywhere else
+still reach the host inline.
 
 Public API: no binding signature changes. Wire: none.
-
-## Waiting
-
-- Maintainer: choose how foreign continuations coexist with the single root.
-  Options: dispatch foreign wakes outside root polling through an additional
-  runtime dispatch mechanism; require every binding to dispatch continuations;
-  or accept and document that a blocking continuation stalls every background
-  child. Recommend dispatching foreign wakes outside the root, preserving
-  callback independence while keeping every `Background` under one owner.
-  This may refine the one-runtime-task boundary. Check: settle the choice on
-  [moq-dev/moq#7720](https://github.com/moq-dev/moq/pull/7720), then implement it
-  and pass the unchanged JVM exit probe.

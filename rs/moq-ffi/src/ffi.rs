@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Poll, ready};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker, ready};
 
 use crate::error::MoqError;
 
@@ -282,6 +282,7 @@ struct Root {
 
 impl Root {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let _root = InRoot::enter();
 		waiter.batch(|| {
 			if let Poll::Ready(mut pending) = self.pending.poll(waiter, |pending| {
 				if pending.as_ref().is_some_and(|pending| !pending.is_empty()) {
@@ -309,9 +310,107 @@ impl Drop for Root {
 	fn drop(&mut self) {
 		// Refuse submissions atomically with taking the last batch, then drop outside the
 		// lock: cleanup can itself submit work. Each Child contains its teardown panic.
+		let _root = InRoot::enter();
 		let pending = self.pending.lock().take();
 		drop(pending);
 	}
+}
+
+thread_local! {
+	/// Set while this thread polls or releases the root's children.
+	static ROOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks this thread as inside the root until dropped.
+struct InRoot(bool);
+
+impl InRoot {
+	fn enter() -> Self {
+		Self(ROOT.replace(true))
+	}
+}
+
+impl Drop for InRoot {
+	fn drop(&mut self) {
+		ROOT.set(self.0);
+	}
+}
+
+/// A host call's waker, which keeps the host's continuation out of the root.
+///
+/// UniFFI resumes the foreign continuation on the waking thread, and a binding may run it there
+/// to its next suspension, host code included (Kotlin's `Dispatchers.Unconfined` does). Woken
+/// inside the root's poll, that would hold every background child until the host returns, so
+/// the wake moves to the runtime's blocking pool instead: a thread per continuation in flight,
+/// owning no state and polling nothing but the host's waker. Woken anywhere else, it wakes the
+/// host directly, as before.
+struct Dispatch {
+	host: Waker,
+	/// A dispatched wake not delivered yet, so repeated wakes before it lands send one.
+	queued: AtomicBool,
+}
+
+impl std::task::Wake for Dispatch {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		if !ROOT.get() {
+			self.host.wake_by_ref();
+			return;
+		}
+		if self.queued.swap(true, Ordering::AcqRel) {
+			return;
+		}
+		let deferred = Deferred(self.clone());
+		match tokio::runtime::Handle::try_current() {
+			// A runtime already shutting down drops the closure unrun, which still delivers it.
+			Ok(handle) => drop(handle.spawn_blocking(move || drop(deferred))),
+			Err(_) => drop(deferred),
+		}
+	}
+}
+
+/// Delivers a dispatched wake when dropped, whether the blocking pool ran it or refused it.
+struct Deferred(Arc<Dispatch>);
+
+impl Drop for Deferred {
+	fn drop(&mut self) {
+		// Before waking, so a wake raised while the host polls dispatches again.
+		self.0.queued.store(false, Ordering::Release);
+		self.0.host.wake_by_ref();
+	}
+}
+
+/// Poll a host call with a [`Dispatch`] waker, so the root cannot run its continuation.
+///
+/// Every primitive a binding call parks in goes through this: [`run`], [`Polled::wait`], and
+/// [`Background::finished`] and [`Background::watch`]. Nesting is harmless: every wake chain
+/// ends at the outermost host waker, and any one dispatch moves it off the root.
+pub(crate) async fn host<F: Future>(future: F) -> F::Output {
+	let mut future = std::pin::pin!(future);
+	// Reused while the host keeps its waker, which UniFFI's call future does.
+	let mut dispatch: Option<(Arc<Dispatch>, Waker)> = None;
+	std::future::poll_fn(|cx| {
+		// Polled by the root itself, the waker is the root's own, not a host's.
+		if ROOT.get() {
+			return future.as_mut().poll(cx);
+		}
+		if !dispatch
+			.as_ref()
+			.is_some_and(|(current, _)| current.host.will_wake(cx.waker()))
+		{
+			let current = Arc::new(Dispatch {
+				host: cx.waker().clone(),
+				queued: AtomicBool::new(false),
+			});
+			dispatch = Some((current.clone(), Waker::from(current)));
+		}
+		let (_, waker) = dispatch.as_ref().expect("set above");
+		future.as_mut().poll(&mut Context::from_waker(waker))
+	})
+	.await
 }
 
 impl Runtime {
@@ -376,7 +475,7 @@ impl Background {
 
 	pub async fn finished(&self) -> Result<(), MoqError> {
 		let Some(result) = &self.result else { return Ok(()) };
-		let completed = kio::wait(|waiter| {
+		let completed = host(kio::wait(|waiter| {
 			match std::task::ready!(result.poll(waiter, |state| {
 				match &**state {
 					Some(completed) => std::task::Poll::Ready(completed.clone()),
@@ -386,7 +485,7 @@ impl Background {
 				Ok(completed) => std::task::Poll::Ready(completed),
 				Err(_) => std::task::Poll::Ready(Err(moq_net::Error::Cancel.into())),
 			}
-		})
+		}))
 		.await;
 		completed.map_err(crate::session::map_closed_error)
 	}
@@ -423,16 +522,19 @@ impl Background {
 
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
 		self.check()?;
-		let result = if self.result.is_some() {
-			tokio::pin!(future);
-			tokio::select! {
-				biased;
-				result = self.finished() => { result?; future.await }
-				result = &mut future => result,
+		let result = host(async {
+			if self.result.is_some() {
+				tokio::pin!(future);
+				tokio::select! {
+					biased;
+					result = self.finished() => { result?; future.await }
+					result = &mut future => result,
+				}
+			} else {
+				future.await
 			}
-		} else {
-			future.await
-		};
+		})
+		.await;
 		self.check()?;
 		result
 	}
@@ -502,7 +604,7 @@ where
 			result = future => result.map_err(Into::into),
 		}
 	}));
-	std::future::poll_fn(move |cx| {
+	host(std::future::poll_fn(move |cx| {
 		let Some(_polling) = Polling::start() else {
 			return Poll::Ready(Err(MoqError::Cancelled));
 		};
@@ -510,7 +612,7 @@ where
 		call.as_mut().poll(cx).map(|completed| {
 			completed.unwrap_or_else(|| Err(crate::session::map_closed_error(moq_tokio::Error::Panic)))
 		})
-	})
+	}))
 }
 
 /// A handle's state for async calls that only poll it, which UniFFI's `RustFuture` polls directly.
@@ -581,7 +683,7 @@ impl<T> Polled<T> {
 		let _call = Call(&self.calls);
 		// The waiter this call polls the state with, on the bridge's waker.
 		let mut park = kio::Park::default();
-		kio::wait(|waiter| self.poll(waiter, &mut park, &mut poll)).await
+		host(kio::wait(|waiter| self.poll(waiter, &mut park, &mut poll))).await
 	}
 
 	fn poll<R>(
@@ -1007,6 +1109,67 @@ mod tests {
 			second.join().unwrap(),
 			"a concurrent shutdown returned with a callback in flight"
 		);
+		runtime.shutdown();
+	}
+
+	/// A host continuation that blocks once woken from a root child, as one resumed inline by
+	/// Kotlin's `Dispatchers.Unconfined` can, holds neither the root nor its other children.
+	#[test]
+	fn a_blocking_host_continuation_does_not_hold_the_root() {
+		/// The host side of a call: woken, it reports entering and blocks until released.
+		struct Continuation {
+			entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
+			release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+		}
+		impl std::task::Wake for Continuation {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				if let Some(entered) = self.entered.lock().unwrap().take() {
+					entered.send(std::thread::current().id()).unwrap();
+					let _ = self.release.lock().unwrap().recv();
+				}
+			}
+		}
+
+		let runtime = Runtime::new(false);
+		let ready = kio::Producer::new(false);
+		let consumer = ready.consume();
+		let mut call = Box::pin(host(kio::wait(|waiter| {
+			consumer.poll(waiter, |ready| if **ready { Poll::Ready(()) } else { Poll::Pending })
+		})));
+		let (entered, entering) = std::sync::mpsc::channel();
+		let (release, released) = std::sync::mpsc::channel();
+		let waker = Waker::from(Arc::new(Continuation {
+			entered: std::sync::Mutex::new(Some(entered)),
+			release: std::sync::Mutex::new(released),
+		}));
+		assert!(call.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+
+		// A root child wakes the parked call; its continuation enters and stays.
+		let (root, rooted) = std::sync::mpsc::channel();
+		runtime.background(async move {
+			root.send(std::thread::current().id()).unwrap();
+			*ready.write().ok().unwrap() = true;
+			std::future::pending().await
+		});
+		let root = rooted.recv_timeout(Duration::from_secs(5)).expect("the root polls its child");
+		let continuation = entering
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the continuation is woken");
+		assert_ne!(continuation, root, "the continuation ran inside the root");
+
+		// Another child still runs to completion while the continuation blocks.
+		let sibling = runtime.background(async { Ok(()) });
+		tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap()
+			.block_on(soon(sibling.finished()))
+			.unwrap();
+
+		release.send(()).unwrap();
 		runtime.shutdown();
 	}
 

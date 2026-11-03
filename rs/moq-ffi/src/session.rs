@@ -807,13 +807,13 @@ impl Shutdown {
 	async fn finished(&self) -> Result<(), MoqError> {
 		// Publish a background panic before reading the channel it dropped.
 		self.task.finished().await?;
-		self.result
-			.wait(|result| match &**result {
-				Some(result) => std::task::Poll::Ready(result.clone()),
-				None => std::task::Poll::Pending,
-			})
-			.await
-			.map_err(|_| MoqError::Cancelled)?
+		// The drain is a root child, so its wake must not run the host's continuation there.
+		crate::ffi::host(self.result.wait(|result| match &**result {
+			Some(result) => std::task::Poll::Ready(result.clone()),
+			None => std::task::Poll::Pending,
+		}))
+		.await
+		.map_err(|_| MoqError::Cancelled)?
 	}
 }
 
