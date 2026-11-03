@@ -2323,8 +2323,22 @@ export class Subscriber {
 	#fillsMoved(): void {
 		const producer = this.#state.producer;
 		if (!this.#state.asker || !producer) return;
+		// At once, before the fills withdraw what it no longer reads: a widening back asks those
+		// groups afresh, never through the one refill an evicted answer is allowed.
+		this.#clipAsked();
 		fillsOf(producer).moved(this.#state.asker);
 		this.#fillMoves.update((moves) => moves + 1);
+	}
+
+	// Keep what this reader asked within what it still reads, as the Rust `Misses` clips what it
+	// judged to the window: a group handed out, forgotten past the budget, passed, or outside the
+	// window is never asked again, so these stay within the live span. A window moving back over a
+	// clipped group asks it once more, as in Rust.
+	#clipAsked(): void {
+		if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
+		if (this.#refilled.length > 0) {
+			this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
+		}
 	}
 
 	// Raise the sequence cursor to `floor`: what lies below it is passed for good.
@@ -2539,14 +2553,7 @@ export class Subscriber {
 		if (fills.serving || fills.active) {
 			drift ??= this.#drift();
 			const asker = this.#askerOf();
-			// Keep only what this reader still reads, as the Rust `Misses` clips what it judged to
-			// the window: a group handed out, forgotten past the budget, or outside the window is
-			// never asked again, so these stay within the live span. A window moving back over a
-			// clipped group asks it once more, as in Rust.
-			if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
-			if (this.#refilled.length > 0) {
-				this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
-			}
+			this.#clipAsked();
 			const timeline = this.#state.timeline;
 			// A datagram still buffered took its sequence, so no group is missed there; the Rust
 			// fetch names it `NotFetchable`.

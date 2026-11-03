@@ -562,6 +562,15 @@ test("fill: a group no reader reads any more stays withdrawn, and widening back 
 	const again = await requests.requestedFill();
 	expect([again?.start, again?.end]).toEqual([0n, 3n]);
 
+	// Each narrowing and widening back asks anew, never spending the refill an eviction gets.
+	reader.update({ ranges: ranges(3n), delay: { max: null }, order: "ascending" });
+	reader.update({ ranges: ranges(0n), delay: { max: null }, order: "ascending" });
+	await yieldNow();
+	expect(again?.isWanted(1n)).toBe(false);
+	const third = await requests.requestedFill();
+	expect([third?.start, third?.end]).toEqual([0n, 3n]);
+
+	third?.close();
 	again?.close();
 	fill.close();
 	reader.close();
