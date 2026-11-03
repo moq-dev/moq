@@ -18,7 +18,7 @@
 //!
 //! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>`
 //! (default prefix `.stats`); parse announce paths back with
-//! [`parse_node_path`]. Each announcement carries a fresh [`Instance`] on its
+//! [`parse_node_path`]. Each announcement carries a fresh [`Instance`](moq_net::Instance) on its
 //! route, so a restarted node is a new broadcast at the same path; a reader
 //! tells them apart by the announced route's instance. The broadcast carries a
 //! `totals.json` track of each [`Tier`]'s [`Totals`] for the instance, and a
@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 /// can depend on this crate alone.
 pub use moq_net::stats::{Failure, Failures, Handle, Presence, RefusalKind, Refusals, Registry, Role, Tier, Traffic};
 
-use moq_net::{Instance, Path};
+use moq_net::Path;
 
 /// One frame off the totals track: each tier's [`Totals`], keyed by tier label
 /// (`""` for the default tier).

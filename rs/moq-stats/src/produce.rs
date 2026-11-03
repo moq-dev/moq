@@ -8,7 +8,7 @@ use std::task::Poll;
 
 use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
-use moq_net::{Instance, Path, broadcast, kio, origin, track};
+use moq_net::{Path, broadcast, kio, origin, track};
 use serde::Serialize;
 use tracing::Instrument as _;
 
@@ -32,7 +32,7 @@ pub struct Config {
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
-	/// `node` is unset), announced under a fresh [`Instance`] each time. Also the
+	/// `node` is unset), announced under a fresh [`Instance`](moq_net::Instance) each time. Also the
 	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
 	/// more stats.
 	pub prefix: Path,
@@ -1636,7 +1636,7 @@ mod tests {
 	use std::collections::BTreeMap;
 
 	use moq_net::stats::{Registry, Tier};
-	use moq_net::{Timestamp, announce, broadcast, track};
+	use moq_net::{Instance, Timestamp, announce, broadcast, track};
 
 	use super::*;
 	use crate::{PrefixFrame, PresenceFrame, TotalsFrame};
