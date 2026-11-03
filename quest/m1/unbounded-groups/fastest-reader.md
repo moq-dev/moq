@@ -200,8 +200,11 @@ Evidence added in the follow-up attempt (2026-11-02):
   moq-transport-22. It parks the final reader, measures each relay's cache pool
   charge, checks backpressure reaches a readiness-driven origin, then verifies
   every payload byte and clean completion. The upstream cache includes sent
-  history within its 32 MiB tail; the downstream cache holds near 16 MiB.
-  These are cache charges, not transport buffers or process RSS.
+  history within its 32 MiB tail. These are cache charges, not transport
+  buffers or process RSS. Under the fixed 16 MiB window the downstream cache
+  held near 16 MiB; under the transport-sized window decided below, with 1 MiB
+  of stream credit per hop, it holds 985,952-986,000 bytes and the upstream
+  3,481,056-3,546,640 bytes.
 - `rs/qmux/benches/receive.rs` measures live requested heap bytes and verified
   payload throughput at 4 MiB connection, 1 MiB stream, and 4 MiB send windows.
   It independently sweeps TCP/WebSocket framing over bounded byte pipes,
@@ -234,13 +237,22 @@ What remains:
   concurrent CI/Nix work, so its throughput measurements are descriptive,
   not this comparison. The first implementation's busy-host repeats swung
   by up to 50% either way.
-- Resolve the earlier ahead-window wording against the landed source:
-  `model::pace::AHEAD` and `group::Producer::poll_paced` use a fixed 16 MiB
-  cache pacing window, even with 1 MiB transport stream credit. The credit
-  reported by `receive_window` sizes the paused-credit reservation, not the
-  cache pacing threshold. The two-relay test records this current behavior;
-  it does not establish the earlier promise that ahead is capped by stream
-  receive credit.
+
+Decided 2026-11-03 (maintainer, /quest-unblock): ✅ keep the decided
+transport-sized cache window, and change ingest and its tests so the cache
+pacing window comes from the transport's stream credit, replacing the fixed
+`model::pace::AHEAD = 16 MiB`. Not chosen: accept the fixed 16 MiB and correct
+the Plan. Reason: memory follows what the peer can actually take in flight.
+
+Landed in this attempt: each ingest stream takes its pacing window when it is
+accepted or opened, from its session's `receive_window`: the stream credit, no
+more than the connection window, capped at `model::pace::AHEAD` (16 MiB), via
+`model::pace::window` and `coding::Pause::window`. A transport that reports no
+window never pauses, so its window is moot. Local writers
+(`group::Producer::poll_ready`) keep the 16 MiB window, since they have no
+transport. The fastest-reader tests now set the relay's windows explicitly: a
+4 MiB stream credit holds three 1 MiB frames, a credit past the cap holds
+fifteen, and the two-relay test bounds the downstream cache near 1 MiB.
 
 Decided 2026-11-02 (maintainer, follow-up planning after the 2026-11-02
 /quest-complete run): JS parity moves to
@@ -250,9 +262,12 @@ cut does not wait on browsers.
 
 ## Waiting
 
-- Maintainer: provide a host without concurrent workloads, then run the paired
-  group benchmarks above against the pre-pacing base with repeated alternating
-  runs. Keep this quest and its PR draft until that comparison is recorded.
-- Maintainer: settle the ahead-window discrepancy: keep the decided
-  transport-sized cache window (recommended, then update ingest and its tests),
-  or accept the landed fixed 16 MiB cache window and correct the earlier Plan.
+- Maintainer: provide a host without concurrent workloads, then an agent runs
+  the paired group benchmarks above against the pre-pacing base
+  [e7a5c10](https://github.com/moq-dev/moq/commit/e7a5c10913b02e21ef851a0250b594fe837d1425)
+  with repeated alternating runs, then against this head. Keep this quest and
+  its PR draft until that comparison is recorded. No test host was quiet on
+  2026-11-03: `nixos2` (12 cores) ran at load 3.5 with a `rustc` build and three
+  Claude sessions, `nixos` (32 cores) at load 20 with clippy and Nix builds,
+  and `kixtop` (10 cores) at load 15.6. An agent cannot free a host other
+  sessions are using; check `uptime` and `ps` on each before running.
