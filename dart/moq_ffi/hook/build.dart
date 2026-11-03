@@ -106,9 +106,9 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
   if (rustc.exitCode != 0) {
     throw StateError('rustc -vV failed: ${rustc.stderr}');
   }
-  final host = LineSplitter.split(rustc.stdout as String)
-      .firstWhere((line) => line.startsWith('host: '))
-      .substring('host: '.length);
+  final host = LineSplitter.split(
+    rustc.stdout as String,
+  ).firstWhere((line) => line.startsWith('host: ')).substring('host: '.length);
   final native = target == host;
 
   // Android needs the NDK's linker and sysroot, which only cargo-ndk sets up.
