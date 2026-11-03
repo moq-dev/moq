@@ -23,14 +23,17 @@ import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
+	type DropRun,
 	hiddenBelow,
 	hooks,
+	insertDrop,
 	maxDelayOf,
 	minDelayOf,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
 	skipHole,
+	staleHole,
 } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
@@ -164,7 +167,8 @@ interface SubscribeEntry {
 	maxDelay?: number;
 	// The runs `tail` accounts for by a stale drop, with the max age each was judged under: a
 	// widening past it reverses the verdict, so they are owed again.
-	stale?: { start: bigint; end: bigint; maxAge: number }[];
+	// Coalesced, so a peer repeating a drop holds one run, not one per message.
+	stale?: DropRun[];
 	// Whether SUBSCRIBE_START arrived, which `start` alone cannot say when no range starts.
 	started?: boolean;
 	// Whether our side is FINned, which lite-07 does once the tail settles past SUBSCRIBE_FINISH.
@@ -1870,10 +1874,8 @@ export class Subscriber {
 				// One the update widened past is served or dropped again, so it is still owed.
 				const reversed = superseded && maxAge < (entry.maxDelay ?? 0);
 				if (!reversed) entry.tail.account(start, end + 1n);
-				if (maxAge !== undefined && !reversed) {
-					entry.stale ??= [];
-					entry.stale.push({ start, end: end + 1n, maxAge });
-				}
+				if (maxAge !== undefined && !reversed)
+					entry.stale = insertDrop(entry.stale ?? [], start, end + 1n, staleHole(maxAge));
 				if (superseded) continue;
 				hooks.dropTrackGroups(entry.track, start, end + 1n, {
 					error: resp.drop.cause(this.version),
@@ -2068,9 +2070,9 @@ export class Subscriber {
 			// A lite-07 publisher re-offers or drops again what a widening reverses, so the tail owes
 			// the stale runs judged under a narrower max age again.
 			for (const run of entry.stale ?? []) {
-				if (run.maxAge < update.maxDelay) entry.tail.unaccount(run.start, run.end);
+				if ((run.stale ?? 0) < update.maxDelay) entry.tail.unaccount(run.start, run.end);
 			}
-			entry.stale = entry.stale?.filter((run) => run.maxAge >= update.maxDelay);
+			entry.stale = entry.stale?.filter((run) => (run.stale ?? 0) >= update.maxDelay);
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the
