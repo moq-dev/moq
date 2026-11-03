@@ -251,7 +251,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 	if (!net) throw new Error("expected a network producer once connected");
 
 	const group = await net.track(Broadcast.CATALOG_TRACK).subscribe().ordered().nextGroup();
-	expect(group?.sequence).toBe(0);
+	expect(group?.sequence).toBe(0n);
 	const catalog = (await group?.readJson()) as Catalog.Root;
 	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
@@ -277,7 +277,7 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	if (!net) throw new Error("expected a network producer once connected");
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
-	expect((await first.nextGroup())?.sequence).toBe(0);
+	expect((await first.nextGroup())?.sequence).toBe(0n);
 
 	announce.set(false);
 	await settle();
@@ -325,7 +325,7 @@ test("a rendition keeps its track across rendition changes", async () => {
 	const again = broadcast.video("video");
 	await settle();
 	expect(again.track.peek()).toBe(track);
-	expect(track.appendGroup().sequence).toBe(1);
+	expect(track.appendGroup().sequence).toBe(1n);
 
 	// The name keeps its kind.
 	again.close();
@@ -393,7 +393,7 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 	const replacement = again.track.peek();
 	expect(replacement).toBeDefined();
 	expect(replacement).not.toBe(track);
-	expect(replacement?.appendGroup().sequence).toBe(0);
+	expect(replacement?.appendGroup().sequence).toBe(0n);
 
 	first.close();
 	second.close();
@@ -540,7 +540,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		await settle();
 		const replacement = video.track.peek();
 		expect(replacement?.name).toBe("video/1");
-		expect(replacement?.appendGroup().sequence).toBe(0);
+		expect(replacement?.appendGroup().sequence).toBe(0n);
 
 		// So is a display aspect change, which moves it again rather than redefining the second name.
 		video.config.set({
@@ -759,7 +759,7 @@ test("identity changes before the first announce take a fresh track name", async
 	// The replacement starts empty, so no group from the old codec reads under the new config.
 	const replacement = video.track.peek();
 	expect(replacement?.name).toBe("video/1");
-	expect(replacement?.appendGroup().sequence).toBe(0);
+	expect(replacement?.appendGroup().sequence).toBe(0n);
 
 	broadcast.close();
 });
@@ -836,7 +836,7 @@ test("an unsubscribed stats track writes nothing", async () => {
 		await settle();
 		await clock.advance(Nano.fromMilli(Milli(1000)));
 		// Nothing was written while nobody subscribed, so the first report opens the first group.
-		expect((await subscriber.recvGroup())?.sequence).toBe(0);
+		expect((await subscriber.recvGroup())?.sequence).toBe(0n);
 		subscriber.close();
 	} finally {
 		broadcast.close();
@@ -1061,7 +1061,7 @@ test("a new network broadcast starts every track name over", async () => {
 	await settle();
 	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBeUndefined();
 	expect(video.track.peek()?.name).toBe("video");
-	expect(video.track.peek()?.appendGroup().sequence).toBe(0);
+	expect(video.track.peek()?.appendGroup().sequence).toBe(0n);
 	expect(() => broadcast.video("video/1").close()).not.toThrow();
 
 	broadcast.close();

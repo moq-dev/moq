@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
+
+Every group sequence is a `bigint`, so a group ID past 2^53 decodes, relays, and encodes again instead of being refused: `Group.Producer`/`Consumer.sequence`, `Track.Position.group`, `Track.Bound`, an `absolute` `Track.Anchor`, `Track.Datagram.sequence`, `Track.Demand.wanted`, the `group` of `Ordered.readFrame()`, and the `sequence` that `createGroup`, `insertDatagram`, and `fetchGroup` take and `appendDatagram` returns.
+Write literals with an `n` (`track.createGroup(5n)`, `{ absolute: 10n }`), convert with `BigInt(n)`, and compare with `===` against another bigint: `5n === 5` is `false`. `Math.min` and `Math.max` refuse a bigint, and `JSON.stringify` throws on one.
+Frame indices, a `relative` anchor's count, and timestamps stay `number`. A number where a sequence belongs throws a `TypeError`, and a negative one a `RangeError`.
+
 ### `Subscription.maxDelay` is `delay: Track.Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `Track.Subscription` carries a `delay: Track.Delay` (`{ min?: Milli | null; max?: Milli | null }`) in place of `maxDelay`, which is now refused at runtime.

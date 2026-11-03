@@ -81,8 +81,8 @@ function writeGroup(track: TrackProducer): GroupProducer {
 
 // Receiving a group means its stream header was written, which the publisher does only after
 // ranking the stream.
-async function receive(subscriber: TrackSubscriber, count: number): Promise<number[]> {
-	const sequences: number[] = [];
+async function receive(subscriber: TrackSubscriber, count: number): Promise<bigint[]> {
+	const sequences: bigint[] = [];
 	for (let i = 0; i < count; i++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended early");
@@ -129,12 +129,12 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 	const subscriber = remote.track("video").subscribe({
 		delay: { max: MAX_DELAY },
 		order,
-		ranges: [{ start: { absolute: 0 } }],
+		ranges: [{ start: { absolute: 0n } }],
 	});
 	await receive(subscriber, groups.length);
 
 	if (update !== undefined) {
-		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: { absolute: 0 } }] });
+		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: { absolute: 0n } }] });
 		await aggregate(video, (upstream) => upstream === update);
 	}
 

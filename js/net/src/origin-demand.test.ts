@@ -64,7 +64,7 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 							)
 						: kind === "fetch"
 							? publisher.runFetch(
-									new Fetch({ broadcast: name, track: "video", group: 0, priority: 0 }),
+									new Fetch({ broadcast: name, track: "video", group: 0n, priority: 0 }),
 									stream,
 								)
 							: kind === "track"
@@ -474,7 +474,7 @@ test("a normal FETCH request FIN keeps unanswered origin demand alive", async ()
 	});
 	let ended = false;
 	const task = publisher
-		.runFetch(new Fetch({ broadcast: path, track: "video", group: 0, priority: 0 }), stream)
+		.runFetch(new Fetch({ broadcast: path, track: "video", group: 0n, priority: 0 }), stream)
 		.finally(() => {
 			ended = true;
 		});
