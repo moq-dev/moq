@@ -7,7 +7,7 @@
 //! The track is complete before the broadcast ends, and the session stays open, so
 //! the subscription must conclude normally. moq-lite, ANNOUNCE_END: "Retraction does
 //! not disturb subscriptions already in flight, which conclude normally with
-//! SUBSCRIBE_END." Instead the track is aborted when the broadcast ends, and
+//! SUBSCRIBE_FINISH." Instead the track is aborted when the broadcast ends, and
 //! whatever the session had not sent yet is gone.
 //!
 //! Deterministic: time is paused, the runtime is single-threaded, and the publisher
