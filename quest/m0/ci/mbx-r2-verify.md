@@ -66,10 +66,11 @@ compilation is "not looked up".
   earlier lockfile state ever matched. The build then fell back to the newest
   local manifest, which was the install's. Since 1.28.0 an install builds
   under its own workspace, so the install order does not matter; it stays
-  where `main` has it. mbx v1.29.1 (2026-11-01) includes #870, so bump the
-  `version` pin in `.github/actions/rust-cache/action.yml` from 1.28.0 to it.
-  Then check that the first scheduled Nightly on it loads a manifest of more
-  than 124 predictions and hits on Windows.
+  where `main` has it. mbx v1.29.1 (2026-11-01) includes
+  [#870](https://github.com/jdx/mr-boxington/pull/870), so this quest's PR bumps
+  `.github/actions/rust-cache/action.yml` from 1.28.0 to 1.29.1. Check that the
+  first scheduled Nightly after it lands loads a manifest of more than 124
+  predictions and hits on Windows.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
@@ -86,6 +87,47 @@ compilation is "not looked up".
   previous Nightly is out of inheritance reach even with full history.
   Decided 2026-10-29 (maintainer): accept that, and count it under the
   rebuild item in the Goal before asking upstream for a deeper lookback.
+
+Evidence checked 2026-11-02: the latest scheduled Nightly,
+[41483654426](https://github.com/moq-dev/moq/actions/runs/41483654426), still
+uses 1.28.0, so it cannot verify the Windows fix. Its
+[Windows job](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408629378)
+failed installing NASM from Chocolatey (HTTP 503), before setting up mbx.
+Its [macOS job](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408628726)
+reported effective read-write. The workspace check took 10m 25s with 13 hits,
+1815 not looked up, no prefetch and no download; the preceding generator
+install had 122 hits and 121 prefetched. Those install hits do not prove the
+workspace reused the previous Nightly. The macOS job later failed tests;
+neither platform failure is evidence against 1.29.1.
+
+The [Linux doctest job](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408205232)
+also reported effective read-write, but 0 hits, 913 not looked up, 51 bypassed
+and 1 remote failure, despite loading 756 predictions. Its Cargo test build
+took 6m 16s; the cache summary reported 1.1 GiB downloaded and 2.6 GiB
+uploaded. The [previous scheduled run](https://github.com/moq-dev/moq/actions/runs/41313466339/job/124868517732)
+had 0 hits, 878 not looked up, 50 bypassed and 3 remote failures, with a
+6m 26s Cargo build. These are different commits, not the same-commit
+restore-plus-build comparison the Goal requires. There were 13 `Cargo.lock`
+changes between these two runs, beyond the accepted 8-state inheritance
+window; count this as an out-of-window rebuild opportunity, not proof that
+expiry caused either miss. The current run also follows the workspace-hack
+feature unification, so changed compiler inputs remain a separate cause.
+
+## Waiting
+
+- GitHub Actions: after this PR lands, the first scheduled Nightly on 1.29.1
+  must demonstrate Windows workspace prediction inheritance and hits. Until
+  then, keep Linux's shallow checkout as decided above. Do not dispatch Nightly.
+- moq-dev/moq: `release` still lacks the platform Rust cache as checked on
+  2026-11-02. Once it carries the cache, inspect a release pull request's
+  `Check the cache` step for effective read-only.
+- GitHub Actions: scheduled runs must supply the remaining cross-platform
+  reuse, restore-plus-build comparison and rebuild-frequency evidence in the
+  Goal. Current timings are not a matched-commit comparison, and macOS's
+  inherited-prediction misses remain unexplained.
+- Maintainer: from about 2026-11-26, collect R2 bucket size and request counts
+  for the first month and check that the six old oversized manifests expired.
+  Use the numbers to decide the lifecycle; retain 30 days until then.
 
 ## Related
 
