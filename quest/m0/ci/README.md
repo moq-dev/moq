@@ -169,4 +169,5 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Pullfrog reviews finish inside their time limit](/quest/m0/ci/pullfrog-timeout.md) - A Pullfrog review of a large PR finishes instead of failing on the action's run limit
 - [Long test runs keep their built binaries](/quest/m0/ci/shared-target.md) - A long `just test interop` or wire-compat run never fails because the binaries it built were removed from the shared Cargo target mid-run, such as by mbx pruning its managed build storage
 - [One nextest pin](/quest/m0/ci/nextest-pin.md) - cargo-nextest's version lives in one place
+- [Local test runs honor NEXTEST_NO_FAIL_FAST](/quest/m0/ci/no-fail-fast.md) - `just check` and `sh/rs/nextest.sh` pass `--no-fail-fast` through, so one host failure doesn't hide the rest
 - [The flake lane skips hosts that can't map user namespaces](/quest/m0/ci/userns-uid-map.md) - `check flake` skips instead of failing where `/proc/self/uid_map` is unwritable

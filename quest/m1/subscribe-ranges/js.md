@@ -79,16 +79,11 @@ What remains:
     concurrent requests, and cancellation while awaiting a reply.
 - **`fetchGroup`.** Becomes a one-range subscription on the request surface
   above, or is removed.
-- **Fills.** Mirror Rust's rule from [#7168](https://github.com/moq-dev/moq/pull/7168)
-  (decided 2026-10-29, maintainer): give up a run below a start already
-  resolved under a budget at least as loose as the reader's, and on a pre-06
-  wire fill below the start only when the reader names a floor. `js/net`
-  requests no fills today, so nothing over-fetches yet; this keeps it that way
-  once it does. With fills, a bounded read also mirrors Rust's head fill
-  ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): it hands out
-  a cached group missing its first frames only once a fill answers from frame
-  0, and gives one whose fill is refused up as a miss. Until then a JS reader
-  counts a hole the feed no longer owes as given up, with no fill asked.
+- **Fills.** Received copies asking upstream for their misses, with Rust's
+  below-start rule and head fill, moved to
+  [JS received copies fill what they missed](/quest/m1/subscribe-ranges/js-fills.md)
+  (maintainer, 2026-11-03). Until it lands, a JS reader counts a hole the
+  feed no longer owes as given up, with no fill asked.
 
 Ranges stay whole groups ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)),
 so the group model keeps refusing a nonzero lite `frameStart` as a protocol

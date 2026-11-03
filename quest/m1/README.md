@@ -141,6 +141,7 @@ per-frame CPU growth since #5926.
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
 - [fMP4 sample plans, trun counts, and trak counts are bounded](/quest/m1/fmp4-metadata-limits.md) - a `moof` or `moov` within the importer's bounds cannot plan hundreds of megabytes or take quadratic time; 116 bytes cost 584 MB today
 - [Mesh dials recover from a stuck flow](/quest/m1/mesh-fresh-port.md) - a relay redials a failing cluster peer from a fresh UDP port, so one dropped 5-tuple can't strand a link
+- [moq-tokio clients redial from a fresh source port](/quest/m1/tokio-client-fresh-port.md) - after N failed dials a client on an ephemeral port rebinds, so one dropped 5-tuple can't strand it
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
@@ -154,11 +155,13 @@ per-frame CPU growth since #5926.
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
 - [A step back smaller than the delay keeps the TS export](/quest/m1/ts-small-step-back.md) - audio restarts instead of regressing; video stays within its declared depth
 - [moq-boy's status loop stops on an errored track](/quest/m1/moq-boy-status-loop.md) - only schema errors are caught
+- [A routed JS read wakes when its track aborts](/quest/m1/js-follow-abort-wake.md) - a pending `readFrame()` on a group found through `request()`/`follow()` rejects on `track.abort()`
 - [release carries the fanout-threads bench](/quest/m1/release-fanout-bench.md) - a bench-only port of session_fanout_threads for the pre-cut pairing
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
+- [@moq/net holds every unbounded u62 as bigint](/quest/m1/js-bigint-audit.md) - u62 wire values a peer can push past 2^53 move to `bigint`, with round-trip tests
 - [moq-crypto replaces moq-sign and moq-e2ee](/quest/m1/moq-crypto.md) - one Rust crate and one JS package hold signing and end-to-end encryption, sharing moq-net's timestamp check
 - [Register moq-dev draft 20 in the interop runner](/quest/m1/ietf-drop/README.md) - land the external registry, notes, and README correction for drafts 18, 20, and 22
 - [A lapsed request token resets with EXPIRED_AUTH_TOKEN](/quest/m1/auth-expiry-reset.md) - group streams of a lapsed grant reset with the expiry code, so a client knows to renew
@@ -196,6 +199,8 @@ per-frame CPU growth since #5926.
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
+- [The JS resume model passes seed 12345](/quest/m1/js-resume-model-12345.md) - a reader updated to no ranges keeps reading instead of ending cleanly
+- [The MSF catalog keeps a prototype-named extension](/quest/m1/msf-ext-proto.md) - `js/msf`'s `ext` map keeps a `__proto__` key, like Rust
 - [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - a resumed read gets every group or a drop on every wire version
 - [Stats name the route instance's epoch with a type](/quest/m1/stats-epoch-type.md) - `GroupFrame::epoch` gets a dedicated type and tests stop mislabelling the instance
 

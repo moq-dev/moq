@@ -19,10 +19,10 @@ epoch pass 94 in 307 s.
 
 - No Nightly timing exists yet: the first run with the job
   ([run 41483654426](https://github.com/moq-dev/moq/actions/runs/41483654426),
-  2026-11-02) failed in 2 minutes before any test, as cargo-miri found no
-  `rust-src` ("given Rust source directory ... does not exist"). Install it
-  with the toolchain (`components: miri` in `.github/workflows/nightly.yml`
-  becomes `miri, rust-src`), then read the timings from the next run.
+  2026-11-02) failed before any test, as cargo-miri found no `rust-src`.
+  Installing it moved to m0 (maintainer, 2026-11-03) with
+  [Nightly Miri installs rust-src](/quest/m0/nightly/miri-frame.md); read
+  the timings from the first run after it.
 - `a_group_has_no_frame_cap` (`rs/moq-net/src/model/group.rs:5228` as of
   be39188000) took 307 s alone, writing 10,000 one-byte frames. Under `cfg(miri)`
   write fewer, still more than any former per-group frame cap, so the test
@@ -35,3 +35,7 @@ epoch pass 94 in 307 s.
   `timeout-minutes: 60` at line 328) rather than raising the timeout.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Nightly Miri installs rust-src and covers the lock-free frame path](/quest/m0/nightly/miri-frame.md) - the job reaches its tests, so it has timings to act on

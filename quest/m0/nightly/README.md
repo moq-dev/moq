@@ -1,4 +1,4 @@
-# [S] Nightly passes on main
+# Nightly passes on main
 
 ## Goal
 
@@ -32,3 +32,10 @@ This README's own work, after the children:
   threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
+
+## Required
+
+- [The receive-windows benchmark runs to the end](/quest/m0/nightly/receive-windows-evicted.md) - `benchmark_receive_windows` stops failing `frame: Evicted`, so the Rust benchmark-tests job publishes its report
+- [The relay's startup fits its stack under all features](/quest/m0/nightly/relay-stack.md) - `debug_relay_load_and_run_fit_windows_stack` passes under `--all-features`, fixed at the feature that grew the future
+- [The binding benchmark's 64 KiB case measures](/quest/m0/nightly/bindings-bench-evicted.md) - the 64 KiB case completes instead of failing `evicted`
+- [Nightly Miri installs rust-src and covers the lock-free frame path](/quest/m0/nightly/miri-frame.md) - the Miri job gets past setup and runs `model::frame::tests`

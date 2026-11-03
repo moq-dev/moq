@@ -690,4 +690,4 @@ the cheapest one; fix it with the route-selection rework here.
 
 - [Route wakes](/quest/m2/route-wakes.md) - index work follows the settled source-selection model
 - [Route health](/quest/m2/route-health/README.md) - epoch-only progress observation and local delivery failover
-
+- [A route stream's interest is a set of prefixes](/quest/m2/route-interest-prefixes.md) - m2: one stream's interest covers several prefixes
