@@ -677,6 +677,9 @@
               export PATH="$(dirname "$shim"):$PATH"
             fi
 
+            # Skills also invoke quest directly, so keep it ahead of host installs.
+            export PATH="${quest-cli}/bin:$PATH"
+
             # Each nested shell (direnv, then `nix develop`, then another
             # inside a gate) prepends this shell's ~160 store paths again,
             # about 10 KB. mbx copies PATH into two variables at ~3.6 times
