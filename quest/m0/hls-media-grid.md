@@ -90,6 +90,19 @@ segment opens on a sync sample. No renderer emits it today, and
 that quest only has to omit it for warmup renditions. #7387's conformance probe
 then checks the tag against each segment's first sample.
 
+## Waiting
+
+- Maintainer: clarify whether the empty grid slots created by an overrun count
+  as "after a gap" for the next group containing no grid line. With a 2s
+  interval, group A covers [0s, 7s) and is segment 0; contiguous group B covers
+  [7s, 7.2s) and contains no line. Joining B to its predecessor assigns it to
+  segment 0; treating the skipped grid slots as a gap assigns it to segment 3.
+  An edge joining at B cannot derive segment 0 without older group metadata.
+  Options: treat skipped grid slots as gaps and assign B to segment 3
+  (recommended, preserves timestamp-derived numbering), or retain segment 0
+  and specify how a new edge recovers the predecessor's segment before listing
+  B. Resume once the Plan states which rule applies.
+
 ## Related
 
 - [Consumers by start](/quest/m1/time-addressing/consumers.md) - later swaps the first-frame pts for group starts
