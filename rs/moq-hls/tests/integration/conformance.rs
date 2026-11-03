@@ -378,8 +378,6 @@ struct Seen {
 	reload: bool,
 	/// Fetches that failed while their segment was listed.
 	failures: Vec<String>,
-	/// Whether a playlist advertised `EXT-X-INDEPENDENT-SEGMENTS`.
-	independent: bool,
 	/// Whether each DASH adaptation set advertised `startWithSAP="1"`, by representation id.
 	sap: BTreeMap<String, bool>,
 }
@@ -392,7 +390,6 @@ impl Seen {
 		let Some(master) = render(app, "/live/master.m3u8").await else {
 			return Polled::Held;
 		};
-		self.independent |= master.contains("#EXT-X-INDEPENDENT-SEGMENTS");
 		let mut uris: Vec<String> = master
 			.lines()
 			.filter(|line| !line.starts_with('#') && line.ends_with(".m3u8"))
@@ -416,7 +413,6 @@ impl Seen {
 		let Some(body) = render(app, &format!("/live/{uri}")).await else {
 			return Polled::Held;
 		};
-		self.independent |= body.contains("#EXT-X-INDEPENDENT-SEGMENTS");
 		let name = uri.rsplit('/').nth(1).expect("a rendition");
 		let name = percent_encoding::percent_decode_str(name)
 			.decode_utf8()
@@ -579,6 +575,17 @@ impl Seen {
 		newest
 	}
 
+	/// The segments of `name` that end a rendition instance a reconfigure retired: the last
+	/// listed under each init but the newest.
+	fn retired(&self, name: &str) -> BTreeSet<u64> {
+		let playlists = self.playlists.iter().filter(|(uri, _)| self.names[*uri] == name);
+		playlists
+			.flat_map(|(_, playlist)| playlist.iter().zip(playlist.values().skip(1)))
+			.filter(|((_, segment), next)| segment.init != next.init)
+			.map(|((number, _), _)| *number)
+			.collect()
+	}
+
 	/// Probe everything fetched, and compare it with what was advertised and recorded.
 	async fn check(&self, recorded: &Recorded) {
 		assert!(self.evicted, "no playlist evicted a segment");
@@ -593,7 +600,6 @@ impl Seen {
 		let mut reconfigured = false;
 		for (uri, playlist) in &self.playlists {
 			let name = &self.names[uri];
-			let target = self.targets[uri] as f64;
 			let mut previous: Option<(f64, &Listed)> = None;
 			let numbers: Vec<u64> = playlist.keys().copied().collect();
 			if numbers.windows(2).any(|pair| pair[1] != pair[0] + 1) {
@@ -604,9 +610,9 @@ impl Seen {
 					continue;
 				};
 				let at = format!("{uri} segment {number}");
-				if self.independent {
-					probe.check_sync(&at, &mut fail);
-				}
+				// Every segment opens on a keyframe, advertised or not: the export doesn't emit
+				// `EXT-X-INDEPENDENT-SEGMENTS`, but players switch renditions at any boundary.
+				probe.check_sync(&at, &mut fail);
 				if (probe.duration() - segment.duration).abs() > TOLERANCE {
 					fail(format!(
 						"{at}: EXTINF {} but decodes {:.6}",
@@ -614,7 +620,8 @@ impl Seen {
 						probe.duration()
 					));
 				}
-				overran |= segment.duration > target;
+				// The scenario, not the playlist's EXT-X-TARGETDURATION: a GOP longer than declared.
+				overran |= segment.duration > DURATION.as_secs_f64() + TOLERANCE;
 				if let Some((start, previous)) = previous
 					&& !segment.discontinuity
 				{
@@ -646,21 +653,45 @@ impl Seen {
 			}
 		}
 		if !overran {
-			fail("no segment overran its target duration".to_string());
+			fail("no segment overran the declared duration".to_string());
 		}
 		if !reconfigured {
 			fail("no rendition was reconfigured".to_string());
 		}
 
 		for (id, timeline) in &self.timelines {
+			// The ladder has no intra refresh, so every adaptation set advertises a SAP.
+			if !self.sap[id] {
+				fail(format!("{id} doesn't advertise startWithSAP=\"1\""));
+			}
+			// The two forms name the same bytes, so the timeline lists what the cursors recorded.
+			let (_, name) = id.split_once('/').expect("a {kind}/{name} id");
+			let mut timed: Vec<&Bytes> = timeline
+				.values()
+				.filter_map(|segment| self.bodies.get(&segment.uri))
+				.collect();
+			let recording = recorded.segments.get(name).cloned().unwrap_or_default();
+			// Except that the manifest lists only the current instance, so the last segment of one
+			// a reconfigure retires may never be listed (/quest/m2/dash-reconfigure.md).
+			let retired = self.retired(name);
+			let missing: Vec<u64> = recording
+				.iter()
+				.filter(|(number, bytes)| !timed.contains(bytes) && !retired.contains(number))
+				.map(|(number, _)| *number)
+				.collect();
+			timed.retain(|bytes| !recording.values().any(|recorded| recorded == *bytes));
+			if !missing.is_empty() || !timed.is_empty() {
+				fail(format!(
+					"{id}: the timeline misses recorded segments {missing:?} and lists {} unrecorded",
+					timed.len()
+				));
+			}
 			for (t, segment) in timeline {
 				let Some(probe) = probes.get(&self.bodies, &segment.init, &segment.uri, &mut fail).await else {
 					continue;
 				};
 				let at = format!("{id} t={t}");
-				if self.sap[id] {
-					probe.check_sync(&at, &mut fail);
-				}
+				probe.check_sync(&at, &mut fail);
 				if (probe.start - segment.start).abs() > TOLERANCE {
 					fail(format!(
 						"{at}: S@t is {} but decodes from {:.6}",
@@ -754,10 +785,10 @@ impl Probe {
 		self.end - self.start
 	}
 
-	/// A segment advertised as starting with a SAP opens on a keyframe presented first.
+	/// A segment opens on a keyframe, decoded and presented first.
 	fn check_sync(&self, at: &str, fail: &mut impl FnMut(String)) {
 		if !self.sync {
-			fail(format!("{at}: advertised as independent but opens on a non-sync frame"));
+			fail(format!("{at}: opens on a non-sync frame"));
 		} else if !self.leads {
 			fail(format!("{at}: opens on a keyframe that isn't presented first"));
 		}
