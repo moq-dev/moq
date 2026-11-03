@@ -7962,10 +7962,16 @@ impl TrackServe {
 							let floor = active.start.or(active.served);
 							start..floor.unwrap_or(u64::MAX)
 						});
+						// So do changed ranges that keep the floor, such as a widening that joins
+						// two: each gap they reach waits a fresh grace, which only delays giving up
+						// on one still owed.
+						let widened = (active.ranges != ranges)
+							.then(|| subscription.start().or(active.served).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(producer.tail_grace(subscription.budget()));
-							if let Some(groups) = lowered {
-								tail.demand(groups, self.subscriber.runtime.now());
+							let now = self.subscriber.runtime.now();
+							for groups in lowered.into_iter().chain(widened) {
+								tail.demand(groups, now);
 							}
 						}
 						active.start = subscription.start();

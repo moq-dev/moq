@@ -1986,12 +1986,12 @@ export class Subscriber {
 			if (ranges.length === 0) throw new Error(EMPTY_RANGE);
 			const span = wireSpan(ranges);
 
-			// A lowered floor owes groups nobody asked for until now.
+			// Changed ranges owe groups nobody asked for until now: below a lowered floor, or
+			// between ranges a widening joins while keeping the floor. Each gap they reach waits
+			// a fresh grace, which only delays giving up on one still owed.
 			const start = rangesStart(ranges);
-			if (start !== undefined) {
-				const floor = rangesStart(wireRanges(lastSent.ranges ?? [{}])) ?? entry.start;
-				entry.tail.demand(start, floor ?? UNBOUNDED);
-			}
+			if (!sameRanges(ranges, wireRanges(lastSent.ranges ?? [{}])))
+				entry.tail.demand(start ?? entry.start ?? 0n, UNBOUNDED);
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/delay/etc.
