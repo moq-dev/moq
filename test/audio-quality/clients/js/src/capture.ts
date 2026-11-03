@@ -52,7 +52,7 @@ export class Capture {
 				if (!active) return;
 				const track = active.track(name).subscribe({
 					priority: Catalog.PRIORITY.audio,
-					maxDelay: subscribed(input.delay.peek(), input.maxDelay.peek()),
+					delay: { max: subscribed(input.delay.peek(), input.maxDelay.peek()) },
 				});
 				const groups = new Set<Group.Consumer>();
 				effect.cleanup(() => {
@@ -62,7 +62,7 @@ export class Capture {
 				effect.run((inner) =>
 					track.update({
 						priority: Catalog.PRIORITY.audio,
-						maxDelay: subscribed(inner.get(input.delay), inner.get(input.maxDelay)),
+						delay: { max: subscribed(inner.get(input.delay), inner.get(input.maxDelay)) },
 					}),
 				);
 				effect.spawn(async () => {

@@ -21,14 +21,12 @@ behind a new optional audio `mediacodec` feature and the decode seam, on `target
 - Optional codecs are probed through `AMediaCodecList` at open and advertised
   only where present.
 - Fixtures and layout-order tests as in the AudioToolbox quest; runtime proof
-  on a device or emulator, recorded separately from the existing Android
-  compile lane. Add the audio feature to that lane.
+  on a device or emulator through `just rs android-test`, which android.yml's
+  `emulator` job runs. Extend `sh/rs/android-test.sh` to run moq-audio's
+  ignored MediaCodec tests beside moq-video's, and add the audio feature to the
+  `just rs android` compile lane.
 - The binding ships in the moq-ffi Android slice, which is how Kotlin and Dart
   reach it.
-
-## Required
-
-- [MediaCodec on an emulator](/quest/m2/android-mediacodec-ci.md) - the emulator lane this runtime proof runs in
 
 ## Related
 

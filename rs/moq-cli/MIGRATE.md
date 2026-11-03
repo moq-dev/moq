@@ -34,10 +34,10 @@ Add `--passthrough` to keep publishing CMAF.
 
 ### `export archive` records a prefix (#6160)
 
-`moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<epoch>`, until the connection ends, instead of one broadcast at `<url>`.
+`moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<instance>`, until the connection ends, instead of one broadcast at `<url>`.
 Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
 Untimed tracks record, and `--retention` works on them.
-`import archive` replays one recorded broadcast in the new layout, `<url>/<broadcast>/@<epoch>`, and no longer reads recordings made by older `moq` versions.
+`import archive` replays one recorded broadcast in the new layout, `<url>/<broadcast>/@<instance>`, and no longer reads recordings made by older `moq` versions.
 
 ### `--cluster-lan-secret` is a file path only (#5910)
 
@@ -52,7 +52,7 @@ If your auth server can take longer than the handshake timeout allows, raise `--
 ### `--epoch` is removed (#5967)
 
 Remove `--epoch` and `MOQ_EPOCH`: either stops startup as an unknown flag or environment variable.
-Every `moq` run mints its own epoch, so two importers fed one stream publish two instances, and the newest wins new requests.
+Every `moq` run mints its own instance, so two importers fed one stream publish two instances. `moq` has no flag to name a stable one.
 To fail over between them, follow restarts: `export ts --stitch` switches programs, and players follow the announced restart.
 Other consumers, such as `export ts --passthrough`, end with the instance they read.
 
@@ -111,7 +111,7 @@ Pass `--delay 100ms` to keep the old fixed delay.
 
 ### `--hop` is removed (#4969)
 
-Remove `--hop` and `MOQ_HOP`: each independent publisher now mints its own epoch.
+Remove `--hop` and `MOQ_HOP`: each independent publisher now mints its own instance.
 Redundant importers switch as a restart; use `export ts --stitch` to follow them.
 A node that pinned its cluster id with `--hop` passes `--cluster-id` instead.
 
@@ -156,7 +156,7 @@ A renamed flag or environment variable is refused with its replacement named.
 | --- | --- |
 | `moq publish`, `moq subscribe` | `moq import`, `moq export` |
 | `moq token`, the `moq-token` binary | `moq auth` |
-| `--origin` | Removed; publishers mint their own epoch |
+| `--origin` | Removed; publishers mint their own instance |
 | `--name` | `--broadcast` |
 | `--latency-max` | `--max-age` |
 | `--server-bind` | `--listen` |

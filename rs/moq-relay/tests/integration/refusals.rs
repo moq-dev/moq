@@ -25,7 +25,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 /// admission configured: each test sets its own. WebSocket is served only when `ws`,
 /// on the HTTP port. A QUIC dial's WebSocket fallback goes to the QUIC port, where
 /// nothing listens over TCP, so it cannot reach admission and count a second time.
-fn config(dir: &std::path::Path, ws: bool) -> Config {
+pub(crate) fn config(dir: &std::path::Path, ws: bool) -> Config {
 	let (cert, key) = certificate(dir);
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -60,8 +60,8 @@ async fn start(config: Config) -> Running {
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	let internal = relay.internal().addr().expect("internal listener bound");
-	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
 	ready.wait().await.expect("relay ready");
 	Running {
@@ -102,7 +102,7 @@ impl Running {
 	}
 }
 
-fn client() -> moq_tokio::Client {
+pub(crate) fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -425,12 +425,11 @@ async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session
 	tls.insecure = Some(true);
 	let mut tls = tls.build().unwrap();
 	tls.alpn_protocols = vec![b"h3".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap()).unwrap();
 	let conn = endpoint
 		.connect(
-			&driver::client::Config::new(std::sync::Arc::new(crypto)),
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
 			addr,
 			"localhost",
 		)
@@ -473,7 +472,9 @@ async fn uri_setup_paths(io_uring: bool) {
 	let addr = relay.quic_addr().unwrap();
 	let mut admissions = relay.admissions().unwrap();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 	for version in versions {
 		for path in [
 			Some(""),

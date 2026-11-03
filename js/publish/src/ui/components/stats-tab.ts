@@ -25,6 +25,9 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	const videoCard = statCard("video", "Video", videoIcon);
 	const vRes = statLine(videoCard.grid, "Resolution");
 	const vCodec = statLine(videoCard.grid, "Codec");
+	// The same encoder stats the broadcast's stats track reports.
+	const vTarget = statLine(videoCard.grid, "Target");
+	const vSkipped = statLine(videoCard.grid, "Skipped");
 	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
@@ -118,6 +121,10 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		const frameDelta = frames - prevFrames;
 		prevFrames = frames;
 		vFpsGraph.push(elapsed > 0 && frameDelta > 0 ? frameDelta / (elapsed / 1000) : undefined);
+
+		const stats = publish.video.out.stats.peek();
+		vTarget.textContent = stats.bitrate !== undefined ? formatBitrate(stats.bitrate) : "-";
+		vSkipped.textContent = `${stats.skipped}`;
 
 		const bytes = encoded();
 		const byteDelta = bytes - prevBytes;

@@ -69,12 +69,12 @@ enum SourceState {
 	Ended,
 }
 
-/// The track a source reads: its broadcast's path, the publisher instance that broadcast must
-/// be, and the track's name there.
+/// The track a source reads: its broadcast's path, the instance that broadcast must have, and
+/// the track's name there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
 	path: moq_net::Path,
-	epoch: Option<moq_net::Epoch>,
+	instance: Option<moq_net::Instance>,
 	track: String,
 }
 
@@ -83,13 +83,13 @@ impl Target {
 	fn of(source: &crate::Source, name: &str, config: &impl Reference) -> Option<Self> {
 		Some(Self {
 			path: source.resolve_reference(config.broadcast())?,
-			epoch: config.epoch().cloned(),
+			instance: config.instance().cloned(),
 			track: config.track(name).to_string(),
 		})
 	}
 
 	fn request(&self, source: &crate::Source) -> SourceState {
-		let binding = source.request_path(&self.path, self.epoch.as_ref());
+		let binding = source.request_path(&self.path, self.instance.as_ref());
 		SourceState::Requesting(binding, self.track.clone())
 	}
 }
@@ -268,7 +268,7 @@ impl ExportSource {
 	) -> Result<Self, crate::Error> {
 		let target = Target {
 			path: source.path().clone(),
-			epoch: None,
+			instance: None,
 			track: name.to_string(),
 		};
 		let media = HangContainer::Legacy(crate::container::Kind::Data);
@@ -519,7 +519,8 @@ impl ExportSource {
 			if sibling {
 				self.instance = Some(broadcast.clone());
 			}
-			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
+			let mut subscription = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(self.max_delay));
 			if let Some(after) = self.after {
 				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
@@ -1045,7 +1046,7 @@ mod tests {
 			let observed = kio::wait(|waiter| {
 				let _ = export.poll_read(waiter);
 				match live.track.subscription() {
-					Some(subscription) => Poll::Ready(subscription.max_delay),
+					Some(subscription) => Poll::Ready(subscription.delay.max),
 					None => Poll::Pending,
 				}
 			})
@@ -1300,7 +1301,10 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let consumer = Consumer::new(
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))),
+			track.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+			),
 			HangContainer::Legacy(crate::container::Kind::Audio),
 		);
 		export.state = SourceState::Active(Box::new(consumer));

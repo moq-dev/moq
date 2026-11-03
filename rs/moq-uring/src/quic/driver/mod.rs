@@ -21,7 +21,6 @@ pub(crate) use connection::Shared;
 
 use std::{num::NonZeroU64, sync::Arc};
 
-use moq_quic::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -33,14 +32,15 @@ use crate::udp;
 /// Streams of each kind a peer may have open at once.
 const MAX_STREAMS: u64 = 1024;
 /// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
-const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
+/// The same default as moq-tokio's `[quic] stream_receive_window`.
+const STREAM_WINDOW: u32 = 1024 * 1024;
 /// Per-connection flow control credit, which also bounds incomplete messages, so it has to fit
-/// the largest one: `MIN_RECEIVE_WINDOW` is the 64 MiB announcement cap plus framing. 128 MiB
-/// also holds two maximum-size frames at once.
-const CONNECTION_WINDOW: u32 = 128 * 1024 * 1024;
+/// the largest unit, `MIN_RECEIVE_WINDOW`: one 1 MiB segment. The same default as moq-tokio's
+/// `[quic] receive_window`.
+const CONNECTION_WINDOW: u32 = 4 * 1024 * 1024;
 const _: () = assert!(CONNECTION_WINDOW as u64 >= moq_net::transport::MIN_RECEIVE_WINDOW);
 /// Unacknowledged outgoing data to buffer, whatever the peer allows.
-const SEND_WINDOW: u32 = 16 * 1024 * 1024;
+const SEND_WINDOW: u32 = 4 * 1024 * 1024;
 /// Datagram bytes to buffer in each direction, about 64 full-size datagrams.
 const DATAGRAM_WINDOW: usize = 96 * 1024;
 
@@ -169,8 +169,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client:
 	};
 	tls.alpn_protocols = alpn(&config.alpn);
 
-	let crypto = QuicClientConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut client = moq_quic::client::Config::new(Arc::new(crypto));
+	let mut client = moq_quic::client::Config::new(Arc::new(tls));
 	client.transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	with_qlog(&mut client.transport, &config.transport, qlog::Side::Client);
@@ -179,8 +178,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client:
 
 /// Serve as `config` says.
 pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::server::Config, Error> {
-	let crypto = QuicServerConfig::try_from(config.tls.clone()).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut server = moq_quic::server::Config::new(Arc::new(crypto));
+	let mut server = moq_quic::server::Config::new(config.tls.clone());
 	server.transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	with_qlog(&mut server.transport, &config.transport, qlog::Side::Server);
@@ -265,9 +263,9 @@ fn transport_config(config: &transport::Config) -> Result<moq_quic::transport::C
 	}
 	transport.congestion = match config.congestion {
 		Congestion::Loss => {
-			Arc::new(moq_congestion::CubicConfig::default()) as Arc<dyn moq_congestion::ControllerFactory + Send + Sync>
+			Arc::new(moq_congestion::cubic::Config::default()) as Arc<dyn moq_congestion::Factory + Send + Sync>
 		}
-		Congestion::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		Congestion::Delay => Arc::new(moq_congestion::bbr3::Config::default()),
 		Congestion::None => Arc::new(moq_congestion::Unlimited),
 	};
 	// A value that cannot go on the wire is an error: clamping it would ignore what was set.

@@ -516,13 +516,13 @@ impl StreamsState {
 	/// The lease of a receive stream, if a reader leased it and has not stopped it since.
 	#[cfg(test)]
 	pub(super) fn leased(&self, id: StreamId) -> Option<&Leased> {
-		let recv = self.recv.get(&id)?.as_ref()?.as_open_recv()?;
+		let recv = self.recv.get(&id)?.as_deref()?;
 		let lease = &recv.lease;
 		(lease.filled && (!recv.stopped || lease.evicted)).then_some(lease)
 	}
 
 	fn lease_mut(&mut self, id: StreamId) -> Option<&mut Leased> {
-		let recv = self.recv.get_mut(&id)?.as_mut()?.as_open_recv_mut()?;
+		let recv = self.recv.get_mut(&id)?.as_deref_mut()?;
 		Some(&mut recv.lease)
 	}
 
@@ -599,7 +599,7 @@ impl StreamsState {
 			let recv = self
 				.recv
 				.get_mut(&id)
-				.and_then(|slot| slot.as_mut()?.as_open_recv_mut())
+				.and_then(|slot| slot.as_deref_mut())
 				.expect("a freed stream leaves the ranks");
 			recv.lease.ranked = false;
 			if recv.stopped || recv.unread_credit() + recv.lease.held == 0 {
@@ -627,7 +627,7 @@ impl StreamsState {
 			let recv = self
 				.recv
 				.get(&id)
-				.and_then(|slot| slot.as_ref()?.as_open_recv())
+				.and_then(|slot| slot.as_deref())
 				.filter(|recv| !recv.stopped && unlooked(recv.unread_credit(), &recv.lease));
 			if let Some(recv) = recv {
 				// Nothing else reruns the pass once the lease comes back.
@@ -652,7 +652,7 @@ impl StreamsState {
 		let recv = self
 			.recv
 			.get_mut(&id)
-			.and_then(|slot| slot.as_mut()?.as_open_recv_mut())
+			.and_then(|slot| slot.as_deref_mut())
 			.expect("a candidate is open");
 		let leased = recv.lease.evict();
 		self.evicted_held += recv.lease.held;
@@ -671,7 +671,7 @@ impl StreamsState {
 	pub(crate) fn check_leases(&self) {
 		let (mut held, mut evicted_held, mut ranked) = (0, 0, 0);
 		for (&id, slot) in &self.recv {
-			let Some(recv) = slot.as_ref().and_then(|slot| slot.as_open_recv()) else {
+			let Some(recv) = slot.as_deref() else {
 				continue;
 			};
 			let lease = &recv.lease;

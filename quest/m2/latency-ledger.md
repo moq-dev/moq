@@ -48,7 +48,6 @@ probes, which was the right trade to get it running. This quest promotes them.
 
 ## Required
 
-- [Browser reporters](/quest/m2/stats/js.md) - `<moq-watch>` publishes the feedback snapshot these stages join
 - [Rust reporters](/quest/m2/stats/rust.md) - `moq play --echo` publishes the feedback snapshot these stages join
 
 ## Related
