@@ -43,11 +43,11 @@ The Dart generator is pinned in `flake.nix`; run `nix develop --command just dar
 
 ```text
 moq-ffi (this crate)
-├── lib.rs          — Library entry and UniFFI scaffolding
-├── ffi.rs          — FFI runtime and Abort helper
-├── session.rs      — QUIC session management
-├── origin.rs       — Broadcast routing (publish/consume)
-├── consumer.rs     — Catalog and track subscription
-├── producer.rs     — Broadcast and track publishing
-└── error.rs        — Error types
+├── lib.rs          - Library entry and UniFFI scaffolding
+├── ffi.rs          - FFI runtime and Abort helper
+├── session.rs      - QUIC session management
+├── origin.rs       - Broadcast routing (publish/consume)
+├── consumer.rs     - Catalog and track subscription
+├── producer.rs     - Broadcast and track publishing
+└── error.rs        - Error types
 ```
