@@ -64,8 +64,9 @@ const PMT_PID: u16 = 0x1000;
 const FIRST_ES_PID: u16 = 0x1001;
 /// Re-emit PAT/PMT at least this often (wall-clock of the media) for tune-in.
 const PSI_INTERVAL: Duration = Duration::from_millis(500);
-/// The floor between emissions of a *changed* SI snapshot, bounding how fast a
-/// revising publisher can make the mux re-emit its tables. The import side
+/// The cadence of changed SI snapshots, bounding how fast a revising publisher
+/// can make the mux re-emit its tables. Clock revisions use an absolute grid;
+/// ordinary SI measures from the last emission. The import side
 /// debounces its own snapshot cuts (`si::DEBOUNCE`), but export consumes any
 /// catalog-named snapshot track, so the bound cannot live only there; this one is
 /// enforced on the media timeline. Clamped to the entry's own interval, so a
@@ -1221,8 +1222,8 @@ struct SiTrack {
 	state: SiState,
 	/// The reduced newest *complete* group: what emission re-transmits.
 	active: super::si::Snapshot,
-	/// A group still being read; swapped into `active` when it ends, so a torn
-	/// half-received snapshot is never emitted.
+	/// A group still being read; only a complete snapshot may become active or staged,
+	/// so a torn half-received snapshot is never emitted.
 	pending: Option<(moq_net::group::Consumer, super::si::Snapshot, Timestamp)>,
 	/// One complete clock revision waiting for its stamped position.
 	future: Option<SiRevision>,
@@ -1265,8 +1266,7 @@ enum SiState {
 		track: Box<moq_net::track::Ordered>,
 		_priority: crate::source::Priority,
 	},
-	/// The track ended or failed; the last complete snapshot keeps re-emitting,
-	/// mirroring how a real mux repeats its tables between (absent) revisions.
+	/// The track ended or failed; retain the last complete snapshot on its cadence.
 	Done,
 }
 
@@ -2028,8 +2028,8 @@ where
 			}
 		}
 
-		// 1b. Drive the SI subscriptions, folding arrived snapshots into each
-		// entry's active set (emission happens on cadence in `mux`).
+		// 1b. Drive the SI subscriptions. Ordinary SI updates its active set; clock
+		// revisions wait for their stamped media position in `mux`.
 		//
 		// Deliberately not part of the first-frame gate below: nothing in SI is
 		// something a TS stream cannot begin without (the PAT/PMT are built locally,
