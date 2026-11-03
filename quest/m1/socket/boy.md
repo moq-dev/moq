@@ -13,10 +13,13 @@ when nobody watches, and the 60 s idle stop behave as before.
 See the [epic](/quest/m1/socket/README.md) for the layout and the reply split.
 
 - Viewers dial `boy/game/<name>` with their random id. Their `command` track
-  moves from `{viewerPrefix}/{name}/{viewerId}` to the socket. Drop the
+  moves from `{viewerPrefix}/{name}/{viewerId}` to the socket, as a fixed
+  track named `command` on the viewer's `.dial` broadcast (`Socket::local`),
+  which the emulator reads by name from `Socket::remote`. It isn't a socket
+  stream: streams are unnamed and for what opens at run time. Drop the
   separate viewer-prefix configuration in `rs/moq-boy/src/main.rs`.
-- Per-viewer latency moves from `status`'s `latency` map to a track on that
-  viewer's `.accept` broadcast. Game state stays in `status`.
+- Per-viewer latency moves from `status`'s `latency` map to a fixed track on
+  that viewer's `.accept` broadcast. Game state stays in `status`.
 - Requests become pinned to the viewer's epoch (boy requests unpinned today),
   so a reload is a new socket.
 - The demo relay's anonymous publish grant (`demo/relay/prod.toml`, and the

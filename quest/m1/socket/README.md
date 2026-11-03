@@ -4,7 +4,7 @@
 
 `moq-net` gains a generic dial/accept primitive. A `Listener` at a path accepts
 the `Socket`s that dialers announce. Inside a socket either side opens and
-accepts named tracks the way QUIC opens and accepts streams. moq-boy, CARLA,
+accepts unnamed streams, as tracks, the way QUIC does. moq-boy, CARLA,
 [byte streams](/quest/m2/stream/README.md), and the mesh
 [Endpoint](/quest/m2/mesh/endpoint.md) all build on it instead of each
 hand-rolling the announce, watch, and request loop. Rust, JS, and Python
@@ -17,6 +17,25 @@ one-driver lease and 1 s watchdog); announcement backpressure, which
 [announce credit](/quest/m2/announce-credit.md) owns.
 
 ## Plan
+
+Decided 2026-11-03 (maintainer, /quest-complete), on
+[moq-dev/moq#7677](https://github.com/moq-dev/moq/pull/7677):
+
+- Copy QUIC's API: socket streams have no application name. Tracks are
+  `.<opener>/<kind>/<number>`, with `<opener>` `dial` or `accept`, `<kind>`
+  `uni` or `bi`, and `<number>` the opener's never-reused counter. The surface
+  is quinn's: `open_uni`, `open_bi`, `accept_uni`, `accept_bi`, each taking
+  the track info an open needs. Why: no consumer needs the name. Well-known
+  channels (boy's `command`; CARLA's `control`, ack, and latency) are ordinary
+  fixed-name tracks on the socket's broadcasts, and Kixel T3 runs byte
+  streams with its own framing. Not chosen: a hidden number plus an app name,
+  or making name uniqueness the app's job.
+- Auth uses moq.pro-style tokens with prefix grants only, rooted at the
+  listener's path `L`: the listener subscribes `.dial/**` and publishes
+  `.accept/**`, and a dialer publishes `.dial/<id>` and subscribes
+  `.accept/<id>`. No mid-path wildcard is needed; it's the shape of moq.pro's
+  voice demo (`request/<id>`, `response/<id>`). A relay test with real
+  `moq-auth` tokens covers it, and `doc/concept/socket.md` shows the tokens.
 
 Decided 2026-11-02 (maintainer, Kixel planning): the whole epic moves from
 m2 to m1, so the next cut publishes sockets in `@moq/net` and moq.pro's
@@ -41,10 +60,10 @@ replacement arc):
   is unchanged. A dialer announces `L/.dial/<id>` and the listener answers on
   `L/.accept/<id>`. Discovery is a one-segment watch of `L/.dial/*`, which is
   cheap for relays, unlike a globstar over the whole origin. Auth enforces the
-  id with a mid-path wildcard grant (`mesh/*/*/.dial/<id>`), which
-  `moq-pattern` supports. The dot keeps sessions out of ordinary discovery
-  ([hidden broadcasts](/doc/concept/moq-lite.md#hidden-broadcasts)), so boy's game list
-  never sees viewers.
+  id with prefix grants rooted at `L` (see the 2026-11-03 decision). The dot
+  keeps sessions out of ordinary discovery
+  ([hidden broadcasts](/doc/concept/moq-lite.md#hidden-broadcasts)), so boy's
+  game list never sees viewers.
 - Identity is a dialer-chosen id plus a pinned instance (the epic first
   called it an epoch; the code's term is the route's `Instance`). The id is the
   dialer's own: an endpoint ID in the mesh, a random id in the demos. Each dial
@@ -62,12 +81,11 @@ replacement arc):
   learns of new tracks from the Lite07 Tracks stream (`TRACKS_ADD`, `REMOVE`,
   `FINISH`), which pushes them like QUIC's accept. `requested_track` was
   declined because it is pull-shaped: only the side being subscribed to can
-  accept. Settled by the Rust implementation: tracks are named
-  `.<opener>/<uni|bi>/<number>/<name>` with `<opener>` `dial` or `accept`, so
-  the two sides' names never collide, and `<number>` counting the opener's
-  streams, so a track never carries two streams and a name may be reopened;
-  accept skips names outside the scheme, so fixed
-  track names coexist; the opener chooses the track info (priority included)
+  accept. Settled by the Rust implementation and the 2026-11-03 decision:
+  tracks are named `.<opener>/<uni|bi>/<number>` with `<opener>` `dial` or
+  `accept`, so the two sides' streams never collide, and `<number>` counting
+  the opener's streams, so a track never carries two streams; accept skips
+  names outside the scheme, so fixed track names coexist; the opener chooses the track info (priority included)
   and a bi answer mirrors it. [`doc/concept/socket.md`](/doc/concept/socket.md)
   is the convention JS and Python follow.
 - Accept is unbounded and lazy. Announced dialers queue without limit, and a
@@ -80,9 +98,11 @@ replacement arc):
   `doc/concept/socket.md`, written with the Rust implementation. It is not a
   section of the moq-lite draft or a new draft: it is an application
   convention over moq-lite.
-- The demos move per-client echoes onto the socket: boy's per-viewer latency
-  and CARLA's driver ack and sequence each go on that client's `.accept`
-  track. State every viewer needs (the game, who is driving, who holds the
+- The demos move per-client channels onto the socket as fixed-name tracks on
+  its broadcasts, not streams: boy's `command` and CARLA's `control` on the
+  dialer's `.dial` broadcast, and boy's per-viewer latency and CARLA's driver
+  ack and sequence on the listener's `.accept` broadcast. State every viewer
+  needs (the game, who is driving, who holds the
   e-stop) stays in the shared broadcast at `L`.
 
 This epic owns removing the hand-rolled loops: after the ports, no

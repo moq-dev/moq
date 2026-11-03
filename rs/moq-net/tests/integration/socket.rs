@@ -106,36 +106,40 @@ async fn streams_flow_both_ways() {
 	assert_eq!(accepted.id(), "alice");
 
 	// A uni stream each way.
-	let up = dialer.open_uni("up", None).unwrap();
+	let up = dialer.open_uni(None).unwrap();
+	assert_eq!(up.name(), ".dial/uni/0");
 	send(&up, b"from the dialer");
 	let uni = kio::clock::timeout(TIMEOUT, accepted.accept_uni())
 		.await
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
-	assert_eq!(&*uni.name, "up");
-	assert_eq!(recv(&uni.consumer).await, b"from the dialer");
+	assert_eq!(uni.name(), up.name());
+	assert_eq!(recv(&uni).await, b"from the dialer");
 
-	let down = accepted.open_uni("down", None).unwrap();
+	let down = accepted.open_uni(None).unwrap();
+	assert_eq!(down.name(), ".accept/uni/0");
 	send(&down, b"from the listener");
 	let uni = kio::clock::timeout(TIMEOUT, dialer.accept_uni())
 		.await
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
-	assert_eq!(&*uni.name, "down");
-	assert_eq!(recv(&uni.consumer).await, b"from the listener");
+	assert_eq!(uni.name(), down.name());
+	assert_eq!(recv(&uni).await, b"from the listener");
 
-	// A bi stream each way, under the same name: the opener's role keeps them apart.
+	// A bi stream each way, both the opener's second stream: the opener's role keeps
+	// them apart.
 	for (opener, acceptor) in [(&dialer, &accepted), (&accepted, &dialer)] {
 		let info = track::Info::default().with_priority(3);
-		let open = opener.open_bi("chat", info).unwrap();
+		let open = opener.open_bi(info).unwrap();
 		let (opened, answered) = kio::clock::timeout(TIMEOUT, async { futures::join!(open, acceptor.accept_bi()) })
 			.await
 			.expect("bi timeout");
 		let opened = opened.expect("open");
 		let answered = answered.expect("accept").expect("a stream");
-		assert_eq!(&*answered.name, "chat");
+		assert!(opened.producer.name().ends_with("/bi/1"), "{}", opened.producer.name());
+		assert_eq!(answered.producer.name(), opened.producer.name());
 		assert_eq!(
 			answered.producer.info().priority,
 			3,
@@ -189,14 +193,14 @@ async fn a_new_dial_replaces_the_old_socket() {
 	);
 
 	// The new socket is the new dialer's.
-	let up = new_dialer.open_uni("up", None).unwrap();
+	let up = new_dialer.open_uni(None).unwrap();
 	send(&up, b"again");
 	let uni = kio::clock::timeout(TIMEOUT, new.accept_uni())
 		.await
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
-	assert_eq!(recv(&uni.consumer).await, b"again");
+	assert_eq!(recv(&uni).await, b"again");
 	assert!(
 		kio::clock::timeout(SETTLE, new.closed()).await.is_err(),
 		"the new socket ended"
@@ -304,9 +308,9 @@ async fn a_stream_is_accepted_only_while_listed() {
 	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
 	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
 
-	let gone = dialer.open_uni("gone", None).unwrap();
-	let done = dialer.open_uni("done", None).unwrap();
-	let live = dialer.open_uni("live", None).unwrap();
+	let gone = dialer.open_uni(None).unwrap();
+	let done = dialer.open_uni(None).unwrap();
+	let live = dialer.open_uni(None).unwrap();
 	// Let the listener's listing hear of all three before any ends.
 	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
 	drop(gone);
@@ -320,7 +324,7 @@ async fn a_stream_is_accepted_only_while_listed() {
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
-	assert_eq!(&*uni.name, "live");
+	assert_eq!(uni.name(), live.name());
 	assert!(
 		kio::clock::timeout(SETTLE, accepted.accept_uni()).await.is_err(),
 		"a stream that left the listing was accepted"
@@ -328,7 +332,7 @@ async fn a_stream_is_accepted_only_while_listed() {
 	drop(live);
 }
 
-/// Two bi opens of one name are two streams, each answered on its own, and dropping the
+/// Two concurrent bi opens are two streams, each answered on its own, and dropping the
 /// socket ends it for the peer even while an open is pending.
 #[kio::test]
 async fn a_pending_open_neither_merges_nor_outlives_its_socket() {
@@ -336,8 +340,8 @@ async fn a_pending_open_neither_merges_nor_outlives_its_socket() {
 	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
 	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
 
-	let first = dialer.open_bi("chat", None).unwrap();
-	let second = dialer.open_bi("chat", None).unwrap();
+	let first = dialer.open_bi(None).unwrap();
+	let second = dialer.open_bi(None).unwrap();
 	let (first, second, answers) = kio::clock::timeout(TIMEOUT, async {
 		futures::join!(first, second, async {
 			(accepted.accept_bi().await, accepted.accept_bi().await)
@@ -348,7 +352,7 @@ async fn a_pending_open_neither_merges_nor_outlives_its_socket() {
 	let (first, second) = (first.expect("first open"), second.expect("second open"));
 	let one = answers.0.expect("accept").expect("a stream");
 	let two = answers.1.expect("accept").expect("a stream");
-	assert_eq!((&*one.name, &*two.name), ("chat", "chat"));
+	assert_ne!(one.producer.name(), two.producer.name());
 	send(&first.producer, b"one");
 	send(&second.producer, b"two");
 	assert_eq!(recv(&one.consumer).await, b"one");
@@ -358,7 +362,7 @@ async fn a_pending_open_neither_merges_nor_outlives_its_socket() {
 	assert_eq!(recv(&first.consumer).await, b"one back");
 	assert_eq!(recv(&second.consumer).await, b"two back");
 
-	let pending = dialer.open_bi("unanswered", None).unwrap();
+	let pending = dialer.open_bi(None).unwrap();
 	drop(dialer);
 	assert_eq!(
 		kio::clock::timeout(TIMEOUT, accepted.closed())
@@ -377,8 +381,8 @@ async fn closing_a_socket_ends_its_opens() {
 	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
 	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
 
-	let late = dialer.open_bi("late", None).unwrap();
-	let stalled = dialer.open_bi("stalled", None).unwrap();
+	let late = dialer.open_bi(None).unwrap();
+	let stalled = dialer.open_bi(None).unwrap();
 	// The peer answers the first and never the second, and keeps its broadcast up: the
 	// listener is not polled again, so nothing ends its socket.
 	let answered = kio::clock::timeout(TIMEOUT, accepted.accept_bi())
@@ -386,7 +390,7 @@ async fn closing_a_socket_ends_its_opens() {
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
-	assert_eq!(&*answered.name, "late");
+	assert_eq!(answered.producer.name(), ".dial/bi/0", "the earlier open is answered");
 	// Let the dialer's listing hear the answer before the close.
 	assert!(kio::clock::timeout(SETTLE, dialer.accept_bi()).await.is_err());
 
@@ -406,8 +410,8 @@ async fn closing_a_socket_ends_its_opens() {
 		"a stalled open outlived the close"
 	);
 
-	assert!(matches!(dialer.open_uni("after", None), Err(moq_net::Error::Closed)));
-	assert!(matches!(dialer.open_bi("after", None), Err(moq_net::Error::Closed)));
+	assert!(matches!(dialer.open_uni(None), Err(moq_net::Error::Closed)));
+	assert!(matches!(dialer.open_bi(None), Err(moq_net::Error::Closed)));
 	assert!(matches!(
 		kio::clock::timeout(TIMEOUT, dialer.accept_uni()).await.expect("accept"),
 		Err(moq_net::Error::Closed)
@@ -415,33 +419,34 @@ async fn closing_a_socket_ends_its_opens() {
 	drop(answered);
 }
 
-/// A name opened again is a new stream: a handle to the earlier one never reads it, and
-/// a bi reopen is answered while the peer still holds its earlier answer.
+/// Each open is a new track, never an earlier one's: a held handle to an earlier stream
+/// never reads a later one, and a bi open is answered while the peer still holds its
+/// answer to an earlier one.
 #[kio::test]
-async fn a_reopened_name_is_a_new_stream() {
+async fn each_open_is_a_new_track() {
 	let fixture = Fixture::new().await;
 	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
 	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
 
-	// Accepted and held without subscribing, then the opener moves on to a new "chat".
-	let old = dialer.open_uni("chat", None).unwrap();
+	// Accepted and held without subscribing, then the opener moves on to a new stream.
+	let old = dialer.open_uni(None).unwrap();
 	let held = kio::clock::timeout(TIMEOUT, accepted.accept_uni())
 		.await
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
 	drop(old);
-	let new = dialer.open_uni("chat", None).unwrap();
+	let new = dialer.open_uni(None).unwrap();
 	send(&new, b"new");
 	let fresh = kio::clock::timeout(TIMEOUT, accepted.accept_uni())
 		.await
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
-	assert_eq!(&*fresh.name, "chat");
-	assert_eq!(recv(&fresh.consumer).await, b"new");
+	assert_ne!(fresh.name(), held.name());
+	assert_eq!(recv(&fresh).await, b"new");
 	let stale = kio::clock::timeout(SETTLE, async {
-		let mut subscriber = held.consumer.subscribe(None).await.ok()?;
+		let mut subscriber = held.subscribe(None).await.ok()?;
 		let mut group = subscriber.recv_group().await.ok()??;
 		Some(group.read_frame().await.ok()??.payload.to_vec())
 	})
@@ -451,14 +456,14 @@ async fn a_reopened_name_is_a_new_stream() {
 		"the earlier stream's handle read the new one"
 	);
 
-	// A bi answer the peer keeps does not stop the name opening again.
-	let first = dialer.open_bi("call", None).unwrap();
+	// A bi answer the peer keeps does not stop the next bi open.
+	let first = dialer.open_bi(None).unwrap();
 	let (opened, answered) = kio::clock::timeout(TIMEOUT, async { futures::join!(first, accepted.accept_bi()) })
 		.await
 		.expect("bi timeout");
 	let _kept = answered.expect("accept").expect("a stream");
 	drop(opened.expect("open"));
-	let again = dialer.open_bi("call", None).unwrap();
+	let again = dialer.open_bi(None).unwrap();
 	let (opened, answered) = kio::clock::timeout(TIMEOUT, async { futures::join!(again, accepted.accept_bi()) })
 		.await
 		.expect("reopen timeout");
@@ -468,4 +473,31 @@ async fn a_reopened_name_is_a_new_stream() {
 	assert_eq!(recv(&answered.consumer).await, b"ping");
 	send(&answered.producer, b"pong");
 	assert_eq!(recv(&opened.consumer).await, b"pong");
+}
+
+/// A fixed-name track sits beside the streams: accept skips it, and the peer reads it by
+/// name from [`Socket::remote`].
+#[kio::test]
+async fn fixed_tracks_sit_beside_streams() {
+	let fixture = Fixture::new().await;
+	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
+	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
+
+	let command = dialer.local().create_track("command", None).unwrap();
+	send(&command, b"press a");
+	let stream = dialer.open_uni(None).unwrap();
+	send(&stream, b"stream");
+
+	let uni = kio::clock::timeout(TIMEOUT, accepted.accept_uni())
+		.await
+		.expect("accept timeout")
+		.unwrap()
+		.expect("a stream");
+	assert_eq!(uni.name(), stream.name(), "accept skips the fixed track");
+	assert_eq!(recv(&uni).await, b"stream");
+	assert_eq!(recv(&accepted.remote().track("command").unwrap()).await, b"press a");
+	assert!(
+		kio::clock::timeout(SETTLE, accepted.accept_uni()).await.is_err(),
+		"the fixed track was accepted as a stream"
+	);
 }

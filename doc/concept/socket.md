@@ -36,10 +36,36 @@ dialer would follow only one of them. Both segments start with `.`, so sockets a
 listener discovers dialers with a one-segment watch of `L/.dial/*`, which a
 relay serves without scanning everything beneath `L`.
 
-Authorization uses ordinary path grants. A dialer needs publish on
-`L/.dial/<id>` and subscribe on `L/.accept/<id>`, and the listener the reverse
-for every id: subscribe on `L/.dial/*` and publish on `L/.accept/*`. A grant
-naming the id is what stops one dialer from taking another's socket.
+## Authorization
+
+Sockets need nothing beyond ordinary
+[token grants](/bin/relay/auth#path-matching). With the token's root at the
+listener's path `L`, each grant is a prefix:
+
+```jsonc
+// The listener: reads every dial and answers every id.
+{ "root": "L", "subscribe": [".dial/**"], "publish": [".accept/**"] }
+
+// The dialer with id <id>: its own dial and its own answer.
+{ "root": "L", "publish": [".dial/<id>"], "subscribe": [".accept/<id>"] }
+```
+
+The dialer's grant names its id, which is what stops one dialer from dialing as
+another, and so replacing its socket, or reading another's answer. A pattern
+matches `.`-prefixed segments like any other, so `**` would cover sockets too;
+hiding narrows only discovery. No mid-path wildcard is needed, because the
+root carries `L`. It's the same shape as a request/response pair, such as
+`request/<id>` and `response/<id>`.
+
+`moq auth sign` writes these as, for example:
+
+```bash
+moq auth sign --key key.jwk --root L --subscribe '.dial/**' --publish '.accept/**' > listener.jwt
+moq auth sign --key key.jwk --root L --publish ".dial/$ID" --subscribe ".accept/$ID" > dialer.jwt
+```
+
+Each client then connects to the relay at `L` with its token, and its socket's
+path is the session root.
 
 ## Instances
 
@@ -64,17 +90,16 @@ announcements without limit, and its broadcast is requested only on accept.
 
 ## Streams
 
-A stream is a track, named by who opened it, which way it carries data, and
-its number:
+A stream is a track. Like a QUIC stream it has no name of its own: it is
+named by who opened it, which way it carries data, and its number.
 
 ```text
-.<opener>/<kind>/<number>/<name>
+.<opener>/<kind>/<number>
 ```
 
 `<opener>` is `dial` or `accept`, and `<kind>` is `uni` or `bi`. `<number>`
 counts the opener's streams in decimal from 0 with no leading zeros, uni and bi
-alike, and is never reused within a socket. `<name>` is the application's name
-for the stream, which may hold `/` and may repeat: each open is a new stream.
+alike, and is never reused within a socket, so each open is a new track.
 
 - **Uni.** The opener publishes the track in its own broadcast. The peer
   accepts it and subscribes.
@@ -84,16 +109,22 @@ for the stream, which may hold `/` and may repeat: each open is a new stream.
   once the answer is listed.
 
 The opener prefix and the number together work like a QUIC stream ID. The
-prefix keeps the two sides' names apart, the way the ID's low bit does, so the
-dialer's bi `chat` and the listener's bi `chat` are two streams. The number
+prefix keeps the two sides' streams apart, the way the ID's low bit does, so
+the dialer's first bi stream and the listener's are two streams. The number
 keeps one side's opens apart, so a track name always means one stream: a
-handle the peer kept to an earlier `chat` never reads a later one. A track's
+handle the peer kept to an earlier stream never reads a later one. A track's
 info, priority included, is the opener's to choose.
 
 The peer learns of new streams from the broadcast's track listing (the Tracks
 stream, `TRACKS_ADD`). A listing reports every track the broadcast holds, so
-accept skips any name outside the scheme. That leaves applications free to use
-fixed track names in either broadcast beside the streams.
+accept skips any name outside the scheme.
+
+A channel both sides know in advance, such as a viewer's `command` track or the
+listener's acks back to it, isn't a stream. It's an ordinary track with a fixed
+name in the socket's broadcast: the writer creates it in its own half, and the
+reader subscribes to it by name in the peer's half, with no accept. Streams are
+for what an application opens at run time, such as one per request or per
+byte-stream connection, with any framing of its own.
 
 A stream can be accepted only while its opener lists it, which holds until the
 opener drops the track, finished or not. One dropped before the peer accepts it

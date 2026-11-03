@@ -15,8 +15,10 @@ See the [epic](/quest/m1/socket/README.md) for the layout and the reply split.
 - The worker (`publish.py`) uses the Python `Listener`; `paths.ts` and
   `truck.ts` dial `carla/<truck>` with the per-lease driver id. A new lease
   is a new epoch and so a new socket, which matches today's lease binding.
-- The `control` track moves onto the socket. The driver's ack, sequence, and
-  round-trip echo move from the shared `status` to the driver's `.accept`
+- The `control` track moves onto the socket as a fixed track named `control`
+  on the driver's `.dial` broadcast, not a socket stream (streams are unnamed
+  and for what opens at run time). The driver's ack, sequence, and round-trip
+  echo move from the shared `status` to fixed tracks on the driver's `.accept`
   broadcast. `driver` and `estop_by` stay in `status`, because every viewer
   shows them.
 - Decide in the PR whether the `safety-<id>` e-stop broadcast becomes its own

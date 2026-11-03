@@ -7,18 +7,21 @@
 //! once the application accepts. The answer carries the dial's [`Instance`], so a
 //! dialer that dials again with the same id gets a new socket rather than an old answer.
 //!
-//! Inside a socket either side opens tracks the way QUIC opens streams. A uni stream is
-//! one track in the opener's broadcast, and a bi stream is the same track name in both.
-//! Each open takes the next number of its opener, so a track never carries two streams.
-//! The peer learns of new streams from the broadcast's track listing, which needs
-//! moq-lite-07 on every hop. See `doc/concept/socket.md` for the convention.
+//! Inside a socket either side opens and accepts streams the way QUIC does, and like
+//! QUIC's they carry no name: a stream is told apart by who opened it and its number. A
+//! uni stream is one track in the opener's broadcast, and a bi stream is the same track
+//! name in both. Each open takes the next number of its opener, so a track never carries
+//! two streams. The peer learns of new streams from the broadcast's track listing, which
+//! needs moq-lite-07 on every hop. Channels both sides know in advance are ordinary
+//! fixed-name tracks on [`Socket::local`] and [`Socket::remote`]. See
+//! `doc/concept/socket.md` for the convention.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Poll, ready};
 
-use hashlink::LinkedHashMap;
+use hashlink::{LinkedHashMap, LinkedHashSet};
 
 use crate::{Error, Instance, Path, Pattern, Patterns};
 
@@ -64,18 +67,17 @@ impl Kind {
 	}
 }
 
-/// The track name of stream `name`, the opener's `number`th, opened by `opener` as a
-/// `kind` stream: `.<opener>/<kind>/<number>/<name>`.
-fn track_name(opener: Role, kind: Kind, number: u64, name: &str) -> String {
-	format!(".{}/{}/{number}/{name}", opener.tag(), kind.tag())
+/// The track name of the opener's `number`th stream, a `kind` one:
+/// `.<opener>/<kind>/<number>`.
+fn track_name(opener: Role, kind: Kind, number: u64) -> String {
+	format!(".{}/{}/{number}", opener.tag(), kind.tag())
 }
 
-/// Split a track name into its opener, kind, and stream name, or `None` for a track
-/// outside the scheme, such as one the application names itself.
-fn parse(track: &str) -> Option<(Role, Kind, &str)> {
+/// Split a track name into its opener and kind, or `None` for a track outside the
+/// scheme, such as one the application names itself.
+fn parse(track: &str) -> Option<(Role, Kind)> {
 	let (opener, rest) = track.strip_prefix('.')?.split_once('/')?;
-	let (kind, rest) = rest.split_once('/')?;
-	let (number, name) = rest.split_once('/')?;
+	let (kind, number) = rest.split_once('/')?;
 	// Decimal, as the opener writes it, so one stream has one name.
 	if number.parse::<u64>().ok()?.to_string() != number {
 		return None;
@@ -90,7 +92,7 @@ fn parse(track: &str) -> Option<(Role, Kind, &str)> {
 		"bi" => Kind::Bi,
 		_ => return None,
 	};
-	Some((opener, kind, name))
+	Some((opener, kind))
 }
 
 /// `L/<side>/<id>`, refusing an id that is not exactly one path segment.
@@ -117,18 +119,8 @@ pub enum Closed {
 	Replaced,
 }
 
-/// A uni stream the peer opened.
-pub struct Uni {
-	/// The name the peer opened it with.
-	pub name: Arc<str>,
-	/// The peer's track.
-	pub consumer: track::Consumer,
-}
-
-/// A bi stream: this side's track and the peer's, under one name.
+/// A bi stream: this side's track and the peer's, under one track name.
 pub struct Bi {
-	/// The name the opener gave it.
-	pub name: Arc<str>,
 	/// This side's track.
 	pub producer: track::Producer,
 	/// The peer's track.
@@ -140,12 +132,12 @@ pub struct Bi {
 struct Listing {
 	/// The peer's listing, opened by the first accept or bi open.
 	tracks: Option<broadcast::Tracks>,
-	/// Uni streams the peer opened, not yet accepted, in order, by track name with their
-	/// stream name. A stream leaves once the peer stops listing it, as the listing drops
-	/// an add its reader never reached, so these hold no more than the peer lists.
-	uni: LinkedHashMap<Arc<str>, Arc<str>>,
+	/// Uni streams the peer opened, not yet accepted, in order, by track name. A stream
+	/// leaves once the peer stops listing it, as the listing drops an add its reader
+	/// never reached, so these hold no more than the peer lists.
+	uni: LinkedHashSet<Arc<str>>,
 	/// Bi streams the peer opened, with the opener's track info, not yet accepted.
-	bi: LinkedHashMap<Arc<str>, (Arc<str>, track::Info)>,
+	bi: LinkedHashMap<Arc<str>, track::Info>,
 	/// This side's bi opens waiting for an answer, by track name, and whether the peer
 	/// listed it.
 	opening: HashMap<Arc<str>, bool>,
@@ -196,19 +188,18 @@ impl Listing {
 				TracksEvent::Synced => continue,
 			};
 			// A track outside the scheme is the application's own.
-			let Some((opener, kind, stream)) = parse(&name) else {
+			let Some((opener, kind)) = parse(&name) else {
 				continue;
 			};
-			let stream: Arc<str> = stream.into();
 			match (opener == role, kind, info) {
 				(false, Kind::Uni, Some(_)) => {
-					self.uni.replace(name, stream);
+					self.uni.replace(name);
 				}
 				(false, Kind::Uni, None) => {
 					self.uni.remove(&name);
 				}
 				(false, Kind::Bi, Some(info)) => {
-					self.bi.replace(name, (stream, info));
+					self.bi.replace(name, info);
 				}
 				(false, Kind::Bi, None) => {
 					self.bi.remove(&name);
@@ -262,9 +253,9 @@ impl Inner {
 		self.local.poll_closed(waiter).is_ready()
 	}
 
-	/// The track name of this side's next `kind` stream, named `name`.
-	fn open(&self, kind: Kind, name: &str) -> String {
-		track_name(self.role, kind, self.next.fetch_add(1, Ordering::Relaxed), name)
+	/// The track name of this side's next `kind` stream.
+	fn open(&self, kind: Kind) -> String {
+		track_name(self.role, kind, self.next.fetch_add(1, Ordering::Relaxed))
 	}
 
 	/// Create a track in this side's broadcast, refusing with [`Error::Closed`] once it
@@ -307,32 +298,33 @@ impl Socket {
 		&self.inner.id
 	}
 
-	/// This side's broadcast, for tracks an application names itself.
+	/// This side's broadcast, for well-known channels: tracks with fixed names that both
+	/// sides agree on, beside the streams.
 	pub fn local(&self) -> &broadcast::Producer {
 		&self.inner.local
 	}
 
-	/// The peer's broadcast, for tracks an application names itself.
+	/// The peer's broadcast, for well-known channels: tracks with fixed names that both
+	/// sides agree on, beside the streams.
 	pub fn remote(&self) -> &broadcast::Consumer {
 		&self.inner.remote
 	}
 
-	/// Open a uni stream named `name`: a track only this side writes.
+	/// Open a uni stream: a new track only this side writes, which the peer takes with
+	/// [`Self::accept_uni`].
 	///
-	/// Each open is a new stream, even under a name opened before. Fails with
-	/// [`Error::Closed`] once this side closed.
-	pub fn open_uni(&self, name: &str, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
-		self.inner.create_track(self.inner.open(Kind::Uni, name), info)
+	/// `info` describes the track. Fails with [`Error::Closed`] once this side closed.
+	pub fn open_uni(&self, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
+		self.inner.create_track(self.inner.open(Kind::Uni), info)
 	}
 
-	/// Open a bi stream named `name`, resolving once the peer accepts it.
+	/// Open a bi stream, resolving once the peer accepts it with [`Self::accept_bi`].
 	///
-	/// `info` describes this side's track, and the peer's answer mirrors it. Each open is
-	/// a new stream, even under a name opened before. Fails with [`Error::Closed`] once
-	/// this side closed.
-	pub fn open_bi(&self, name: &str, info: impl Into<Option<track::Info>>) -> Result<kio::Pending<OpenBi>, Error> {
+	/// `info` describes this side's track, and the peer's answer mirrors it. Fails with
+	/// [`Error::Closed`] once this side closed.
+	pub fn open_bi(&self, info: impl Into<Option<track::Info>>) -> Result<kio::Pending<OpenBi>, Error> {
 		let inner = &self.inner;
-		let track: Arc<str> = inner.open(Kind::Bi, name).into();
+		let track: Arc<str> = inner.open(Kind::Bi).into();
 		// Registered first, so a poll that reads the peer's answer before this returns keeps it.
 		inner.listing.lock().opening.insert(track.clone(), false);
 		let producer = match inner.create_track(track.to_string(), info) {
@@ -344,7 +336,6 @@ impl Socket {
 		};
 		Ok(kio::Pending::new(OpenBi {
 			inner: inner.clone(),
-			name: name.into(),
 			track,
 			producer: Some(producer),
 		}))
@@ -355,7 +346,7 @@ impl Socket {
 	///
 	/// A stream is handed out only while the peer still lists it: one whose track the peer
 	/// dropped first, finished or not, is skipped.
-	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Option<Uni>, Error>> {
+	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Option<track::Consumer>, Error>> {
 		let inner = &self.inner;
 		loop {
 			if inner.poll_local_closed(waiter) {
@@ -363,7 +354,7 @@ impl Socket {
 			}
 			let mut listing = inner.listing.lock();
 			listing.drain(waiter, inner.role, &inner.remote);
-			let Some((track, name)) = listing.uni.pop_front() else {
+			let Some(track) = listing.uni.pop_front() else {
 				return match listing.ended() {
 					Some(end) => Poll::Ready(end),
 					None => Poll::Pending,
@@ -371,7 +362,7 @@ impl Socket {
 			};
 			drop(listing);
 			return match inner.remote.track(&track) {
-				Ok(consumer) => Poll::Ready(Ok(Some(Uni { name, consumer }))),
+				Ok(consumer) => Poll::Ready(Ok(Some(consumer))),
 				// The peer's broadcast ended.
 				Err(Error::Unroutable) => Poll::Ready(Ok(None)),
 				// The peer dropped the track since the listing read it.
@@ -383,7 +374,7 @@ impl Socket {
 
 	/// Wait for the next uni stream the peer opened; see [`Self::poll_accept_uni`].
 	#[cfg(feature = "async")]
-	pub async fn accept_uni(&self) -> Result<Option<Uni>, Error> {
+	pub async fn accept_uni(&self) -> Result<Option<track::Consumer>, Error> {
 		kio::wait(|waiter| self.poll_accept_uni(waiter)).await
 	}
 
@@ -398,7 +389,7 @@ impl Socket {
 			}
 			let mut listing = inner.listing.lock();
 			listing.drain(waiter, inner.role, &inner.remote);
-			let Some((track, (name, info))) = listing.bi.pop_front() else {
+			let Some((track, info)) = listing.bi.pop_front() else {
 				return match listing.ended() {
 					Some(end) => Poll::Ready(end),
 					None => Poll::Pending,
@@ -427,11 +418,7 @@ impl Socket {
 				Err(Error::Duplicate) => continue,
 				Err(err) => return Poll::Ready(Err(err)),
 			};
-			return Poll::Ready(Ok(Some(Bi {
-				name,
-				producer,
-				consumer,
-			})));
+			return Poll::Ready(Ok(Some(Bi { producer, consumer })));
 		}
 	}
 
@@ -477,7 +464,6 @@ impl Drop for Socket {
 /// A bi stream being opened, from [`Socket::open_bi`]: resolves once the peer answers.
 pub struct OpenBi {
 	inner: Arc<Inner>,
-	name: Arc<str>,
 	/// The stream's track name, which the answer shares.
 	track: Arc<str>,
 	/// This side's track, handed over once the peer answers.
@@ -502,11 +488,7 @@ impl OpenBi {
 			drop(listing);
 			let consumer = inner.remote.track(&self.track)?;
 			let producer = self.producer.take().ok_or(Error::Closed)?;
-			return Poll::Ready(Ok(Bi {
-				name: self.name.clone(),
-				producer,
-				consumer,
-			}));
+			return Poll::Ready(Ok(Bi { producer, consumer }));
 		}
 		match &listing.end {
 			Some(Ok(())) => Poll::Ready(Err(Error::Unroutable)),
@@ -755,12 +737,12 @@ mod tests {
 	fn track_names_round_trip() {
 		for opener in [Role::Dialer, Role::Listener] {
 			for kind in [Kind::Uni, Kind::Bi] {
-				let name = track_name(opener, kind, 7, "chat/room");
-				assert_eq!(parse(&name), Some((opener, kind, "chat/room")));
+				let name = track_name(opener, kind, 7);
+				assert_eq!(parse(&name), Some((opener, kind)));
 			}
 		}
-		assert_eq!(track_name(Role::Dialer, Kind::Bi, 0, "x"), ".dial/bi/0/x");
-		assert_eq!(track_name(Role::Listener, Kind::Uni, 12, "x"), ".accept/uni/12/x");
+		assert_eq!(track_name(Role::Dialer, Kind::Bi, 0), ".dial/bi/0");
+		assert_eq!(track_name(Role::Listener, Kind::Uni, 12), ".accept/uni/12");
 	}
 
 	#[test]
@@ -769,14 +751,15 @@ mod tests {
 			"command",
 			".dial",
 			".dial/uni",
-			".dial/other/0/x",
-			".other/uni/0/x",
-			"dial/uni/0/x",
+			".dial/uni/",
+			".dial/other/0",
+			".other/uni/0",
+			"dial/uni/0",
 			".dial/uni/x",
-			".dial/uni/0",
-			".dial/uni/07/x",
-			".dial/uni/-1/x",
-			".dial/uni/+1/x",
+			".dial/uni/0/x",
+			".dial/uni/07",
+			".dial/uni/-1",
+			".dial/uni/+1",
 		] {
 			assert_eq!(parse(name), None, "{name}");
 		}
