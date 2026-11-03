@@ -354,7 +354,8 @@ A publisher that knows the offset states it, and it is used as given. The
 receiver already adds a frame duration on top, so an encoder configured not to
 reorder or queue frames, whose frames trail by no more than their own duration,
 states zero. moq-video does so for a backend that confirmed its preset, and
-moq-audio for Opus and PCM. Anything else is measured: the least a rendition's
+moq-audio for Opus and PCM captured at the codec's rate, since a resampler
+holds input. Anything else is measured: the least a rendition's
 timestamps trailed those the broadcast's other renditions already wrote, over a
 window of a second or a group of its media, whichever is longer, keeping the
 largest of those windows. A measured value is reported only once a window
