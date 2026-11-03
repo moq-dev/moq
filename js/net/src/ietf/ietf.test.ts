@@ -686,7 +686,7 @@ test("group flags round-trip firstObject", async () => {
 	const makeGroup = (firstObject: boolean) =>
 		new Group({
 			trackAlias: 7n,
-			groupId: 3,
+			groupId: 3n,
 			subGroupId: 0,
 			publisherPriority: 0,
 			flags: {
@@ -819,7 +819,7 @@ test("FetchFrame: the first object carries its absolute ids and the rest inherit
 	const timestamp = new Timestamp(96_000, Timescale.MILLI);
 	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), timestamp });
 
-	const first = await encodeFetchFrameVersioned(frame, { group: 7, object: 3, first: true }, Version.DRAFT_22);
+	const first = await encodeFetchFrameVersioned(frame, { group: 7n, object: 3, first: true }, Version.DRAFT_22);
 	expect(Array.from(first)).toEqual([
 		0x3c, // GROUP_ID | OBJECT_ID | PRIORITY | PROPERTIES
 		7, // group id
@@ -837,7 +837,7 @@ test("FetchFrame: the first object carries its absolute ids and the rest inherit
 
 	// Same group and priority, and the object id is the prior one plus one, so only the
 	// properties and the payload go on the wire.
-	const next = await encodeFetchFrameVersioned(frame, { group: 7, object: 4, first: false }, Version.DRAFT_22);
+	const next = await encodeFetchFrameVersioned(frame, { group: 7n, object: 4, first: false }, Version.DRAFT_22);
 	expect(Array.from(next)).toEqual([
 		0x20, // PROPERTIES
 		0x04,
@@ -882,7 +882,7 @@ test("FetchFrame: the first object after an End of Range", async () => {
 	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
 	const encoded = await encodeFetchFrameVersioned(
 		frame,
-		{ group: 9, object: 0, first: true, previousGroup: 7 },
+		{ group: 9n, object: 0, first: true, previousGroup: 7n },
 		Version.DRAFT_22,
 	);
 	// GROUP_ID | OBJECT_ID | PRIORITY, group 7 + 1 + 1, object 0, priority 0, then the payload.
@@ -893,7 +893,7 @@ test("FetchFrame: the first object after an End of Range", async () => {
 // simply an empty object, and writing a status after it would desync the stream.
 test("FetchFrame: an empty payload is a zero length, with no status byte", async () => {
 	const frame = new FetchFrame({ payload: new Uint8Array(), timestamp: new Timestamp(0, Timescale.MILLI) });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 1, object: 0, first: true }, Version.DRAFT_22);
+	const encoded = await encodeFetchFrameVersioned(frame, { group: 1n, object: 0, first: true }, Version.DRAFT_22);
 
 	expect(Array.from(encoded)).toEqual([
 		0x3c,
@@ -912,7 +912,7 @@ test("FetchFrame: an empty payload is a zero length, with no status byte", async
 // subscriber that sent INCLUDE_PROPERTIES=0 gets.
 test("FetchFrame: an unstamped object omits the properties field", async () => {
 	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 0, object: 0, first: false }, Version.DRAFT_22);
+	const encoded = await encodeFetchFrameVersioned(frame, { group: 0n, object: 0, first: false }, Version.DRAFT_22);
 
 	// Flags 0 (subgroup zero, no fields present), then the payload.
 	expect(Array.from(encoded)).toEqual([0x00, 0x01, 0x01]);
@@ -921,7 +921,7 @@ test("FetchFrame: an unstamped object omits the properties field", async () => {
 // The first object still carries its absolute ids and priority; only the properties go.
 test("FetchFrame: an unstamped first object keeps its ids", async () => {
 	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 4, object: 2, first: true }, Version.DRAFT_22);
+	const encoded = await encodeFetchFrameVersioned(frame, { group: 4n, object: 2, first: true }, Version.DRAFT_22);
 
 	expect(Array.from(encoded)).toEqual([
 		0x1c, // GROUP_ID | OBJECT_ID | PRIORITY, without PROPERTIES

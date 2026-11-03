@@ -1041,7 +1041,7 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 		const fetched = wireOf(client)
 			.consume(Path.from("room/x"))
 			.track("video")
-			.fetchGroup(0, { signal: abort.signal });
+			.fetchGroup(0n, { signal: abort.signal });
 		await yieldNow();
 		abort.abort(new Error("left"));
 		await expect(fetched).rejects.toThrow();
@@ -1121,12 +1121,12 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 			if (!unanswered) throw new Error("missing token");
 			const track = wireOf(client).consume(Path.from("room/x")).track("video");
 			const abort = new AbortController();
-			const first = track.fetchGroup(0, { signal: abort.signal });
+			const first = track.fetchGroup(0n, { signal: abort.signal });
 			await yieldNow();
 			// The last caller leaves and another coalesces before the wait observes it.
 			abort.abort(new Error("left"));
 			for (let i = 0; i < gap; i++) await Promise.resolve();
-			const second = track.fetchGroup(0);
+			const second = track.fetchGroup(0n);
 			await expect(first).rejects.toThrow();
 			const issued = unanswered.accept(grant([], ["room"]));
 			await adding;

@@ -48,6 +48,7 @@ impl Client {
 		let http = reqwest::Client::builder()
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(TIMEOUT)
+			.use_preconfigured_tls(crate::crypto::tls()?)
 			.build()?;
 		Ok(Self { http, base, signer })
 	}

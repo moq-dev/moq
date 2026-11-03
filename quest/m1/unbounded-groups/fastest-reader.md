@@ -157,10 +157,7 @@ Decided 2026-11-02 (maintainer, /quest-grill interview on
 
 The adapter inventory this plan once listed is stale: moq-tokio has no Quinn
 backend, and moq-ffi drives sessions through moq-tokio rather than a
-transport of its own, so neither needs an adapter. Iroh, which returns credit
-as it reads, leaves with its removal
-([moq-dev/moq#7345](https://github.com/moq-dev/moq/pull/7345)); until then its
-ingest never pauses.
+transport of its own, so neither needs an adapter.
 
 Decided 2026-11-02 (maintainer, settling the open items of
 [moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624)):
