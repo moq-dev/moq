@@ -28,7 +28,6 @@ since cutting segments from first-frame pts waits on nothing in m1.
 ## Required
 
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
-- [Release credential leaks](/quest/m0/security-audit/README.md) - tokens stay out of logs and outbound HTTP clients verify their peer, on `main` and `release`
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Python `moq-rs` 0.5.2 and Dart `moq` 0.1.1 reach PyPI and pub.dev from `release`
 - [Backport audio groupDuration](/quest/m0/backport-audio-group-duration.md) - `@moq/publish` 0.5.4 on `release` can pack several Opus frames per group, making Cloudflare's relay drop audio less often

@@ -239,7 +239,7 @@ url = "2"
 usage-rs = "7.1.0"
 uuid = { version = "1.26", features = ["v7"] }
 web-transport-iroh = "0.8.3"
-web-transport-proto = "0.6"
+web-transport-proto = "0.6.4"
 web-transport-trait = "0.5"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
 x509-parser = "0.18"
