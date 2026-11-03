@@ -2192,19 +2192,36 @@ fn raw_track_subscription_options_and_update() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
-	let ranges = [moq_range {
-		start: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 1,
-			timestamp: moq_timestamp::default(),
+	// A read whose ranges all end ends once it read them, so an open range far ahead keeps
+	// this one open for the update.
+	let ranges = [
+		moq_range {
+			start: moq_anchor {
+				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
+				group: 1,
+				timestamp: moq_timestamp::default(),
+			},
+			end: moq_anchor {
+				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
+				group: 2,
+				timestamp: moq_timestamp::default(),
+			},
+			end_present: true,
 		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 2,
-			timestamp: moq_timestamp::default(),
+		moq_range {
+			start: moq_anchor {
+				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
+				group: 100,
+				timestamp: moq_timestamp::default(),
+			},
+			end: moq_anchor {
+				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
+				group: 0,
+				timestamp: moq_timestamp::default(),
+			},
+			end_present: false,
 		},
-		end_present: true,
-	}];
+	];
 	let subscription = moq_subscription {
 		priority: 5,
 		max_delay_us: 25_000,
@@ -2496,12 +2513,20 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	publish(b"zero");
 	let consume = request_broadcast(origin, path);
 
-	// Group 0 only: the reader's cap sits below where the track will be.
-	let first = [moq_range {
-		start: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
-		end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 1),
-		end_present: true,
-	}];
+	// Group 0 only: the reader's cap sits below where the track will be. A read whose
+	// ranges all end ends once it read them, so an open range far ahead keeps it open.
+	let first = [
+		moq_range {
+			start: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
+			end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 1),
+			end_present: true,
+		},
+		moq_range {
+			start: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 100),
+			end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
+			end_present: false,
+		},
+	];
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe {
 		moq_consume_track(

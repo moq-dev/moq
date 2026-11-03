@@ -588,9 +588,14 @@ impl Copy {
 		if !reader.groups_read {
 			return Retains::No;
 		}
-		// Not yet bounded, it may still feed a group the new copy never has.
+		// Not yet bounded, it may still feed a group the new copy never has, unless the reader
+		// already holds every group of a bounded window. Then it is kept rather than waited
+		// on, so the read ends, and a widening judges it again.
 		if self.until.is_none() && self.done.is_none() {
-			return Retains::Wait;
+			return match reader.holds_window() {
+				true => Retains::Keep,
+				false => Retains::Wait,
+			};
 		}
 		// Superseded once the serving copy has a group past the bound.
 		if self.since.is_none()
@@ -669,6 +674,22 @@ struct Retain<'a> {
 	waiter: &'a kio::Waiter,
 }
 
+impl Retain<'_> {
+	/// Whether the reader handed out every group its bounded, resolved window names.
+	fn holds_window(&self) -> bool {
+		let Some(end) = self.window.end().filter(|_| !self.window.is_pending()) else {
+			return false;
+		};
+		self.window
+			.runs(self.window.floor().unwrap_or(0))
+			.take_while(|run| *run.start() < end)
+			.all(|run| {
+				let run = *run.start()..run.end().saturating_add(1).min(end);
+				self.delivered.gaps(run).is_empty()
+			})
+	}
+}
+
 /// How a reader still needs a replaced copy; see [`Copy::retains`].
 enum Retains {
 	/// It may still deliver a group the reader lacks.
@@ -723,18 +744,28 @@ impl Mirror {
 impl Subscriber {
 	/// Reserve the lowest next group not in `delivered` across copies, without handing it
 	/// out: in arrival order, or in sequence order for `ordered`.
+	/// Unless it `parks`, a bounded reader ends once its window has nothing left on any copy;
+	/// see [`Reader::exhausted`].
 	pub(super) fn poll_peek_group(
 		&mut self,
 		ordered: bool,
+		parks: bool,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Candidate>>> {
 		let mut reader = self.reader();
 		loop {
-			if let Some(result) = reader.poll_lowest(ordered, delivered, waiter) {
+			if let Some(result) = reader.poll_lowest(ordered, parks, delivered, waiter) {
 				return result;
 			}
 		}
+	}
+
+	/// Whether this reader's bounded window has nothing left for the readers that handed out
+	/// `taken`, the first of which is its own; see [`Reader::exhausted`].
+	pub(super) fn exhausted(&mut self, taken: &[&Delivered], waiter: &kio::Waiter) -> bool {
+		let mut reader = self.reader();
+		!reader.let_go(taken[0], waiter) && reader.exhausted(taken, waiter)
 	}
 
 	/// Hand out the group a [`Self::poll_peek_group`] reserved.
@@ -1433,6 +1464,7 @@ impl Reader {
 	fn poll_lowest(
 		&mut self,
 		ordered: bool,
+		parks: bool,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> Option<Poll<Result<Option<Candidate>>>> {
@@ -1530,11 +1562,60 @@ impl Reader {
 		}
 		let drained = self.bound_at_end();
 		let waits = self.let_go(delivered, waiter);
+		if !parks && !waits && self.exhausted(&[delivered], waiter) {
+			return Some(Poll::Ready(Ok(None)));
+		}
 		match self.poll_end(waiter, |copy| copy.done.clone()) {
 			// The serving copy drained, but a copy it replaced may still deliver a group below
 			// its end: the track ends once that copy has.
 			Some(Poll::Ready(Ok(None))) if drained && waits => Some(Poll::Pending),
 			end => end,
+		}
+	}
+
+	/// Whether a bounded window has nothing left to deliver, once no replaced copy may still
+	/// deliver a group under its bound. The serving copy reads every group of the window from
+	/// its resume point, so its cursor judges those: each was handed out (in any of `taken`, or
+	/// by that copy), dropped, skipped as stale, or given up as unfillable. What lies under its
+	/// resume point was the copies' it replaced, each let go once it had nothing more, and a
+	/// backfill still out is not judged yet. A route between copies has nothing to judge.
+	/// `taken` holds the logical readers' records, the reader's own first.
+	fn exhausted(&mut self, taken: &[&Delivered], waiter: &kio::Waiter) -> bool {
+		if self.resumed.is_some() {
+			return false;
+		}
+		let (lowest, cap) = self.groups;
+		let resumed = self.copies.last().and_then(|copy| copy.floor);
+		let window = self.window();
+		let Some(end) = window.end().filter(|_| !window.is_pending()) else {
+			return false;
+		};
+		// A group under the serving copy's resume point that the local floor or cap keeps
+		// out stays owed, as on one cursor, though no copy reads it.
+		if let Some(resumed) = resumed {
+			let until = resumed.min(end);
+			for run in window
+				.runs(window.floor().unwrap_or(0))
+				.take_while(|run| *run.start() < until)
+			{
+				let run = *run.start()..run.end().saturating_add(1).min(until);
+				if Delivered::gaps_in_all(taken, run)
+					.iter()
+					.any(|gap| gap.start < lowest || cap.is_some_and(|cap| gap.end > cap))
+				{
+					return false;
+				}
+			}
+		}
+		match self.copies.last_mut() {
+			Some(Copy {
+				generation,
+				replaced: false,
+				done: None,
+				sub: Sub::Ready(sub),
+				..
+			}) if Some(*generation) == self.generation => sub.exhausted_for(taken, waiter),
+			_ => false,
 		}
 	}
 
@@ -4066,6 +4147,55 @@ mod test {
 				matches!(sub.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
 				"nested end propagates past covered copies"
 			);
+		}
+	}
+
+	/// A bounded read whose whole window was handed out ends after a route switch, to a copy
+	/// with nothing or only a group already read, though the replaced copy is still live.
+	#[test]
+	fn a_read_range_ends_after_a_switch_to_a_repeating_route() {
+		for ordered in [false, true] {
+			for repeats in [false, true] {
+				let case = format!("ordered={ordered}, repeats={repeats}");
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let a = copy();
+				routes.serve(a.consume());
+				let subscription = Subscription::default()
+					.with_delay(Delay::default().with_max(HOUR))
+					.with_range(0..1);
+				let mut sub = logical
+					.consume()
+					.subscribe(subscription)
+					.now_or_never()
+					.unwrap()
+					.unwrap();
+				write(&a, 0);
+				assert_eq!(drain(&mut sub, ordered), [0], "{case}");
+				let b = copy();
+				if repeats {
+					write(&b, 0);
+				}
+				routes.serve(b.consume());
+				let res = match ordered {
+					true => sub.poll_next_group(&kio::Waiter::noop()),
+					false => sub.poll_recv_group(&kio::Waiter::noop()),
+				};
+				let res = res.map(|res| res.map(|group| group.map(|group| group.sequence)));
+				assert!(
+					matches!(res, Poll::Ready(Ok(None))),
+					"{case}: the read ends, got {res:?}"
+				);
+				// The replaced copy was kept, so a widening still reads what only it has.
+				write(&a, 1);
+				sub.update(
+					Subscription::default()
+						.with_delay(Delay::default().with_max(HOUR))
+						.with_range(0..2),
+				)
+				.unwrap();
+				assert_eq!(drain(&mut sub, ordered), [1], "{case}");
+			}
 		}
 	}
 
