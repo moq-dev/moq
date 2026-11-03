@@ -1071,6 +1071,8 @@ export class Subscriber {
 			}
 			const id = this.#subscribeNext++;
 			const msg = this.#subscribeMessage(id, broadcast, consumed, producer.name, subscription, ranges);
+			// The new SUBSCRIBE's terms are new, so a stale run the last one reported is no verdict on them.
+			hooks.supersedeStale(producer);
 			console.debug(`subscribe reopen: id=${id} broadcast=${broadcast} track=${producer.name}`);
 			// Bounded like the first setup, and given up once nobody wants the track, so a peer
 			// that stops reading holds neither the stream nor its entry.

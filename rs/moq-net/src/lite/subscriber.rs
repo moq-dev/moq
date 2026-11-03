@@ -8063,8 +8063,12 @@ impl TrackServe {
 		match request {
 			Some((subscription, ranges)) => {
 				match sub {
-					// Open an upstream SUBSCRIBE for the first subscriber.
-					Sub::None => Ok(Begin::Establish(self.prepare_establish(producer, subscription, ranges))),
+					// Open an upstream SUBSCRIBE for the first subscriber. Its terms are new, so a
+					// stale run an earlier subscription reported is no verdict on them.
+					Sub::None => {
+						producer.supersede_stale();
+						Ok(Begin::Establish(self.prepare_establish(producer, subscription, ranges)))
+					}
 					Sub::Active(active) => {
 						// Downstream preferences changed: forward them upstream as a
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).

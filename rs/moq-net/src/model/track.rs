@@ -6835,6 +6835,10 @@ struct Within<'a> {
 	drift: Option<&'a Drift>,
 }
 
+/// The [`TrackState::drops_revision`], span, window revision, and the budget and coverage
+/// that settle received stale runs (see [`Drift::settles`]) a [`DropCursor`] folded in.
+type Scan = (u64, ops::Range<u64>, u64, Option<(Duration, Option<u64>)>);
+
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
 /// the cache on every poll.
 struct DropCursor {
@@ -6844,10 +6848,9 @@ struct DropCursor {
 	/// Sequences given up and not reported yet, with why: stale skips, cuts, and upstream
 	/// skips and drops.
 	pending: RangeMap<u64, Hole>,
-	/// The [`TrackState::drops_revision`], span, window revision, and what settles received
-	/// stale runs, last folded into `pending`.
+	/// What `pending` last folded in; see [`Scan`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	scanned: Option<(u64, ops::Range<u64>, u64, Option<(Duration, Option<u64>)>)>,
+	scanned: Option<Scan>,
 	/// Every sequence this cursor already reported.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	reported: RangeSet<u64>,
@@ -23191,7 +23194,7 @@ mod test {
 		producer.give_up(1..3, Hole::stale(budget));
 		producer.skip_groups(3..4);
 		let waiter = kio::Waiter::noop();
-		let mut dropped = |subscriber: &mut Subscriber| {
+		let dropped = |subscriber: &mut Subscriber| {
 			let mut runs = Vec::new();
 			while let Poll::Ready(run) = subscriber.poll_drop(&waiter) {
 				runs.push(run);
