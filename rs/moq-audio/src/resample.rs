@@ -275,33 +275,23 @@ impl Resampler {
 	}
 
 	/// Convert every whole chunk that is buffered, keeping the remainder.
+	///
+	/// Chunks are read in place and the remainder moves to the front once, so a
+	/// large batch costs linear rather than quadratic copying.
 	fn convert(&mut self) -> Result<Vec<f32>, BackendError> {
 		let chunk_samples = self.chunk_frames * self.channels;
 		let mut out = Vec::new();
-		while self.pending.len() >= chunk_samples {
-			for (frame_idx, frame) in self.pending[..chunk_samples].chunks_exact(self.channels).enumerate() {
-				for (ch, &sample) in frame.iter().enumerate() {
-					self.input_planar[ch][frame_idx] = sample;
-				}
+		let mut consumed = 0;
+		let mut result = Ok(());
+		while result.is_ok() && self.pending.len() - consumed >= chunk_samples {
+			result = self.convert_chunk(consumed, &mut out);
+			// A chunk the filter refused stays buffered.
+			if result.is_ok() {
+				consumed += chunk_samples;
 			}
-
-			let input = SequentialSliceOfVecs::new(&self.input_planar, self.channels, self.chunk_frames)
-				.expect("resampler input buffer dimensions");
-			let mut output =
-				SequentialSliceOfVecs::new_mut(&mut self.output_planar, self.channels, self.output_frames_max)
-					.expect("resampler output buffer dimensions");
-			let (_, produced) = self.resampler.process_into_buffer(&input, &mut output, None)?;
-
-			let prev_len = out.len();
-			out.resize(prev_len + produced * self.channels, 0.0);
-			for frame_idx in 0..produced {
-				for ch in 0..self.channels {
-					out[prev_len + frame_idx * self.channels + ch] = self.output_planar[ch][frame_idx];
-				}
-			}
-
-			self.pending.drain(..chunk_samples);
 		}
+		self.pending.drain(..consumed);
+		result?;
 
 		// Drop the filter's startup silence rather than passing it on as audio. What
 		// it costs is paid back by `flush`, which drains the same amount at the end,
@@ -313,6 +303,31 @@ impl Resampler {
 		}
 
 		Ok(out)
+	}
+
+	/// Convert the chunk starting at `start` in `pending`, appending its output to `out`.
+	fn convert_chunk(&mut self, start: usize, out: &mut Vec<f32>) -> Result<(), BackendError> {
+		let chunk = &self.pending[start..start + self.chunk_frames * self.channels];
+		for (frame_idx, frame) in chunk.chunks_exact(self.channels).enumerate() {
+			for (ch, &sample) in frame.iter().enumerate() {
+				self.input_planar[ch][frame_idx] = sample;
+			}
+		}
+
+		let input = SequentialSliceOfVecs::new(&self.input_planar, self.channels, self.chunk_frames)
+			.expect("resampler input buffer dimensions");
+		let mut output = SequentialSliceOfVecs::new_mut(&mut self.output_planar, self.channels, self.output_frames_max)
+			.expect("resampler output buffer dimensions");
+		let (_, produced) = self.resampler.process_into_buffer(&input, &mut output, None)?;
+
+		let prev_len = out.len();
+		out.resize(prev_len + produced * self.channels, 0.0);
+		for frame_idx in 0..produced {
+			for ch in 0..self.channels {
+				out[prev_len + frame_idx * self.channels + ch] = self.output_planar[ch][frame_idx];
+			}
+		}
+		Ok(())
 	}
 }
 
