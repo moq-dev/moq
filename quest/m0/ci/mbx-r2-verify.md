@@ -69,9 +69,9 @@ compilation is "not looked up".
   under its own workspace, so the install order does not matter; it stays
   where `main` has it. mbx v1.29.1 (2026-11-01) includes
   [#870](https://github.com/jdx/mr-boxington/pull/870), so this quest's PR bumps
-  `.github/actions/rust-cache/action.yml` from 1.28.0 to 1.29.1. Check that the
-  first scheduled Nightly after it lands loads a manifest of more than 124
-  predictions and hits on Windows.
+  `.github/actions/rust-cache/action.yml` from 1.28.0 to 1.29.1. Verify it
+  against the Windows criterion in Waiting below. The fix also offers legacy
+  CRLF identities, so an in-window manifest from 1.28.0 remains usable.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
@@ -109,16 +109,21 @@ uploaded. The [previous scheduled run](https://github.com/moq-dev/moq/actions/ru
 had 0 hits, 878 not looked up, 50 bypassed and 3 remote failures, with a
 6m 26s Cargo build. These are different commits, not the same-commit
 restore-plus-build comparison the Goal requires. There were 13 `Cargo.lock`
-changes between these two runs, beyond the accepted 8-state inheritance
-window; count this as an out-of-window rebuild opportunity, not proof that
-expiry caused either miss. The current run also follows the workspace-hack
+changes between these two runs. Record such intervals for the full-history
+platform jobs' 8-state lookback, not as the cause of these Linux misses:
+Linux has no history to search even within that window, and the loaded
+predictions did not match. The current run also follows the workspace-hack
 feature unification, so changed compiler inputs remain a separate cause.
 
 ## Waiting
 
-- GitHub Actions: after this PR lands, the first scheduled Nightly on 1.29.1
-  must demonstrate Windows workspace prediction inheritance and hits. Until
-  then, keep Linux's shallow checkout as decided above. Do not dispatch Nightly.
+- GitHub Actions: after this PR lands, a scheduled Windows job on 1.29.1
+  must load a workspace manifest of more than 124 predictions and hit. Check
+  the first run with an available manifest from an earlier scheduled Windows
+  workspace build at the same lockfile state or within 8 earlier states. A
+  setup failure or no in-window predecessor is inconclusive; inspect the next
+  eligible scheduled run. Until this proves inheritance pays, keep Linux's
+  shallow checkout as decided above. Do not dispatch Nightly.
 - moq-dev/moq: `release` still lacks the platform Rust cache as checked on
   2026-11-02. Once it carries the cache, inspect a release pull request's
   `Check the cache` step for effective read-only.
