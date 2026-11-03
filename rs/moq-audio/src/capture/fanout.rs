@@ -121,6 +121,11 @@ impl Consumer {
 		)
 	}
 
+	/// The shared failure, if capture has already ended, without waiting.
+	pub(crate) fn failure(&self) -> Option<Error> {
+		self.state.read().failure.clone()
+	}
+
 	pub(crate) fn skip_to_live(&mut self) {
 		self.next = self.state.read().next;
 	}

@@ -25,7 +25,8 @@ pub enum Status {
 	Starting,
 	/// Post-processing samples are being encoded and published.
 	Live,
-	/// The capture consumer failed and the driver has ended.
+	/// The driver ended with an error: a capture failure, or a conversion,
+	/// encoding, or publishing error.
 	Failed,
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
@@ -62,7 +63,7 @@ impl State {
 		self.device.as_ref()
 	}
 
-	/// The most recent input failure while [`Status::Failed`].
+	/// The error that ended the driver while [`Status::Failed`].
 	pub fn failure(&self) -> Option<&Error> {
 		self.failure.as_ref()
 	}
@@ -312,6 +313,15 @@ impl fmt::Debug for Driver {
 	}
 }
 
+impl Drop for Driver {
+	fn drop(&mut self) {
+		// Dropped before `run` finished, e.g. a sibling task failed: say so rather than `Dropped`.
+		if let Some(producer) = self.producer.take() {
+			producer.abort(moq_net::Error::Cancel);
+		}
+	}
+}
+
 impl Driver {
 	/// Encode until capture fails, the final control drops, or the track ends.
 	pub async fn run(mut self) -> Result<(), Error> {
@@ -351,6 +361,8 @@ impl Driver {
 				tokio::select! {
 					biased;
 					changed = desired_changed(&self.desired, desired.revision) => {
+						// A failure that landed first still ends the publication.
+						if let Some(error) = desired.capture.failure() { return Err(error); }
 						if changed.is_none() { return Ok(()); }
 					}
 					_ = track.closed() => return Ok(()),
@@ -381,13 +393,14 @@ impl Driver {
 				tokio::select! {
 					biased;
 					changed = desired_changed(&self.desired, desired.revision) => {
-						if changed.is_none() {
-							// The track finishes after this, so its source must too.
-							if let Some((samples, timestamp)) = converter.drain()? {
-								output.write(&samples, timestamp)?;
-							}
-							return Ok(());
+						// A failure that landed first still ends the publication.
+						if let Some(error) = reader.failure() { return Err(error); }
+						// This reader's stream ends here. Its tail belongs before a stop, which
+						// can be followed by `finish`; a restart or replacement reanchors anyway.
+						if let Some((samples, timestamp)) = converter.drain()? {
+							output.write(&samples, timestamp)?;
 						}
+						if changed.is_none() { return Ok(()); }
 						break;
 					}
 					_ = track.closed() => return Ok(()),
@@ -931,46 +944,97 @@ mod tests {
 	async fn a_resampled_replacement_is_drained_when_the_track_finishes() {
 		tokio::task::LocalSet::new()
 			.run_until(async {
-				let Fixture {
-					capture: _original,
-					mut control,
-					driver,
-					broadcast,
-					catalog: _catalog,
-					epoch,
-					..
-				} = fixture(false);
-				let (replacement, samples) = capture::test_source_with(44_100, 1);
-				control.replace(replacement.consume()).unwrap();
-				let mut observer = replacement.consume();
-				let capture_task = tokio::task::spawn_local(replacement.run());
-				let encode_task = tokio::spawn(driver.run());
-				let mut track = subscribe(&broadcast).await;
-				// The replacement starts at live capture, so let the driver select it first.
-				status(&mut control, Status::Live).await;
-				// Ten whole 10 ms resampler chunks plus a partial one.
-				let frames = 4_410 + 200;
-				let mut block = Samples::plain(vec![0.25; frames], false);
-				block.captured = Some(epoch + Duration::from_millis(100));
-				samples.try_push(Ok(block)).unwrap();
-				observer.read().await.unwrap();
-				packet(&mut track).await;
-				drop(control);
-				encode_task.await.unwrap().unwrap();
-				let end = loop {
-					match track.read().await.unwrap() {
-						Some(Read::End { end, .. }) => break end,
-						Some(_) => continue,
-						None => panic!("the track finished without its end"),
+				// Finish directly from live, and after a stop that leaves the producer anchored.
+				for stop_first in [false, true] {
+					let Fixture {
+						capture: _original,
+						mut control,
+						driver,
+						broadcast,
+						catalog: _catalog,
+						epoch,
+						..
+					} = fixture(false);
+					let (replacement, samples) = capture::test_source_with(44_100, 1);
+					control.replace(replacement.consume()).unwrap();
+					let mut observer = replacement.consume();
+					let capture_task = tokio::task::spawn_local(replacement.run());
+					let encode_task = tokio::spawn(driver.run());
+					let mut track = subscribe(&broadcast).await;
+					// The replacement starts at live capture, so let the driver select it first.
+					status(&mut control, Status::Live).await;
+					// Ten whole 10 ms resampler chunks plus a partial one.
+					let frames = 4_410 + 200;
+					let mut block = Samples::plain(vec![0.25; frames], false);
+					block.captured = Some(epoch + Duration::from_millis(100));
+					samples.try_push(Ok(block)).unwrap();
+					observer.read().await.unwrap();
+					packet(&mut track).await;
+					if stop_first {
+						control.stop();
+						status(&mut control, Status::Stopped).await;
 					}
-				};
-				// The track ends where its source did, including the partial chunk and filter tail.
-				let resampled = (frames * 48_000 + 22_050) / 44_100;
-				assert_eq!(end.as_micros(), 100_000 + (resampled * 1_000_000 / 48_000) as u128);
-				capture_task.abort();
-				assert!(capture_task.await.unwrap_err().is_cancelled());
+					drop(control);
+					encode_task.await.unwrap().unwrap();
+					// A live reader may skip to the newest group, and its end can precede its last frame.
+					let (mut peak, mut end) = (0.0f32, None);
+					while let Some(read) = track.read().await.unwrap() {
+						match read {
+							Read::End { end: at, .. } => end = Some(at),
+							Read::Frame { frame, .. } => {
+								let pcm = crate::Format::F32.as_interleaved_f32(&frame.payload, 2).unwrap();
+								peak = pcm.iter().fold(peak, |peak, sample| peak.max(sample.abs()));
+							}
+							_ => {}
+						}
+					}
+					let end = end.expect("the track finished without its end");
+					// The track ends where its source did, including the partial chunk and filter tail.
+					let resampled = (frames * 48_000 + 22_050) / 44_100;
+					assert_eq!(end.as_micros(), 100_000 + (resampled * 1_000_000 / 48_000) as u128);
+					// The tail is the source's audio, not padding; filter ringing rules out an exact match.
+					assert!(peak > 0.05, "tail peak {peak}");
+					capture_task.abort();
+					assert!(capture_task.await.unwrap_err().is_cancelled());
+				}
 			})
 			.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_failure_before_a_replacement_still_ends_the_publication() {
+		tokio::task::LocalSet::new()
+			.run_until(async {
+				let Fixture {
+					capture,
+					mut control,
+					driver,
+					catalog: _catalog,
+					..
+				} = fixture(false);
+				let (replacement, _samples) = capture::test_source();
+				let encode_task = tokio::spawn(driver.run());
+				status(&mut control, Status::Live).await;
+				// Both land before the driver runs again; the failure came first.
+				drop(capture);
+				control.replace(replacement.consume()).unwrap();
+				let result = kio::clock::timeout(Duration::from_secs(1), encode_task)
+					.await
+					.expect("the failed capture ends the driver")
+					.unwrap();
+				assert!(matches!(result, Err(Error::Capture(_))));
+				assert_eq!(control.state().status(), Status::Failed);
+			})
+			.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn dropping_an_unfinished_driver_cancels_its_track() {
+		let Fixture { driver, broadcast, .. } = fixture(false);
+		let mut track = subscribe(&broadcast).await;
+		drop(driver);
+		let error = track.read().await.unwrap_err();
+		assert!(format!("{error:?}").contains("Cancel"), "{error:?}");
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -287,9 +287,12 @@ impl Producer {
 	/// Dropping this future releases the device. On macOS, run it on a local
 	/// task because ScreenCaptureKit owns Objective-C handles across awaits.
 	pub async fn run(mut self) -> Result<(), Error> {
+		// A gap reported by an empty buffer still belongs before the next samples.
+		let mut gap = false;
 		let error = loop {
 			match self.stream.read().await {
 				Ok(Some(samples)) => {
+					gap |= samples.gap;
 					if samples.data.is_empty() {
 						continue;
 					}
@@ -298,7 +301,7 @@ impl Producer {
 					let buffer = Buffer {
 						data: samples.data.as_slice().into(),
 						captured: samples.captured.unwrap_or_else(Instant::now),
-						gap: samples.gap,
+						gap: std::mem::take(&mut gap),
 					};
 					drop(samples);
 					self.shared.write(buffer);
@@ -844,6 +847,19 @@ mod tests {
 		assert!(error.contains("stream stopped"));
 		assert_eq!(first.read().await.unwrap_err().to_string(), error);
 		assert_eq!(second.read().await.unwrap_err().to_string(), error);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_empty_gap_buffer_marks_the_next_samples() {
+		let (producer, samples) = test_source();
+		let mut reader = producer.consume();
+		samples.try_push(Ok(Samples::plain(Vec::new(), true))).unwrap();
+		samples.try_push(Ok(Samples::plain(vec![0.25; 960], false))).unwrap();
+		samples.try_push(Ok(Samples::plain(vec![0.5; 960], false))).unwrap();
+		let run = tokio::spawn(producer.run());
+		assert!(reader.read().await.unwrap().gap);
+		assert!(!reader.read().await.unwrap().gap);
+		run.abort();
 	}
 
 	fn reader() -> (buffer::Writer, kio::Producer<Option<cpal::Error>>, MicrophoneReader) {
