@@ -7,10 +7,12 @@ The paired Rust Criterion comparison each Nightly runs (see
 regressions: its threshold, confirmation budget, and round count come from A/A
 runs on the hosted ARM runners, and a deliberately slowed bench fails the job.
 
-## Plan
+## Waiting
 
-Waits on maintainer-dispatched Nightly runs on `main` after the paired mode
-lands; agents never dispatch Nightly.
+- Maintainer: dispatch the Nightly runs on `main` below (A/A and slowed
+  bench); agents never dispatch Nightly. Check each run's `paired.json`.
+
+## Plan
 
 - A/A: dispatch Nightly on `main` with `bench-base` set to the run's own
   commit, at least twice. Read each paired group's `paired.json` (the

@@ -1151,12 +1151,12 @@ impl OutgoingDatagram {
 	}
 
 	/// Write the length-prefixed frame.
-	pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+	pub(crate) fn encode<W: BufMut>(&self, out: &mut W) {
 		out.write(FrameType(*DATAGRAM_TYS.start() | 1)); // 1 byte
 		// Safe to unwrap because we check length sanity before queueing datagrams
 		out.write(VarInt::from_u64(self.len as u64).unwrap()); // <= 8 bytes
 		for chunk in &self.chunks {
-			out.extend_from_slice(chunk);
+			out.put_slice(chunk);
 		}
 	}
 }

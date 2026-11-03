@@ -564,7 +564,7 @@ export class Reload {
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
 					// torn down. Anything else is the peer's GOAWAY.
-					const ended = await effect.race(connection.closed, wireOf(connection).goaway);
+					const ended = await effect.race(connection.closed, connection.draining);
 					if (ended === undefined) return;
 					if (ended === null || ended instanceof Error) {
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);

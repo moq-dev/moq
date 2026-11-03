@@ -84,6 +84,7 @@ This README's own work, once the children land:
 ## Required
 
 - [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
 - [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists

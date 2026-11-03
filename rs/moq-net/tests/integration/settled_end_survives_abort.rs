@@ -33,7 +33,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
 		.with_range(0..)
-		.with_max_delay(std::time::Duration::from_secs(30));
+		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 	let mut consumer = track.subscribe(subscription);
 
 	for _ in 0..GROUPS {

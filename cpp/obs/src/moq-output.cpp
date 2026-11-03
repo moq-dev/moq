@@ -7,7 +7,6 @@
 #include "moq-settings.h"
 #include "moq-url.h"
 #include "logger.h"
-#include "util/util_uint64.h"
 
 #include <algorithm>
 #include <cstring>
@@ -168,7 +167,8 @@ bool MoQOutput::Start()
 	}
 
 	// Create the broadcast on an origin of our own, then announce it so subscribers
-	// can discover it. Stop() finishes it, so each Start creates a fresh one. Only the
+	// can discover it. Stop() finishes it, so each Start creates a fresh one, under a
+	// fresh instance the broadcast mints and keeps across reconnects. Only the
 	// broadcast is kept: the route outlives the publication until the broadcast closes.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
@@ -177,9 +177,7 @@ bool MoQOutput::Start()
 		LOG_ERROR("Failed to create broadcast: %s", publication.error().to_string().c_str());
 		return false;
 	}
-	moq::AnnounceRoute route;
-	route.epoch = moq::mint_epoch();
-	if (auto announced = (*publication)->announce(route); !announced) {
+	if (auto announced = (*publication)->announce({}); !announced) {
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
 		return false;
 	}
@@ -230,7 +228,6 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		epoch = *route.epoch;
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -372,7 +369,6 @@ void MoQOutput::Reset()
 		connected = false;
 		live = false;
 		url.clear();
-		epoch.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 		token_refusal.clear();
@@ -427,12 +423,6 @@ void MoQOutput::Reset()
 
 	for (auto &[encoder, bitrate] : restore)
 		SetBitrate(encoder, bitrate);
-}
-
-std::string MoQOutput::GetEpoch()
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	return epoch;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
@@ -605,20 +595,20 @@ void MoQOutput::Data(struct encoder_packet *packet)
 }
 
 // The packet's timestamp on the broadcast clock, or nothing when it falls before zero.
-static std::optional<uint64_t> PacketTimestamp(const struct encoder_packet *packet)
+static std::optional<moq::Timestamp> PacketTimestamp(const struct encoder_packet *packet)
 {
-	// Add ~1 second offset to handle negative PTS from audio priming frames, and
-	// the same to video for A/V sync.
-	// TODO: This is slightly wrong when den is not evenly divisible by num, but close enough.
-	int64_t pts = packet->pts + packet->timebase_den / packet->timebase_num;
-	if (pts < 0)
+	// A tick is num/den seconds, so den units per second hold it exactly, 1001/30000 included.
+	// Offset by one second to cover the negative PTS of audio priming frames, and video by
+	// the same for A/V sync.
+	const int64_t value = packet->pts * packet->timebase_num + packet->timebase_den;
+	if (value < 0)
 		return std::nullopt;
-	return util_mul_div64(pts, 1000000ULL * packet->timebase_num, packet->timebase_den);
+	return moq::Timestamp{static_cast<uint64_t>(value), static_cast<uint64_t>(packet->timebase_den)};
 }
 
-static moq::Frame PacketFrame(const struct encoder_packet *packet, uint64_t timestamp_us)
+static moq::Frame PacketFrame(const struct encoder_packet *packet, const moq::Timestamp &timestamp)
 {
-	return moq::Frame{std::vector<uint8_t>(packet->data, packet->data + packet->size), timestamp_us};
+	return moq::Frame{std::vector<uint8_t>(packet->data, packet->data + packet->size), timestamp};
 }
 
 void MoQOutput::AudioData(struct encoder_packet *packet)
