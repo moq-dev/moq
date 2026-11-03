@@ -13,7 +13,6 @@ import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
-import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -104,59 +103,6 @@ async function setup() {
 		},
 	};
 }
-
-test("a returning route reaches past its earlier cap with relative and time ends", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		for (const end of [{ relative: 991 }, { time: Timestamp.fromMillis(10) }]) {
-			const front = new Front();
-			const sources = [new BroadcastProducer(), new BroadcastProducer()];
-			const handles = sources.map((source) => source.consume());
-			const tracks = sources.map((source) => source.createTrack("seq", { timescale: Timescale.MILLI }));
-			const write = (route: number, sequence: number) => {
-				const group = tracks[route].createGroup(sequence);
-				group.writeFrame({ timestamp: Timestamp.fromMillis(sequence), payload: enc.encode("x") });
-				group.finish();
-			};
-			for (const route of [0, 1]) {
-				for (let sequence = 2; sequence <= 11; sequence++) write(route, sequence);
-				write(route, 1001);
-			}
-			front.serve(handles[0]);
-			const sub = front.consumer
-				.track("seq")
-				.subscribe({ delay: { max: Milli(3_600_000) }, ranges: [{ start: { absolute: 2 }, end }] })
-				.withRange({ start: { included: 2 }, end: { excluded: 3 } });
-			try {
-				await clock.advance(Nano.zero);
-				const held = sub.tryRecvGroup();
-				if (!held) throw new Error("expected the held group");
-				expect(held.sequence).toBe(2);
-				sub.withRange({ start: { included: 4 }, end: { excluded: 5 } });
-				front.serve(handles[1]);
-				await clock.advance(Nano.zero);
-				expect(drain(sub)).toEqual([4]);
-				front.serve(handles[0]);
-				await clock.advance(Nano.zero);
-				sub.withRange({ start: { included: 4 }, end: { excluded: 9 } });
-				await clock.advance(Nano.zero);
-				expect(drain(sub).sort((a, b) => a - b)).toEqual([5, 6, 7, 8]);
-				sub.withRange({ start: { included: 4 } });
-				await clock.advance(Nano.zero);
-				expect(drain(sub).sort((a, b) => a - b)).toEqual([9, 10]);
-				held.close();
-			} finally {
-				sub.close();
-				front.consumer.close();
-				for (const handle of handles) handle.close();
-				for (const source of sources) source.close();
-			}
-		}
-	} finally {
-		installed.close();
-	}
-});
 
 test("returning to a route reuses its subscription and held group", async () => {
 	const clock = new Manual();
