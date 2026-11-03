@@ -4,7 +4,7 @@ import { Timestamp } from "./time.ts";
 import type { Info } from "./track.ts";
 
 /**
- * `timestamp` at `info`'s {@link Info.timescale}, rounded as the wire rounds it.
+ * `timestamp` at `info`'s {@link Info.timescale}, rounded down, as Rust's `Timestamp::convert` does.
  *
  * A track is all timed or all untimed, so a frame must match it: a timestamp on an untimed track,
  * none on a timed one, or one the scale can't hold throws {@link TimestampMismatch}. A writer that
@@ -16,7 +16,7 @@ export function rescale(info: Pick<Info, "timescale">, timestamp: Timestamp | un
 	if ((timescale !== undefined) !== (timestamp !== undefined)) throw new TimestampMismatch();
 	if (timestamp === undefined || timescale === undefined) return undefined;
 	try {
-		return new Timestamp(Math.round(timestamp.as(timescale)), timescale);
+		return new Timestamp(Math.floor(timestamp.as(timescale)), timescale);
 	} catch (cause) {
 		throw new TimestampMismatch({ cause });
 	}

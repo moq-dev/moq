@@ -41,10 +41,10 @@ export function encodeObjectExtensions(
 	// The units come from the track's TIMESCALE property, not from here: repeating the
 	// timescale on every object would cost bytes per frame to restate something fixed for
 	// the track's lifetime. The timestamp is converted into the track's units so the value
-	// on the wire matches what the track declared. The shared conversion is exact at the same
-	// scale, and refused before anything is written when the result leaves the range a
+	// on the wire matches what the track declared, rounded down as Rust does. The shared
+	// conversion is exact at the same scale, and refused before anything is written when the result leaves the range a
 	// Timestamp, and so the receiver, can hold.
-	const value = Math.round(timestamp.as(timescale));
+	const value = Math.floor(timestamp.as(timescale));
 	// The only property, so its type's delta from the previous one is from zero.
 	return concat([encodeVarint(PROP_TIMESTAMP, version), encodeVarint(value, version)]);
 }

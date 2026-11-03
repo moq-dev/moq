@@ -22,7 +22,8 @@ test("a same-scale timestamp is written exactly, up to the largest a Timestamp h
 
 test("a timestamp is converted to the track's scale", () => {
 	expect(roundtrip(Timestamp.fromMillis(1234), Timescale.NANO)?.value).toBe(1_234_000_000);
-	expect(roundtrip(Timestamp.fromMicros(1_500), Timescale.MILLI)?.value).toBe(2);
+	// Rounded down, as Rust converts it.
+	expect(roundtrip(Timestamp.fromMicros(1_500), Timescale.MILLI)?.value).toBe(1);
 });
 
 test("a conversion past what a Timestamp holds is refused before anything is written", () => {

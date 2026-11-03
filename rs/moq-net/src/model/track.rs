@@ -17172,7 +17172,10 @@ mod test {
 		let timed = Info::timed();
 		let ms = Timestamp::from_micros(2_400).unwrap();
 		let rescaled = timed.rescale(Some(ms)).unwrap().unwrap();
-		assert_eq!(rescaled.scale(), Timescale::MILLI);
+		assert_eq!(rescaled, Timestamp::from_millis(2).unwrap());
+		// Halfway rounds down too, as `@moq/net`'s `Track.rescale` does.
+		let half = timed.rescale(Timestamp::from_micros(1_500).ok()).unwrap().unwrap();
+		assert_eq!(half, Timestamp::from_millis(1).unwrap());
 		assert!(matches!(timed.rescale(None), Err(Error::TimestampMismatch)));
 		// (2^61-1) seconds overflows conversion to the milli-scale track.
 		let huge = Timestamp::from_secs((1 << 61) - 1).unwrap();

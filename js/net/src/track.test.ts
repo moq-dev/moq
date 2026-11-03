@@ -504,11 +504,14 @@ test("refresh must be a u32 ratio", () => {
 	expect(infoDefaults({ refresh: 0 }).refresh).toBe(0);
 });
 
-test("rescale matches the track's timeline, rounded as the wire rounds it", () => {
+test("rescale matches the track's timeline, rounded down as Rust's convert does", () => {
 	const timed = { timescale: Timescale.MILLI };
 	const rescaled = rescale(timed, Timestamp.fromMicros(2_400));
 	expect(rescaled?.value).toBe(2);
 	expect(rescaled?.scale).toBe(Timescale.MILLI);
+	// Halfway and fractional values round down too, where Math.round would give 2 and 3.
+	expect(rescale(timed, Timestamp.fromMicros(1_500))?.value).toBe(1);
+	expect(rescale(timed, new Timestamp(2.6, Timescale.MILLI))?.value).toBe(2);
 	expect(() => rescale(timed, undefined)).toThrow(TimestampMismatch);
 	const huge = new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MILLI);
 	expect(() => rescale({ timescale: Timescale.NANO }, huge)).toThrow(TimestampMismatch);

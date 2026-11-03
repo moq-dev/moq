@@ -49,8 +49,8 @@ function assertTimestampValue(value: number): void {
  * own scale, so a track can pick its units and conversions can't silently mix them up.
  *
  * The value must be finite and in `[0, Number.MAX_SAFE_INTEGER]`. Fractions are allowed
- * ({@link Timestamp.now}, scale conversion). Encoding rounds to the nearest integer at the
- * track timescale. Integer timestamps are exact through `2^53 - 1` units; this package
+ * ({@link Timestamp.now}, scale conversion). Encoding rounds down to an integer at the
+ * track timescale, as the Rust `Timestamp::convert` does. Integer timestamps are exact through `2^53 - 1` units; this package
  * does not use BigInt for timestamps. {@link Timestamp.as} also refuses a converted
  * value that leaves that range, so a legal source timestamp cannot become an unencodable
  * wire timestamp after a scale change.

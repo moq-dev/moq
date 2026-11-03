@@ -119,7 +119,7 @@ function stamping(version: Version, info: Pick<track.Info, "timescale">): Stamp 
 /** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out untimed. */
 function wireTime(timestamp: Timestamp | undefined, stamp: Stamp): number {
 	const own = stamp.timed && rescale(stamp.timed, timestamp);
-	return own ? own.value : Math.round(Timestamp.now().as(stamp.timescale));
+	return own ? own.value : Math.floor(Timestamp.now().as(stamp.timescale));
 }
 
 /**

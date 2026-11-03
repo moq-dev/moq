@@ -80,7 +80,7 @@ test("frames roundtrip signed, timestamps included", async () => {
 
 	const group = video.appendGroup();
 	await group.writeFrame(Time.Timestamp.fromMillis(1), encoder.encode("keyframe"));
-	// Signed at the track's scale, rounded as the wire rounds it.
+	// Signed at the track's scale, rounded down as the wire rounds it.
 	await group.writeFrame(Time.Timestamp.fromMicros(2_400), new Uint8Array());
 
 	const consumer = await published.consume(key.public);

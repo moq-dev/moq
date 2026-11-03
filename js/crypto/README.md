@@ -25,7 +25,7 @@ An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed a
 characters (a DNS label). `SecretKey.generate()` keeps the private half a nonextractable `CryptoKey`.
 
 `Broadcast.Producer` wraps the `@moq/net` broadcast, mints a fresh instance, and signs each frame
-over the application path, instance, track, group, frame index, and timestamp (rounded to the
+over the application path, instance, track, group, frame index, and timestamp (rounded down to the
 track's timescale, as the wire carries it). Announce the broadcast with that instance on its route:
 
 ```ts

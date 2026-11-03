@@ -509,6 +509,7 @@ fn sign_interop() {
 	};
 
 	let stamps = [10, 20, 30];
+	let fractional = [1_500, 2_600, 3_000];
 	let output = bun(serde_json::json!({
 		"seed": hex::encode(seed.as_ref()),
 		"path": path.as_str(),
@@ -519,8 +520,9 @@ fn sign_interop() {
 			sign_group(9, 9, Some((stamps, stamps))),
 			sign_group(10, 10, Some((stamps, [11, 20, 30]))),
 		],
-		// Microseconds on a millisecond track: JS signs the rounded value the wire carries.
-		"js": [write("js", None), write("js", None), write("js-video", Some([2_400, 2_600, 3_000]))],
+		// Microseconds on a millisecond track: JS signs the value the wire carries, rounded down
+		// as `track::Info::rescale` rounds it.
+		"js": [write("js", None), write("js", None), write("js-video", Some(fractional))],
 	}));
 
 	assert_eq!(output["public"], key.public().to_string());
@@ -561,5 +563,14 @@ fn sign_interop() {
 		.iter()
 		.map(|frame| frame["timestamp"].as_u64().unwrap())
 		.collect();
-	assert_eq!(timed, [2, 3, 3]);
+	let track = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+	let rescaled: Vec<u64> = fractional
+		.iter()
+		.map(|&micros| {
+			let at = moq_net::Timestamp::from_micros(micros).unwrap();
+			track.rescale(Some(at)).unwrap().unwrap().as_millis() as u64
+		})
+		.collect();
+	assert_eq!(timed, rescaled);
+	assert_eq!(timed, [1, 2, 3]);
 }
