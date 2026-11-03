@@ -10,7 +10,7 @@ const PAYLOAD = 8;
 const APPENDS = 64;
 const REPS = 5;
 // Every retained group, however old: replay is the work being measured.
-const SUBSCRIPTION = { groups: { start: { included: 0 } }, delay: { max: null } };
+const SUBSCRIPTION = { ranges: [{ start: { absolute: 0 } }], delay: { max: null } };
 
 // The arrival order of sequences 0..count-1: ascending, descending, or a seeded shuffle.
 function arrivals(count: number, order: Order): number[] {
