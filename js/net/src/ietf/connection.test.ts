@@ -1,20 +1,20 @@
 import { expect, spyOn, test } from "bun:test";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
-import { SessionCode } from "../error.ts";
+import { SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Stream, Writer } from "../stream.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { Group } from "./object.ts";
+import { Frame, Group } from "./object.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
 import { SetupOption, SetupOptions } from "./setup_options.ts";
-import { SubscribeOk } from "./subscribe.ts";
+import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
@@ -125,16 +125,22 @@ for (const [version, alpn] of [
 	[Version.DRAFT_20, ALPN.DRAFT_20],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
-	test(`SUBSCRIBE_TRACKS is refused on its own stream on ${alpn}`, async () => {
+	test(`a refused SUBSCRIBE_TRACKS leaves subscriptions usable after a pause on ${alpn}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.server, { version });
+		const origin = new OriginProducer();
+		const publication = origin.createBroadcast(Path.from("prefix"));
+		publication.announce();
+		const track = publication.broadcast.createTrack("video", {});
 		const connection = new Connection({
 			url: new URL("https://example.com"),
 			quic: pair.server,
 			control,
 			version,
 			client: false,
+			publish: origin.consume(),
 		});
+		const uni = pair.client.incomingUnidirectionalStreams.getReader();
 
 		try {
 			// A second listing of the same prefix is refused the same way, each spending its Request ID.
@@ -150,8 +156,56 @@ for (const [version, alpn] of [
 				expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x3);
 				expect(await stream.reader.done()).toBe(true);
 			}
+
+			// The browser pauses by cancelling its subscription, then opens a fresh one.
+			// Neither the refused listing nor the old request may end the returning reader.
+			for (let i = 0; i < 2; i++) {
+				const stream = await Stream.open(pair.client, { version });
+				await Message.write(
+					stream.writer,
+					Subscribe.id,
+					new Subscribe({
+						requestId: BigInt(4 + i * 2),
+						trackNamespace: Path.from("prefix"),
+						trackName: "video",
+						subscriberPriority: 128,
+						filter: { kind: "nextObject" },
+					}),
+					version,
+				);
+				expect(await stream.reader.u53()).toBe(SubscribeOk.id);
+				const ok = await SubscribeOk.decode(stream.reader, version);
+				const group = track.appendGroup();
+				group.writeFrame({ payload: Uint8Array.of(i + 1) });
+				group.finish();
+
+				for (;;) {
+					const incoming = await uni.read();
+					if (incoming.done) throw new Error("the subscription served no group");
+					const reader = new Reader(incoming.value, undefined, version);
+					const header = await Group.decode(reader, version);
+					expect(header.trackAlias).toBe(ok.trackAlias);
+					// Next Object may first open an empty tail of the previous group.
+					if (header.groupId < i) {
+						while (!(await reader.done())) {
+							const frame = await reader.decode((cursor) => Frame.decode(cursor, header.flags, undefined));
+							expect(frame.payload).toBeUndefined();
+						}
+						continue;
+					}
+					expect(header.groupId).toBe(i);
+					const frame = await reader.decode((cursor) => Frame.decode(cursor, header.flags, undefined));
+					expect(frame.payload).toEqual(Uint8Array.of(i + 1));
+					break;
+				}
+
+				stream.abort(new StreamError(StreamCode.Cancel, { message: "pause" }));
+				while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			}
 		} finally {
+			uni.releaseLock();
 			connection.abort();
+			origin.close();
 		}
 	});
 }
