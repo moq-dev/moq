@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive operations wake transmission themselves
+
+`ShouldTransmit` is removed. `recv::Stream::lease` returns `Result<Lease, Error>` and
+`poll_lease` returns `Poll<Result<Lease, Error>>`; remove the transmit hint from tuple
+destructuring. `restore`, `release`, and `Chunks::finalize` return `()`; call them
+directly. Each operation wakes the connection's transmit waiter when needed.
+
 ### Waits replace stream and connection events
 
 Every wait is a `poll_*` taking the caller's `&kio::Waiter`, which moq-quic registers and wakes itself, so a driver keeps no waiter tables.

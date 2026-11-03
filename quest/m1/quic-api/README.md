@@ -46,7 +46,6 @@ side by side and fix any name or signature that still differs, and check
 
 ## Required
 
-- [Poll forms](/quest/m1/quic-api/poll.md) - both drivers' waits poll as `&self, &kio::Waiter` forwards to moq-quic, the async forms wrap them, and `send::Finished` is a future
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - `quic::web` in both crates implements moq-net's poll traits, deleting the generic `web_transport_trait` adapters and the dependency on it
 
 ## Related

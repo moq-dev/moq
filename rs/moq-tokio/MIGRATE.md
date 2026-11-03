@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC waits have caller-owned poll forms
+
+The QUIC driver connection's stream opens, accepts, datagram receive and close waits,
+the endpoint's accept, and both send handles' close waits now expose `poll_*` methods
+taking `&self, &kio::Waiter`. Existing async methods keep their behavior and wrap the
+polls. `send::Finished` also implements `Future`, with the same result as `stopped()`:
+`None` for acknowledged data and FIN or a local reset, `Some(code)` for a peer stop,
+and an error if the connection ends first.
+
 ### QUIC handshake data needs no downcast ([#7028](https://github.com/moq-dev/moq/pull/7028))
 
 `quic::driver::Connecting::handshake_data` returns `crypto::HandshakeData` and `Connection::handshake_data` returns `Option<crypto::HandshakeData>`, so drop the `downcast`.

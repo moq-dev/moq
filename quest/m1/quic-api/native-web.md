@@ -65,10 +65,6 @@ Align the two stacks while each gets its impl:
 Measure relay CPU per Gbps and allocations per stream before and after on
 the same workload.
 
-## Required
-
-- [Poll forms](/quest/m1/quic-api/poll.md) - the leak-free driver polls these impls forward to
-
 ## Related
 
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - retakes its profile after the adapter's per-stream boxing is gone

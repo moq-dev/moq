@@ -229,7 +229,7 @@ impl Reader {
 		}
 		let mut conn = self.conn.state.lock();
 		// moq-quic wakes the driver for any credit the lease returned.
-		let (result, _) = conn.inner.recv_stream(self.id).poll_lease(waiter, want);
+		let result = conn.inner.recv_stream(self.id).poll_lease(waiter, want);
 		let err = match ready!(result) {
 			Ok(lease) => return Poll::Ready(Ok(lease)),
 			Err(err) => err,
@@ -296,7 +296,7 @@ impl Reader {
 					Ok(mut chunks) => {
 						let status = read_fn(&mut chunks, waiter);
 						// moq-quic wakes the driver for the credit the read returned.
-						let _ = chunks.finalize();
+						chunks.finalize();
 						status
 					}
 					Err(err) => ReadStatus::Failed(None, err),
@@ -424,7 +424,7 @@ impl Lease<'_> {
 	pub fn release(mut self) {
 		let lease = self.inner.take().expect("only taken to hand it back");
 		let mut conn = self.reader.conn.state.lock();
-		let _ = conn.inner.recv_stream(self.reader.id).release(lease);
+		conn.inner.recv_stream(self.reader.id).release(lease);
 	}
 }
 
@@ -452,7 +452,7 @@ impl Drop for Lease<'_> {
 		if let Some(lease) = self.inner.take()
 			&& let Some(mut conn) = self.reader.conn.state.lock_for_drop()
 		{
-			let _ = conn.inner.recv_stream(self.reader.id).restore(lease);
+			conn.inner.recv_stream(self.reader.id).restore(lease);
 		}
 	}
 }
