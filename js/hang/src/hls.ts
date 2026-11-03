@@ -31,7 +31,7 @@ import { Micro } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import type * as Catalog from "./catalog";
 import { PRIORITY, u53, u53Schema } from "./catalog";
 

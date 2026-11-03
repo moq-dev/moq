@@ -15,7 +15,10 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use moq_tokio::moq_net::{self, Timestamp, frame, track::Subscription};
+use moq_tokio::moq_net::{
+	self, Timestamp, frame,
+	track::{Delay, Subscription},
+};
 use moq_tokio::quic::{driver, web};
 use tokio::io::AsyncWriteExt;
 
@@ -631,7 +634,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	let every = Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
 		.with_range(0..)
-		.with_max_delay(Duration::from_secs(60));
+		.with_delay(Delay::default().with_max(Duration::from_secs(60)));
 	let waiting = tokio::spawn({
 		let remote = setup.remote.clone();
 		async move { remote.track("parked").unwrap().subscribe(every).await }
@@ -973,7 +976,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 		let name = index.to_string();
 		let track = setup.broadcast.create_track(name.as_str(), timed()).unwrap();
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.
-		let subscription = Subscription::default().with_max_delay(TIMEOUT);
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(TIMEOUT));
 		let sub = kio::clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")

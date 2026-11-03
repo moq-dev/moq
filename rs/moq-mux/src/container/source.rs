@@ -519,7 +519,8 @@ impl ExportSource {
 			if sibling {
 				self.instance = Some(broadcast.clone());
 			}
-			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
+			let mut subscription = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(self.max_delay));
 			if let Some(after) = self.after {
 				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
@@ -1045,7 +1046,7 @@ mod tests {
 			let observed = kio::wait(|waiter| {
 				let _ = export.poll_read(waiter);
 				match live.track.subscription() {
-					Some(subscription) => Poll::Ready(subscription.max_delay),
+					Some(subscription) => Poll::Ready(subscription.delay.max),
 					None => Poll::Pending,
 				}
 			})
@@ -1300,7 +1301,10 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let consumer = Consumer::new(
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))),
+			track.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+			),
 			HangContainer::Legacy(crate::container::Kind::Audio),
 		);
 		export.state = SourceState::Active(Box::new(consumer));

@@ -49,10 +49,10 @@ async fn relay(version: &str) -> Relay {
 		.expect("broadcast resolves");
 	let subscriber = kio::clock::timeout(
 		TIMEOUT,
-		remote
-			.track("data")
-			.unwrap()
-			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600))),
+		remote.track("data").unwrap().subscribe(
+			track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600))),
+		),
 	)
 	.await
 	.expect("subscribe timeout")

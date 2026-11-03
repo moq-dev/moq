@@ -1477,7 +1477,7 @@ describe("Decoder with a warmup rendition", () => {
 			const run = await refresh(fields);
 			try {
 				expect(run.playback.codecs).toBe(decoders);
-				const budgets = subscribe.mock.calls.map(([options]) => options?.maxDelay);
+				const budgets = subscribe.mock.calls.map(([options]) => options?.delay?.max);
 				// The max-delay decoder tolerates one sweep more; js/net merges the two upstream.
 				expect(budgets).toEqual(decoders === 1 ? [Milli(0)] : [Milli(0), Milli(WARMUP)]);
 			} finally {

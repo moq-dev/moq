@@ -3269,7 +3269,6 @@ dependencies = [
  "moq-mux",
  "moq-net",
  "moq-tokio",
- "regex",
  "serde",
  "serde_json",
  "serde_with",

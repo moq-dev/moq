@@ -11622,7 +11622,8 @@ mod tests {
 		queued(&server).await.accept(&source);
 		let resolved = pending.await.expect("resolves");
 
-		let budget = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+		let budget =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600)));
 		for name in ["a", "b"] {
 			let mut subscription = resolved
 				.track(name)
@@ -13091,7 +13092,9 @@ mod tests {
 		let mut again = resolved
 			.track("video")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)))
+			.subscribe(
+				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+			)
 			.await
 			.expect("resubscribe");
 		let mut group = kio::clock::timeout(Duration::from_secs(1), again.recv_group())
@@ -13245,7 +13248,9 @@ mod tests {
 		let mut subscription = edge_resolved
 			.track("video")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)))
+			.subscribe(
+				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+			)
 			.await
 			.expect("resubscribe");
 		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))

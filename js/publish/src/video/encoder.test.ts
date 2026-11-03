@@ -1182,7 +1182,7 @@ test.each([false, true])(
 			await recording.send(150);
 			expect(recording.keys).toEqual(onDemand ? [] : [0, 100]);
 
-			late = net.track("video").subscribe({ maxDelay: Milli(10_000) });
+			late = net.track("video").subscribe({ delay: { max: Milli(10_000) } });
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
 			await recording.send(200);

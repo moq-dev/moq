@@ -1646,7 +1646,7 @@ impl Reader {
 			subscriber = async {
 				instance
 					.track(&shape.track)?
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay))
+					.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(max_delay)))
 					.await
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
@@ -2816,7 +2816,7 @@ mod session_tests {
 		});
 
 		let request = await_request(&mut dynamic);
-		assert_eq!(request.subscription().unwrap().max_delay, Some(max_delay));
+		assert_eq!(request.subscription().unwrap().delay.max, Some(max_delay));
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();

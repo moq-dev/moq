@@ -4,6 +4,7 @@
 //! subscription, and each still gets the groups its own range asks for.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -143,7 +144,7 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 			.expect("broadcast resolves");
 
 		let subscription = Subscription::default()
-			.with_max_delay(Duration::from_secs(60))
+			.with_delay(Delay::default().with_max(Duration::from_secs(60)))
 			.with_ranges(sparse);
 		let mut reader = subscribe(&remote, subscription).await;
 		kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
@@ -262,7 +263,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 						&fixture.remote,
 						Subscription::default()
 							.with_ranges([Range::live()])
-							.with_max_delay(None),
+							.with_delay(Delay::default().with_max(None)),
 					)
 					.await;
 					assert_eq!(next(&mut warm).await, Some(5));
@@ -271,7 +272,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 				}
 				let subscription = Subscription::default()
 					.with_ranges([Range::groups(1..2), Range::live()])
-					.with_max_delay(None);
+					.with_delay(Delay::default().with_max(None));
 				let mut reader = subscribe(&fixture.remote, subscription).await;
 				let mut got = Vec::new();
 				for _ in 0..2 {
@@ -292,7 +293,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		let mut fixture = range_fixture(relay).await;
 		let initial = Subscription::default()
 			.with_range(2..4)
-			.with_max_delay(None)
+			.with_delay(Delay::default().with_max(None))
 			.with_order(moq_net::track::Order::Ascending);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = [next(&mut reader).await.unwrap(), next(&mut reader).await.unwrap()];
@@ -350,7 +351,7 @@ async fn draft22_resolves_cached_time_ends() {
 		let mut fixture = range_fixture(relay).await;
 		let initial = Subscription::default()
 			.with_range(2..4)
-			.with_max_delay(None)
+			.with_delay(Delay::default().with_max(None))
 			.with_order(moq_net::track::Order::Ascending);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = [next(&mut reader).await.unwrap(), next(&mut reader).await.unwrap()];
@@ -428,7 +429,9 @@ async fn draft22_can_widen_while_the_current_group_is_quiet() {
 		);
 		let mut history = subscribe(
 			&fixture.remote,
-			Subscription::default().with_range(0..2).with_max_delay(None),
+			Subscription::default()
+				.with_range(0..2)
+				.with_delay(Delay::default().with_max(None)),
 		)
 		.await;
 		let mut got = [next(&mut history).await.unwrap(), next(&mut history).await.unwrap()];
@@ -452,7 +455,9 @@ async fn draft18_updates_narrow_then_widen() {
 	let version = "moq-transport-18";
 	for relay in [false, true] {
 		let mut fixture = range_fixture_version(version, relay).await;
-		let initial = Subscription::default().with_range(5..).with_max_delay(None);
+		let initial = Subscription::default()
+			.with_range(5..)
+			.with_delay(Delay::default().with_max(None));
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = Vec::new();
 		for _ in 0..1 {
@@ -581,7 +586,9 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 async fn draft22_cold_widening_finishes_the_largest_group() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture_history("moq-transport-22", relay, 0).await;
-		let initial = Subscription::default().with_range(2..).with_max_delay(None);
+		let initial = Subscription::default()
+			.with_range(2..)
+			.with_delay(Delay::default().with_max(None));
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		for start in [0, 1, 2] {
 			let future = start + 1;
@@ -745,7 +752,7 @@ async fn a_covered_bounded_subscription_ends_on_lite07() {
 
 		let bounded = |range: std::ops::Range<u64>| {
 			Subscription::default()
-				.with_max_delay(Duration::from_secs(60))
+				.with_delay(Delay::default().with_max(Duration::from_secs(60)))
 				.with_order(moq_net::track::Order::Ascending)
 				.with_ranges([Range::groups(range)])
 		};

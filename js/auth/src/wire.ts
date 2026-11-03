@@ -11,7 +11,7 @@
  */
 
 import { Pattern, Patterns } from "@moq/pattern";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 
 /** A list of pattern texts, each validated by `Pattern.parse`. */
 export const PatternListSchema = z.array(
