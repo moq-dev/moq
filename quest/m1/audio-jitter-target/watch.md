@@ -72,3 +72,4 @@ defer validation of the current player.
 
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - confirms the build-flush fix on the nightlies, no gate on this proof
+- [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - the native time-stretch sharing one NetEq algorithm and its test vectors with this one

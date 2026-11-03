@@ -37,6 +37,7 @@ native playback against its budgets.
 ## Required
 
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
+- [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - `moq play` copies NetEq's accelerate and preemptive expand, sharing the browser's algorithm and vectors, so its native rows reach zero steady-state underruns
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - post-cap nightlies confirm AAC bursty discards about as much audio as Opus bursty and the first row no longer stalls, and every browser row's budgets are re-measured from them
 
 ## Closes

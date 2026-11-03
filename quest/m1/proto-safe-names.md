@@ -23,13 +23,16 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 - m2
 
 Both gaps are the same bug as hang's catalog maps, fixed by
-[moq-dev/moq#7498](https://github.com/moq-dev/moq/pull/7498): a plain object
-keyed by an untrusted name. Planned as one quest (maintainer, from #7498's
+[moq-dev/moq#7498](https://github.com/moq-dev/moq/pull/7498) (merged as
+[7b4f53165](https://github.com/moq-dev/moq/commit/7b4f53165056d665378a09ec84465b6b033f5bf7)):
+a plain object keyed by an untrusted name. Planned as one quest (maintainer, from #7498's
 iterate, 2026-11-03).
 
 - **MSF `ext`.** It parses with `z.record` (around line 76), which drops a
-  `__proto__` key. Use the same parser and test corpus as hang's maps from
-  #7498.
+  `__proto__` key; the encoder already writes one as an own property. Use the
+  parser hang's maps use since #7498 (`renditions()`/`section()` in
+  `js/hang/src/catalog/section.ts`, or its pattern if `js/msf` can't depend on
+  hang) and add the case to the parity corpus.
 - **js/publish.** `#renditions` and `#records` in
   `js/publish/src/broadcast.ts` (around lines 147 and 163) are plain
   objects, so `this.#renditions.peek()[name]` finds `Object.prototype`'s
@@ -39,7 +42,3 @@ iterate, 2026-11-03).
 - Test `__proto__`, `constructor`, and `toString` in each place.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Text and data sections keep a prototype-named ID](/quest/m1/cut-audit/catalog-proto-ids.md) - the parser and corpus this reuses (moq-dev/moq#7498)
