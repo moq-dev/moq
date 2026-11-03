@@ -1466,11 +1466,8 @@ mod tests {
 			.unwrap();
 		catalog
 			.audio(
-				moq_mux::timeline::Audio {
-					end: track,
-					buffered: Container::Legacy(moq_mux::container::Kind::Audio),
-					target: Container::Legacy(moq_mux::container::Kind::Audio),
-				},
+				track,
+				Container::Legacy(moq_mux::container::Kind::Audio),
 				AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1),
 			)
 			.unwrap()
