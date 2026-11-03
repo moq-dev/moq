@@ -2,6 +2,7 @@
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium, type Page } from "playwright";
+import { collections, GC_CATEGORIES, rendererPid, traceEvents } from "./trace.ts";
 import { workspace } from "./workspace.ts";
 
 const { values, positionals } = parseArgs({
@@ -14,9 +15,19 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-const benchmarks = { frames: 26, drift: 36, ledger: 12, buffered: 36 } as const;
-if (!Object.hasOwn(benchmarks, benchmark)) throw new Error("--bench must be frames, drift, ledger, or buffered");
-const expected = benchmarks[benchmark as keyof typeof benchmarks];
+// The rows each benchmark prints per run.
+const ROWS: Record<string, number> = {
+	frames: 26,
+	drift: 36,
+	ledger: 12,
+	bandwidth: 44,
+	replay: 72,
+	"resume-history": 72,
+	buffered: 36,
+};
+if (!Object.hasOwn(ROWS, benchmark)) throw new Error(`--bench must be one of ${Object.keys(ROWS).join(", ")}`);
+// The fixture directory, relative to each checkout; buffered drives @moq/hang's container consumer.
+const dir = benchmark === "buffered" ? "js/hang/bench" : "js/net/bench";
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -30,10 +41,8 @@ const scripts = new Map<string, string>();
 for (const [name, root] of roots) {
 	const entry =
 		benchmark === "frames"
-			? resolve(root, "js/net/bench/frames.ts")
-			: benchmark === "buffered"
-				? resolve(import.meta.dir, "../../js/hang/bench/buffered.ts")
-				: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
+			? resolve(root, dir, "frames.ts")
+			: resolve(import.meta.dir, "../..", dir, `${benchmark}.ts`);
 	const result = await Bun.build({
 		entrypoints: [entry],
 		target: "browser",
@@ -42,27 +51,26 @@ for (const [name, root] of roots) {
 			{
 				name: "repeat-microbenchmark",
 				setup(build) {
-					// The ledger is internal, so select it explicitly instead of a package export.
-					build.onResolve({ filter: /^\.\.\/src\/ledger\.ts$/ }, () => ({
-						path: resolve(root, "js/net/src/ledger.ts"),
-					}));
-					// So is the container consumer, which the buffered fixture drives directly.
-					build.onResolve({ filter: /^\.\.\/src\/container\/(consumer|legacy)\.ts$/ }, ({ path }) => ({
-						path: resolve(root, "js/hang/src", path.slice("../src/".length)),
-					}));
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|buffered)\.ts$/ }, async ({ path }) => {
-						const source = await Bun.file(path).text();
-						if (benchmark !== "frames")
-							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
-						const marker =
-							'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
-						const parts = source.split(marker);
-						if (parts.length !== 2) throw new Error("frames benchmark entry moved");
-						return {
-							loader: "ts",
-							contents: `${parts[0]}globalThis.measure = async () => {${marker}\n${parts[1]}\n};`,
-						};
-					});
+					// Internal modules have no package export, so select each variant's own explicitly.
+					build.onResolve({ filter: /^\.\.\/src\// }, ({ path, importer }) =>
+						importer.endsWith(`/${dir}/${benchmark}.ts`) ? { path: resolve(root, dir, path) } : undefined,
+					);
+					build.onLoad(
+						{ filter: /\/bench\/(frames|drift|ledger|bandwidth|replay|resume-history|buffered)\.ts$/ },
+						async ({ path }) => {
+							const source = await Bun.file(path).text();
+							if (benchmark !== "frames")
+								return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
+							const marker =
+								'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
+							const parts = source.split(marker);
+							if (parts.length !== 2) throw new Error("frames benchmark entry moved");
+							return {
+								loader: "ts",
+								contents: `${parts[0]}globalThis.measure = async () => {${marker}\n${parts[1]}\n};`,
+							};
+						},
+					);
 				},
 			},
 		],
@@ -83,13 +91,35 @@ const server = Bun.serve({
 			});
 		}
 		if (!scripts.has(name)) return new Response("unknown variant", { status: 404 });
+		// Cross-origin isolated, so performance.now() resolves 5 us instead of 100 us.
 		return new Response(`<script type="module" src="/${name}.js"></script>`, {
-			headers: { "Content-Type": "text/html" },
+			headers: {
+				"Content-Type": "text/html",
+				"Cross-Origin-Opener-Policy": "same-origin",
+				"Cross-Origin-Embedder-Policy": "require-corp",
+			},
 		});
 	},
 });
-const browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_BIN });
+const browser = await chromium.launch({
+	headless: true,
+	executablePath: process.env.BROWSER_BIN,
+	// Retention is counted after full collections the page asks for, against an unrounded heap size.
+	args: benchmark === "resume-history" ? ["--js-flags=--expose-gc", "--enable-precise-memory-info"] : [],
+});
 const samples: { round: number; variant: string; rows: string[] }[] = [];
+const traced: { variant: string; rows: string[] }[] = [];
+// Main-thread GC across one whole run per variant, from a traced pass after the timed rounds.
+const gc: Record<string, ReturnType<typeof collections>> = {};
+const save = () =>
+	Bun.write(
+		values.out,
+		JSON.stringify(
+			{ benchmark, browser: browser.version(), warmup: 1, roots: Object.fromEntries(roots), samples, traced, gc },
+			null,
+			2,
+		),
+	);
 try {
 	const pages = new Map<string, Page>();
 	const rows = new Map<string, string[]>();
@@ -106,29 +136,58 @@ try {
 			void page.close();
 		});
 		await page.goto(`http://127.0.0.1:${server.port}/${name}`);
+		if (!(await page.evaluate("crossOriginIsolated"))) throw new Error(`${name} page is not cross-origin isolated`);
 		await page.waitForFunction(() => typeof (globalThis as unknown as { measure: unknown }).measure === "function");
 		await page.evaluate("globalThis.measure()");
 		console.log(`warmed ${name}`);
 	}
+	// One run of `variant`'s page, requiring every row.
+	const measure = async (variant: string) => {
+		rows.set(variant, []);
+		await pages.get(variant)?.evaluate("globalThis.measure()");
+		const measured = rows.get(variant) ?? [];
+		if (measured.length !== ROWS[benchmark]) throw new Error(`incomplete rows: ${variant}`);
+		return measured;
+	};
 	for (let round = 0; round < rounds; round++) {
 		const names = [...roots.keys()];
 		if (round % 2) names.reverse();
 		for (const variant of names) {
-			rows.set(variant, []);
-			await pages.get(variant)?.evaluate("globalThis.measure()");
-			const measured = rows.get(variant);
-			if (measured?.length !== expected) throw new Error(`incomplete rows: ${variant}`);
-			samples.push({ round, variant, rows: measured });
-			await Bun.write(
-				values.out,
-				JSON.stringify(
-					{ benchmark, browser: browser.version(), warmup: 1, roots: Object.fromEntries(roots), samples },
-					null,
-					2,
-				),
-			);
+			samples.push({ round, variant, rows: await measure(variant) });
+			await save();
 			console.log(`measured ${round} ${variant}`);
 		}
+	}
+	// Traced apart from the timed rounds, so tracing overhead never enters a timing.
+	for (const [variant, page] of pages) {
+		if (benchmark !== "replay" && benchmark !== "resume-history") continue;
+		await browser.startTracing(page, { categories: GC_CATEGORIES });
+		let buffer: Buffer | undefined;
+		try {
+			traced.push({ variant, rows: await measure(variant) });
+		} finally {
+			buffer = await browser.stopTracing();
+		}
+		const events = traceEvents(buffer);
+		gc[variant] = collections(events, rendererPid(events, page.url()));
+		await save();
+		console.log(`traced ${variant}`);
+	}
+	// Reachability is exact here, so a retired route still reachable fails the run, once every
+	// variant's samples are written for comparison.
+	if (benchmark === "resume-history") {
+		const retaining = [...samples, ...traced].filter(({ rows }) =>
+			rows.some((row) =>
+				row
+					.split(",")
+					.slice(5, 9)
+					.some((retired) => retired !== "0"),
+			),
+		);
+		if (retaining.length)
+			throw new Error(
+				`retired routes stayed reachable: ${[...new Set(retaining.map((s) => s.variant))].join(", ")}`,
+			);
 	}
 } finally {
 	await browser.close();

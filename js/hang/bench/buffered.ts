@@ -40,7 +40,7 @@ function wire(group: number, frame: number): Group.Frame {
 }
 
 function open(track: Track.Producer, delay: Signal<Delay>): Player {
-	const subscriber = track.subscribe({ maxDelay: HOLD });
+	const subscriber = track.subscribe({ delay: { max: HOLD } });
 	const received: Group.Consumer[] = [];
 	const recv = subscriber.recvGroup.bind(subscriber);
 	subscriber.recvGroup = async () => {

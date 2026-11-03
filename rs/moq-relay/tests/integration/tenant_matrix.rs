@@ -142,8 +142,8 @@ async fn start(io_uring: bool) -> Running {
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	let internal = relay.internal().addr().expect("internal listener bound");
-	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
 	ready.wait().await.expect("relay ready");
 	Running {
@@ -322,12 +322,11 @@ async fn raw_setup(addr: SocketAddr, target: &str) -> (driver::endpoint::Endpoin
 	connect.tls.insecure = Some(true);
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
 			.expect("endpoint");
 	let conn = endpoint
-		.connect(&driver::client::Config::new(Arc::new(crypto)), addr, "localhost")
+		.connect(&driver::client::Config::new(Arc::new(tls)), addr, "localhost")
 		.expect("connect")
 		.await
 		.expect("handshake");

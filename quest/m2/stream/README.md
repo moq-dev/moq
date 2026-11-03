@@ -17,7 +17,7 @@ fastest-reader pacing gives.
 Decided 2026-10-25 with the maintainer (mesh planning interview):
 
 - TCP-level proxying over groups, never IP over datagrams.
-- A forwarded service is one [socket](/quest/m2/socket/README.md), and each
+- A forwarded service is one [socket](/quest/m1/socket/README.md), and each
   TCP connection is one bi track on it (amended 2026-11-01, below), one group
   each way; each TCP `read()` becomes one frame, because a frame's length must
   be known before it is written and a read has one. It coalesces whatever is
@@ -40,7 +40,7 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
   [mesh](/quest/m2/mesh/README.md), which builds on this.
 
 Amended 2026-11-01 with the maintainer (socket planning interview): connection
-setup is the [socket](/quest/m2/socket/README.md) epic's `Listener` and `dial`,
+setup is the [socket](/quest/m1/socket/README.md) epic's `Listener` and `dial`,
 which settles the path layout (`L/.dial/<id>`, `L/.accept/<id>`). The earlier
 one track per direction with a group per connection is replaced by one bi
 track per connection. Each connection then gets its own priority, pacing, and
@@ -54,7 +54,7 @@ the window.
 
 ## Required
 
-- [Rust sockets](/quest/m2/socket/rust.md) - the dial/accept primitive and tracks as streams
+- [Rust sockets](/quest/m1/socket/rust.md) - the dial/accept primitive and tracks as streams
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - relays push back instead of evicting a reader that keeps up
 - [Rust byte streams](/quest/m2/stream/rust.md) - a duplex `AsyncRead`/`AsyncWrite` stream, a listener and a dialer, and `moq` CLI forwarding
 - [JS byte streams](/quest/m2/stream/js.md) - the same surface in `@moq/net`
