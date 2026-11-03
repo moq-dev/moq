@@ -102,6 +102,17 @@ harness_begin() {
     echo "run: $HARNESS_RUN"
 }
 
+# ── artifacts ───────────────────────────────────────────────────────────────
+
+# Copy a build artifact into this run before another build or collection can
+# remove it. Dereference symlinks: ownership must not depend on the build cache.
+# DEST is relative to HARNESS_RUN; callers use that path for every later load.
+harness_stage() {
+    local dest="$HARNESS_RUN/$1" source="$2"
+    mkdir -p "$(dirname "$dest")" || return $?
+    cp -L "$source" "$dest"
+}
+
 # ── endpoints ───────────────────────────────────────────────────────────────
 
 # Where port reservations live. Shared across worktrees on purpose: the point is

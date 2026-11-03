@@ -34,6 +34,10 @@ Every run owns three things and touches nothing else.
 holding every log, generated config, and capture. `HARNESS_RUNS` moves the root.
 Client builds go here too (the Python venv, the staged Go modules, the browser
 page), so two runs from one checkout never rebuild a client the other is running.
+Interop and wire-compat also copy their Cargo executables, headers, static libraries,
+and GStreamer plugin here immediately after building. Every later execution, link,
+and plugin load uses these copies, so collecting shared Cargo output cannot remove
+an artifact a running matrix still needs. Binary overrides are copied too.
 
 **Reserved ports.** A port is claimed by creating a directory under
 `/tmp/moq-test-ports-<uid>` (`HARNESS_PORT_ROOT`), held for the whole run, and
