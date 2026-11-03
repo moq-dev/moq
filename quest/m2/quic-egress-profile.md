@@ -39,9 +39,11 @@ Then, only where the profile shows a cost:
 
 - `sendmmsg` in `moq_sock::udp` behind the existing GSO path, submitting every
   train ready across connections in one call, falling back to per-train
-  `sendmsg` on partial failure the way the GSO fallback does. A prototype on
-  the tokio driver gives the profile a starting point. It was measured before
-  being [ported onto main](https://github.com/zshenker/moq/commit/040df9948bd110a83463f35cd4bd86245db03373)
+  `sendmsg` on partial failure the way the GSO fallback does. A contributor's
+  prototype on the tokio driver gives the profile a starting point; none of
+  its code is in-tree, and its numbers below are the prototype's, not the
+  profile's. It was measured before being
+  [ported onto main in a fork](https://github.com/zshenker/moq/commit/040df9948bd110a83463f35cd4bd86245db03373)
   (opt-in through `Endpoint::batch_sends`), and comes with its
   [raw samples](https://github.com/zshenker/moq/blob/eae2ca6941ce67b8e14ba6afdb76c1c2240c45a0/bench/driver-batch-sends/samples.jsonl),
   so the profile should re-measure the port.
@@ -52,7 +54,7 @@ Then, only where the profile shows a cost:
     in its opt-in (`Endpoint::batch_sends`), its flush task's spawner, the
     handshake bypass, and its base. Those revisions and the harness are not
     public.
-  - Invocation: one run per point of the harness's
+  - Invocation: one run per sample of the harness's
     `bench --sessions 1000 --rate 30 --object-size 1024-4096 --objects-per-stream 1 --client-threads 6 --client-endpoints 12 --pin --batch-sends {false|true}`,
     with audio at `--rate 50 --object-size 100-200`, 1 Mbit/s video at
     `--object-size 3125-5208 --objects-per-stream 30`, and 3 Mbit/s video at
@@ -63,7 +65,7 @@ Then, only where the profile shows a cost:
   - Setup: server and client on one host over loopback, the server on one
     tokio worker pinned to one physical core, and the client on 6 pinned workers
     over 12 sockets. 1,280-byte payloads, MTU discovery off, GSO and GRO on,
-    BBR3. Only the server batches. Each point is one 15 s run after a 5 s
+    BBR3. Only the server batches. Each sample is one 15 s run after a 5 s
     warmup, on a dual-socket Broadwell Xeon with Linux 6.12. On and off ran back
     to back on the same binary, in alternating order across runs.
   - Server CPU (`getrusage`, % of one core):
@@ -92,10 +94,13 @@ Then, only where the profile shows a cost:
     `try_send`, so GSO halting still applies.
   - The driver copies each train into a per-socket queue, bounded in bytes,
     and one task per socket yields once and then flushes the queue.
-  - Handshake packets bypass the queue. `handle_unreachable` acts only during
-    a handshake, and a queued send's error never reaches it, so a dial to an
-    unreachable address would wait out the handshake timeout instead of
-    failing with `NO_VIABLE_PATH`.
+  - Handshake packets try the socket directly, since `handle_unreachable`
+    acts only during a handshake and a queued send's error never reaches it;
+    without that, a dial to an unreachable address would wait out the
+    handshake timeout instead of failing with `NO_VIABLE_PATH`. The bypass is
+    not unconditional: on `WouldBlock` the port queues the handshake packet,
+    and that packet's send error is lost the same way. A shipped version
+    should keep backpressure on handshake sends instead of queueing them.
   - A rebind wraps the new socket the same way. Dropping the queue sends what
     the socket has room for and closes it synchronously, freeing the port. The
     flush is best-effort: it stops at `WouldBlock`, and a batch the flush task
