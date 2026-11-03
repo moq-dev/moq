@@ -86,9 +86,7 @@ class SelectionTest(unittest.TestCase):
         )
         just.chmod(0o755)
         subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
-        self.assertEqual(
-            calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts"]
-        )
+        self.assertEqual(calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts"])
         self.assertFalse(summary.exists())
 
     def test_cli_loads_without_shadowing_standard_library_modules(self):
