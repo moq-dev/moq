@@ -52,38 +52,10 @@ fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
 }
 
 /// Request a published broadcast via `moq_origin_request` and return its handle.
-///
-/// A broadcast created with `moq_origin_create_broadcast` becomes reachable
-/// asynchronously, so an early request can race the attach and fail as unroutable;
-/// retry until the deadline.
 fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
-	let deadline = kio::clock::now() + TIMEOUT;
-	loop {
-		let cb = Callback::new();
-		let _task = id(unsafe {
-			moq_origin_request(
-				origin,
-				path.as_ptr() as *const c_char,
-				path.len(),
-				std::ptr::null(),
-				0,
-				Some(channel_callback),
-				cb.ptr,
-			)
-		});
-		let code = cb.recv();
-		if code > 0 {
-			cb.recv_terminal();
-			return code as u32;
-		}
-		// A failed request already delivered its terminal code; back off and retry.
-		assert!(kio::clock::now() < deadline, "timed out requesting broadcast: {code}");
-		#[expect(
-			clippy::disallowed_methods,
-			reason = "the test thread has no runtime; it polls the C API's runtime between real retries"
-		)]
-		std::thread::sleep(Duration::from_millis(10));
-	}
+	let code = request_once(origin, path);
+	assert!(code > 0, "requesting the broadcast failed: {code}");
+	code as u32
 }
 
 /// Request `path` once and return the first callback code: a broadcast handle, or

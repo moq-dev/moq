@@ -1943,8 +1943,9 @@ export class Consumer implements Reader {
 	 * Resolve one publisher instance serving `path`, pinned to `instance` when given.
 	 *
 	 * The request owns discovery of its path until closed and retries route churn while
-	 * pending. It fails `Unroutable` once every session's discovery has synced without a
-	 * route for it, and can use a session without discovery instead. Once resolved it keeps
+	 * pending. It fails `Unroutable` once at least one session is attached and every
+	 * session's discovery has synced without a route for it, and can use a session without
+	 * discovery instead. With no session attached, such as between reconnects, it waits. Once resolved it keeps
 	 * that instance, ending when the instance stops serving. Use {@link follow} to move on
 	 * to the next one.
 	 */

@@ -699,6 +699,32 @@ test("a pending request fails Unroutable once its discovery syncs without a rout
 	origin.close();
 });
 
+// Unlike a Rust origin, which answers for its own table at once, a JS origin usually fronts a
+// reconnecting connection: no session yet means nothing has synced.
+test("a pending request waits for a session before concluding absence", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+	const request = origin.request(Path.from("room/missing"));
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+
+	let synced: (() => void) | undefined;
+	const stop = wire.interests((prefix, wanted) => {
+		if (wanted) synced = wire.snapshot(prefix);
+	});
+	const detach = wire.attach(true);
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+	synced?.();
+	await settle();
+	expect((request.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+
+	request.close();
+	stop();
+	detach();
+	origin.close();
+});
+
 test("a follower retains a selected handler's explicit unroutable refusal", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
