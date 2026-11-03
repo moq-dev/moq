@@ -5349,6 +5349,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-mux-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-mux",
+]
+
+[[package]]
 name = "moq-native"
 version = "0.20.0"
 dependencies = [
@@ -5605,6 +5613,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-rtmp-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-rtmp",
+]
+
+[[package]]
 name = "moq-rtsp"
 version = "0.1.0"
 dependencies = [
@@ -5809,9 +5825,12 @@ name = "moq-transcode"
 version = "0.1.10"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
+ "futures",
  "hang",
  "kio 0.6.2",
+ "libc",
  "moq-mux",
  "moq-net",
  "moq-tokio",
