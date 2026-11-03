@@ -146,13 +146,12 @@ async fn window_opens_once_admitted(mut relay: Relay, port: u16) {
 	connect.tls.insecure = Some(true);
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
 			.expect("endpoint");
 	let conn = endpoint
 		.connect(
-			&driver::client::Config::new(std::sync::Arc::new(crypto)),
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
 			([127, 0, 0, 1], port).into(),
 			"localhost",
 		)
