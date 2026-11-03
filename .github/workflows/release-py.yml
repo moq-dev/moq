@@ -116,7 +116,7 @@ jobs:
         if: github.event_name != 'workflow_run' && steps.ffi-gate.outputs.unreleased != 'true' && steps.ffi-pypi.outputs.exists != 'true'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
-        run: echo "::warning::moq-ffi ${FFI_VERSION} is not on PyPI; deferring to the Release Py FFI chain."
+        run: echo "::warning::moq-ffi ${FFI_VERSION} is not on PyPI; Release Py FFI must publish it before this wrapper can publish."
 
       # The release gate: skip publishing a version that's already on PyPI
       # (re-uploads are rejected anyway, but this keeps the run green and makes

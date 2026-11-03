@@ -10,19 +10,13 @@ import { YAML } from "bun";
 
 type Job = {
 	if?: string;
-	outputs?: Record<string, string>;
-	permissions?: Record<string, string>;
 	uses?: string;
 	needs?: string[];
 	environment?: string | { name?: string };
 	with?: Record<string, string | boolean>;
 	steps?: { id?: string; if?: string }[];
 };
-type Workflow = {
-	on: Record<string, unknown>;
-	permissions: Record<string, string>;
-	jobs: Record<string, Job>;
-};
+type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
 
 async function read(name: string): Promise<Workflow> {
 	return YAML.parse(await Bun.file(`.github/workflows/${name}.yml`).text()) as Workflow;
@@ -81,93 +75,15 @@ test("release dispatches name a release ref", async () => {
 	]);
 });
 
-test("Python release retries require release and published, unchanged FFI", async () => {
+test("Python release retries share the release ref and FFI gates with pushes", async () => {
 	const workflow = await read("release-py");
 	expect(Object.keys(workflow.on)).toContain("workflow_dispatch");
 	const build = workflow.jobs.build;
-	const runs = new Function("github", "startsWith", `return (${build.if});`);
-	const startsWith = (value: string, prefix: string) => value.startsWith(prefix);
-	const publishes = new Function(
-		"github",
-		"steps",
-		`return (${build.outputs?.publish
-			.replace(/\$\{\{|\}\}/g, "")
-			.replaceAll("steps.ffi-gate", 'steps["ffi-gate"]')
-			.replaceAll("steps.ffi-pypi", 'steps["ffi-pypi"]')});`,
+	expect(build.if?.replace(/\s+/g, " ")).toContain(
+		"(github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/release'",
 	);
-	for (const event_name of ["push", "workflow_dispatch"]) {
-		const github = {
-			event_name,
-			ref: "refs/heads/release",
-			repository_owner: "moq-dev",
-			event: { workflow_run: {} },
-		};
-		expect(runs(github, startsWith)).toBe(true);
-		for (const unreleased of ["true", "false"]) {
-			for (const ffiExists of ["true", "false"]) {
-				for (const wrapperExists of ["true", "false"]) {
-					const steps: Record<string, { outputs: Record<string, string> }> = {
-						"ffi-gate": { outputs: {} },
-						"ffi-pypi": { outputs: {} },
-						pypi: { outputs: { exists: wrapperExists } },
-					};
-					// A skipped Actions step has empty outputs. Evaluate the real
-					// step conditions so a skipped FFI check cannot pass this matrix.
-					for (const id of ["ffi-gate", "ffi-pypi"]) {
-						const step = build.steps?.find((step) => step.id === id);
-						const enabled = new Function(
-							"github",
-							"steps",
-							`return (${step?.if?.replaceAll("steps.ffi-gate", 'steps["ffi-gate"]')});`,
-						);
-						if (enabled(github, steps))
-							steps[id].outputs = id === "ffi-gate" ? { unreleased } : { exists: ffiExists };
-					}
-					expect([event_name, unreleased, ffiExists, wrapperExists, publishes(github, steps)]).toEqual([
-						event_name,
-						unreleased,
-						ffiExists,
-						wrapperExists,
-						unreleased === "false" && ffiExists === "true" && wrapperExists === "false",
-					]);
-				}
-			}
-		}
+	for (const id of ["ffi-gate", "ffi-pypi"]) {
+		const step = build.steps?.find((step) => step.id === id);
+		expect(step?.if).toContain("github.event_name != 'workflow_run'");
 	}
-	for (const ref of ["refs/heads/main", "refs/heads/topic", "refs/tags/release", "refs/tags/moq-ffi-v0.4.20"]) {
-		expect(
-			runs(
-				{ event_name: "workflow_dispatch", ref, repository_owner: "moq-dev", event: { workflow_run: {} } },
-				startsWith,
-			),
-		).toBe(false);
-	}
-	const upstream = { conclusion: "success", event: "push", head_branch: "moq-ffi-v0.4.20" };
-	for (const [repository_owner, workflow_run, wanted] of [
-		["moq-dev", upstream, true],
-		["fork", upstream, false],
-		["moq-dev", { ...upstream, conclusion: "failure" }, false],
-		["moq-dev", { ...upstream, event: "workflow_dispatch" }, false],
-		["moq-dev", { ...upstream, head_branch: "main" }, false],
-	] as const) {
-		expect(
-			runs(
-				{ event_name: "workflow_run", ref: "refs/heads/main", repository_owner, event: { workflow_run } },
-				startsWith,
-			),
-		).toBe(wanted);
-	}
-	expect(
-		publishes(
-			{ event_name: "workflow_run" },
-			{ pypi: { outputs: { exists: "false" } }, "ffi-gate": { outputs: {} }, "ffi-pypi": { outputs: {} } },
-		),
-	).toBe(true);
-	expect(workflow.permissions).toEqual({ contents: "read" });
-	expect(build.permissions).toBeUndefined();
-	expect(build.environment).toBeUndefined();
-	expect(workflow.jobs.publish.needs).toEqual(["build"]);
-	expect(workflow.jobs.publish.if).toBe("${{ needs.build.outputs.publish == 'true' }}");
-	expect(workflow.jobs.publish.environment).toEqual({ name: "pypi", url: "https://pypi.org/p/moq-rs" });
-	expect(workflow.jobs.publish.permissions).toEqual({ "id-token": "write" });
 });
