@@ -103,7 +103,7 @@ impl FrameBounds {
 		Self(crate::lite::FramesBench::new(ranges))
 	}
 
-	/// The first and last frame served of `group`, as a served group or datagram looks
+	/// The first and last frame served of `group`, as a served group looks
 	/// them up.
 	pub fn serve(&self, group: u64) -> (u64, Option<u64>) {
 		self.0.serve(group)
@@ -238,49 +238,23 @@ fn ietf_paths(data: &[u8], version: ietf::Version) {
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp or an inflated size, whether the
-	// session negotiated the `ietf` extension, or which draft its track came from, so try
-	// every reading.
-	let negotiated: &[bool] = match version.has_ietf() {
-		true => &[false, true],
-		false => &[false],
-	};
+	// The body doesn't say whether it carries a timestamp, so try both readings.
 	let mut any = false;
-	for &negotiated in negotiated {
-		for timescale in [Some(crate::Timescale::MILLI), None] {
-			for ietf in [
-				None,
-				Some(ietf::Version::Draft18),
-				Some(ietf::Version::Draft20),
-				Some(ietf::Version::Draft22),
-			] {
-				for compressed in [false, true] {
-					let framing = lite::Framing {
-						timescale,
-						ietf,
-						compressed,
-					};
-					let Ok(decoded) =
-						lite::Datagram::decode(Bytes::copy_from_slice(data), version, negotiated, |_| framing)
-					else {
-						continue;
-					};
-					any = true;
-					let Some(decoded) = decoded else {
-						continue;
-					};
-
-					let Ok(first) = decoded.encode_bytes(version) else {
-						continue;
-					};
-
-					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
-						.expect("could not decode our own encoding")
-						.expect("encoded group decoded as padding");
-					assert_eq!(echo, decoded, "datagram did not survive a round trip");
-				}
-			}
-		}
+	for timed in [true, false] {
+		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
+			continue;
+		};
+		any = true;
+		let Some(decoded) = decoded else {
+			continue;
+		};
+		let Ok(first) = decoded.encode_bytes(version) else {
+			continue;
+		};
+		let echo = lite::Datagram::decode(first, version, |_| timed)
+			.expect("could not decode our own encoding")
+			.expect("encoded datagram decoded as padding");
+		assert_eq!(echo, decoded, "datagram did not survive a round trip");
 	}
 	any
 }
@@ -660,9 +634,7 @@ impl LiteSample {
 				subscribe: 3,
 				sequence: 1_234,
 				timestamp: Some(1_234_567_890),
-				inflated: None,
 				payload: bytes::Bytes::new(),
-				ietf: None,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -695,13 +667,9 @@ impl LiteSample {
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
 			Self::Datagram => {
-				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Framing {
-					timescale: Some(crate::Timescale::MILLI),
-					ietf: None,
-					compressed: false,
-				})
-				.map(|_| 1)
-				.unwrap()
+				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+					.map(|_| 1)
+					.unwrap()
 			}
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}

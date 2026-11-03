@@ -279,15 +279,6 @@ impl Version {
 		)
 	}
 
-	/// Whether the stream error table has NOT_FETCHABLE, for a FETCH that reached a
-	/// datagram. Added in lite-07; earlier versions say NOT_FOUND instead.
-	pub(crate) fn has_not_fetchable(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
 	/// Whether SUBSCRIBE_DROP's Error Code is a stream error code, ending a dropped group's
 	/// reader as a reset keeping its header would. Added in lite-07; earlier versions carry
 	/// an application-specific code there.

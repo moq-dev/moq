@@ -222,9 +222,7 @@ pub(crate) mod request {
 			// moq-transport has no code for a FETCH that reached a datagram, which is never
 			// cached, so it is a group that is not there. NOT_SUPPORTED would claim the peer
 			// does not implement FETCH at all.
-			Error::NotFound
-			| Error::NotFetchable
-			| Error::Stream(StreamError::NotFound | StreamError::NotFetchable) => return DOES_NOT_EXIST,
+			Error::NotFound | Error::Stream(StreamError::NotFound) => return DOES_NOT_EXIST,
 			Error::InvalidRange => invalid_range(kind),
 			Error::InvalidJoiningRequestId => invalid_joining_request_id(kind, version),
 			// A path with no route is one we will not carry. A subscriber that asked for it
@@ -300,7 +298,6 @@ pub(crate) mod request {
 			Error::Unsupported,
 			Error::Session(SessionError::Unsupported),
 			Error::NotFound,
-			Error::NotFetchable,
 			Error::InvalidRange,
 			Error::InvalidJoiningRequestId,
 			Error::Unroutable,
@@ -339,15 +336,6 @@ pub(crate) mod request {
 
 			// A broadcast with no route is, to the peer that asked for it, not here either.
 			assert_eq!(to_code(&Error::Unroutable, Kind::Subscribe, Version::Draft22), 0x10);
-
-			// So is a datagram group: never cached, so a FETCH reaching one finds nothing, and
-			// NOT_SUPPORTED would say the endpoint has no FETCH at all.
-			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft22), 0x10);
-			// Including a lite-07 upstream's NOT_FETCHABLE, bridged by a relay.
-			assert_eq!(
-				to_code(&Error::Stream(StreamError::NotFetchable), Kind::Fetch, Version::Draft22),
-				0x10
-			);
 		}
 
 		/// A refused route says UNINTERESTED to the requests that offer content.
@@ -560,7 +548,6 @@ mod tests {
 	fn unregistered_conditions_are_internal() {
 		for err in [
 			StreamError::NotFound,
-			StreamError::NotFetchable,
 			StreamError::Unroutable,
 			StreamError::Old,
 			StreamError::Evicted,
@@ -619,7 +606,6 @@ mod tests {
 		StreamError::TooFarBehind,
 		StreamError::MalformedTrack,
 		StreamError::NotFound,
-		StreamError::NotFetchable,
 		StreamError::Unroutable,
 		StreamError::Old,
 		StreamError::Evicted,

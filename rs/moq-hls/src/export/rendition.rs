@@ -1703,12 +1703,10 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 	matches!(
 		err,
 		moq_net::Error::NotFound
-			| moq_net::Error::NotFetchable
 			| moq_net::Error::Old
 			| moq_net::Error::Evicted
 			| moq_net::Error::Stream(
 				moq_net::StreamError::NotFound
-					| moq_net::StreamError::NotFetchable
 					| moq_net::StreamError::Old
 					| moq_net::StreamError::Evicted
 			)
@@ -1872,7 +1870,6 @@ mod tests {
 	fn a_cache_miss_that_crossed_a_session_is_still_a_cache_miss() {
 		for local in [
 			moq_net::Error::NotFound,
-			moq_net::Error::NotFetchable,
 			moq_net::Error::Old,
 			moq_net::Error::Evicted,
 		] {

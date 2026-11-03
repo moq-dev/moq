@@ -2594,13 +2594,12 @@ impl Handle {
 			&& !matches!(
 				err,
 				Error::Cancel
-					| Error::Lagged | Error::NotFetchable
+					| Error::Lagged
 					| Error::Stream(
 						StreamError::Cancel
 							| StreamError::Old | StreamError::Evicted
 							| StreamError::DeliveryTimeout
 							| StreamError::TooFarBehind
-							| StreamError::NotFetchable
 					)
 			);
 		if cut {

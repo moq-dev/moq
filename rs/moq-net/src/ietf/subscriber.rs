@@ -5383,10 +5383,10 @@ impl Subscriber {
 				prior_group = Some(sequence);
 			}
 
-			// A datagram cannot be reconstructed from a FETCH stream.
+			// A datagram is never a stream track's, so a FETCH stream has no group to rebuild.
 			if object.datagram {
 				tracing::debug!(?group, "a datagram group is not fetchable");
-				return Err(Error::NotFetchable);
+				return Err(Error::NotFound);
 			}
 
 			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
