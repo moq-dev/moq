@@ -1447,6 +1447,21 @@ mod tests {
 		assert!(next.await.unwrap(), "no admission arrives once every clone is gone");
 	}
 
+	#[tokio::test]
+	async fn queued_embedded_admissions_survive_the_last_auth() {
+		let (auth, mut admissions) = Auth::embedded("test");
+		let waiting = submit_embedded(&auth, "/waiting");
+		drop(auth);
+		let admission = admissions
+			.next()
+			.await
+			.expect("a queued admission outlives the last Auth");
+		assert_eq!(admission.request.path, "/waiting");
+		admission.refuse(Error::Refused(Default::default()));
+		assert!(matches!(waiting.await, Err(Error::Refused(_))));
+		assert!(admissions.next().await.is_none());
+	}
+
 	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
