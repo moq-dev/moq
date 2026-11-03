@@ -16,7 +16,7 @@ Three findings shaped the method during this attempt:
 
 These are sampled-delivery estimates on a shared host. No confidence interval is claimed.
 
-## Chat on io_uring
+## Chat on io\_uring
 
 The quiet round of run.qYPSii (one-minute load 2-4, every cell at 20,000 frames/s with no loss):
 
@@ -36,7 +36,7 @@ Markers are inclusive shares of the fixed-period samples; they overlap and are n
 - **[moq-dev/moq#6224](https://github.com/moq-dev/moq/pull/6224), 26k of a +34k step, accidental, fixed.** Its `Reader::learn_end` polled each subscriber's finish through the track lock on every forward-drop pass (`poll_forward_drop` → `Subscriber::poll_drop` → `Reader::poll_serving` → `sync` → `learn_end`). It takes 10-18% of all relay instructions from [fd59eb18a5](https://github.com/moq-dev/moq/commit/fd59eb18a50f6e0ac819e73d941a3832cbdac91f), the PR's merge, through [2fff7ea7ae](https://github.com/moq-dev/moq/commit/2fff7ea7ae4eff1ac984c1f1af6894e3529f1cf3), and none at its parent ([run.16AJUb](relay-cpu-bisect.json) has every point in the interval). [moq-dev/moq#7532](https://github.com/moq-dev/moq/pull/7532) brought it to 0.5% on `main`.
 - **[moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171) and the changes after it, +39k to [2fff7ea7ae](https://github.com/moq-dev/moq/commit/2fff7ea7ae4eff1ac984c1f1af6894e3529f1cf3), mostly fixed.** Dynamic tracks added `Cursor::probe`, 15.8k at [991572d636](https://github.com/moq-dev/moq/commit/991572d636d264c6189a3477849d2969e689f55c) and 9.8k on `main` (below). The rest is track lock contention: futex syscalls and the forward-drop path. [moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493) took the fanout subscribers off the shared lock, and `main`'s syscall leaf is now below the old endpoint's (26.3k against 28.8k).
 - **[cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95) to [e84ffb3de3](https://github.com/moq-dev/moq/commit/e84ffb3de3139f7245bed5697754fd6add9a022e), +18k, a staircase of feature steps.** The first checkpoint measured [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929)'s per-reader ranges and time anchors at +6k. Runs eVjz2w and 2DucdO (main's generator, load 2-5 in the rounds used) put about +6k across [moq-dev/moq#5928](https://github.com/moq-dev/moq/pull/5928) (compressed tracks) and [moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129) (a subscriber reads only its ranges' frames), and +12k in steps of 2-4k from [2d73eea67d](https://github.com/moq-dev/moq/commit/2d73eea67d083ecf18938f4fc7c4842118eb87cf): qmux in tree ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)), signed priorities ([moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142)), the m0 simplification audit and public ingest ([moq-dev/moq#6108](https://github.com/moq-dev/moq/pull/6108), [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)), and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)). Each step is within twice the spread between rounds, so these name the interval, not a single commit's cost.
-- **[moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530) moved io_uring submission, not cost.** `udp::send` doubled after [21d6da9fc1](https://github.com/moq-dev/moq/commit/21d6da9fc108b48373a961f34e43c3fcd38b0146) because each turn now submits its queued sends inside `Shared::push_inner`, while total syscall instructions fell from 39.2k to 26.3k per frame.
+- **[moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530) moved io\_uring submission, not cost.** `udp::send` doubled after [21d6da9fc1](https://github.com/moq-dev/moq/commit/21d6da9fc108b48373a961f34e43c3fcd38b0146) because each turn now submits its queued sends inside `Shared::push_inner`, while total syscall instructions fell from 39.2k to 26.3k per frame.
 
 ## Main against the old endpoint
 
@@ -44,14 +44,14 @@ Every runtime and workload, with the pinned generator:
 
 | Workload, runtime | Run | [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95) | [21d6da9fc1](https://github.com/moq-dev/moq/commit/21d6da9fc108b48373a961f34e43c3fcd38b0146) | `main` | `main` / old | Highest load |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| chat, io_uring | qYPSii, quiet round | 117.7 | 176.2 | 148.8 | 1.26 | 3 |
-| chat, tokio workers | IV47ua, 4 rounds | 131.1 [123.6-131.5] | 186.1 [184.3-189.6] | 171.6 [167.8-172.8] | 1.31 | 23 |
-| video, io_uring | SkAD0k, 4 rounds | 109.7 [105.6-119.9] | 140.3 [138.3-146.8] | 124.9 [120.5-138.3] | 1.14 | 40 |
-| video, tokio workers | Z04ENl, 4 rounds | 152.8 [148.2-163.9] | 167.3 [163.2-175.3] | 146.8 [142.9-147.3] | 0.96 | 40 |
+| chat, io\_uring | qYPSii, quiet round | 117.7 | 176.2 | 148.8 | 1.26 | 3 |
+| chat, tokio workers | IV47ua, 4 rounds | 131.1 \[123.6-131.5] | 186.1 \[184.3-189.6] | 171.6 \[167.8-172.8] | 1.31 | 23 |
+| video, io\_uring | SkAD0k, 4 rounds | 109.7 \[105.6-119.9] | 140.3 \[138.3-146.8] | 124.9 \[120.5-138.3] | 1.14 | 40 |
+| video, tokio workers | Z04ENl, 4 rounds | 152.8 \[148.2-163.9] | 167.3 \[163.2-175.3] | 146.8 \[142.9-147.3] | 0.96 | 40 |
 
-Medians of four rounds, min-max in brackets; every cell delivered its workload's full rate with no loss. The video rows ran at load up to 40, so treat their ratios as approximate. Chat rose on both runtimes, so the remaining cost is shared code. By the nearest named function, chat's growth on `main` falls in the same places on io_uring (run.qYPSii) and the tokio workers (run.IV47ua), in instructions per frame:
+Medians of four rounds, min-max in brackets; every cell delivered its workload's full rate with no loss. The video rows ran at load up to 40, so treat their ratios as approximate. Chat rose on both runtimes, so the remaining cost is shared code. By the nearest named function, chat's growth on `main` falls in the same places on io\_uring (run.qYPSii) and the tokio workers (run.IV47ua), in instructions per frame:
 
-| Growth on `main` | io_uring | tokio | Introduced by |
+| Growth on `main` | io\_uring | tokio | Introduced by |
 | --- | ---: | ---: | --- |
 | `Cursor::probe` and `Misses::judge` for every peek | 8.6k | 8.7k | [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), fills for misses |
 | `Cursor` `sync`, `poll_drift`, `poll_peek`, `TrackState::live_edge` and `live` | 11.0k | 9.0k | [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) and its successors, per-reader ranges and time anchors |

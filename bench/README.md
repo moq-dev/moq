@@ -299,9 +299,9 @@ Hybrid CPUs require performance cores, and count their `cpu_core` events.
 The relay and generator keep these affinities for every revision. Instructions
 mode runs alone.
 
-Each base keeps a detached worktree and target under
-`target/bench/revisions/<sha>`, so later runs reuse its build; delete them with
-`git worktree remove`. The revisions build side by side on every allowed CPU,
+Each base builds into its own target under `target/bench/revisions/<sha>`,
+from a detached worktree in `.tmp/` that the run removes when it exits, so a
+later run reuses that build. The revisions build side by side on every allowed CPU,
 since fat LTO links on one thread. Every round measures each base and the
 current tree back to back, rotating which goes first, for
 `BENCH_RUNTIME_ROUNDS` rounds (default 3). The revisions are each other's

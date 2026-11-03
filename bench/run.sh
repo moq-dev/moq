@@ -186,6 +186,7 @@ fi
 RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
 printf 'Benchmark evidence: %s\n' "$RUN"
 WORKTREE=
+WORKTREES=()
 RELAY_PID=
 HOST_PID=
 LOAD_PID=
@@ -211,10 +212,11 @@ cleanup() {
         kill "$RELAY_PID" 2>/dev/null || true
         wait "$RELAY_PID" 2>/dev/null || true
     fi
-    if [[ -n $WORKTREE ]]; then
-        git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
-        rmdir "$WORKTREE" 2>/dev/null || true
-    fi
+    local worktree
+    for worktree in ${WORKTREE:+"$WORKTREE"} ${WORKTREES[@]+"${WORKTREES[@]}"}; do
+        git -C "$ROOT" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+        rmdir "$worktree" 2>/dev/null || true
+    done
     # Close both pipe writers before waiting for the owned log copiers.
     if [[ -n $STDOUT_PID ]]; then
         exec 1>&3 2>&4
@@ -903,17 +905,18 @@ run_profiles() {
     done
 }
 
-# Check out one revision where it stays put, so Cargo's fingerprints survive and a
-# later bisect step reuses its build. It loads only its own Cargo configuration.
+# Check out one revision for this run, in the checkout's ignored scratch space,
+# where it loads only its own Cargo configuration. Its target persists, keyed by
+# revision; the compiler cache keys on remapped paths, so a fresh checkout reuses it.
 revision_checkout() {
-    local sha=$1 label=$2 checkout=$TARGET/revisions/$1/checkout
-    if [[ $(git -C "$checkout" rev-parse HEAD 2>/dev/null) != "$sha" ]]; then
-        rm -rf "$checkout"
-        git worktree prune
-        git worktree add --detach "$checkout" "$sha" >/dev/null
-    fi
+    local sha=$1 label=$2 worktree
+    mkdir -p "$ROOT/.tmp"
+    worktree=$(mktemp -d "$ROOT/.tmp/moq-bench-base.XXXXXX")
+    WORKTREES+=("$worktree")
+    git worktree add --detach "$worktree" "$sha" >/dev/null
     mkdir -p "$RUN/base-context/$label"
-    (cd "$checkout" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
+    (cd "$worktree" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context/$label" "$sha" --profile)
+    REVISION_CHECKOUT=$worktree
 }
 
 # Count every base and the current tree in rotated order, so each round measures
@@ -929,7 +932,7 @@ run_instructions() {
         if ((${#BASES[@]} > 1)); then label=base-${sha:0:12}; fi
         revision_checkout "$sha" "$label"
         labels+=("$label")
-        checkouts+=("$TARGET/revisions/$sha/checkout")
+        checkouts+=("$REVISION_CHECKOUT")
         targets+=("$TARGET/revisions/$sha/profile")
     done
     labels+=(current)
@@ -943,7 +946,7 @@ run_instructions() {
         if [[ " ${BASES[*]} " != *" $GENERATOR "* ]]; then
             revision_checkout "$GENERATOR" generator
             build_labels+=(generator)
-            build_checkouts+=("$TARGET/revisions/$GENERATOR/checkout")
+            build_checkouts+=("$REVISION_CHECKOUT")
             build_targets+=("$generator")
         fi
     fi
