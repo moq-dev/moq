@@ -15,7 +15,7 @@ Depend on `moq-crypto` and rename the imports:
 | `moq_e2ee::…` | `moq_crypto::e2ee::…` |
 | `moq_sign::…` | `moq_crypto::sign::…` |
 
-`moq_e2ee`'s entries below predate the merge and apply to `moq_crypto::e2ee`.
+`moq_e2ee`'s entries below predate the merge; their `Before` code keeps the old paths, and their instructions name the `moq_crypto::e2ee` ones.
 
 ### Tracks are named semantically through `broadcast` wrappers (#5876)
 
@@ -30,8 +30,8 @@ let subscriber = remote.track(name.as_str())?.subscribe(subscription).await?;
 let reader = consuming.consume(subscriber)?;
 
 // After
-let video = moq_e2ee::broadcast::Producer::new(broadcast, generation).create_track("video", info)?;
-let reader = moq_e2ee::broadcast::Consumer::new(remote, consuming)
+let video = moq_crypto::e2ee::broadcast::Producer::new(broadcast, generation).create_track("video", info)?;
+let reader = moq_crypto::e2ee::broadcast::Consumer::new(remote, consuming)
 	.subscribe("video", subscription)?
 	.await?;
 ```
@@ -42,7 +42,7 @@ A track served on demand is reserved up front with `broadcast::Producer::reserve
 
 The protected path is the opaque broadcast path; the publisher epoch is read from the route's instance instead of a path suffix.
 On wires that do not carry an instance, the session mints one, so the application supplies the epoch.
-Drop `join_epoch` and `split_epoch`: announce the generation's `moq_e2ee::Epoch` as the route's instance with `Route::default().with_instance(generation.epoch().instance(), 0)`, and read it back from the resolved broadcast with `moq_e2ee::Epoch::of(&broadcast)`.
+Drop `join_epoch` and `split_epoch`: announce the generation's `moq_crypto::e2ee::Epoch` as the route's instance with `Route::default().with_instance(generation.epoch().instance(), 0)`, and read it back from the resolved broadcast with `moq_crypto::e2ee::Epoch::of(&broadcast)`.
 
 ### Timestamps are optional
 

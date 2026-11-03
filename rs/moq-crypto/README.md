@@ -75,10 +75,10 @@ learns only its length rounded up to 16 bytes. A track served on demand is reser
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
 let generation = credential.produce();
-let broadcast = origin.create_broadcast(&credential.path("meeting.hang")?)?;
-let protected = broadcast::Producer::new(broadcast.clone(), generation.clone());
+let publication = origin.create_broadcast(&credential.path("meeting.hang")?)?;
+let protected = broadcast::Producer::new(publication.broadcast().clone(), generation.clone());
 let video = protected.create_track("video", None)?;
-broadcast.announce(Route::default().with_instance(generation.epoch().instance(), 0))?;
+publication.announce(Route::default().with_instance(generation.epoch().instance(), 0))?;
 ```
 
 A subscriber follows `credential.path(semantic)` with `origin.follow(path, None)`. It takes
