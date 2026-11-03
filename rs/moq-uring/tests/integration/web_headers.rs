@@ -33,6 +33,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 		quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
 	let address = endpoint.local_addr();
 	let (start_tx, mut start_rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
+	let (acked, acknowledgement) = tokio::sync::oneshot::channel();
 	let client = std::thread::spawn(move || {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		let runtime = tokio::runtime::Builder::new_current_thread()
@@ -86,6 +87,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 			// Wait for acknowledgement so the client stays alive until all payloads arrived.
 			let mut recv = session.accept_uni().await.unwrap();
 			assert_eq!(recv.read_to_end(1).await.unwrap(), [0xff]);
+				acknowledgement.await.expect("server received the ACK");
 		});
 	});
 	let elapsed = worker
@@ -117,6 +119,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 			let mut send = session.open_uni(Default::default()).await.unwrap();
 			send.write_all(&[0xff][..]).await.unwrap();
 			assert_eq!(send.finish().await.unwrap(), None);
+			acked.send(()).expect("release client");
 			elapsed
 		})
 		.expect("worker");

@@ -1277,15 +1277,14 @@ mod tests {
 				};
 				let mut send = client.open_uni(Default::default()).await.unwrap();
 				send.write_all(payload.clone()).await.unwrap();
-				let _finished = send.finish();
+				let finished = send.finish();
 				let mut recv = server.accept_uni().await.unwrap();
 				if !payload.is_empty() {
 					assert_eq!(recv.read_to_end(payload.len()).await.unwrap(), payload);
 				}
-				kio::clock::timeout(Duration::from_secs(2), recv.closed())
-					.await
-					.unwrap_or_else(|err| panic!("FIN watch: framed={framed}, bytes={}, {err}", payload.len()))
-					.unwrap();
+				// The FIN is acknowledged, so checking close needs no timing assumption.
+				assert!(finished.await.unwrap().is_none());
+				assert!(matches!(recv.poll_closed(&Waiter::noop()), Poll::Ready(Ok(()))));
 				assert!(recv.read_chunk(1).await.unwrap().is_none());
 			}
 		}
