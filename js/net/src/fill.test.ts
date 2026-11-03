@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli, yieldNow } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -353,6 +353,55 @@ test("fill: a group arriving live answers the fill", async () => {
 
 	fill.close();
 	requests.close();
+	broadcast.close();
+});
+
+test("fill: an ordered reader stops waiting on an unanswered fill once its budget convicts the hole", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { broadcast, track } = resumed(5n);
+		const requests = track.requests();
+		const reader = track.subscribe({
+			ranges: [{ start: { absolute: 0n } }],
+			delay: { max: Milli(1000) },
+			order: "ascending",
+		});
+		const next = reader.ordered().nextGroup();
+		// The handler takes the fill for the missing groups and never answers.
+		const fill = await requests.requestedFill();
+		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
+
+		// Group 5 arrived when the reader asked, so its budget gives up the holes below a second on.
+		await clock.advance(Nano.fromMilli(Milli(1001)));
+		expect((await next)?.sequence).toBe(5n);
+
+		fill?.close();
+		reader.close();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
+test("fill: a reader joins a fill still served after its handler's handle closed", async () => {
+	const { broadcast, track } = resumed(5n);
+	const requests = track.requests();
+	const first = wireOf(broadcast).fetchGroup("video", 2n);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	requests.close();
+
+	// The fill is still out, so a second fetch joins it rather than failing at once.
+	const second = wireOf(broadcast).fetchGroup("video", 2n);
+	await yieldNow();
+	serve(fill, new Map([[2n, ["shared"]]]));
+	expect(await frames(await first)).toEqual(["shared"]);
+	expect(await frames(await second)).toEqual(["shared"]);
+	// With the fill answered and no handle open, a new miss fails at once again.
+	await expect(wireOf(broadcast).fetchGroup("video", 3n)).rejects.toBeInstanceOf(NotFound);
+
 	broadcast.close();
 });
 

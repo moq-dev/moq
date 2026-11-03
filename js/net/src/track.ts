@@ -2510,7 +2510,8 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (this.#resume || !producer || this.#closed) return undefined;
 		const fills = fillsOf(producer);
-		if (fills.serving) {
+		// A fill already out can be joined even once its handler's handle closed.
+		if (fills.serving || fills.active) {
 			drift ??= this.#drift();
 			const asker = this.#askerOf();
 			const timeline = this.#state.timeline;
@@ -2546,18 +2547,20 @@ export class Subscriber {
 		if (!producer) return false;
 		if (this.#state.info.peek() === undefined && this.#state.closed.peek() === undefined) return "pending";
 		if (cachedHolds(producer, sequence)) return true;
-		const fills = fillsOf(producer);
-		if (!fills.serving) return false;
 		if (this.#state.datagrams.peek().some((datagram) => datagram.sequence === sequence)) return false;
+		// Joins a fill already bringing it, handler or not; asks a new one only while one is open.
+		const asked = fillsOf(producer).ask(sequence, sequence + 1n, this.#askerOf());
+		if (asked.length === 0) return false;
 		insertRun(this.#asked, sequence, sequence + 1n);
-		fills.ask(sequence, sequence + 1n, this.#askerOf());
 		return true;
 	}
 
 	// The lowest group a fill still brings this reader, asking for what it misses first.
 	#filling(): bigint | undefined {
 		const producer = this.#state.producer;
-		if (this.#resume || !producer || !fillsOf(producer).serving) return undefined;
+		if (this.#resume || !producer) return undefined;
+		const fills = fillsOf(producer);
+		if (!fills.serving && !fills.active) return undefined;
 		const drift = this.#drift();
 		const filling = this.#askFills(this.#cursor.peek().start, UNBOUNDED, drift);
 		return filling !== undefined && !this.#staleAt(filling, drift) ? filling : undefined;
@@ -2575,13 +2578,13 @@ export class Subscriber {
 				runGaps(fills.covered(refill.start, refill.end, asker), refill.start, refill.end),
 			),
 		);
+		// Only what a fill took counts as asked: with no handler open, a miss no fill covers is
+		// left to ask once one opens.
 		for (const gap of runGaps(this.#asked, start, end)) {
-			insertRun(this.#asked, gap.start, gap.end);
-			fills.ask(gap.start, gap.end, asker);
+			for (const run of fills.ask(gap.start, gap.end, asker)) insertRun(this.#asked, run.start, run.end);
 		}
 		for (const refill of again) {
-			insertRun(this.#refilled, refill.start, refill.end);
-			fills.ask(refill.start, refill.end, asker);
+			for (const run of fills.ask(refill.start, refill.end, asker)) insertRun(this.#refilled, run.start, run.end);
 		}
 	}
 
@@ -3402,9 +3405,12 @@ export class Subscriber {
 			if (owed) break;
 		}
 		if (!owed) {
-			// A fill still owes a group below, which lands as a group does.
+			// A fill still owes a group below, which lands as a group does. Its staleness deadline
+			// wakes the cursor too, so a fill that never answers cannot pin it.
 			const filling = this.#askFills(start, end, drift);
-			return filling !== undefined && !this.#staleAt(filling, drift, true);
+			if (filling === undefined || this.#staleAt(filling, drift, true)) return false;
+			this.#state.waitingOrdered = true;
+			return true;
 		}
 		if (this.#staleAt(owed.sequence, drift, true)) return false;
 		if (owed.folds !== undefined) this.#wakeAt(owed.folds);
@@ -3484,7 +3490,11 @@ export class Subscriber {
 		if (closed !== undefined) return { kind: "done" };
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
 		const filling = this.#askFills(start, cursor.end ?? UNBOUNDED, drift);
-		if (filling !== undefined && !this.#staleAt(filling, drift, true)) return { kind: "idle" };
+		if (filling !== undefined && !this.#staleAt(filling, drift, true)) {
+			// Its staleness deadline wakes the cursor, as for any owed hole.
+			this.#state.waitingOrdered = true;
+			return { kind: "idle" };
+		}
 		const end = this.#state.end.peek();
 		if (this.#exhausted()) return { kind: "done" };
 		if (

@@ -133,9 +133,19 @@ export class FillState {
 		return this.#handlers > 0 && !this.#track.closed();
 	}
 
-	/** Ask for `[start, end)` for `asker`, joining the fills already bringing part of it. */
-	ask(start: bigint, end: bigint, asker: Asker): void {
-		if (!this.serving || start >= end) return;
+	/** Whether a fill is out that a reader could join, handler or not. */
+	get active(): boolean {
+		return this.#pending.size > 0;
+	}
+
+	/**
+	 * Ask for `[start, end)` for `asker`: join the fills already bringing part of it, and queue the
+	 * rest while a handler is open, as the Rust `FillState::join` does. Returns the parts now
+	 * asked, in order.
+	 */
+	ask(start: bigint, end: bigint, asker: Asker): Run[] {
+		if (start >= end || this.#track.closed()) return [];
+		const asked: Run[] = [];
 		let missing: Run[] = [{ start, end }];
 		for (const pending of this.#pending) {
 			const unresolved = pending.unresolved(start, end);
@@ -144,15 +154,21 @@ export class FillState {
 				pending.askers.add(asker);
 				pending.bump();
 			}
-			for (const run of unresolved) missing = missing.flatMap((gap) => subtract(gap, run));
+			for (const run of unresolved) {
+				insertRun(asked, run.start, run.end);
+				missing = missing.flatMap((gap) => subtract(gap, run));
+			}
 		}
+		if (this.#handlers === 0) return asked;
 		for (const gap of missing) {
 			const pending = new Pending(gap.start, gap.end);
 			pending.askers.add(asker);
 			this.#pending.add(pending);
 			this.#queue.push(pending);
+			insertRun(asked, gap.start, gap.end);
 		}
 		if (missing.length > 0) this.#queued.update((revision) => revision + 1);
+		return asked;
 	}
 
 	/** The first sequence of `[start, end)` a fill still owes `asker`. */
