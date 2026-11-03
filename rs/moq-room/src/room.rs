@@ -35,7 +35,9 @@ struct Participant {
 	identity: Path,
 	kind: Kind,
 	path: Path,
-	following: origin::Following,
+	/// `None` once the follower failed, such as a handler refusing the path: the participant
+	/// stays listed until the listing reports it absent.
+	following: Option<origin::Following>,
 }
 
 /// Runs the announce loop and yields remote participant broadcasts.
@@ -108,17 +110,21 @@ impl Room {
 			identity: parsed.identity,
 			kind: parsed.kind,
 			path,
-			following,
+			following: Some(following),
 		});
 	}
 
 	/// The next broadcast a participant's follower hands out. A follower that fails, such as a
-	/// handler refusing its path, is dropped until the path is listed again; its end comes
-	/// from the listing.
+	/// handler refusing its path, stops until the path is listed again; its end comes from the
+	/// listing.
 	fn poll_participants(&mut self, waiter: &kio::Waiter) -> Poll<Event> {
 		let mut index = 0;
 		while let Some(participant) = self.participants.get_mut(index) {
-			match participant.following.poll_available(waiter) {
+			let Some(following) = participant.following.as_mut() else {
+				index += 1;
+				continue;
+			};
+			match following.poll_available(waiter) {
 				Poll::Ready(Ok(Some(broadcast))) => {
 					return Poll::Ready(Event {
 						identity: participant.identity.clone(),
@@ -128,9 +134,7 @@ impl Room {
 					});
 				}
 				Poll::Ready(Ok(None)) => continue,
-				Poll::Ready(Err(_)) => {
-					self.participants.swap_remove(index);
-				}
+				Poll::Ready(Err(_)) => participant.following = None,
 				Poll::Pending => index += 1,
 			}
 		}
@@ -177,6 +181,29 @@ mod tests {
 		let gone = room.next().await.expect("bob unannounce");
 		assert_eq!(gone.identity.as_str(), "bob");
 		assert_eq!(gone.kind, Kind::Camera);
+		assert!(gone.broadcast.is_none());
+	}
+
+	/// A participant whose follower fails stays listed, so its absence is still reported.
+	#[tokio::test(start_paused = true)]
+	async fn reports_the_absence_of_a_refused_participant() {
+		let wait = std::time::Duration::from_secs(1);
+		let origin = origin();
+		let mut room = Room::new(&origin.consume(), None);
+
+		let claim = origin.requests("bob/camera").expect("claim");
+		let (request, nothing) = tokio::join!(claim.requested_broadcast(), kio::clock::timeout(wait, room.next()));
+		assert!(nothing.is_err(), "nothing serves bob yet");
+		request.expect("requested").reject(moq_net::Error::NotFound);
+		// The refusal fails bob's follower, which yields nothing.
+		assert!(kio::clock::timeout(wait, room.next()).await.is_err());
+
+		drop(claim);
+		let gone = kio::clock::timeout(wait, room.next())
+			.await
+			.expect("the absence was never reported")
+			.expect("bob unannounce");
+		assert_eq!(gone.identity.as_str(), "bob");
 		assert!(gone.broadcast.is_none());
 	}
 
