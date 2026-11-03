@@ -485,6 +485,12 @@ impl Producer {
 		self.backlog.deadline()
 	}
 
+	/// Whether unencoded history is still retained.
+	#[cfg(any(feature = "capture", test))]
+	pub(crate) fn retains(&self) -> bool {
+		!self.backlog.is_empty()
+	}
+
 	/// PTS of the frame `frames` samples past the anchor, stamped `delay` samples
 	/// earlier to fold in codec priming the catalog can't signal.
 	///
@@ -573,6 +579,17 @@ impl Producer {
 	/// track and its catalog rendition stay published. Writes and bitrate changes then
 	/// fail with [`moq_net::Error::Closed`].
 	pub fn finish(&mut self) -> Result<(), Error> {
+		self.end(None)
+	}
+
+	/// [`finish`](Self::finish) the track with `err`, for a source that failed: subscribers keep
+	/// every packet published, then get `err` instead of the end of stream.
+	#[cfg(any(feature = "capture", test))]
+	pub(crate) fn fail(&mut self, err: moq_net::Error) -> Result<(), Error> {
+		self.end(Some(err))
+	}
+
+	fn end(&mut self, err: Option<moq_net::Error>) -> Result<(), Error> {
 		if self.encoder.is_none() {
 			return Ok(());
 		}
@@ -641,7 +658,10 @@ impl Producer {
 			}
 		}
 
-		self.track.finish()?;
+		match err {
+			None => self.track.finish()?,
+			Some(err) => self.track.fail(err)?,
+		}
 		self.encoder = None;
 		self.pending = Vec::new();
 		self.remix = None;

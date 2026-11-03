@@ -18,6 +18,8 @@ use crate::{Error, Frame, Level};
 #[non_exhaustive]
 pub enum Status {
 	/// Encoding was explicitly stopped; the shared capture is independent.
+	///
+	/// Retained history is still encoded on demand, or expires on its own.
 	Stopped,
 	/// Raw audio is retained until a subscriber needs encoding.
 	Waiting,
@@ -25,8 +27,11 @@ pub enum Status {
 	Starting,
 	/// Post-processing samples are being encoded and published.
 	Live,
-	/// The driver ended with an error: a capture failure, or a conversion,
-	/// encoding, or publishing error.
+	/// The source failed, or the driver ended with a conversion, encoding, or
+	/// publishing error.
+	///
+	/// After a source failure the driver keeps serving retained history on demand
+	/// until it is served or expires, then returns the failure.
 	Failed,
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
@@ -63,7 +68,7 @@ impl State {
 		self.device.as_ref()
 	}
 
-	/// The error that ended the driver while [`Status::Failed`].
+	/// The source failure or driver error while [`Status::Failed`].
 	pub fn failure(&self) -> Option<&Error> {
 		self.failure.as_ref()
 	}
@@ -221,6 +226,9 @@ impl Control {
 	}
 
 	/// Stop this encoder while retaining the MoQ track and shared device.
+	///
+	/// Audio already retained stays on the track: a subscriber still encodes it on
+	/// demand, and it expires on its own. Nothing is encoded eagerly.
 	pub fn stop(&self) {
 		let Ok(mut desired) = self.desired.write() else { return };
 		if !desired.enabled {
@@ -235,7 +243,8 @@ impl Control {
 	/// The new reader starts at live capture, immediately if started or on the next
 	/// [`start`](Self::start). A consumer whose layout cannot be converted into the
 	/// track's fixed input is rejected, leaving the current one selected. A capture
-	/// failure ends the driver; create a new publication to recover.
+	/// failure is terminal, so neither this nor [`start`](Self::start) recovers it;
+	/// create a new publication instead.
 	pub fn replace(&self, capture: capture::Consumer) -> Result<(), Error> {
 		Converter::new(capture.input(), &self.input)?;
 		let Ok(mut desired) = self.desired.write() else {
@@ -322,24 +331,48 @@ impl Drop for Driver {
 	}
 }
 
+/// Why [`Driver::drive`] stopped without an encoding or publishing error.
+enum End {
+	/// The final control dropped or the track ended.
+	Closed,
+	/// The source failed, and every retained frame since was served or expired.
+	Failed(Error),
+}
+
 impl Driver {
-	/// Encode until capture fails, the final control drops, or the track ends.
+	/// Encode until the final control drops, the track ends, or the source fails.
+	///
+	/// A source failure is terminal, yet retained history stays as reachable as while
+	/// stopped: subscribers still encode it on demand until it is served or expires.
+	/// The driver then ends the track with the failure, keeping what it published, and
+	/// returns it.
 	pub async fn run(mut self) -> Result<(), Error> {
-		let result = self.drive().await;
+		let end = self.drive().await;
 		let mut producer = self.producer.take().unwrap();
-		let result = result.and_then(|()| {
+		let ended = end.and_then(|end| {
 			producer.set_active(false, self.clock.now())?;
-			producer.finish()
+			match end {
+				End::Closed => producer.finish().map(|()| None),
+				End::Failed(error) => producer
+					.fail(moq_net::Error::Transport(error.to_string()))
+					.map(|()| Some(error)),
+			}
 		});
-		match &result {
-			Ok(()) => {
+		let result = match ended {
+			Ok(None) => {
 				self.update(Status::Ended, None);
+				Ok(())
+			}
+			Ok(Some(error)) => {
+				self.update(Status::Failed, Some(error.clone()));
+				Err(error)
 			}
 			Err(error) => {
 				self.update(Status::Failed, Some(error.clone()));
 				producer.abort(moq_net::Error::Transport(error.to_string()));
+				Err(error)
 			}
-		}
+		};
 		if let Ok(mut level) = self.level.write() {
 			*level = Level::default();
 		}
@@ -347,9 +380,13 @@ impl Driver {
 		result
 	}
 
-	async fn drive(&mut self) -> Result<(), Error> {
+	async fn drive(&mut self) -> Result<End, Error> {
 		let track = self.producer.as_ref().unwrap().track().clone();
-		loop {
+		let mut retention = Retention {
+			demand: track.demand(),
+			on_demand: self.on_demand,
+		};
+		'drive: loop {
 			let desired = self.desired.read().clone();
 			self.source = desired.capture.source().clone();
 			self.device = desired.capture.device().cloned();
@@ -358,15 +395,24 @@ impl Driver {
 				if let Ok(mut level) = self.level.write() {
 					*level = Level::default();
 				}
-				tokio::select! {
-					biased;
-					changed = desired_changed(&self.desired, desired.revision) => {
-						// A failure that landed first still ends the publication.
-						if let Some(error) = desired.capture.failure() { return Err(error); }
-						if changed.is_none() { return Ok(()); }
+				let producer = self.producer.as_mut().unwrap();
+				// Retained history outlives the stop: demand still encodes it, and it expires on its own.
+				retention.refresh(producer, &self.clock)?;
+				loop {
+					tokio::select! {
+						biased;
+						changed = desired_changed(&self.desired, desired.revision) => {
+							// A failure that landed first still ends the publication.
+							if let Some(error) = desired.capture.failure() { return self.failed(error, &mut retention).await; }
+							if changed.is_none() { return Ok(End::Closed); }
+							break;
+						}
+						_ = track.closed() => return Ok(End::Closed),
+						error = kio::wait(|waiter| desired.capture.poll_failed(waiter)) => {
+							return self.failed(error, &mut retention).await;
+						}
+						changed = retention.changed(producer, &self.clock) => { changed?; }
 					}
-					_ = track.closed() => return Ok(()),
-					error = kio::wait(|waiter| desired.capture.poll_failed(waiter)) => return Err(error),
 				}
 				continue;
 			}
@@ -374,8 +420,7 @@ impl Driver {
 			let mut converter = Converter::new(capture.input(), &self.input)?;
 			let mut output = EncoderOutput {
 				producer: self.producer.as_mut().unwrap(),
-				demand: track.demand(),
-				on_demand: self.on_demand,
+				retention: &mut retention,
 				clock: &self.clock,
 				source: &self.source,
 				device: self.device.clone(),
@@ -389,23 +434,32 @@ impl Driver {
 			}
 			output.producer.reanchor();
 			output.refresh()?;
-			loop {
+			let failure = loop {
 				tokio::select! {
 					biased;
 					changed = desired_changed(&self.desired, desired.revision) => {
-						// A failure that landed first still ends the publication.
-						if let Some(error) = reader.failure() { return Err(error); }
 						// This reader's stream ends here. Its tail belongs before a stop, which
 						// can be followed by `finish`; a restart or replacement reanchors anyway.
 						if let Some((samples, timestamp)) = converter.drain()? {
 							output.write(&samples, timestamp)?;
 						}
-						if changed.is_none() { return Ok(()); }
-						break;
+						// A failure that landed first still ends the publication.
+						if let Some(error) = reader.failure() { break error; }
+						if changed.is_none() { return Ok(End::Closed); }
+						continue 'drive;
 					}
-					_ = track.closed() => return Ok(()),
+					_ = track.closed() => return Ok(End::Closed),
 					samples = reader.read() => {
-						let samples = samples?;
+						let samples = match samples {
+							Ok(samples) => samples,
+							Err(error) => {
+								// The source ended here, so its converted tail belongs on the track.
+								if let Some((samples, timestamp)) = converter.drain()? {
+									output.write(&samples, timestamp)?;
+								}
+								break error;
+							}
+						};
 						if samples.gap { output.producer.reanchor(); }
 						let timestamp = output.stamp(samples.captured)?;
 						if let Some((samples, timestamp)) = converter.process(samples, timestamp)? {
@@ -414,8 +468,34 @@ impl Driver {
 					}
 					changed = output.changed() => changed?,
 				}
+			};
+			return self.failed(failure, &mut retention).await;
+		}
+	}
+
+	/// Keep serving retained history after the source fails, until none is left or
+	/// nothing can want it any more. Controls can no longer restart or replace the source.
+	async fn failed(&mut self, error: Error, retention: &mut Retention) -> Result<End, Error> {
+		self.update(Status::Failed, Some(error.clone()));
+		if let Ok(mut level) = self.level.write() {
+			*level = Level::default();
+		}
+		let track = self.producer.as_ref().unwrap().track().clone();
+		let producer = self.producer.as_mut().unwrap();
+		let mut revision = self.desired.read().revision;
+		retention.refresh(producer, &self.clock)?;
+		while producer.retains() {
+			tokio::select! {
+				biased;
+				changed = desired_changed(&self.desired, revision) => match changed {
+					Some(desired) => revision = desired.revision,
+					None => break,
+				},
+				_ = track.closed() => break,
+				changed = retention.changed(producer, &self.clock) => { changed?; }
 			}
 		}
+		Ok(End::Failed(error))
 	}
 
 	fn update(&self, status: Status, failure: Option<Error>) {
@@ -495,10 +575,49 @@ fn assert_publish_capture_send(
 	is_send(&publish_capture(broadcast, catalog, options));
 }
 
-struct EncoderOutput<'a> {
-	producer: &'a mut Producer,
+/// Encodes retained history while a subscriber wants it, and expires it otherwise.
+///
+/// Runs whether or not this encoder is reading capture, so history stays reachable
+/// after a stop or a source failure.
+struct Retention {
 	demand: moq_net::track::Demand,
 	on_demand: bool,
+}
+
+impl Retention {
+	/// Expire retained history, then encode one retained frame if wanted.
+	///
+	/// Returns whether a subscriber wants encoding.
+	fn refresh(&self, producer: &mut Producer, clock: &moq_mux::Clock) -> Result<bool, Error> {
+		let active = !self.on_demand || self.demand.wanted().is_some();
+		producer.set_active(active, clock.now())?;
+		Ok(active)
+	}
+
+	/// Wait for a change in demand, the next expiry, or the next retained frame to encode,
+	/// then [`refresh`](Self::refresh).
+	async fn changed(&mut self, producer: &mut Producer, clock: &moq_mux::Clock) -> Result<bool, Error> {
+		if producer.backlog_ready() {
+			// Keep the microphone queue moving between codec frames during a long catch-up.
+			tokio::task::yield_now().await;
+			return self.refresh(producer, clock);
+		}
+		let delay = producer
+			.backlog_deadline()
+			.map(|at| at.saturating_sub(clock.now().into()));
+		tokio::select! {
+			changed = self.demand.wanted_changed() => { changed?; }
+			_ = async {
+				match delay { Some(delay) => kio::clock::sleep(delay).await, None => std::future::pending().await }
+			} => {}
+		}
+		self.refresh(producer, clock)
+	}
+}
+
+struct EncoderOutput<'a> {
+	producer: &'a mut Producer,
+	retention: &'a mut Retention,
 	clock: &'a moq_mux::Clock,
 	/// The source this reader belongs to, so a published state can
 	/// never name an input this stream isn't actually reading.
@@ -534,27 +653,18 @@ impl EncoderOutput<'_> {
 	}
 
 	async fn changed(&mut self) -> Result<(), Error> {
-		if self.producer.backlog_ready() {
-			// Keep the microphone queue moving between codec frames during a long catch-up.
-			tokio::task::yield_now().await;
-			return self.refresh();
-		}
-		let delay = self
-			.producer
-			.backlog_deadline()
-			.map(|at| at.saturating_sub(self.clock.now().into()));
-		tokio::select! {
-			changed = self.demand.wanted_changed() => { changed?; }
-			_ = async {
-				match delay { Some(delay) => kio::clock::sleep(delay).await, None => std::future::pending().await }
-			} => {}
-		}
-		self.refresh()
+		let active = self.retention.changed(self.producer, self.clock).await?;
+		self.publish_status(active);
+		Ok(())
 	}
 
 	fn refresh(&mut self) -> Result<(), Error> {
-		let active = !self.on_demand || self.demand.wanted().is_some();
-		self.producer.set_active(active, self.clock.now())?;
+		let active = self.retention.refresh(self.producer, self.clock)?;
+		self.publish_status(active);
+		Ok(())
+	}
+
+	fn publish_status(&self, active: bool) {
 		publish_state(
 			self.state,
 			self.source,
@@ -562,7 +672,6 @@ impl EncoderOutput<'_> {
 			self.device.clone(),
 			None,
 		);
-		Ok(())
 	}
 
 	/// Levels ride their own channel: they change every buffer, so folding them
@@ -907,6 +1016,126 @@ mod tests {
 			})
 			.await;
 	}
+	/// Wait until the driver has read and retained a buffer, which publishes its level.
+	async fn retained(control: &Control) {
+		while control.level() == Level::default() {
+			tokio::task::yield_now().await;
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn history_retained_before_a_stop_is_encoded_on_demand_or_expires() {
+		tokio::task::LocalSet::new()
+			.run_until(async {
+				for expire in [false, true] {
+					let Fixture {
+						capture,
+						samples,
+						mut control,
+						driver,
+						broadcast,
+						catalog: _catalog,
+						epoch,
+					} = fixture(true);
+					let mut observer = capture.consume();
+					let capture_task = tokio::task::spawn_local(capture.run());
+					let encode_task = tokio::spawn(driver.run());
+					status(&mut control, Status::Waiting).await;
+					let mut block = Samples::plain(vec![0.25; 1920], false);
+					block.captured = Some(epoch + Duration::from_millis(100));
+					samples.try_push(Ok(block)).unwrap();
+					observer.read().await.unwrap();
+					retained(&control).await;
+					control.stop();
+					status(&mut control, Status::Stopped).await;
+					if expire {
+						// Past the track's 30 s max_age.
+						tokio::time::advance(Duration::from_secs(31)).await;
+					}
+					let mut track = subscribe(&broadcast).await;
+					if expire {
+						// Only fresh capture after a restart reaches the subscriber.
+						control.start();
+						status(&mut control, Status::Live).await;
+						samples.try_push(Ok(Samples::plain(vec![0.5; 1920], false))).unwrap();
+						observer.read().await.unwrap();
+						assert!(packet(&mut track).await.timestamp.as_micros() > 30_000_000);
+					} else {
+						// Served while still stopped, without restarting capture.
+						assert_eq!(packet(&mut track).await.timestamp.as_micros(), 100_000);
+						assert_eq!(control.state().status(), Status::Stopped);
+					}
+					drop(control);
+					encode_task.await.unwrap().unwrap();
+					capture_task.abort();
+					assert!(capture_task.await.unwrap_err().is_cancelled());
+				}
+			})
+			.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_source_serves_retained_history_then_ends_with_the_failure() {
+		tokio::task::LocalSet::new()
+			.run_until(async {
+				for (stop_first, subscribe_late) in [(false, true), (true, true), (false, false)] {
+					let Fixture {
+						capture,
+						samples,
+						mut control,
+						driver,
+						broadcast,
+						catalog: _catalog,
+						epoch,
+					} = fixture(true);
+					let mut observer = capture.consume();
+					let capture_task = tokio::task::spawn_local(capture.run());
+					let encode_task = tokio::spawn(driver.run());
+					status(&mut control, Status::Waiting).await;
+					let mut block = Samples::plain(vec![0.25; 1920], false);
+					block.captured = Some(epoch + Duration::from_millis(100));
+					samples.try_push(Ok(block)).unwrap();
+					observer.read().await.unwrap();
+					retained(&control).await;
+					if stop_first {
+						control.stop();
+						status(&mut control, Status::Stopped).await;
+					}
+					samples.try_push(Err(Error::Capture("device lost".into()))).unwrap();
+					status(&mut control, Status::Failed).await;
+					assert!(matches!(control.state().failure(), Some(Error::Capture(message)) if message == "device lost"));
+					// Failure is terminal, but the publication still serves what it retained.
+					assert!(!control.is_finished());
+					control.start();
+					let track = if subscribe_late {
+						let mut track = subscribe(&broadcast).await;
+						assert_eq!(packet(&mut track).await.timestamp.as_micros(), 100_000);
+						Some(track)
+					} else {
+						None
+					};
+					// Once served, or expired unwanted, the history is gone and the driver reports the failure.
+					let result = encode_task.await.unwrap();
+					assert!(matches!(result, Err(Error::Capture(message)) if message == "device lost"));
+					assert!(control.is_finished());
+					assert_eq!(control.state().status(), Status::Failed);
+					if let Some(mut track) = track {
+						// The track keeps what it published, then ends with the failure rather than cleanly.
+						let error = loop {
+							match track.read().await {
+								Ok(Some(_)) => {}
+								Ok(None) => panic!("the failed track ended cleanly"),
+								Err(error) => break error,
+							}
+						};
+						assert!(error.to_string().contains("device lost"), "{error}");
+					}
+					assert!(capture_task.await.unwrap().is_err());
+				}
+			})
+			.await;
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn replace_rejects_a_consumer_the_track_cannot_convert() {
 		tokio::task::LocalSet::new()
