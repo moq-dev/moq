@@ -3,5 +3,8 @@
 	// are neither published nor discovered by `bun test` at the package root.
 	// `tsc --noEmit` still uses tsconfig.json, so tests stay type-checked.
 	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"rootDir": "./src"
+	},
 	"exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

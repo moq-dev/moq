@@ -246,8 +246,7 @@ impl MoqJsonSnapshotConsumer {
 
 	/// Get the next state in order. Returns `None` once the track ends.
 	///
-	/// Groups older than the subscription's `delay.max` are skipped, so a playhead
-	/// reader sets that budget to its distance behind live.
+	/// Skips every group a newer one supersedes, whatever the subscription's `delay.max`.
 	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
 		let value = self
 			.reads

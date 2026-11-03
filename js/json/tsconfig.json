@@ -2,7 +2,9 @@
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
 		"outDir": "dist",
-		"rootDir": "./src",
+		// The snapshot test borrows `@moq/net`'s internal hooks by relative path, so the
+		// type-check spans the workspace. The build pins `rootDir` to src and skips tests.
+		"rootDir": "..",
 		"types": ["bun"]
 	},
 	"include": ["src"]

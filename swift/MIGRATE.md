@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Snapshot consumers always read at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`Json.SnapshotConsumer` reads at a zero `delay.max`, whatever the subscription asked for: iteration skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes. Publish a window or stream track when every state must survive.
+
 ### Subscriptions take a `Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `Subscription.maxDelay` is `delay: Delay`: pass `delay: Delay(min: 0, max: maxDelay)`, where a `nil` `max` sets no subscriber limit, or start from `Subscription.default`.

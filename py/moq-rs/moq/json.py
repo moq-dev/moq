@@ -126,9 +126,9 @@ class StreamProducer:
 class SnapshotConsumer(_Stream[Timed]):
     """Async iterator over a JSON snapshot track, yielding each state in order (lossy).
 
-    Each item is a :class:`Timed`. Groups older than the subscription's ``delay.max`` are skipped,
-    so a playhead reader sets that budget to its distance behind live; :meth:`latest` skips to the
-    newest state instead. Usable as an async context manager that cancels on exit.
+    Each item is a :class:`Timed`. Every group a newer one supersedes is skipped, whatever the
+    subscription's ``delay.max``; :meth:`latest` skips to the newest state instead. Usable as an
+    async context manager that cancels on exit.
     """
 
     def __init__(self, track: subscribe.TrackConsumer) -> None:

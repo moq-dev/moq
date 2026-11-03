@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Snapshot consumers always read at a zero delay
+### Snapshot consumers always read at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
 `snapshot::Consumer::new` sets its subscription's `delay.max` to zero, replacing whatever the subscriber asked for.
 `next()` now skips every group a newer one supersedes, and `latest()` no longer waits for a lower group a received track still owes.
