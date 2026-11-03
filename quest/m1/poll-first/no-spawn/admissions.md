@@ -29,6 +29,10 @@ The review also found that the HTTP/1.1 admission benchmark could exhaust a
 1024-fd process limit and wait forever during setup. Its fix keeps the server
 sweep within that budget and fails when a held admission completes early.
 
-## Waiting
-
-- Maintainer: choose the stats construction API on [moq-dev/moq#7673](https://github.com/moq-dev/moq/pull/7673): keep `Cluster::with_stats` and its queue, or move stats configuration into `cluster::Options` and remove the builder. Recommend `Options`, which removes the queue, its per-poll locks, and the post-driver-drop panic. Check the recorded decision, implement it if needed, and finish local review before marking the PR ready.
+Decided 2026-11-03 (maintainer, /quest-unblock): ✅ **Move cluster stats
+configuration into `cluster::Options` and remove `Cluster::with_stats`.**
+Construction adds the stats publisher directly to the driver, removing the
+handoff queue, the two locks per driver poll, and the panic after the driver
+drops. Not chosen: keep `with_stats` and its queue. Update every in-tree
+caller (moq-relay) and write migration notes in the PR's Impact section and
+`rs/moq-relay/MIGRATE.md`.
