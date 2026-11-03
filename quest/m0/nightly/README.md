@@ -1,4 +1,4 @@
-# Nightly passes on main
+# [S] Nightly passes on main
 
 ## Goal
 
