@@ -13,7 +13,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { hlsHint, wanted, watched } from "../internal";
+import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import type { RenditionStats } from "../rendition";
@@ -132,7 +132,7 @@ export type EncoderOutput = {
 	// PCM rather than in the graph, so this is pre-gain. Undefined for a source that isn't a track.
 	root: Signal<AudioNode | undefined>;
 	// True while encoding: enabled with a captured format and a track, which also takes a
-	// subscriber to it or its HLS records unless the broadcast's `onDemand` is false.
+	// subscriber unless the broadcast's `onDemand` is false.
 	active: Signal<boolean>;
 	// Cumulative output totals (frames, bytes) measured while serving, and the target bitrate.
 	stats: Signal<Stats>;
@@ -150,8 +150,7 @@ type Pipeline = {
  * A single audio rendition encoder.
  *
  * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.audio(name)`), pumps PCM
- * off the source via a {@link Capture}, and retains raw PCM while enabled. A subscriber, to the track or its HLS records,
- * triggers encoding of that history followed by
+ * off the source via a {@link Capture}, and retains raw PCM while enabled. A subscriber triggers encoding of that history followed by
  * live audio; leaving resumes buffering without ending the epoch. The broadcast's `onDemand: false`
  * keeps encoding continuously instead. Rename by constructing a new encoder; the name is not a signal.
  */
@@ -412,9 +411,9 @@ export class Encoder {
 
 		const rendition = broadcast.audio(this.name);
 		effect.cleanup(() => rendition.close());
-		// Audio groups are far shorter than a segment, so any hint declares the grid's own duration up front.
-		rendition.hlsHint.set(hlsHint(this.groupDuration.peek()));
-		effect.subscribe(this.groupDuration, (duration) => rendition.hlsHint.set(hlsHint(duration)));
+		// The group duration, which the broadcast declares as the catalog's join interval when nothing
+		// longer, such as a video GOP, sits beside it.
+		effect.proxy(rendition.joinInterval, this.groupDuration);
 		effect.proxy(this.#slot, rendition.slot);
 		effect.cleanup(() => this.#slot.set(undefined));
 
@@ -446,11 +445,7 @@ export class Encoder {
 
 			const live = {
 				track,
-				producer: new Container.Legacy.Producer(
-					track,
-					new Container.Legacy.Format("audio"),
-					rendition.hls(track),
-				),
+				producer: new Container.Legacy.Producer(track, new Container.Legacy.Format("audio")),
 			};
 			this.#live = live;
 			effect.cleanup(() => {
@@ -469,8 +464,8 @@ export class Encoder {
 			const fatal = effect.get(this.#out.error);
 
 			const onDemand = effect.get(broadcast.in.onDemand) ?? true;
-			const demanded = !!track && wanted(effect, track, rendition.hls(track));
-			this.#encoding = enabled && !!format && !!track && !fatal && (!onDemand || demanded);
+			const demanded = track && effect.get(track.demand().wanted) !== undefined;
+			this.#encoding = enabled && !!format && !!track && !fatal && (!onDemand || !!demanded);
 			effect.set(this.#out.active, this.#encoding, false);
 			try {
 				if (this.#encoding) this.#pipeline?.drain();

@@ -295,8 +295,7 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1034,15 +1033,15 @@ test.each([undefined, false, true])(
 	},
 );
 
-// An HLS export subscribes only to the records the catalog advertises, so their reader must start the
-// on-demand audio encode just as a media subscriber does.
-test("a record subscriber starts on-demand audio", async () => {
+// An HLS export of an audio-only broadcast cuts segments on the audio group duration and reads the
+// media directly, so the catalog declares it before anything is encoded and advertises no records.
+test("an audio-only broadcast declares its group duration as the join interval", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("records.hang") });
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("join.hang") });
 	const feed = new Feed();
 	const configuring = configured();
-	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
-	let records: Moq.Track.Subscriber | undefined;
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never, groupDuration: Milli(40) });
+	let catalog: Moq.Track.Subscriber | undefined;
 	try {
 		await configuring;
 		await settle();
@@ -1050,16 +1049,13 @@ test("a record subscriber starts on-demand audio", async () => {
 		if (!net) throw new Error("expected network broadcast");
 		expect(encoder.out.active.peek()).toBe(false);
 
-		records = net.track("audio.hls").subscribe();
-		await settle();
-		expect(encoder.out.active.peek()).toBe(true);
-
-		records.close();
-		records = undefined;
-		await settle();
-		expect(encoder.out.active.peek()).toBe(false);
+		catalog = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		const root = (await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalog }).latest())?.value;
+		expect(root?.media?.join).toEqual({ interval: Catalog.u53(40) });
+		expect(root?.audio?.renditions.audio).toBeDefined();
+		expect(root?.audio?.renditions.audio).not.toHaveProperty("hls");
 	} finally {
-		records?.close();
+		catalog?.close();
 		encoder.close();
 		broadcast.close();
 	}
