@@ -296,6 +296,39 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
 
+    def test_module_admission_keeps_builds_and_tests_out_of_the_quick_queue(self):
+        self.env.pop("LOCAL_SUPERVISED")
+        quick = {"biome", "markdown", "quest", "python", "shell", "large_files", "text", "toml", "nix", "justfile"}
+        for action in ("check", "ci", "fix"):
+            with self.subTest(action=action):
+                self.stub_ci()
+                (self.repo / "sh/local.sh").write_text("""#!/usr/bin/env bash
+[[ "${LOCAL_SUPERVISED:-}" == 1 ]] || printf 'admit %s\\n' "$*" >>"$CALLS"
+export LOCAL_SUPERVISED=1
+[[ "$1" != --quick ]] || shift
+exec "$@"
+""")
+                result = subprocess.run(
+                    ["bash", "sh/dispatch.sh", action, "--all"],
+                    cwd=self.repo,
+                    env=self.env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = (self.root / "calls").read_text().splitlines()
+                admissions = [call.split() for call in calls if call.startswith("admit ")]
+                self.assertTrue(admissions, calls)
+                phases = {(call[-2], call[-1]) for call in admissions}
+                self.assertIn(("fix" if action == "fix" else "check", "markdown"), phases)
+                if action != "fix":
+                    self.assertIn(("check", "quest"), phases)
+                    self.assertIn(("test", "rs"), phases)
+                    self.assertIn(("test", "gh"), phases)
+                for call in admissions:
+                    phase, module = call[-2:]
+                    self.assertEqual(call[1] == "--quick", module in quick and phase != "test", call)
+
     def test_check_and_ci_reject_em_dashes_outside_the_diff(self):
         self.stub_ci()
         shutil.copy(ROOT / "sh/text.sh", self.repo / "sh/text.sh")

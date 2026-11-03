@@ -72,8 +72,9 @@ fi
 #                   run concurrently.
 #   alone           Its lane runs with no other lane beside it, so it waits for
 #                   the rest.
+#   quick           Cheap phases wait at most a minute for host admission.
 #   fix             `just fix` runs it too; check and ci run every module.
-declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=()
+declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=() quick=()
 checks=()
 fixes=()
 module() {
@@ -88,6 +89,7 @@ module() {
             compiles=*) for each in ${option#compiles=}; do compiles[$each]+=" $name"; done ;;
             lane=*) lane[$name]=${option#lane=} ;;
             alone) solo=1 ;;
+            quick) quick[$name]=1 ;;
             fix) fixes+=("$name") ;;
             *)
                 echo "error: module $name has an unknown option '$option'" >&2
@@ -135,7 +137,7 @@ module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi
 # that fix runs it first, since Biome can fix sources that the package build
 # rejects, such as a type-only export.
 module biome '' \
-    tools='bun' lane=bun fix
+    tools='bun' lane=bun fix quick
 # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
 # fails a check that reads a cross-tree input this pattern misses.
 # Root Nix inputs own the browser version every npm Playwright pin matches.
@@ -163,7 +165,7 @@ module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/sa
 module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
     tools='bun kramdown-rfc xml2rfc' lane=bun
 module markdown '' \
-    tools='bun' lane=bun fix
+    tools='bun' lane=bun fix quick
 module gh '' \
     tools='actionlint zizmor bun python3 cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
@@ -177,7 +179,7 @@ module moq_sh '^infra/moq-sh/' \
 # Quest documents form one graph, so any change validates the whole tree,
 # as does a bump of the flake-pinned validator.
 module quest '^(quest/|flake\.lock$)' \
-    tools='quest'
+    tools='quest' quick
 # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
 # nixpkgs, and the last moves on a flake.lock bump alone.
 module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)' \
@@ -188,17 +190,17 @@ module ts_paths '^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.gith
     tools='cargo python3'
 # Ruff lints and formats every Python file under the nearest pyproject.toml.
 module python '(\.pyi?|(^|/)pyproject\.toml)$' \
-    tools='ruff' fix
+    tools='ruff' fix quick
 module shell '' \
-    tools='shellcheck shfmt' fix
-module large_files ''
-module text ''
+    tools='shellcheck shfmt' fix quick
+module large_files '' quick
+module text '' quick
 module toml '' \
-    tools='taplo' fix
+    tools='taplo' fix quick
 module nix '' \
-    tools='nixfmt' fix
+    tools='nixfmt' fix quick
 module justfile '' \
-    fix
+    quick fix
 # dart builds moq-ffi with the filtered environment its build hook gets, then
 # checks that the hook finds that build fresh. Any other Cargo build in between
 # reruns the host build scripts in target/debug that track the environment,
@@ -460,7 +462,14 @@ run_lane() {
                 # processes. Trapped, it exits once they do, so a cancel
                 # returns only after the whole tree has exited.
                 trap 'exit 143' TERM
-                step "$phase" "$module"
+                # Export only the phase's inputs and functions to the launcher.
+                # Admission belongs to the module, not its command name or lane:
+                # the bun lane mixes formatters with builds and tooling tests.
+                export action rs_list js_list large_base
+                export -f files step
+                gate=()
+                [[ ! -v "quick[$module]" || "$phase" == test ]] || gate+=(--quick)
+                bash sh/local.sh "${gate[@]}" bash -euo pipefail -c 'step "$@"' -- "$phase" "$module"
             )
             status=$?
             set -e

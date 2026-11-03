@@ -24,14 +24,18 @@ class LocalGate(unittest.TestCase):
         env.update(changes)
         return env
 
-    def run_command(self, script, **changes):
+    def run_command(self, script, quick=False, **changes):
+        options = ["--quick"] if quick else []
         return subprocess.run(
-            [BASH, str(LAUNCHER), sys.executable, "-c", script], env=self.env(**changes), text=True, capture_output=True
+            [BASH, str(LAUNCHER), *options, sys.executable, "-c", script],
+            env=self.env(**changes),
+            text=True,
+            capture_output=True,
         )
 
     def test_hosted_ci_bypasses_admission_and_worker_defaults(self):
         result = self.run_command(
-            'import os; print(os.getenv("NEXTEST_TEST_THREADS")); exit(7)', GITHUB_ACTIONS="true", PATH=""
+            'import os; print(os.getenv("NEXTEST_TEST_THREADS")); exit(7)', quick=True, GITHUB_ACTIONS="true", PATH=""
         )
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertEqual(result.stdout.strip(), "None")
@@ -39,6 +43,7 @@ class LocalGate(unittest.TestCase):
     def test_nested_admission_preserves_failures_and_worker_override(self):
         result = self.run_command(
             'import os; print(os.environ["NEXTEST_TEST_THREADS"]); exit(9)',
+            quick=True,
             LOCAL_SUPERVISED="1",
             NEXTEST_TEST_THREADS="2",
             PATH="",
@@ -58,7 +63,9 @@ class LocalGate(unittest.TestCase):
                 f"#!{sys.executable}\n"
                 "import os, sys\n"
                 'assert sys.argv[1] == "gate"\n'
-                'print("admitted", flush=True)\n'
+                'quick = sys.argv[2:3] == ["--quick"]\n'
+                'print("quick" if quick else "admitted", flush=True)\n'
+                "if quick: del sys.argv[2]\n"
                 'os.environ["QUEST_GATE_ADMITTED"] = "1"\n'
                 "os.execvp(sys.argv[2], sys.argv[2:])\n"
             )
@@ -68,15 +75,17 @@ class LocalGate(unittest.TestCase):
                 f"sys.exit(subprocess.call([{BASH!r}, {str(LAUNCHER)!r}, "
                 'sys.executable, "-c", "print(\'inner\'); exit(11)"]))'
             )
-            result = self.run_command(script, PATH=directory)
-            self.assertEqual(result.returncode, 11, result.stderr)
-            self.assertEqual(result.stdout.splitlines(), ["admitted", "outer", "inner"])
+            for quick in (False, True):
+                with self.subTest(quick=quick):
+                    result = self.run_command(script, quick=quick, PATH=directory)
+                    self.assertEqual(result.returncode, 11, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), ["quick" if quick else "admitted", "outer", "inner"])
 
     def test_external_admission_keeps_descendant_supervision(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "bun").symlink_to(BUN)
             result = self.run_command(
-                'import os; print(os.environ["LOCAL_SUPERVISED"])', QUEST_GATE_ADMITTED="1", PATH=directory
+                'import os; print(os.environ["LOCAL_SUPERVISED"])', quick=True, QUEST_GATE_ADMITTED="1", PATH=directory
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "1")
