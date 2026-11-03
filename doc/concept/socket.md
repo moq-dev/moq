@@ -87,6 +87,11 @@ stream, `TRACKS_ADD`). A listing reports every track the broadcast holds, so
 accept skips any name outside the scheme. That leaves applications free to use
 fixed track names in either broadcast beside the streams.
 
+A stream can be accepted only while its opener lists it, which holds until the
+opener drops the track, finished or not. One dropped before the peer accepts it
+is never handed out, so a backlog of unaccepted streams costs the peer no more
+than the tracks the opener keeps.
+
 ## Ending
 
 A socket ends when either side's broadcast ends, which includes either side

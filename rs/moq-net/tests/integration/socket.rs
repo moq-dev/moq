@@ -291,23 +291,23 @@ async fn a_dial_takes_only_its_own_answer() {
 	assert_ne!(bob_accepted.remote().info().instance, alice.remote().info().instance);
 }
 
-/// A stream the peer withdraws unfinished before it is accepted is never handed out,
-/// while one it finished still is.
+/// A stream is accepted only while its opener lists it: one whose producer the opener
+/// dropped first, finished or not, is never handed out.
 #[kio::test]
-async fn a_withdrawn_stream_is_not_accepted() {
+async fn a_stream_is_accepted_only_while_listed() {
 	let fixture = Fixture::new().await;
 	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
 	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
 
 	let gone = dialer.open_uni("gone", None).unwrap();
 	let done = dialer.open_uni("done", None).unwrap();
-	send(&done, b"finished");
-	done.finish().unwrap();
-	// Let the listener's listing hear of both before either ends.
+	let live = dialer.open_uni("live", None).unwrap();
+	// Let the listener's listing hear of all three before any ends.
 	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
 	drop(gone);
+	done.finish().unwrap();
 	drop(done);
-	// And of the withdrawal.
+	// And of the ends.
 	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
 
 	let uni = kio::clock::timeout(TIMEOUT, accepted.accept_uni())
@@ -315,11 +315,12 @@ async fn a_withdrawn_stream_is_not_accepted() {
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
-	assert_eq!(&*uni.name, "done");
+	assert_eq!(&*uni.name, "live");
 	assert!(
 		kio::clock::timeout(SETTLE, accepted.accept_uni()).await.is_err(),
-		"a withdrawn stream was accepted"
+		"a stream that left the listing was accepted"
 	);
+	drop(live);
 }
 
 /// Opening a bi stream of a name still being opened fails without disturbing the first,

@@ -139,8 +139,9 @@ pub struct Bi {
 struct Listing {
 	/// The peer's listing, opened by the first accept or bi open.
 	tracks: Option<broadcast::Tracks>,
-	/// Uni streams the peer opened, not yet accepted, in order. A stream the peer withdraws
-	/// unfinished leaves, so these hold no more than the peer lists plus what it finished.
+	/// Uni streams the peer opened, not yet accepted, in order. A stream leaves once the
+	/// peer stops listing it, as the listing drops an add its reader never reached, so
+	/// these hold no more than the peer lists.
 	uni: LinkedHashMap<Arc<str>, ()>,
 	/// Bi streams the peer opened, with the opener's track info, not yet accepted.
 	bi: LinkedHashMap<Arc<str>, track::Info>,
@@ -187,11 +188,10 @@ impl Listing {
 					return;
 				}
 			};
-			// A finished stream stays readable, so only a withdrawal takes one back.
 			let (name, info) = match event {
 				TracksEvent::Added { name, info } => (name, Some(info)),
-				TracksEvent::Removed { name } => (name, None),
-				TracksEvent::Synced | TracksEvent::Finished { .. } => continue,
+				TracksEvent::Removed { name } | TracksEvent::Finished { name } => (name, None),
+				TracksEvent::Synced => continue,
 			};
 			// A track outside the scheme is the application's own.
 			let Some((opener, kind, stream)) = parse(&name) else {
@@ -210,11 +210,13 @@ impl Listing {
 				(false, Kind::Bi, None) => {
 					self.bi.remove(stream);
 				}
-				(true, Kind::Bi, info) => {
+				// An answer seen once stays seen: the opener reads whatever it wrote.
+				(true, Kind::Bi, Some(_)) => {
 					if let Some(answered) = self.opening.get_mut(stream) {
-						*answered = info.is_some();
+						*answered = true;
 					}
 				}
+				(true, Kind::Bi, None) => {}
 				// This side's uni streams live only in its own broadcast.
 				(true, Kind::Uni, _) => {}
 			}
@@ -331,6 +333,9 @@ impl Socket {
 	}
 
 	/// Poll for the next uni stream the peer opened; `None` once the peer's broadcast ended.
+	///
+	/// A stream is handed out only while the peer still lists it: one whose track the peer
+	/// dropped first, finished or not, is skipped.
 	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Option<Uni>, Error>> {
 		let inner = &self.inner;
 		let mut listing = inner.listing.lock();
