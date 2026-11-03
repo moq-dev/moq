@@ -1018,7 +1018,7 @@ fn partial_headers_do_not_block_ready_streams() {
 	drop(worker);
 	for pending in [0, 64, 256] {
 		for ready in [1, 16] {
-			super::web_headers::run(pending, ready, 1);
+			super::web_headers::run(pending, ready, 16);
 		}
 	}
 }
