@@ -434,6 +434,54 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 	}
 });
 
+test("fill: a reader joining a wider fill is owed only its own ranges", async () => {
+	const { broadcast, track } = resumed(10n);
+	const requests = track.requests();
+	const wide = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 10n } }],
+		delay: { max: null },
+		order: "ascending",
+	});
+	void drain(wide);
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	expect([fill.start, fill.end]).toEqual([0n, 10n]);
+
+	// A narrower reader joins the same fill for 2 and 7 alone.
+	const narrow = track.subscribe({
+		ranges: [
+			{ start: { absolute: 2n }, end: { absolute: 3n } },
+			{ start: { absolute: 7n }, end: { absolute: 8n } },
+		],
+		delay: { max: null },
+		order: "ascending",
+	});
+	const got: bigint[] = [];
+	const done = (async () => {
+		for (let group = await narrow.recvGroup(); group; group = await narrow.recvGroup()) {
+			got.push(group.sequence);
+			group.close();
+		}
+	})();
+	await yieldNow();
+	expect(await Promise.race([requests.requestedFill(), yieldNow().then(() => "none")])).toBe("none");
+
+	for (const sequence of [2n, 7n]) {
+		const group = fill.accept(sequence);
+		group.writeFrame({ payload: enc.encode(`old ${sequence}`) });
+		group.finish();
+	}
+	// The wide reader still waits on the rest of the fill; the narrow one has all it reads.
+	await done;
+	expect(got).toEqual([2n, 7n]);
+	expect(fill.wanted()).toBe(0n);
+
+	fill.close();
+	wide.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a reader joins a fill still served after its handler's handle closed", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();

@@ -171,12 +171,18 @@ export class FillState {
 		return asked;
 	}
 
-	/** The parts of `[start, end)` a fill `asker` joined still owes, in order. */
+	/**
+	 * The parts of `[start, end)` a fill `asker` joined still owes it, in order: only what it still
+	 * reads, as the Rust `Join::held` holds, so a wider fill shared with other readers owes it
+	 * nothing outside its own ranges.
+	 */
 	covered(start: bigint, end: bigint, asker: Asker): Run[] {
 		const covered: Run[] = [];
 		for (const pending of this.#pending) {
 			if (!pending.askers.has(asker)) continue;
-			for (const run of pending.unresolved(start, end)) insertRun(covered, run.start, run.end);
+			for (const gap of pending.unresolved(start, end)) {
+				for (const run of asker.wants(gap.start, gap.end)) insertRun(covered, run.start, run.end);
+			}
 		}
 		return covered;
 	}
