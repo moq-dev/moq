@@ -156,7 +156,7 @@ async fn every_wire_carries_the_live_and_oldest_starts() {
 		let mut oldest = read(Some(version), Range::oldest()).await.unwrap();
 		oldest.sort_unstable();
 		let want: &[u64] = match *version {
-			"moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4],
+			"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4],
 			_ => &[0, 1, 2, 3, 4],
 		};
 		assert_eq!(oldest, want, "{version}: oldest reads every group its start reaches");

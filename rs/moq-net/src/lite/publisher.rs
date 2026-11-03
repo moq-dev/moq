@@ -121,9 +121,9 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 /// must not read as a request to replay the whole cache on join.
 ///
 /// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
-/// resolved: anything written in between is newer, so it is delivered. On lite-05, a
-/// SUBSCRIBE sent alongside its TRACK can arrive before the track resolves, when no group
-/// is known yet: the newest once it resolves stands in, as it would for one sent after.
+/// resolved: anything written in between is newer, so it is delivered. A SUBSCRIBE on
+/// a copy still fetching upstream (or alongside its TRACK on lite-05) can arrive before
+/// any group is known: the newest once it resolves stands in, as for one sent after.
 fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>) -> u64 {
 	if version.resolves_start() || start_group.is_some() {
 		return 0;
@@ -2256,10 +2256,7 @@ impl Request for SubscribeServe {
 						ietf,
 					};
 
-					let latest = match shared.version.has_track_stream() {
-						true => latest.or_else(|| track.latest_sequence()),
-						false => latest,
-					};
+					let latest = latest.or_else(|| track.latest_sequence());
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
 					if let Some(update) = update {
@@ -8793,6 +8790,139 @@ mod tests {
 						"{case}: {:?}",
 						session.log.resets()
 					);
+				}
+			}
+		}
+	}
+
+	/// A join on an unresolved copy uses its live edge once the upstream answer lands.
+	/// Named starts and joins whose live edge was already known keep their original floor.
+	#[kio::test]
+	async fn a_pending_subscribe_joins_the_resolved_live_edge() {
+		use crate::lite::test_transport::{Log, Sent};
+
+		for version in [Version::Lite03, Version::Lite04, Version::Lite05, Version::Lite06] {
+			for unresolved in [true, false] {
+				for start in [None, Some(0)] {
+					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+					let broadcast = origin.create_broadcast("room").unwrap();
+					let mut dynamic = broadcast.requests();
+					broadcast.announce(Default::default()).unwrap();
+					let copy = broadcast.consume().track("video").unwrap();
+					let held = copy.info().into_inner();
+					assert!(held.poll_ok(&kio::Waiter::noop()).is_pending());
+					let request = dynamic.requested_track().await.unwrap();
+					let staged = request.stage(track::Info::timed());
+					if !unresolved {
+						for sequence in [0, 3] {
+							let mut group = staged.create_group(group::Info { sequence }).unwrap();
+							group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+							group.finish().unwrap();
+						}
+					}
+					let mut staged = Some(staged);
+					let mut track = (!unresolved).then(|| staged.take().unwrap().commit());
+
+					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
+					peer_setup.set(crate::lite::Setup::default());
+					let (_, goaway) = crate::goaway::Handle::new(true);
+					let log = Log::default();
+					let publisher = Publisher::new(PublisherConfig {
+						runtime: crate::time::sim(),
+						session: crate::driver::Transport::new(SinkSession::new(log.clone())),
+						origin: origin.consume(),
+						version,
+						peer_setup,
+						goaway,
+						peer_hop: None,
+						auth: crate::auth::Link::new(false),
+						peer_grant: Default::default(),
+						client: false,
+						subscriptions: Default::default(),
+						estimate: kio::Producer::default().weak(),
+					});
+					let msg = lite::Subscribe {
+						order: crate::track::Order::Ascending,
+						instance: None,
+						id: 0,
+						broadcast: crate::Path::from_static("room"),
+						track: "video".into(),
+						priority: 0,
+						max_delay: Duration::from_secs(60),
+						min_delay: None,
+						ranges: vec![lite::Range::span(start, 0, None, None)],
+					};
+					let mut serve =
+						SubscribeServe::start(&publisher.shared, msg, "video", broadcast.consume()).unwrap();
+					let mut writer = Writer::new(
+						crate::transport::boxed::SendStream::new(SinkSend::new(Log::default())),
+						version,
+					);
+					if unresolved {
+						assert!(
+							serve
+								.poll(&publisher.shared, &mut writer, &kio::Waiter::noop())
+								.is_pending()
+						);
+					}
+					// The answer exposes retained history below the live edge, and advertises
+					// a source start below it. A join must use the newest group, not either.
+					let producer = match &mut track {
+						Some(track) => track,
+						None => &mut *staged.as_mut().unwrap(),
+					};
+					producer.start_at(0).unwrap();
+					for &sequence in if unresolved { &[0, 3, 7][..] } else { &[7][..] } {
+						let mut group = producer.create_group(group::Info { sequence }).unwrap();
+						group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+						group.finish().unwrap();
+					}
+					if unresolved {
+						track = Some(staged.take().unwrap().commit());
+					}
+					let track = track.unwrap();
+					let outcome = kio::clock::timeout(
+						Duration::from_millis(1),
+						kio::wait(|waiter| {
+							loop {
+								match ready!(serve.poll(&publisher.shared, &mut writer, waiter))? {
+									ControlFlow::Continue(()) => {}
+									ControlFlow::Break(()) => return Poll::Ready(Ok::<_, Error>(())),
+								}
+							}
+						}),
+					)
+					.await;
+					assert!(outcome.is_err(), "the live subscription ended");
+					let mut streams = std::collections::BTreeMap::<_, Vec<u8>>::new();
+					for (id, sent) in log.trail() {
+						if let Sent::Write(bytes) = sent {
+							streams.entry(id).or_default().extend(bytes);
+						}
+					}
+					let mut sequences = streams
+						.values()
+						.map(|bytes| {
+							crate::coding::decode_buf(&mut bytes.as_slice(), version, |r, v| {
+								assert_eq!(lite::DataType::decode(r, v)?, lite::DataType::Group);
+								Ok(lite::Group::decode(r, v)?.sequence)
+							})
+							.unwrap()
+						})
+						.collect::<Vec<_>>();
+					sequences.sort();
+					let expected = if start.is_some() || version.resolves_start() {
+						vec![0, 3, 7]
+					} else if unresolved {
+						vec![7]
+					} else {
+						vec![3, 7]
+					};
+					assert_eq!(
+						sequences, expected,
+						"{version}, unresolved={unresolved}, start={start:?}"
+					);
+					track.abort(Error::Cancel).unwrap();
 				}
 			}
 		}

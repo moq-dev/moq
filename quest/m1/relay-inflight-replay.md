@@ -31,3 +31,33 @@ pipeline-requests epic, so this sits at the m1 top level.
   cells here.
 
 Public API: none. Wire: none.
+
+Implementation checkpoint: [moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737)
+removes the confirmation-time version guard and adds a controlled held-answer test.
+The test exposes cached groups 0, 3, and 7 with source start 0, and checks the
+encoded group streams. Lite03/04 join at 7; explicit starts and arrival floors
+remain covered, with lite05/06 controls. The range-anchor integration expectation
+now includes lite03/04 among the versions whose unfloored copy joins live.
+
+## Waiting
+
+- Maintainer: settle the HLS recorder startup contract before this behavior lands.
+  The live-edge fix makes
+  `moq-hls::integration server::a_cursor_records_a_publisher_without_fetch`
+  time out with `moq-lite-03: no segment recorded`; the same test passes with
+  `origin/main`'s publisher implementation. The normal test first reports this
+  on lite01; a diagnostic run limited to lite03 confirms that restricting the
+  fix to lite03/04 would not avoid it. `Demand::wanted` includes queries, and
+  pre05 copies expose synthetic info before their upstream SUBSCRIBE answer,
+  so neither signal establishes that a media subscription can retain the
+  recorder's first segment. Options: (1) preserve the settled live-edge join
+  and make HLS recording request an explicit media floor derived from its
+  records (recommended), or (2) revisit how a pending join distinguishes cached
+  history from media produced in response to its demand. Do not weaken the
+  recorder assertion or add a timing wait. Complete the source fix, rerun
+  `just ci`, and run all-language interop if this extends into the gateway.
+  The twelve requested lite03/04 Rust/browser-JS publisher by Rust/Node/Bun
+  subscriber matrix cells passed. The broader interop invocation also runs
+  finite-finish and CLI FETCH cases that failed on these old versions; their
+  applicability and base behavior still need verification before claiming
+  that broader suite passes.
