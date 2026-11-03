@@ -17,16 +17,17 @@ the ranges model, anchors, `delay: { max: null }`, and the on-demand request
 surface. Rust's lite-07 SUBSCRIBE already carries ranges
 ([moq-dev/moq#6715](https://github.com/moq-dev/moq/pull/6715)).
 
-Mirror lite-07 bounded completion as the Rust copy implements it when this
-lands. The target is [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)'
-"Ends are signaled" design: a covered bounded subscription sends
-SUBSCRIBE_FINISH, keeps the Subscribe Stream open, and never FINs it. This
-quest does not wait on that one, so if it lands first, the wire still FINs a
-covered bounded subscription without SUBSCRIBE_END. The JS subscriber already
-accepts that FIN, closing the request's track once its tail settles, and
-failing it when an update moved the range and the groups that arrived leave it
-uncovered; until SUBSCRIBE_FINISH ships it reopens that demand on the same
-track instead, as the Rust copy does.
+Mirror lite-07's explicit end as the Rust side implements it
+([Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)' "Ends are signaled"):
+SUBSCRIBE_END is renamed SUBSCRIBE_FINISH, and neither it nor a covered bounded
+subscription closes the Subscribe Stream. The JS publisher keeps reading
+updates past SUBSCRIBE_FINISH instead of FINing, and once no group can resolve
+a held start (every group of a bounded subscription given up, or the track
+finished) sends SUBSCRIBE_OK, then the drops it held. The JS subscriber FINs
+once its tail settles past SUBSCRIBE_FINISH, reads on to the publisher's FIN in
+reply, and waits for SUBSCRIBE_OK before judging the tail. Interop passes
+meanwhile: a JS reader ends at the declared end, and the stream closes when the
+consumer releases it.
 
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
 The publisher resolves no relative or time start, serving it from the oldest
