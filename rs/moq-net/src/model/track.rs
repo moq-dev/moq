@@ -257,6 +257,23 @@ impl Info {
 		self
 	}
 
+	/// `timestamp` at this track's [`timescale`](Self::timescale).
+	///
+	/// A track is all timed or all untimed, so a frame must match it: a timed frame on an
+	/// untimed track, or an untimed one on a timed track, is [`Error::TimestampMismatch`],
+	/// as is a timestamp the track's scale can't hold. A writer that changes state before
+	/// its frame reaches the track, such as signing or encrypting it, rescales first so a
+	/// refused timestamp changes nothing.
+	pub fn rescale(&self, timestamp: Option<Timestamp>) -> Result<Option<Timestamp>> {
+		match (timestamp, self.timescale) {
+			(Some(timestamp), Some(timescale)) => Ok(Some(
+				timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
+			)),
+			(None, None) => Ok(None),
+			_ => Err(Error::TimestampMismatch),
+		}
+	}
+
 	/// The original moq-transport publisher's draft, whose timestamps may rewind, or
 	/// `None` for a native moq-lite track.
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
@@ -3471,8 +3488,7 @@ impl Producer {
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
-		let timescale = state.info.as_ref().unwrap().timescale;
-		let timestamp = group::on_track(timestamp.into(), timescale)?;
+		let timestamp = state.info.as_ref().unwrap().rescale(timestamp.into())?;
 		let sequence = state.next_sequence()?;
 		if let Some(fin) = state.final_sequence()
 			&& sequence >= fin
@@ -3535,14 +3551,13 @@ impl Producer {
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
 		let info = state.info.as_ref().unwrap();
-		let timescale = info.timescale;
 		let status = datagram.wire.as_ref().and_then(|wire| wire.status);
 		// A datagram is its own group, so it compresses alone. A status has no payload.
 		if info.compress && datagram.deflated.is_none() && status.is_none() {
 			datagram.deflated = Some(super::flate::Encoder::new().frame(&datagram.payload));
 		}
 		if status.is_none_or(|status| status == 0) {
-			datagram.datagram.timestamp = group::on_track(datagram.timestamp, timescale)?;
+			datagram.datagram.timestamp = info.rescale(datagram.timestamp)?;
 		}
 		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
 			return Err(Error::Closed);
@@ -3595,8 +3610,7 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 		// Checked before the group exists, so a refused frame leaves no empty group behind.
-		let timescale = self.modify()?.info.as_ref().unwrap().timescale;
-		let timestamp = group::on_track(timestamp.into(), timescale)?;
+		let timestamp = self.modify()?.info.as_ref().unwrap().rescale(timestamp.into())?;
 		let mut group = self.append_group()?;
 		if let Err(err) = group.write_frame(timestamp, frame) {
 			// A rewind is only known once the group exists; end it rather than leave it open.
@@ -8854,6 +8868,27 @@ impl Subscriber {
 			Inner::Plain(cursor) => cursor.filter.window.runs(from).next().map(|run| *run.start()),
 			Inner::Resume(resume, _) => resume.next_in_range(from),
 		}
+	}
+
+	/// The groups from `from` up to the exclusive `end` that this subscriber's ranges and
+	/// [`Self::with_range`] bounds name, lowest first: the groups it is owed, without the
+	/// ones between disjoint ranges.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn runs_in_range(&mut self, from: u64, end: u64) -> Vec<ops::Range<u64>> {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		let end = bounds.end.map_or(end, |cap| cap.min(end));
+		let runs = match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.runs(from).collect::<Vec<_>>()
+			}
+			Inner::Resume(resume, _) => resume.runs(from),
+		};
+		runs.into_iter()
+			.take_while(|run| *run.start() < end)
+			.map(|run| *run.start()..run.end().saturating_add(1).min(end))
+			.collect()
 	}
 
 	/// Whether `accounted` holds every group from `from` on that this subscriber's ranges
@@ -17437,6 +17472,25 @@ mod test {
 		);
 		// Nothing can follow the maximum sequence.
 		assert!(consumer.next_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	#[test]
+	fn rescale_matches_the_track_timeline() {
+		let timed = Info::timed();
+		let ms = Timestamp::from_micros(2_400).unwrap();
+		let rescaled = timed.rescale(Some(ms)).unwrap().unwrap();
+		assert_eq!(rescaled, Timestamp::from_millis(2).unwrap());
+		// Halfway rounds down too, as `@moq/net`'s `Track.rescale` does.
+		let half = timed.rescale(Timestamp::from_micros(1_500).ok()).unwrap().unwrap();
+		assert_eq!(half, Timestamp::from_millis(1).unwrap());
+		assert!(matches!(timed.rescale(None), Err(Error::TimestampMismatch)));
+		// (2^61-1) seconds overflows conversion to the milli-scale track.
+		let huge = Timestamp::from_secs((1 << 61) - 1).unwrap();
+		assert!(matches!(timed.rescale(Some(huge)), Err(Error::TimestampMismatch)));
+
+		let untimed = Info::default();
+		assert_eq!(untimed.rescale(None).unwrap(), None);
+		assert!(matches!(untimed.rescale(Some(ms)), Err(Error::TimestampMismatch)));
 	}
 
 	#[test]

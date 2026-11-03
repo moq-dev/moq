@@ -2,10 +2,10 @@
 
 ## Goal
 
-`moq_auth::mesh::EndpointId` is merged into `moq_sign::PublicKey`: one Rust
+`moq_auth::mesh::EndpointId` is merged into `moq_crypto::sign::PublicKey`: one Rust
 type for a mesh endpoint's Ed25519 public key, with one z-base-32 text codec
 (52 lowercase characters, zero trailing bits, no other text form) that
-moq-auth and moq-sign share. JS has one codec too, used by `@moq/sign` and
+moq-auth and moq-crypto share. JS has one codec too, used by `@moq/crypto` and
 by `@moq/auth` if it grows one. The text form, vectors, and refusals stay as
 both PRs specified.
 
@@ -25,24 +25,23 @@ is related.
   `rs/moq-sign` with `SecretKey`/`PublicKey` using the same specification,
   and a separate JS codec in `js/sign/src/zbase32.ts`. Both chose z-base-32
   so they would share one format; whichever landed second was to dedupe.
-- Merge `EndpointId` into `moq_sign::PublicKey` (moq-auth depends on
-  moq-sign for it, or the type moves to a small shared crate if the
+- Merge `EndpointId` into `moq_crypto::sign::PublicKey` (moq-auth depends on
+  moq-crypto for it, or the type moves to a small shared crate if the
   dependency direction is wrong; say which in the PR). Keep the shared
   vectors in `drafts/moq-sign-00.json` as the single source of test vectors.
 - Both copies are still on `main` at be39188000:
   `rs/moq-auth/src/mesh/mod.rs:52` (the specification) and `:65`
-  (`EndpointId`), beside `rs/moq-sign/src/key.rs:18`.
-- [moq-crypto replaces moq-sign](/quest/m1/moq-crypto.md) renames
-  `moq-sign`/`@moq/sign` to `moq-crypto`/`@moq/crypto`. If it lands first,
-  merge `EndpointId` into its public key type and use its JS codec instead.
+  (`EndpointId`), beside what is now `rs/moq-crypto/src/sign/key.rs`.
+- [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702) merged
+  `moq-sign`/`@moq/sign` into `moq-crypto`/`@moq/crypto`; the JS codec is
+  `js/crypto/src/sign/zbase32.ts`.
 - Note, not in scope: persist a browser JS `SecretKey` (a nonextractable
   `CryptoKey`) in IndexedDB only once a browser mesh node needs a stable
   endpoint ID.
 
 Public API: breaking for moq-auth (`mesh::EndpointId` becomes
-`moq_sign::PublicKey` or a re-export). Wire: none.
+`moq_crypto::sign::PublicKey` or a re-export). Wire: none.
 
 ## Related
 
 - [Mesh](/quest/m2/mesh/README.md) - the epic both types serve
-- [moq-crypto replaces moq-sign](/quest/m1/moq-crypto.md) - renames the crate this quest merges into
