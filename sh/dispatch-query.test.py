@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_env import dispatch_env
 
@@ -25,15 +26,18 @@ class QueryTests(unittest.TestCase):
         (self.repo / "sh").mkdir(parents=True)
         for script in ("dispatch.sh", "changed.sh", "local.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
+        # The stub belongs in the base so it does not widen every test's diff.
+        (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 0\n")
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
+        for command in ("bash", "git", "sort", "mktemp", "rm", "grep", "cat", "sed", "tr", "xargs", "sleep"):
             (self.bin / command).symlink_to(shutil.which(command))
         self.env = dispatch_env(
             LOCAL_SUPERVISED="1",
             PATH=str(self.bin),
             GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL=os.devnull,
+            BASH_ENV=os.devnull,
             CI_STRICT="1",
         )
         self.git("init", "-q", "-b", "main")
@@ -79,6 +83,15 @@ class QueryTests(unittest.TestCase):
         self.change("quest/m1/example.md")
         self.expect(True, rust=False)
 
+    def test_biome_checks_files_outside_the_js_impact_map(self):
+        for path in ("cpp/obs/buildspec.json", "sh/gh/setup.test.ts", ".github/ci-selection-audit.json"):
+            with self.subTest(path=path):
+                self.change(path)
+                calls = self.run_ci()
+                self.assertIn("biome", calls)
+                self.assertFalse(any(call.startswith("js check-changed ") for call in calls), calls)
+                (self.repo / path).unlink()
+
     def test_rust_cache_follows_modules_that_compile_rust(self):
         for path, rust in (
             ("rs/moq-net/src/lib.rs", True),
@@ -104,6 +117,13 @@ class QueryTests(unittest.TestCase):
                 self.assertTrue(any(call.startswith("rs test-changed ") for call in calls), calls)
                 (self.repo / path).unlink()
 
+    def test_generator_pin_checks_the_bindings_it_renders(self):
+        self.change("rs/uniffi-bindgen/Cargo.toml")
+        calls = self.run_ci()
+        for module in ("py", "kt", "swift"):
+            self.assertIn(f"{module} check", calls)
+        self.assertNotIn("go check", calls)
+
     def test_nixpkgs_updates_check_browser_pins(self):
         self.change("flake.lock")
         self.expect(True)
@@ -125,9 +145,12 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
 
     def test_orchestration_and_all_select_work(self):
-        self.expect(True, base="--all")
+        self.expect(True, base="--all", rust=True)
         self.change("justfile")
-        self.expect(True)
+        self.expect(True, rust=True)
+        (self.repo / "justfile").unlink()
+        self.change("sh/kvm.sh")
+        self.expect(True, rust=True)
 
     def test_working_tree_changes_and_deletions_count(self):
         self.change("rs/moq-net/src/lib.rs")
@@ -214,6 +237,7 @@ class QueryTests(unittest.TestCase):
             "bun",
             "python3",
             "cargo",
+            "release-plz",
             "jq",
             "shellcheck",
             "shfmt",
@@ -224,6 +248,7 @@ class QueryTests(unittest.TestCase):
             "quest",
             "nix",
             "c++",
+            "cc",
             "clang-format",
             "cmake",
             "dart",
@@ -257,7 +282,6 @@ class QueryTests(unittest.TestCase):
         nix.chmod(0o755)
         self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
-        self.env["PATH"] = f"{self.bin}:{os.environ['PATH']}"
         for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
@@ -270,6 +294,25 @@ class QueryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
+
+    def test_ci_requires_its_tool_stubs_even_when_the_host_has_them(self):
+        host = self.root / "host"
+        host.mkdir()
+        tool = host / "zizmor"
+        tool.write_text("#!/bin/sh\nexit 0\n")
+        tool.chmod(0o755)
+        with patch.dict(os.environ, PATH=str(host)):
+            self.stub_ci()
+        (self.bin / "zizmor").unlink()
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("these tools are missing: zizmor", result.stderr)
 
     def test_failure_keeps_running_lanes_and_starts_remaining_modules(self):
         # The failed lane finishes before go releases the two parked lanes.
@@ -463,7 +506,32 @@ class QueryTests(unittest.TestCase):
         self.assertNotIn("nix flake check --print-build-logs", calls)
         self.assertIn("gh test", calls)
 
-    def test_strict_ci_runs_the_full_flake_without_a_probe(self):
+    @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
+    def test_missing_kvm_refuses_flake_without_skipping_or_cancelling_other_modules(self):
+        for strict in (False, True):
+            with self.subTest(strict=strict):
+                self.stub_ci()
+                self.change("flake.nix")
+                (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 1\n")
+                env = dict(self.env)
+                if not strict:
+                    env.pop("CI_STRICT")
+                result = subprocess.run(
+                    ["bash", "sh/dispatch.sh", "ci" if strict else "check", "origin/main"],
+                    cwd=self.repo,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("/dev/kvm is missing", result.stdout + result.stderr)
+                self.assertRegex(result.stderr, r"\d+  check flake \(failed\)")
+                self.assertNotIn("(skipped)", result.stderr)
+                calls = (self.root / "calls").read_text().splitlines()
+                self.assertNotIn("nix flake check --print-build-logs", calls)
+                self.assertIn("gh test", calls)
+
+    def test_strict_ci_runs_the_full_flake_without_a_namespace_probe(self):
         self.change("flake.nix")
         calls = self.run_ci()
         self.assertIn("nix flake check --print-build-logs", calls)

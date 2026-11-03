@@ -82,30 +82,6 @@ typedef SoftwareEncoder = SoftwareMoqVideoEncoderKind;
 /// A specific backend by name, such as `videotoolbox`, `mediafoundation`, or `openh264`.
 typedef NamedEncoder = NamedMoqVideoEncoderKind;
 
-/// Duration view over a raw picture's timestamp.
-extension VideoFrameDuration on MoqVideoFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over a decoded picture's timestamp.
-extension VideoDecodedFrameDuration on MoqVideoDecodedFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs());
-}
-
-/// Duration view over a gap.
-extension VideoReadGapDuration on GapMoqVideoRead {
-  /// The furthest presentation point already read.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over an encoder end.
-extension VideoReadEndDuration on EndMoqVideoRead {
-  /// Where the stopped encoder's media stops.
-  Duration get end => Duration(microseconds: endUs);
-}
-
 /// Input, codec settings, and publication ownership for a producer.
 typedef ProducerOptions = MoqVideoProducerOptions;
 

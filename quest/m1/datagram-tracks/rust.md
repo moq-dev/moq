@@ -29,6 +29,11 @@ The decisions are in the [epic](/quest/m1/datagram-tracks/README.md).
 - A datagram carries its sequence, its timestamp, and the payload.
 - Decide whether the request's answer carries the track's timescale and
   compression as TRACK_INFO does, and record the reason in the epic.
+- Every datagram write takes a timestamp, as every write does
+  ([the model](/quest/m1/time-addressing/model.md), maintainer 2026-11-03).
+  On a scale-less track (`Timescale` 0) a stream frame's timestamp is its
+  group's key, and a datagram has no group: decide what its timestamp is
+  there, and record the reason in the epic.
 - Remove the lite-07 rules that mixing needed:
   - stream/datagram dedup;
   - ordering a datagram among its group's streams;

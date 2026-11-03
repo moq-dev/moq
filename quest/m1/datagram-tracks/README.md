@@ -90,4 +90,3 @@ The draft's own Datagrams section changes with the
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - ranges no longer cover datagrams
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - stream tracks address by start; datagram tracks keep a sequence
-- [Broadcast archives](/quest/m1/archive/README.md) - skips datagram tracks

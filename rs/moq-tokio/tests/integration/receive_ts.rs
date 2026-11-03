@@ -86,13 +86,9 @@ impl Controller for Recorder {
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(self.clone())
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-		self
-	}
 }
 
-impl congestion::ControllerFactory for Recorder {
+impl congestion::Factory for Recorder {
 	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 		Box::new((*self).clone())
 	}
@@ -152,8 +148,7 @@ async fn run(preset: &str) -> Run {
 		.dangerous()
 		.with_custom_certificate_verifier(Arc::new(crate::receive_credit::AnyCert))
 		.with_no_client_auth();
-	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-	let mut client = driver::client::Config::new(Arc::new(quic));
+	let mut client = driver::client::Config::new(Arc::new(tls));
 	client.transport.congestion = Arc::new(recorder.clone());
 	client.transport.receive_timestamps = std::num::NonZeroU32::new(32);
 	let endpoint =

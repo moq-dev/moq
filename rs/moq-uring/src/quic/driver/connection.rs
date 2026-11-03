@@ -23,6 +23,13 @@ pub(crate) type Shared = Rc<Inner>;
 /// One GSO train is at most 64 segments; stay a hair under the kernel cap.
 const TRAIN_SEGMENTS: usize = 63;
 
+/// The GSO trains a connection stages per worker turn before it yields to
+/// the next, so one connection's backlog shares the socket with the others
+/// and with the completions the next reap brings back. More than one, so a
+/// reply's lone train is followed by an empty flush rather than a yield and a
+/// turn of its own; four cut a bulk sender's enters by a quarter against one.
+const TRAINS_PER_TURN: usize = 4;
+
 /// Everything the handles and the driver share, single-threaded.
 ///
 /// The connection and the bookkeeping live in separate `RefCell`s so a stream
@@ -333,21 +340,16 @@ impl Connection {
 		self.shared.conn.borrow().stats()
 	}
 
-	/// The peer's certificate chain in DER, leaf first, or `None` if it
-	/// presented none.
+	/// The certificate chain the peer presented, end entity first, or `None`
+	/// if it presented none.
 	///
 	/// A server only sees one when it asked
 	/// ([`ClientAuth`](crate::quic::server::ClientAuth)), and TLS already
 	/// validated it against the configured roots by the time this connection
 	/// exists: an invalid chain fails the handshake instead. So a `Some` here
 	/// is an authenticated peer, and the chain is what names it.
-	pub fn peer_chain(&self) -> Option<Vec<Vec<u8>>> {
-		let conn = self.shared.conn.borrow();
-		let identity = conn.crypto_session().peer_identity()?;
-		let chain = identity
-			.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-			.ok()?;
-		Some(chain.iter().map(|cert| cert.to_vec()).collect())
+	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+		self.shared.conn.borrow().peer_identity()
 	}
 
 	/// The peer's address as of the handshake; a peer that migrates later
@@ -392,6 +394,12 @@ impl Connection {
 	/// Receive streams evicted to free a stuck receive window.
 	pub(crate) fn streams_evicted(&self) -> u64 {
 		self.shared.conn.borrow().stats().credit.evicted
+	}
+
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let conn = self.shared.conn.borrow();
+		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
 	}
 }
 
@@ -444,6 +452,8 @@ pub(crate) fn launch(
 		key,
 		deadline: owner.timer(),
 		close_staged: false,
+		turn: 0,
+		trains: 0,
 	};
 	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
 	(shared, future)
@@ -505,13 +515,9 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 
 	let (alpn, server_name, remote) = {
 		let conn = shared.conn.borrow();
-		let handshake = conn
-			.crypto_session()
-			.handshake_data()
-			.and_then(|data| data.downcast::<moq_quic::crypto::rustls::HandshakeData>().ok());
-		let (alpn, server_name) = match handshake {
+		let (alpn, server_name) = match conn.handshake_data() {
 			Some(data) => (
-				data.protocol.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
+				data.alpn.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
 				data.server_name,
 			),
 			None => (None, None),
@@ -800,6 +806,10 @@ struct Driver {
 	/// flush that came back empty: moq-quic paces the close like any other packet,
 	/// so it can sit behind a pacing timer after the application asked for it.
 	close_staged: bool,
+	/// The worker turn `trains` counts in.
+	turn: u64,
+	/// Trains staged this turn.
+	trains: usize,
 }
 
 /// The worker dropped its tasks, this driver among them: nothing will ever
@@ -930,18 +940,27 @@ impl Driver {
 		}
 	}
 
-	/// Stage one GSO train, then yield so another connection sharing the
-	/// socket gets a chance at the transmit pool.
+	/// Stage up to [`TRAINS_PER_TURN`] GSO trains this turn, then yield the
+	/// rest to the next turn, so other connections sharing the socket get a
+	/// chance at the transmit pool and the ring is reaped in between.
 	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		match self.flush_one(waiter) {
-			Poll::Ready(Ok(())) => {}
-			Poll::Ready(Err(err)) => return Poll::Ready(err),
-			// Backpressure, or nothing left to stage.
-			Poll::Pending => return Poll::Pending,
+		let turn = self.shared.owner.turn();
+		if self.turn != turn {
+			self.turn = turn;
+			self.trains = 0;
 		}
-		// Requeue behind the other ready tasks. If moq-quic is drained, the next
-		// poll costs one empty acquire and then parks normally.
-		waiter.waker().wake_by_ref();
+		while self.trains < TRAINS_PER_TURN {
+			match std::task::ready!(self.flush_one(waiter)) {
+				Ok(()) => self.trains += 1,
+				Err(err) => return Poll::Ready(err),
+			}
+			// The budget is spent: requeue behind the next reap, once per turn.
+			// If moq-quic is drained by then, that poll costs one empty acquire
+			// and then parks normally.
+			if self.trains == TRAINS_PER_TURN {
+				self.shared.owner.yield_turn(waiter.waker());
+			}
+		}
 		Poll::Pending
 	}
 
