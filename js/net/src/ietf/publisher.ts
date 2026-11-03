@@ -29,7 +29,7 @@ import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Groups, Info, Range, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
@@ -497,14 +497,17 @@ export class Publisher {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
 			const fixed = subscribeRange(msg, {}, version);
-			return source.track(msg.trackName).subscribe({
-				priority: fromWire(msg.subscriberPriority),
-				order: msg.groupOrder,
-				// An absent budget preserves everything retained by the producer.
-				// moq-transport has no field for a minimum.
-				delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
-				groups: fixed.start ? rangeGroups(fixed) : undefined,
-			});
+			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
+			return hooks.parked(
+				source.track(msg.trackName).subscribe({
+					priority: fromWire(msg.subscriberPriority),
+					order: msg.groupOrder,
+					// An absent budget preserves everything retained by the producer.
+					// moq-transport has no field for a minimum.
+					delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
+					ranges: fixed.start ? serveRanges(fixed) : undefined,
+				}),
+			);
 		};
 		let track = subscribe(broadcast);
 
@@ -710,7 +713,7 @@ export class Publisher {
 				order,
 				// moq-transport has no field for a minimum.
 				delay: { max: Milli(msg.maxAge ?? Varint.MAX_U53), min: null },
-				groups: rangeGroups(range),
+				ranges: serveRanges(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
 			if (startGroup !== undefined) track.withRange({ ...rangeGroups(range), start: { included: startGroup } });
@@ -864,7 +867,7 @@ export class Publisher {
 						range.start = tail.start;
 						range.end = tail.end;
 						bounds.set(requested, true);
-						track.update({ ...track.subscription.peek(), groups: rangeGroups(range) });
+						track.update({ ...track.subscription.peek(), ranges: serveRanges(range) });
 						// Below its floor the live cursor already passed every group or never owned it,
 						// so lowering it for a fill-only update would hand those groups out a second time.
 						let start = range.start ? Number(range.start.group) : 0;
@@ -2849,6 +2852,14 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 }
 
 /** The model's group bounds for a {@link ServeRange}: an absent start joins at the latest group. */
+/** The model ranges a {@link ServeRange} asks for, whole groups through its last one. */
+function serveRanges(range: ServeRange): Range[] {
+	const out: Range = {};
+	if (range.start) out.start = { absolute: Number(range.start.group) };
+	if (range.end) out.end = { absolute: Number(range.end.group) + 1 };
+	return [out];
+}
+
 function rangeGroups(range: ServeRange): Groups {
 	return {
 		start: range.start ? { included: Number(range.start.group) } : undefined,
