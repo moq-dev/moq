@@ -1103,7 +1103,9 @@ mod tests {
 					}
 					samples.try_push(Err(Error::Capture("device lost".into()))).unwrap();
 					status(&mut control, Status::Failed).await;
-					assert!(matches!(control.state().failure(), Some(Error::Capture(message)) if message == "device lost"));
+					assert!(
+						matches!(control.state().failure(), Some(Error::Capture(message)) if message == "device lost")
+					);
 					// Failure is terminal, but the publication still serves what it retained.
 					assert!(!control.is_finished());
 					control.start();

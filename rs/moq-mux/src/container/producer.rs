@@ -958,7 +958,10 @@ where
 		match err {
 			None => self.inner.finish()?,
 			Some(err) => {
-				let next = self.inner.largest().map_or(0, |largest| largest.group.saturating_add(1));
+				let next = self
+					.inner
+					.largest()
+					.map_or(0, |largest| largest.group.saturating_add(1));
 				self.inner.finish_at(moq_net::track::Position::group(next), Some(err))?;
 			}
 		}
