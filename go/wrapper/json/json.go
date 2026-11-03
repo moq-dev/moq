@@ -166,7 +166,7 @@ func NewSnapshotConsumer(track *moq.TrackConsumer) (*SnapshotConsumer, error) {
 }
 
 // Next returns the next state in order, or nil when the track ends. Groups older
-// than the subscription's MaxDelay are skipped, so a playhead reader sets that
+// than the subscription's Delay.Max are skipped, so a playhead reader sets that
 // budget to its distance behind live.
 func (c *SnapshotConsumer) Next(ctx context.Context) (*Timed, error) {
 	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
