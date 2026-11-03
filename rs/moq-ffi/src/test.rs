@@ -2954,7 +2954,7 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 }
 
 /// A byte-stream rung above another sits one priority below it, so a grant short of both funds
-/// the lower one first. Disabled, it drops what it is written, and enabled again it resumes at
+/// the lower one first. Disabled, it drops what is written to it, and enabled again it resumes at
 /// the next keyframe in the stream.
 #[tokio::test]
 async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
