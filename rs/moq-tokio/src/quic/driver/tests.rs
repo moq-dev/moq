@@ -879,7 +879,7 @@ async fn echo((mut send, mut recv): (send::Stream, recv::Stream)) {
 		send.write_all(chunk).await.expect("write chunk");
 	}
 
-	let _ = send.finish();
+	drop(send.finish());
 }
 
 fn gen_data(size: usize, seed: u64) -> Vec<u8> {
@@ -1400,7 +1400,7 @@ async fn forwarded_packets_reach_their_owner() {
 		let message = format!("round {round} through server {server}");
 		let (mut send, mut recv) = conn.open_bi(Default::default()).await.unwrap();
 		send.write_all(message.as_bytes()).await.unwrap();
-		let _ = send.finish();
+		drop(send.finish());
 		let echoed = timeout(Duration::from_secs(10), recv.read_to_end(1024))
 			.await
 			.expect("the owner answered")
@@ -1850,14 +1850,16 @@ async fn dropped_stream_resolves_stopped() {
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"truncated"[..]).await.unwrap();
+	let id = send.id();
 	let stopped = send.stopped();
 	drop(send);
+	assert!(!conn.send_released(id), "the stopped future keeps the stream's end");
 	let stopped = timeout(Duration::from_secs(10), stopped).await;
 	assert_eq!(stopped, Ok(Ok(None)));
-	assert_eq!(conn.stopped_waiters(), 0);
+	assert!(conn.send_released(id), "the last stopped future releases the stream");
 }
 
-/// A reset releases the stream's `stopped` waiters, even one dropped while pending
+/// A `stopped` future dropped while pending leaves the stream to release itself
 #[tokio::test]
 async fn stream_reset_releases_stopped() {
 	let _guard = subscribe();
@@ -1865,18 +1867,21 @@ async fn stream_reset_releases_stopped() {
 	let (conn, _server) = connect_self(&endpoint).await;
 	let mut send = conn.open_uni(Default::default()).await.unwrap();
 	send.write_all(&b"hello"[..]).await.unwrap();
+	let id = send.id();
 	{
 		let mut stopped = pin!(send.stopped());
 		let poll = std::future::poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx))).await;
 		assert!(poll.is_pending());
 	}
-	assert_eq!(conn.stopped_waiters(), 1);
+	assert!(!conn.send_released(id));
 	send.reset(7u32.into());
-	assert_eq!(conn.stopped_waiters(), 0);
+	assert!(conn.send_released(id));
 }
 
+/// A blocked read wakes when the connection closes, and one dropped with its stream leaves no
+/// waiter behind
 #[tokio::test]
-async fn stream_drop_removes_blocked_reader() {
+async fn dropped_read_leaves_no_waiter() {
 	let _guard = subscribe();
 
 	for drop_stream in [false, true] {
@@ -1895,24 +1900,20 @@ async fn stream_drop_removes_blocked_reader() {
 
 			let (waker, wake_counter) = new_count_waker();
 			let mut cx = Context::from_waker(&waker);
-			// do a blocking read which will add the stream in conn.blocked_readers
-			{
-				let mut buf = [0u8; 64];
-				let mut buf = &mut buf[..];
-				let read_fut = stream.read(&mut buf);
-				tokio::pin!(read_fut);
-				assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
-			}
+			// A blocking read registers its waiter with moq-quic.
+			let mut buf = [0u8; 64];
+			let mut buf = &mut buf[..];
+			let mut read_fut = Box::pin(stream.read(&mut buf));
+			assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
 
 			if !drop_stream {
 				assert_eq!(wake_counter.wakes(), 0);
-				// We have a blocked reader, closing the connection should wake it. We use this as
-				// a proxy to assert that the stream is in conn.blocked_readers.
+				// Closing the connection wakes the blocked reader.
 				conn.close(0u32.into(), "done");
 				assert_eq!(wake_counter.wakes(), 1);
 			} else {
-				// dropping the stream should remove it from conn.blocked_readers, so we don't
-				// expect any wakeups
+				// The dropped read took its waiter with it, so nothing is left to wake.
+				drop(read_fut);
 				drop(stream);
 				assert_eq!(wake_counter.wakes(), 0, "no wakeups should have occurred");
 				conn.close(0u32.into(), "done");
@@ -2481,4 +2482,181 @@ async fn close_during_handshake_does_not_wait_for_silent_peer() {
 	let elapsed = start.elapsed();
 	assert!(connect.await.is_err());
 	assert_eq!(elapsed, Duration::ZERO, "waited {elapsed:?}");
+}
+
+/// A socket whose output can be held independently of QUIC's flow control.
+#[cfg(feature = "sim")]
+#[derive(Debug)]
+struct ControlledSocket {
+	inner: super::sim::Socket,
+	output: Arc<Mutex<ControlledOutput>>,
+}
+
+#[cfg(feature = "sim")]
+#[derive(Debug, Default)]
+struct ControlledOutput {
+	blocked: bool,
+	attempts: usize,
+	writable: Option<Waker>,
+	parked: kio::WaiterList,
+}
+
+#[cfg(feature = "sim")]
+impl AsyncUdpSocket for ControlledSocket {
+	fn poll_recv(
+		&self,
+		cx: &mut Context<'_>,
+		bufs: &mut [IoSliceMut<'_>],
+		meta: &mut [RecvMeta],
+	) -> Poll<io::Result<usize>> {
+		// Once output stalls, suppress further ingress too, so the peer's retransmits cannot
+		// accidentally drive the close timer for us.
+		if self.output.lock().unwrap().writable.is_some() {
+			return Poll::Pending;
+		}
+		self.inner.poll_recv(cx, bufs, meta)
+	}
+
+	fn try_send(&self, transmit: &moq_sock::udp::Transmit<'_>) -> io::Result<()> {
+		if self.output.lock().unwrap().blocked {
+			return Err(io::ErrorKind::WouldBlock.into());
+		}
+		self.inner.try_send(transmit)
+	}
+
+	fn poll_writable(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		let mut output = self.output.lock().unwrap();
+		if !output.blocked {
+			return Poll::Ready(Ok(()));
+		}
+		output.attempts += 1;
+		output.writable = Some(cx.waker().clone());
+		output.parked.wake();
+		Poll::Pending
+	}
+
+	fn local_addr(&self) -> io::Result<SocketAddr> {
+		self.inner.local_addr()
+	}
+}
+
+/// Output resumes on release, and closing never depends on that release.
+#[cfg(feature = "sim")]
+#[test]
+fn a_close_behind_a_blocked_socket_is_bounded() {
+	for release in [false, true] {
+		kio::clock::sim::run(async {
+			let network = super::sim::Network::new(1);
+			let client_addr = SocketAddr::from(([10, 0, 0, 1], 4433));
+			let server_addr = SocketAddr::from(([10, 0, 0, 2], 443));
+			let factory = EndpointFactory::new();
+			let mut transport = transport::Config::default();
+			transport.idle_timeout = None;
+			let mut roots = RootCertStore::empty();
+			roots.add(factory.cert.cert.der().clone()).unwrap();
+			let mut config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();
+			config.transport = transport.clone();
+			let output = Arc::new(Mutex::new(ControlledOutput::default()));
+			let socket: Box<dyn AsyncUdpSocket> = Box::new(ControlledSocket {
+				inner: network.bind(server_addr),
+				output: output.clone(),
+			});
+			let client = Endpoint::new(endpoint::Config::default(), network.bind(client_addr)).unwrap();
+			let server = Endpoint::new(
+				endpoint::Config::default().with_server(factory.server_config(transport)),
+				socket,
+			)
+			.unwrap();
+			let (conn, peer) = tokio::try_join!(client.connect(&config, server_addr, "localhost").unwrap(), async {
+				server.accept().await.unwrap().accept().unwrap().await
+			})
+			.unwrap();
+
+			// Settle the server's handshake flight and FIN before holding an ACK-only packet.
+			let warmup = peer.open_uni(Default::default()).await.unwrap().finish();
+			assert_eq!(warmup.await, Ok(None));
+			// Retire handshake keys on the simulated clock before blocking its next send.
+			sleep(Duration::from_secs(1)).await;
+
+			output.lock().unwrap().blocked = true;
+			let mut stream = conn.open_uni(Default::default()).await.unwrap();
+			stream.write_all(&b"held"[..]).await.unwrap();
+			let finished = stream.finish();
+			kio::wait(|waiter| {
+				let mut output = output.lock().unwrap();
+				if output.writable.is_some() {
+					return Poll::Ready(());
+				}
+				waiter.register(&mut output.parked);
+				Poll::Pending
+			})
+			.await;
+
+			// Consume any transmit registration left from before the socket blocked. The driver
+			// must park again without polling transmission, which would consume a packet.
+			let attempts = output.lock().unwrap().attempts;
+			peer.send_datagram(Bytes::from_static(b"queued"), Default::default())
+				.unwrap();
+			kio::wait(|waiter| {
+				let mut output = output.lock().unwrap();
+				if output.attempts > attempts {
+					return Poll::Ready(());
+				}
+				waiter.register(&mut output.parked);
+				Poll::Pending
+			})
+			.await;
+
+			if release {
+				let waker = {
+					let mut output = output.lock().unwrap();
+					output.blocked = false;
+					output.writable.take().unwrap()
+				};
+				waker.wake();
+				let mut received = peer.accept_uni().await.unwrap();
+				assert_eq!(received.read_to_end(4).await.unwrap(), b"held");
+				assert_eq!(finished.await, Ok(None));
+			}
+
+			peer.close(0u32.into(), "closed while blocked");
+			// With zero path latency, three PTOs take about 78 ms. Closing must use that
+			// deadline rather than the unrelated timer left from the handshake.
+			timeout(Duration::from_secs(1), async {
+				server.wait_all_draining().await;
+				server.wait_idle().await;
+			})
+			.await
+			.expect("socket backpressure held the closing period open");
+			if !release {
+				assert!(output.lock().unwrap().blocked);
+			}
+		});
+	}
+}
+
+/// A finished handle keeps the terminal outcome when driven as a future or a caller-owned poll.
+#[tokio::test]
+async fn finished_waits_keep_the_terminal_outcome() {
+	for stopped in [false, true] {
+		let endpoint = endpoint();
+		let (conn, peer) = connect_self(&endpoint).await;
+		let mut stream = conn.open_uni(Default::default()).await.unwrap();
+		stream.write_all(&b"data"[..]).await.unwrap();
+		let received = peer.accept_uni().await.unwrap();
+		let finished = stream.finish();
+		if stopped {
+			received.stop(42u32.into());
+		} else {
+			peer.close(5u32.into(), "connection lost before FIN was acknowledged");
+		}
+		let polled = kio::wait(|waiter| finished.poll_closed(waiter)).await;
+		let awaited = finished.await;
+		assert_eq!(polled, awaited);
+		if stopped {
+			assert_eq!(awaited, Ok(Some(42u32.into())));
+		} else {
+			assert!(matches!(awaited, Err(send::Error::Connection(_))));
+		}
+	}
 }

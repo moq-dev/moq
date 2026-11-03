@@ -32,7 +32,7 @@ export function statCard(kind: StatKind, label: string, svg: string): StatCard {
 /** Append a labeled row to a card's grid, returning the value span to fill in. */
 export function statLine(grid: HTMLElement, label: string): HTMLSpanElement {
 	const row = DOM.create("div", { className: "stat-line" });
-	const value = DOM.create("span", { className: "stat-value" }, "—");
+	const value = DOM.create("span", { className: "stat-value" }, "-");
 	row.append(DOM.create("span", { className: "stat-key" }, label), value);
 	grid.appendChild(row);
 	return value;

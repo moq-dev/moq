@@ -51,6 +51,7 @@ use crate::time::Instant;
 use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
+use super::idle::{Idle, Walk};
 use super::subscription::{Accounted, Anchor, Position, Resolved, Subscription, Unheld, Window};
 use crate::ledger;
 
@@ -394,7 +395,11 @@ impl Consumer {
 			.lock()
 			.unwrap_or_else(PoisonError::into_inner)
 			.sync(&kio::Waiter::noop());
-		Subscriber { reader, subscription }
+		Subscriber {
+			reader,
+			subscription,
+			idle: None,
+		}
 	}
 
 	/// Fetch one group from whichever route serves the track. `logical` is the logical
@@ -412,6 +417,12 @@ impl Consumer {
 			logical,
 			pending: None,
 		}
+	}
+
+	/// Register `waiter` for any change to the route, so a read that parked on a path that
+	/// never looked at the route still wakes when it changes.
+	fn register(&self, waiter: &kio::Waiter) {
+		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
 	}
 
 	/// Poll for the route state to move past `generation`, or the track to end.
@@ -624,8 +635,13 @@ impl Copy {
 					.take_while(|run| *run.start() < end)
 					.any(|run| {
 						let end = run.end().saturating_add(1).min(end);
-						self.track
-							.may_land(*run.start()..end, floor.is_some(), grace, Some(reader.delivered))
+						self.track.may_land(
+							*run.start()..end,
+							floor.is_some(),
+							grace,
+							Some(reader.delivered),
+							reader.waiter,
+						)
 					}) {
 				return Retains::Wait;
 			}
@@ -652,7 +668,7 @@ impl Copy {
 				|| (lands
 					&& self
 						.track
-						.may_land(sequence..sequence.saturating_add(1), asked, grace, None))
+						.may_land(sequence..sequence.saturating_add(1), asked, grace, None, reader.waiter))
 		};
 		match Arc::strong_count(&self.lease) > 1 || reader.out.iter().any(|(sequence, _)| backs(*sequence)) {
 			true => Retains::Keep,
@@ -706,6 +722,9 @@ pub(super) struct Subscriber {
 	/// reader onto the next route without the reader polling for groups.
 	reader: Arc<Mutex<Reader>>,
 	subscription: track::Preferences,
+	/// The group read that last parked, answered again without the walk until something it
+	/// parked on fires, once it first parks; see [`super::idle`].
+	idle: Option<Box<Idle<Walk>>>,
 }
 
 impl Subscriber {
@@ -746,6 +765,12 @@ impl Subscriber {
 	/// out: in arrival order, or in sequence order for `ordered`.
 	/// Unless it `parks`, a bounded reader ends once its window has nothing left on any copy;
 	/// see [`Reader::exhausted`].
+	///
+	/// A read that parked is answered again with `Pending` until something it parked on
+	/// fires: the reader's preferences, the route, a copy's answer, its cursor, or a wall
+	/// deadline. What the reader changes itself (its range, what it handed out) disarms it.
+	/// Another handle's read that follows the route or the preferences first only applies
+	/// a change that already woke this one.
 	pub(super) fn poll_peek_group(
 		&mut self,
 		ordered: bool,
@@ -753,12 +778,37 @@ impl Subscriber {
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Candidate>>> {
-		let mut reader = self.reader();
-		loop {
-			if let Some(result) = reader.poll_lowest(ordered, parks, delivered, waiter) {
-				return result;
-			}
+		let walk = Walk::new(ordered);
+		if self.parked(walk, waiter) {
+			return Poll::Pending;
 		}
+		let mut idle = Idle::start(&mut self.idle, waiter);
+		let polled = {
+			let waiter = idle.waiter();
+			let mut reader = self.reader();
+			// Registered before looking, so a route change from here on wakes the read,
+			// even on a path that parks without looking at the route.
+			reader.route.register(waiter);
+			loop {
+				if let Some(result) = reader.poll_lowest(ordered, parks, delivered, waiter) {
+					break result;
+				}
+			}
+		};
+		idle.finish(&mut self.idle, walk, polled.is_pending());
+		polled
+	}
+
+	/// Whether a group read in `walk` order would park again at once; see
+	/// [`Self::poll_peek_group`].
+	pub(super) fn parked(&self, walk: Walk, waiter: &kio::Waiter) -> bool {
+		Idle::parked(&self.idle, walk, waiter)
+	}
+
+	/// Forget the parked group read: what the reader handed out changed, which nothing
+	/// notifies.
+	pub(super) fn disarm(&mut self) {
+		Idle::disarm(&mut self.idle);
 	}
 
 	/// Whether this reader's bounded window has nothing left for the readers that handed out
@@ -770,6 +820,7 @@ impl Subscriber {
 
 	/// Hand out the group a [`Self::poll_peek_group`] reserved.
 	pub(super) fn take(&mut self, candidate: Candidate) -> Result<group::Consumer> {
+		self.disarm();
 		self.reader().take(candidate)
 	}
 
@@ -829,6 +880,12 @@ impl Subscriber {
 		self.reader().window().runs(from).next().map(|run| *run.start())
 	}
 
+	/// The groups the reader's ranges name from `from` on; see
+	/// [`track::Subscriber::runs_in_range`].
+	pub(super) fn runs(&self, from: u64) -> Vec<std::ops::RangeInclusive<u64>> {
+		self.reader().window().runs(from).collect()
+	}
+
 	/// Whether `accounted` holds every group the reader's bounded ranges name from `from`
 	/// up to `cap`; see [`track::Subscriber::covered`].
 	pub(super) fn covered(&self, from: u64, cap: Option<u64>, accounted: &impl Accounted) -> bool {
@@ -851,6 +908,8 @@ impl Subscriber {
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
 	/// `delivered` says which groups a lowered floor newly owes.
 	pub(super) fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
+		// A moved range notifies nothing a parked read waits on.
+		self.disarm();
 		self.reader().set_range(start, end, delivered)
 	}
 
@@ -1190,6 +1249,8 @@ impl Reader {
 		// group's in-flight tail. A fresh copy would replay it and retain one per flap. The
 		// newest is the route's own copy, not a backfill of it.
 		if let Some(index) = self.copies.iter().rposition(|copy| copy.track.same_channel(&track)) {
+			// The copy's own resolution ends at its old cap; the reader's does not.
+			let resolved = self.window().resolved();
 			let mut copy = self.copies.remove(index);
 			copy.generation = generation;
 			copy.replaced = false;
@@ -1207,7 +1268,9 @@ impl Reader {
 					self.groups.1.map_or(Bound::Unbounded, Bound::Excluded),
 				));
 			}
-			copy.update(&self.mirrored);
+			copy.resolved = resolved;
+			let wire = self.mirrored.clamped(copy.floor, None, &copy.resolved);
+			copy.send(wire);
 			self.copies.push(copy);
 			return;
 		}
@@ -2569,6 +2632,13 @@ mod test {
 		Timestamp::from_millis(ms).unwrap()
 	}
 
+	/// A task that has not polled yet. Nothing drives these copies' pools, so no wall
+	/// deadline wakes a read parked on one: once time passes, a test looks again from a
+	/// fresh task, since the same task's read answers as it parked until a wake.
+	fn fresh() -> kio::Waiter {
+		kio::Waiter::new(Arc::new(Wake::default()).into())
+	}
+
 	/// A later stream header is not a verdict on the group held from a failed route.
 	#[kio::test]
 	async fn a_failed_route_waits_for_a_reordered_group_header() {
@@ -2614,7 +2684,7 @@ mod test {
 			} else {
 				kio::clock::sleep(Duration::from_secs(1)).await;
 				assert!(matches!(
-					held.poll_read_frame(&waiter),
+					held.poll_read_frame(&fresh()),
 					Poll::Ready(Err(Error::NotFound))
 				));
 			}
@@ -3023,6 +3093,66 @@ mod test {
 		routes.serve(tracks[0].consume());
 		write(&tracks[0], 2);
 		assert_eq!(recv(&mut sub).sequence, 2);
+		drop(held);
+	}
+
+	#[kio::test]
+	async fn a_returning_route_keeps_its_relative_end() {
+		returning_route(Anchor::Relative(991)).await;
+	}
+
+	#[kio::test]
+	async fn a_returning_route_keeps_its_resolved_time_end() {
+		returning_route(Anchor::Time(ts(10))).await;
+	}
+
+	/// Its old cap bounds a replaced copy's wire, not the reader's resolved end. Reusing
+	/// that copy must ask past the cap while keeping the reader's range and local bounds.
+	async fn returning_route(end: Anchor) {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		// Both anchors resolve the reader's exclusive end at 11.
+		for sequence in 2..=11 {
+			write(&a, sequence);
+		}
+		write(&a, 1001);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Absolute(2),
+				end: Some(end),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.await
+			.unwrap()
+			.with_range(2..3);
+		let held = recv(&mut sub);
+		assert_eq!(held.sequence, 2);
+		assert_eq!(sub.next_in_range(11), None, "the reader resolved its end");
+		sub.set_range(4..9);
+
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 4);
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert_eq!(copies(&routes), 2, "the held group keeps A's capped copy");
+
+		routes.serve(a.consume());
+		for sequence in [1, 12] {
+			write(&a, sequence);
+		}
+		let mut resumed = drain(&mut sub, false);
+		resumed.sort_unstable();
+		assert_eq!(resumed, [5, 6, 7, 8], "end={end:?}");
+		// Widening the local cursor still respects the reader's resolved end.
+		sub.set_range(4..);
+		let mut widened = drain(&mut sub, false);
+		widened.sort_unstable();
+		assert_eq!(widened, [9, 10], "end={end:?}");
 		drop(held);
 	}
 
@@ -4377,7 +4507,10 @@ mod test {
 			match outcome {
 				"lands" => {}
 				"dropped" => a.drop_groups(1..2, StreamError::NotFound),
-				_ => kio::clock::sleep(Duration::from_secs(1)).await,
+				_ => {
+					kio::clock::sleep(Duration::from_secs(1)).await;
+					assert!(sub.poll_recv_group(&fresh()).is_pending());
+				}
 			}
 			if outcome != "lands" {
 				assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
@@ -4517,6 +4650,130 @@ mod test {
 		write(&a, 1);
 		assert_eq!(drain(&mut sub, false), [1]);
 		assert!(matches!(sub.poll_recv_group(&noop), Poll::Ready(Ok(None))));
+	}
+
+	/// A capped cursor never probes the gap outside its cap, but the resume reader still
+	/// waits for it. Its grace must wake the clean end before the replacement's budget.
+	#[test]
+	fn a_replaced_copys_gap_wakes_the_clean_end_at_its_grace() {
+		for first_group in [false, true] {
+			for ordered in [false, true] {
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let a = copy();
+				let pool = a.broadcast().pool.clone();
+				let opened = a.consume().now();
+				let noop = kio::Waiter::noop();
+				pool.poll(opened, &noop);
+				routes.serve(a.consume());
+				let budget = Duration::from_secs(1);
+				let mut sub = subscribe(&logical, budget);
+				write(&a, 0);
+				write(&a, 2);
+				assert_eq!(drain(&mut sub, false), [0, 2]);
+
+				pool.poll(opened + budget / 2, &noop);
+				let b = copy();
+				write(&b, if first_group { 3 } else { 2 });
+				routes.serve(b.consume());
+				if first_group {
+					assert_eq!(recv(&mut sub).sequence, 3);
+				}
+				b.finish().unwrap();
+				sub.set_range(..1);
+				let wake = Arc::new(Wake::default());
+				let waiter = kio::Waiter::new(wake.clone().into());
+				let mut poll = || match ordered {
+					true => sub.poll_next_group(&waiter),
+					false => sub.poll_recv_group(&waiter),
+				};
+				assert!(poll().is_pending());
+				wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+				assert!(poll().is_pending());
+				assert!(!wake.0.load(std::sync::atomic::Ordering::Relaxed));
+
+				let deadline = opened + budget;
+				assert_eq!(pool.poll(deadline - Duration::from_micros(1), &noop), Some(deadline));
+				assert!(
+					!wake.0.load(std::sync::atomic::Ordering::Relaxed),
+					"not before the grace"
+				);
+				pool.poll(deadline, &noop);
+				assert!(
+					wake.0.load(std::sync::atomic::Ordering::Relaxed),
+					"first_group={first_group}, ordered={ordered}: the gap's grace wakes the reader"
+				);
+				assert!(matches!(poll(), Poll::Ready(Ok(None))));
+			}
+		}
+	}
+
+	/// A read parked on that wait, which never looks at the route, still wakes once the
+	/// front serves another route.
+	#[test]
+	fn a_read_waiting_past_a_drained_copy_wakes_when_the_route_changes() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(1));
+		write(&a, 0);
+		write(&a, 2);
+		assert_eq!(drain(&mut sub, false), [0, 2]);
+
+		let b = copy();
+		write(&b, 2);
+		b.finish().unwrap();
+		routes.serve(b.consume());
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(sub.poll_recv_group(&waiter).is_pending(), "group 1 may still land");
+		// Bounding the replaced copy updates its subscription, which wakes the read once.
+		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+		assert!(sub.poll_recv_group(&waiter).is_pending());
+		assert!(
+			sub.poll_recv_group(&waiter).is_pending(),
+			"nothing fired, so it parks again"
+		);
+		assert!(!wake.0.load(std::sync::atomic::Ordering::Relaxed));
+
+		let c = copy();
+		routes.serve(c.consume());
+		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
+	}
+
+	/// A resumed read that found nothing parks again at once until something it parked on
+	/// fires, but parks anew for another task, which the next group then wakes instead.
+	#[test]
+	fn an_idle_resumed_read_parks_for_the_task_polling_it() {
+		for ordered in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(1));
+			write(&a, 0);
+			let mut read = |waiter: &kio::Waiter| match ordered {
+				true => sub.poll_next_group(waiter),
+				false => sub.poll_recv_group(waiter),
+			};
+			let first = Arc::new(Wake::default());
+			let waiter = kio::Waiter::new(first.clone().into());
+			assert!(matches!(read(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(read(&waiter).is_pending());
+			assert!(read(&waiter).is_pending(), "nothing fired, so it parks again");
+			assert!(!first.0.load(std::sync::atomic::Ordering::Relaxed));
+
+			let other = Arc::new(Wake::default());
+			let moved = kio::Waiter::new(other.clone().into());
+			assert!(read(&moved).is_pending());
+			write(&a, 1);
+			assert!(
+				other.0.load(std::sync::atomic::Ordering::Relaxed),
+				"the next group wakes the task that polled last"
+			);
+			assert!(matches!(read(&moved), Poll::Ready(Ok(Some(_)))));
+		}
 	}
 
 	/// Datagrams are ephemeral: a reader that only reads them keeps no replaced copy, whatever

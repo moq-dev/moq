@@ -73,10 +73,9 @@ current.
 
 Open after the 2026-11-01 removal run:
 
-- The lock still carries vt100 0.17 and web-transport-iroh 0.8.3.
-  Re-check their costs and the Iroh backend's consumer before upgrading;
-  [moq-dev/moq#7345](https://github.com/moq-dev/moq/pull/7345) proposes dropping
-  that backend. Dependency upgrades alone were not this off-cycle run's goal.
+- The lock still carries vt100 0.17 (moq-cli dev-dependency). Re-check its
+  cost before upgrading; dependency upgrades alone were not this off-cycle
+  run's goal.
 - `test/smoke/flake.lock` lands through the Smoke toolchain update workflow,
   which bumps the npm `playwright` pin with it; confirm the coupled PRs land.
 - http-cache-reqwest stays on its 1.0 prerelease (alpha.9) until 1.0 ships.
@@ -97,8 +96,7 @@ Advisories waiting on upstream:
   a safe dependency range. The Worker and other standalone lockfiles audit
   clean; the root lockfile does not (see the glob and minimatch advisories
   below).
-- paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl and iroh's
-  netlink-packet-core 0.8. tikv-jemallocator's unreleased main drops it.
+- paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl. tikv-jemallocator's unreleased main drops it.
 
 ### Baselines (2026-11-01 removal run)
 

@@ -122,10 +122,13 @@ fresh broadcast. Choose between two kinds of reader.
 **Follow announcements** when the reader should outlive any one stream, as a
 player does. Start on each broadcast, drop all decoder and buffer state on a
 restart, and wait on an end. Rust uses `consumer.follow(path, None)` (or
-`moq_mux::follow::Instances`), and JavaScript `origin.follow(path)`.
-`@moq/watch`, `moq play`, and `moqsrc` follow this way, and
-`moq export ts --stitch` can splice a replacement as a marked program switch.
-A request failing is never the signal to restart; the announcement is.
+`moq_mux::follow::Instances`), JavaScript `origin.follow(path)`, and the
+moq-ffi bindings `follow(path)` with `available()`. `@moq/watch`, `moq play`,
+and `moqsrc` follow this way, and `moq export ts --stitch` can splice a
+replacement as a marked program switch. A request failing is never the signal
+to restart; the announcement is. Nor is a track's error kind: a track withdrawn
+unfinished ends `Unroutable` over moq-lite but `Internal` over moq-transport,
+whose wire has no code for it.
 
 **Hold one stream** when the output must not splice two, as an exporter or
 recorder does. Rust and JavaScript `request(path)` and `moq_mux::Source` keep
@@ -154,10 +157,17 @@ demand, which has none until a worker answers.
 
 ## Work on demand
 
-A worker can advertise a prefix it serves on demand, such as a transcoder
-claiming `transcode`. A claim promises capability, not content. Each requested
-path is a separate job, announced at its exact path under a fresh instance of
-its own.
+A worker can advertise a prefix it serves on demand and answer with a
+broadcast it already holds. This announces no exact route: the answer belongs
+to the prefix route's instance at that path. Every answer there must continue
+one sequence space with the same bytes. To serve different content at a path
+already served, start a new prefix route. Its first subscription stays on
+the prefix route without a restart.
+
+A job that may restart independently, such as a transcoder claiming
+`transcode`, instead prepares and publishes each requested path. A claim
+promises capability, not content. Each requested path is a separate job,
+announced at its exact path under a fresh instance of its own.
 
 ```rust
 let claim = origin.requests("transcode")?;

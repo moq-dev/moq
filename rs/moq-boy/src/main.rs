@@ -118,7 +118,7 @@ impl Config {
 
 /// Shared state for a game session, accessible from multiple threads/tasks.
 ///
-/// Everything here is either atomic, behind a mutex, or immutable —
+/// Everything here is either atomic, behind a mutex, or immutable -
 /// safe to share via `Arc<Session>` between the emulator thread,
 /// track monitors, and async tasks.
 struct Session {
