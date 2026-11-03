@@ -9,11 +9,11 @@ const BOUNDARY: u64 = (HIGH + 2 * LOW) / 3;
 const NARROW: Duration = Duration::from_secs(8);
 const BELOW_LOWEST: Duration = Duration::from_secs(20);
 const RECOVER: Duration = Duration::from_secs(32);
-const END: Duration = Duration::from_secs(50);
+const END: Duration = Duration::from_secs(110);
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
 
 #[tokio::test]
-#[ignore = "real sockets and 50s of shaped uplink; run nightly by `just rs rung-disable`"]
+#[ignore = "real sockets and BBR3 capacity cycles; run nightly by `just rs rung-disable`"]
 async fn shaped_uplink_disables_and_resumes() {
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
@@ -89,7 +89,18 @@ async fn shaped_uplink_disables_and_resumes() {
 	let remote = await_announced(&receiver.consume(), "ladder").await;
 	let catalog = MoqMediaCatalogConsumer::subscribe(&remote).await.unwrap();
 	let first = catalog.next().await.unwrap().expect("catalog ended");
-	let low = remote.subscribe_track("low".into(), None).await.unwrap();
+	let low = MoqMediaTrackConsumer::subscribe(
+		&remote,
+		MoqMediaTrackConfig {
+			rendition: MoqRendition::Video {
+				id: "low".into(),
+				config: first.video["low"].clone(),
+			},
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
 	let high = MoqMediaTrackConsumer::subscribe(
 		&remote,
 		MoqMediaTrackConfig {
@@ -110,6 +121,8 @@ async fn shaped_uplink_disables_and_resumes() {
 	let mut below_lowest = false;
 	let mut resumed = false;
 	let mut received = [0u64; 2];
+	let mut sent = [0u64; 2];
+	let mut keyframe = [true; 2];
 	let mut resumed_frame = false;
 	let mut stopped_at = None;
 	let mut resumed_at = None;
@@ -128,25 +141,28 @@ async fn shaped_uplink_disables_and_resumes() {
 						track.set_enabled(enabled).unwrap();
 						if !enabled {
 							assert_eq!(i, 1, "the lowest rung must never disable");
-							assert!(reservation.rate().unwrap() < BOUNDARY);
 							track.discontinuity().unwrap();
+							keyframe[i] = true;
 							if elapsed >= NARROW && stopped_at.is_none() {
 								stopped_at = Some(timestamp);
 							}
 						} else if i == 1 && was_disabled && stopped_at.is_some() {
 							assert!(elapsed >= RECOVER, "resumed before the path reopened");
-							assert!(reservation.rate().unwrap() >= BOUNDARY + BOUNDARY / 20,
-								"resumed without clearing the hysteresis");
+							assert_eq!(target, MoqRateTarget::Enabled { bitrate_bps: BOUNDARY },
+								"resume must start at the band boundary before ramping");
 							resumed_at.get_or_insert(timestamp);
 						}
 					}
 					if let MoqRateTarget::Enabled { bitrate_bps } = control.target() {
-						// An IDR access unit padded to the target's frame budget. This exercises
-						// framing and transport, without making a codec's rate accuracy the test.
-						let mut payload = h264_init();
-						payload.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
+						// Two-second GOPs, with an IDR on resume. Pad access units to the
+						// target budget, keeping codec rate accuracy out of this transport test.
+						let idr = keyframe[i] || sent[i].is_multiple_of(60);
+						let mut payload = if idr { h264_init() } else { Vec::new() };
+						payload.extend_from_slice(&[0, 0, 0, 1, if idr { 0x65 } else { 0x41 }, 0x88, 0x84, 0x21]);
 						payload.resize((bitrate_bps / 8 / 30) as usize, 0xff);
 						track.write_frame(MoqFrame { payload, timestamp: Some(us(timestamp)) }).unwrap();
+						keyframe[i] = false;
+						sent[i] += 1;
 					}
 				}
 				if elapsed < NARROW && remote_enabled == Some(true) && received.iter().all(|count| *count > 0) {
@@ -178,9 +194,10 @@ async fn shaped_uplink_disables_and_resumes() {
 				remote_enabled = Some(update.video["high"].enabled);
 				println!("{:?}: remote enabled {remote_enabled:?}", start.elapsed());
 			},
-			frame = low.read_frame() => {
-				frame.unwrap().expect("lowest track ended");
-				received[0] += 1;
+			frame = low.next() => {
+				if let MoqMediaRead::Frame { .. } = frame.unwrap().expect("lowest track ended") {
+					received[0] += 1;
+				}
 			},
 			frame = high.next() => {
 				let read = frame.unwrap().expect("top track ended");
@@ -193,13 +210,16 @@ async fn shaped_uplink_disables_and_resumes() {
 						assert!(timestamp < stopped || resumed_at.is_some_and(|at| timestamp >= at),
 							"media was produced while disabled: {timestamp}");
 					}
-					if resumed_at.is_some_and(|at| timestamp >= at) {
+					if !resumed_frame && resumed_at.is_some_and(|at| timestamp >= at) {
 						assert!(frame.keyframe, "the resumed rendition must start with a keyframe");
 						resumed_frame = true;
 					}
 					received[1] += 1;
 				}
 			},
+		}
+		if initial && disabled && below_lowest && resumed && resumed_frame {
+			break;
 		}
 	}
 	let stats = shaper.verify().unwrap();

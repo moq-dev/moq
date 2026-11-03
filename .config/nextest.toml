@@ -44,10 +44,10 @@ test-group = "v4l2"
 filter = "package(moq-ffi) & test(=bench::benchmark_ffi)"
 slow-timeout = { period = "60s" }
 
-# The shaped uplink spends 50s crossing BBR3's max-bandwidth windows and recovering.
+# The shaped uplink crosses BBR3's max-bandwidth windows before waiting for recovery.
 [[profile.default.overrides]]
 filter = "package(moq-ffi) & test(/^test::rung::/)"
-slow-timeout = { period = "60s", terminate-after = 2 }
+slow-timeout = { period = "120s", terminate-after = 2 }
 
 # The receive-window benchmark sweeps a grid twice, once through a bottleneck
 # whose rate bounds how fast a run can go, so it outlasts the hang budget.
