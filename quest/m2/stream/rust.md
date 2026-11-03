@@ -3,7 +3,7 @@
 ## Goal
 
 A Rust application opens a duplex byte stream on a
-[socket](/quest/m2/socket/rust.md) and gets an `AsyncRead + AsyncWrite` that
+[socket](/quest/m1/socket/rust.md) and gets an `AsyncRead + AsyncWrite` that
 carries TCP semantics over one bi track: ordered,
 lossless, FIN as half-close, reset with a code. A socket's listener accepts the streams
 its dialers open. `moq` gains TCP forwarding on both ends so an
@@ -32,5 +32,5 @@ per TCP read, no fill handler.
 
 ## Required
 
-- [Rust sockets](/quest/m2/socket/rust.md) - the socket each stream is a bi track on
+- [Rust sockets](/quest/m1/socket/rust.md) - the socket each stream is a bi track on
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - lossless delivery to a reader that keeps up

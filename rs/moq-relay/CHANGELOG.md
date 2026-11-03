@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- QUIC and WebTransport sessions on the tokio and io_uring listeners enforce a grant's bitrate caps: `publish_rate` paces what the relay receives and `subscribe_rate` what it sends. Unions take the highest cap and an uncapped grant lifts it; a re-checked cap reaches the live session. WebSocket, iroh, and HTTP refuse a capped grant at connect, in band, and at revalidation. Every QUIC session starts with only the SETUP's flow-control credit, opened once admitted.
+- QUIC and WebTransport sessions on the tokio and io_uring listeners enforce a grant's bitrate caps: `publish_rate` paces what the relay receives and `subscribe_rate` what it sends. Unions take the highest cap and an uncapped grant lifts it; a re-checked cap reaches the live session. WebSocket and HTTP refuse a capped grant at connect, in band, and at revalidation. Every QUIC session starts with only the SETUP's flow-control credit, opened once admitted.
 
 ### Changed
 

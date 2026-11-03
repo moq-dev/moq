@@ -235,10 +235,18 @@ impl Version {
 	}
 
 	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
-	/// its tail accounting settles. SUBSCRIBE_END says which groups are owed, so that is
+	/// its tail accounting settles. SUBSCRIBE_FINISH says which groups are owed, so that is
 	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
 		self.has_track_stream()
+	}
+
+	/// Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH and past a covered
+	/// bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's history.
+	/// The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
+	/// Added in lite-07; before it the publisher FINs once the track ends.
+	pub(crate) fn keeps_subscribe_open(self) -> bool {
+		self.has_ranges()
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
@@ -289,7 +297,7 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_END carries the error the track ended with, so an errored end
+	/// Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end
 	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
 	pub(crate) fn has_end_error(self) -> bool {
 		!matches!(

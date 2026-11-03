@@ -278,7 +278,7 @@ struct Ahead {
 	back: Option<Duration>,
 	/// The first PCR read since, which times how long the silent streams are waited for.
 	since: Option<u64>,
-	/// The next input offset to read, and the framer's state there.
+	/// The next input offset to read, never before `at`, and the framer's state there.
 	scan: u64,
 	framer: Framer,
 	/// The step, once every clock confirmed it.
@@ -292,7 +292,6 @@ impl Steps {
 			self.clock = routes.pcr_pid.map(|pid| (pid, None));
 		}
 		let (mut cursor, mut framer) = demux.cursor();
-		let start = (cursor, framer);
 		let Some((at, pkt)) = demux.peek(&mut cursor, &mut framer) else {
 			return Verdict::Route;
 		};
@@ -300,7 +299,7 @@ impl Steps {
 		let marks = Marks::read(pkt, routes, &self.headers);
 
 		if self.ahead.is_none() && at >= self.cleared {
-			self.ahead = self.trigger(at, pid, &marks, routes, start);
+			self.ahead = self.trigger(at, pid, &marks, routes, framer);
 		}
 		let Some(ahead) = &mut self.ahead else {
 			self.observe(pid, marks, routes);
@@ -342,15 +341,9 @@ impl Steps {
 	}
 
 	/// Start judging a step at the packet at `at` if it shows one, with the clocks expected to
-	/// step with it.
-	fn trigger(
-		&self,
-		at: u64,
-		pid: u16,
-		marks: &Marks,
-		routes: &Routes,
-		(scan, framer): (u64, Framer),
-	) -> Option<Ahead> {
+	/// step with it. `framer` is locked onto that packet, so the scan reads it again from `at`
+	/// rather than from the junk a resync skipped before it.
+	fn trigger(&self, at: u64, pid: u16, marks: &Marks, routes: &Routes, framer: Framer) -> Option<Ahead> {
 		let last_pcr = self.clock.and_then(|(_, last)| last);
 		let stepped = if marks.flagged {
 			None
@@ -397,7 +390,7 @@ impl Steps {
 			headers: self.headers.clone(),
 			back: None,
 			since: None,
-			scan,
+			scan: at,
 			framer,
 			confirmed: None,
 		})
@@ -629,6 +622,24 @@ mod tests {
 			.extend(ts(&mut cc, VIDEO, false, &[0x21, 0x00, 0x05, 0x00, 0x05]));
 		second(&mut mux, &mut cc, PCR_HZ + 2 * FRAME, true);
 		assert_eq!(judge(&mux.out, &[VIDEO]), None);
+	}
+
+	/// Junk before the switch, such as a torn packet at the splice, makes the framer resync onto
+	/// the packet that shows the step, past the cursor. The look-ahead reads on from that
+	/// packet, not from the junk, so the switch is still judged whole.
+	#[test]
+	fn a_resync_before_the_step_reads_on_from_it() {
+		let (mut mux, mut cc) = (Mux::default(), 0);
+		second(&mut mux, &mut cc, PCR_HZ, true);
+		mux.out.extend_from_slice(&[0x00; 5]);
+		second(&mut mux, &mut cc, PCR_WRAP + 2 * PCR_HZ - SWITCH, true);
+		let Some(Step::Rewind { by, flagged: false }) = judge(&mux.out, &[VIDEO]) else {
+			panic!("the switch was missed");
+		};
+		assert!(
+			by.abs_diff(Duration::from_millis(16_844_460)) < Duration::from_millis(100),
+			"{by:?}"
+		);
 	}
 
 	/// A PES header split across packets still times its stream, so the switch is seen.

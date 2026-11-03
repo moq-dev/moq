@@ -141,7 +141,7 @@ export function graph(parent: Effect, title: string, opts?: GraphOptions): Graph
 	const push = (v: number | undefined) => {
 		samples.push(v !== undefined && Number.isFinite(v) ? Math.max(0, v) : 0);
 		while (samples.length > capacity) samples.shift();
-		value.textContent = v !== undefined && Number.isFinite(v) ? (opts?.format?.(v) ?? v.toFixed(0)) : "—";
+		value.textContent = v !== undefined && Number.isFinite(v) ? (opts?.format?.(v) ?? v.toFixed(0)) : "-";
 		draw();
 	};
 

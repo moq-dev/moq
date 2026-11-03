@@ -1236,11 +1236,10 @@ pub struct Cluster {
 	/// Dial template every peer dial is built from; see [`Self::peer_client`].
 	connect: Option<moq_tokio::connect::Config>,
 	quic: Option<moq_tokio::quic::Config>,
-	#[cfg(feature = "iroh")]
-	iroh: Option<moq_tokio::iroh::Endpoint>,
-	/// The client static and API peers share, on the template's bind address, so
-	/// a fixed `[connect]` bind port stays the cluster's egress port. Built by
-	/// [`Self::start`] and joins [`Self::dialers`] once [`Started::run`] begins.
+	/// The client static and API peers share when the template binds a fixed
+	/// `[connect]` port, so that port stays the cluster's egress port. Otherwise
+	/// `None`, and every session builds its own client on an ephemeral port. Built
+	/// by [`Self::start`] and joins [`Self::dialers`] once [`Started::run`] begins.
 	dial: Option<moq_tokio::Client>,
 	/// Every dial client, shared by all clones, for [`Self::close`].
 	dialers: Dialers,
@@ -1392,8 +1391,6 @@ impl Cluster {
 			quic: None,
 			dial: None,
 			dialers: Dialers::new(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 			advertise: None,
 			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
@@ -1515,21 +1512,16 @@ impl Cluster {
 	}
 
 	/// Attach the dial template every peer dial is built from, with the
-	/// [`Options::peer`] QUIC limits. Static and API peers share one socket on its
-	/// bind address; each LAN dial takes an ephemeral port.
+	/// [`Options::peer`] QUIC limits. Each peer session binds its own ephemeral
+	/// port on the template's bind address, so a redial leaves from a fresh one.
+	/// A fixed bind port is kept instead: static and API peers share one socket
+	/// on it, while LAN dials still take ephemeral ports.
 	///
 	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
 		self.connect = Some(connect);
 		self.quic = Some(quic);
-		self
-	}
-
-	/// Dial `iroh://` peers through this endpoint.
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: moq_tokio::iroh::Endpoint) -> Self {
-		self.iroh = Some(iroh);
 		self
 	}
 
@@ -1799,13 +1791,19 @@ impl Cluster {
 
 		// Built here, so a bad template fails startup rather than every dial, and
 		// last, so a start that fails earlier never binds a fixed `[connect]` port.
-		// Static and API peers share this client; LAN dials each build their own,
-		// so a LAN-only node builds one only to check the template.
+		// Static and API peers share this client only on a fixed bind port, which
+		// names one source port. Otherwise every session builds its own (see
+		// `run_remote_session`), and this one only checks the template.
 		let statics = !self.config.connect.is_empty() || self.config.api.url.is_some();
+		let fixed = self
+			.connect
+			.as_ref()
+			.is_some_and(|connect| connect.resolve().bind.port() != 0);
+		let shared = statics && fixed;
 		let client = self
-			.peer_client(!statics, None)
+			.peer_client(!shared, None)
 			.context("cluster peers configured but the dial template is unusable")?;
-		self.dial = statics.then_some(client);
+		self.dial = shared.then_some(client);
 
 		// After everything fallible, so a failed start leaves no credential behind.
 		#[cfg(feature = "cluster-lan")]
@@ -2109,19 +2107,19 @@ impl Cluster {
 		let redacted = moq_tokio::RedactedUrl::new(first);
 		tracing::info!(url = %redacted, "dialing cluster peer");
 
-		// A LAN client is this dial's alone, so it closes when the dial ends.
-		let (client, _held) = match target.lan {
-			true => {
-				let client = self.peer_client(true, target.fingerprint.as_deref())?;
+		// Each session gets its own client, so its own UDP socket and source port,
+		// which closes when the session ends. A path that drops one 5-tuple (seen
+		// live for a day while fresh ports to the same peer handshook) then strands
+		// this peer only until the reconnect loop gives up, and the next session
+		// leaves from a fresh port. A fixed `[connect]` bind port names a single
+		// source port, so static and API peers share the client bound to it instead.
+		let (client, _held) = match (&self.dial, target.lan) {
+			(Some(shared), false) => (shared.clone(), None),
+			_ => {
+				let client = self.peer_client(true, Some(target))?;
 				let held = self.dialers.hold(&client)?;
 				(client, Some(held))
 			}
-			false => (
-				self.dial
-					.clone()
-					.context("internal: cluster peer dial before Cluster::start")?,
-				None,
-			),
 		};
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
@@ -2180,20 +2178,30 @@ impl Cluster {
 	}
 
 	/// A peer client from the dial template, with the [`Options::peer`] QUIC
-	/// limits, since every dial is a peer. A LAN client is built per dial, so it
-	/// takes an ephemeral port beside the shared static client, keeps only
-	/// request-path versions, and pins the advertised fingerprint on a clean TLS
-	/// config, so the relay's CA roots cannot combine with it.
-	fn peer_client(&self, lan: bool, fingerprint: Option<&str>) -> anyhow::Result<moq_tokio::Client> {
+	/// limits, since every dial is a peer.
+	///
+	/// An `ephemeral` client is one session's alone: it binds an ephemeral port on
+	/// the template's bind address, and its reconnect loop always gives up, so a
+	/// redial moves to a fresh socket rather than retrying one the path may be
+	/// dropping. A zero backoff timeout, which would retry the one socket forever,
+	/// takes moq-tokio's default instead; the redial loop already retries forever.
+	///
+	/// A LAN `target` keeps only request-path versions. A `target` fingerprint is
+	/// pinned on a clean TLS config, so the relay's CA roots cannot combine with it.
+	fn peer_client(&self, ephemeral: bool, target: Option<&DialTarget>) -> anyhow::Result<moq_tokio::Client> {
 		let mut connect = self
 			.connect
 			.clone()
 			.context("cluster dial without a dial template (call Cluster::with_connect)")?;
-		if lan {
+		if ephemeral {
 			let mut bind = connect.resolve().bind;
 			bind.set_port(0);
 			connect.bind = Some(bind);
-			connect.backoff.timeout = Some((std::time::Duration::ZERO).into());
+			if connect.backoff.timeout().is_zero() {
+				connect.backoff.timeout = None;
+			}
+		}
+		if target.is_some_and(|target| target.lan) {
 			connect.version = connect
 				.versions()
 				.iter()
@@ -2201,19 +2209,13 @@ impl Cluster {
 				.copied()
 				.collect();
 		}
-		if let Some(fingerprint) = fingerprint {
+		if let Some(fingerprint) = target.and_then(|target| target.fingerprint.as_deref()) {
 			connect.tls = moq_tokio::tls::Connect::default();
 			connect.tls.fingerprint = vec![fingerprint.to_string()];
 		}
 		let mut quic = self.quic.clone().unwrap_or_default();
 		self.peer_quic.dial(&mut quic);
-		let client = connect.init(quic)?;
-		#[cfg(feature = "iroh")]
-		let client = match &self.iroh {
-			Some(iroh) => client.with_iroh(iroh.clone()),
-			None => client,
-		};
-		Ok(client)
+		Ok(connect.init(quic)?)
 	}
 
 	/// Start a reconnecting LAN session from discovered details. Tests wire this
@@ -2222,7 +2224,7 @@ impl Cluster {
 	fn dial_lan_target(&self, target: &DialTarget) -> anyhow::Result<moq_tokio::Connection> {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
-			.peer_client(true, target.fingerprint.as_deref())?
+			.peer_client(true, Some(target))?
 			.with_origin(self.origin.clone().with_link(origin::Link::Peer));
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
@@ -3868,10 +3870,9 @@ mod tests {
 			.iter()
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.collect();
-		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
 		let mut transport = driver::transport::Config::default();
 		transport.idle_timeout = Some(idle);
-		let mut server_config = driver::server::Config::new(Arc::new(crypto));
+		let mut server_config = driver::server::Config::new(Arc::new(tls));
 		server_config.transport = transport;
 		driver::endpoint::Endpoint::new(
 			driver::endpoint::Config::default().with_server(server_config),

@@ -270,8 +270,8 @@ leave `quic.keep_alive` unset.
 
 QUIC uses the smaller of the two endpoints' idle timeouts
 ([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),
-so either relay on a link can shorten it for both. iroh links use the same
-timeout; WebSocket links keep their own 30s deadline.
+so either relay on a link can shorten it for both. WebSocket links keep their
+own 30s deadline.
 
 ## Authentication
 
@@ -288,6 +288,14 @@ only by asking, which a relay below moq-lite-07-wip, or on moq-transport
 without the hidden extension, cannot. Dials retry forever with jittered backoff
 capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
 [Authentication](/bin/relay/auth#mtls).
+
+Each dialed session binds its own UDP socket on an ephemeral port of
+`connect.bind`'s address. Once `connect.backoff.timeout` (10s by default; `0`
+takes that default here) passes without a session, the redial leaves from a
+fresh port, so a network path that drops one UDP flow can't hold a link down
+while other ports to the same peer would work. A fixed `connect.bind` port opts
+out: static and API peers then share one socket on that port, and a redial
+reuses it.
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.

@@ -8,7 +8,7 @@ import { Milli, Nano } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { type Route, routesEqual } from "../hop.ts";
-import { coveringPrefixes, hooks } from "../internal.ts";
+import { coveringPrefixes } from "../internal.ts";
 import type { Producer as OriginProducer, RequestSlot, Requests } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
@@ -109,7 +109,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		existing.reporters.set(interest, route);
 		// Another request covering the prefix only holds it; the first reporter drives it.
 		if (joined && existing.reporters.keys().next().value === interest) {
-			follow(existing, prefix, route, event.kind === "restart");
+			updateReported(existing, prefix, route, event.kind === "restart");
 		}
 	};
 
@@ -118,7 +118,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	 * instance, so nothing resolved through the old one is joined again, and an in-place
 	 * update otherwise.
 	 */
-	const follow = (existing: Reported, prefix: Path.Valid, route: Route, restart: boolean) => {
+	const updateReported = (existing: Reported, prefix: Path.Valid, route: Route, restart: boolean) => {
 		if (restart || route.epoch !== existing.handle.route.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
@@ -145,7 +145,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		} else if (driving) {
 			// The next request takes over driving. Without an instance nothing proves it reports
 			// the stream the handle serves, so the route restarts rather than stitch two together.
-			follow(existing, prefix, next.value, next.value.instance === undefined);
+			updateReported(existing, prefix, next.value, next.value.instance === undefined);
 		}
 	};
 
@@ -293,7 +293,7 @@ async function drive(handle: Requests, conn: Established): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {
-			hooks.acceptRequest(request, session.consume(request.path));
+			request.serve(session.consume(request.path));
 		}
 	} catch {
 		handle.close();

@@ -1,0 +1,35 @@
+# The libFuzzer harness for moq-rtmp's AMF0 receive views. `just rs fuzz amf0` drives it,
+# and nightly.yml runs it for five minutes.
+#
+# A workspace member so it shares the root lockfile, which is the only thing that
+# keeps its resolve from drifting when a sibling it depends on is bumped. It is
+# excluded from every gate that means "all of it" instead: libFuzzer needs a nightly
+# toolchain and sanitizer flags, so nothing in `check` or `test` may compile it.
+#
+# The target body lives in `moq-rtmp`'s hidden `fuzz` module, not here: the vendored
+# `rml` module is private, and sharing the body is what lets the crate's own tests
+# replay the corpus on stable.
+[package]
+name = "moq-rtmp-fuzz"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+publish = false
+edition = "2024"
+autobins = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "amf0"
+path = "fuzz_targets/amf0.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+moq-rtmp = { workspace = true, features = ["fuzz"] }
+
+[lints]
+workspace = true

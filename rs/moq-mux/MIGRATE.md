@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json::Snapshot::update` and `json::Stream::append` take `(&value, timestamp)`, a required `moq_net::Timestamp` on the broadcast clock, instead of `impl Into<Timed<&T>>`. Every track in a broadcast shares that clock's epoch, so nothing stamps a write for you.
+Replace `update(&value)` and `update(Timed::from(&value).at(at))` with `update(&value, at)`, taking `at` from `catalog.clock().now()` or `catalog.clock().capture(instant)?`.
+`catalog::Producer::json_snapshot` and `json_stream` refuse a track without a timescale with `Error::Moq(moq_net::Error::TimestampMismatch)`: create it with `moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)`.
+
 ### fMP4 decode errors are terminal
 
 After `container::fmp4::Import::decode` fails, later decodes, cuts, seeks and discontinuities return that error without reading input or changing tracks, including through `import::Container`.

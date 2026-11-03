@@ -76,7 +76,7 @@ export * as Loc from "@moq/loc";
 
 export type Read = {
 	frame: ReceivedFrame;
-	group: number;
+	group: bigint;
 	kind: "frame";
 } | {
 	duration: Micro;
@@ -84,7 +84,7 @@ export type Read = {
 	timestamp: Micro;
 } | {
 	end: Micro;
-	group: number;
+	group: bigint;
 	kind: "end";
 };
 

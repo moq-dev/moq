@@ -389,9 +389,12 @@ impl Rejected {
 	}
 }
 
+/// Safe to log: [`proto::ConnectRequest`]'s `Debug` redacts the URL's
+/// userinfo, query, and fragment and every header value but `origin` and
+/// `user-agent`, so a `?jwt=` or `Authorization` credential stays out.
 impl std::fmt::Debug for Request {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Request").field("url", &self.request.url).finish()
+		f.debug_struct("Request").field("connect", &self.request).finish()
 	}
 }
 
@@ -1702,6 +1705,24 @@ mod tests {
 			}),
 			Error::App { code: c, .. } if c == code
 		));
+	}
+
+	/// The CONNECT request is logged here, so its `Debug` must keep credentials
+	/// out: `web-transport-proto` redacts them from 0.6.4.
+	#[test]
+	fn connect_debug_redacts_credentials() {
+		let url = url::Url::parse("https://user:hunter2@relay.example/anon?jwt=SECRET#SECRET").unwrap();
+		let request = proto::ConnectRequest::new(url)
+			.with_header(
+				http::header::AUTHORIZATION,
+				http::HeaderValue::from_static("Bearer SECRET"),
+			)
+			.with_header(http::header::COOKIE, http::HeaderValue::from_static("session=SECRET"));
+		let debug = format!("{request:?}");
+		assert!(debug.contains("relay.example/anon"), "{debug}");
+		for secret in ["SECRET", "hunter2", "jwt="] {
+			assert!(!debug.contains(secret), "{secret} leaked: {debug}");
+		}
 	}
 
 	/// Wrap `payload` in an HTTP/3 frame of type `typ`.

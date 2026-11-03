@@ -499,7 +499,7 @@ impl VideoProducer {
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
@@ -1050,7 +1050,7 @@ pub struct MoqVideoDecoderOutput {
 	/// `None` keeps the moq-mux default of zero for both (start at the newest group,
 	/// skip aggressively).
 	#[uniffi(default = None)]
-	pub delay: Option<crate::media::MoqDelay>,
+	pub delay: Option<crate::consumer::MoqDelay>,
 	/// Keep each frame in the surface its decoder produced, for
 	/// [`MoqVideoDecodedFrame::surface`]. `false`, the default, downloads every
 	/// frame to CPU memory as it is decoded, so
@@ -1872,10 +1872,11 @@ mod rung_tests {
 			.subscribe_track(
 				"high".into(),
 				Some(crate::consumer::MoqSubscription {
-					priority: 0,
-					max_delay: None,
-					ranges: None,
-					order: None,
+					delay: crate::consumer::MoqDelay {
+						min: Some(std::time::Duration::ZERO),
+						max: None,
+					},
+					..crate::consumer::moq_subscription_defaults()
 				}),
 			)
 			.await

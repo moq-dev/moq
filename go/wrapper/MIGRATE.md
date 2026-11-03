@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.Update`, `json.StreamProducer.Append`, and `json.WindowProducer.Push` / `Pop` take a `moq.Timestamp` instead of a `*moq.Timestamp`, so there is no untimed write. Stamp it from `media.CatalogProducer.Now()`, the broadcast clock every track shares. Their track needs a `TrackInfo.Timescale`; one without is refused.
+
+### Subscriptions take a `moq.Delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`Subscription.MaxDelay` is `Delay moq.Delay`, and the zero `Subscription{}` is moq-net's defaults, the same as `DefaultSubscription()`: set `Delay.Max` to the old `*MaxDelay`, and `Delay.MaxUnlimited` where `MaxDelay` was nil.
+`media.Delay` is `moq.Delay`, a struct of its own whose zero value states zero for both: `Min` and `Max` are `time.Duration`, `MinUnstated` leaves the target latency unstated, and `MaxUnlimited` sets no limit.
+`audio.DecoderOutput.Delay` and `video.DecoderOutput.Delay` are a `moq.Delay` value instead of a `*media.Delay`; the zero value is what nil meant.
+
+### `media.VideoInit` is a struct
+
+`media.VideoInit` is its own struct rather than an alias of the generated record, so its new `Lower` field takes a `*media.TrackProducer`. A composite literal with `Format`, `Data`, `Label`, and `Hint` compiles unchanged; build one that way where you converted a generated `MoqVideoInit`.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.Captures` is `[]string` instead of `*[]string`. Remove pointer checks and dereferences; an empty slice means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.
@@ -13,7 +27,7 @@ How to update your code for each breaking change, newest first.
 `audio.DecoderOutput` replaces `MaxDelay` and the playout `Delay *time.Duration` with `Delay *media.Delay` and `Estimate *bool` (nil estimates).
 `video.DecoderOutput.MaxDelay` is `Delay *media.Delay`.
 `media.Delay{Min, Max}`: `Max` (nil for no limit) is the old `MaxDelay`, and `Min` is the playout delay, where a cold join starts.
-A fixed audio playout delay `d` is `Delay: &media.Delay{Min: d, Max: &max}` with `Estimate` set to false.
+A fixed audio playout delay `d` is `Delay: moq.Delay{Min: d, Max: max}` with `Estimate` set to false.
 
 ### Compression moves to the track
 
@@ -130,6 +144,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
 Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+To answer with a broadcast you already hold, `request.Serve(consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to close.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
 ### `TrackInfo` gains `Compress` (#5928)
