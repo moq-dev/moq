@@ -2516,8 +2516,8 @@ impl DatagramServe {
 			match &mut self.state {
 				DatagramState::Open { request } => {
 					self.validity.check(waiter)?;
-					// Nobody waits for it any more.
-					if request.priority().is_none() {
+					// Nobody waits for it any more, unless a reader arrived meanwhile.
+					if request.close_unused() {
 						return Poll::Ready(Err(Error::Cancel));
 					}
 					if !version.has_datagrams() || !version.has_track_stream() || self.closed.max_datagram_size() == 0 {
@@ -2681,9 +2681,13 @@ impl DatagramServe {
 							}
 							continue;
 						}
-						// Nobody reads it: cancel, unless a reader arrived meanwhile.
-						Poll::Ready(None) if producer.close_unused() => return Poll::Ready(Err(Error::Cancel)),
-						_ => {}
+						// Nobody reads it: cancel, unless a reader arrived meanwhile, whose
+						// priority the next pass reads.
+						Poll::Ready(None) => match producer.close_unused() {
+							true => return Poll::Ready(Err(Error::Cancel)),
+							false => continue,
+						},
+						Poll::Pending => {}
 					}
 					ready!(stream.writer.poll_flush(waiter))?;
 					return Poll::Pending;

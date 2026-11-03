@@ -356,6 +356,12 @@ impl Request {
 		self.producer.priority()
 	}
 
+	/// [`Producer::close_unused`] for a request nobody waits for any more.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn close_unused(&self) -> bool {
+		self.producer.close_unused()
+	}
+
 	/// Serve the track with `info`, returning its producer.
 	pub fn accept(self, info: Info) -> Producer {
 		let mut producer = self.producer;
