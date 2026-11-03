@@ -121,6 +121,38 @@ changed during the live run. The observer only
 records frames delivered under the player's maximum age, so a replay cannot recover groups the
 transport already discarded.
 
+## Push-to-talk
+
+```bash
+just test push-to-talk                  # acceptance: 64 kbit/s, finite 1 s queue, 50 ms each way
+just test push-to-talk --reproduction   # diagnostic: 100 ms RTT, 2% random loss
+```
+
+This separate, roughly nine-minute run drives the shipped publish and watch elements in one
+Chromium page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with
+60 ms frames. The listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22
+presses, alternating two and three seconds: eight with no intervening wait, seven after five
+seconds, and seven after sixty seconds. The publisher reaches the relay directly; the listener
+uses WebTransport through the UDP shaper. No TCP service exists on the shaper port.
+
+`presses.json` records WebCodecs inputs and outputs, container writes, frame arrivals before
+reordering, and audible output onsets. Publisher, receiver, and worklet observations share the
+page's monotonic clock. A listening worklet detects each nonzero output onset and maps its render
+time through `getOutputTimestamp`; the port-message arrival time is kept separately. This measures
+the browser's projected device output, not acoustic output from a physical speaker. Zero-gap
+presses can remain continuously audible; a missing onset is reported as null, never zero latency.
+
+`summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
+is still attributed to its utterance. The command refuses missing encoder inputs, missing heads,
+submitted frames that never encode or reach the container, reopened capture, repeated probes or
+subscriptions, and separated utterances with no audible output. The shaper must report throttling
+and queue overflow without random loss. Lost receiver frames are reported separately; aggregate
+queue drops alone cannot attribute every missing frame to a particular packet. The reproduction
+reports these checks without using random loss to gate acceptance. Both modes still fail on a
+broken driver or invalid capture.
+
+Nightly runs the bufferbloated arm and keeps the raw evidence alongside the audio quality rows.
+
 ## Traces
 
 The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, each graded as a
