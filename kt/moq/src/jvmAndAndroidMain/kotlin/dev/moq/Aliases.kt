@@ -85,7 +85,10 @@ typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** Follows a specific broadcast path across the publisher instances that serve it. */
 typealias Following = uniffi.moq.MoqFollowing
 
-/** A route over a prefix: its origin-relative path, wildcard captures, and route metadata. */
+/**
+ * A route over a prefix: its origin-relative path, required wildcard captures (empty without
+ * wildcards), and route metadata.
+ */
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
@@ -162,15 +165,19 @@ typealias Datagram = uniffi.moq.MoqDatagram
 /** A payload plus the timestamp it should be presented at. */
 typealias Frame = uniffi.moq.MoqFrame
 
+/** An exact media timestamp: `value` units at `scale` units per second. */
+typealias Timestamp = uniffi.moq.MoqTimestamp
+
 /**
- * How a broadcast advertises its exact path: its static production cost (lower wins) and the
- * publisher epoch it serves (null when unknown).
+ * How a broadcast advertises its exact path: its static production cost (lower wins), an optional
+ * stable instance (null keeps the one the broadcast minted), and the epoch, which only matters with
+ * a stable instance.
  */
 typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
 
 /**
- * An observed path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * An observed path-prefix route: the instance of the stream it serves, relay hop ids (oldest
+ * first), and static production and link cost (lower wins).
  */
 typealias Route = uniffi.moq.MoqRoute
 
@@ -200,7 +207,7 @@ typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 
-/** The group containing `timestampUs`, a presentation time in microseconds. */
+/** The group containing `timestamp`, a presentation time. */
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
@@ -275,6 +282,15 @@ typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 
 /** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
+
+/** Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame. */
+typealias RateControl = uniffi.moq.MoqRateControl
+
+/** How a [RateControl] maps a grant onto a bitrate, and the lower rendition that disables it. */
+typealias RatePolicy = uniffi.moq.MoqRatePolicy
+
+/** What a sender following a [RateControl] should be doing: an enabled bitrate, or disabled. */
+typealias RateTarget = uniffi.moq.MoqRateTarget
 
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats

@@ -61,6 +61,11 @@ pub(crate) struct Shared {
 	pub deadlines: kio::clock::Deadlines,
 	/// Whether a turn is running, so `deadlines` already holds its instant.
 	pub turning: Cell<bool>,
+	/// Counts the worker's turns, so a task can budget work per turn.
+	pub turn: Cell<u64>,
+	/// Tasks that [yielded](crate::worker::Owner::yield_turn) this turn, woken
+	/// once its passes are done so they run after the next reap.
+	pub yields: RefCell<Vec<std::task::Waker>>,
 	/// Tasks handed to [`crate::Handle::spawn`], drained by the worker loop.
 	pub spawns: RefCell<Vec<Task>>,
 	pub unpark: std::sync::Arc<Unpark>,

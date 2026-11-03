@@ -18,8 +18,9 @@ use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-	Dir, Duration, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE, MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Rate, Side,
-	StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError, TransportErrorCode, VarInt, Version,
+	Dir, Duration, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE, MAX_STREAM_COUNT, MAX_TRANSMIT_SIZE,
+	MIN_INITIAL_SIZE, Rate, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
+	TransportErrorCode, VarInt, Version,
 	cid_queue::CidQueue,
 	coding::BufMutExt,
 	connection::spaces::LostPacket,
@@ -564,6 +565,9 @@ impl Connection {
 			}
 			None => max_datagrams,
 		};
+		// Rechecked per call since MTU discovery can grow the segments. A lone datagram above the
+		// limit is left to the socket: only an IPv6 path configured past it can carry one.
+		let max_datagrams = max_datagrams.min((MAX_TRANSMIT_SIZE / usize::from(self.path.current_mtu())).max(1));
 
 		let mut num_datagrams = 0;
 		// Position in `buf` of the first byte of the current UDP datagram. When coalescing QUIC
@@ -1535,9 +1539,28 @@ impl Connection {
 		self.update_keys(None, false);
 	}
 
-	/// Get a session reference
-	pub fn crypto_session(&self) -> &dyn crypto::Session {
-		&*self.crypto
+	/// What the handshake negotiated, once the connection emits [`Event::HandshakeDataReady`]
+	pub fn handshake_data(&self) -> Option<crypto::HandshakeData> {
+		self.crypto.handshake_data()
+	}
+
+	/// The certificate chain the peer presented, end entity first, if it presented one
+	///
+	/// Complete only once the handshake finishes, signaled by [`Event::Connected`].
+	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+		self.crypto.peer_identity()
+	}
+
+	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
+	/// `label` and `context` for domain separation
+	#[cfg(test)]
+	pub(crate) fn export_keying_material(
+		&self,
+		output: &mut [u8],
+		label: &[u8],
+		context: &[u8],
+	) -> Result<(), crypto::ExportKeyingMaterialError> {
+		self.crypto.export_keying_material(output, label, context)
 	}
 
 	/// Whether the connection is in the process of being established
@@ -1597,13 +1620,22 @@ impl Connection {
 	/// fills the inflight it allows
 	/// ([`probe_inflight`](crate::congestion::Metrics::probe_inflight)) with duplicates
 	/// of STREAM data still in flight, sending no more than the target in all, so the probe
-	/// measures the path. Duplicates count against congestion control, as
-	/// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
+	/// measures the path. A controller that paces its own probe cluster
+	/// ([`Controller::paces_probe`]) gets it filled at its pace instead, and may aim its probes at
+	/// the target ([`Controller::on_probe_target`]). Duplicates count against congestion control,
+	/// as [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
 	/// attempt that misses the target sits out a few seconds before retrying it, and a changed
 	/// target is retried at once. A controller that never probes ([`Controller::probes`])
 	/// ignores the target, and zero, the default, never probes.
 	pub fn set_probe_target(&mut self, bytes_per_second: u64) {
+		if bytes_per_second == self.bandwidth_probe.target() {
+			return;
+		}
 		self.bandwidth_probe.set_target(bytes_per_second);
+		self.path.congestion.on_probe_target(bytes_per_second);
+		if let Some((_, prev)) = &mut self.prev_path {
+			prev.congestion.on_probe_target(bytes_per_second);
+		}
 	}
 
 	/// Resets path-specific settings.
@@ -1619,6 +1651,7 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn path_changed(&mut self, now: Instant) {
 		self.path.reset(now, &self.config);
+		self.path.congestion.on_probe_target(self.bandwidth_probe.target());
 		// The rebuilt controller never sees state the old one gave packets still in flight.
 		for space in SpaceId::iter() {
 			for info in self.spaces[space].sent_packets.values_mut() {
@@ -1660,6 +1693,17 @@ impl Connection {
 		if self.streams.set_receive_window(receive_window) {
 			self.spaces[SpaceId::Data].pending.max_data = true;
 		}
+	}
+
+	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
+	pub fn receive_window(&self) -> u64 {
+		self.streams.receive_window()
+	}
+
+	/// The most receive credit one stream may hold: the largest per-stream window ever in force,
+	/// since credit already granted outlives a shrink; see [`Limits::stream_receive_window`]
+	pub fn stream_receive_window(&self) -> u64 {
+		self.streams.peak_stream_receive_window()
 	}
 
 	/// Change every limit `limits` sets, leaving the others as they are
@@ -3370,6 +3414,7 @@ impl Connection {
 				&self.config,
 			)
 		};
+		new_path.congestion.on_probe_target(self.bandwidth_probe.target());
 		new_path.challenge = Some(self.rng.random());
 		new_path.challenge_pending = true;
 		let prev_pto = self.pto(SpaceId::Data);
@@ -3818,9 +3863,15 @@ impl Connection {
 			)
 		});
 		self.peer_params = params;
+		let mtu = self.path.mtud.current_mtu();
 		self.path.mtud.on_peer_max_udp_payload_size_received(
 			u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX),
 		);
+		// A peer limit below the initial MTU shrinks the datagrams the controller sizes its
+		// minimum window and pacing burst by
+		if self.path.mtud.current_mtu() != mtu {
+			self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
+		}
 	}
 
 	fn decrypt_packet(&mut self, now: Instant, packet: &mut Packet) -> Result<Option<u64>, Option<TransportError>> {

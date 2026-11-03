@@ -1,6 +1,6 @@
-import type { Epoch } from "@moq/net";
 import type { Credential } from "./credential.ts";
 import { type Domain, keyInfo, nonce } from "./derive.ts";
+import type * as Epoch from "./epoch.ts";
 import { Failure } from "./failure.ts";
 import { MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, TAG_LEN } from "./limits.ts";
 import { expand } from "./secret.ts";
