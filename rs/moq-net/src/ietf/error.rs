@@ -32,6 +32,15 @@ const GOING_AWAY: u32 = 0x4;
 /// The subscription outran the publisher's resource limits.
 const TOO_FAR_BEHIND: u32 = 0x5;
 
+/// The authorization token for the request has expired.
+///
+/// Sent only on the streams of a subscription whose request token's grant lapsed, which no
+/// [`StreamError`] names: [`to_stream_code`] never returns it, and [`from_stream_code`]
+/// keeps it [`StreamError::Unknown`], so a relay passes an upstream's expiry on as
+/// INTERNAL_ERROR rather than telling its own subscriber that its token lapsed. The same
+/// 0x7 in drafts 18, 20, and 22.
+pub(crate) const EXPIRED_AUTH_TOKEN: u32 = 0x7;
+
 /// The track's content could not be parsed.
 const MALFORMED_TRACK: u32 = 0x12;
 
@@ -63,7 +72,7 @@ pub fn to_stream_code(err: &StreamError) -> u32 {
 /// A code the drafts do not assign stays [`StreamError::Unknown`], which surfaces as
 /// [`Error::Stream`](crate::Error::Stream): an error, but never one given a meaning it did
 /// not carry. That includes the codes this crate has no local counterpart for
-/// (UNKNOWN_OBJECT_STATUS, EXCESSIVE_LOAD) and every value a later
+/// (UNKNOWN_OBJECT_STATUS, [`EXPIRED_AUTH_TOKEN`], EXCESSIVE_LOAD) and every value a later
 /// draft may add.
 pub fn from_stream_code(code: u32) -> StreamError {
 	match code {

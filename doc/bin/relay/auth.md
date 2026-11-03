@@ -197,7 +197,9 @@ independently of the session's scope. Discovery reveals only paths it grants;
 a `PUBLISH_NAMESPACE` grant must cover the whole namespace: `room/**`, not just
 `room`. The last naming request ending releases the lease at the auth server;
 a later request verifies the token again. Expiry or revocation ends every
-request naming it. A joining `FETCH` still follows its subscription. A session verifies at most
+request naming it. A subscription it ended reports `PUBLISH_DONE` as
+`UNAUTHORIZED` either way, but on expiry its open group streams reset with
+`EXPIRED_AUTH_TOKEN`, so the client knows to renew the token. A joining `FETCH` still follows its subscription. A session verifies at most
 128 tokens at once, counting
 checks still running past the admission timeout. Later tokens wait their turn
 rather than being refused. Each HTTP request is admitted on its own, so an
