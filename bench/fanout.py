@@ -106,13 +106,36 @@ def functions(zero, full, units, inclusive=False):
             if not match:
                 continue
             name = re.sub(r"\s+\[[^\]]*\]$", "", match.group(2))
-            name = re.sub(r"^(/[^:]*|\?\?\?):", "", name)
+            name = re.sub(r"^([^ <]*\.rs|\?\?\?):", "", name)
             totals[name] = totals.get(name, 0) + int(match.group(1).replace(",", ""))
         return totals
 
     before, after = load(zero), load(full)
     names = set(before) | set(after)
     return {name: (after.get(name, 0) - before.get(name, 0)) / units for name in names}
+
+
+def differences(base, current, subscribers, inclusive, top):
+    """What each function costs per group in `current` against `base`: the largest moves
+    either way, from the callgrind outputs `--callgrind` kept for each."""
+
+    def per_group(directory):
+        units = int((directory / f"{subscribers}.units").read_text())
+        zero, full = directory / f"{subscribers}.zero.out", directory / f"{subscribers}.full.out"
+        return functions(zero, full, units, inclusive)
+
+    before, after = per_group(base), per_group(current)
+    moves = sorted(
+        (
+            (after.get(name, 0) - before.get(name, 0), before.get(name, 0), after.get(name, 0), name)
+            for name in set(before) | set(after)
+        ),
+        reverse=True,
+    )
+    shown = moves[:top] + [None] + moves[-top // 3 :]
+    return [
+        "   ..." if row is None else f"{row[0]:+10.1f} {row[1]:10.1f} {row[2]:10.1f}  {row[3][:160]}" for row in shown
+    ]
 
 
 def summarize(run):
@@ -153,6 +176,12 @@ def main():
     measure.add_argument("--callgrind", action="store_true")
     summary = sub.add_parser("summarize")
     summary.add_argument("run", type=Path)
+    compare = sub.add_parser("compare")
+    compare.add_argument("base", type=Path, help="callgrind/ directory of the base revision")
+    compare.add_argument("current", type=Path, help="callgrind/ directory of the revision compared")
+    compare.add_argument("subscribers", type=int)
+    compare.add_argument("--inclusive", action="store_true")
+    compare.add_argument("--top", type=int, default=30)
     top = sub.add_parser("functions")
     top.add_argument("zero", type=Path)
     top.add_argument("full", type=Path)
@@ -181,6 +210,9 @@ def main():
                     out.write(json.dumps(row) + "\n")
         elif args.command == "summarize":
             summarize(args.run)
+        elif args.command == "compare":
+            for line in differences(args.base, args.current, args.subscribers, args.inclusive, args.top):
+                print(line)
         else:
             ranked = functions(args.zero, args.full, args.units, args.inclusive)
             for name, value in sorted(ranked.items(), key=lambda item: -item[1])[: args.top]:

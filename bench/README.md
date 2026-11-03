@@ -388,7 +388,8 @@ zero cycles and one of many; the difference over the groups delivered is
 group. `BENCH_FANOUT_CALLGRIND=1`, with `valgrind` on `PATH`, also keeps
 callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
 `python3 bench/fanout.py functions ZERO FULL UNITS` ranks functions by
-instructions per group. `BENCH_FANOUT_VERSION` picks the session's protocol
+instructions per group, and `python3 bench/fanout.py compare BASE CURRENT
+SUBSCRIBERS` ranks what moved between two revisions' `callgrind/` directories. `BENCH_FANOUT_VERSION` picks the session's protocol
 version (default `moq-lite-06`).
 
 ### Heap
