@@ -325,7 +325,12 @@ for (const [alpn, version] of [
 			const first = producer.appendGroup();
 			first.writeFrame(textFrame("first"));
 			first.finish();
-			expect(await (await track.nextGroup())?.readString()).toBe("first");
+			// A frame can arrive while its sender still yields on the write. Drain the setup group
+			// before a zero-delay subscription supersedes it or the FIN hold catches it too.
+			const received = await track.nextGroup();
+			expect(await received?.readString()).toBe("first");
+			expect(await received?.readString()).toBeUndefined();
+			received?.close();
 
 			fin.enable();
 			const last = producer.appendGroup();
@@ -384,7 +389,10 @@ for (const [alpn, version] of [
 				const first = producer.appendGroup();
 				first.writeFrame(textFrame("first"));
 				first.finish();
-				expect(await (await track.nextGroup())?.readString()).toBe("first");
+				const received = await track.nextGroup();
+				expect(await received?.readString()).toBe("first");
+				expect(await received?.readString()).toBeUndefined();
+				received?.close();
 
 				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
 				const last = producer.appendGroup();
