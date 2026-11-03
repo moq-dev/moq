@@ -28,7 +28,3 @@ This README's own work, after the children: confirm a scheduled Interop
 and Video run each pass.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The browser js -> js moq-transport cell stays fixed](/quest/m0/interop-green/js-pause-resume.md) - interop's browser `js -> js` cell passes on moq-transport drafts 20 and 22 in the scheduled run on `main`, with a regression test for the fix
