@@ -822,6 +822,18 @@ pub(crate) fn test_source() -> (Producer, kio::Queue<Result<Samples, Error>>) {
 mod tests {
 	use super::*;
 
+	#[tokio::test(start_paused = true)]
+	async fn a_stopped_source_ends_every_consumer_with_its_error() {
+		let (producer, samples) = test_source();
+		let mut first = producer.consume();
+		let mut second = producer.consume();
+		samples.close();
+		let error = producer.run().await.unwrap_err().to_string();
+		assert!(error.contains("stream stopped"));
+		assert_eq!(first.read().await.unwrap_err().to_string(), error);
+		assert_eq!(second.read().await.unwrap_err().to_string(), error);
+	}
+
 	fn reader() -> (buffer::Writer, kio::Producer<Option<cpal::Error>>, MicrophoneReader) {
 		let (tx, rx) = buffer::channel(
 			1,

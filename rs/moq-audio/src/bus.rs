@@ -246,12 +246,9 @@ impl Bus {
 	///
 	/// Requires the `capture` feature.
 	#[cfg(feature = "capture")]
-	pub fn capture(&self, capture: crate::capture::Consumer, strip: Strip) -> Capture {
-		Capture {
-			bus: self.clone(),
-			capture,
-			strip,
-		}
+	pub fn capture(&self, capture: crate::capture::Consumer, strip: Strip) -> Result<Capture, Error> {
+		let channel = self.channel(capture.input().clone(), strip)?;
+		Ok(Capture { capture, channel })
 	}
 }
 
@@ -397,9 +394,8 @@ impl Meter {
 /// Requires the `capture` feature.
 #[cfg(feature = "capture")]
 pub struct Capture {
-	bus: Bus,
 	capture: crate::capture::Consumer,
-	strip: Strip,
+	channel: Channel,
 }
 
 #[cfg(feature = "capture")]
@@ -407,12 +403,10 @@ impl Capture {
 	/// Feed the mix until shared capture stops or fails, returning its error.
 	///
 	/// Dropping this future removes only this bus channel.
-	pub async fn run(self) -> Result<(), Error> {
-		let mut capture = self.capture;
-		let mut channel = self.bus.channel(capture.input().clone(), self.strip)?;
+	pub async fn run(mut self) -> Result<(), Error> {
 		loop {
-			let samples = capture.read().await?;
-			channel.push(&samples.data);
+			let samples = self.capture.read().await?;
+			self.channel.push(&samples.data);
 		}
 	}
 }

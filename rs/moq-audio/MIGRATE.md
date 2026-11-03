@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Capture is one producer with independent consumers
 
 Open `capture::Producer::open(config).await?` once and create a consumer with
-`capture.consume()` for each destination. Pass one to `bus.capture(consumer, strip)`
+`capture.consume()` for each destination. Pass one to `bus.capture(consumer, strip)?`
 and another to `encode::Capture::new(consumer)`, then set its `encode` and
 `on_demand` fields. Drive `capture.run()` alongside the bus and encoder futures.
 This replaces both device-opening entry points; `encode::Capture::default()`

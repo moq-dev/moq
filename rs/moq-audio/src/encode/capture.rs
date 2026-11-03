@@ -299,11 +299,13 @@ impl Driver {
 	pub async fn run(mut self) -> Result<(), Error> {
 		let result = self.drive().await;
 		let mut producer = self.producer.take().unwrap();
+		let result = result.and_then(|()| {
+			producer.set_active(false, self.clock.now())?;
+			producer.finish()
+		});
 		match &result {
 			Ok(()) => {
 				self.update(Status::Ended, None);
-				producer.set_active(false, self.clock.now())?;
-				producer.finish()?;
 			}
 			Err(error) => {
 				self.update(Status::Failed, Some(error.clone()));
@@ -740,7 +742,7 @@ mod tests {
 				} = fixture(false);
 				let mut observer = capture.consume();
 				let bus = Bus::new(BusConfig::default()).unwrap();
-				let mut bus_run = Box::pin(bus.capture(capture.consume(), Strip::default()).run());
+				let mut bus_run = Box::pin(bus.capture(capture.consume(), Strip::default()).unwrap().run());
 				// Register the bus channel and park its reader before the first mix read.
 				assert!(
 					std::future::poll_fn(|cx| Poll::Ready(std::future::Future::poll(bus_run.as_mut(), cx)))
@@ -824,7 +826,7 @@ mod tests {
 				} = fixture(false);
 				let mut observer = capture.consume();
 				let bus = Bus::new(BusConfig::default()).unwrap();
-				let bus_task = tokio::spawn(bus.capture(capture.consume(), Strip::default()).run());
+				let bus_task = tokio::spawn(bus.capture(capture.consume(), Strip::default()).unwrap().run());
 				let capture_task = tokio::task::spawn_local(capture.run());
 				let encode_task = tokio::spawn(driver.run());
 				samples.try_push(Err(Error::Capture("device lost".into()))).unwrap();
@@ -876,6 +878,10 @@ mod tests {
 				assert_eq!(control.level(), Level::default());
 				control.start();
 				status(&mut control, Status::Live).await;
+				tokio::time::advance(Duration::from_millis(40)).await;
+				samples.try_push(Ok(Samples::plain(vec![0.75; 1920], false))).unwrap();
+				observer.read().await.unwrap();
+				assert_eq!(packet(&mut track).await.timestamp.as_micros(), 1_040_000);
 				drop(control);
 				encode_task.await.unwrap().unwrap();
 				capture_task.abort();
