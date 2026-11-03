@@ -2602,12 +2602,7 @@ fn json_snapshot_publish_consume() {
 		// Nothing stamps a write for the caller, so a NULL timestamp publishes nothing.
 		assert_eq!(
 			unsafe {
-				moq_publish_json_snapshot_update(
-					producer,
-					r#"{"a":0}"#.as_ptr() as *const c_char,
-					7,
-					std::ptr::null(),
-				)
+				moq_publish_json_snapshot_update(producer, r#"{"a":0}"#.as_ptr() as *const c_char, 7, std::ptr::null())
 			},
 			MOQ_ERROR_INVALID_POINTER
 		);
@@ -2683,7 +2678,9 @@ fn json_stream_publish_consume() {
 		);
 		let now = catalog_now(broadcast);
 		assert_eq!(
-			unsafe { moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len(), &now) },
+			unsafe {
+				moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len(), &now)
+			},
 			0
 		);
 		let value_id = id(value_cb.recv());

@@ -1588,11 +1588,15 @@ mod children_tests {
 		}
 		let json = serde_json::Value::Null;
 		assert!(matches!(
-			state.publish.json_snapshot_update(json_snapshot, json.clone(), moq_net::Timestamp::ZERO),
+			state
+				.publish
+				.json_snapshot_update(json_snapshot, json.clone(), moq_net::Timestamp::ZERO),
 			Err(Error::TrackNotFound)
 		));
 		assert!(matches!(
-			state.publish.json_stream_append(json_stream, json, moq_net::Timestamp::ZERO),
+			state
+				.publish
+				.json_stream_append(json_stream, json, moq_net::Timestamp::ZERO),
 			Err(Error::TrackNotFound)
 		));
 	}

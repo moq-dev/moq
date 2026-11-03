@@ -536,11 +536,7 @@ mod test {
 	fn an_importer_joins_the_data_tracks_clock() {
 		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
-			.json_snapshot::<Value>(
-				track(&mut broadcast, "status"),
-				Config::default(),
-				Options::default(),
-			)
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
 		let mut chat = catalog
 			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
@@ -723,11 +719,7 @@ mod test {
 			.json_stream::<Value>(track(&mut broadcast, "gps"), Config::default())
 			.unwrap();
 		let mut status = catalog
-			.json_snapshot::<Value>(
-				track(&mut broadcast, "status"),
-				Config::default(),
-				Options::default(),
-			)
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
 		let now = catalog.clock().now();
 		let value = serde_json::json!({ "armed": true });

@@ -1359,8 +1359,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 		match kind {
 			"json snapshot" => {
 				let producer =
-					MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: false })
-						.unwrap();
+					MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: false }).unwrap();
 				producer
 					.update(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
 					.unwrap();
@@ -4797,7 +4796,10 @@ async fn closing_a_broadcast_ends_its_open_data_tracks() {
 
 	assert!(matches!(json_snapshot.update("1".into(), us(0)), Err(MoqError::Closed)));
 	assert!(matches!(json_stream.append("1".into(), us(0)), Err(MoqError::Closed)));
-	assert!(matches!(json_window.push("1".into(), Some(us(0))), Err(MoqError::Closed)));
+	assert!(matches!(
+		json_window.push("1".into(), Some(us(0))),
+		Err(MoqError::Closed)
+	));
 }
 
 /// A data writer released without a finish ends its track as a publisher leaving.

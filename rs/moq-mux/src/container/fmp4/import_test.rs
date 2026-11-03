@@ -2763,7 +2763,9 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	fmp4.decode(&live_session(start_us, 20)).unwrap();
 	let after = clock.now().as_micros();
 	if let Some(stream) = data.as_mut() {
-		stream.append(&serde_json::json!("after"), catalog.clock().now()).unwrap();
+		stream
+			.append(&serde_json::json!("after"), catalog.clock().now())
+			.unwrap();
 	}
 	fmp4.finish().unwrap();
 
