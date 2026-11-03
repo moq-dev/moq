@@ -15,16 +15,17 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-// The rows each benchmark prints per run.
-const ROWS: Record<string, number> = {
-	frames: 26,
-	drift: 36,
-	ledger: 12,
-	bandwidth: 44,
-	replay: 72,
-	"resume-history": 72,
+// Each entry is named in full, so sh/gh/test-inventory.py sees this harness run it.
+const benchmarks: Record<string, { entry: string; rows: number }> = {
+	frames: { entry: "js/net/bench/frames.ts", rows: 26 },
+	drift: { entry: "js/net/bench/drift.ts", rows: 36 },
+	ledger: { entry: "js/net/bench/ledger.ts", rows: 12 },
+	bandwidth: { entry: "js/net/bench/bandwidth.ts", rows: 44 },
+	replay: { entry: "js/net/bench/replay.ts", rows: 72 },
+	"resume-history": { entry: "js/net/bench/resume-history.ts", rows: 72 },
 };
-if (!Object.hasOwn(ROWS, benchmark)) throw new Error(`--bench must be one of ${Object.keys(ROWS).join(", ")}`);
+const selected = Object.hasOwn(benchmarks, benchmark) ? benchmarks[benchmark] : undefined;
+if (!selected) throw new Error(`--bench must be one of: ${Object.keys(benchmarks).join(", ")}`);
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -36,10 +37,8 @@ for (const argument of positionals.length ? positionals : ["current=.", "aa=."])
 }
 const scripts = new Map<string, string>();
 for (const [name, root] of roots) {
-	const entry =
-		benchmark === "frames"
-			? resolve(root, "js/net/bench/frames.ts")
-			: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
+	// Only frames is bundled from each variant; the rest import each variant's `../src/` below.
+	const entry = resolve(benchmark === "frames" ? root : resolve(import.meta.dir, "../.."), selected.entry);
 	const result = await Bun.build({
 		entrypoints: [entry],
 		target: "browser",
@@ -144,7 +143,7 @@ try {
 		rows.set(variant, []);
 		await pages.get(variant)?.evaluate("globalThis.measure()");
 		const measured = rows.get(variant) ?? [];
-		if (measured.length !== ROWS[benchmark]) throw new Error(`incomplete rows: ${variant}`);
+		if (measured.length !== selected.rows) throw new Error(`incomplete rows: ${variant}`);
 		return measured;
 	};
 	for (let round = 0; round < rounds; round++) {
