@@ -211,6 +211,7 @@ class MetadataTest(unittest.TestCase):
             os.environ,
             LOCAL_SUPERVISED="1",
             BASH_ENV=os.devnull,
+            GITHUB_ACTIONS="false",
             PATH=f"{self.scratch}:{os.environ['PATH']}",
             SELECT_CALLS=str(self.calls),
             TEST_METADATA=str(self.fixture),
