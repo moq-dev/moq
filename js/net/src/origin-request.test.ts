@@ -4,14 +4,7 @@ import { StreamCode, StreamError } from "./error";
 import { Route } from "./hop";
 import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
-import {
-	type Following,
-	type FollowOptions,
-	Producer,
-	type Publication,
-	type Request,
-	type Requesting,
-} from "./origin";
+import { type Following, Producer, type Publication, type Request, type Requesting } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
 
@@ -52,8 +45,7 @@ test("an instance-pinned follower refuses another instance", async () => {
 	const firstPublication = origin.createBroadcast(path);
 	const first = firstPublication.broadcast;
 	firstPublication.announce({ instance });
-	const options: FollowOptions = { instance };
-	const request = origin.follow(path, options);
+	const request = origin.follow(path, { instance });
 	const secondPublication = origin.createBroadcast(path);
 	const second = secondPublication.broadcast;
 	secondPublication.announce({ instance: Instance.random() });
