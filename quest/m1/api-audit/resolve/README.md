@@ -56,7 +56,6 @@ Wire: none.
 
 ## Required
 
-- [JS follow returns a Following](/quest/m1/api-audit/resolve/js-following.md) - `follow` and `request` get their own JS types, matching Rust and the bindings
 - [JS follow takes FollowOptions](/quest/m1/api-audit/resolve/follow-options.md) - `follow` and `request` get their own JS options types
 
 ## Related
