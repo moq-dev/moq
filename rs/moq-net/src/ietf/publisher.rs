@@ -5722,7 +5722,7 @@ struct GroupServe {
 	terminal: Option<Arc<Terminal>>,
 	marked: bool,
 	/// The subscription's, so a stream dropped once its token lapsed says so.
-	lapse: Lapse,
+	lapse: Option<Lapse>,
 	state: GroupState,
 	/// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
@@ -5769,7 +5769,7 @@ impl kio::Task for GroupServe {
 impl Drop for GroupServe {
 	fn drop(&mut self) {
 		// The writer's own fallback would say CANCELLED, which a lapse is not.
-		if self.lapse.lapsed()
+		if self.lapse.as_ref().is_some_and(Lapse::lapsed)
 			&& let GroupState::Serve { writer, .. } | GroupState::Closed { writer } =
 				std::mem::replace(&mut self.state, GroupState::Done)
 		{
@@ -5809,7 +5809,7 @@ impl GroupServe {
 			ended: false,
 			terminal: None,
 			marked: false,
-			lapse: Lapse::default(),
+			lapse: None,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
 		}
@@ -5852,7 +5852,7 @@ impl GroupServe {
 	}
 
 	fn lapsing(mut self, lapse: Lapse) -> Self {
-		self.lapse = lapse;
+		self.lapse = Some(lapse);
 		self
 	}
 
