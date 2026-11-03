@@ -1,11 +1,9 @@
-# [XL] Lite-07 ranges
+# [L] Lite-07 ranges
 
 ## Goal
 
 A relay fills a lite-07 upstream by subscribing to the missing ranges, and
-recovers a dropped group with a one-group SUBSCRIBE. SUBSCRIBE_FINISH signals
-a track's end and the Subscribe Stream stays open, so one-range reads back to
-back on one lite-07 session complete. FETCH stays on lite-07 until
+recovers a dropped group with a one-group SUBSCRIBE. FETCH stays on lite-07 until
 [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md)
 removes it from both implementations.
 
@@ -31,16 +29,29 @@ Fetch as a range finished in
 remaining lite-07 work here (maintainer, 2026-11-02): the explicit end, the
 back-to-back hang, and the one-group recovery below.
 
+The explicit end landed in
+[moq-dev/moq#7675](https://github.com/moq-dev/moq/pull/7675): SUBSCRIBE_END is
+renamed SUBSCRIBE_FINISH, and on lite-07 neither it nor a covered bounded
+subscription closes the Subscribe Stream. The publisher keeps reading updates
+and FINs only in reply to the subscriber's FIN. Once no group can resolve a
+held start (every group of a bounded subscription given up, or the track
+finished), it sends SUBSCRIBE_OK and then the drops it held. The Rust copy
+starts its tail at SUBSCRIBE_FINISH, waits for SUBSCRIBE_OK before judging it,
+and FINs once it settles. That fixed back-to-back one-range reads
+(`range_read::one_range_reads_back_to_back_each_complete`), and the Rust
+copy's covered-FIN path (`SubStream::covered`, `ServeLoop::covered`) is gone.
+Datagrams take no ranges, since they become their own track kind (maintainer,
+2026-11-01; the datagram-tracks plan,
+[moq-dev/moq#7575](https://github.com/moq-dev/moq/pull/7575)). What remains is
+the range fill and the one-group recovery.
+
 ### Range fill through the subscription
 
 Lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE carry the range list (`lite::Range`,
 typed anchors), and the publisher serves it from the model. Older wires map at
 the codec, and a merged request goes upstream as one span, from group 0 when
-its starts mix (`wire_span`). Today a lite-07 publisher FINs a covered bounded
-subscription without SUBSCRIBE_END, and the Rust copy settles its tail, keeps
-the cached copy, and subscribes again only for demand the covered ranges leave
-out. The explicit end below replaces that FIN; build the fill on it, not on
-the FIN.
+its starts mix (`wire_span`). A covered bounded subscription stays open, so a
+fill joins the live subscription's ranges with a SUBSCRIBE_UPDATE.
 
 The first attempt
 ([moq-dev/moq#7487](https://github.com/moq-dev/moq/pull/7487), WIP commit
@@ -55,8 +66,10 @@ requirement landed. Reuse its design:
   cache as its groups arrive.
 - A fill is judged only against the subscription that asked for it, not the
   track's arrivals ledger, which still holds a group an earlier subscription
-  cut. A SUBSCRIBE_DROP over its groups, a SUBSCRIBE_START past its range's
-  start, or a covered end refuses it, so a cut group is filled whole.
+  cut. A SUBSCRIBE_DROP over its groups, or a SUBSCRIBE_OK Range Start past
+  its range's start, refuses it, so a cut group is filled whole. The WIP's
+  covered-FIN refusal has no counterpart now: the publisher drops what it
+  gives up instead.
 - A run stays on the wire while a fill owes part of it, then until each of its
   streams still being read finishes, so narrowing never resets a group in
   flight.
@@ -64,7 +77,7 @@ requirement landed. Reuse its design:
   carrying only fills sets neither, and canceling it does not idle the copy.
   If the demand leaves while fills are out, the subscription keeps the
   demand's ranges until they are answered.
-- A NotFound drop or a covered end names the fill's groups dropped
+- A NotFound drop names the fill's groups dropped
   (`Fill::drop_groups`), as a FETCH miss does; Old and NOT_FETCHABLE reject
   them, and any other error refuses only that request.
 
@@ -100,7 +113,9 @@ Open questions the attempt raised, each with the attempt's recommendation:
   wire change. The alternative keeps FETCH for a fill the first answer shows is
   a datagram, at a round trip and a second path.
   Since settled in part: datagrams become their own track kind, which takes
-  no ranges (maintainer, 2026-11-01; see "Ends are signaled" below).
+  no ranges (maintainer, 2026-11-01). Today a lite-07 publisher that served a
+  bounded range's only group as a datagram never answers it with SUBSCRIBE_OK
+  (`TrackRun::unservable`), so such a fill parks until its readers leave.
 - **Fills from partway through a group.** Route recovery (`resume::Recover`)
   fills from frame N, which a whole-group range cannot say. Recommended: keep
   FETCH on lite-07 for a fill whose first group starts past frame 0, as
@@ -113,7 +128,11 @@ Open questions the attempt raised, each with the attempt's recommendation:
   a stale group 5). Recommended: settle the partial-group question first,
   since the failing fill is a recovery fill, and rerun the test. The
   alternatives fill under the demand's budget, refusing older groups as Old,
-  or add a per-range budget to the wire.
+  or add a per-range budget to the wire. Since the one-group recovery below
+  was decided (2026-11-02), filling under the demand's budget composes with
+  it: a group the live budget drops as OLD is officially dropped, so a
+  one-group SUBSCRIBE with no max delay recovers it, and the live cap never
+  loosens. That is the 2026-11-03 handback's recommendation.
 - **A range added after SUBSCRIBE_OK has no reported start.** SUBSCRIBE_OK's
   Range Starts are positional and sent once, yet the subscriber judges a
   bounded range complete from them, on a stream that stays open for later
@@ -134,74 +153,6 @@ bounded ranges complete upstream. A hole on a live track counts as dropped
 once the feed gives up on it, past the arrival grace (#7545's bounded wait,
 `TrackState::miss_grace`).
 
-### Ends are signaled, not inferred
-
-The maintainer, 2026-11-01, on
-[moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545): "we should have
-a SUBSCRIBE_END message or something to signal the last group of a track? we
-were using QUIC FIN to signal that but that prevents updates in the future, so
-we should have a signal instead". Settled the same day:
-
-- No SUBSCRIBE_COVERED message: a subscriber judges a bounded range complete
-  from the groups it received, SUBSCRIBE_DROP, the Range Starts in
-  SUBSCRIBE_OK, and SUBSCRIBE_FINISH. Drops and groups name absolute
-  sequences, so the subscriber judges against its latest ranges and an update
-  in flight changes nothing it has counted; the FIN's race with an unread
-  update goes away.
-- "Keep stream open": SUBSCRIBE_FINISH names the track's final group and no
-  longer FINs the Subscribe Stream, so an update can still reach an ended
-  track's history. A covered bounded subscription is not FINed either.
-- ✅ Rename SUBSCRIBE_END to SUBSCRIBE_FINISH. It matches TRACKS_FINISH and
-  `track::Producer::finish`, and "END" would read as closing the stream, which
-  it no longer does.
-- Before SUBSCRIBE_OK a lite-07 publisher holds back what it gave up
-  (`TrackRun::skipped`) and answers only once a group stream resolves the
-  start, so a bounded subscription none of whose groups it can serve gets
-  neither, and only the covered FIN ends it today. Once such a subscription is
-  covered, the publisher sends SUBSCRIBE_OK and then the drops it held.
-- The subscriber FINs the stream once it wants nothing more, and the publisher
-  FINs in reply.
-- Datagrams take no ranges, since they become their own track kind
-  (maintainer, 2026-11-01). The datagram-tracks plan
-  ([moq-dev/moq#7575](https://github.com/moq-dev/moq/pull/7575)) touches this
-  quest too, and should take this design and the rename as given.
-
-The draft's exception for a start past the publisher's largest position should
-also say that a relay knows that position only from its upstream's answer,
-never from its cache (maintainer, 2026-11-01: "NEVER use the cache as the live
-edge").
-
-### Back-to-back one-range reads
-
-Acceptance test (maintainer, 2026-11-02, on
-[moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): on lite-07,
-one-range reads of the same track through one session, groups 1 then 2, and
-2, 1, 0, each complete, direct and through a relay. Today each hangs on the
-later read (on 2, and on 0). Lite-05/06 and moq-transport pass. It also hangs
-hls's `a_live_fmp4_import_serves_segments_over_lite07` once hls reads a
-segment's groups that way. Reproduce with sequential `one_range` reads in
-`range_read.rs`'s fixture.
-
-The cause is the publisher's end-of-subscription FIN on a covered bounded
-subscription, traced with tracing on:
-
-- When the copy widens `1..2` to `1..3` with SUBSCRIBE_UPDATE while the
-  publisher FINs the covered `1..2` without reading it, the copy's tail owes
-  `1..3` (`SubStream::covered`, `updated` set) and waits its grace, which is
-  `Duration::MAX` with no max delay (`Subscription::budget`). Group 2 never
-  comes and nothing re-subscribes.
-- When the FIN lands first (as on main before
-  [moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)), the tail
-  settles, `TrackServe::begin` finds the lingering demand equal to the covered
-  ranges and keeps `Sub::None`, and the second read's demand never wakes the
-  serve loop again, so the copy is left with no upstream subscription.
-
-No SUBSCRIBE_DROP is involved, so the one-group recovery below does not reach
-it, and a fresh SUBSCRIBE while group 2 may still be in flight could deliver
-it twice. Fix it with the explicit end above: the Subscribe Stream stays open
-and the covered FIN goes, so the publisher reads the update and serves or
-drops the group.
-
 ### Recovering a dropped group
 
 Decided 2026-11-02 (maintainer, on
@@ -221,7 +172,8 @@ and a dropped group is recovered exactly once.
 ### Draft and checks
 
 Update `drafts/draft-lcurley-moq-lite.md` with each wire change here,
-including that a subscriber fills missing groups through its ranges. Run
+including that a subscriber fills missing groups through its ranges, and
+recovers a dropped group with a one-group SUBSCRIBE. Run
 `just drafts check` and `just test interop --all`, and the `moq-net-tests`
 `restart::retired_fetch_lite07` and `moq-relay` suites.
 
