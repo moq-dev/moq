@@ -246,8 +246,10 @@ impl Following {
 	///
 	/// Returns the broadcast of each instance as it comes online or takes over, and `None`
 	/// once the path the one handed out last served goes offline, or, when pinned, another
-	/// instance takes it over. Returns [`Error::Closed`] once the origin closes, and any other resolution
-	/// failure as-is. Dropping the future keeps the wait's progress for the next call.
+	/// instance takes it over. Returns [`Error::Closed`] once the origin closes, and any other
+	/// resolution failure as-is, such as a handler refusing the path; the next call then waits
+	/// for another instance to serve it. Dropping the future keeps the wait's progress for the
+	/// next call.
 	#[cfg(feature = "async")]
 	pub async fn available(&mut self) -> Result<Option<broadcast::Consumer>, Error> {
 		kio::wait(|waiter| self.poll_available(waiter)).await
@@ -306,8 +308,10 @@ impl Following {
 				.get_or_insert_with(|| self.consumer.routing(self.path.clone(), self.instance.clone()));
 			let resolved = ready!(kio::Task::poll(resolving, waiter));
 			self.resolving = None;
-			let broadcast = resolved?;
+			// A refusal answers for the routes serving the path now: wait for another instance
+			// to serve it before asking again, rather than asking the same handler at once.
 			self.unseen = false;
+			let broadcast = resolved?;
 
 			// Resolving can run ahead of the follower: a takeover resolves at once while the
 			// origin holds its restart, and that restart then names the instance handed out.
@@ -728,6 +732,27 @@ mod tests {
 			result.expect("the selected refusal must answer"),
 			Err(Error::Unroutable)
 		));
+	}
+
+	/// A refusal is reported once, and the follower then waits for another instance rather than
+	/// asking the refusing handler again.
+	#[kio::test]
+	async fn announced_waits_for_another_instance_after_a_refusal() {
+		let origin = Hop::new(1).unwrap().produce();
+		let claim = origin.requests("live").unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async { requested(&claim).await.reject(Error::NotFound) }
+		);
+		assert!(matches!(result.expect("the refusal answers"), Err(Error::NotFound)));
+		none(&mut announced).await;
+		let again = kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast()).await;
+		assert!(again.is_err(), "the refusing handler was asked again");
+
+		// A publisher takes the path over from the claim, and is handed out.
+		let _publisher = origin.publish("live", route(&Instance::random())).unwrap();
+		let _served = available(&mut announced).await;
 	}
 
 	/// A path no pattern can spell is refused rather than followed through the whole scope,

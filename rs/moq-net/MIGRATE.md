@@ -12,7 +12,7 @@ Map `Start` to `Present` and `End` to `Absent`, and drop `Update` arms.
 Where you requested the path again on `Restart`, hold `consumer.follow(path, None)` instead: each `available()` returns the next instance's broadcast.
 
 `Following::available()` returns `Result<Option<broadcast::Consumer>, Error>`: `None` reports the path going offline (or, when pinned, another instance taking it over), and the next `Some` is whatever serves it again.
-The first call never returns `None`.
+The first call never returns `None`. After a resolution failure, such as a handler refusing the path, the next `available()` waits for another instance to serve it instead of asking the same handler again, so keep the follower rather than dropping it.
 
 ```rust
 // Before

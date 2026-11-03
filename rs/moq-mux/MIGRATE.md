@@ -8,7 +8,6 @@ How to update your code for each breaking change, newest first.
 
 `follow::Instances::new` is removed: call `origin.follow(path, instance)` and read `Following::available()`, which returns `Some(broadcast)` where `Event::Start` did and `None` where `Event::End` did.
 `Source::follow` still returns `follow::Instances`, for its one-shot hand-out of the catalog's own broadcast; its `next()` and `poll_next()` now return `Option<broadcast::Consumer>`, and `follow::Event` is gone.
-A pinned instance is now pinned in the origin's follower, which ends the rendition when another instance takes the path.
 
 ### fMP4 decode errors are terminal
 

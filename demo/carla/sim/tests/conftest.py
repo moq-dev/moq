@@ -52,6 +52,8 @@ class SnapshotConsumer:
 
 moq = ModuleType("moq")
 moq.Error = MoqError
+# The stub has no shutdown errors: every `MoqError` it raises is a failure.
+moq.is_shutdown = lambda err: False
 moq.AnnounceEventPresent = AnnounceEventPresent
 moq.AnnounceEventAbsent = AnnounceEventAbsent
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)

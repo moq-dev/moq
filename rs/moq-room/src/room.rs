@@ -35,9 +35,7 @@ struct Participant {
 	identity: Path,
 	kind: Kind,
 	path: Path,
-	/// `None` once the follower failed, such as a handler refusing the path: the participant
-	/// stays listed until the listing reports it absent.
-	following: Option<origin::Following>,
+	following: origin::Following,
 }
 
 /// Runs the announce loop and yields remote participant broadcasts.
@@ -110,21 +108,17 @@ impl Room {
 			identity: parsed.identity,
 			kind: parsed.kind,
 			path,
-			following: Some(following),
+			following,
 		});
 	}
 
-	/// The next broadcast a participant's follower hands out. A follower that fails, such as a
-	/// handler refusing its path, stops until the path is listed again; its end comes from the
-	/// listing.
+	/// The next broadcast a participant's follower hands out. A refusal, such as a handler
+	/// refusing the path, yields nothing: the follower waits for another instance to serve it,
+	/// and the participant's end comes from the listing.
 	fn poll_participants(&mut self, waiter: &kio::Waiter) -> Poll<Event> {
 		let mut index = 0;
 		while let Some(participant) = self.participants.get_mut(index) {
-			let Some(following) = participant.following.as_mut() else {
-				index += 1;
-				continue;
-			};
-			match following.poll_available(waiter) {
+			match participant.following.poll_available(waiter) {
 				Poll::Ready(Ok(Some(broadcast))) => {
 					return Poll::Ready(Event {
 						identity: participant.identity.clone(),
@@ -134,7 +128,9 @@ impl Room {
 					});
 				}
 				Poll::Ready(Ok(None)) => continue,
-				Poll::Ready(Err(_)) => participant.following = None,
+				// Re-polled on the next wake, rather than again now: a closed origin answers
+				// `Closed` every time until the listing ends.
+				Poll::Ready(Err(_)) => index += 1,
 				Poll::Pending => index += 1,
 			}
 		}
@@ -184,7 +180,8 @@ mod tests {
 		assert!(gone.broadcast.is_none());
 	}
 
-	/// A participant whose follower fails stays listed, so its absence is still reported.
+	/// A refused participant stays listed and followed: a publisher taking it over is yielded, and
+	/// its absence is still reported.
 	#[tokio::test(start_paused = true)]
 	async fn reports_the_absence_of_a_refused_participant() {
 		let wait = std::time::Duration::from_secs(1);
@@ -195,10 +192,18 @@ mod tests {
 		let (request, nothing) = tokio::join!(claim.requested_broadcast(), kio::clock::timeout(wait, room.next()));
 		assert!(nothing.is_err(), "nothing serves bob yet");
 		request.expect("requested").reject(moq_net::Error::NotFound);
-		// The refusal fails bob's follower, which yields nothing.
+		// The refusal yields nothing.
 		assert!(kio::clock::timeout(wait, room.next()).await.is_err());
 
-		drop(claim);
+		// A publisher taking the path over from the claim is still followed.
+		let bob = publish(&origin, "bob/camera");
+		let back = kio::clock::timeout(wait, room.next())
+			.await
+			.expect("the publisher was never yielded")
+			.expect("bob camera");
+		assert!(back.broadcast.is_some());
+
+		drop((bob, claim));
 		let gone = kio::clock::timeout(wait, room.next())
 			.await
 			.expect("the absence was never reported")

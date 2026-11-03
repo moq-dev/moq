@@ -347,7 +347,14 @@ async def _follow_driver(
     try:
         async with client.follow(path) as following:
             while True:
-                broadcast = await following.available()
+                try:
+                    broadcast = await following.available()
+                # A refusal leaves the follow waiting for another run; only shutdown ends it.
+                except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
+                    if moq.is_shutdown(err):
+                        raise
+                    log.info("driver %s refused: %s", driver_id, err)
+                    continue
                 if run is not None:
                     run.cancel()
                     run = None

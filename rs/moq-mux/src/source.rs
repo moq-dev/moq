@@ -389,7 +389,7 @@ impl Source {
 				check_instance(instance, &broadcast)?;
 				crate::follow::Instances::fixed(broadcast)
 			}
-			false => crate::follow::Instances::following(self.origin.follow(&path, instance.cloned())?),
+			false => crate::follow::Instances::following(self.origin.follow(&path, None)?, instance.cloned()),
 		})
 	}
 }

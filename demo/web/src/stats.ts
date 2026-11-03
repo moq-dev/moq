@@ -195,6 +195,9 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 			};
 		});
 		history.delete(node);
+		// The aggregate spans every node, so a restarted node's counters must not splice into
+		// its history either.
+		clusterMembership = "";
 		if (!consumer) return;
 
 		const track = consumer.track("group.json").subscribe();

@@ -219,7 +219,8 @@ class Announcements(Scripted):
 
 
 class Following(Scripted):
-    """A scripted follow of one path: each `run` hands out another instance, and `offline` a `None`."""
+    """A scripted follow of one path: each `run` hands out another instance, `offline` a `None`,
+    and `refuse` an error."""
 
     async def __aenter__(self):
         return self
@@ -228,7 +229,14 @@ class Following(Scripted):
         pass
 
     async def available(self):
-        return await self.next()
+        item = await self.next()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def refuse(self) -> None:
+        """Fail the next `available()`, as a handler refusing the path does."""
+        await self.send(moq.Error("refused"))
 
     async def run(self, sequence: int) -> None:
         """Hand out an instance that serves one drive command numbered `sequence`, then stays open."""
@@ -320,6 +328,20 @@ def test_a_driver_whose_run_goes_offline_loses_the_lease_until_it_returns() -> N
         second = await next_command(commands, gate)
         assert second.kind == "drive" and second.instance != first.instance
         assert gate.driver == "abc"
+
+    asyncio.run(watching(scenario))
+
+
+def test_a_refused_driver_is_still_followed() -> None:
+    """A refusal leaves the follow waiting, so the driver's next run still takes the lease."""
+
+    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        await relay.announcements.present(DRIVER)
+        await relay.following(DRIVER).refuse()
+        await relay.following(DRIVER).run(1)
+        command = await next_command(commands, gate)
+        assert (command.kind, command.driver_id) == ("drive", "abc")
+        assert relay.followed == [DRIVER]
 
     asyncio.run(watching(scenario))
 

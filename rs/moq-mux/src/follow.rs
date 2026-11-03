@@ -3,7 +3,7 @@
 //! An announcement is the online and offline signal, so a reader that restarts on each instance
 //! follows [`Instances`] rather than pinning one broadcast as a [`Binding`](crate::Binding) does.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 /// The publisher instances serving a rendition's broadcast, as each comes online, takes over,
 /// and goes. Created by [`Source::follow`](crate::Source::follow).
@@ -15,14 +15,30 @@ pub struct Instances(Feed);
 
 enum Feed {
 	/// Every instance announced at a path.
-	Following(Box<moq_net::origin::Following>),
+	Following {
+		following: Box<moq_net::origin::Following>,
+		/// The instance a reference named, if any.
+		instance: Option<moq_net::Instance>,
+		/// An instance was handed out and its end not reported yet.
+		live: bool,
+	},
 	/// One instance, handed out once.
 	Fixed(Option<moq_net::broadcast::Consumer>),
 }
 
 impl Instances {
-	pub(crate) fn following(following: moq_net::origin::Following) -> Self {
-		Self(Feed::Following(Box::new(following)))
+	/// Follow every instance, handing out only `instance` when given.
+	///
+	/// The path is followed unpinned and each instance checked here, rather than pinned in the
+	/// origin: a hop older than moq-lite 07 mints instances a pin never matches, which
+	/// [`check_instance`](crate::source::check_instance) lets through, and another instance
+	/// winning the path ends the rendition rather than leaving an older one to resolve.
+	pub(crate) fn following(following: moq_net::origin::Following, instance: Option<moq_net::Instance>) -> Self {
+		Self(Feed::Following {
+			following: Box::new(following),
+			instance,
+			live: false,
+		})
 	}
 
 	pub(crate) fn fixed(broadcast: moq_net::broadcast::Consumer) -> Self {
@@ -32,16 +48,39 @@ impl Instances {
 	/// Poll for the next change, registering `waiter` when there is none yet.
 	///
 	/// Returns each instance as it comes online or takes over, and `None` once the path goes
-	/// offline; see [`Following::available`](moq_net::origin::Following::available). Fails
-	/// once the origin closes, and with any resolution failure, such as a handler refusing the
-	/// path.
+	/// offline or, with an instance named, another one takes it over; see
+	/// [`Following::available`](moq_net::origin::Following::available). Fails once the origin
+	/// closes, and with any resolution failure, such as a handler refusing the path.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<moq_net::broadcast::Consumer>>> {
-		match &mut self.0 {
-			Feed::Following(following) => following.poll_available(waiter).map_err(crate::Error::from),
-			Feed::Fixed(broadcast) => match broadcast.take() {
-				Some(broadcast) => Poll::Ready(Ok(Some(broadcast))),
-				None => Poll::Pending,
-			},
+		let (following, instance, live) = match &mut self.0 {
+			Feed::Following {
+				following,
+				instance,
+				live,
+			} => (following, instance, live),
+			Feed::Fixed(broadcast) => {
+				return match broadcast.take() {
+					Some(broadcast) => Poll::Ready(Ok(Some(broadcast))),
+					None => Poll::Pending,
+				};
+			}
+		};
+		loop {
+			match ready!(following.poll_available(waiter))? {
+				Some(broadcast) if crate::source::check_instance(instance.as_ref(), &broadcast).is_ok() => {
+					*live = true;
+					return Poll::Ready(Ok(Some(broadcast)));
+				}
+				Some(broadcast) => {
+					tracing::debug!(path = %broadcast.info().path, "skipping a broadcast of another instance");
+				}
+				None => {}
+			}
+			// Report the end of what was handed out once, whether it went offline or another
+			// instance took over.
+			if std::mem::take(live) {
+				return Poll::Ready(Ok(None));
+			}
 		}
 	}
 
@@ -140,6 +179,25 @@ mod tests {
 		assert_eq!(back.info().instance.as_ref(), Some(&old_instance));
 		let back = followed(&mut any).await.unwrap();
 		assert_eq!(back.info().instance.as_ref(), Some(&old_instance));
+	}
+
+	/// A reference naming an instance still follows a sibling whose instance an older hop
+	/// minted, which proves nothing either way.
+	#[tokio::test(start_paused = true)]
+	async fn a_named_instance_follows_a_minted_one() {
+		let origin = produce_origin();
+		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		let minted: moq_net::Instance = "~minted".parse().unwrap();
+		assert!(minted.is_minted());
+		let _sibling = origin.publish("a/source", route(&minted)).unwrap();
+		settle().await;
+		let source = resolved(&origin, "a/pub").await;
+		let named = moq_net::Instance::random();
+		let mut follow = source
+			.follow(Some(&Relative::new("./source").unwrap()), Some(&named))
+			.unwrap();
+		let served = followed(&mut follow).await.expect("the minted sibling");
+		assert_eq!(served.info().instance.as_ref(), Some(&minted));
 	}
 
 	/// A self-reference reads only the catalog instance, whatever replaces it at the path.
