@@ -7,7 +7,7 @@ Workspace-only implementation; this crate is not published.
 Content signing and end-to-end encryption for [Media over QUIC](https://moq.dev): the `sign`
 module signs every frame so relays cannot forge it, and the `e2ee` module encrypts groups,
 datagrams, and track names so relays cannot read them. Both wrap `moq-net` and check timestamps
-with its `group::on_track`, so a frame either half accepts is one `moq-net` accepts.
+with its `track::Info::rescale`, so a frame either half accepts is one `moq-net` accepts.
 
 ## Signing
 

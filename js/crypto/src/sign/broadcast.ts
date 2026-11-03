@@ -6,7 +6,7 @@
  *
  * @module
  */
-import { Instance, type Broadcast as NetBroadcast, type Track as NetTrack, type Path } from "@moq/net";
+import { Instance, type Broadcast as NetBroadcast, Track as NetTrack, type Path } from "@moq/net";
 import { Failure } from "./failure.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
 import { Scope } from "./scope.ts";
@@ -42,13 +42,18 @@ export class Producer {
 	/** Create a track whose frames are signed; throws the net error if the broadcast already holds it. */
 	createTrack(name: string, info: Partial<NetTrack.Info> = {}): Track.Producer {
 		const inner = this.#inner.createTrack(name, info);
-		const timescale = info.timescale ?? undefined;
 		let sequences = this.#sequences.get(name);
 		if (!sequences) {
 			sequences = { next: 0n };
 			this.#sequences.set(name, sequences);
 		}
-		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.instance, name), sequences, timescale);
+		return Track.Producer.make(
+			inner,
+			this.#key,
+			new Scope(this.#path, this.instance, name),
+			sequences,
+			NetTrack.infoDefaults(info),
+		);
 	}
 
 	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */

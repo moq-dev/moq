@@ -5,7 +5,6 @@
  */
 import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import { Pump } from "../pump.ts";
-import { onTrack } from "../timestamp.ts";
 import type { Event } from "./datagram.ts";
 import { checkGroup } from "./derive.ts";
 import { Failure } from "./failure.ts";
@@ -33,16 +32,16 @@ export class Producer {
 	#next = 0n;
 	#finished = false;
 
-	private constructor(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys) {
+	private constructor(inner: NetTrack.Producer, info: NetTrack.Info, keys: Keys) {
 		this.#inner = inner;
 		this.name = inner.name;
-		this.#writer = { pump: new Pump(), key: keys.group, timescale, closed: false };
+		this.#writer = { pump: new Pump(), key: keys.group, track: info, closed: false };
 		this.#datagramKey = keys.datagram;
 	}
 
 	/** @internal */
-	static make(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys): Producer {
-		return new Producer(inner, timescale, keys);
+	static make(inner: NetTrack.Producer, info: NetTrack.Info, keys: Keys): Producer {
+		return new Producer(inner, info, keys);
 	}
 
 	/** The track's final outcome, once its declared end is reached or it aborts. */
@@ -91,7 +90,7 @@ export class Producer {
 	): Promise<void> {
 		this.#writable();
 		this.#reserve(sequence);
-		const at = onTrack(timestamp, this.#writer.timescale);
+		const at = this.#writer.track.rescale(timestamp);
 		const iv = this.#datagramKey.admitSeal(sequence, 0, plaintext.byteLength, MAX_DATAGRAM_PAYLOAD);
 		this.#next = sequence + 1n;
 		const owned = plaintext.slice();

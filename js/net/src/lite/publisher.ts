@@ -27,7 +27,7 @@ import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
-import type * as track from "../track.ts";
+import * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
@@ -100,21 +100,25 @@ interface Stamp {
 	/** The wire timescale TRACK_INFO declared (see `wireTimescale`). */
 	timescale: Timescale;
 	/**
-	 * Whether each frame's own timestamp goes out. Lite-05/06 cannot encode an untimed track, so
-	 * an untimed one carries its send time instead.
+	 * The timed track whose frames' own timestamps go out, at its timescale, which the wire's
+	 * equals. Lite-05/06 cannot encode an untimed track, so an untimed one carries its send time
+	 * instead.
 	 */
-	timed: boolean;
+	timed?: track.Info;
 }
 
-/** How `version` stamps a track with `timescale`, or undefined when it carries none. */
-function stamping(version: Version, timescale: Timescale | undefined): Stamp | undefined {
+/** How `version` stamps a track with `info`, or undefined when it carries no timestamps. */
+function stamping(version: Version, info: track.Info): Stamp | undefined {
+	const timescale = info.timescale ?? undefined;
 	const wire = wireTimescale(version, timescale);
-	return wire === undefined ? undefined : { timescale: wire, timed: timescale !== undefined };
+	if (wire === undefined) return undefined;
+	return timescale === undefined ? { timescale: wire } : { timescale: wire, timed: info };
 }
 
 /** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out untimed. */
 function wireTime(timestamp: Timestamp | undefined, stamp: Stamp): number {
-	return Math.round(((stamp.timed ? timestamp : undefined) ?? Timestamp.now()).as(stamp.timescale));
+	const own = stamp.timed?.rescale(timestamp);
+	return own ? own.value : Math.round(Timestamp.now().as(stamp.timescale));
 }
 
 /**
@@ -988,7 +992,7 @@ export class Publisher {
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
 				// they always agree.
-				stamp = stamping(this.version, info.timescale ?? undefined);
+				stamp = stamping(this.version, info);
 				compress = hasCompression(this.version) && !!info.compress;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
@@ -1163,7 +1167,7 @@ export class Publisher {
 					return;
 				}
 				await this.#runFetchGroup(group, stream.writer, {
-					stamp: stamping(this.version, info.timescale),
+					stamp: stamping(this.version, track.infoDefaults({ timescale: info.timescale })),
 					compress: info.compress,
 					start: msg.startFrame,
 					end: msg.endFrame,

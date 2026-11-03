@@ -42,7 +42,7 @@ import {
 	type TrackRequestOptions,
 } from "./internal.ts";
 import { CACHE_EXPIRY, grace, Ledger } from "./ledger.ts";
-import { Timescale, type Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { checkSequence, max, min } from "./util/sequence.ts";
 import {
 	type Holdings,
@@ -177,6 +177,28 @@ export interface Info {
 	 * @internal
 	 */
 	unchecked?: boolean;
+	/**
+	 * `timestamp` at this track's {@link Info.timescale}, rounded as the wire rounds it. A track is
+	 * all timed or all untimed, so a frame must match it: a timestamp on an untimed track, none on
+	 * a timed one, or one the scale can't hold throws {@link TimestampMismatch}. A writer that
+	 * changes state before its frame reaches the track, such as signing or encrypting it,
+	 * rescales first so a refused timestamp changes nothing. Mirrors the Rust `track::Info::rescale`.
+	 */
+	rescale(timestamp: Timestamp | undefined): Timestamp | undefined;
+}
+
+// The one implementation of `Info.rescale`, shared by every resolved `Info`.
+const INFO_METHODS: Pick<Info, "rescale"> = { rescale };
+
+function rescale(this: Info, timestamp: Timestamp | undefined): Timestamp | undefined {
+	const timescale = this.timescale ?? undefined;
+	if ((timescale !== undefined) !== (timestamp !== undefined)) throw new TimestampMismatch();
+	if (timestamp === undefined || timescale === undefined) return undefined;
+	try {
+		return new Timestamp(Math.round(timestamp.as(timescale)), timescale);
+	} catch (cause) {
+		throw new TimestampMismatch({ cause });
+	}
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -208,7 +230,8 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 	if (info.compress !== undefined && typeof info.compress !== "boolean")
 		throw new TypeError("compress must be a boolean");
 	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
-	return {
+	// The method lives on the prototype, so the fields stay plain data to compare and copy.
+	return Object.assign(Object.create(INFO_METHODS) as Pick<Info, "rescale">, {
 		compress: info.compress ?? false,
 		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
@@ -216,7 +239,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
 		...(info.ietf === undefined ? {} : { ietf: info.ietf }),
 		...(info.unchecked ? { unchecked: true } : {}),
-	};
+	});
 }
 
 function refreshRatio(value: number): number {
@@ -1090,17 +1113,16 @@ export class Producer {
 	accept(info: Partial<Info> = {}): this {
 		if (this.#state.closed.peek() !== undefined) return this;
 		const resolved = infoDefaults(info);
-		const timed = resolved.timescale != null;
 		// Anything written before accept() must match too. A mismatch closes the track, so
 		// nothing waiting on info() hangs on a half-bound cache.
 		try {
 			for (const { group } of this.#cache) {
-				hooks.bindGroupTimed(group, timed);
+				hooks.bindGroupTimed(group, resolved);
 				hooks.bindGroupCompression(group, resolved.compress ?? false);
 			}
 			for (const sink of this.#sinks) {
 				for (const datagram of sink.datagrams.peek()) {
-					if ((datagram.timestamp !== undefined) !== timed) throw new TimestampMismatch();
+					resolved.rescale(datagram.timestamp);
 				}
 			}
 		} catch (err) {
@@ -1546,15 +1568,14 @@ export class Producer {
 	#bind(group: GroupProducer): void {
 		const info = this.#state.info.peek();
 		if (info) {
-			hooks.bindGroupTimed(group, info.timescale != null);
+			hooks.bindGroupTimed(group, info);
 			hooks.bindGroupCompression(group, info.compress ?? false);
 		}
 	}
 
 	// Refuse a datagram whose timedness disagrees with this track's.
 	#checkDatagram(timestamp: Timestamp | undefined): void {
-		const info = this.#state.info.peek();
-		if (info && (info.timescale != null) !== (timestamp !== undefined)) throw new TimestampMismatch();
+		this.#state.info.peek()?.rescale(timestamp);
 	}
 
 	// Refuse a write once the track is closed, or at or past its declared end.

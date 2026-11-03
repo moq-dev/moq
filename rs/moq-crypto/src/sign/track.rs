@@ -76,7 +76,12 @@ impl Producer {
 	}
 
 	fn group(&self, inner: moq_net::group::Producer) -> group::Producer {
-		group::Producer::new(inner, self.key.clone(), Arc::clone(&self.scope))
+		group::Producer::new(
+			inner,
+			self.inner.info().clone(),
+			self.key.clone(),
+			Arc::clone(&self.scope),
+		)
 	}
 
 	/// Finish the track after the last group.

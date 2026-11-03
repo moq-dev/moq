@@ -866,10 +866,10 @@ test("a timestamp out of range at the track's timescale spends nothing", async (
 	const producer = await generation.produce(net, "video");
 	const huge = new Time.Timestamp(Number.MAX_SAFE_INTEGER, Time.Timescale.MILLI);
 
-	await expect(producer.insertDatagram(0n, huge, text("x"))).rejects.toThrow(RangeError);
+	await expect(producer.insertDatagram(0n, huge, text("x"))).rejects.toBeInstanceOf(NetError.TimestampMismatch);
 	await producer.insertDatagram(0n, ms(1), text("datagram"));
 	const group = producer.createGroup(1n);
-	await expect(group.writeFrame(huge, text("x"))).rejects.toThrow(RangeError);
+	await expect(group.writeFrame(huge, text("x"))).rejects.toBeInstanceOf(NetError.TimestampMismatch);
 	await group.writeFrame(ms(2), text("frame"));
 	group.finish();
 	expect(datagramText(await consumer.recvDatagram())).toBe("datagram");

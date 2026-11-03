@@ -3,9 +3,8 @@
  *
  * @module
  */
-import type { Group as NetGroup, Time } from "@moq/net";
+import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import type { Pump } from "../pump.ts";
-import { onTrack } from "../timestamp.ts";
 import { Failure } from "./failure.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
 import type { Scope } from "./scope.ts";
@@ -24,8 +23,8 @@ export interface Writer {
 	pump: Pump;
 	key: SecretKey;
 	scope: Scope;
-	// The track's timescale, which every timestamp is signed at; undefined when untimed.
-	timescale?: Time.Timescale;
+	// The track's info, whose `rescale` gives the timestamp every frame is signed at.
+	track: NetTrack.Info;
 	// Set by release or abort: no new writes, including on existing groups.
 	closed: boolean;
 	aborted?: Error;
@@ -72,7 +71,7 @@ export class Producer {
 		if (this.#closed || this.#writer.closed) throw this.#writer.aborted ?? new Error("group is closed");
 		const owned = payload.slice();
 		// Signed at the track's timescale, and written that way so a local reader sees the signed value too.
-		const at = onTrack(timestamp, this.#writer.timescale);
+		const at = this.#writer.track.rescale(timestamp);
 		return this.#writer.pump.run(async () => {
 			this.#check();
 			const body = await this.#writer.scope.sign(this.#writer.key, this.sequence, this.#next, at, owned);

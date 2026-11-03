@@ -504,6 +504,20 @@ test("refresh must be a u32 ratio", () => {
 	expect(infoDefaults({ refresh: 0 }).refresh).toBe(0);
 });
 
+test("rescale matches the track's timeline, rounded as the wire rounds it", () => {
+	const timed = infoDefaults({ timescale: Timescale.MILLI });
+	const rescaled = timed.rescale(Timestamp.fromMicros(2_400));
+	expect(rescaled?.value).toBe(2);
+	expect(rescaled?.scale).toBe(Timescale.MILLI);
+	expect(() => timed.rescale(undefined)).toThrow(TimestampMismatch);
+	const nano = infoDefaults({ timescale: Timescale.NANO });
+	expect(() => nano.rescale(new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MILLI))).toThrow(TimestampMismatch);
+
+	const untimed = infoDefaults();
+	expect(untimed.rescale(undefined)).toBeUndefined();
+	expect(() => untimed.rescale(Timestamp.fromMillis(1))).toThrow(TimestampMismatch);
+});
+
 test("appendDatagram shares the group sequence counter", () => {
 	const producer = new TrackProducer("test");
 	const ts = Timestamp.fromMillis(10);

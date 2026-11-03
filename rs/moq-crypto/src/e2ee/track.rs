@@ -82,7 +82,11 @@ impl Producer {
 			sequence
 		};
 		let inner = self.inner.create_group(moq_net::group::Info { sequence })?;
-		Ok(group::Producer::new(inner, Arc::clone(&self.keys.group)))
+		Ok(group::Producer::new(
+			inner,
+			self.inner.info().clone(),
+			Arc::clone(&self.keys.group),
+		))
 	}
 
 	/// Encrypt `plaintext` at the next sequence and insert the datagram, returning that sequence.
@@ -125,7 +129,7 @@ impl Producer {
 		plaintext: &[u8],
 	) -> Result<u64> {
 		// Checked before the sequence is spent.
-		let timestamp = moq_net::group::on_track(timestamp, self.inner.info().timescale)?;
+		let timestamp = self.inner.info().rescale(timestamp)?;
 		// Held across encryption, so another producer of this name cannot take the sequence.
 		let (sequence, payload) = {
 			let mut next = self.keys.next.lock().expect("track sequence");

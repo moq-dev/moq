@@ -10,6 +10,7 @@ import { Compression, encodable, stored } from "./flate/group.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
 import type { Timestamp } from "./time.ts";
+import type { Info as TrackInfo } from "./track.ts";
 import { MAX_FRAME_BYTES, SEGMENT_BYTES } from "./util/limits.ts";
 import { checkSequence } from "./util/sequence.ts";
 
@@ -211,9 +212,10 @@ class GroupState {
 	cacheBytes = 0;
 	compressed?: boolean;
 	flate?: Compression;
-	// Whether the owning track has a timescale, so every frame must carry a timestamp (true)
-	// or none may (false). Undefined for a group no track has claimed yet, which takes either.
-	timed?: boolean;
+	// The owning track's info, whose `rescale` every frame must pass: a timed track's frames
+	// carry a timestamp its scale holds, an untimed track's carry none. Undefined for a group
+	// no track has claimed yet, which takes either.
+	track?: TrackInfo;
 	// The first frame's timestamp, retained after reads. Media time only: an untimed group
 	// never has one, so it says nothing about whether a frame was written.
 	timestamp?: Timestamp;
@@ -253,9 +255,9 @@ class Landed implements Frame {
 	}
 }
 
-// Refuse a frame whose timedness disagrees with the track's.
-function checkTimed(timed: boolean | undefined, frame: Frame) {
-	if (timed !== undefined && timed !== (frame.timestamp !== undefined)) throw new TimestampMismatch();
+// Refuse a frame whose timestamp the track's `rescale` refuses.
+function checkTimed(track: TrackInfo | undefined, frame: Frame) {
+	track?.rescale(frame.timestamp);
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
@@ -393,13 +395,14 @@ export class Producer {
 			state.progress.add(fn);
 			return () => state.progress.delete(fn);
 		};
-		hooks.bindGroupTimed = (group, timed) => {
+		hooks.bindGroupTimed = (group, track) => {
 			const state = group.#state;
-			if (state.timed === timed) return;
+			const timed = track.timescale != null;
+			if (state.track !== undefined && (state.track.timescale != null) === timed) return;
 			// Another track already holds it to the opposite timedness, empty or not.
-			if (state.timed !== undefined) throw new TimestampMismatch();
-			for (const frame of state.frames.peek()) checkTimed(timed, frame);
-			state.timed = timed;
+			if (state.track !== undefined) throw new TimestampMismatch();
+			for (const frame of state.frames.peek()) checkTimed(track, frame);
+			state.track = track;
 		};
 		hooks.admitGroupStart = (group, admit) => {
 			group.#admits ??= [];
@@ -603,7 +606,7 @@ export class Producer {
 		if (this.#open) throw new Error("a frame is still being written");
 		if (this.#state.total.peek() === Number.MAX_SAFE_INTEGER)
 			throw new ProtocolViolation("group frame index exceeds the safe integer range");
-		checkTimed(this.#state.timed, frame);
+		checkTimed(this.#state.track, frame);
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
 		}

@@ -3,7 +3,7 @@
  *
  * @module
  */
-import type { Track as NetTrack, Time } from "@moq/net";
+import type { Track as NetTrack } from "@moq/net";
 import { Pump } from "../pump.ts";
 import * as Group from "./group.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
@@ -38,23 +38,23 @@ export class Producer {
 		key: SecretKey,
 		scope: Scope,
 		sequences: Sequences,
-		timescale?: Time.Timescale,
+		info: NetTrack.Info,
 	) {
 		this.#inner = inner;
 		this.name = inner.name;
-		this.#writer = { pump: new Pump(), key, scope, timescale, closed: false };
+		this.#writer = { pump: new Pump(), key, scope, track: info, closed: false };
 		this.#sequences = sequences;
 	}
 
-	/** Sign `inner`, whose info declared `timescale` (undefined when untimed). @internal */
+	/** Sign `inner`, created with `info`. @internal */
 	static make(
 		inner: NetTrack.Producer,
 		key: SecretKey,
 		scope: Scope,
 		sequences: Sequences,
-		timescale?: Time.Timescale,
+		info: NetTrack.Info,
 	): Producer {
-		return new Producer(inner, key, scope, sequences, timescale);
+		return new Producer(inner, key, scope, sequences, info);
 	}
 
 	/** The track's final outcome, once its declared end is reached or it aborts. */

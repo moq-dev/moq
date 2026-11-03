@@ -1,5 +1,5 @@
 // Package-private state the public modules share without exporting it.
-import type { Time } from "@moq/net";
+import type { Track as NetTrack } from "@moq/net";
 import type { Pump } from "../pump.ts";
 import type { TrackKey } from "./key.ts";
 import type { Terminal } from "./terminal.ts";
@@ -14,8 +14,8 @@ export interface Keys {
 export interface Writer {
 	pump: Pump;
 	key: TrackKey;
-	// The net track's committed timescale, or undefined when untimed.
-	timescale?: Time.Timescale;
+	// The net track's committed info, whose `rescale` checks every timestamp before encryption.
+	track: NetTrack.Info;
 	// Set by release or abort: no new writes, including on existing groups.
 	closed: boolean;
 	aborted?: Error;

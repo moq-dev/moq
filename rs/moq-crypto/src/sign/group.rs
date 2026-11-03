@@ -22,13 +22,25 @@ pub struct Frame {
 /// Exclusive writer for one group, signing each frame at the index it lands on.
 pub struct Producer {
 	inner: moq_net::group::Producer,
+	// The parent track's info, which rescales each timestamp before it is signed.
+	track: moq_net::track::Info,
 	key: SecretKey,
 	scope: Arc<Scope>,
 }
 
 impl Producer {
-	pub(crate) fn new(inner: moq_net::group::Producer, key: SecretKey, scope: Arc<Scope>) -> Self {
-		Self { inner, key, scope }
+	pub(crate) fn new(
+		inner: moq_net::group::Producer,
+		track: moq_net::track::Info,
+		key: SecretKey,
+		scope: Arc<Scope>,
+	) -> Self {
+		Self {
+			inner,
+			track,
+			key,
+			scope,
+		}
 	}
 
 	/// The group's sequence number.
@@ -44,7 +56,7 @@ impl Producer {
 	/// signed frame exceeds the frame size limit.
 	pub fn write_frame(&mut self, timestamp: impl Into<Option<moq_net::Timestamp>>, payload: &[u8]) -> Result<()> {
 		// Signed at the track's timescale, the value the net group stores and every hop carries.
-		let timestamp = moq_net::group::on_track(timestamp.into(), self.inner.timescale())?;
+		let timestamp = self.track.rescale(timestamp.into())?;
 		let frame = self.inner.frame_count() as u64;
 		let body = self
 			.scope

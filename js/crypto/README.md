@@ -6,8 +6,9 @@
 
 Content signing and end-to-end encryption for [Media over QUIC](https://moq.dev), mirroring the
 Rust `moq-crypto` crate. `Sign` signs every frame so relays cannot forge it, and `E2ee` encrypts
-groups, datagrams, and track names so relays cannot read them. Both wrap `@moq/net` and refuse a
-timestamp its track would refuse before signing or encrypting.
+groups, datagrams, and track names so relays cannot read them. Both wrap `@moq/net` and check each
+timestamp with its track's `Info.rescale` before signing or encrypting, so a frame either accepts is
+one `@moq/net` accepts.
 
 ## Signing
 

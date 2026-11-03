@@ -127,7 +127,7 @@ impl<T: Serialize> Inner<T> {
 
 		// A timestamp that doesn't match the track, or that its scale can't hold, is refused before
 		// anything changes: found by `write`, it would be a hole that ends the whole log.
-		let at = moq_net::group::on_track(payload.at, track.inner.info().timescale)?;
+		let at = track.inner.info().rescale(payload.at)?;
 
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because

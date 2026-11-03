@@ -157,6 +157,6 @@ export class Producer {
 			this.#claims.delete(semantic);
 			throw err;
 		}
-		return Track.Producer.make(track, info.timescale ?? undefined, keys(this.credential, this.epoch, semantic));
+		return Track.Producer.make(track, info, keys(this.credential, this.epoch, semantic));
 	}
 }

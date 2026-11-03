@@ -26,16 +26,19 @@ pub struct Frame {
 pub struct Producer {
 	// The error that aborted the group once a write failed after encryption.
 	inner: std::result::Result<moq_net::group::Producer, Error>,
+	// The parent track's info, which rescales each timestamp before it is encrypted.
+	track: moq_net::track::Info,
 	sequence: u64,
 	key: Arc<Mutex<TrackKey>>,
 	next_frame: u32,
 }
 
 impl Producer {
-	pub(crate) fn new(inner: moq_net::group::Producer, key: Arc<Mutex<TrackKey>>) -> Self {
+	pub(crate) fn new(inner: moq_net::group::Producer, track: moq_net::track::Info, key: Arc<Mutex<TrackKey>>) -> Self {
 		Self {
 			sequence: inner.sequence,
 			inner: Ok(inner),
+			track,
 			key,
 			next_frame: 0,
 		}
@@ -70,7 +73,7 @@ impl Producer {
 			return Err(Error::Identity);
 		}
 		// Checked before the frame identity is spent.
-		let timestamp = moq_net::group::on_track(timestamp.into(), inner.timescale())?;
+		let timestamp = self.track.rescale(timestamp.into())?;
 		let payload = self.key.lock().expect("track key").protect(
 			self.sequence,
 			u64::from(frame),

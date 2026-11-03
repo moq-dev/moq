@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Track.Info` has `rescale` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A resolved `Track.Info` has `rescale(timestamp)`, which returns the timestamp at the track's timescale, rounded as the wire rounds it, and throws `TimestampMismatch` for a timestamp the track refuses. It mirrors the Rust `track::Info::rescale`.
+Build an `Info` with `Track.infoDefaults(fields)` rather than an object literal, which lacks the method.
+A timestamp that leaves the safe range at the track's timescale is now refused at the write with `TimestampMismatch`, rather than with a `RangeError` when it is encoded.
+
 ### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
 
 Every group sequence is a `bigint`, so a group ID past 2^53 decodes, relays, and encodes again instead of being refused: `Group.Producer`/`Consumer.sequence`, `Track.Position.group`, `Track.Bound`, an `absolute` `Track.Anchor`, `Track.Datagram.sequence`, `Track.Demand.wanted`, the `group` of `Ordered.readFrame()`, and the `sequence` that `createGroup`, `insertDatagram`, and `fetchGroup` take and `appendDatagram` returns.

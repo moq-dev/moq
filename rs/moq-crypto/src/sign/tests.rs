@@ -432,7 +432,7 @@ async fn group_resumed_above_frame_zero_verifies_at_its_index() {
 	let track = broadcast.create_track("stream", None).unwrap();
 	let net = track.append_group().unwrap();
 	let raw = net.consume();
-	let mut signed = group::Producer::new(net, key.clone(), Arc::clone(&scope));
+	let mut signed = group::Producer::new(net, track.info().clone(), key.clone(), Arc::clone(&scope));
 	signed.write_frame(None, b"zero").unwrap();
 	signed.write_frame(None, b"one").unwrap();
 	signed.finish().unwrap();
