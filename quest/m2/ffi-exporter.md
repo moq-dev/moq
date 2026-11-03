@@ -20,7 +20,8 @@ replaces the fork, which stays in maintenance; publishing `rust2-uniffi` to
 crates.io would commit permanent names to code already slated for
 retirement, and switching moq to it would be churn on the way to the
 exporter. Until the switch, moq keeps building from its pinned
-`kixelated/uniffi-*` forks ([UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md)).
+`kixelated/uniffi-*` forks, checked each release cycle by
+[the vendor sync](/quest/m1/vendor-sync/README.md).
 Not chosen: publish the fork and switch to it first; decide later.
 
 Carried over from the fork plan, where they still apply to the exporter's
@@ -106,7 +107,6 @@ none.
 
 ## Related
 
-- [UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md) - keeps the forks this replaces synced with upstream until the switch; its fixes must reach rust2's fork
 - [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
 - [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
 - [Foreign poll for hot reads](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it
