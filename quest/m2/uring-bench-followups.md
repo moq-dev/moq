@@ -6,7 +6,7 @@ Run-to-quiescence on the io_uring workers has acceptance numbers from a quiet ho
 
 ## Plan
 
-Follow-ups of [moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530), which runs a turn's tasks to quiescence before submitting. Its deterministic counts were the evidence (fanout 40.2 to 20.9 turns per round, -3.6% instructions); its `just bench-runtime` rows were indicative only, because host load put every runtime's p99 in seconds and moved the unchanged tokio rows by up to 8%. This waits on [moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530) landing.
+Follow-ups of [moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530), which runs a turn's tasks to quiescence before submitting. Its deterministic counts were the evidence (fanout 40.2 to 20.9 turns per round, -3.6% instructions); its `just bench-runtime` rows were indicative only, because host load put every runtime's p99 in seconds and moved the unchanged tokio rows by up to 8%. #7530 merged 2026-11-02.
 
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2, one quest for both.
 

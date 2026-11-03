@@ -19,7 +19,7 @@ check that moq's generated bindings need, and moq pins the updated forks:
 
 Recurring child of the [vendor sync](/quest/m1/vendor-sync/README.md), which
 says how each run works and recurs. Decided 2026-10-30 (maintainer): covered
-only until [the rust2 switch](/quest/m2/uniffi-fork.md) lands. After that,
+only until [the switch to rust2's exporter](/quest/m2/ffi-exporter.md) lands. After that,
 rust2 owns the generators, and the next run drops this child. Until then, a fix
 landed here goes upstream into rust2's fork too, or rust2's import loses it.
 
