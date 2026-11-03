@@ -22,8 +22,9 @@ and says so.
 
 Town10HD\_Opt includes a calibrated WebP capture. Its manifest preserves the
 capture metadata and image checksum alongside the player's `name`, `image`,
-and `bbox` fields. The supplied image already has its horizontal flip applied;
-image right is +x and image down is +y. Do not flip it again.
+and `bbox` fields. Image right is +x and image down is +y, which is what a
+nadir camera at yaw -90 sees. Other yaws need a rotation, never a mirror: a
+mirrored town still looks plausible, but the roads no longer line up.
 
 On the machine running CARLA, open a truck camera in the player to activate
 rendering, then run:
@@ -46,11 +47,11 @@ records `name`, image `width`/`height`, `groundZ`, the camera transform and FOV,
 and the simulator `frame`. The PNG and manifest are a pair: ship them together.
 WebP is also supported using `<Town>.aerial.webp` and the matching manifest.
 Every visitor downloads the image, and the map fits the view to the roads
-without zooming further, so ship at most 2560x1440 WebP (Town10HD\_Opt is about
-350 KB) and update the manifest's size and checksum to match:
+without zooming further, so ship at most 1920x1080 WebP (Town10HD\_Opt is about
+180 KB) and update the manifest's size and checksum to match:
 
 ```bash
-ffmpeg -i <Town>.aerial.png -vf scale=2560:1440 -c:v libwebp -quality 70 <Town>.aerial.webp
+ffmpeg -i <Town>.aerial.png -vf scale=1920:1080 -c:v libwebp -quality 60 <Town>.aerial.webp
 ```
 
 Run `just fix` afterwards so the manifests match the repository's formatting.

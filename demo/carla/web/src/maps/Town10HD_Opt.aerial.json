@@ -2,11 +2,11 @@
 	"version": 1,
 	"map": "Carla/Maps/Town10HD_Opt",
 	"image": "Town10HD_Opt.aerial.webp",
-	"image_sha256": "a131ed672676660a9146a638ea4b40acbbc09f234d4c9d147dc83fbab5b1ec96",
+	"image_sha256": "42951b57763862fdc52a07c337178d530c39a50ce11f509892a4fa147aa1cb48",
 	"units": "metres",
 	"image_size": {
-		"width": 2560,
-		"height": 1440
+		"width": 1920,
+		"height": 1080
 	},
 	"camera": {
 		"location": {
@@ -16,7 +16,7 @@
 		},
 		"rotation_degrees": {
 			"pitch": -90.0,
-			"yaw": 90.0,
+			"yaw": -90.0,
 			"roll": 0.0
 		},
 		"horizontal_fov_degrees": 60.0
@@ -46,8 +46,7 @@
 			"max_x": 109.98175811767578,
 			"max_y": 141.2115936279297
 		},
-		"padding_fraction": 0.18,
-		"horizontal_flip_applied": true
+		"padding_fraction": 0.18
 	},
 	"name": "Town10HD_Opt",
 	"bbox": [-222.51113226996526, -87.62369926452635, 217.8976679144965, 160.10625083923338]

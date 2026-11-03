@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -26,6 +28,16 @@ def test_footprint_contains_roads_and_preserves_world_axes() -> None:
     for x, y, expected in [(bbox[0], bbox[1], (0, 0)), (bbox[2], bbox[3], (1, 1))]:
         pixel = ((x - camera.x) / (2 * half_width) + 0.5, (y - camera.y) / (2 * half_width) + 0.5)
         assert pixel == pytest.approx(expected)
+
+
+def test_shipped_aerials_use_the_road_map_orientation() -> None:
+    maps = Path(__file__).resolve().parents[2] / "web/src/maps"
+    manifests = list(maps.glob("*.aerial.json"))
+    assert manifests
+    for path in manifests:
+        manifest = json.loads(path.read_text())
+        assert manifest["camera"]["rotation_degrees"]["yaw"] == -90, path.name
+        assert "horizontal_flip_applied" not in manifest["capture"], path.name
 
 
 def test_ground_height_changes_altitude_without_changing_footprint() -> None:
