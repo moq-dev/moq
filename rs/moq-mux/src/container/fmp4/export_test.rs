@@ -78,7 +78,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 }
 
 /// Legacy AAC source (catalog `Container::Legacy`, codec `mp4a.40.2`, with a
-/// `description` carrying the AudioSpecificConfig — the shape an MPEG-TS import
+/// `description` carrying the AudioSpecificConfig - the shape an MPEG-TS import
 /// produces) → fMP4 export must synthesize an mp4a sample entry whose esds
 /// carries that AudioSpecificConfig, instead of bailing with UnsupportedSynthesis.
 #[tokio::test(start_paused = true)]

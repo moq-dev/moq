@@ -62,7 +62,7 @@ async function pair(semantic: string): Promise<Pair> {
 }
 
 // Ciphertext written straight to the net track, as a relay or attacker would.
-async function sealed(pair: Pair, domain: 0 | 1, group: number, frame: number, plaintext: string, forge = false) {
+async function sealed(pair: Pair, domain: 0 | 1, group: bigint, frame: number, plaintext: string, forge = false) {
 	const key = trackKey(pair.consuming.credential, pair.consuming.epoch, pair.semantic, domain);
 	const limit = domain === GROUP ? MAX_GROUPED_PAYLOAD : MAX_DATAGRAM_PAYLOAD;
 	const bytes = text(plaintext);
@@ -168,13 +168,13 @@ test("path is opaque", async () => {
 test("grouped roundtrip", async () => {
 	const p = await pair("video");
 	const group = p.producer.appendGroup();
-	expect(group.sequence).toBe(0);
+	expect(group.sequence).toBe(0n);
 	await group.writeFrame(ms(1), text("frame-zero"));
 	await group.writeFrame(ms(2), text("frame-one"));
 	group.finish();
 
 	const received = await recvGroup(p.consumer);
-	expect(received.sequence).toBe(0);
+	expect(received.sequence).toBe(0n);
 	const first = await received.readFrame();
 	expect(decoder.decode(first?.plaintext)).toBe("frame-zero");
 	expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(1);
@@ -184,11 +184,11 @@ test("grouped roundtrip", async () => {
 
 test("datagram roundtrip", async () => {
 	const p = await pair("audio");
-	expect(await p.producer.appendDatagram(ms(5), text("opus"))).toBe(0);
+	expect(await p.producer.appendDatagram(ms(5), text("opus"))).toBe(0n);
 	const event = await p.consumer.recvDatagram();
 	expect(event?.kind).toBe("datagram");
 	if (event?.kind !== "datagram") return;
-	expect(event.datagram.sequence).toBe(0);
+	expect(event.datagram.sequence).toBe(0n);
 	expect(event.datagram.timestamp?.as(Time.Timescale.MILLI)).toBe(5);
 	expect(decoder.decode(event.datagram.plaintext)).toBe("opus");
 });
@@ -196,20 +196,22 @@ test("datagram roundtrip", async () => {
 test("sequences allocate monotonically", async () => {
 	const p = await pair("video");
 	const subscriber = subscribe(p.net);
-	expect(p.producer.appendGroup().sequence).toBe(0);
-	expect(p.producer.createGroup(5).sequence).toBe(5);
-	expect(await p.producer.appendDatagram(ms(1), text("x"))).toBe(6);
-	expect(p.producer.appendGroup().sequence).toBe(7);
-	expect(thrown(() => p.producer.createGroup(7))).toBe("reuse");
-	expect(thrown(() => p.producer.createGroup(3))).toBe("reuse");
-	expect(await failure(p.producer.insertDatagram(6, ms(1), text("x")))).toBe("reuse");
-	expect(thrown(() => p.producer.createGroup(MAX_U53 + 1))).toBe("identity");
-	expect(thrown(() => p.producer.createGroup(1.5))).toBe("identity");
+	expect(p.producer.appendGroup().sequence).toBe(0n);
+	expect(p.producer.createGroup(5n).sequence).toBe(5n);
+	expect(await p.producer.appendDatagram(ms(1), text("x"))).toBe(6n);
+	expect(p.producer.appendGroup().sequence).toBe(7n);
+	expect(thrown(() => p.producer.createGroup(7n))).toBe("reuse");
+	expect(thrown(() => p.producer.createGroup(3n))).toBe("reuse");
+	expect(await failure(p.producer.insertDatagram(6n, ms(1), text("x")))).toBe("reuse");
+	expect(thrown(() => p.producer.createGroup(BigInt(MAX_U53) + 1n))).toBe("identity");
+	expect(thrown(() => p.producer.createGroup(-1n))).toBe("identity");
+	// An untyped caller's fractional sequence is refused as an identity too.
+	expect(thrown(() => p.producer.createGroup(1.5 as unknown as bigint))).toBe("identity");
 
 	// Only the one admitted datagram reached the net track: a later sentinel is next.
-	expect((await subscriber.recvDatagram())?.sequence).toBe(6);
-	p.net.insertDatagram(8, ms(2), new Uint8Array());
-	expect((await subscriber.recvDatagram())?.sequence).toBe(8);
+	expect((await subscriber.recvDatagram())?.sequence).toBe(6n);
+	p.net.insertDatagram(8n, ms(2), new Uint8Array());
+	expect((await subscriber.recvDatagram())?.sequence).toBe(8n);
 });
 
 test("oversize payloads are refused before an identity is spent", async () => {
@@ -217,7 +219,7 @@ test("oversize payloads are refused before an identity is spent", async () => {
 	expect(await failure(p.producer.appendDatagram(ms(1), new Uint8Array(MAX_DATAGRAM_PLAINTEXT + 1)))).toBe(
 		"oversize",
 	);
-	expect(await p.producer.appendDatagram(ms(1), new Uint8Array(MAX_DATAGRAM_PLAINTEXT))).toBe(0);
+	expect(await p.producer.appendDatagram(ms(1), new Uint8Array(MAX_DATAGRAM_PLAINTEXT))).toBe(0n);
 
 	const group = p.producer.appendGroup();
 	expect(await failure(group.writeFrame(ms(1), new Uint8Array(MAX_GROUPED_PLAINTEXT + 1)))).toBe("oversize");
@@ -362,8 +364,8 @@ test("invocation exhaustion", async () => {
 	const generation = credential().produce();
 	const key = trackKey(generation.credential, generation.epoch, "video", GROUP);
 	key.invocations = MAX_INVOCATIONS - 1;
-	key.admitSeal(0, 0, 4, MAX_GROUPED_PAYLOAD);
-	expect(thrown(() => key.admitSeal(0, 1, 4, MAX_GROUPED_PAYLOAD))).toBe("exhausted");
+	key.admitSeal(0n, 0, 4, MAX_GROUPED_PAYLOAD);
+	expect(thrown(() => key.admitSeal(0n, 1, 4, MAX_GROUPED_PAYLOAD))).toBe("exhausted");
 	expect(key.invocations).toBe(MAX_INVOCATIONS);
 });
 
@@ -371,28 +373,28 @@ test("plaintext byte exhaustion", async () => {
 	const generation = credential().produce();
 	const key = trackKey(generation.credential, generation.epoch, "video", GROUP);
 	key.plaintextBytes = MAX_PLAINTEXT_BYTES - 3;
-	key.admitSeal(0, 0, 2, MAX_GROUPED_PAYLOAD);
-	expect(thrown(() => key.admitSeal(0, 1, 4, MAX_GROUPED_PAYLOAD))).toBe("exhausted");
+	key.admitSeal(0n, 0, 2, MAX_GROUPED_PAYLOAD);
+	expect(thrown(() => key.admitSeal(0n, 1, 4, MAX_GROUPED_PAYLOAD))).toBe("exhausted");
 });
 
 test("failed opens spend the key", async () => {
 	const generation = credential().produce();
 	const key = trackKey(generation.credential, generation.epoch, "video", GROUP);
 	const plaintext = text("ok");
-	const good = await key.encrypt(key.admitSeal(0, 0, plaintext.byteLength, MAX_GROUPED_PAYLOAD), plaintext);
+	const good = await key.encrypt(key.admitSeal(0n, 0, plaintext.byteLength, MAX_GROUPED_PAYLOAD), plaintext);
 	const forged = good.slice();
 	forged[0] ^= 1;
 
 	key.invocations = MAX_INVOCATIONS - 1;
-	const iv = key.admitOpen(0, 0, forged.byteLength, MAX_GROUPED_PAYLOAD);
+	const iv = key.admitOpen(0n, 0, forged.byteLength, MAX_GROUPED_PAYLOAD);
 	expect(await failure(key.decrypt(iv, forged))).toBe("authentication");
 	expect(key.invocations).toBe(MAX_INVOCATIONS);
-	expect(thrown(() => key.admitOpen(0, 0, good.byteLength, MAX_GROUPED_PAYLOAD))).toBe("exhausted");
+	expect(thrown(() => key.admitOpen(0n, 0, good.byteLength, MAX_GROUPED_PAYLOAD))).toBe("exhausted");
 
 	// Refusals before AEAD spend nothing.
 	const fresh = new TrackKey(Promise.reject(new Error("never derived")));
-	expect(thrown(() => fresh.admitOpen(0, 0, 3, MAX_GROUPED_PAYLOAD))).toBe("oversize");
-	expect(thrown(() => fresh.admitOpen(0, 2 ** 32, good.byteLength, MAX_GROUPED_PAYLOAD))).toBe("identity");
+	expect(thrown(() => fresh.admitOpen(0n, 0, 3, MAX_GROUPED_PAYLOAD))).toBe("oversize");
+	expect(thrown(() => fresh.admitOpen(0n, 2 ** 32, good.byteLength, MAX_GROUPED_PAYLOAD))).toBe("identity");
 	expect(fresh.invocations).toBe(0);
 });
 
@@ -403,8 +405,8 @@ test("grouped authentication failure ends the track", async () => {
 	group.finish();
 
 	// A forged second group, written straight to the net track.
-	const bad = p.net.createGroup(1);
-	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1, 0, "ok", true) });
+	const bad = p.net.createGroup(1n);
+	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "ok", true) });
 	bad.finish();
 
 	expect(await readText(await recvGroup(p.consumer))).toBe("ok");
@@ -420,11 +422,11 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	expect(demand.wanted.peek()).toBeDefined();
 
 	// One authentic frame, then silence. The group and the track stay open.
-	const open = p.net.createGroup(0);
-	open.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0, 0, "ok") });
-	const bad = p.net.createGroup(1);
+	const open = p.net.createGroup(0n);
+	open.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "ok") });
+	const bad = p.net.createGroup(1n);
 	const badDemand = bad.demand();
-	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1, 0, "nope", true) });
+	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "nope", true) });
 
 	const good = await recvGroup(p.consumer);
 	expect(await readText(good)).toBe("ok");
@@ -449,9 +451,9 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 
 test("a grouped failure ahead of a datagram open rejects the datagram", async () => {
 	const p = await pair("audio");
-	const bad = p.net.createGroup(0);
-	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0, 0, "nope", true) });
-	p.net.insertDatagram(0, ms(2), await sealed(p, DATAGRAM, 0, 0, "late"));
+	const bad = p.net.createGroup(0n);
+	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "nope", true) });
+	p.net.insertDatagram(0n, ms(2), await sealed(p, DATAGRAM, 0n, 0, "late"));
 	const forged = await recvGroup(p.consumer);
 
 	const hold = holdFirstOpen();
@@ -519,17 +521,17 @@ test("a bad datagram stays an event and keeps demand", async () => {
 	const demand = p.net.demand();
 	const open = p.producer.appendGroup();
 	await open.writeFrame(ms(1), text("ok"));
-	p.net.insertDatagram(1, ms(2), await sealed(p, DATAGRAM, 1, 0, "nope", true));
+	p.net.insertDatagram(1n, ms(2), await sealed(p, DATAGRAM, 1n, 0, "nope", true));
 
 	const good = await recvGroup(p.consumer);
 	expect(await readText(good)).toBe("ok");
 	// The parked grouped read survives the bad datagram: it later resolves with a newer frame.
 	const frame = good.readFrame();
 
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 1 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 1n });
 	expect(demand.wanted.peek()).toBeDefined();
 
-	await p.producer.insertDatagram(2, ms(3), text("next"));
+	await p.producer.insertDatagram(2n, ms(3), text("next"));
 	expect(datagramText(await p.consumer.recvDatagram())).toBe("next");
 	expect(demand.wanted.peek()).toBeDefined();
 
@@ -540,29 +542,29 @@ test("a bad datagram stays an event and keeps demand", async () => {
 test("a forged datagram does not burn the identity", async () => {
 	const p = await pair("audio");
 	await p.producer.appendDatagram(ms(1), text("one"));
-	p.net.insertDatagram(1, ms(2), await sealed(p, DATAGRAM, 1, 0, "two", true));
-	await p.producer.insertDatagram(1, ms(2), text("two"));
+	p.net.insertDatagram(1n, ms(2), await sealed(p, DATAGRAM, 1n, 0, "two", true));
+	await p.producer.insertDatagram(1n, ms(2), text("two"));
 
 	expect(datagramText(await p.consumer.recvDatagram())).toBe("one");
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 1 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 1n });
 	const event = await p.consumer.recvDatagram();
 	expect(datagramText(event)).toBe("two");
 });
 
 test("a datagram no publisher could seal is dropped with its code", async () => {
 	const p = await pair("audio");
-	const sealedAt = await sealed(p, DATAGRAM, 0, 0, "x");
-	p.net.insertDatagram(1, ms(1), new Uint8Array(MAX_DATAGRAM_PAYLOAD + 1));
-	p.net.insertDatagram(2, ms(2), sealedAt.subarray(0, 3));
-	p.net.insertDatagram(2 ** 53, ms(3), sealedAt);
-	p.net.insertDatagram(2 ** 53 + 2, ms(3), sealedAt.subarray(0, 3));
-	await p.producer.insertDatagram(2 ** 53 - 1, ms(4), text("last"));
+	const sealedAt = await sealed(p, DATAGRAM, 0n, 0, "x");
+	p.net.insertDatagram(1n, ms(1), new Uint8Array(MAX_DATAGRAM_PAYLOAD + 1));
+	p.net.insertDatagram(2n, ms(2), sealedAt.subarray(0, 3));
+	p.net.insertDatagram(2n ** 53n, ms(3), sealedAt);
+	p.net.insertDatagram(2n ** 53n + 2n, ms(3), sealedAt.subarray(0, 3));
+	await p.producer.insertDatagram(2n ** 53n - 1n, ms(4), text("last"));
 
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "oversize", sequence: 1 });
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "oversize", sequence: 2 });
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "identity", sequence: 2 ** 53 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "oversize", sequence: 1n });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "oversize", sequence: 2n });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "identity", sequence: 2n ** 53n });
 	// Identity is checked before size, as in every core.
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "identity", sequence: 2 ** 53 + 2 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "identity", sequence: 2n ** 53n + 2n });
 	expect(datagramText(await p.consumer.recvDatagram())).toBe("last");
 });
 
@@ -590,18 +592,18 @@ test("resubscribing shares a key's budget", async () => {
 
 test("duplicate datagrams are suppressed inside a bounded window", async () => {
 	const p = await pair("audio");
-	const replay = await sealed(p, DATAGRAM, 0, 0, "once");
-	p.net.insertDatagram(0, ms(1), replay);
-	p.net.insertDatagram(0, ms(1), replay);
+	const replay = await sealed(p, DATAGRAM, 0n, 0, "once");
+	p.net.insertDatagram(0n, ms(1), replay);
+	p.net.insertDatagram(0n, ms(1), replay);
 	expect(datagramText(await p.consumer.recvDatagram())).toBe("once");
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "duplicate", sequence: 0 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "duplicate", sequence: 0n });
 
 	// Once the window slides past it, the same ciphertext opens again.
-	for (let sequence = 1; sequence <= DATAGRAM_WINDOW; sequence++) {
-		p.net.insertDatagram(sequence, ms(sequence), await sealed(p, DATAGRAM, sequence, 0, "x"));
+	for (let sequence = 1n; sequence <= BigInt(DATAGRAM_WINDOW); sequence++) {
+		p.net.insertDatagram(sequence, ms(Number(sequence)), await sealed(p, DATAGRAM, sequence, 0, "x"));
 		expect((await p.consumer.recvDatagram())?.kind).toBe("datagram");
 	}
-	p.net.insertDatagram(0, ms(1), replay);
+	p.net.insertDatagram(0n, ms(1), replay);
 	expect(datagramText(await p.consumer.recvDatagram())).toBe("once");
 });
 
@@ -710,14 +712,14 @@ test("the pump keeps frame ordinals in submit order", async () => {
 	const p = await pair("video");
 	const groups = [p.producer.appendGroup(), p.producer.appendGroup()];
 	const writes: Promise<void>[] = [];
-	const datagrams: Promise<number>[] = [];
+	const datagrams: Promise<bigint>[] = [];
 	for (let i = 0; i < 200; i++) {
 		writes.push(groups[i % 2].writeFrame(ms(i), text(`frame-${i}`)));
 		if (i % 50 === 0) datagrams.push(p.producer.appendDatagram(ms(i), text(`datagram-${i}`)));
 	}
 	for (const group of groups) group.finish();
 	await Promise.all(writes);
-	expect(await Promise.all(datagrams)).toEqual([2, 3, 4, 5]);
+	expect(await Promise.all(datagrams)).toEqual([2n, 3n, 4n, 5n]);
 
 	for (let g = 0; g < 2; g++) {
 		const received = await recvGroup(p.consumer);
@@ -759,7 +761,7 @@ test("aborting a group rejects its pending writes", async () => {
 	await next.writeFrame(ms(4), text("next"));
 	next.finish();
 	const received = await recvGroup(p.consumer);
-	expect(received.sequence).toBe(0);
+	expect(received.sequence).toBe(0n);
 	expect(await received.readFrame().catch((err) => err)).toBe(abort);
 	expect(await readText(await recvGroup(p.consumer))).toBe("next");
 });
@@ -789,7 +791,7 @@ test("an abort stops queued datagrams before they seal", async () => {
 	};
 	try {
 		const abort = new Error("abort");
-		const write = p.producer.insertDatagram(0, ms(1), text("x"));
+		const write = p.producer.insertDatagram(0n, ms(1), text("x"));
 		p.producer.abort(abort);
 		await expect(write).rejects.toBe(abort);
 		expect(seals).toBe(0);
@@ -804,7 +806,7 @@ test("a finished group and a released declared track keep their promised drain",
 	const frame = group.writeFrame(ms(1), text("frame"));
 	group.finish();
 	group.abort(new Error("late"));
-	const datagram = p.producer.insertDatagram(1, ms(2), text("datagram"));
+	const datagram = p.producer.insertDatagram(1n, ms(2), text("datagram"));
 	p.producer.finish();
 	p.producer.close();
 	p.producer.abort(new Error("late"));
@@ -836,9 +838,9 @@ test("produce waits for an unaccepted track's timescale", async () => {
 	const producer = await producing;
 
 	// The timescale is known from the start, so mismatches spend neither a sequence nor a frame.
-	await expect(producer.insertDatagram(0, undefined, text("untimed"))).rejects.toThrow("timestamp");
-	await producer.insertDatagram(0, ms(1), text("datagram"));
-	const group = producer.createGroup(1);
+	await expect(producer.insertDatagram(0n, undefined, text("untimed"))).rejects.toThrow("timestamp");
+	await producer.insertDatagram(0n, ms(1), text("datagram"));
+	const group = producer.createGroup(1n);
 	await expect(group.writeFrame(undefined, text("untimed"))).rejects.toThrow("timestamp");
 	await group.writeFrame(ms(2), text("frame"));
 	group.finish();
@@ -864,9 +866,9 @@ test("a timestamp out of range at the track's timescale spends nothing", async (
 	const producer = await generation.produce(net, "video");
 	const huge = new Time.Timestamp(Number.MAX_SAFE_INTEGER, Time.Timescale.MILLI);
 
-	await expect(producer.insertDatagram(0, huge, text("x"))).rejects.toThrow(RangeError);
-	await producer.insertDatagram(0, ms(1), text("datagram"));
-	const group = producer.createGroup(1);
+	await expect(producer.insertDatagram(0n, huge, text("x"))).rejects.toThrow(RangeError);
+	await producer.insertDatagram(0n, ms(1), text("datagram"));
+	const group = producer.createGroup(1n);
 	await expect(group.writeFrame(huge, text("x"))).rejects.toThrow(RangeError);
 	await group.writeFrame(ms(2), text("frame"));
 	group.finish();
@@ -876,11 +878,11 @@ test("a timestamp out of range at the track's timescale spends nothing", async (
 
 test("a grouped failure skips opens queued behind it", async () => {
 	const p = await pair("video");
-	const bad = p.net.createGroup(0);
-	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0, 0, "nope", true) });
-	const good = p.net.createGroup(1);
-	good.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1, 0, "ok") });
-	p.net.insertDatagram(0, ms(3), await sealed(p, DATAGRAM, 0, 0, "late"));
+	const bad = p.net.createGroup(0n);
+	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "nope", true) });
+	const good = p.net.createGroup(1n);
+	good.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "ok") });
+	p.net.insertDatagram(0n, ms(3), await sealed(p, DATAGRAM, 0n, 0, "late"));
 	const forged = await recvGroup(p.consumer);
 	const held = await recvGroup(p.consumer);
 

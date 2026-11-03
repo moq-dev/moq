@@ -47,7 +47,7 @@ test("keys", async () => {
 test("frames", async () => {
 	for (const row of vectors.frames) {
 		const s = scope(row);
-		const [group, frame, at] = [Number(row.group), Number(row.frame), timestamp(row)];
+		const [group, frame, at] = [BigInt(row.group as number | string), Number(row.frame), timestamp(row)];
 		expect(hex(s.message(group, frame, at, unhex(row.payload)))).toBe(String(row.message));
 		const body = await s.sign(await SecretKey.fromSeed(unhex(row.seed)), group, frame, at, unhex(row.payload));
 		expect(hex(body)).toBe(String(row.body));
@@ -60,7 +60,7 @@ test("negative", async () => {
 	for (const row of vectors.negative) {
 		const verified = scope(row).verify(
 			PublicKey.parse(String(row.endpoint)),
-			Number(row.group),
+			BigInt(row.group as number | string),
 			Number(row.frame),
 			timestamp(row),
 			unhex(row.body),
@@ -75,7 +75,7 @@ test("a fractional timestamp never verifies", async () => {
 	const at = new Time.Timestamp(Number(row.timestamp) + 0.5, Time.Timescale(Number(row.timescale)));
 	const verified = scope(row).verify(
 		PublicKey.parse(String(row.endpoint)),
-		Number(row.group),
+		BigInt(row.group as number | string),
 		Number(row.frame),
 		at,
 		unhex(row.body),

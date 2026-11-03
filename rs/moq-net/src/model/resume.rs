@@ -635,8 +635,13 @@ impl Copy {
 					.take_while(|run| *run.start() < end)
 					.any(|run| {
 						let end = run.end().saturating_add(1).min(end);
-						self.track
-							.may_land(*run.start()..end, floor.is_some(), grace, Some(reader.delivered))
+						self.track.may_land(
+							*run.start()..end,
+							floor.is_some(),
+							grace,
+							Some(reader.delivered),
+							reader.waiter,
+						)
 					}) {
 				return Retains::Wait;
 			}
@@ -663,7 +668,7 @@ impl Copy {
 				|| (lands
 					&& self
 						.track
-						.may_land(sequence..sequence.saturating_add(1), asked, grace, None))
+						.may_land(sequence..sequence.saturating_add(1), asked, grace, None, reader.waiter))
 		};
 		match Arc::strong_count(&self.lease) > 1 || reader.out.iter().any(|(sequence, _)| backs(*sequence)) {
 			true => Retains::Keep,
@@ -1238,6 +1243,8 @@ impl Reader {
 		// group's in-flight tail. A fresh copy would replay it and retain one per flap. The
 		// newest is the route's own copy, not a backfill of it.
 		if let Some(index) = self.copies.iter().rposition(|copy| copy.track.same_channel(&track)) {
+			// The copy's own resolution ends at its old cap; the reader's does not.
+			let resolved = self.window().resolved();
 			let mut copy = self.copies.remove(index);
 			copy.generation = generation;
 			copy.replaced = false;
@@ -1255,7 +1262,9 @@ impl Reader {
 					self.groups.1.map_or(Bound::Unbounded, Bound::Excluded),
 				));
 			}
-			copy.update(&self.mirrored);
+			copy.resolved = resolved;
+			let wire = self.mirrored.clamped(copy.floor, None, &copy.resolved);
+			copy.send(wire);
 			self.copies.push(copy);
 			return;
 		}
@@ -3081,6 +3090,66 @@ mod test {
 		drop(held);
 	}
 
+	#[kio::test]
+	async fn a_returning_route_keeps_its_relative_end() {
+		returning_route(Anchor::Relative(991)).await;
+	}
+
+	#[kio::test]
+	async fn a_returning_route_keeps_its_resolved_time_end() {
+		returning_route(Anchor::Time(ts(10))).await;
+	}
+
+	/// Its old cap bounds a replaced copy's wire, not the reader's resolved end. Reusing
+	/// that copy must ask past the cap while keeping the reader's range and local bounds.
+	async fn returning_route(end: Anchor) {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		// Both anchors resolve the reader's exclusive end at 11.
+		for sequence in 2..=11 {
+			write(&a, sequence);
+		}
+		write(&a, 1001);
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Absolute(2),
+				end: Some(end),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.await
+			.unwrap()
+			.with_range(2..3);
+		let held = recv(&mut sub);
+		assert_eq!(held.sequence, 2);
+		assert_eq!(sub.next_in_range(11), None, "the reader resolved its end");
+		sub.set_range(4..9);
+
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 4);
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert_eq!(copies(&routes), 2, "the held group keeps A's capped copy");
+
+		routes.serve(a.consume());
+		for sequence in [1, 12] {
+			write(&a, sequence);
+		}
+		let mut resumed = drain(&mut sub, false);
+		resumed.sort_unstable();
+		assert_eq!(resumed, [5, 6, 7, 8], "end={end:?}");
+		// Widening the local cursor still respects the reader's resolved end.
+		sub.set_range(4..);
+		let mut widened = drain(&mut sub, false);
+		widened.sort_unstable();
+		assert_eq!(widened, [9, 10], "end={end:?}");
+		drop(held);
+	}
+
 	/// A returning route resumes where a fresh copy would, and what it buffered while
 	/// replaced below what another route already handed out comes through the backfill:
 	/// the late group once, and nothing handed out again.
@@ -4575,6 +4644,62 @@ mod test {
 		write(&a, 1);
 		assert_eq!(drain(&mut sub, false), [1]);
 		assert!(matches!(sub.poll_recv_group(&noop), Poll::Ready(Ok(None))));
+	}
+
+	/// A capped cursor never probes the gap outside its cap, but the resume reader still
+	/// waits for it. Its grace must wake the clean end before the replacement's budget.
+	#[test]
+	fn a_replaced_copys_gap_wakes_the_clean_end_at_its_grace() {
+		for first_group in [false, true] {
+			for ordered in [false, true] {
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let a = copy();
+				let pool = a.broadcast().pool.clone();
+				let opened = a.consume().now();
+				let noop = kio::Waiter::noop();
+				pool.poll(opened, &noop);
+				routes.serve(a.consume());
+				let budget = Duration::from_secs(1);
+				let mut sub = subscribe(&logical, budget);
+				write(&a, 0);
+				write(&a, 2);
+				assert_eq!(drain(&mut sub, false), [0, 2]);
+
+				pool.poll(opened + budget / 2, &noop);
+				let b = copy();
+				write(&b, if first_group { 3 } else { 2 });
+				routes.serve(b.consume());
+				if first_group {
+					assert_eq!(recv(&mut sub).sequence, 3);
+				}
+				b.finish().unwrap();
+				sub.set_range(..1);
+				let wake = Arc::new(Wake::default());
+				let waiter = kio::Waiter::new(wake.clone().into());
+				let mut poll = || match ordered {
+					true => sub.poll_next_group(&waiter),
+					false => sub.poll_recv_group(&waiter),
+				};
+				assert!(poll().is_pending());
+				wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+				assert!(poll().is_pending());
+				assert!(!wake.0.load(std::sync::atomic::Ordering::Relaxed));
+
+				let deadline = opened + budget;
+				assert_eq!(pool.poll(deadline - Duration::from_micros(1), &noop), Some(deadline));
+				assert!(
+					!wake.0.load(std::sync::atomic::Ordering::Relaxed),
+					"not before the grace"
+				);
+				pool.poll(deadline, &noop);
+				assert!(
+					wake.0.load(std::sync::atomic::Ordering::Relaxed),
+					"first_group={first_group}, ordered={ordered}: the gap's grace wakes the reader"
+				);
+				assert!(matches!(poll(), Poll::Ready(Ok(None))));
+			}
+		}
 	}
 
 	/// A read parked on that wait, which never looks at the route, still wakes once the

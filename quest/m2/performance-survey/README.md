@@ -98,6 +98,15 @@ performance suite, GPU/platform codecs, or every generated wrapper. Those
 remain with their existing owners. The recurring audit is not completed by
 this source survey.
 
+UDP socket queues closed as a measured no-win: the 8 MiB request stays,
+with no new setting. `benchmark_socket_queues` (moq-uring, nightly) showed
+loss follows the kernel queue against worker stalls, while pool depth, flows
+and the receive path did not change it. A bigger queue costs delay only
+while a worker is overloaded and the queue sits full. Relay shard sweeps at
+up to 256 connections saw no socket drops, with the sampled peak queue under
+1% of the granted 16 MiB. The relay sampler now records per-socket drops,
+granted buffers and queued bytes (`udp_*`).
+
 An operation-count probe imported the actual JS `bandwidth.allocate`, counted
 `Want.priority` getter reads, and called it for every reservation, as
 `Allocator.#publish` does. With one tier, 16/64/256 reservations caused
@@ -199,11 +208,7 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - memory a task set keeps after peak occupancy subsides
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
-- [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
-- [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
-- [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
-- [UDP socket queues](/quest/m2/performance-survey/socket-queues.md) - drop attribution and queue-size tradeoffs across workers and load
 - [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md) - HTTP polling cost versus result size and unrelated routes
 - [Selective session operations](/quest/m2/performance-survey/session-selection.md) - exact-ID lookups and registry lock hold time
 - [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md) - CMAF sample and LOC framing copies versus retention
