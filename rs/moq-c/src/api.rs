@@ -4033,6 +4033,10 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 ///   `user_data` is never touched again, so release `user_data` there. The
 ///   terminal callback fires even after [moq_consume_video_cancel].
 ///
+/// The catalog rendition's `warmup` reaches that much further back for decoder history and
+/// increases the subscription's max delay by the same amount. The steady-state skip budget
+/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
+///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
@@ -4080,6 +4084,10 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 /// terminal callback fires even after [moq_consume_audio_cancel].
 /// `delay` is how far behind the live edge to play: where a cold join starts and when
 /// frames are skipped. NULL uses the defaults (see [moq_delay]).
+///
+/// The catalog rendition's `warmup` reaches that much further back for decoder history and
+/// increases the subscription's max delay by the same amount. The steady-state skip budget
+/// stays at `delay.max`; the caller's decoder must consume the warmup before presenting output.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///

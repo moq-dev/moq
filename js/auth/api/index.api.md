@@ -674,6 +674,7 @@ export type Request = infer<typeof RequestSchema>;
 
 export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	auth: ZodMiniOptional<ZodMiniString<string>>;
 	event: ZodMiniLiteral<"connect">;
 	id: ZodMiniString<string>;
 	implementation: ZodMiniOptional<ZodMiniString<string>>;
@@ -712,6 +713,46 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>>;
 }, $strip>, ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	auth: ZodMiniString<string>;
+	event: ZodMiniLiteral<"attach">;
+	id: ZodMiniString<string>;
+	implementation: ZodMiniOptional<ZodMiniString<string>>;
+	local: ZodMiniOptional<ZodMiniString<string>>;
+	node: ZodMiniString<string>;
+	path: ZodMiniString<string>;
+	query: ZodMiniOptional<ZodMiniString<string>>;
+	remote: ZodMiniOptional<ZodMiniString<string>>;
+	role: ZodMiniOptional<ZodMiniEnum<{
+		publisher: "publisher";
+		subscriber: "subscriber";
+	}>>;
+	server_name: ZodMiniOptional<ZodMiniString<string>>;
+	tls: ZodMiniOptional<ZodMiniObject<{
+		expires: ZodMiniOptional<ZodMiniInt>;
+		fingerprint: ZodMiniString<string>;
+		issuer: ZodMiniString<string>;
+		name: ZodMiniString<string>;
+	}, $strip>>;
+	token: ZodMiniOptional<ZodMiniObject<{
+		kind: ZodMiniInt;
+		value: ZodMiniString<string>;
+	}, $strip>>;
+	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
+		http: "http";
+		iroh: "iroh";
+		quic: "quic";
+		rtmp: "rtmp";
+		srt: "srt";
+		tcp: "tcp";
+		unix: "unix";
+		unknown: "unknown";
+		webrtc: "webrtc";
+		websocket: "websocket";
+		webtransport: "webtransport";
+	}>>>;
+}, $strip>, ZodMiniObject<{
+	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	auth: ZodMiniOptional<ZodMiniString<string>>;
 	event: ZodMiniLiteral<"revalidate">;
 	id: ZodMiniString<string>;
 	implementation: ZodMiniOptional<ZodMiniString<string>>;
@@ -750,6 +791,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>>;
 }, $strip>, ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
+	auth: ZodMiniOptional<ZodMiniString<string>>;
 	bytes: ZodMiniObject<{
 		received: ZodMiniInt;
 		sent: ZodMiniInt;

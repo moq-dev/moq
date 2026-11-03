@@ -7,8 +7,13 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
-`MoqJsonSnapshotProducer::update` and `MoqJsonStreamProducer::append` take a required `MoqTimestamp` instead of an optional one that defaulted to null. Stamp it on the broadcast clock, read with `MoqMediaCatalogProducer::now`, so the data shares the media's epoch.
-Their constructors refuse a track created without a `timescale`: set one in `MoqTrackInfo`. `MoqJsonWindowProducer` is unchanged.
+`MoqJsonSnapshotProducer::update`, `MoqJsonStreamProducer::append`, and `MoqJsonWindowProducer::push` and `pop` take a required `MoqTimestamp` instead of an optional one that defaulted to null. Stamp it on the broadcast clock, read with `MoqMediaCatalogProducer::now`, so the data shares the media's epoch.
+Their constructors refuse a track created without a `timescale`: set one in `MoqTrackInfo`.
+
+### `MoqTransport::Iroh` is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+moq-tokio no longer accepts iroh sessions, so `MoqTransport` loses its `Iroh` variant and the later variants renumber; Go loses `TransportIroh`.
+Drop the match arm, and regenerate the bindings and rebuild the matching native library together.
 
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 

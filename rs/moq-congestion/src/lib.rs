@@ -17,12 +17,14 @@ pub mod cubic;
 pub mod gcc;
 mod pacer;
 mod rate;
+pub mod scream;
 mod unlimited;
 
 pub use bbr3::Bbr3;
 pub use cubic::Cubic;
 pub use gcc::Gcc;
 pub use rate::Packet;
+pub use scream::Scream;
 pub use unlimited::Unlimited;
 
 /// Common interface for different congestion controllers
@@ -283,11 +285,12 @@ mod tests {
     /// The largest UDP payload (RFC 9000), whose two datagrams outgrow every 1200-based default
     const MTU: u16 = 65527;
 
-    fn factories() -> [(&'static str, Arc<dyn Factory>); 4] {
+    fn factories() -> [(&'static str, Arc<dyn Factory>); 5] {
         [
             ("bbr3", Arc::new(bbr3::Config::default())),
             ("cubic", Arc::new(cubic::Config::default())),
             ("gcc", Arc::new(gcc::Config::default())),
+            ("scream", Arc::new(scream::Config::default())),
             ("unlimited", Arc::new(Unlimited)),
         ]
     }

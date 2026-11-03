@@ -107,29 +107,17 @@ fn server_sends(pair: &mut Pair, ch: ConnectionHandle, space: SpaceId, frames: F
 		.push_back((pair.time, None, packet.as_slice().into()));
 }
 
-/// Drains `conn`'s events, returning the error it was lost with, if any
+/// The error `conn` was lost with, if any
 fn lost(conn: &mut Connection) -> Option<ConnectionError> {
-	let mut lost = None;
-	while let Some(event) = conn.poll() {
-		if let Event::ConnectionLost { reason } = event {
-			assert!(lost.is_none(), "lost twice: {lost:?}, then {reason:?}");
-			lost = Some(reason);
-		}
-	}
-	lost
+	conn.error().cloned()
 }
 
-/// Drains `conn`'s events, panicking unless it connected and was never lost
+/// Panics unless `conn` connected and was never lost
 fn assert_connected(conn: &mut Connection) {
-	let mut connected = false;
-	while let Some(event) = conn.poll() {
-		match event {
-			Event::Connected => connected = true,
-			Event::ConnectionLost { reason } => panic!("lost: {reason:?}"),
-			_ => {}
-		}
+	if let Some(reason) = conn.error() {
+		panic!("lost: {reason:?}");
 	}
-	assert!(connected, "never connected");
+	assert!(is_connected(conn), "never connected");
 }
 
 /// The transport error code `conn` was lost with, panicking if it is still up or lost otherwise

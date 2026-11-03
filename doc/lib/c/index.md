@@ -45,6 +45,9 @@ same frame/gap/end tags as decoded audio and video. Release every kind with
 `moq_consume_read_free`; frame payload pointers borrow that handle. A gap breaks
 continuity. An encoder end is not callback EOF: frames before its endpoint are the old
 encoder's drain, and the first at or past it starts fresh. Callback 0 ends the stream.
+These consumers include the rendition's catalog `warmup` in both the history fetched at
+join and the subscription budget. Feed that history to your decoder before presenting
+output; the requested max delay still controls steady-state skips.
 
 ## Connect
 
