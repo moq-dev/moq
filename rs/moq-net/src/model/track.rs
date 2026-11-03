@@ -501,6 +501,9 @@ pub(crate) struct TrackState {
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
 	// one entry.
 	drops: RangeMap<u64, Hole>,
+	// Where the ranges a received copy's upstream judges stale runs against end: the
+	// exclusive end of its current terms, `None` past the live edge or unknown.
+	judged_end: Option<u64>,
 	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
 	drops_revision: u64,
 	drops_changes: ledger::Changes,
@@ -3790,10 +3793,12 @@ impl Producer {
 
 	/// Forget every run held as stale: the terms a received copy's upstream judged them
 	/// under were replaced, so they are unknown again, and a reader that wants one fills it.
+	/// The new terms' ranges end at `judged_end`, `None` past the live edge or unknown.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn supersede_stale(&self) {
+	pub(crate) fn supersede_stale(&self, judged_end: Option<u64>) {
 		if let Ok(mut state) = self.modify() {
 			state.supersede_stale();
+			state.judged_end = judged_end;
 		}
 	}
 
@@ -6110,22 +6115,41 @@ struct Drift {
 	/// The budget is the track's max age bound, which no widening passes: its verdicts are final.
 	bounded: bool,
 	edge: Edge,
-	/// The lowest group from which this reader reads every group up past the live edge,
-	/// `None` while a range end or a cap bounds it.
-	covers_from: Option<u64>,
+	/// This reader's last contiguous run of groups: where it starts and its exclusive end,
+	/// `None` when it reads up past the live edge; see [`Coverage`].
+	coverage: Coverage,
+}
+
+/// A reader's last contiguous run of groups, its start and exclusive end (`None` past the
+/// live edge), or `None` before its ranges resolve.
+type Coverage = Option<(u64, Option<u64>)>;
+
+/// Whether a reader judging under `budget` with `coverage` is settled by `hole` over a run
+/// from `start`, on a track whose upstream judged stale runs against ranges ending at
+/// `judged_end` (`None` past the live edge, or unknown). Any hole but a received stale one
+/// settles every reader. A stale verdict holds for a reader no wider than the budget it was
+/// judged under, whose range covers the run and every group above it up to where the
+/// upstream's range ended: its own successor and edge are then no older than those the
+/// verdict was judged against. Any other reader treats the run as unknown, and fills it.
+fn settles(budget: Duration, coverage: Coverage, start: u64, hole: &Hole, judged_end: Option<u64>) -> bool {
+	let Some(judged) = hole.stale_budget() else {
+		return true;
+	};
+	let covers = coverage.is_some_and(|(from, until)| {
+		from <= start
+			&& match (until, judged_end) {
+				(None, _) => true,
+				(Some(until), Some(end)) => until >= end,
+				(Some(_), None) => false,
+			}
+	});
+	budget <= judged && covers
 }
 
 impl Drift {
-	/// Whether `hole`, over a run from `start`, settles this reader. Any hole but a received
-	/// stale one does. A stale verdict holds for a reader no wider than the budget it was
-	/// judged under, whose range covers the run and every group above it: its own successor
-	/// and edge are then no older than those the verdict was judged against, wherever the
-	/// upstream's range ended. Any other reader treats the run as unknown, and fills it.
-	fn settles(&self, start: u64, hole: &Hole) -> bool {
-		match hole.stale_budget() {
-			None => true,
-			Some(budget) => self.budget <= budget && self.covers_from.is_some_and(|from| from <= start),
-		}
+	/// Whether `hole`, over a run from `start`, settles this reader on `state`; see [`settles`].
+	fn settles(&self, state: &TrackState, start: u64, hole: &Hole) -> bool {
+		settles(self.budget, self.coverage, start, hole, state.judged_end)
 	}
 }
 
@@ -6856,7 +6880,7 @@ impl Pending {
 
 /// The [`TrackState::drops_revision`], span, window revision, and the budget and coverage
 /// that settle received stale runs (see [`Drift::settles`]) a [`DropCursor`] folded in.
-type Scan = (u64, ops::Range<u64>, u64, Option<(Duration, Option<u64>)>);
+type Scan = (u64, ops::Range<u64>, u64, Option<(Duration, Coverage, Option<u64>)>);
 
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
 /// the cache on every poll.
@@ -6953,7 +6977,9 @@ impl DropCursor {
 		}
 		// Rescan only after the drops change, the window moves, or what settles a stale run
 		// does; out-of-window and unsettling runs were skipped and may be owed now.
-		let settles = within.drift.map(|drift| (drift.budget, drift.covers_from));
+		let settles = within
+			.drift
+			.map(|drift| (drift.budget, drift.coverage, state.judged_end));
 		let scan = (state.drops_revision, span.clone(), within.revision, settles);
 		if self.scanned.as_ref() != Some(&scan) {
 			self.scanned = Some(scan);
@@ -6970,7 +6996,7 @@ impl DropCursor {
 				let run = dropped.start.max(span.start)..dropped.end.min(span.end);
 				// A received stale run that does not settle this reader is unknown to it.
 				let settled = match within.drift {
-					Some(drift) => drift.settles(run.start, hole),
+					Some(drift) => drift.settles(state, run.start, hole),
 					None => hole.stale_budget().is_none(),
 				};
 				if settled {
@@ -7290,7 +7316,9 @@ impl Cursor {
 			return false;
 		}
 		let given_up = self.misses.as_ref().map(|misses| misses.given_up());
+		let coverage = self.coverage();
 		let state = self.state.read();
+		let budget = clamp_max_delay(self.subscription.read().budget(), state.max_age_bound());
 		let accounted = |gap: ops::Range<u64>| {
 			let mut left = RangeSet::new();
 			left.insert(gap.clone());
@@ -7302,12 +7330,12 @@ impl Cursor {
 					left.remove(run.clone());
 				}
 			}
-			// A bounded window never covers everything above a received stale run, so such a
-			// run does not settle it (see `Drift::settles`): the reader still wants those groups.
+			// A received stale run that does not settle this reader is unknown to it, so it
+			// still wants those groups.
 			for (run, _) in state
 				.drops
 				.overlapping(&gap)
-				.filter(|(_, hole)| hole.stale_budget().is_none())
+				.filter(|(run, hole)| settles(budget, coverage, run.start.max(gap.start), hole, state.judged_end))
 			{
 				left.remove(run.clone());
 			}
@@ -7579,6 +7607,21 @@ impl Cursor {
 		std::mem::take(&mut self.stale)
 	}
 
+	/// This reader's last contiguous run of groups, capped; see [`Coverage`].
+	fn coverage(&self) -> Coverage {
+		let run = self.filter.window.groups()?.last(0, u64::MAX)?;
+		let end = match *run.end() {
+			u64::MAX => None,
+			last => Some(last + 1),
+		};
+		let end = match (end, self.end_sequence) {
+			(end, None) => end,
+			(None, Some(cap)) => Some(cap),
+			(Some(end), Some(cap)) => Some(end.min(cap)),
+		};
+		Some((*run.start(), end))
+	}
+
 	/// This subscriber's clamped drift budget and the live edge to measure against,
 	/// resolved once per poll.
 	///
@@ -7595,24 +7638,14 @@ impl Cursor {
 			max_delay = subscription.budget();
 			Poll::<()>::Pending
 		});
-		// Uncapped, an open last range reads everything above its start.
-		let covers_from = match self.end_sequence {
-			Some(_) => None,
-			None => self
-				.filter
-				.window
-				.groups()
-				.and_then(|groups| groups.last(0, u64::MAX))
-				.filter(|run| *run.end() == u64::MAX)
-				.map(|run| *run.start()),
-		};
+		let coverage = self.coverage();
 		self.poll(waiter, |state| {
 			let bound = state.max_age_bound();
 			Poll::Ready(Ok(Drift {
 				budget: clamp_max_delay(max_delay, bound),
 				bounded: bound.is_some_and(|bound| max_delay >= bound),
 				edge: state.drift_edge(servable),
-				covers_from,
+				coverage,
 			}))
 		})
 	}
@@ -14521,7 +14554,7 @@ mod test {
 			budget: Duration::ZERO,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
-			covers_from: None,
+			coverage: None,
 		};
 		assert!(
 			state.is_stale(0, &drift.edge, drift.budget),
@@ -23277,7 +23310,7 @@ mod test {
 		);
 		let waiter = kio::Waiter::noop();
 		producer.give_up(1..2, Hole::stale(budget));
-		producer.supersede_stale();
+		producer.supersede_stale(None);
 		assert!(
 			subscriber.poll_drop(&waiter).is_pending(),
 			"no verdict under the new terms"
@@ -23307,29 +23340,49 @@ mod test {
 		);
 		producer.give_up(3..7, Hole::stale(budget));
 		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((3..4, Hole::stale(budget))));
-		producer.supersede_stale();
+		producer.supersede_stale(None);
 		assert!(subscriber.poll_drop(&waiter).is_pending(), "5 and 6 are unknown again");
 	}
 
-	/// A bounded reader is never settled by a received stale run, so it still waits for the
-	/// groups the run names rather than end.
+	/// A bounded reader is settled by a received stale run only when its range reaches where
+	/// the upstream's did; otherwise it still waits for the groups the run names.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_received_stale_run_does_not_end_a_bounded_reader() {
+	fn a_received_stale_run_settles_a_bounded_reader_only_to_the_judged_end() {
 		let producer = track_producer("test", Info::timed());
 		producer.received();
-		let mut subscriber = producer.subscribe(
-			Subscription::default()
-				.with_delay(Delay::default().with_max(Duration::from_secs(5)))
-				.with_ranges([Range::groups(0..2)]),
-		);
+		let bounded = |max: Duration| {
+			producer.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(max))
+					.with_ranges([Range::groups(0..2)]),
+			)
+		};
+		let mut wider = bounded(Duration::from_secs(5));
+		let mut matching = bounded(Duration::from_millis(500));
+		let waiter = kio::Waiter::noop();
+		// The upstream judged its own range of 0..2 under 500ms.
+		producer.supersede_stale(Some(2));
 		producer.give_up(0..2, Hole::stale(Duration::from_millis(500)));
 		assert!(
-			subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending(),
-			"the groups are still wanted"
+			wider.poll_recv_group(&waiter).is_pending(),
+			"a wider budget still wants the groups"
 		);
+		assert_eq!(
+			matching.poll_drop(&waiter),
+			Poll::Ready((0..2, Hole::stale(Duration::from_millis(500))))
+		);
+		assert!(
+			matches!(matching.poll_recv_group(&waiter), Poll::Ready(Ok(None))),
+			"nothing is owed"
+		);
+		// Judged against an open range, a capped reader may see an older edge.
+		producer.supersede_stale(None);
+		producer.give_up(0..2, Hole::stale(Duration::from_millis(500)));
+		let mut capped = bounded(Duration::from_millis(500));
+		assert!(capped.poll_drop(&waiter).is_pending());
 		write_group(&producer, 0);
-		assert_eq!(drain_groups(&mut subscriber), [0]);
+		assert_eq!(drain_groups(&mut wider), [0]);
 	}
 
 	/// A report describes a miss, not a delivery: a late group is still handed out once.

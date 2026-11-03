@@ -1101,7 +1101,7 @@ impl Misses {
 		left.insert(hole.clone());
 		// Only what overlaps the hole, so judging every run costs each one the same.
 		for (run, gone) in state.drops.overlapping(&hole) {
-			if drift.settles(run.start.max(hole.start), gone) {
+			if drift.settles(state, run.start.max(hole.start), gone) {
 				left.remove(run.clone());
 			}
 		}
@@ -1460,7 +1460,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
-			covers_from: None,
+			coverage: None,
 		};
 		let asks = misses.judge(
 			&state,
@@ -1603,7 +1603,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
-			covers_from: None,
+			coverage: None,
 		};
 		let asks = misses.judge(
 			&state,
@@ -1677,7 +1677,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
-			covers_from: None,
+			coverage: None,
 		};
 		assert!(
 			misses
@@ -1785,7 +1785,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
-			covers_from: None,
+			coverage: None,
 		};
 		let full = |span| [span].into_iter().collect();
 		assert!(
@@ -1966,7 +1966,7 @@ mod tests {
 					budget,
 					bounded: false,
 					edge: state.drift_edge(&servable),
-					covers_from: None,
+					coverage: None,
 				};
 				let expected = each(&misses, &state, &drift);
 				let found = misses.expired(&state, &drift, &kio::Waiter::noop());
@@ -2080,7 +2080,7 @@ mod tests {
 						budget,
 						bounded: false,
 						edge: state.drift_edge(&Servable::ALL),
-						covers_from: None,
+						coverage: None,
 					};
 					let asks = misses.judge(
 						&state,

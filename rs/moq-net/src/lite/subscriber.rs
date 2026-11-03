@@ -8066,7 +8066,7 @@ impl TrackServe {
 					// Open an upstream SUBSCRIBE for the first subscriber. Its terms are new, so a
 					// stale run an earlier subscription reported is no verdict on them.
 					Sub::None => {
-						producer.supersede_stale();
+						producer.supersede_stale(judged_end(&ranges));
 						Ok(Begin::Establish(self.prepare_establish(producer, subscription, ranges)))
 					}
 					Sub::Active(active) => {
@@ -8357,6 +8357,21 @@ fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration
 	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
 }
 
+/// Where a stale drop judged under `ranges` stops looking: the exclusive end past every
+/// group they name, `None` when one stays open or ends at an anchor only the publisher
+/// resolves.
+fn judged_end(ranges: &[lite::Range]) -> Option<u64> {
+	ranges
+		.iter()
+		.map(|range| match range.end {
+			Some(lite::Anchor::Absolute(end)) => Some(end.group.saturating_add(u64::from(end.frame > 0))),
+			_ => None,
+		})
+		.collect::<Option<Vec<_>>>()?
+		.into_iter()
+		.max()
+}
+
 /// Buffer the current SUBSCRIBE parameters under new range terms. The caller flushes.
 ///
 /// A stale drop judged under earlier terms may still be in flight, and the update may have
@@ -8365,7 +8380,7 @@ fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration
 fn buffer_update(active: &mut SubStream, serving: &track::Producer) -> Result<(), Error> {
 	active.bounded |= bounded(&active.ranges);
 	active.terms += 1;
-	serving.supersede_stale();
+	serving.supersede_stale(judged_end(&active.ranges));
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,

@@ -3867,7 +3867,7 @@ test("a superseded stale run is unknown again, and its group is handed out", () 
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ delay: { max: Milli(500) }, ranges: [{ start: { absolute: 0n } }] });
 	hooks.dropTrackGroups(producer, 1n, 2n, staleHole(500));
-	hooks.supersedeStale(producer);
+	hooks.supersedeStale(producer, undefined);
 	expect(hooks.tryDrop(reader)).toBeUndefined();
 	producer.createGroup(1n).finish();
 	const recv = hooks.tryRecvGroup(reader, true);
@@ -3885,7 +3885,7 @@ test("superseding withdraws a partly reported stale run", () => {
 	expect(hooks.tryDrop(reader)).toMatchObject({ start: 4n, end: 5n });
 	hooks.dropTrackGroups(producer, 3n, 7n, staleHole(500));
 	expect(hooks.tryDrop(reader)).toMatchObject({ start: 3n, end: 4n, stale: 500 });
-	hooks.supersedeStale(producer);
+	hooks.supersedeStale(producer, undefined);
 	// 5 and 6 are unknown again.
 	expect(hooks.tryDrop(reader)).toBeUndefined();
 	reader.close();
@@ -3893,21 +3893,33 @@ test("superseding withdraws a partly reported stale run", () => {
 	producer.close();
 });
 
-test("a received stale run does not end a bounded reader", () => {
+test("a received stale run settles a bounded reader only to the judged end", () => {
 	const producer = new TrackProducer("video").accept({});
 	hooks.receiveTrack(producer);
-	const reader = producer.subscribe({
-		delay: { max: Milli(5000) },
-		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
-	});
+	const bounded = (max: number) =>
+		producer.subscribe({
+			delay: { max: Milli(max) },
+			ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		});
+	const wider = bounded(5000);
+	const matching = bounded(500);
+	// The upstream judged its own range of 0..2 under 500ms.
+	hooks.supersedeStale(producer, 2n);
 	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
-	// The groups are still wanted.
-	expect(hooks.tryRecvGroup(reader, false)).toEqual({ kind: "idle" });
+	// A wider budget still wants the groups, however the feed accounted for them.
+	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
+	expect(hooks.tryDrop(matching)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
+	expect(hooks.tryRecvGroup(matching, false)).toEqual({ kind: "done" });
+	// Judged against an open range, a capped reader may see an older edge.
+	hooks.supersedeStale(producer, undefined);
+	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
+	const capped = bounded(500);
+	expect(hooks.tryDrop(capped)).toBeUndefined();
 	producer.createGroup(0n).finish();
-	const recv = hooks.tryRecvGroup(reader, false);
+	const recv = hooks.tryRecvGroup(wider, false);
 	expect(recv.kind === "group" ? recv.group.sequence : recv).toBe(0n);
 	if (recv.kind === "group") recv.group.close();
-	reader.close();
+	for (const reader of [wider, matching, capped]) reader.close();
 	producer.finish();
 	producer.close();
 });

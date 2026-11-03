@@ -629,6 +629,9 @@ class TrackState {
 	// DROP costs one entry. Replaced rather than mutated, so a cursor can tell it changed by
 	// identity.
 	drops = new Signal<readonly DropRun[]>([]);
+	// Where the ranges a received copy's upstream judges stale runs against end: the exclusive end
+	// of its current terms, undefined past the live edge or unknown.
+	judgedEnd?: bigint;
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -759,16 +762,22 @@ let goneAt: (producer: Producer, sequence: bigint) => bigint | undefined;
 // Whether the producer is fed by a wire subscription; assigned in its static block.
 let received: (producer: Producer) => boolean;
 
+/** A reader's last contiguous run of groups: its start, and its exclusive end unless it reads past the live edge. */
+type Coverage = { start: bigint; end?: bigint } | undefined;
+
 /**
- * Whether `hole`, over a run from `run.start`, settles a reader judging under `budget` that
- * covers everything from `coversFrom` up. Any hole but a received stale one does. A stale
- * verdict holds for a reader no wider than the budget it was judged under, whose range covers
- * the run and every group above it: its own successor and edge are then no older than those the
- * verdict was judged against. Mirrors the Rust `Drift::settles`.
+ * Whether `run` settles a reader judging under `budget` with `coverage`, on a track whose upstream
+ * judged stale runs against ranges ending at `judgedEnd` (undefined past the live edge, or
+ * unknown). Any run but a received stale one does. A stale verdict holds for a reader no wider
+ * than the budget it was judged under, whose range covers the run and every group above it up to
+ * where the upstream's range ended: its own successor and edge are then no older than those the
+ * verdict was judged against. Mirrors the Rust `settles`.
  */
-function settles(run: DropRun, budget: number, coversFrom: bigint | undefined): boolean {
+function settles(run: DropRun, budget: number, coverage: Coverage, judgedEnd: bigint | undefined): boolean {
 	if (run.stale === undefined) return true;
-	return budget <= run.stale && coversFrom !== undefined && coversFrom <= run.start;
+	if (budget > run.stale || coverage === undefined || coverage.start > run.start) return false;
+	if (coverage.end === undefined) return true;
+	return judgedEnd !== undefined && coverage.end >= judgedEnd;
 }
 // Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
 let objectLargest: (producer: Producer) => Position | undefined;
@@ -954,8 +963,9 @@ export class Producer {
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
-		hooks.supersedeStale = (producer) => {
+		hooks.supersedeStale = (producer, judgedEnd) => {
 			for (const state of [producer.#state, ...producer.#sinks]) {
+				state.judgedEnd = judgedEnd;
 				const drops = state.drops.peek();
 				if (drops.some((run) => run.stale !== undefined))
 					state.drops.set(drops.filter((run) => run.stale === undefined));
@@ -2047,7 +2057,8 @@ export class Subscriber {
 		end?: bigint;
 		revision: number;
 		budget: number;
-		coversFrom?: bigint;
+		coverage?: Coverage;
+		judgedEnd?: bigint;
 	};
 	#reported: Run[] = [];
 	// The reported runs judged stale, with the budget each was judged under, for a wire whose
@@ -2511,15 +2522,20 @@ export class Subscriber {
 		if (end === undefined) return false;
 		const held = this.#state.groups.peek();
 		const received = this.#state.received.peek();
-		// A bounded window never covers everything above a received stale run, so such a run
-		// does not settle it (see `settles`): the reader still wants those groups.
-		const drops = this.#state.drops.peek().filter((run) => run.stale === undefined);
+		// A received stale run that does not settle this reader is unknown to it (see `settles`):
+		// the reader still wants those groups, however the feed accounted for them.
+		const budget = this.#drift().budget;
+		const coverage = this.#coverage();
+		const all = this.#state.drops.peek();
+		const drops = all.filter((run) => settles(run, budget, coverage, this.#state.judgedEnd));
+		const unknown = all.filter((run) => !settles(run, budget, coverage, this.#state.judgedEnd));
 		const producer = this.#state.producer;
 		for (const run of this.#window.runs(this.#window.floor() ?? 0n, end)) {
 			let gaps = [run];
 			for (const delivered of taken) gaps = gaps.flatMap((gap) => delivered.gaps(gap.start, gap.end));
 			for (const gap of gaps) {
 				for (const open of runGaps(drops, gap.start, gap.end)) {
+					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
 					// Not received yet, so it may still arrive.
 					if (open.end > received) return false;
 					// Held, so a read still hands it out, skips it, or waits for the cap to rise.
@@ -3112,7 +3128,8 @@ export class Subscriber {
 		const drops = this.#state.drops.peek();
 		const revision = this.#revision;
 		const { budget } = this.#drift();
-		const coversFrom = this.#coversFrom();
+		const coverage = this.#coverage();
+		const judgedEnd = this.#state.judgedEnd;
 		const seen = this.#dropsSeen;
 		if (
 			!seen ||
@@ -3121,15 +3138,17 @@ export class Subscriber {
 			seen.end !== end ||
 			seen.revision !== revision ||
 			seen.budget !== budget ||
-			seen.coversFrom !== coversFrom
+			seen.coverage?.start !== coverage?.start ||
+			seen.coverage?.end !== coverage?.end ||
+			seen.judgedEnd !== judgedEnd
 		) {
-			this.#dropsSeen = { drops, start, end, revision, budget, coversFrom };
+			this.#dropsSeen = { drops, start, end, revision, budget, coverage, judgedEnd };
 			// The track's runs are folded in afresh, so one it forgot, such as a stale run new terms
 			// superseded, or one that stopped settling this reader, leaves nothing behind.
 			this.#pending = this.#pending.filter((run) => !run.received);
 			for (const run of drops) {
 				// A received stale run that does not settle this reader is unknown to it.
-				if (!settles(run, budget, coversFrom)) continue;
+				if (!settles(run, budget, coverage, judgedEnd)) continue;
 				this.#pending = insertDrop(this.#pending, run.start, run.end, { ...run, received: true });
 			}
 		}
@@ -3142,12 +3161,14 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// The lowest group from which this reader reads every group up past the live edge, undefined
-	// while a range end or a cap bounds it.
-	#coversFrom(): bigint | undefined {
-		if (this.#cursor.peek().end !== undefined || this.#window.pending) return undefined;
+	// This reader's last contiguous run of groups, capped; see `Coverage`.
+	#coverage(): Coverage {
+		if (this.#window.pending) return undefined;
 		const last = this.#window.runs().at(-1);
-		return last?.end === UNBOUNDED ? last.start : undefined;
+		if (!last) return undefined;
+		const cap = this.#cursor.peek().end;
+		const end = last.end === UNBOUNDED ? cap : cap === undefined ? last.end : min(last.end, cap);
+		return { start: last.start, end };
 	}
 
 	// A group from the routes' copies; see #resume.

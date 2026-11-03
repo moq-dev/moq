@@ -213,6 +213,19 @@ export class Minted {
 	}
 }
 
+/**
+ * Where a stale drop judged under `ranges` stops looking: the exclusive end past every group they
+ * name, undefined when one stays open or ends at an anchor only the publisher resolves.
+ */
+function judgedEnd(ranges: readonly track.Range[]): bigint | undefined {
+	let end: bigint | undefined;
+	for (const range of ranges) {
+		if (range.end?.absolute === undefined) return undefined;
+		if (end === undefined || range.end.absolute > end) end = range.end.absolute;
+	}
+	return end;
+}
+
 /** Subscribe to the peer and own its receive-side protocol tasks.
  * @internal
  */
@@ -1072,7 +1085,7 @@ export class Subscriber {
 			const id = this.#subscribeNext++;
 			const msg = this.#subscribeMessage(id, broadcast, consumed, producer.name, subscription, ranges);
 			// The new SUBSCRIBE's terms are new, so a stale run the last one reported is no verdict on them.
-			hooks.supersedeStale(producer);
+			hooks.supersedeStale(producer, judgedEnd(ranges));
 			console.debug(`subscribe reopen: id=${id} broadcast=${broadcast} track=${producer.name}`);
 			// Bounded like the first setup, and given up once nobody wants the track, so a peer
 			// that stops reading holds neither the stream nor its entry.
@@ -1397,6 +1410,8 @@ export class Subscriber {
 		state: SubscribeSetup,
 	): SubscribeEntry {
 		hooks.receiveTrack(producer);
+		// The SUBSCRIBE's terms: where a stale drop judged under them stops looking.
+		hooks.supersedeStale(producer, judgedEnd(ranges));
 		if (!hasRanges(this.version)) hooks.dropAnchors(producer);
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
@@ -1993,7 +2008,7 @@ export class Subscriber {
 			// may move the range it was judged against, so the runs held as stale become unknown
 			// again: a reader fills them rather than trust an old verdict.
 			entry.terms = update.terms;
-			hooks.supersedeStale(entry.track);
+			hooks.supersedeStale(entry.track, judgedEnd(ranges));
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the

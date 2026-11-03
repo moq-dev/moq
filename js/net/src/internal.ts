@@ -503,9 +503,10 @@ export const hooks: {
 	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, hole: Hole) => void;
 	/**
 	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
-	 * were replaced, so they are unknown again. Mirrors the Rust `supersede_stale`.
+	 * were replaced, so they are unknown again. The new terms' ranges end at `judgedEnd`,
+	 * undefined past the live edge or unknown. Mirrors the Rust `supersede_stale`.
 	 */
-	supersedeStale: (producer: Producer) => void;
+	supersedeStale: (producer: Producer, judgedEnd: bigint | undefined) => void;
 	/** Mark a track as fed by a wire subscription, which owes missing groups. Assigned by `track.ts`. */
 	receiveTrack: (producer: Producer) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
