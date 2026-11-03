@@ -42,12 +42,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 	group.finish().unwrap();
 	let handler = async {
 		if publish {
-			let prepared = requests
-				.requested_broadcast()
-				.await
-				.unwrap()
-				.prepare()
-				.unwrap();
+			let prepared = requests.requested_broadcast().await.unwrap().prepare().unwrap();
 			let track = prepared
 				.broadcast()
 				.create_track(

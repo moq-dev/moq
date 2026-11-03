@@ -2815,7 +2815,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 			const requests = handle.requested();
 			const request = (await requests.next()).value;
 			if (!request) throw new Error("missing job request");
-			const prepared = request.prepare(Epoch.mint());
+			const prepared = request.prepare();
 			prepared.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
 			return prepared.publish();
 		})();

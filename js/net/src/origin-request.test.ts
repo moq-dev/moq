@@ -3,7 +3,7 @@ import { Producer as BroadcastProducer } from "./broadcast";
 import { StreamCode, StreamError } from "./error";
 import { Route } from "./hop";
 import * as Instance from "./instance.ts";
-import { type Following, Producer, type Publication, type Request, type Requesting } from "./origin";
+import { type Following, Producer, type Publication, type Requesting } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
 
@@ -401,7 +401,7 @@ for (const withdraw of ["unannounce", "replace"] as const) {
 		const first = origin.request(path);
 		const pending = (await requests.next()).value;
 		if (!pending) throw new Error("expected a request");
-		const publication = pending.prepare(Epoch.mint()).publish();
+		const publication = pending.prepare().publish();
 		await settle();
 		const held = first.active.peek()?.clone();
 		if (withdraw === "unannounce") publication.unannounce();

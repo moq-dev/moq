@@ -11531,12 +11531,7 @@ mod tests {
 		let claim = producer.requests("room").unwrap();
 		let path = Path::from_static("room/alice");
 		let pending = producer.consume().request(path.clone(), None);
-		let publication = queued(&claim)
-			.await
-			.prepare()
-			.unwrap()
-			.publish()
-			.unwrap();
+		let publication = queued(&claim).await.prepare().unwrap().publish().unwrap();
 		let held = pending.await.unwrap();
 		publication.unannounce();
 		assert!(
