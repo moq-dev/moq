@@ -69,8 +69,8 @@ source "$DIR/process.sh"
 # whether they arrived as flags or as environment overrides.
 RERUN="$(harness_env TSC_DURATION TSC_BITRATE TSC_PORT TSC_PROFILE TSC_SEED MOQ_QUIC_CONGESTION_CONTROL)just test ts$(harness_argv "$@")"
 
-# Seamless session replacement needs an explicit publisher epoch. Keep this
-# opt-in local to the validation rig; epochless replacement is tested as refusal.
+# Seamless session replacement needs the publisher's instance on the wire. Keep this
+# opt-in local to the validation rig; replacement without one is tested as refusal.
 VERSION=moq-lite-07-wip
 
 SOURCE=""       # real capture to publish instead of a generated clip

@@ -41,10 +41,9 @@ under a set capacity. If it does, bring options with a recommendation, such
 as per-tenant accounts in the pool with debt charged to the tenant over its
 share, before building.
 
-Open, for the design: what keys a tenant. Candidates are the grant root,
-which exists today, and the issuer-qualified subject from
-[grant subject](/quest/m1/cluster-routing/grant-subject.md). Pick the same key
-as [broadcast fairness](/quest/m2/broadcast-fairness.md)'s tenant keying.
+Open, for the design: what keys a tenant, such as the grant root, which
+exists today. Pick the same key as
+[broadcast fairness](/quest/m2/broadcast-fairness.md)'s tenant keying.
 
 Public API: likely a relay cache setting if per-tenant shares need a knob.
 Wire: none.
@@ -57,4 +56,3 @@ Wire: none.
 
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - the same tenant fair share on cluster links
 - [Receive pool](/quest/m2/receive-pool.md) - one per-worker budget covering receive credit and the cache
-- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - a candidate tenant key

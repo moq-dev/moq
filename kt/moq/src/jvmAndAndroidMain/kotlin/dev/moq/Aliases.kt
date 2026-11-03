@@ -85,7 +85,10 @@ typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** Follows a specific broadcast path across the publisher instances that serve it. */
 typealias Following = uniffi.moq.MoqFollowing
 
-/** A route over a prefix: its origin-relative path, wildcard captures, and route metadata. */
+/**
+ * A route over a prefix: its origin-relative path, required wildcard captures (empty without
+ * wildcards), and route metadata.
+ */
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
@@ -166,14 +169,15 @@ typealias Frame = uniffi.moq.MoqFrame
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
- * How a broadcast advertises its exact path: its static production cost (lower wins) and the
- * publisher epoch it serves (null when unknown).
+ * How a broadcast advertises its exact path: its static production cost (lower wins), an optional
+ * stable instance (null keeps the one the broadcast minted), and the epoch, which only matters with
+ * a stable instance.
  */
 typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
 
 /**
- * An observed path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * An observed path-prefix route: the instance of the stream it serves, relay hop ids (oldest
+ * first), and static production and link cost (lower wins).
  */
 typealias Route = uniffi.moq.MoqRoute
 

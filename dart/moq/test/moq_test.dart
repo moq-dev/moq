@@ -393,6 +393,16 @@ void main() {
     expect(() => catalog.finish(), throwsA(isA<ClosedMoqException>()));
   });
 
+  test('a broadcast consumer\'s closed() resolves once it closes', () async {
+    final broadcast = BroadcastProducer();
+    var resolved = false;
+    final closed = broadcast.consume().closed().then((_) => resolved = true);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(resolved, isFalse, reason: 'resolved while the broadcast is live');
+    broadcast.close();
+    await closed.timeout(timeout);
+  });
+
   test('timestamps round-trip exactly at the track scale', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(
@@ -506,24 +516,22 @@ void main() {
     replacement.broadcast().close();
   });
 
-  test('a new epoch restarts announce consumers', () async {
+  test('a new instance restarts announce consumers', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(config: MoqAnnounceConfig());
-    final publication = origin.createBroadcast(path: 'epoch');
+    final publication = origin.createBroadcast(path: 'instance');
 
-    final first = mintEpoch();
-    publication.announce(route: AnnounceRoute(epoch: first));
+    publication.announce(route: AnnounceRoute());
     final start = await nextRoute(announced) as AnnounceEventStart;
-    expect(start.announce.route.epoch, first);
+    expect(start.announce.route.instance, isNotEmpty);
 
-    final second = mintEpoch();
-    publication.announce(route: AnnounceRoute(epoch: second));
+    publication.announce(route: AnnounceRoute(instance: 'camera', epoch: 1));
     final restart = await nextRoute(announced) as AnnounceEventRestart;
-    expect(restart.announce.route.epoch, second);
+    expect(restart.announce.route.instance, 'camera');
 
     expect(
-      () => publication.announce(route: AnnounceRoute(epoch: 'not-an-epoch')),
-      throwsA(isA<MoqException>()),
+      () => publication.announce(route: AnnounceRoute(instance: '')),
+      throwsA(isA<InvalidInstanceMoqException>()),
     );
     announced.cancel();
     announced.dispose();
@@ -548,7 +556,7 @@ void main() {
     final pending = origin.consume().request(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
-    final prepared = request.prepare(epoch: mintEpoch());
+    final prepared = request.prepare();
     final served = prepared.publish();
     await pending.timeout(timeout);
     // The publication controls the prepared fill: closing that ends its announcement.

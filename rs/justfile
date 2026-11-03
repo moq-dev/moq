@@ -51,7 +51,10 @@ lint *args:
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
     cargo shear
-    cargo sort --workspace --check --no-format
+    # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
+    cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
+    cargo hakari generate --diff
+    python3 sh/rs/hakari.py
 
 # Auto-fix clippy/format/shear/sort.
 [positional-arguments]
@@ -59,7 +62,8 @@ fix *args:
     bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
     cargo shear --fix
-    cargo sort --workspace --no-format
+    cargo hakari generate
+    cargo sort --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
 
 # Like `check`, but only the crates in a changed-file list plus their dependents.
 check-changed $LIST:
@@ -150,14 +154,14 @@ macos-test:
 # Compile and lint the capture and playback features, which the default check skips.
 [positional-arguments]
 capture *args:
-    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio -p moq-scene -p moq-studio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
 # The capture and playback tests drive synthetic devices, so they need no hardware.
 
 # Test the capture and playback features, which the default test pass skips.
 [positional-arguments]
 capture-test *args:
-    just rs test -p moq-video -p moq-audio -p moq-scene -p moq-studio --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@"
+    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@"
 
 # Stream V4L2 capture from the kernel's vivid virtual camera (`sudo modprobe vivid`
 # first); without one the tests skip, or fail under CI_STRICT.
@@ -186,7 +190,9 @@ x11-bench-ci:
     } 2>&1 | tee "$log"
 
 # moq-video's MediaCodec code is `#[cfg(target_os = "android")]`. Needs an NDK,
-# which the dev shell lacks, so android.yml runs it outside Nix. `check` rather
+# which the dev shell lacks, so android.yml runs it outside Nix with the
+# workspace-hack disabled (`cargo hakari disable && cargo update --workspace`).
+# Do the same locally, then restore Cargo.lock and rs/workspace-hack. `check` rather
 # than a denying clippy: the capture plumbing is dead on a target without a
 # capture backend.
 
@@ -197,6 +203,13 @@ android *args:
     bash sh/local.sh cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets "$@"
     bash sh/local.sh cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build-ffi "$@"
     nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
+
+# Run moq-video's ignored MediaCodec tests on the Android device or emulator adb
+# reaches. Needs an NDK and the workspace-hack disabled, like `android`;
+# android.yml's `emulator` job runs it on an x86_64 emulator.
+[positional-arguments]
+android-test *args:
+    sh/rs/android-test.sh "$@"
 
 # Audit dependencies against deny.toml. Nightly: advisories land without a diff.
 audit:
@@ -211,6 +224,10 @@ relay-minimal:
 # Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     sh/rs/c-tests.sh
+
+# The workspace-hack would supply third-party features a crate forgets to
+# declare, so CI runs this after `cargo hakari disable && cargo update
+# --workspace`; do the same locally, then `git checkout Cargo.lock rs/workspace-hack`.
 
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:
@@ -302,6 +319,14 @@ play *args:
 doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
+# Needs nightly with the miri component; executes only in Nightly. See sh/rs/miri.sh
+# for what runs and why it splits in two.
+
+# Run kio's and moq-net's hand-written in-memory unsafe under Miri.
+[positional-arguments]
+miri *args:
+    bash sh/rs/miri.sh "$@"
+
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite and the receive-timestamps comparison.
 quic-sim:
     #!/usr/bin/env bash
@@ -332,8 +357,8 @@ cli-export *args:
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
 
-# Render CPU frames, composite scenes, and publish a studio program through wgpu on
-# Mesa's software Vulkan driver, so no GPU is needed.
+# Render CPU frames and export them for encoding through wgpu on Mesa's software
+# Vulkan driver, so no GPU is needed.
 render-sw:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -346,10 +371,6 @@ render-sw:
     # Mesa's software driver exports no memory, so this covers the readback route.
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-video --features render,openh264 --lib --run-ignored only -E 'test(/^render::export::(nv12::)?tests::/)'
-    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
-        just rs test -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
-    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
-        just rs test -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay)'
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:

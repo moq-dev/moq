@@ -263,6 +263,17 @@ class SmokeTest {
     }
 
     @Test
+    fun `a broadcast consumer's closed returns once the broadcast ends`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            broadcast.consume().use { consumer ->
+                val closed = async { consumer.closed() }
+                broadcast.end()
+                closed.await()
+            }
+        }
+    }
+
+    @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
             CatalogProducer(broadcast).setVideoProperties(VideoProperties(rotation = 315.0))
@@ -498,26 +509,27 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = true)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
-            val producer = SnapshotProducer(broadcast, track, config)
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            for (n in 1..4) producer.update(
-                Status(state = "live$n"),
-                timestamp = n.milliseconds.toTimestamp(),
-            )
+            SnapshotProducer(broadcast, track, config).use { producer ->
+                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                for (n in 1..4) producer.update(
+                    Status(state = "live$n"),
+                    timestamp = n.milliseconds.toTimestamp(),
+                )
 
-            // `next` yields every state in order; `latest` skips the buffered third.
-            assertEquals(
-                Timed(Status(state = "live1"), Timestamp(1_000uL, 1_000_000uL)),
-                consumer.next()?.decode<Status>(),
-            )
-            assertEquals(
-                Timed(Status(state = "live2"), Timestamp(2_000uL, 1_000_000uL)),
-                consumer.next()?.decode<Status>(),
-            )
-            assertEquals(
-                Timed(Status(state = "live4"), Timestamp(4_000uL, 1_000_000uL)),
-                consumer.latest()?.decode<Status>(),
-            )
+                // `next` yields every state in order; `latest` skips the buffered third.
+                assertEquals(
+                    Timed(Status(state = "live1"), Timestamp(1_000uL, 1_000_000uL)),
+                    consumer.next()?.decode<Status>(),
+                )
+                assertEquals(
+                    Timed(Status(state = "live2"), Timestamp(2_000uL, 1_000_000uL)),
+                    consumer.next()?.decode<Status>(),
+                )
+                assertEquals(
+                    Timed(Status(state = "live4"), Timestamp(4_000uL, 1_000_000uL)),
+                    consumer.latest()?.decode<Status>(),
+                )
+            }
         }
     }
 
@@ -562,16 +574,17 @@ class SmokeTest {
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer =
-                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
-            val demand: TrackDemand = producer.demand()
-            assertEquals("status", demand.name())
-            assertEquals(null, demand.wanted())
+            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
+                producer ->
+                val demand: TrackDemand = producer.demand()
+                assertEquals("status", demand.name())
+                assertEquals(null, demand.wanted())
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            while (demand.wantedChanged() == null) {}
-            consumer.cancel()
-            while (demand.wantedChanged() != null) {}
+                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                while (demand.wantedChanged() == null) {}
+                consumer.cancel()
+                while (demand.wantedChanged() != null) {}
+            }
         }
     }
 
@@ -579,17 +592,19 @@ class SmokeTest {
     fun `cancelling a flow collection cancels its native handle`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer =
-                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
-            val demand: TrackDemand = producer.demand()
-            producer.update(Status(state = "live"))
+            // A demand watcher does not own the writer; keep it alive through collection.
+            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
+                producer ->
+                val demand: TrackDemand = producer.demand()
+                producer.update(Status(state = "live"))
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            while (demand.wantedChanged() == null) {}
-            // `first` cancels the collection, which must release the subscription without an
-            // explicit cancel.
-            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
-            while (demand.wantedChanged() != null) {}
+                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                while (demand.wantedChanged() == null) {}
+                // `first` cancels the collection, which must release the subscription without an
+                // explicit cancel.
+                assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
+                while (demand.wantedChanged() != null) {}
+            }
         }
     }
 
@@ -601,12 +616,16 @@ class SmokeTest {
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer =
-                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
-            producer.update("""{"state":"raw"}""")
+            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
+                producer ->
+                producer.update("""{"state":"raw"}""")
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            assertEquals(Timed(Status(state = "raw"), null), consumer.valuesAs<Status>().first())
+                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                assertEquals(
+                    Timed(Status(state = "raw"), null),
+                    consumer.valuesAs<Status>().first(),
+                )
+            }
         }
     }
 
@@ -736,22 +755,20 @@ class SmokeTest {
     }
 
     @Test
-    fun `a new epoch restarts announce consumers`() = runTest {
+    fun `a new instance restarts announce consumers`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig())
-            origin.createBroadcast("epoch").use { publication ->
-                val first = mintEpoch()
-                publication.announce(AnnounceRoute(epoch = first))
+            origin.createBroadcast("instance").use { publication ->
+                publication.announce(AnnounceRoute())
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
-                assertEquals(first, start.announce.route.epoch)
+                assertTrue(start.announce.route.instance.isNotEmpty())
 
-                val second = mintEpoch()
-                publication.announce(AnnounceRoute(epoch = second))
+                publication.announce(AnnounceRoute(instance = "camera", epoch = 1uL))
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
-                assertEquals(second, restart.announce.route.epoch)
+                assertEquals("camera", restart.announce.route.instance)
 
-                assertFailsWith<MoqException> {
-                    publication.announce(AnnounceRoute(epoch = "not-an-epoch"))
+                assertFailsWith<MoqException.InvalidInstance> {
+                    publication.announce(AnnounceRoute(instance = ""))
                 }
             }
         }
@@ -780,7 +797,7 @@ class SmokeTest {
                 }
                 val request = dynamic.requestedBroadcast()
                 assertEquals("live/cam", request.path())
-                request.prepare(mintEpoch()).use { prepared ->
+                request.prepare().use { prepared ->
                     prepared.broadcast().use { fill ->
                         prepared.publish().use { publication ->
                             pending.await()

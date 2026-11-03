@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/7a191e6197c691f477b4c55edba34cc425c3e77c";
+      url = "github:moq-dev/quest/d003102129236c88edbfec11f001e8efeaf9b5fd";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -158,6 +158,8 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
+            # The workspace-hack that gives every build one feature set per dependency.
+            cargo-hakari
             # Weekly mutation testing of the security-critical modules (`just rs mutants`).
             cargo-mutants
             cargo-nextest
@@ -380,13 +382,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.6+v0.32.0";
+          version = "0.3.1-kixelated.7+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
+            hash = "sha256-uSApyCocEhADWu8Koj5vXIt0fMYQVjnBVKctDWQHqLM=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
@@ -673,6 +675,14 @@
             if [ -x "$shim" ]; then
               export PATH="$(dirname "$shim"):$PATH"
             fi
+
+            # Each nested shell (direnv, then `nix develop`, then another
+            # inside a gate) prepends this shell's ~160 store paths again,
+            # about 10 KB. mbx copies PATH into two variables at ~3.6 times
+            # its size, and Linux rejects any one variable over 128 KiB, so
+            # four nested shells failed every Cargo launch with E2BIG. Keep
+            # each directory's first entry only: lookups resolve as before.
+            PATH=$(printf '%s' "$PATH" | awk -v RS=: '!seen[$0]++ { printf "%s%s", sep, $0; sep = ":" }')
           '';
 
           env = {
