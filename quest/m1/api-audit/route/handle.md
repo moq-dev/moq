@@ -106,6 +106,24 @@ Run `just check` and `just test interop --all`.
 Public API: breaking across moq-net, @moq/net, moq-ffi, moq-c and the
 wrappers. Wire: none.
 
+## Waiting
+
+- Maintainer: choose the default when a job ends and the same prefix serves its
+  path again. The inherited-instance default above would reuse the ended job's
+  instance even though its group sequences restart. The dependent
+  [takeover quest](/quest/m1/announce-takeover.md) requires a fresh instance and
+  refusal of pins to the ended job before relying on inheritance. Recommend
+  making `request.route(options)` mint a fresh instance by default, with an
+  explicit stable instance only for callers that continue its sequences;
+  keep the existing predecessor handling until that quest replaces it.
+  Alternatively, preserve the inherited default by making the prefix terminal
+  when a materialized job ends, requiring a new prefix route for later jobs.
+  Keeping both an immutable prefix instance and automatic per-path restarts
+  needs an ownership bound for ended-path history: serial requests must not
+  leave a growing tombstone map. Resolve the default and its safety scope before
+  migrating the public API. See
+  [the implementation audit](https://github.com/moq-dev/moq/pull/7770).
+
 ## Related
 
 - No constructible internal handles - the same JS hygiene rule
