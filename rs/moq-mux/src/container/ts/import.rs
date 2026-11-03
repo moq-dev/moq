@@ -10753,6 +10753,7 @@ pub(super) mod test {
 	/// catalog. Its bounded PES need not have delivered any payload yet.
 	#[tokio::test(start_paused = true)]
 	async fn a_configured_track_releases_the_catalog_at_its_pes_header() {
+		use super::super::catalog::Ext;
 		const PID: u16 = 0x62;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut initial = crate::catalog::hang::Catalog::<Ext>::default();
