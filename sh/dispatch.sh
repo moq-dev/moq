@@ -470,7 +470,7 @@ run_lane() {
                 # systemd scopes cannot carry exported Bash functions, so pass
                 # the phase's function source as the script instead.
                 script=$(declare -f files step)
-                bash sh/local.sh "${gate[@]}" bash -euo pipefail -c "$script"$'\n''step "$@"' -- "$phase" "$module"
+                bash sh/local.sh "${gate[@]}" bash -euo pipefail -c "$script"$'\n''trap "exit 143" TERM; step "$@"' -- "$phase" "$module"
             )
             status=$?
             set -e
