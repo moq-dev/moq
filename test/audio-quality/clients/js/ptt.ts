@@ -55,8 +55,8 @@ const browser = await launch([
 ]);
 try {
 	const page = await browser.newPage();
-	const errors: string[] = [];
-	page.on("pageerror", (error) => errors.push(String(error)));
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(String(error)));
 	await page.route(`${viewer}/certificate.sha256`, (route) =>
 		route.fulfill({ body: hash, headers: { "access-control-allow-origin": "*" } }),
 	);
@@ -96,9 +96,9 @@ try {
 	const state = await page.evaluate(() => globalThis.ptt.state());
 	await Bun.write(
 		join(out, "presses.json"),
-		JSON.stringify({ browser: browser.version(), ...result, state, errors }),
+		JSON.stringify({ browser: browser.version(), ...result, state, pageErrors }),
 	);
-	if (errors.length || result.errors.length || result.captureError || state.error)
+	if (pageErrors.length || result.errors.length || result.captureError || state.error)
 		throw new Error("measurement failed; see presses.json");
 } finally {
 	await browser.close();

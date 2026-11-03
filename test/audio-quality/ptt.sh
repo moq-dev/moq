@@ -46,18 +46,33 @@ harness_spawn shaper "$HARNESS_RUN/shaper.log" "$TARGET_BASE/debug/moq-shaper" \
     --listen "127.0.0.1:$shaper_port" --target "127.0.0.1:$relay_port" --seed 7 \
     --report "$HARNESS_RUN/shaper.json" "${shape[@]}"
 shaper_pid=$HARNESS_PID
+until grep -q '^shaper:' "$HARNESS_RUN/shaper.log" 2>/dev/null; do
+    if harness_exited "$shaper_pid"; then
+        cat "$HARNESS_RUN/shaper.log" >&2
+        echo 'shaper exited before binding' >&2
+        exit 1
+    fi
+    sleep 0.05
+done
 harness_spawn driver "$HARNESS_RUN/driver.log" bun test/audio-quality/clients/js/ptt.ts \
     --publisher "http://127.0.0.1:$relay_port" --viewer "http://127.0.0.1:$shaper_port" --out "$HARNESS_RUN"
-status=0
-if ! harness_wait "$HARNESS_PID"; then
-    status=1
+driver_status=0
+harness_wait "$HARNESS_PID" || driver_status=$?
+if [[ $driver_status -ne 0 ]]; then
     cat "$HARNESS_RUN/driver.log" >&2
 fi
 kill -TERM -- -"$shaper_pid" 2>/dev/null || true
-harness_wait "$shaper_pid" || status=$?
+shaper_status=0
+harness_wait "$shaper_pid" || shaper_status=$?
+printf '%s\n' "$shaper_status" >"$HARNESS_RUN/shaper.status"
+if [[ $shaper_status -ne 0 ]]; then
+    cat "$HARNESS_RUN/shaper.log" >&2
+fi
+status=$driver_status
+[[ $shaper_status -eq 0 ]] || status=$shaper_status
 analysis=()
 [[ "${1:-}" != --reproduction ]] || analysis=(--diagnostic)
-if [[ $status -eq 0 ]]; then
+if [[ $driver_status -eq 0 ]]; then
     bun test/audio-quality/clients/js/ptt-analyze.ts "$HARNESS_RUN" "${analysis[@]}" >"$HARNESS_RUN/summary.log" || status=$?
 fi
 exit "$status"

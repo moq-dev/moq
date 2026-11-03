@@ -27,9 +27,14 @@ const presses = result.presses
 			return received ? [received] : [];
 		});
 		const first = received.toSorted((a, b) => a[0] - b[0])[0];
-		const audible = result.audible.find(
-			(frame) => frame.at >= press.at && frame.at < (result.presses[(i + 1) * 2]?.at ?? Infinity),
-		);
+		// An onset during a zero-gap press may belong to its still-playing predecessor.
+		// A constant tone has no utterance ID, so only separated presses have identifiable onsets.
+		const separated = i === 0 || i >= 8;
+		const audible = separated
+			? result.audible.find(
+					(frame) => frame.at >= press.at && frame.at < (result.presses[(i + 1) * 2]?.at ?? Infinity),
+				)
+			: undefined;
 		return {
 			press: i + 1,
 			gap: result.presses[i * 2 - 1] ? press.at - result.presses[i * 2 - 1].at : null,

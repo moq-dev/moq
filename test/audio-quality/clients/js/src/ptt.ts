@@ -123,9 +123,13 @@ async function attach() {
 	const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
 	try {
 		await context.audioWorklet.addModule(url);
+	} catch (error) {
+		if (audio.out.root.peek() !== root) return;
+		throw error;
 	} finally {
 		URL.revokeObjectURL(url);
 	}
+	if (audio.out.root.peek() !== root) return;
 	const tap = new AudioWorkletNode(context, "ptt-tap");
 	const mute = new GainNode(context, { gain: 0 });
 	root.connect(tap);

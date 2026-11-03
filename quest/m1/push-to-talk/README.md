@@ -78,10 +78,9 @@ encoder, and record why.
   proposed.
 
 - Maintainer: choose live utterance startup semantics. The 2026-11-03 measurement
-  preserved subscriptions and delivered separated utterance heads in about
-  100-140 ms, but projected device output under bufferbloat was much later
-  (median 950 ms across 17 observed onsets). `AudioRingBuffer.write` waits for
-  the target's media span before leaving a stall; filling 300 ms of media over
+  preserved subscriptions and encoded every utterance head, but projected
+  device output under bufferbloat missed the latency goal on separated presses.
+  `AudioRingBuffer.write` waits for the target's media span before leaving a stall; filling 300 ms of media over
   a below-bitrate path takes longer than 300 ms of wall time. Options: (1) honor
   the existing goal with a clocked live start that retains the first frame and
   uses bounded silence while waiting (recommended; buffered playback can keep
