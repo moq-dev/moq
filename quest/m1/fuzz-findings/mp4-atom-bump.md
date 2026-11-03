@@ -19,7 +19,8 @@ moq-mux is already on 0.17.0
 the `meta/iref.rs` subtract overflow (kixelated/mp4-atom#219), so what remains
 is a move within 0.17 and the regression inputs. If the
 [iloc fix](/quest/m1/fuzz-findings/mp4-atom-iloc.md) merges before the
-release, the same bump covers it.
+release, the same bump covers it: its upstream fix is
+[kixelated/mp4-atom#267](https://github.com/kixelated/mp4-atom/pull/267).
 
 Public API: none expected in moq-mux. Wire: none.
 
