@@ -268,7 +268,7 @@ export class Game {
 		const active = effect.get(this.broadcast.out.active);
 		if (!active) return;
 
-		const statusTrack = active.track("status").subscribe({ priority: 10 });
+		const statusTrack = active.track("status").subscribe({ ...Moq.Track.Subscription.default(), priority: 10 });
 		effect.cleanup(() => statusTrack.close());
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
@@ -321,7 +321,7 @@ export class Game {
 			Moq.Path.from(this.#viewerPrefix, this.sessionId, viewerId),
 		);
 		const viewerBroadcast = viewerBroadcastPublication.broadcast;
-		viewerBroadcastPublication.announce({ epoch: Moq.Epoch.mint() });
+		viewerBroadcastPublication.announce();
 		effect.cleanup(() => {
 			viewerBroadcast.close();
 			this.viewerId.set(undefined);

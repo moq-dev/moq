@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`Announce.captures` is `[String]` instead of `[String]?`. Remove optional checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Rebuild with the matching MoqFFI package and native library.
+
+### Decoder outputs take a `Media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`Audio.DecoderOutput` replaces `maxDelay` and the playout `delay: TimeInterval?` with `delay: Media.Delay?` and `estimate: Bool = true`.
+`Video.DecoderOutput.maxDelay` is `delay: Media.Delay?`.
+`Media.Delay(min:max:)`: `max` (nil for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `delay: Media.Delay(min: d, max: ...)` with `estimate: false`.
+
 ### Compression moves to the track
 
 `Flate` is removed: publish opaque bytes on a `TrackProducer`.
@@ -31,7 +42,7 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 Every duration is a `TimeInterval` in seconds instead of a `UInt64` `...Us` field, and drops the suffix: `Client(timeout:race:resolutionDelay:)`, `Backoff(initial:max:timeout:)`, `QuicConfig(idleTimeout:keepAlive:)`, `WebSocketConfig(delay:)`, `ConnectionStats.rtt`, `Grant.expires`, `TrackInfo.maxAge`, `Subscription.maxDelay`, `Fill.maxDelay`, `Audio.Consumer.delay`, and the decoder outputs' `maxDelay` and `delay`.
 Divide a microsecond value by 1,000,000. A negative interval traps.
 `AudioEncoderOutput.frameDuration` is optional: pass `nil` where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` has no default: pass `0` for the old one.
+`Subscription.maxDelay` has no default: start from `Subscription.default`, or pass `0`, for the old default. `nil` sets no subscriber limit.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state
@@ -51,12 +62,12 @@ the matching generated bindings and native library.
 
 ### `announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
-`Route` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:instance:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream; leave `instance` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
-Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve(_:epoch:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve(_:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the task.
 
 ### Media track names belong to the target
@@ -93,11 +104,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `ContainerFormat.fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `ContainerFormat.cmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`Media.Video` and `Media.Audio` gain `epoch`, the publisher instance their `broadcast` reference names.
-`BroadcastConsumer.resolve(_:)` takes the catalog `Media.Rendition` instead of its reference, and reads its `broadcast` and `epoch` from it.
-Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another epoch.
+`Media.Video` and `Media.Audio` gain `instance`, the publisher instance their `broadcast` reference names.
+`BroadcastConsumer.resolve(_:)` takes the catalog `Media.Rendition` instead of its reference, and reads its `broadcast` and `instance` from it.
+Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another instance.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -113,7 +124,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix:)` takes no route, and `OriginDynamic.update(route:)` is gone.
-Replace `request.accept(broadcast:)` with `let prepared = try request.prepare(epoch: mintEpoch())`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under that epoch and returns its producer.
+Replace `request.accept(broadcast:)` with `let prepared = try request.prepare()`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under a fresh instance of its own and returns its producer.
 
 ### Anchors can name a time (#6074)
 

@@ -18,11 +18,6 @@ workflow tests still read the reformatted files.
 Decided with the maintainer on 2026-10-29: adopt Biome's YAML formatter
 (✅ yes / no), in m2, as in moq.pro.
 
-## Required
-
-- [Upgrade Biome to 2.6](/quest/m2/biome-2-6.md) - the workspace runs a Biome
-  with the YAML formatter
-
 ## Related
 
 - [moq-dev/moq.pro `quest/m2/biome-yaml.md`](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/biome-yaml.md) -

@@ -39,6 +39,7 @@ in sync at the latency you ask for.
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `follow` | Follow the broadcast's announcements (default on): wait for one before subscribing, so a player can mount before the stream exists, and move to each restart. Off requests the name once. |
 | `catalog-format` | `hang`, `msf`, or `manual`; detected from the name by default. |
+| `echo` | The viewer's name for [feedback](/concept/stats#media-reports), one path segment not starting with `.`. Once the catalog solicits feedback, the player publishes `<echo path>/<name>.echo`. Absent publishes none. |
 
 Every attribute is also a reactive property, and property or UI changes reflect
 back into the attributes. An invalid value is refused rather than defaulted: the
@@ -52,6 +53,22 @@ buffering indicator, and a stats panel.
 The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
 broken media automatically.
+
+A video rendition encoded with intra refresh has no keyframes, and its catalog
+`warmup` says how long a decoder takes to clean up after joining. The player
+decodes such a rendition twice: one decoder holds your delay and may show
+refresh stripes after a join or a skip, while a second starts one group earlier
+and tolerates `warmup` more lateness, so its picture is clean. The clean
+picture shows whenever it has caught up. Each decoder costs its own CPU and
+decoder memory, and both share one subscription. A rendition without `warmup`
+uses one decoder.
+
+An H.264 group of such a rendition opens on a recovery point that is not an
+IDR. Chromium's WebCodecs refuses to open a decoder on that picture: it wants
+an IDR or a recovery point that counts zero frames. So when a decoder opens on
+one, the player inserts a second recovery point with a zero count before its
+first slice. The slices are untouched; the stripes clear as the sweep
+completes.
 
 `el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
 On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
@@ -67,6 +84,23 @@ ends while a covering prefix still serves the name, it moves to the prefix. A
 name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
 once, with a fresh catalog, and video, audio, and the clock start over on its
 timeline instead of waiting for it to catch up to the old one.
+
+## Feedback
+
+A publisher solicits feedback with the catalog's `echo` section, such as
+`<moq-publish echo-path="viewers">`. Given `echo="alice"`, the player resolves
+that path against the broadcast and publishes `alice.echo` there, with one
+`feedback.json` track reporting what each rendition was received and played
+under its catalog ID: frames, bytes, decoded, late, decode errors, stalls and
+stalled time, audio underruns, and the newest arrival, plus the PROBE
+round-trip time. It writes about once a second while someone subscribes, and
+follows the catalog: a removed or moved section retracts the broadcast. Each
+player publishes its own broadcast, reporting only what it counted, so a second
+player on one connection that resolves the same feedback path, for any catalog,
+publishes nothing and warns until the first one leaves; give each player its own
+name. The decoders'
+`out.stats` and the stats panel read the same counters. The token must allow
+publishing under the echo path.
 
 ## Binding from a framework
 
@@ -92,6 +126,7 @@ broadcast consumer, and decode JSON with
 
 ```ts
 import * as Json from "@moq/json";
+import * as Moq from "@moq/net";
 import { Hang } from "@moq/watch";
 
 // Run after the element module has loaded and the node has mounted.
@@ -110,7 +145,10 @@ const dispose = el.signals.run((effect) => {
     const name = metadata?.[0];
     if (!active || !name) return;
 
-    const track = active.track(name).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
+    const track = active.track(name).subscribe({
+        ...Moq.Track.Subscription.default(),
+        priority: Hang.Catalog.PRIORITY.catalog,
+    });
     effect.cleanup(() => track.close());
 
     const consumer = new Json.Snapshot.Consumer<unknown>({ track });

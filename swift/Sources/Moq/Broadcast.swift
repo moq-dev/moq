@@ -9,6 +9,11 @@ public final class BroadcastConsumer: Sendable {
         self.ffi = ffi
     }
 
+    /// Wait until the broadcast ends: its publisher closed it, or every producer left.
+    public func closed() async throws {
+        try await ffi.closed()
+    }
+
     /// Subscribe to a track by name, delivering raw frame payloads with no codec
     /// or container parsing. `subscription` tunes delivery priority, group range, and
     /// staleness; omit for defaults.
@@ -29,9 +34,9 @@ public final class BroadcastConsumer: Sendable {
     /// Resolve a catalog rendition to the broadcast serving its track.
     ///
     /// The rendition's `broadcast` reference, `nil` or empty, names this broadcast; anything else
-    /// names a sibling relative to it (e.g. `./source`). Its `epoch` is the publisher instance the
-    /// reference names: a broadcast proven to serve another instance throws instead of resolving,
-    /// and a route without an epoch cannot prove one, so there it is best effort. Call it on a
+    /// names a sibling relative to it (e.g. `./source`). Its `instance` is the stream the reference
+    /// names: a broadcast proven to serve another one throws instead of resolving, while a route
+    /// over a wire that carries no instance cannot prove one, so there it is best effort. Call it on a
     /// rendition that carries a reference before `subscribeTrack` or `fetchGroup`, which take a
     /// track name rather than a rendition: the rendition's `track`, or its ID when `nil`. The
     /// rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,

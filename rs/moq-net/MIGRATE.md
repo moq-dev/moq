@@ -4,6 +4,49 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Subscription::max_delay` is `delay: track::Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
+
+`track::Subscription` carries a `track::Delay { min, max }` in place of `max_delay`, and `with_max_delay(d)` is `with_delay(Delay)`.
+`Delay::max` is the old `max_delay`, unchanged. `Delay::min` is the subscriber's target latency, or `None` when a peer whose wire cannot carry it (moq-lite before 07, moq-transport) left it unstated. Both default to `Some(Duration::ZERO)`.
+moq-lite-07 SUBSCRIBE and SUBSCRIBE\_UPDATE carry `min`, and a track's aggregate subscription takes the smallest stated one.
+
+```rust
+// Before
+Subscription::default().with_max_delay(d);
+subscription.max_delay;
+// After
+Subscription::default().with_delay(Delay::default().with_max(d));
+subscription.delay.max;
+```
+
+`group::Fetch::max_delay` is unchanged.
+
+### Local readiness takes the next frame ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`group::Producer::poll_ready(waiter)` and `ready()` take the next frame's `&frame::Info`: `poll_ready(waiter, &info)` and `ready(&info).await`.
+They wait until that frame fits within 16 MB of the fastest reader, so a large frame no longer sheds what the reader has yet to take. Pass the same `Info` to `create_frame`, or one with the payload's size before `write_frame`.
+
+### A legacy announcement set fits one segment ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+lite-01/02 `ANNOUNCE_INIT` is capped at 1 MiB less its 16 bytes of prefixes, down from 64 MiB, on both ends: an origin whose initial set exceeds it fails the announce request, and a peer that sends one is refused. Serve such an origin over lite-03 or later, which announces one broadcast per message.
+`transport::MIN_RECEIVE_WINDOW` is now one 1 MiB segment, so a leasing transport may offer a connection window that small.
+
+### `poll_reset` reports an eviction ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`transport::poll::RecvStream::poll_reset` also completes once the receiver evicts the stream to free a stuck window.
+A leasing transport must report the eviction there: a paused group stream, and one waiting unread for its TRACK\_INFO, is watched only through it, and an evicted stream whose reader holds leased bytes keeps further eviction off until it is stopped.
+
+### A bounded subscription ends once its ranges are read
+
+When every one of a subscription's `ranges` has an end, `track::Subscriber::recv_group` and `track::Ordered::next_group` return `None` once each group in them was handed out, dropped, skipped as stale, or given up as unfillable, instead of waiting for an update to widen the ranges.
+This holds for a track read through an origin's routes, such as a remote broadcast's, too: it ends once no route it left may still deliver a group in range.
+A reader that wants to widen its ranges later keeps one open, such as `Range::groups(n..)`, and narrows its reads with `with_range`, whose cap never ends a read.
+A group another reader's fetch or fill cached is now handed to every subscriber whose ranges hold it, not only fetches.
+A missing group the live feed may still deliver is waited for at most one second before it is asked of a fill or named dropped, when neither the readers' `delay.max` nor the track's max age bounds the wait. Before, a reader with `max_delay: None` on a track with no max age waited for it until the track ended.
+Over moq-transport, a subscription to a copy the session holds no upstream subscription for, such as one only fetched so far, whose ranges all end below the publisher's reported Largest Object, is served by FETCH without subscribing upstream. Each missing group is asked at once and a refusal is final, since nothing else would deliver it.
+A first request whose ranges all have an absolute start and end asks TRACK\_STATUS before it subscribes, so one wholly below the Largest Object is served the same way. Since moq-transport publishers here answer only a one-group FETCH, such a read of a run of missing groups from one of them is refused and names the run dropped; keep a range that reaches the Largest Object to have it subscribed instead.
+A cached group missing its first frames, such as one a relay joined midway, is handed to a bounded subscription only once a fill answered it from its first frame, and is given up when none can, rather than read as `Error::Lagged`.
+
 ### `broadcast::Demand` reads like `track::Demand`
 
 Replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the broadcast closes.
@@ -22,14 +65,14 @@ A group a subscription or fetch handed out now keeps its track wanted until the 
 
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
-`Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Invalid::TooLong`. Keep broadcast paths within 4096 bytes.
+`Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Error::TooLong`. Keep broadcast paths within 4096 bytes.
 A moq-transport namespace whose escaped path would exceed it is refused when decoded, and a SUBSCRIBE, TRACK\_STATUS, FETCH, or PUBLISH whose namespace and track name exceed 4096 bytes together fails that request with `Error::Encode` instead of being sent.
 
 ### Building a `Path` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
-`Path::new` and `TryFrom` fail with `path::Invalid::EmptySegment` on a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling; the empty path is still the root. Origin entry points report it as `Error::EmptySegment`, and `Path::from_static` panics on it.
+`Path::new` and `TryFrom` fail with `path::Error::EmptySegment` on a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling; the empty path is still the root. Origin entry points report it as `Error::EmptySegment`, and `Path::from_static` panics on it.
 Pass a prefix without a trailing `/`: `Path::from_static("room")` covers `room/cam`. Build a path from pieces with `Path::join` rather than `format!`, since an empty piece is the root and adds no segment.
-`Path::from_escaped` is gone, and `path::TooLong` is `path::Invalid::TooLong`. `Path::head(n)` returns the path's first `n` segments.
+`Path::from_escaped` is gone, and `path::TooLong` is `path::Error::TooLong`. `Path::head(n)` returns the path's first `n` segments.
 moq-lite decoding refuses a path with an empty segment as a protocol violation, and moq-transport decoding refuses a namespace field ending in `/`, which escapes to one.
 
 ### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
@@ -45,8 +88,8 @@ There is one owned `Path` type: a short path is stored inline and a long one sha
 
 - `PathOwned`, `Path<'a>`, and `Path<'static>` are all `Path`; `RelativeOwned` and `Relative<'a>` are `Relative`.
 - `Path::{to_owned, into_owned, borrow}` and the `Relative` equivalents are gone: drop the call, or `clone()` a `&Path` you need to keep.
-- `Path::new`, `Relative::new`, `Path::join`, and `Path::resolve` return `Result<_, path::Invalid>`, failing on a path longer than `Path::MAX_BYTES`. `Path::new` copies its argument; use `Path::from_static("room")` for a literal, which borrows it and panics if it is too long.
-- `From<&str>`, `From<&String>`, and `From<String>` for `Path` and `Relative` are `TryFrom`, with `path::Invalid` as the error.
+- `Path::new`, `Relative::new`, `Path::join`, and `Path::resolve` return `Result<_, path::Error>`, failing on a path longer than `Path::MAX_BYTES`. `Path::new` copies its argument; use `Path::from_static("room")` for a literal, which borrows it and panics if it is too long.
+- `From<&str>`, `From<&String>`, and `From<String>` for `Path` and `Relative` are `TryFrom`, with `path::Error` as the error.
 - `AsPath` is gone. Origin entry points such as `publish`, `create_broadcast`, `scope`, `mount`, and `routed` take `impl TryInto<Path, Error: Into<Error>>`, so `&str`, `String`, `Path`, and `&Path` still work and a too-long string fails with `Error::BoundsExceeded`. Other functions that took `impl AsPath`, such as `stats::Tier::new`, take `impl Into<Path>`: pass a `Path` or `&Path`.
 - `origin::{Producer, Consumer}::absolute` and `announce::Consumer::absolute` return `Result<Path, Error>`.
 - `Path::{has_prefix, strip_prefix, join, relative}` take `&Path`: write `path.has_prefix(&Path::from_static("room"))`.
@@ -261,8 +304,8 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 
 ### A claim answers by publishing (#5678)
 
-`origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
+`origin::Producer::dynamic(prefix)` takes no route: an application claim has no instance, cost, or hops.
+Answer each `origin::Request` with `request.prepare()?`, fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under a fresh instance of its own and returns its producer.
 Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
 `Request::accept`, `Producer::dynamic_route`, and `Dynamic::update_route` are crate-private (#6496): only the built-in sessions answer with a broadcast they already hold.
@@ -368,8 +411,8 @@ let rate = bandwidth.as_ref().and_then(|b| b.peek());
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, fails with `TimestampMismatch`; `@moq/net` throws it the same way.
 A group received over moq-lite-07 is checked the same way.
-A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of `frame::Frame::timestamp`.
-One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
+A track received over moq-lite-05/06 keeps its timestamps unchecked, since they may be an untimed origin's send times, and so does one received over moq-transport.
+A relay serves both on over every version, where a moq-lite-07 receiver checks them and may refuse a group that rewinds.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
 ### Broadcast `finish` is gone
@@ -452,13 +495,13 @@ Pick the start sequence yourself with `create_group(group::Info { sequence })`, 
 `announce::Consumer` yields `announce::Event`, carrying an `announce::Announce { prefix, captures, route }`.
 `announce::Update` and `announce::Kind` are gone.
 `Restart` means another publisher instance now serves the prefix: request the path again.
-A newer epoch no longer ends open subscriptions with `Unroutable`; they stay on the old instance until dropped or its route goes.
+Another instance winning the path no longer ends open subscriptions with `Unroutable`; they stay on the old instance until dropped or its last route goes.
 
 ```rust
 while let Some(event) = announced.next().await {
 	match event {
 		announce::Event::Start(a) | announce::Event::Restart(a) => {
-			let broadcast = origin.request_broadcast(&a.prefix, a.route.epoch).await?;
+			let broadcast = origin.request(&a.prefix, a.route.instance.clone()).await?;
 		}
 		announce::Event::Update(_) => {}
 		announce::Event::End(_) => {}
@@ -466,16 +509,18 @@ while let Some(event) = announced.next().await {
 }
 ```
 
-### Routes carry the publisher epoch (#4942)
+### Routes carry an instance and a per-instance epoch (#4942, [#7489](https://github.com/moq-dev/moq/pull/7489))
 
-An epoch is a property of the route, not the path.
-`Path::join_epoch` and `Path::split_epoch` are gone; publish the plain path with `route.with_epoch(epoch)` and read `Route::epoch`.
-Nothing mints an epoch by default, and a route without one does not resume across routes.
+Every route carries an `Instance`: non-empty text naming one continuous run of group numbers at its path, like a cloud instance ID that survives a reboot.
+Every broadcast mints a random one when it is created and keeps it across withdraw, re-announce, and reconnect, so most publishers set nothing.
+A publisher that continues its group sequences across restarts may name a stable one with `Route::with_instance(instance, epoch)`, raising `epoch` on each run; within one instance only the highest epoch is eligible.
+Read `Route::instance` and `broadcast::Info::instance`; the epoch is never readable.
+A session of moq-lite 06 or older, or moq-transport, mints an instance starting with `~` for each announcement (`Instance::is_minted`).
 
-### `request_broadcast` takes an epoch
+### `request` and `follow` take an instance
 
-Pass `None` to accept any publisher instance, or an `Epoch` to refuse every other one.
-A dynamic route updated to another epoch refuses the requests its handler still holds with `Unroutable`.
+Pass `None` to accept whichever instance wins the path, or an `Instance` to refuse every other one.
+A route updated to another instance refuses the requests its handler still holds with `Unroutable`.
 
 ### Demand is read through `demand()`
 

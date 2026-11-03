@@ -81,6 +81,10 @@ pub struct Client {
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Client>,
+	/// The settings each qmux dial starts from: the `[quic]` windows and stream count, so a
+	/// qmux session takes the same per-session numbers as a QUIC one.
+	#[cfg(any(feature = "websocket", feature = "tcp"))]
+	qmux: qmux::Config,
 	#[cfg(feature = "iroh")]
 	iroh: Option<crate::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
@@ -130,6 +134,8 @@ impl Client {
 		#[cfg(any(feature = "quic", feature = "websocket"))]
 		let tls = config.tls.build()?;
 
+		#[cfg(any(feature = "websocket", feature = "tcp"))]
+		let qmux = crate::qmux_config(&quic.resolve());
 		#[cfg(feature = "quic")]
 		let quic = Some(crate::quic::Client::new(&config, &quic)?);
 
@@ -178,6 +184,8 @@ impl Client {
 			tls,
 			#[cfg(feature = "quic")]
 			quic,
+			#[cfg(any(feature = "websocket", feature = "tcp"))]
+			qmux,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 			#[cfg(feature = "iroh")]
@@ -349,13 +357,14 @@ impl Client {
 				let config = opened.config;
 				let session = qmux::Session::connect(opened.channel, config)
 					.await
+					.map(crate::spawn_qmux)
 					.map_err(crate::webrtc::Error::from)?;
 				Ok::<_, Error>(connect_session(&self.moq, session).await?)
 			};
 
 			let session = match self.timeout.is_zero() {
 				true => attempt.await?,
-				false => moq_clock::timeout(self.timeout, attempt)
+				false => kio::clock::timeout(self.timeout, attempt)
 					.await
 					.map_err(|_| Error::ConnectTimeout(self.timeout))??,
 			};
@@ -427,7 +436,7 @@ impl Client {
 		// arm was still pending.
 		let dialed = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => match moq_clock::timeout(self.timeout, attempt).await {
+			false => match kio::clock::timeout(self.timeout, attempt).await {
 				Ok(res) => res?,
 				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
 			},
@@ -454,8 +463,14 @@ impl Client {
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
-			let session =
-				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
+			let session = crate::tcp::connect(
+				url,
+				&self.versions.alpns(),
+				&self.qmux,
+				self.failover_delay,
+				self.resolution_delay,
+			)
+			.await?;
 			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
@@ -467,6 +482,7 @@ impl Client {
 				url,
 				&self.versions.alpns(),
 				&self.tcp_tls,
+				&self.qmux,
 				self.failover_delay,
 				self.resolution_delay,
 			)
@@ -479,7 +495,7 @@ impl Client {
 		// authenticate us by uid/gid via SO_PEERCRED.
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
-			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
+			let session = crate::unix::connect(url, &self.versions.alpns(), &self.qmux).await?;
 			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Unix));
 		}
@@ -541,8 +557,15 @@ impl Client {
 	#[cfg(feature = "websocket")]
 	async fn connect_websocket(&self, moq: &moq_net::Client, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let alpns = self.versions.alpns();
-		let session =
-			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
+		let session = crate::websocket::connect(
+			&self.websocket,
+			&self.tls,
+			self.tls_host_name.as_deref(),
+			addr,
+			&alpns,
+			&self.qmux,
+		)
+		.await?;
 		let session = connect_session(moq, session).await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
@@ -569,10 +592,18 @@ impl Client {
 		let ws_config = self.websocket.clone();
 		let ws_tls = self.tls.clone();
 		let ws_tls_host_name = self.tls_host_name.clone();
+		let ws_session = self.qmux.clone();
 		let websocket = async move {
-			crate::websocket::race_handle(&ws_config, &ws_tls, ws_tls_host_name.as_deref(), addr, &alpns)
-				.await
-				.map(|res| res.map_err(Error::from))
+			crate::websocket::race_handle(
+				&ws_config,
+				&ws_tls,
+				ws_tls_host_name.as_deref(),
+				addr,
+				&alpns,
+				&ws_session,
+			)
+			.await
+			.map(|res| res.map_err(Error::from))
 		};
 
 		match race_transport_connect(&url, quic, websocket).await? {
@@ -713,7 +744,6 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1105,7 +1135,7 @@ mod tests {
 				.map_err(Error::from)
 		});
 
-		let dialed = tokio::time::timeout(
+		let dialed = kio::clock::timeout(
 			std::time::Duration::from_secs(10),
 			client.race_moq_connect(&client.moq, ws_addr, quic),
 		)
@@ -1358,7 +1388,7 @@ mod tests {
 		let quic = async { Ok("quic") };
 		let websocket = std::future::pending::<Option<crate::Result<&str>>>();
 
-		let value = tokio::time::timeout(
+		let value = kio::clock::timeout(
 			std::time::Duration::from_secs(1),
 			super::race_transport_connect(&race_url(), quic, websocket),
 		)

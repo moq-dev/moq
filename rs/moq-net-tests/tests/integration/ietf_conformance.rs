@@ -29,7 +29,7 @@ async fn routing(version: &str, cluster: bool) {
 	let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
 	let serving = prefix.clone();
 	let answer = broadcast.consume();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		let request = serving.requested_broadcast().await.unwrap();
 		assert_eq!(request.path().as_str(), NAMESPACE);
 		moq_net::fuzz::accept(request, answer);
@@ -79,14 +79,14 @@ async fn routing(version: &str, cluster: bool) {
 	drop((links, prefix, broadcast, track));
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn conformance_namespaces_route_through_one_relay() {
 	for version in ["moq-transport-18"] {
 		routing(version, false).await;
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn conformance_namespaces_route_through_a_lite_cluster() {
 	for version in ["moq-transport-18"] {
 		routing(version, true).await;

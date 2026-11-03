@@ -1,4 +1,4 @@
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -244,8 +244,8 @@ async fn produce(
 
 	let zeros = Bytes::from(vec![0u8; rolled.frame_size as usize]);
 	let period = Duration::from_secs_f64(1.0 / rolled.fps as f64);
-	let mut ticker = moq_clock::interval(period);
-	ticker.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
+	let mut ticker = kio::clock::interval(period);
+	ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
 
 	let mut sequence = 0u64;
 	loop {
@@ -262,7 +262,7 @@ async fn produce(
 			group_size: rolled.group_size,
 			broadcasts: rolled.broadcasts,
 			subscribe: rolled.subscribe,
-			timestamp_ms: moq_clock::wall()
+			timestamp_ms: kio::clock::wall()
 				.saturating_duration_since(Wall::UNIX_EPOCH)
 				.as_millis(),
 			pad: String::new(),
@@ -346,7 +346,7 @@ async fn subscribe(
 	let mut eligible = 0;
 
 	// Gather candidates until the startup window closes (or the announce stream ends).
-	let deadline = moq_clock::sleep(startup);
+	let deadline = kio::clock::sleep(startup);
 	tokio::pin!(deadline);
 	loop {
 		tokio::select! {
@@ -359,7 +359,7 @@ async fn subscribe(
 					Some(
 						moq_net::announce::Event::Start(update)
 						| moq_net::announce::Event::Update(update)
-						| moq_net::announce::Event::Restart(update),
+						| moq_net::announce::Event::Restart(update) | moq_net::announce::Event::Takeover { announce: update, .. },
 					) => update,
 					Some(moq_net::announce::Event::End(_)) => continue,
 					None => break,
@@ -389,7 +389,8 @@ async fn subscribe(
 			Some(
 				moq_net::announce::Event::Start(update)
 				| moq_net::announce::Event::Update(update)
-				| moq_net::announce::Event::Restart(update),
+				| moq_net::announce::Event::Restart(update)
+				| moq_net::announce::Event::Takeover { announce: update, .. },
 			) => update,
 			Some(moq_net::announce::Event::End(_)) => continue,
 			None => break,
@@ -453,7 +454,7 @@ fn spawn_drain(
 async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
-	let subscription = track::Subscription::default().with_max_delay(max_delay);
+	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(max_delay));
 	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?;
 	let mut gaps = GapTracker::new(stats);
 	let mut learned_shape = false;
@@ -672,11 +673,6 @@ impl Drop for Gauge<'_> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -764,6 +760,11 @@ mod tests {
 	/// Sweep connection count and the broadcast fan-out touched by connection establishment.
 	#[test]
 	#[ignore = "benchmark, run nightly"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real establishment time"
+	)]
 	fn benchmark_readiness_establishment() {
 		for connections in [1, 16, 128] {
 			for broadcasts in [1, 16, 128] {
@@ -823,7 +824,7 @@ mod tests {
 	}
 
 	fn replay() -> track::Subscription {
-		track::Subscription::default().with_max_delay(Duration::from_secs(30))
+		track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
 	}
 
 	/// A produced group must start with the JSON keyframe describing the rolled

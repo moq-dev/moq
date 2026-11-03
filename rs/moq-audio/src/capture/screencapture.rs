@@ -124,7 +124,7 @@ impl SystemAudio {
 			_dispatch: dispatch,
 		};
 
-		let pending = match moq_clock::timeout(FIRST_BUFFER_TIMEOUT, rx.recv()).await {
+		let pending = match kio::clock::timeout(FIRST_BUFFER_TIMEOUT, rx.recv()).await {
 			Ok(Some(buffer)) => buffer,
 			Ok(None) => {
 				return Err(Error::Capture("system audio stopped before any samples".into()));
@@ -352,7 +352,7 @@ async fn shareable_content() -> Result<Retained<SCShareableContent>, Error> {
 	});
 	unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
 
-	match moq_clock::timeout(ASYNC_TIMEOUT, rx).await {
+	match kio::clock::timeout(ASYNC_TIMEOUT, rx).await {
 		Ok(Ok(Ok(content))) => Ok(content.0),
 		Ok(Ok(Err(msg))) => Err(Error::Capture(format!("shareable content: {msg}"))),
 		Ok(Err(_)) => Err(Error::Capture("shareable content handler dropped".into())),
@@ -374,7 +374,7 @@ async fn start_capture(stream: &SCStream) -> Result<(), Error> {
 	});
 	unsafe { stream.startCaptureWithCompletionHandler(Some(&handler)) };
 
-	match moq_clock::timeout(ASYNC_TIMEOUT, rx).await {
+	match kio::clock::timeout(ASYNC_TIMEOUT, rx).await {
 		Ok(Ok(None)) => Ok(()),
 		Ok(Ok(Some(msg))) => Err(Error::Capture(format!("start system audio: {msg}"))),
 		Ok(Err(_)) => Err(Error::Capture("start-capture handler dropped".into())),

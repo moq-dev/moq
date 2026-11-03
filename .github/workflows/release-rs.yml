@@ -57,12 +57,16 @@ jobs:
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          # Only what release-plz needs: push the release branch and tags, and open the PR.
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          token: ${{ steps.generate-token.outputs.token }}
+          # release-plz pushes the release branch and tags with this credential.
+          token: ${{ steps.generate-token.outputs.token }} # zizmor: ignore[artipacked]
 
       # Install Nix for system dependencies (e.g. ffmpeg).
       - uses: ./.github/actions/nix

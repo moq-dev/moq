@@ -62,6 +62,13 @@ macro_rules! apply_params {
 			max_ack_delay(MaxAckDelay) = 25,
 			/// Maximum number of connection IDs from the peer that an endpoint is willing to store
 			active_connection_id_limit(ActiveConnectionIdLimit) = 2,
+
+			/// The most receive timestamps the endpoint wants in each ACK_RECEIVE_TIMESTAMPS frame,
+			/// with zero refusing the frame entirely
+			max_receive_timestamps_per_ack(MaxReceiveTimestampsPerAck) = 0,
+			/// Exponent used to decode the timestamp deltas in ACK_RECEIVE_TIMESTAMPS frames the
+			/// peer sends, with zero meaning microseconds
+			receive_timestamps_exponent(ReceiveTimestampsExponent) = 0,
 		}
 	};
 }
@@ -180,6 +187,7 @@ impl TransportParameters {
 			grease_quic_bit: endpoint_config.grease_quic_bit,
 			min_ack_delay: Some(VarInt::from_u64(u64::try_from(TIMER_GRANULARITY.as_micros()).unwrap()).unwrap()),
 			reset_stream_at: config.reset_stream_at,
+			max_receive_timestamps_per_ack: config.receive_timestamps.map_or(VarInt(0), |max| max.get().into()),
 			grease_transport_parameter: Some(ReservedTransportParameter::random(rng)),
 			write_order: Some({
 				let mut order = std::array::from_fn(|i| i as u8);
@@ -507,6 +515,9 @@ impl TransportParameters {
 
 		// https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.26.1
 		if params.ack_delay_exponent.0 > 20
+            // https://www.ietf.org/archive/id/draft-ietf-quic-receive-ts-03.html#section-6, which
+            // ignores the exponent without a maximum
+            || (params.max_receive_timestamps_per_ack.0 != 0 && params.receive_timestamps_exponent.0 > 20)
             // https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.28.1
             || params.max_ack_delay.0 >= 1 << 14
             // https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-6.2.1
@@ -644,11 +655,15 @@ pub(crate) enum TransportParameterId {
 
 	// https://datatracker.ietf.org/doc/html/draft-ietf-quic-ack-frequency#section-10.1
 	MinAckDelayDraft07 = 0xFF04DE1B,
+
+	// https://www.ietf.org/archive/id/draft-ietf-quic-receive-ts-03.html#section-6
+	MaxReceiveTimestampsPerAck = 0x4AC07,
+	ReceiveTimestampsExponent = 0x4AC26,
 }
 
 impl TransportParameterId {
 	/// Array with all supported transport parameter IDs
-	const SUPPORTED: [Self; 22] = [
+	const SUPPORTED: [Self; 24] = [
 		Self::MaxIdleTimeout,
 		Self::MaxUdpPayloadSize,
 		Self::InitialMaxData,
@@ -671,6 +686,8 @@ impl TransportParameterId {
 		Self::GreaseQuicBit,
 		Self::MinAckDelayDraft07,
 		Self::ResetStreamAt,
+		Self::MaxReceiveTimestampsPerAck,
+		Self::ReceiveTimestampsExponent,
 	];
 }
 
@@ -707,6 +724,8 @@ impl TryFrom<u64> for TransportParameterId {
 			id if Self::GreaseQuicBit == id => Self::GreaseQuicBit,
 			id if Self::MinAckDelayDraft07 == id => Self::MinAckDelayDraft07,
 			id if Self::ResetStreamAt == id => Self::ResetStreamAt,
+			id if Self::MaxReceiveTimestampsPerAck == id => Self::MaxReceiveTimestampsPerAck,
+			id if Self::ReceiveTimestampsExponent == id => Self::ReceiveTimestampsExponent,
 			_ => return Err(()),
 		};
 		Ok(param)
@@ -749,6 +768,8 @@ mod test {
 			grease_quic_bit: true,
 			min_ack_delay: Some(2_000u32.into()),
 			reset_stream_at: true,
+			max_receive_timestamps_per_ack: 32u32.into(),
+			receive_timestamps_exponent: 3u32.into(),
 			..TransportParameters::default()
 		};
 		params.write(&mut buf);

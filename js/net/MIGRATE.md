@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Subscription.maxDelay` is `delay: Track.Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
+
+`Track.Subscription` carries a `delay: Track.Delay` (`{ min?: Milli | null; max?: Milli | null }`) in place of `maxDelay`, which is now refused at runtime.
+Replace `maxDelay: d` with `delay: { max: d }`. `max` keeps `maxDelay`'s meaning, and an omitted field is zero.
+`min` is the subscriber's target latency; `null` means not stated, which only a peer on moq-lite before 07 or moq-transport sends. moq-lite-07 SUBSCRIBE and SUBSCRIBE\_UPDATE carry it, and a track's aggregate takes the smallest stated one.
+`FetchGroupOptions.maxDelay` is unchanged.
+
+### Ordered subscriptions wait for owed groups
+
+An ordered reader on a subscribed track now waits at a missing group while the feed may still deliver it, up to `delay.max` by media time or wall clock. Local tracks still skip gaps, and the zero default waits for nothing.
+With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. Publisher retention still bounds the budget.
+
+### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
+
+A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
+
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
 `Path.MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and an origin refuses a longer one. Keep broadcast paths within 4096 bytes.
@@ -53,7 +69,7 @@ Closing `publication.broadcast` still retracts and ends the broadcast. Keeping o
 const publication = origin.createBroadcast(path);
 const broadcast = publication.broadcast;
 broadcast.createTrack("data");
-publication.announce({ epoch: Epoch.mint() });
+publication.announce();
 ```
 
 ### `Varint.sizeLeadingOnes` is gone
@@ -96,8 +112,8 @@ Treat a rejected group read as the loss of that group and keep reading the track
 
 ### A claim answers by publishing (#5678)
 
-`Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `Origin.Request` with `using prepared = request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its publication handle.
+`Origin.Producer.dynamic(prefix)` takes no route: an application claim has no instance, cost, or hops.
+Answer each `Origin.Request` with `using prepared = request.prepare()`, fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under a fresh instance of its own and returns its publication handle.
 Only `publish` announces it: `prepared.broadcast` has no announcement methods.
 `Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
 Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
@@ -148,8 +164,8 @@ A new group or datagram raises it at frame 0 before any frame lands, and it can 
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.
 A group received over moq-lite-07 is checked the same way.
-A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of the frame's `timestamp`.
-One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
+A track received over moq-lite-05/06 keeps its timestamps unchecked, since they may be an untimed origin's send times, and so does one received over moq-transport.
+A relay serves both on over every version, where a moq-lite-07 receiver checks them and may refuse a group that rewinds.
 A publisher whose timeline restarts publishes a new broadcast instead.
 
 ### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)
@@ -174,7 +190,7 @@ Import them from `@moq/clock`, which throws on negative or non-finite values.
 ### Announced requests follow restarts, and `broadcasts()` is gone
 
 An unpinned `request(path, { announced: true })` stays open across publisher instances: its `active` moves to each new instance's broadcast and clears between them, instead of ending with `Unroutable`.
-Read `active` reactively and close the request when done, or pass `epoch` to keep the old single-instance behavior.
+Read `active` reactively and close the request when done, or pass `instance` to keep the old single-instance behavior.
 `Origin.Producer` and `Origin.Consumer` drop `broadcasts(scope)`; iterate `announced(scope)` instead.
 
 ```ts
@@ -197,11 +213,11 @@ Drop the option.
 Replace `Announce.isActive` with a check on `event.kind`: skip `"end"`, and treat `"start"` and `"restart"` as active.
 A `"restart"` means another publisher instance now serves the prefix: request the path again.
 
-### Routes carry the publisher epoch (#4942)
+### Routes carry an instance and a per-instance epoch (#4942, [#7489](https://github.com/moq-dev/moq/pull/7489))
 
-`Path.joinEpoch` and `Path.splitEpoch` are gone.
-Set the epoch on the route with `announce({ epoch })` and read `Route.epoch`; pin a request to one instance with `RequestOptions.epoch`.
-Nothing mints an epoch by default.
+Every route carries an `Instance`: non-empty text naming one continuous run of group numbers at its path. Every broadcast mints a random one and keeps it across re-announcing, so most publishers set nothing.
+A publisher that continues its group sequences across restarts may name a stable one with `announce({ instance, epoch })`, raising `epoch` on each run.
+Read `Route.instance` and `Broadcast.Consumer.instance`; pin a request or follow to one with `request(path, { instance })`.
 
 ### Publishing never invents a timestamp (#5070)
 

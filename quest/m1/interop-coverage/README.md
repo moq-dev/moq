@@ -5,7 +5,7 @@
 The moq-transport features moq-net exposes with the most interop bug
 history have cross-implementation tests: Rust, JS, and the bindings exchange
 hang media and exercise subgroup data, namespace discovery, late joins,
-FETCH, GOAWAY, TRACK_STATUS, and datagrams over drafts 18 and 22. Our
+FETCH, GOAWAY, TRACK_STATUS, and datagrams over drafts 18, 20, and 22. Our
 upstream runner clients implement the runner's existing cases for those
 features.
 
@@ -26,6 +26,11 @@ Boundaries:
 
 ## Plan
 
+Decided 2026-11-02 (maintainer, follow-up planning after the 2026-11-02 /quest-complete run): draft 20 joins the covered drafts, since it came back in
+[moq-dev/moq#7190](https://github.com/moq-dev/moq/pull/7190) and every published moq-dev client and relay already offers it (verified on
+[moq-dev/moq#6972](https://github.com/moq-dev/moq/pull/6972)). Where this Plan says drafts 18 and 22, read 18, 20, and 22.
+
+
 Decided with the maintainer on 2026-10-21, from an inventory of the
 coverage on `main` at `3ab6cbf81d`.
 
@@ -44,9 +49,7 @@ coverage on `main` at `3ab6cbf81d`.
 
 ## Required
 
-- [JS namespace lifecycle](/quest/m1/interop-coverage/js-namespace-done.md) - the runner's moq-dev-js client moves to an `@moq/net` that withdraws namespaces by reset, so subscribe-namespace-lifecycle passes on Cloudflare draft-18 and aiomoqt
-- [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md) - the runner's moq-dev-js client moves to an `@moq/net` patch that writes data stream headers in one write, so data-subgroup-basic passes against imquic
-- [JS subscribers FETCH](/quest/m1/interop-coverage/js-ietf-fetch.md) - `@moq/net` fetches past groups and recovers a mid-group join over moq-transport, and joins the CLI FETCH round
+- [JS subscribers FETCH](/quest/m1/interop-coverage/js-ietf-fetch.md) - `@moq/net` fetches past groups over moq-transport, and joins the CLI FETCH round
 
 ## Related
 

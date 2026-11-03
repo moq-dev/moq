@@ -67,9 +67,17 @@ pub struct Export<S: Stream> {
 	max_delay: Duration,
 	fragment_duration: Option<Duration>,
 
-	/// Every track by rendition name. Before the init a rendition that leaves the catalog
-	/// is dropped; after it, the track stays so a returning rendition reuses its id.
+	/// The tracks being read, by rendition name. Before the init a rendition that leaves the
+	/// catalog is dropped; after it, the track moves to `departed` once written out.
 	tracks: HashMap<String, Fmp4Track>,
+
+	/// Renditions that left the catalog after the init, kept out of the polled set so one
+	/// returning reuses its track. A late rendition that wrote nothing is dropped instead,
+	/// so a publisher cycling names holds only what it recorded.
+	departed: HashMap<String, Fmp4Track>,
+
+	/// The first track id the init segment does not declare.
+	first_late_id: u32,
 
 	/// Fragments cut before the init segment, written right after it in the order they
 	/// were cut.
@@ -77,6 +85,13 @@ pub struct Export<S: Stream> {
 
 	/// Set after the init segment has been emitted, which fixes the track set.
 	init_emitted: bool,
+
+	/// Keep a rendition that joins after the init segment instead of failing, for a writer
+	/// that declares it elsewhere. Its fragments carry a track id the init never declared.
+	late: bool,
+
+	/// Set by [`stop`](Self::stop), after which nothing more is read.
+	stopped: bool,
 
 	/// The `tkhd.track_id` the next new rendition gets.
 	next_track_id: u32,
@@ -184,6 +199,18 @@ impl Rendition {
 		matches!(self, Rendition::Video(_))
 	}
 
+	/// Whether frames may present out of decode order: what the catalog's `reorder` declares,
+	/// else whatever the codec allows.
+	fn may_reorder(&self) -> bool {
+		match self {
+			Rendition::Video(config) => match config.reorder {
+				Some(depth) => depth > 0,
+				None => crate::codec::video::max_reorder(config) > 0,
+			},
+			Rendition::Audio(_) => false,
+		}
+	}
+
 	/// Fallback duration for a trailing frame that carries no per-sample duration.
 	fn default_frame(&self) -> Duration {
 		match self {
@@ -254,6 +281,14 @@ struct Fmp4Track {
 	/// instead of writing the track's history twice.
 	written: Option<Duration>,
 
+	/// Where the last written fragment's decode timeline ended, in ticks at `timescale`.
+	///
+	/// A fragment cut inside a GOP continues from here rather than anchoring at its first
+	/// frame's presentation time: with reordered video that frame is often a reference
+	/// presented after the B-frames decoded next, so its presentation time would put the
+	/// fragment's `tfdt` ahead of the one that follows.
+	decode_end: Option<u64>,
+
 	/// The first presentation time read before the init segment, which bounds how much
 	/// media queues behind it.
 	backlog: Option<Duration>,
@@ -285,6 +320,7 @@ impl Fmp4Track {
 			resume: None,
 			group_finished: false,
 			written: None,
+			decode_end: None,
 			backlog: None,
 			track_id,
 			timescale,
@@ -481,8 +517,12 @@ impl<S: Stream> Export<S> {
 			max_delay: Duration::ZERO,
 			fragment_duration: None,
 			tracks: HashMap::new(),
+			departed: HashMap::new(),
+			first_late_id: u32::MAX,
 			queued: VecDeque::new(),
 			init_emitted: false,
+			late: false,
+			stopped: false,
 			next_track_id: 1,
 			sequence_number: 1,
 		}
@@ -509,11 +549,52 @@ impl<S: Stream> Export<S> {
 	/// marker; audio and samples with explicit durations remain immediate. Otherwise
 	/// the cap applies in addition to the group boundary.
 	///
+	/// A fragment cut inside a GOP continues the decode timeline where the previous one
+	/// ended, so B-frame video keeps increasing decode times. Such a fragment cannot see
+	/// the reordering around it, so unless the catalog declares `reorder: 0` (or the codec
+	/// never reorders), a video sample with unknown duration lasts no longer than the
+	/// catalog frame rate's cadence.
+	///
 	/// Accepts either `Duration` or `Option<Duration>` (where `None` restores
 	/// the per-group default).
 	pub fn with_fragment_duration(mut self, duration: impl Into<Option<Duration>>) -> Self {
 		self.fragment_duration = duration.into();
 		self
+	}
+
+	/// Keep renditions that join after the init segment, whose fragments then carry track
+	/// ids the init does not declare. See [`declaration`](Self::declaration).
+	pub(crate) fn with_late_tracks(mut self) -> Self {
+		self.late = true;
+		self
+	}
+
+	/// Stop reading the broadcast. The export still writes out the media it read, the
+	/// fragment each track was buffering included, then ends.
+	///
+	/// Stopping before the init segment could be written ends the export without writing.
+	pub(crate) fn stop(&mut self) {
+		self.catalog = None;
+		for track in self.tracks.values_mut() {
+			track.source = None;
+			track.finished = true;
+		}
+		self.stopped = true;
+	}
+
+	/// The `trak` and `trex` declaring `track_id`, once the track could be described.
+	pub(crate) fn declaration(&self, track_id: u32) -> Option<(&mp4_atom::Trak, &mp4_atom::Trex)> {
+		self.declarations()
+			.find(|(id, _, _)| *id == track_id)
+			.map(|(_, trak, trex)| (trak, trex))
+	}
+
+	/// Every track id with its `trak` and `trex`, the tracks being read first.
+	pub(crate) fn declarations(&self) -> impl Iterator<Item = (u32, &mp4_atom::Trak, &mp4_atom::Trex)> {
+		self.tracks.values().chain(self.departed.values()).filter_map(|track| {
+			let declaration = track.declaration.as_ref()?;
+			Some((track.track_id, &declaration.trak, &declaration.trex))
+		})
 	}
 
 	/// Get the next byte chunk.
@@ -626,11 +707,12 @@ impl<S: Stream> Export<S> {
 				if self.init_ready() {
 					let init = self.build_init()?;
 					self.init_emitted = true;
+					self.first_late_id = self.next_track_id;
 					return Poll::Ready(Ok(Some(Chunk::Init(init))));
 				}
 				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
 					// Media was read but can't be written without every track's description.
-					if !self.queued.is_empty() {
+					if !self.queued.is_empty() && !self.stopped {
 						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
 					}
 					return Poll::Ready(Ok(None));
@@ -785,7 +867,8 @@ impl<S: Stream> Export<S> {
 			.iter()
 			.filter(|(_, track)| {
 				!track.buffer.is_empty()
-					&& (track.finished
+					// A stopped track's pending frame joins its buffer first.
+					&& ((track.finished && track.pending.is_none())
 						|| track.group_finished
 						|| (self.fragment_duration == Some(Duration::ZERO)
 							&& track.buffer.last().is_some_and(|frame| frame.duration.is_some())))
@@ -827,6 +910,11 @@ impl<S: Stream> Export<S> {
 			if active.contains(&name) {
 				continue;
 			}
+			if !self.tracks.contains_key(&name)
+				&& let Some(track) = self.departed.remove(&name)
+			{
+				self.tracks.insert(name.clone(), track);
+			}
 			let moved = self
 				.tracks
 				.get(&name)
@@ -864,7 +952,7 @@ impl<S: Stream> Export<S> {
 					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
 						continue;
 					};
-					if self.init_emitted {
+					if self.init_emitted && !self.late {
 						return Err(Error::TrackAdded(name).into());
 					}
 					let mut track = Fmp4Track::new(source, config, self.next_track_id)?;
@@ -886,6 +974,15 @@ impl<S: Stream> Export<S> {
 					track.resume = Some(source.resume());
 					track.finished = true;
 					track.described = false;
+				}
+			}
+			// A departed track still holding media waits for the next catalog to move.
+			let drained = self
+				.tracks
+				.extract_if(|_, track| track.source.is_none() && track.pending.is_none() && track.buffer.is_empty());
+			for (name, track) in drained {
+				if track.written.is_some() || track.track_id < self.first_late_id {
+					self.departed.insert(name, track);
 				}
 			}
 		} else {
@@ -1003,24 +1100,39 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 
 /// Encode a buffered run of samples as a single CMAF moof+mdat fragment,
 /// consuming the next `mfhd` sequence number of the file.
-fn encode_fragment(track: &Fmp4Track, sequence_number: &mut u32, frames: Vec<Frame>) -> Result<Bytes> {
-	if frames.is_empty() {
+///
+/// A run that opens a GOP (and every audio run) anchors its `tfdt` at its first frame's
+/// presentation time, which re-syncs the decode timeline after a gap the durations did not
+/// cover. A run cut inside a GOP continues the timeline where the track's previous fragment
+/// ended, so decode times never step back however the GOP is reordered.
+fn encode_fragment(
+	track: &mut Fmp4Track,
+	sequence_number: &mut u32,
+	frames: Vec<Frame>,
+	opens_gop: bool,
+) -> Result<Bytes> {
+	let Some(first) = frames.first() else {
 		return Err(Error::NoFrames.into());
-	}
-	let seq = *sequence_number;
-	*sequence_number += 1;
+	};
 	let timescale = moq_net::Timescale::new(track.timescale)?;
+	let base_dts = match track.decode_end {
+		Some(end) if !opens_gop => end,
+		_ => super::base_ticks(first, timescale)?,
+	};
 	let info = crate::container::fmp4::FragmentInfo {
 		track_id: track.track_id,
 		timescale,
-		sequence_number: seq,
+		sequence_number: *sequence_number,
 		kind: if track.is_video {
 			super::Kind::Video
 		} else {
 			super::Kind::Audio
 		},
 	};
-	Ok(crate::container::fmp4::encode_fragment(info, &frames)?)
+	let (data, decode_end) = super::encode_at(info, base_dts, &frames)?;
+	*sequence_number += 1;
+	track.decode_end = Some(decode_end);
+	Ok(data)
 }
 
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
@@ -1053,9 +1165,16 @@ fn emit_fragment(
 	let latest = frames.iter().map(|frame| Duration::from(frame.timestamp)).max();
 	track.written = track.written.max(latest);
 	let timescale = moq_net::Timescale::new(track.timescale)?;
-	infer_missing_durations(&mut frames, successor, track.default_frame, timescale)?;
+	// A run that starts or ends inside a GOP sees only part of its reordering.
+	let partial = !track.buffer_independent || successor.is_some_and(|next| !next.keyframe);
+	let run = if partial && track.config.may_reorder() {
+		Run::PartialGop
+	} else {
+		Run::Whole
+	};
+	infer_missing_durations(&mut frames, successor, track.default_frame, timescale, run)?;
 	let duration = fragment_duration(&frames, track.default_frame, timescale)?;
-	let data = encode_fragment(track, sequence_number, frames)?;
+	let data = encode_fragment(track, sequence_number, frames, independent)?;
 	Ok(Fragment {
 		data,
 		independent,
@@ -1134,23 +1253,51 @@ pub(crate) fn apply_codec_durations(frames: &mut [Frame], opus: bool) {
 /// The publisher is the one that actually knows where its group's content ends, and
 /// [`Producer::cut`](crate::container::Producer::cut) is how it says so: the durations it
 /// writes arrive already set and are left alone here.
+///
+/// Frames arrive in decode order, so a gap is a decode duration only when presentation order
+/// matches it. A run whose timestamps go backwards is reordered video, and every frame takes
+/// the catalog cadence. A [`Run::PartialGop`] cannot rule reordering out from its own frames,
+/// since the B-frames that would reveal it may sit in a neighbouring run, so no gap there may
+/// exceed the cadence: in reordered video the gap to the next frame decoded spans the frames
+/// decoded after it, and a longer duration would push the decode timeline past the next GOP.
 pub(crate) fn infer_missing_durations(
 	frames: &mut [Frame],
 	successor: Option<&Frame>,
 	default_frame: Duration,
 	timescale: moq_net::Timescale,
+	run: Run,
 ) -> Result<()> {
 	let infer_from_pts = pts_monotonic(frames, successor);
+	let cadence = fallback_duration(default_frame, timescale);
 
 	for i in 0..frames.len() {
 		let successor = infer_from_pts
 			.then(|| duration_bound(frames, successor, i))
 			.flatten()
 			.cloned();
+		let stated = frames[i].duration.is_some_and(|duration| !duration.is_zero());
 		infer_missing_duration(&mut frames[i], successor.as_ref(), default_frame, timescale)?;
+		if run == Run::PartialGop
+			&& !stated
+			&& let (Some(inferred), Some(cadence)) = (frames[i].duration, cadence)
+			&& Duration::from(inferred) > Duration::from(cadence)
+		{
+			frames[i].duration = Some(cadence);
+		}
 	}
 
 	Ok(())
+}
+
+/// How much of its reordering a run of frames passed to [`infer_missing_durations`] shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Run {
+	/// Whole GOPs, or media that presents in decode order, so its own timestamps show
+	/// whether it is reordered.
+	Whole,
+	/// Video that may reorder, cut inside a GOP, whose reordering may only show in a
+	/// neighbouring run.
+	PartialGop,
 }
 
 /// Infer one frame's duration from a known same-group successor, else the catalog cadence.
@@ -1303,7 +1450,14 @@ mod tests {
 	#[test]
 	fn infer_missing_durations_uses_default_for_trailing_sample() {
 		let mut frames = vec![frame(0, Some(0)), frame(41_667, None), frame(83_334, None)];
-		infer_missing_durations(&mut frames, None, Duration::from_millis(33), moq_net::Timescale::MICRO).unwrap();
+		infer_missing_durations(
+			&mut frames,
+			None,
+			Duration::from_millis(33),
+			moq_net::Timescale::MICRO,
+			Run::Whole,
+		)
+		.unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 		assert_eq!(frames[1].duration, Some(ts(41_667)));
@@ -1317,7 +1471,14 @@ mod tests {
 	#[test]
 	fn infer_missing_duration_uses_default_for_single_frame() {
 		let mut frames = vec![frame(83_333, Some(0))];
-		infer_missing_durations(&mut frames, None, Duration::from_millis(40), moq_net::Timescale::MICRO).unwrap();
+		infer_missing_durations(
+			&mut frames,
+			None,
+			Duration::from_millis(40),
+			moq_net::Timescale::MICRO,
+			Run::Whole,
+		)
+		.unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(40_000)));
 		assert_eq!(
@@ -1327,7 +1488,8 @@ mod tests {
 	}
 
 	/// The duration cap splits a GOP across fragments, so the successor is a delta frame
-	/// in the SAME group. That one is a real bound and is still used.
+	/// in the SAME group. In video that presents in decode order that one is a real bound
+	/// and is still used.
 	#[test]
 	fn infer_trailing_duration_from_successor_frame() {
 		let successor = frame(83_334, None);
@@ -1337,6 +1499,7 @@ mod tests {
 			Some(&successor),
 			Duration::from_millis(33),
 			moq_net::Timescale::MICRO,
+			Run::Whole,
 		)
 		.unwrap();
 
@@ -1347,11 +1510,38 @@ mod tests {
 		);
 	}
 
+	/// Video that may reorder, cut inside a GOP, cannot tell a reference frame's gap to the
+	/// B-frames decoded after it from a duration, so no inferred duration there exceeds the
+	/// cadence. A shorter gap still times its frame, and a stated duration is kept.
+	#[test]
+	fn a_partial_gop_caps_inferred_durations_at_the_cadence() {
+		let successor = frame(100_000, None);
+		let mut frames = vec![frame(0, Some(50_000)), frame(10_000, None), frame(20_000, None)];
+		infer_missing_durations(
+			&mut frames,
+			Some(&successor),
+			Duration::from_millis(33),
+			moq_net::Timescale::MICRO,
+			Run::PartialGop,
+		)
+		.unwrap();
+
+		let durations: Vec<_> = frames.iter().map(duration_micros).collect();
+		assert_eq!(durations, vec![50_000, 10_000, 33_000]);
+	}
+
 	#[test]
 	fn inferred_microsecond_clock_carries_fractional_ticks_forward() {
 		let timescale = moq_net::Timescale::new(30_000).unwrap();
 		let mut frames = vec![frame(0, None), frame(33_333, None), frame(66_667, None)];
-		infer_missing_durations(&mut frames, None, Duration::from_nanos(33_333_333), timescale).unwrap();
+		infer_missing_durations(
+			&mut frames,
+			None,
+			Duration::from_nanos(33_333_333),
+			timescale,
+			Run::Whole,
+		)
+		.unwrap();
 
 		let durations: Vec<_> = frames
 			.iter()
@@ -1376,6 +1566,7 @@ mod tests {
 			Some(&next_group),
 			Duration::from_millis(33),
 			moq_net::Timescale::MICRO,
+			Run::Whole,
 		)
 		.unwrap();
 
@@ -1392,7 +1583,14 @@ mod tests {
 	#[test]
 	fn infer_stops_at_an_interior_group_boundary() {
 		let mut frames = vec![frame(0, None), frame(21_333, None), group_start(600_000_000)];
-		infer_missing_durations(&mut frames, None, Duration::from_millis(21), moq_net::Timescale::MICRO).unwrap();
+		infer_missing_durations(
+			&mut frames,
+			None,
+			Duration::from_millis(21),
+			moq_net::Timescale::MICRO,
+			Run::Whole,
+		)
+		.unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(21_333)), "same group, real delta");
 		assert_eq!(duration_micros(&frames[1]), 21_000, "bounded by the next group");
@@ -1420,6 +1618,7 @@ mod tests {
 			None,
 			Duration::from_micros(21_333),
 			moq_net::Timescale::MICRO,
+			Run::Whole,
 		)
 		.unwrap();
 
@@ -1443,6 +1642,7 @@ mod tests {
 			Some(&next_group),
 			Duration::from_millis(50),
 			moq_net::Timescale::MICRO,
+			Run::Whole,
 		)
 		.unwrap();
 
@@ -1463,6 +1663,7 @@ mod tests {
 			Some(&successor),
 			Duration::from_millis(33),
 			moq_net::Timescale::MICRO,
+			Run::Whole,
 		)
 		.unwrap();
 

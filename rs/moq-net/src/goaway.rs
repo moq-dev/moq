@@ -30,7 +30,7 @@ const MAX_TIMEOUT_MS: u64 = (1 << 62) - 1;
 
 /// A GOAWAY: the sender intends to close the session soon and the peer should
 /// migrate its subscriptions elsewhere.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Goaway {
 	/// Where the peer should reconnect, including any credentials it needs.
 	/// Empty means reconnect to the same endpoint.
@@ -42,6 +42,15 @@ pub struct Goaway {
 	/// Only moq-transport carries this on the wire. Elsewhere it still
 	/// applies locally, so the sender enforces a deadline the peer cannot see.
 	pub(crate) timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for Goaway {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Goaway")
+			.field("uri_len", &self.uri.len())
+			.field("timeout", &self.timeout)
+			.finish()
+	}
 }
 
 impl Goaway {

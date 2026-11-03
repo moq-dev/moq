@@ -15,13 +15,16 @@ name: release-winget
 #   1. A maintainer lands the first manifest once via `wingetcreate new` (or a
 #      manual PR) for each PackageIdentifier below.
 #   2. Set the WINGET_TOKEN repo secret: a classic PAT with `public_repo`
-#      scope, owned by an account that has forked microsoft/winget-pkgs. By
-#      default the fork is looked up under the token owner.
+#      scope, owned by an account that has forked microsoft/winget-pkgs. The
+#      fork is looked up under the token owner (winget-releaser would default
+#      to this repo's owner, which has no fork).
 # After that every release is hands-off. Until the secret exists the real
 # submit is a clean no-op (the dry run still works without it).
 
 on:
-  workflow_run:
+  # Publishes only a protected release tag at the run's commit; see
+  # "Require a release tag at the run's commit".
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows:
       - moq-cli
       - moq-relay
@@ -52,11 +55,14 @@ env:
 jobs:
   publish:
     name: Submit winget manifest
-    # workflow_run: only after a successful release of a tag the `release tags`
-    # ruleset protects. workflow_dispatch: always (it's an explicit dry run).
+    # workflow_run: only after a successful tag push in this repository, of a
+    # tag the `release tags` ruleset protects; a fork PR can rename a workflow
+    # and its branch to match. workflow_dispatch: always (an explicit dry run).
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        (startsWith(github.event.workflow_run.head_branch, 'moq-relay-v') ||
         startsWith(github.event.workflow_run.head_branch, 'moq-cli-v')))
     runs-on: windows-latest
@@ -132,6 +138,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.parse.outputs.tag }}
+          IDENTIFIER: ${{ steps.parse.outputs.identifier }}
+          VERSION: ${{ steps.parse.outputs.version }}
         run: |
           names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
           matched=$(echo "$names" | grep -E -e "$INSTALLERS_REGEX" || true)
@@ -141,7 +149,7 @@ jobs:
             echo "$names" >&2
             exit 1
           fi
-          echo "Dry run OK. Would submit ${{ steps.parse.outputs.identifier }} ${{ steps.parse.outputs.version }} with installer(s):"
+          echo "Dry run OK. Would submit $IDENTIFIER $VERSION with installer(s):"
           echo "$matched"
 
       - name: Check for WINGET_TOKEN
@@ -158,6 +166,19 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # The PR comes from the token owner's winget-pkgs fork, so look the fork
+      # up under that account rather than winget-releaser's default (this
+      # repo's owner).
+      - name: Resolve the winget-pkgs fork owner
+        if: steps.gate.outputs.enabled == 'true'
+        id: fork
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          user=$(gh api user --jq .login)
+          echo "user=$user" >> "$GITHUB_OUTPUT"
+
       - name: Submit to winget-pkgs
         if: steps.mode.outputs.dry_run == 'false' && steps.gate.outputs.enabled == 'true'
         uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
@@ -167,3 +188,4 @@ jobs:
           release-tag: ${{ steps.parse.outputs.tag }}
           installers-regex: ${{ env.INSTALLERS_REGEX }}
           token: ${{ secrets.WINGET_TOKEN }}
+          fork-user: ${{ steps.fork.outputs.user }}

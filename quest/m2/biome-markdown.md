@@ -35,11 +35,6 @@ Decided with the maintainer on 2026-10-29:
   Biome's Markdown rules leave nursery
 - Milestone: ✅ m2
 
-## Required
-
-- [Upgrade Biome to 2.6](/quest/m2/biome-2-6.md) - the workspace runs a Biome
-  with the Markdown formatter
-
 ## Related
 
 - [moq-dev/moq.pro `quest/m2/biome-markdown.md`](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/biome-markdown.md) -

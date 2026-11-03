@@ -40,11 +40,15 @@ fn track_info<E: CatalogExt>(
 	}
 }
 
-/// The codec parser fills everything from the init bytes, so the label and container are all the
-/// caller adds.
+/// The codec parser fills the decoder fields from the init bytes; the caller adds the label, the
+/// container, and the bitrate when it knows it, which then counts as supplied and replaces any the
+/// init bytes give.
 fn with_init(init: &AudioInit, mut config: hang::catalog::AudioConfig) -> hang::catalog::AudioConfig {
 	config.label = init.label.clone();
 	config.container = init.container.clone();
+	if init.bitrate.is_some() {
+		config.bitrate = init.bitrate;
+	}
 	config
 }
 
@@ -915,7 +919,7 @@ mod tests {
 			.decode(&payload, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -948,8 +952,10 @@ mod tests {
 			.unwrap();
 		// Every group is written before anything reads, which the default
 		// REAL_TIME budget would collapse to the live edge.
-		let subscriber =
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30)));
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+		);
 		let config = crate::codec::opus::Config::new(48_000, 2);
 		let import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		(import, subscriber)
@@ -1235,7 +1241,7 @@ mod tests {
 			.decode(&au, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -1288,7 +1294,7 @@ mod tests {
 			track,
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		);
-		tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.expect("a frame")
 			.unwrap()
@@ -1365,7 +1371,8 @@ mod tests {
 		assert_eq!((audio.sample_rate, audio.channel_count), (44_100, 2));
 
 		// Delay-tolerant, so the first group is still delivered once the second exists.
-		let replay = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)));
 		let mut track = consumer.track("audio").unwrap().subscribe(Some(replay)).await.unwrap();
 		for i in 0..4u64 {
 			if i == 2 {

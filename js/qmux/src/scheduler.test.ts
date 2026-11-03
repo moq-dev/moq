@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { SendScheduler, type SendSink } from "./scheduler.ts";
 
 /** A sink that starts backpressured; `release()` admits exactly one write. */
@@ -58,7 +59,7 @@ class GatedSink implements SendSink {
 /** Yield to the event loop `n` times to let queued work run. */
 async function tick(n = 1): Promise<void> {
 	for (let i = 0; i < n; i++) {
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 	}
 }
 
@@ -66,7 +67,7 @@ async function tick(n = 1): Promise<void> {
  *  so a scheduler regression fails the test instead of silently proceeding. */
 async function until(fn: () => boolean, tries = 200): Promise<void> {
 	for (let i = 0; i < tries && !fn(); i++) {
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 	}
 	if (!fn()) throw new Error("until: condition not met within timeout");
 }

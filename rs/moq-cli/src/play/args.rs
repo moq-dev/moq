@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use moq_mux::catalog::CatalogFormat;
 
-use crate::subscribe::{CatalogFormatArg, SelectArgs};
+use crate::subscribe::{CatalogFormatArg, Mode, SelectArgs};
 
 /// The longest delay the speaker can hold, which is what bounds `--delay`.
 ///
@@ -86,8 +86,8 @@ pub struct Args {
 	/// Each line has the playhead, the playout target, the render quanta the speaker played
 	/// and how many were quiet, and the gaps and stalls since the line before, in the metric
 	/// schema of `test/audio-quality`, whose analyzer reduces it to underruns, skips, and
-	/// silence. Audio only, so it needs `--no-video`.
-	#[usage(long, requires = "--no-video", value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
+	/// silence. Audio only, so it needs `--video off`.
+	#[usage(long, value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
 	pub metrics: Option<PathBuf>,
 }
 
@@ -136,6 +136,12 @@ impl Args {
 	/// decode, leaving a blank window rather than an error.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		use crate::subscribe::VideoCodecArg;
+
+		self.select.validate()?;
+		anyhow::ensure!(
+			self.metrics.is_none() || self.select.video == Some(Mode::Off),
+			"--metrics needs audio-only playback: pass --video off"
+		);
 
 		anyhow::ensure!(
 			cfg!(feature = "vpx") || !matches!(self.select.video_codec, Some(VideoCodecArg::Vp8 | VideoCodecArg::Vp9)),
@@ -189,27 +195,32 @@ mod tests {
 	/// Playback can leave a role out, but not both, and not one it also narrows.
 	#[test]
 	fn a_role_can_be_left_out() {
-		let selection = parse(&["--no-video"]).select.selection(None);
+		let selection = parse(&["--video", "off"]).select.selection(None);
 		assert!(!selection.has_video());
 		assert!(selection.has_audio());
 
 		for refused in [
-			["--no-video", "--no-audio"].as_slice(),
-			&["--no-video", "--video-codec", "h264"],
-			&["--no-audio", "--audio-name", "stereo"],
+			["--video", "off", "--audio", "off"].as_slice(),
+			&["--video", "off", "--video-codec", "h264"],
+			&["--audio", "off", "--audio-name", "stereo"],
 		] {
-			let argv: Vec<&std::ffi::OsStr> = refused.iter().map(std::ffi::OsStr::new).collect();
-			assert!(Cli::parse_from(&argv).is_err(), "{refused:?} parsed");
+			assert!(parse(refused).validate().is_err(), "{refused:?} must be refused");
 		}
 	}
 
 	/// The metrics count the speaker alone, so they need audio-only playback.
 	#[test]
 	fn metrics_need_audio_only_playback() {
-		let args = parse(&["--no-video", "--metrics", "play.ndjson"]);
+		let args = parse(&["--video", "off", "--metrics", "play.ndjson"]);
 		assert_eq!(args.metrics, Some(PathBuf::from("play.ndjson")));
-		let argv: Vec<&std::ffi::OsStr> = ["--metrics", "play.ndjson"].iter().map(std::ffi::OsStr::new).collect();
-		assert!(Cli::parse_from(&argv).is_err(), "--metrics parsed without --no-video");
+		args.validate().unwrap();
+		for flags in [
+			["--metrics", "play.ndjson"].as_slice(),
+			&["--video", "on", "--metrics", "play.ndjson"],
+			&["--video", "off", "--audio", "off", "--metrics", "play.ndjson"],
+		] {
+			assert!(parse(flags).validate().is_err(), "{flags:?}");
+		}
 	}
 
 	/// A fixed delay is the playout offset and the staleness budget at once.

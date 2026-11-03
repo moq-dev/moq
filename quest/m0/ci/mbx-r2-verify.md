@@ -16,7 +16,8 @@ and record the numbers in the PR that closes this:
   store it replaced, from the same commit before and after.
 - Each object expires 30 days after upload, so a crate no Nightly builds in
   that window stays cold for the next hosted job. Count how often a Nightly
-  job pays that rebuild.
+  job pays that rebuild, including when `Cargo.lock` changed more than 8 times
+  since the previous Nightly (see Plan).
 - Bucket size and request counts after a month on mbx 1.28.0 (from about
   2026-11-26), against the 30-day expiry in `infra/mbx/lifecycle.json`.
   Shorten or lengthen it from that.
@@ -64,10 +65,11 @@ compilation is "not looked up".
   Windows checks `Cargo.lock` out with CRLF, while history holds LF, so no
   earlier lockfile state ever matched. The build then fell back to the newest
   local manifest, which was the install's. Since 1.28.0 an install builds
-  under its own workspace. Check that the first scheduled Nightly on an mbx
-  release with that fix loads a manifest of more than 124 predictions and
-  hits on Windows. The pin is `version` in
-  `.github/actions/rust-cache/action.yml`.
+  under its own workspace, so the install order does not matter; it stays
+  where `main` has it. mbx v1.29.1 (2026-11-01) includes #870, so bump the
+  `version` pin in `.github/actions/rust-cache/action.yml` from 1.28.0 to it.
+  Then check that the first scheduled Nightly on it loads a manifest of more
+  than 124 predictions and hits on Windows.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
@@ -75,11 +77,15 @@ compilation is "not looked up".
 - Linux: Nightly's Linux jobs check out at depth 1, so mbx finds no earlier
   lockfile and reuses only a manifest written for the identical `Cargo.lock`.
   The doctest job hit 0 on 2026-10-24 and 2026-10-27, 115 on 2026-10-25, and
-  46 on 2026-10-26.
+  46 on 2026-10-26. Decided 2026-10-29 (maintainer): give those jobs full
+  history (`fetch-depth: 0` with `filter: blob:none`) only once Windows hits
+  after the mbx bump, which shows inheritance pays.
 - `Cargo.lock` changed 7, 2, 6, 10, 8 and 8 times between consecutive
   scheduled Nightlies from 2026-10-21 to 2026-10-27. Nightly is the only
   hosted writer for Windows and macOS, so after more than 8 changes the
   previous Nightly is out of inheritance reach even with full history.
+  Decided 2026-10-29 (maintainer): accept that, and count it under the
+  rebuild item in the Goal before asking upstream for a deeper lookback.
 
 ## Related
 

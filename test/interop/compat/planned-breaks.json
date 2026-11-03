@@ -1,10 +1,10 @@
 {
 	"moq-lite-07-wip": {
-		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Remeasured 2026-10-23 against these releases, with the media lanes checking the audio tone: all 16 cross-version lite-07-wip media, publication, and FETCH cells fail, while its FETCH capability check and the stable lite-01 through lite-06 cells pass. Current and released lite-07-wip framing differs (long buffer, invalid value, protocol violation). Reassess when any affected release changes.",
+		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Remeasured 2026-10-30 against these releases, with the media lanes checking the audio tone: all 16 cross-version lite-07-wip media, publication, and FETCH cells fail, while its FETCH capability check and the stable lite-01 through lite-06 cells pass, including the Opus phase check now that moq-cli 0.14.10 keeps the Opus edit list. Current and released lite-07-wip framing differs (long buffer, invalid value, protocol violation). Reassess when any affected release changes.",
 		"releases": {
-			"moq-cli": "0.14.8",
-			"moq-relay": "0.17.8",
-			"@moq/net": "0.4.5"
+			"moq-cli": "0.14.10",
+			"moq-relay": "0.17.10",
+			"@moq/net": "0.4.7"
 		}
 	}
 }

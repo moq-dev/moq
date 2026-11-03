@@ -248,6 +248,9 @@ pub unsafe extern "C" fn moq_bandwidth_consumer_changed(
 }
 
 /// Release this consumer's demand and cancel any outstanding wait.
+///
+/// The outstanding `moq_bandwidth_consumer_changed` callback still fires once.
+/// Release its `user_data` in that callback, not when this function returns.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_bandwidth_consumer_close(consumer: u32) -> i32 {
 	ffi::enter(move || {
@@ -287,7 +290,7 @@ mod consumer_tests {
 			.unwrap();
 		let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 		let user_data = || Box::into_raw(Box::new(sender.clone())) as *mut std::ffi::c_void;
-		assert!(producer.is_used());
+		assert!(producer.demand().wanted());
 		assert_eq!(
 			unsafe { moq_bandwidth_consumer_changed(id.into(), user_data(), Some(changed)) },
 			0
@@ -306,7 +309,10 @@ mod consumer_tests {
 			0
 		);
 		assert_eq!(moq_bandwidth_consumer_close(id.into()), 0);
-		assert!(!producer.is_used(), "closing releases demand before the callback runs");
+		assert!(
+			!producer.demand().wanted(),
+			"closing releases demand before the callback runs"
+		);
 		assert!(receiver.recv().await.unwrap() < 0);
 	}
 

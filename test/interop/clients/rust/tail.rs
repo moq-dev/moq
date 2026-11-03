@@ -40,7 +40,7 @@ fn frames(sequence: u64, mode: Option<&str>) -> Vec<Vec<u8>> {
 /// Publish every group, cutting group 1 for `drop`.
 fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Result<()> {
 	// Declare the end before the final group's payload is even available.
-	track.finish_at(moq_net::track::Position::group(GROUPS))?;
+	track.finish_at(moq_net::track::Position::group(GROUPS), None)?;
 	for sequence in 0..GROUPS {
 		let mut group = track.append_group()?;
 		if mode == Some("drop") && sequence == 1 {
@@ -202,7 +202,8 @@ async fn main() -> anyhow::Result<()> {
 			if late {
 				// No range: join the latest group as a player does, group 0, whose head predates
 				// the subscription.
-				let options = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(5));
+				let options = moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
 				let mut track = remote.subscribe(Some(options)).await?;
 				for sequence in 0..LATE_GROUPS {
 					let mut group = track.recv_group().await?.context("missing group")?;
@@ -224,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			let options = moq_net::track::Subscription::default()
-				.with_max_delay(Duration::from_secs(if drop { 60 } else { 5 }))
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
 				.with_range(0..);
 			let mut track = remote.subscribe(Some(options)).await?;
 			if datagram {

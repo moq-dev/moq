@@ -1,4 +1,4 @@
-# Interop and Video pass on main
+# [XS] Interop and Video pass on main
 
 ## Goal
 
@@ -24,12 +24,7 @@ Already owned: the intermittent media-matrix timestamp-gap cells
 [test flakes](/quest/m0/test-flakes-2/README.md), with
 [moq-dev/moq#6990](https://github.com/moq-dev/moq/pull/6990) open.
 
-This README's own work, after the children: confirm a scheduled Interop
+Every child has landed. What remains: confirm a scheduled Interop
 and Video run each pass.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Browser tests expect current behavior](/quest/m0/interop-green/stale-browser-tests.md) - the renderer and element version tests match the shipped validation and version list
-- [Remeasure the planned wire break](/quest/m0/interop-green/wire-compat-remeasure.md) - the lite-07-wip planned break is measured against `@moq/net` 0.4.6
