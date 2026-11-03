@@ -736,13 +736,13 @@ async fn unresolved_time_reader_never_changes_sibling_demand() {
 	}
 }
 
-/// A lite-07 publisher ends a bounded subscription once every group in range is
-/// delivered or dropped, releasing its demand, and the subscriber keeps the copy: the
-/// track does not end, the same range reads again from the cache, and a wider one
-/// subscribes again for the rest, past a group that never existed. Older versions park
-/// instead, since their subscriber reads a FIN as the track's end.
+/// A covered bounded subscription stays open on every version: a lite-07 publisher keeps
+/// the stream open for an update rather than FIN it, and older ones park, since their
+/// subscriber reads a FIN as the track's end. The track does not end, the same range reads
+/// again from the cache, and a wider one reaches upstream for the rest, past a group that
+/// never existed. The demand goes once the readers do.
 #[kio::test]
-async fn a_covered_bounded_subscription_ends_on_lite07() {
+async fn a_covered_bounded_subscription_stays_open() {
 	for version in LITE {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -776,34 +776,30 @@ async fn a_covered_bounded_subscription_ends_on_lite07() {
 		assert_eq!(next(&mut reader).await, Some(2), "{version}");
 
 		let released = kio::clock::timeout(TIMEOUT, crate::support::unwanted(track.demand())).await;
-		if *version != "moq-lite-07-wip" {
-			assert!(released.is_err(), "{version}: the publisher parks");
-			drop((reader, track, session, subscriber, broadcast, publisher));
-			continue;
-		}
-		released.expect("the covered subscription ends").unwrap();
+		assert!(released.is_err(), "{version}: the covered subscription stays open");
 		assert!(
 			kio::clock::timeout(TIMEOUT, reader.finished()).await.is_err(),
-			"the track goes on"
+			"{version}: the track goes on"
 		);
 
 		let mut again = subscribe(&remote, bounded(1..3)).await;
-		assert_eq!(next(&mut again).await, Some(1));
-		assert_eq!(next(&mut again).await, Some(2));
-		assert!(track.subscription().is_none(), "the cache answers the same range");
+		assert_eq!(next(&mut again).await, Some(1), "{version}");
+		assert_eq!(next(&mut again).await, Some(2), "{version}");
 
 		let mut wider = subscribe(&remote, bounded(1..6)).await;
 		let mut got = Vec::new();
 		for _ in 0..4 {
 			got.extend(next(&mut wider).await);
 		}
-		assert_eq!(got, [1, 2, 4, 5]);
-		// Group 3 may still arrive on a live track, so it is dropped once the feed gives up
-		// on it, past the arrivals grace.
+		// Before lite-07 the wire carries no order, so the upstream serves newest first.
+		got.sort();
+		assert_eq!(got, [1, 2, 4, 5], "{version}");
+
+		drop((reader, again, wider));
 		kio::clock::timeout(Duration::from_secs(60), crate::support::unwanted(track.demand()))
 			.await
-			.expect("the wider subscription ends past the missing group")
+			.unwrap_or_else(|_| panic!("{version}: the demand leaves with the readers"))
 			.unwrap();
-		drop((reader, again, wider, track, session, subscriber, broadcast, publisher));
+		drop((track, session, subscriber, broadcast, publisher));
 	}
 }

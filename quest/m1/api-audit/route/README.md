@@ -17,7 +17,7 @@ kinds. Rust, JS, moq-ffi, moq-c and the wrappers
 mirror it.
 
 Non-goals: the route layer's wire messages and federation
-([Routes and announces](/quest/m1/cluster-routing/routes.md)), lite-07
+([Routes and announces](/quest/m1/cluster-routing/routes/README.md)), lite-07
 takeover ([announce takeover](/quest/m1/announce-takeover.md)), and any
 moq-transport instance ([moq-transport carries no epoch](https://github.com/moq-dev/moq/pull/7239)).
 
@@ -173,4 +173,4 @@ stale, including `doc/concept/identity.md`.
 ## Related
 
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, so lite-07 readers keep the first subscribe
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the wire route layer; instances take over its epochless deletion
+- [Routes and announces](/quest/m1/cluster-routing/routes/README.md) - the wire route layer; instances take over its epochless deletion

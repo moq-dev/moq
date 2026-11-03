@@ -443,7 +443,7 @@ async fn cross_node_close_without_hold_reannounces() {
 
 // Residual counterexamples on `main`, with the hold and the retraction
 // quarantine. Each pins what the cluster does today, so a change either way
-// fails here. Routes and announces (quest/m1/cluster-routing/routes.md) must
+// fails here. Routes and announces (quest/m1/cluster-routing/routes/README.md) must
 // bring each to a single retraction everywhere.
 
 /// A ring of six relays with links under 150 ms. Relay 3 hears the withdrawal
