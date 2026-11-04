@@ -92,7 +92,6 @@ Public API: none. Wire: none.
 - [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
 - [moq-transcode's live multi-rung test survives load](/quest/m0/test-flakes-2/transcode-multi-rung.md) - `live_multi_rung` stops failing queue batches with a cancelled rung group
 - [moq-relay's embedded io_uring stop test survives load](/quest/m0/test-flakes-2/relay-embed-stop.md) - `uring_custom_route_and_quic` stops seeing HTTP accepted after its owner stopped
-- [The JS worklet library-build test survives load](/quest/m0/test-flakes-2/js-worklet-build.md) - the lazy-blob worklet build test stops timing out at bun's 5 seconds
 - [moq-archive's cross-backend recording test survives load](/quest/m0/test-flakes-2/archive-backends-identical.md) - `recordings_are_byte_identical_on_every_backend` stops splitting S3's video objects differently
 - [moq-ffi's panicked-origin supervision test survives load](/quest/m0/test-flakes-2/ffi-origin-panic.md) - a read the origin driver's panic ends always reports `MoqError::Task`
 - [The scheduled macOS WebSocket version test completes reliably](/quest/m0/test-flakes-2/macos-websocket.md) - fix the scheduled timeout while preserving newest-version negotiation assertions
