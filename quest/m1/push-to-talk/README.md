@@ -96,7 +96,6 @@ catches this. A complete set of runs finishes this epic.
 
 - [Pick how the browser publisher suppresses silence](/quest/m1/push-to-talk/dtx-route.md) - measures the DTX routes
 - [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - replaces hold with DTX
-- [Browser capture delivers audio frames on a steady cadence](/quest/m1/push-to-talk/capture-smoothing.md) - so `"auto"` measures the network
 
 ## Closes
 
