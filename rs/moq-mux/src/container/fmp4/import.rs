@@ -57,6 +57,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// Republish each fragment whole as CMAF instead of unwrapping its samples.
 	passthrough: bool,
 
+	// The license and certificate servers of each DRM system the media is encrypted for.
+	drm: std::collections::BTreeMap<hang::catalog::drm::Uuid, hang::catalog::drm::Servers>,
+
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track<E>>,
 	text: HashMap<u32, super::text::Track>,
@@ -137,6 +140,9 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	// The segment this track's open group belongs to. A mismatch with `Import::segment` rolls the
 	// group, which is what keeps audio on the same boundaries as video.
 	segment: Option<u64>,
+
+	// The samples are encrypted, so each fragment's encryption information must survive.
+	protected: Option<super::cenc::Aux>,
 
 	output: Output<E>,
 }
@@ -248,6 +254,8 @@ struct Sample {
 	sync: bool,
 	/// The sample's bytes within the `mdat` payload.
 	range: std::ops::Range<usize>,
+	/// The sample's position among its `traf`'s, which its encryption information follows.
+	index: usize,
 }
 
 /// The samples one `traf` places in its `mdat`.
@@ -272,6 +280,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			initial_reservation: Some(reserved),
 			select: None,
 			passthrough: false,
+			drm: Default::default(),
 			tracks: HashMap::default(),
 			text: HashMap::default(),
 			skipped: HashSet::default(),
@@ -333,6 +342,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// of every consumer parsing ISO BMFF. Text tracks are reconstructed as timed text either way.
 	pub fn with_passthrough(mut self, passthrough: bool) -> Self {
 		self.passthrough = passthrough;
+		self
+	}
+
+	/// Set the license and certificate servers of a DRM system the media is encrypted for.
+	///
+	/// Common Encryption media names its DRM systems (each `pssh` box's system ID) but not where a
+	/// player gets a license, so the publisher supplies that here; the catalog's `drm` entries for
+	/// `system` carry it. A later call for the same system replaces the earlier one. Once the
+	/// `moov` arrives, a system no imported encrypted track carries a `pssh` for is refused with
+	/// [`Error::UnusedDrmSystem`].
+	pub fn with_drm(mut self, system: hang::catalog::drm::Uuid, servers: hang::catalog::drm::Servers) -> Self {
+		self.drm.insert(system, servers);
 		self
 	}
 
@@ -534,6 +555,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Only `finish()` releases the reservation before a moov, since a fragment needs one.
 		let reserved = self.initial_reservation.clone().ok_or(Error::MoovAfterFinish)?;
 
+		// Refuse undecryptable or unsignalled protection before any track is published.
+		let protections = self.protections(&moov)?;
+
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
@@ -558,9 +582,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 			let edit = Edit::new(trak, moov.mvhd.timescale)?;
+			let protection = protections.get(&track_id);
 			let output = match self.passthrough {
 				true => Output::Passthrough(Box::new(
-					self.init_passthrough(trak, &moov, &reserved, kind, timescale)?,
+					self.init_passthrough(trak, &moov, &reserved, kind, timescale, protection)?,
 				)),
 				false => self.init_unwrap(trak, &moov, &reserved, kind)?,
 			};
@@ -577,6 +602,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					last_decode_time: None,
 					sample_duration: None,
 					segment: None,
+					protected: protection.map(super::cenc::Protection::aux),
 					output,
 				},
 			);
@@ -593,6 +619,73 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// The protection of every imported track that is encrypted, keyed by track ID.
+	///
+	/// Refuses encrypted media without passthrough, whose unwrapped samples would lose their
+	/// per-sample IVs, every protection [`Protection::of`](super::cenc::Protection::of) refuses, and a
+	/// DRM system [`with_drm`](Self::with_drm) configured that no encrypted track carries.
+	fn protections(&self, moov: &Moov) -> Result<HashMap<u32, super::cenc::Protection>> {
+		let mut protections = HashMap::new();
+		for trak in &moov.trak {
+			let imported = Kind::from_handler(trak.mdia.hdlr.handler).is_ok_and(|kind| self.selects(&kind));
+			if !imported {
+				continue;
+			}
+			let Some(protection) = super::cenc::Protection::of(trak, moov)? else {
+				continue;
+			};
+			if !self.passthrough {
+				return Err(Error::ProtectedNeedsPassthrough.into());
+			}
+			protections.insert(trak.tkhd.track_id, protection);
+		}
+
+		let carried = |system: &hang::catalog::drm::Uuid| {
+			(protections.values())
+				.flat_map(|protection| &protection.pssh)
+				.any(|pssh| pssh.system_id == *system.as_bytes())
+		};
+		if let Some(system) = self.drm.keys().find(|system| !carried(system)) {
+			return Err(Error::UnusedDrmSystem(*system).into());
+		}
+		Ok(protections)
+	}
+
+	/// Add the catalog's `drm` entries for `protection`, one per DRM system with the servers
+	/// [`with_drm`](Self::with_drm) set for it, returning their IDs for the rendition to list.
+	///
+	/// A system, scheme, and key another rendition already uses shares its entry, so video and
+	/// audio under one key list the same IDs. A new entry takes the lowest free numeric ID.
+	fn register_drm(&mut self, protection: &super::cenc::Protection) -> Result<Vec<String>> {
+		let mut entries = protection.entries()?;
+		for entry in &mut entries {
+			if let Some(servers) = self.drm.get(&entry.system) {
+				entry.license = servers.license.clone();
+				entry.certificate = servers.certificate.clone();
+			}
+		}
+
+		let mut ids = Vec::with_capacity(entries.len());
+		self.catalog.mutate(|catalog| {
+			for entry in entries {
+				let existing = catalog.drm.iter().find(|(_, other)| other.same_key(&entry));
+				let id = match existing {
+					Some((id, _)) => id.clone(),
+					None => {
+						let id = (1..)
+							.map(|n: u64| n.to_string())
+							.find(|id| !catalog.drm.contains_key(id))
+							.expect("a free entry ID");
+						catalog.drm.insert(id.clone(), entry);
+						id
+					}
+				};
+				ids.push(id);
+			}
+		})?;
+		Ok(ids)
+	}
+
 	fn init_passthrough(
 		&mut self,
 		trak: &Trak,
@@ -600,6 +693,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		reserved: &crate::catalog::Reserved<E>,
 		kind: Kind,
 		timescale: moq_net::Timescale,
+		protection: Option<&super::cenc::Protection>,
 	) -> Result<Passthrough<E>> {
 		// Declare the track at the fMP4's native timescale, which the moq-hang draft requires
 		// of a CMAF track: frame timestamps are emitted at this same scale (see `extract`), so
@@ -614,15 +708,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 		// `estimate` as fragments arrive.
+		// The entries go in before the rendition listing them, so no catalog has a dangling one.
+		let drm = protection.map(|protection| self.register_drm(protection)).transpose()?;
 		let rendition = match kind {
 			Kind::Video => {
-				let config = self.init_video(trak, moov)?;
+				let mut config = self.init_video(trak, moov, protection)?;
+				config.drm = drm.unwrap_or_default();
 				let mut rendition = reserved.init(track.name())?;
 				rendition.set(config)?;
 				Rendition::Video(rendition)
 			}
 			Kind::Audio => {
-				let config = self.init_audio(trak, moov)?;
+				let mut config = self.init_audio(trak, moov, protection)?;
+				config.drm = drm.unwrap_or_default();
 				let mut rendition = reserved.init(track.name())?;
 				rendition.set(config)?;
 				Rendition::Audio(rendition)
@@ -660,8 +758,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		)?;
 		let wire = crate::catalog::hang::Container::new(&Container::Legacy, wire_kind)?;
 		Ok(match kind {
-			Kind::Video => Output::Video(reserved.video(track, wire, self.init_video(trak, moov)?)?),
-			Kind::Audio => Output::Audio(reserved.audio(track, wire, self.init_audio(trak, moov)?)?),
+			Kind::Video => Output::Video(reserved.video(track, wire, self.init_video(trak, moov, None)?)?),
+			Kind::Audio => Output::Audio(reserved.audio(track, wire, self.init_audio(trak, moov, None)?)?),
 		})
 	}
 
@@ -709,7 +807,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// The container a rendition advertises: unwrapped samples are Legacy frames, while a
 	/// passthrough track carries its own single-track init segment.
-	fn container(&self, trak: &Trak, moov: &Moov) -> Result<Container> {
+	///
+	/// An encrypted track's init keeps its `encv`/`enca` entry and the `pssh` boxes that apply to
+	/// it, which a decrypting player needs (CMSF section 4.2).
+	fn container(&self, trak: &Trak, moov: &Moov, protection: Option<&super::cenc::Protection>) -> Result<Container> {
 		if !self.passthrough {
 			return Ok(Container::Legacy);
 		}
@@ -741,7 +842,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			trak.edts = None;
 
 			let single_moov = Moov {
-				pssh: Vec::new(),
+				pssh: protection.map(|protection| protection.pssh.clone()).unwrap_or_default(),
 				mvhd: moov.mvhd.clone(),
 				trak: vec![trak],
 				mvex: Some(mp4_atom::Mvex {
@@ -761,8 +862,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 	}
 
-	fn init_video(&mut self, trak: &Trak, moov: &Moov) -> Result<VideoConfig> {
-		let container = self.container(trak, moov)?;
+	fn init_video(
+		&mut self,
+		trak: &Trak,
+		moov: &Moov,
+		protection: Option<&super::cenc::Protection>,
+	) -> Result<VideoConfig> {
+		let container = self.container(trak, moov, protection)?;
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {
@@ -770,6 +876,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			1 => &stsd.codecs[0],
 			_ => return Err(Error::MultipleCodecs.into()),
 		};
+		// A protected rendition is described by the codec its encrypted entry wraps.
+		let codec = super::cenc::clear(codec);
 
 		let (mut config, colr, pasp, spatial) = match codec {
 			mp4_atom::Codec::Avc1(avc1) => (
@@ -941,8 +1049,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(config)
 	}
 
-	fn init_audio(&mut self, trak: &Trak, moov: &Moov) -> Result<AudioConfig> {
-		let container = self.container(trak, moov)?;
+	fn init_audio(
+		&mut self,
+		trak: &Trak,
+		moov: &Moov,
+		protection: Option<&super::cenc::Protection>,
+	) -> Result<AudioConfig> {
+		let container = self.container(trak, moov, protection)?;
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {
@@ -950,6 +1063,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			1 => &stsd.codecs[0],
 			_ => return Err(Error::MultipleCodecs.into()),
 		};
+		// A protected rendition is described by the codec its encrypted entry wraps.
+		let codec = super::cenc::clear(codec);
 
 		let config = match codec {
 			mp4_atom::Codec::Mp4a(mp4a) => {
@@ -1162,7 +1277,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				new_segment: track.segment != Some(self.segment),
 			};
 			let prefix = match track.output {
-				Output::Passthrough(_) => Some(fragment(traf, &moof, &run, &track.defaults)?),
+				Output::Passthrough(_) => Some(fragment(traf, &moof, &run, &track.defaults, track.protected)?),
 				_ => None,
 			};
 			let index = mdat.tracks.len();
@@ -1406,7 +1521,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 		let mut end = None;
 		let mut samples = Vec::with_capacity(sample::count(traf) as usize);
 		let mut dropped = false;
-		for resolved in resolver.resolve(traf, self.defaults)? {
+		for (index, resolved) in resolver.resolve(traf, self.defaults)?.enumerate() {
 			let sample::Resolved { sample, cts, range } = resolved?;
 			let duration = sample.duration;
 
@@ -1440,6 +1555,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 					flags: sample.flags,
 					sync: sample.is_sync(),
 					range,
+					index,
 				});
 			} else {
 				dropped = true;
@@ -1469,17 +1585,35 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 ///
 /// The mdat holds `run`'s samples back to back in decode order, whatever separated them in the
 /// source (padding, another track's runs), so each rewritten `data_offset` is the sizes before it.
-fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::Defaults) -> Result<Bytes> {
+///
+/// An encrypted track's fragment keeps its `senc`, `saiz`, and `saio`, with `saio` pointed at the
+/// rebuilt `senc`. One whose keys rotate, whose encryption information is outside `senc`, or whose
+/// edit list drops samples is refused.
+fn fragment(
+	traf: &mp4_atom::Traf,
+	moof: &Moof,
+	run: &Run,
+	defaults: &sample::Defaults,
+	protected: Option<super::cenc::Aux>,
+) -> Result<Bytes> {
+	if protected.is_some() {
+		super::cenc::check_moof(moof, traf)?;
+	}
+
 	// Build a per-track moof containing only this traf, and a per-track mdat
 	// with only the samples belonging to this track.
 	let mut adjusted_moof = Moof {
 		pssh: Vec::new(),
 		mfhd: moof.mfhd.clone(),
 		traf: vec![match run.dropped {
-			true => kept(traf, run)?,
+			true => kept(traf, run, protected)?,
 			false => traf.clone(),
 		}],
 	};
+	let protected = protected.is_some();
+	if protected {
+		super::cenc::reserve_saio(&mut adjusted_moof.traf[0])?;
+	}
 
 	// Apply structural (flag-presence) changes BEFORE measuring the encoded
 	// size, otherwise the rewritten data_offset values are computed from a
@@ -1508,6 +1642,10 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 	let mut moof_buf = Vec::new();
 	adjusted_moof.encode(&mut moof_buf)?;
 	let new_moof_size = moof_buf.len();
+	// Rewriting the reserved offsets below keeps every box's size, so senc stays where it is now.
+	if protected {
+		super::cenc::point_saio(&mut adjusted_moof.traf[0], &moof_buf)?;
+	}
 
 	// A payload past 4 GiB takes the 16-byte largesize header.
 	let mut mdat = Vec::new();
@@ -1547,9 +1685,10 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 ///
 /// Each sample keeps its decode and composition time: `tfdt` starts at the first kept sample, and
 /// each kept sample lasts until the next one decodes. The per-sample tables (`sbgp`,
-/// `subs`, sample auxiliary information) would index the wrong samples, and no consumer reads
-/// them, so they go.
-fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
+/// `subs`, sample auxiliary information) would index the wrong samples, and no consumer of a clear
+/// track reads them, so they go. An encrypted track's encryption information is restated for the
+/// kept samples instead, since a player cannot decrypt without it.
+fn kept(traf: &mp4_atom::Traf, run: &Run, protected: Option<super::cenc::Aux>) -> Result<mp4_atom::Traf> {
 	let mut entries = Vec::with_capacity(run.samples.len());
 	for (index, sample) in run.samples.iter().enumerate() {
 		let duration = match run.samples.get(index + 1) {
@@ -1565,7 +1704,7 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 		});
 	}
 	let first = run.samples.first().ok_or(Error::MissingTrun)?;
-	Ok(mp4_atom::Traf {
+	let mut kept = mp4_atom::Traf {
 		tfhd: traf.tfhd.clone(),
 		tfdt: Some(mp4_atom::Tfdt {
 			base_media_decode_time: first.dts,
@@ -1575,7 +1714,12 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 			samples: entries.into(),
 		}],
 		..Default::default()
-	})
+	};
+	if let Some(aux) = protected {
+		let indices: Vec<usize> = run.samples.iter().map(|sample| sample.index).collect();
+		aux.restate(traf, &mut kept, &indices)?;
+	}
+	Ok(kept)
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {

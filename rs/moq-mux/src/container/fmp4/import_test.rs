@@ -3883,3 +3883,426 @@ async fn declared_boundaries_do_not_split_passthrough_fragments() {
 		);
 	}
 }
+
+const CENC: &[u8] = include_bytes!("test_data/cenc-clearkey.mp4");
+const CBCS_VIDEO: &[u8] = include_bytes!("test_data/cbcs-video.mp4");
+const CBCS_AUDIO: &[u8] = include_bytes!("test_data/cbcs-audio.mp4");
+const CLEARKEY_KID: hang::catalog::drm::Uuid =
+	hang::catalog::drm::Uuid::from_u128(0xa1b2c3d4_e5f6_0718_293a_4b5c6d7e8f90);
+
+/// Import each of `files` in passthrough into one broadcast and catalog, configuring each importer
+/// with `configure`, and return the first error alongside what was published.
+///
+/// The importers come back too: dropping one retires its renditions.
+#[allow(clippy::type_complexity, reason = "a test helper returning what each test reads")]
+fn import_protected(
+	files: &[&[u8]],
+	configure: impl Fn(super::Import) -> super::Import,
+) -> (
+	crate::Result<()>,
+	crate::catalog::Producer,
+	moq_net::broadcast::Consumer,
+	Vec<super::Import>,
+) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut importers: Vec<_> = (files.iter())
+		.map(|_| configure(super::Import::new(broadcast.clone(), catalog.reserve()).with_passthrough(true)))
+		.collect();
+	let mut result = Ok(());
+	for (fmp4, data) in importers.iter_mut().zip(files) {
+		result = result.and(fmp4.decode(data));
+	}
+	for fmp4 in &mut importers {
+		result = result.and(fmp4.finish());
+	}
+	(result, catalog, consumer, importers)
+}
+
+fn protected_error(files: &[&[u8]], configure: impl Fn(super::Import) -> super::Import) -> super::Error {
+	match import_protected(files, configure).0 {
+		Err(crate::Error::Cmaf(err)) => err,
+		other => panic!("expected a refusal, got {other:?}"),
+	}
+}
+
+/// The file's top-level boxes with `edit` applied, re-encoded. A changed `moof` keeps addressing
+/// its samples: every run's `data_offset` shifts by how much the `moof` grew.
+fn rewrite(data: &[u8], mut edit: impl FnMut(&mut mp4_atom::Any)) -> Vec<u8> {
+	use mp4_atom::DecodeMaybe;
+
+	let mut cursor = std::io::Cursor::new(data);
+	let mut out = Vec::new();
+	loop {
+		let start = cursor.position();
+		let Some(mut atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() else {
+			break;
+		};
+		let before = cursor.position() - start;
+		edit(&mut atom);
+		if let mp4_atom::Any::Moof(moof) = &mut atom {
+			let mut after = Vec::new();
+			moof.encode(&mut after).unwrap();
+			let grew = after.len() as i32 - before as i32;
+			for trun in moof.traf.iter_mut().flat_map(|traf| &mut traf.trun) {
+				trun.data_offset = trun.data_offset.map(|offset| offset + grew);
+			}
+		}
+		atom.encode(&mut out).unwrap();
+	}
+	out
+}
+
+/// The first `moof` of `data`.
+fn first_moof(data: &[u8]) -> mp4_atom::Moof {
+	use mp4_atom::DecodeMaybe;
+
+	let mut cursor = std::io::Cursor::new(data);
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			return moof;
+		}
+	}
+	panic!("no moof");
+}
+
+/// Every fragment the broadcast published on `name`, in order.
+async fn fragments(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<bytes::Bytes> {
+	let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+	let mut out = Vec::new();
+	while let Some(mut group) = track.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
+		while let Some(frame) = group.read_frame().now_or_never().and_then(|r| r.ok().flatten()) {
+			out.push(frame.payload);
+		}
+	}
+	out
+}
+
+/// The `senc` of a published fragment, checking its `saio` (if any) points at its first sample's
+/// information, relative to the `moof`.
+fn checked_senc(fragment: &[u8]) -> mp4_atom::Senc {
+	let moof = mp4_atom::Moof::decode(&mut &fragment[..]).unwrap();
+	let traf = &moof.traf[0];
+	let senc = traf.senc.clone().expect("the fragment keeps its senc");
+	if let Some(saio) = traf.saio.first() {
+		let [offset] = saio.offsets[..] else {
+			panic!("one saio offset, got {:?}", saio.offsets);
+		};
+		let offset = offset as usize;
+		// The senc header's type, its version and flags, then the sample count the data starts with.
+		assert_eq!(
+			&fragment[offset - 12..offset - 8],
+			b"senc",
+			"saio points past a senc header"
+		);
+		assert_eq!(&fragment[offset - 4..offset - 4 + senc.data.len()], &senc.data[..]);
+	}
+	senc
+}
+
+/// The ClearKey `cenc` file's two tracks share one key and system, so one `drm` entry protects
+/// both; each init keeps its encrypted entry and the `pssh`, and the codec is the one it wraps.
+#[test]
+fn cenc_passthrough_signals_drm() {
+	use hang::catalog::drm;
+
+	let (result, catalog, _, _importers) = import_protected(&[CENC], |fmp4| fmp4);
+	result.unwrap();
+	let catalog = catalog.snapshot();
+
+	let entry = &catalog.drm["1"];
+	assert_eq!(catalog.drm.len(), 1, "{:?}", catalog.drm);
+	assert_eq!(entry.system, drm::system::CLEARKEY);
+	assert_eq!(entry.scheme, drm::Scheme::Cenc);
+	assert_eq!(entry.kid, CLEARKEY_KID);
+	let pssh = mp4_atom::Pssh::decode(&mut entry.pssh.as_deref().unwrap()).unwrap();
+	assert_eq!(pssh.kid.as_deref(), Some(&[*CLEARKEY_KID.as_bytes()][..]));
+
+	let video = catalog.video.renditions.values().next().unwrap();
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert!(video.codec.to_string().starts_with("avc1"), "{}", video.codec);
+	assert_eq!(audio.codec.to_string(), "mp4a.40.2");
+	assert_eq!(
+		(&video.drm[..], &audio.drm[..]),
+		(&["1".to_string()][..], &["1".to_string()][..])
+	);
+
+	for container in [&video.container, &audio.container] {
+		let Container::Cmaf { init } = container else {
+			panic!("passthrough publishes CMAF");
+		};
+		let (_, moov) = decode_init(init);
+		assert!(
+			matches!(
+				moov.trak[0].mdia.minf.stbl.stsd.codecs[..],
+				[mp4_atom::Codec::Encv(_) | mp4_atom::Codec::Enca(_)]
+			),
+			"the init keeps the encrypted entry"
+		);
+		assert_eq!(moov.pssh, std::slice::from_ref(&pssh), "the init keeps the pssh");
+	}
+}
+
+/// Shaka's `cbcs` video and audio, imported side by side, share the entry for their one key; the
+/// audio's `roll` sample groups are not key rotation.
+#[test]
+fn cbcs_video_and_audio_share_an_entry() {
+	let (result, catalog, _, _importers) = import_protected(&[CBCS_VIDEO, CBCS_AUDIO], |fmp4| fmp4);
+	result.unwrap();
+	let catalog = catalog.snapshot();
+	assert_eq!(catalog.drm.len(), 1, "{:?}", catalog.drm);
+	assert_eq!(catalog.drm["1"].scheme, hang::catalog::drm::Scheme::Cbcs);
+	assert_eq!(catalog.drm["1"].kid, CLEARKEY_KID);
+	let video = catalog.video.renditions.values().next().unwrap();
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(video.drm, ["1"]);
+	assert_eq!(audio.drm, ["1"]);
+	assert!(video.codec.to_string().starts_with("avc1"), "{}", video.codec);
+	assert_eq!(audio.codec.to_string(), "mp4a.40.2");
+}
+
+/// The MSF catalog renders the entries as CMSF `contentProtections`, with the publisher's servers,
+/// and parsing it maps them back to the same `drm` section.
+#[test]
+fn drm_renders_as_cmsf_content_protection_and_back() {
+	use hang::catalog::drm;
+
+	let mut certificate = drm::Server::new("https://cert.example.com/".parse().unwrap());
+	certificate.kind = Some("application/pkcs7-mime".into());
+	let mut servers = drm::Servers::license("https://license.example.com/clearkey".parse().unwrap());
+	servers.certificate = Some(certificate);
+	let (result, catalog, _, _importers) = import_protected(&[CBCS_VIDEO, CBCS_AUDIO], |fmp4| {
+		fmp4.with_drm(drm::system::CLEARKEY, servers.clone())
+	});
+	result.unwrap();
+	let catalog = catalog.snapshot();
+	assert_eq!(catalog.drm["1"].license, servers.license);
+	assert_eq!(catalog.drm["1"].certificate, servers.certificate);
+
+	let msf = crate::catalog::to_msf(&catalog, &moq_net::Path::empty());
+	let [entry] = &msf.content_protections[..] else {
+		panic!("one entry, got {:?}", msf.content_protections);
+	};
+	assert_eq!(entry.ref_id, "1");
+	assert_eq!(entry.scheme, "cbcs");
+	assert_eq!(entry.default_kid, ["a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"]);
+	assert_eq!(entry.drm_system.system_id, "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b");
+	assert_eq!(
+		entry.drm_system.la_url.as_ref().unwrap().url,
+		"https://license.example.com/clearkey"
+	);
+	assert_eq!(
+		entry.drm_system.cert_url.as_ref().unwrap().kind.as_deref(),
+		Some("application/pkcs7-mime")
+	);
+	assert!(entry.drm_system.pssh.is_some());
+	for track in &msf.tracks {
+		assert_eq!(track.content_protection_ref_ids, ["1"], "{}", track.name);
+	}
+
+	let wire: moq_msf::Catalog = msf.to_json().unwrap().parse().unwrap();
+	let back = crate::catalog::msf::from_msf(&wire, &moq_net::Path::empty()).unwrap();
+	assert_eq!(back.drm, catalog.drm);
+	assert_eq!(back.video.renditions.values().next().unwrap().drm, ["1"]);
+	assert_eq!(back.audio.renditions.values().next().unwrap().drm, ["1"]);
+}
+
+/// A license server for a DRM system the media carries no `pssh` for is a configuration mistake.
+#[test]
+fn a_drm_system_the_media_lacks_is_refused() {
+	use hang::catalog::drm;
+
+	let servers = drm::Servers::license("https://license.example.com/".parse().unwrap());
+	let err = protected_error(&[CENC], |fmp4| fmp4.with_drm(drm::system::WIDEVINE, servers.clone()));
+	assert!(
+		matches!(err, super::Error::UnusedDrmSystem(system) if system == drm::system::WIDEVINE),
+		"{err:?}"
+	);
+}
+
+/// Without passthrough the importer would unwrap samples and lose their per-sample IVs, so an
+/// encrypted file is refused rather than published undecryptable.
+#[test]
+fn encrypted_unwrapped_import_is_refused() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut fmp4 = super::Import::new(broadcast, catalog.reserve());
+	let err = fmp4.decode(CBCS_VIDEO).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Cmaf(super::Error::ProtectedNeedsPassthrough)),
+		"{err:?}"
+	);
+}
+
+/// Passthrough re-encodes each fragment, which moves `senc`; every published fragment's `saio`
+/// still points at its IVs, which are the source's.
+#[tokio::test]
+async fn encrypted_fragments_keep_saio_on_their_ivs() {
+	for data in [CENC, CBCS_VIDEO] {
+		let (result, catalog, consumer, _importers) = import_protected(&[data], |fmp4| fmp4);
+		result.unwrap();
+		let snapshot = catalog.snapshot();
+		let source = first_moof(data);
+		for (name, config) in &snapshot.video.renditions {
+			let Container::Cmaf { init } = &config.container else {
+				unreachable!()
+			};
+			let (_, moov) = decode_init(init);
+			let track_id = moov.trak[0].tkhd.track_id;
+			let published = fragments(&consumer, name).await;
+			assert!(!published.is_empty(), "{name}");
+			let senc = checked_senc(&published[0]);
+			let traf = source.traf.iter().find(|traf| traf.tfhd.track_id == track_id).unwrap();
+			assert_eq!(Some(senc), traf.senc, "the IVs are the source's");
+			for fragment in &published[1..] {
+				checked_senc(fragment);
+			}
+		}
+	}
+}
+
+/// Shaka starts AAC on an edit that skips its priming frame. The edit list drops that sample, so
+/// the first fragment's `senc` is restated for the kept samples rather than refused.
+#[tokio::test]
+async fn an_edit_restates_the_kept_samples_encryption() {
+	let (result, catalog, consumer, _importers) = import_protected(&[CBCS_AUDIO], |fmp4| fmp4);
+	result.unwrap();
+	let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+	let published = fragments(&consumer, &name).await;
+	let first = mp4_atom::Moof::decode(&mut &published[0][..]).unwrap();
+	let samples = super::sample::count(&first.traf[0]);
+	assert_eq!(samples, super::sample::count(&first_moof(CBCS_AUDIO).traf[0]) - 1);
+	let senc = checked_senc(&published[0]);
+	assert_eq!(
+		senc.data,
+		(samples as u32).to_be_bytes(),
+		"one empty entry per kept sample"
+	);
+}
+
+/// The same with per-sample IVs and subsamples: an edit dropping the `cenc` file's first audio
+/// frame drops that frame's IV and size, and keeps the rest byte for byte.
+#[tokio::test]
+async fn an_edit_drops_the_skipped_samples_ivs() {
+	let data = rewrite(CENC, |atom| {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			let audio = moov
+				.trak
+				.iter_mut()
+				.find(|trak| trak.mdia.hdlr.handler == b"soun".into())
+				.unwrap();
+			let frame = 1024;
+			audio.edts = Some(mp4_atom::Edts {
+				elst: Some(mp4_atom::Elst {
+					entries: vec![mp4_atom::ElstEntry {
+						segment_duration: 0,
+						media_time: Some(frame),
+						media_rate: mp4_atom::FixedPoint::from(1),
+					}],
+				}),
+			});
+		}
+	});
+	let (result, catalog, consumer, _importers) = import_protected(&[&data], |fmp4| fmp4);
+	result.unwrap();
+	let (name, config) = catalog.snapshot().audio.renditions.into_iter().next().unwrap();
+	let Container::Cmaf { init } = &config.container else {
+		unreachable!()
+	};
+	let track_id = decode_init(init).1.trak[0].tkhd.track_id;
+	let source = first_moof(&data);
+	let source = source.traf.iter().find(|traf| traf.tfhd.track_id == track_id).unwrap();
+
+	let published = fragments(&consumer, &name).await;
+	let senc = checked_senc(&published[0]);
+	let kept = super::sample::count(source) as u32 - 1;
+	// 8-byte IVs and no subsamples in ffmpeg's audio: the first IV goes.
+	let source_senc = source.senc.as_ref().unwrap();
+	assert!(!source_senc.use_subsamples);
+	let mut expected = kept.to_be_bytes().to_vec();
+	expected.extend_from_slice(&source_senc.data[4 + 8..]);
+	assert_eq!(senc.data, expected);
+	let moof = mp4_atom::Moof::decode(&mut &published[0][..]).unwrap();
+	assert_eq!(moof.traf[0].saiz[0].sample_count, kept);
+}
+
+/// Keys that rotate are refused: a `pssh` in a `moof`, or a `seig` sample group.
+#[test]
+fn key_rotation_is_refused() {
+	let pssh = rewrite(CBCS_VIDEO, |atom| {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			moof.pssh.push(mp4_atom::Pssh {
+				system_id: *hang::catalog::drm::system::CLEARKEY.as_bytes(),
+				kid: Some(vec![*CLEARKEY_KID.as_bytes()]),
+				data: Vec::new(),
+			});
+		}
+	});
+	let seig = rewrite(CBCS_VIDEO, |atom| {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			moof.traf[0].sbgp.push(mp4_atom::Sbgp {
+				grouping_type: b"seig".into(),
+				grouping_type_parameter: None,
+				entries: vec![mp4_atom::SbgpEntry {
+					sample_count: 1,
+					group_description_index: 1,
+				}],
+			});
+		}
+	});
+	for data in [pssh, seig] {
+		let err = protected_error(&[&data], |fmp4| fmp4);
+		assert!(matches!(err, super::Error::KeyRotation), "{err:?}");
+	}
+}
+
+/// Without a `pssh` the catalog could name no DRM system, and the track would read as clear.
+#[test]
+fn an_encrypted_track_without_pssh_is_refused() {
+	let data = rewrite(CBCS_VIDEO, |atom| {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			moov.pssh.clear();
+		}
+	});
+	let err = protected_error(&[&data], |fmp4| fmp4);
+	assert!(matches!(err, super::Error::MissingPssh), "{err:?}");
+}
+
+/// IVs the rebuilt fragment would not carry are refused: ones outside `senc`, or split over
+/// several `saio`.
+#[test]
+fn encryption_information_outside_senc_is_refused() {
+	let outside = rewrite(CBCS_VIDEO, |atom| {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			moof.traf[0].senc = None;
+		}
+	});
+	let split = rewrite(CBCS_VIDEO, |atom| {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			let saio = moof.traf[0].saio[0].clone();
+			moof.traf[0].saio.push(saio);
+		}
+	});
+	for data in [outside, split] {
+		let err = protected_error(&[&data], |fmp4| fmp4);
+		assert!(matches!(err, super::Error::InvalidProtection(_)), "{err:?}");
+	}
+}
+
+/// A clear lead (an encrypted entry beside a clear one) stays refused as several codecs.
+#[test]
+fn a_clear_lead_is_refused() {
+	let data = rewrite(CBCS_VIDEO, |atom| {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			let codecs = &mut moov.trak[0].mdia.minf.stbl.stsd.codecs;
+			let mp4_atom::Codec::Encv(encv) = &codecs[0] else {
+				unreachable!()
+			};
+			let clear = (*encv.codec).clone();
+			codecs.push(clear);
+		}
+	});
+	let err = protected_error(&[&data], |fmp4| fmp4);
+	assert!(matches!(err, super::Error::MultipleCodecs), "{err:?}");
+}

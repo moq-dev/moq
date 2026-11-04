@@ -1372,6 +1372,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.alt_group = if has_multiple_video { Some(1) } else { None };
 		track.max_grp_sap_starting_type = sap_type;
 		track.max_obj_sap_starting_type = sap_type;
+		track.content_protection_ref_ids = config.drm.clone();
 		track.jitter = config.jitter;
 		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
@@ -1405,6 +1406,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.alt_group = if has_multiple_audio { Some(1) } else { None };
 		track.max_grp_sap_starting_type = Some(1);
 		track.max_obj_sap_starting_type = Some(1);
+		track.content_protection_ref_ids = config.drm.clone();
 		track.jitter = config.jitter;
 		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
@@ -1442,7 +1444,33 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 			}
 		}
 	}
-	moq_msf::Catalog::with_ext(unique, E::default())
+	let mut msf = moq_msf::Catalog::with_ext(unique, E::default());
+	msf.content_protections = catalog
+		.drm
+		.iter()
+		.map(|(id, entry)| content_protection(id, entry))
+		.collect();
+	msf
+}
+
+/// A hang `drm` entry as the CMSF `contentProtections` entry it mirrors (draft-ietf-moq-cmsf
+/// section 4.1.1), its ID becoming the `refID` tracks reference.
+fn content_protection(id: &str, entry: &hang::catalog::drm::Entry) -> moq_msf::ContentProtection {
+	let server = |server: &hang::catalog::drm::Server| {
+		let mut url = moq_msf::ProtectionUrl::new(server.url.as_str());
+		url.kind = server.kind.clone();
+		url
+	};
+	let mut msf = moq_msf::ContentProtection::new(
+		id,
+		vec![entry.kid.hyphenated().to_string()],
+		entry.scheme.as_str(),
+		entry.system.hyphenated().to_string(),
+	);
+	msf.drm_system.la_url = entry.license.as_ref().map(server);
+	msf.drm_system.cert_url = entry.certificate.as_ref().map(server);
+	msf.drm_system.pssh = (entry.pssh.as_ref()).map(|pssh| base64::engine::general_purpose::STANDARD.encode(pssh));
+	msf
 }
 
 #[cfg(test)]

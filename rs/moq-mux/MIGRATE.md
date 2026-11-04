@@ -4,6 +4,14 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### Protected CMAF import and the mp4-atom bump
+
+`fmp4::Import` with passthrough publishes Common Encryption (`cenc` and `cbcs`) fMP4 instead of refusing its `encv`/`enca` entries, filling the catalog's `drm` section; set license and certificate servers with `Import::with_drm`.
+Without passthrough, an encrypted file now fails with `fmp4::Error::ProtectedNeedsPassthrough` rather than `UnsupportedCodec`.
+
+The re-exported `fmp4::mp4_atom` moves to the release with Common Encryption's boxes: a sample entry's `colr` is a `Vec<Colr>`, `Moov` and `Moof` gain `pssh: Vec<Pssh>`, and `Codec` gains `Encv` and `Enca`.
+Build a `Moov` or `Moof` literal with `pssh: Vec::new()`, and match the new `Codec` variants.
+
 ### Shared playout timing
 
 Native players can use `timeline::Producer` and its read-only `Consumer` instead

@@ -40,6 +40,17 @@ pub enum Error {
 		namespace: String,
 	},
 
+	/// A `contentProtections` entry the hang catalog's `drm` section cannot carry: a malformed
+	/// system or key ID, a scheme other than `cenc` and `cbcs`, no default key, or a malformed URL
+	/// or `pssh`.
+	#[error("MSF content protection {ref_id:?} is invalid: {reason}")]
+	InvalidContentProtection {
+		/// The entry's `refID`.
+		ref_id: String,
+		/// What is wrong with it.
+		reason: &'static str,
+	},
+
 	/// The catalog frame is not valid UTF-8.
 	#[error("MSF catalog frame is not valid UTF-8")]
 	InvalidUtf8,

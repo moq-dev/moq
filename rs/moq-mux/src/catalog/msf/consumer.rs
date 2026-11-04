@@ -111,9 +111,16 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 /// Fields with no representation in `hang::Catalog` (`generated_at`, `is_complete`, `is_live`,
 /// `render_group`, `alt_group`, `max_grp_sap_starting_type`, `max_obj_sap_starting_type`) are
 /// dropped.
+///
+/// `contentProtections` become the `drm` section, each `refID` an entry ID, and a track's
+/// `contentProtectionRefIDs` its rendition's `drm`. An entry naming several default keys becomes
+/// one hang entry per key, `{refID}:{kid}`, and a track lists the one its init's `tenc` uses (all
+/// of them when the init names none).
 pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net::Path) -> Result<Catalog<E>> {
 	let mut catalog = Catalog::default();
 	catalog.ext = msf.ext.clone();
+	let protections = Protections::from_msf(msf)?;
+	catalog.drm = protections.entries.clone();
 
 	for track in &msf.tracks {
 		// The track name is the rendition ID, so a later track with the name replaces the earlier
@@ -146,6 +153,7 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			moq_msf::Role::Video => match video_config_from_msf(track)? {
 				Some(mut config) => {
 					config.broadcast = broadcast;
+					config.drm = protections.track(track, &config.container);
 					catalog.video.renditions.insert(track.name.clone(), config);
 				}
 				None => {
@@ -159,6 +167,7 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			moq_msf::Role::Audio => match audio_config_from_msf(track)? {
 				Some(mut config) => {
 					config.broadcast = broadcast;
+					config.drm = protections.track(track, &config.container);
 					catalog.audio.renditions.insert(track.name.clone(), config);
 				}
 				None => {
@@ -186,6 +195,101 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 	}
 
 	Ok(catalog)
+}
+
+/// An MSF catalog's `contentProtections` as hang `drm` entries.
+struct Protections {
+	/// The hang entries, by ID.
+	entries: std::collections::BTreeMap<String, hang::catalog::drm::Entry>,
+	/// Each `refID`'s hang entries, with the default key each one is for.
+	by_ref: std::collections::HashMap<String, Vec<(String, hang::catalog::drm::Uuid)>>,
+}
+
+impl Protections {
+	fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Self> {
+		use hang::catalog::drm;
+
+		let mut entries = std::collections::BTreeMap::new();
+		let mut by_ref = std::collections::HashMap::<String, Vec<_>>::new();
+		for cp in &msf.content_protections {
+			let invalid = |reason| Error::InvalidContentProtection {
+				ref_id: cp.ref_id.clone(),
+				reason,
+			};
+			let system = drm::Uuid::try_parse(&cp.drm_system.system_id).map_err(|_| invalid("malformed systemID"))?;
+			let scheme: drm::Scheme = cp.scheme.parse().map_err(|_| invalid("unsupported scheme"))?;
+			let server = |url: &moq_msf::ProtectionUrl| -> Result<drm::Server> {
+				let mut server = drm::Server::new(url.url.parse().map_err(|_| invalid("malformed URL"))?);
+				server.kind = url.kind.clone();
+				Ok(server)
+			};
+			let license = cp.drm_system.la_url.as_ref().map(server).transpose()?;
+			let certificate = cp.drm_system.cert_url.as_ref().map(server).transpose()?;
+			let pssh = (cp.drm_system.pssh.as_ref())
+				.map(|pssh| base64::engine::general_purpose::STANDARD.decode(pssh))
+				.transpose()
+				.map_err(|_| invalid("malformed pssh"))?;
+			if cp.default_kid.is_empty() {
+				return Err(invalid("no defaultKID").into());
+			}
+
+			let split = by_ref.entry(cp.ref_id.clone()).or_default();
+			for kid in &cp.default_kid {
+				let kid = drm::Uuid::try_parse(kid).map_err(|_| invalid("malformed defaultKID"))?;
+				let id = match cp.default_kid.len() {
+					1 => cp.ref_id.clone(),
+					_ => format!("{}:{}", cp.ref_id, kid.hyphenated()),
+				};
+				let mut entry = drm::Entry::new(system, scheme, kid);
+				entry.license = license.clone();
+				entry.certificate = certificate.clone();
+				entry.pssh = pssh.clone().map(Into::into);
+				entries.insert(id.clone(), entry);
+				split.push((id, kid));
+			}
+		}
+		Ok(Self { entries, by_ref })
+	}
+
+	/// The hang entry IDs protecting `track`, whose CMAF init is in `container`.
+	fn track(&self, track: &moq_msf::Track, container: &Container) -> Vec<String> {
+		let kid = match container {
+			Container::Cmaf { init } => init_kid(init),
+			_ => None,
+		};
+		let mut ids = Vec::new();
+		// moq-msf refuses a refID the root lacks.
+		for split in track
+			.content_protection_ref_ids
+			.iter()
+			.filter_map(|id| self.by_ref.get(id))
+		{
+			let matching: Vec<_> = split.iter().filter(|(_, other)| Some(*other) == kid).collect();
+			let chosen = match (split.len(), matching.is_empty()) {
+				(1, _) | (_, true) => split.iter().collect(),
+				_ => matching,
+			};
+			ids.extend(chosen.into_iter().map(|(id, _)| id.clone()));
+		}
+		ids
+	}
+}
+
+/// The default key ID an encrypted CMAF init's `tenc` names, if any.
+fn init_kid(init: &[u8]) -> Option<hang::catalog::drm::Uuid> {
+	use mp4_atom::{Any, DecodeMaybe};
+
+	let mut cursor = std::io::Cursor::new(init);
+	while let Ok(Some(atom)) = Any::decode_maybe(&mut cursor) {
+		if let Any::Moov(moov) = atom {
+			let sinf = (moov.trak.iter())
+				.flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs)
+				.find_map(crate::container::fmp4::cenc::sinf)?;
+			let tenc = sinf.schi.as_ref()?.tenc.as_ref()?;
+			return Some(hang::catalog::drm::Uuid::from_bytes(tenc.default_kid));
+		}
+	}
+	None
 }
 
 /// Decode the [`Container`] for a track based on its packaging and `init_data`.
@@ -432,7 +536,9 @@ fn cmaf_moov(track: &moq_msf::Track, init: &[u8]) -> Result<mp4_atom::Moov> {
 fn cmaf_video_description(track: &moq_msf::Track, init: &[u8], codec: &VideoCodec) -> Result<Option<bytes::Bytes>> {
 	use mp4_atom::{Atom, Codec};
 	let moov = cmaf_moov(track, init)?;
-	for sample in moov.trak.iter().flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs) {
+	let samples = moov.trak.iter().flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs);
+	// A protected entry wraps the codec the catalog names.
+	for sample in samples.map(crate::container::fmp4::cenc::clear) {
 		let mut description = bytes::BytesMut::new();
 		match (codec, sample) {
 			(
@@ -462,7 +568,7 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 	// position in the moov.
 	for trak in &moov.trak {
 		let stbl = &trak.mdia.minf.stbl;
-		for sample in &stbl.stsd.codecs {
+		for sample in stbl.stsd.codecs.iter().map(crate::container::fmp4::cenc::clear) {
 			match sample {
 				mp4_atom::Codec::Mp4a(mp4a) => {
 					return Ok(DerivedAudio {
@@ -485,6 +591,54 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 
 #[cfg(test)]
 mod test {
+	/// CMSF content protection maps onto the hang `drm` section. An entry naming two default
+	/// keys becomes one hang entry per key; a track whose init names neither lists both, and a
+	/// malformed entry refuses the catalog.
+	#[test]
+	fn content_protections_become_drm_entries() {
+		use hang::catalog::drm;
+
+		let json = r#"{
+			"version": "draft-01",
+			"contentProtections": [
+				{ "refID": "wv", "defaultKID": ["01234567-89ab-cdef-0123-456789abcdef"], "scheme": "cbcs",
+				  "drmSystem": { "systemID": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",
+				                 "laURL": { "url": "https://wv.example.com/", "type": "EME-1.0" }, "pssh": "AAAA" } },
+				{ "refID": "ck", "defaultKID": ["01234567-89ab-cdef-0123-456789abcdef", "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"],
+				  "scheme": "cenc", "drmSystem": { "systemID": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b" } }
+			],
+			"tracks": [
+				{ "name": "video", "packaging": "legacy", "isLive": true, "role": "video", "codec": "vp8",
+				  "contentProtectionRefIDs": ["wv", "ck"] },
+				{ "name": "audio", "packaging": "legacy", "isLive": true, "role": "audio", "codec": "opus",
+				  "samplerate": 48000, "channelConfig": "2" }
+			]
+		}"#;
+		let msf: moq_msf::Catalog = json.parse().unwrap();
+		let catalog = from_msf(&msf, &moq_net::Path::empty()).unwrap();
+		catalog.check_renditions().unwrap();
+
+		assert_eq!(catalog.drm.len(), 3, "{:?}", catalog.drm);
+		let wv = &catalog.drm["wv"];
+		assert_eq!(wv.system, drm::system::WIDEVINE);
+		assert_eq!(wv.scheme, drm::Scheme::Cbcs);
+		assert_eq!(wv.license.as_ref().unwrap().kind.as_deref(), Some("EME-1.0"));
+		assert_eq!(wv.pssh.as_deref(), Some(&[0u8, 0, 0][..]));
+		assert_eq!(
+			catalog.video.renditions["video"].drm,
+			[
+				"wv",
+				"ck:01234567-89ab-cdef-0123-456789abcdef",
+				"ck:a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"
+			]
+		);
+		assert!(catalog.audio.renditions["audio"].drm.is_empty());
+
+		let malformed = json.replace("\"cenc\"", "\"cens\"");
+		let msf: moq_msf::Catalog = malformed.parse().unwrap();
+		assert!(from_msf(&msf, &moq_net::Path::empty()).is_err());
+	}
+
 	/// A later track with a name replaces the earlier one, even under another role, so the
 	/// name never lands as both a video and an audio rendition.
 	#[test]

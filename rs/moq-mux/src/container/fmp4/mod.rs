@@ -6,6 +6,7 @@
 //! container; [`Import`] parses external fMP4 streams and [`Export`]
 //! produces them.
 
+pub(crate) mod cenc;
 mod edit;
 mod export;
 pub mod fragment;
@@ -172,6 +173,37 @@ pub enum Error {
 	/// The sample entry has an unrecognized codec four-character code.
 	#[error("unknown codec: {0:?}")]
 	UnknownCodec(mp4_atom::FourCC),
+
+	/// An encrypted (`encv`/`enca`) track whose protection boxes, or whose fragments' encryption
+	/// information, the republished media could not carry intact.
+	#[error("invalid protected track: {0}")]
+	InvalidProtection(&'static str),
+
+	/// An encrypted track under a Common Encryption scheme other than `cenc` and `cbcs`.
+	#[error("unsupported encryption scheme: {0:?}")]
+	UnsupportedScheme(mp4_atom::FourCC),
+
+	/// Encrypted samples carry their per-sample IVs in the fragment's `senc`, which only
+	/// passthrough keeps; unwrapped samples would be undecryptable.
+	#[error("encrypted fMP4 needs passthrough (CMAF) import")]
+	ProtectedNeedsPassthrough,
+
+	/// An encrypted track without a `pssh` box, so the catalog could name no DRM system for it.
+	#[error("encrypted track without a pssh box")]
+	MissingPssh,
+
+	/// Keys that rotate within the track: a `pssh` box in a `moof`, or a `seig` sample group.
+	#[error("key rotation is not supported")]
+	KeyRotation,
+
+	/// An edit list drops samples of an encrypted track, whose kept samples' encryption
+	/// information would not be restated.
+	#[error("an edit list drops samples from an encrypted track")]
+	ProtectedEdit,
+
+	/// A license or certificate server for a DRM system no encrypted track carries a `pssh` for.
+	#[error("DRM system {0} protects no track")]
+	UnusedDrmSystem(hang::catalog::drm::Uuid),
 
 	/// A `colr` box code point past H.273's 255.
 	#[error("invalid colr code point: {0}")]

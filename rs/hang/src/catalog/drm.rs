@@ -25,6 +25,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
 
+/// Re-export of the [`uuid`] crate's UUID, which system and key IDs are.
+pub use uuid::Uuid;
+
 /// Well-known DRM system IDs, as draft-ietf-moq-cmsf lists them.
 pub mod system {
 	/// Google Widevine.
@@ -165,6 +168,28 @@ impl std::str::FromStr for Scheme {
 			"cenc" => Ok(Self::Cenc),
 			"cbcs" => Ok(Self::Cbcs),
 			other => Err(crate::Error::UnsupportedScheme(other.to_string())),
+		}
+	}
+}
+
+/// The servers a publisher supplies for one DRM system, which the media does not carry.
+///
+/// An importer copies them into each [`Entry`] of that system.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Servers {
+	/// Where to request a license.
+	pub license: Option<Server>,
+	/// Where to fetch the server certificate.
+	pub certificate: Option<Server>,
+}
+
+impl Servers {
+	/// A license server and no certificate server.
+	pub fn license(url: url::Url) -> Self {
+		Self {
+			license: Some(Server::new(url)),
+			certificate: None,
 		}
 	}
 }
