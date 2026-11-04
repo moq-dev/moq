@@ -625,6 +625,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.description = catalog_audio.description.map(Into::into);
 	config.container = catalog_audio.container.into();
 	config.jitter = catalog_audio.jitter;
+	config.warmup = catalog_audio.warmup;
 	Ok(config)
 }
 
@@ -713,7 +714,18 @@ mod tests {
 			enabled: true,
 			container: MoqContainer::Legacy,
 			jitter: None,
+			warmup: None,
 		}
+	}
+
+	/// The decoder starts the catalog warmup earlier, so it must survive the trip through the FFI
+	/// record.
+	#[test]
+	fn audio_config_keeps_the_warmup() {
+		let mut audio = catalog_audio("opus");
+		audio.warmup = Some(Duration::from_millis(80));
+		let config = audio_config(audio).unwrap();
+		assert_eq!(config.warmup, Some(Duration::from_millis(80)));
 	}
 
 	/// A consumer holds a disabled rendition it already plays, so one converts like any other.

@@ -5,6 +5,13 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Transport and HTTP cryptography use rind
+
+The relay checks rind CPU support at startup, including `Relay::load` for embedders.
+Its HTTP clients and HTTPS listener use rustls without enabling another crypto provider.
+x86\_64 CPUs without crypto extensions and aarch64 Raspberry Pi 4, CM4, and Zero 2 W remain supported through rind's software paths; aarch64 requires NEON and armv7 remains supported.
+No configuration or wire format changes.
+
 ### Built-in ACME is removed ([#7803](https://github.com/moq-dev/moq/pull/7803))
 
 Remove the `acme` Cargo feature, `[acme]` table, `--acme-*` flags, and `MOQ_ACME_*` variables.
