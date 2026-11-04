@@ -441,6 +441,70 @@ test("disabling with a subscriber attached flushes the held audio, then marks wh
 	expect(LaggingAudioEncoder.instances).toHaveLength(1);
 });
 
+// The codec has to restart across a capture gap to re-base its output clock, but the audio it still
+// held predates the gap: it is flushed out first, and the marker follows it.
+test("a capture gap flushes the held audio, then marks where it ends", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using _now = manualAt(0);
+	using env = await setup();
+	const { feed, written } = env;
+
+	const push = async (start: number, count: number) => {
+		for (let i = 0; i < count; i++) {
+			await feed.push({ timestamp: Micro(start + i * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+	};
+
+	await push(20_000, 4); // two written, two held
+	await push(200_000, 4); // the restarted codec, so two written and two held
+
+	expect(written).toEqual([
+		[20_000, 1],
+		[40_000, 1],
+		[60_000, 1],
+		[80_000, 1],
+		[100_000, 0],
+		[200_000, 1],
+		[220_000, 1],
+	]);
+	expect(LaggingAudioEncoder.instances).toHaveLength(1);
+});
+
+// A lost track already marked where its audio ends, so what the codec held for it must not open the
+// track that replaces it.
+test("a closed track's held audio stays off its replacement", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using _now = manualAt(0);
+	using env = await setup();
+	const { track, rendition, feed } = env;
+	const encode = spyOn(Container.Legacy.Producer.prototype, "encode");
+
+	try {
+		const push = async (start: number, count: number) => {
+			for (let i = 0; i < count; i++) {
+				await feed.push({ timestamp: Micro(start + i * 20_000), channels: [new Float32Array(960)] });
+			}
+			await feed.drain();
+		};
+
+		await push(20_000, 4); // two written, two held
+		track.close();
+		rendition.track.set(undefined);
+		await settle();
+
+		const replacement = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
+		encode.mockClear();
+		rendition.track.set(replacement);
+		await push(200_000, 4);
+		await settle();
+
+		expect(encode.mock.calls.map(([, timestamp]) => timestamp)).toEqual([Micro(200_000), Micro(220_000)]);
+	} finally {
+		encode.mockRestore();
+	}
+});
+
 // A muted rendition stays in the catalog, so a viewer deselects it with a one-field delta instead of
 // seeing it removed and re-added.
 test("disabling keeps the rendition in the catalog with enabled: false", async () => {
@@ -1402,6 +1466,71 @@ test("audio retained across a disable and re-enable is served before the break",
 			[60_000, 1],
 			[80_000, 0],
 			[200_000, 1],
+		]);
+	} finally {
+		discontinuity.mockRestore();
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
+// A replay submits the whole backlog at once, so restarting the codec at a gap inside it would drop
+// every frame of that drain still queued in a real codec. The gap flushes them out first instead.
+test("a capture gap inside replayed audio keeps every frame on both sides of it", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("gap.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const push = async (start: number, count: number) => {
+			for (let index = 0; index < count; index++) {
+				await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Nano.fromMilli(Milli(20)));
+			}
+		};
+		await push(0, 4);
+		await push(200_000, 4);
+		expect(encoder.out.stats.peek().frames).toBe(0);
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ delay: { max: Milli(1000) } });
+		await settle(20);
+		// Every frame before the gap, then the restarted codec holds two of the four after it.
+		expect(encoder.out.stats.peek().frames).toBe(6);
+		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Micro(80_000)]);
+		const reader = late.ordered();
+		const read: [number, number][] = [];
+		while (read.length < 7) {
+			const group = await reader.nextGroup();
+			const frame = await group?.readFrame();
+			if (!frame) throw new Error("expected a frame");
+			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
+			read.push([timestamp, payload.byteLength]);
+			group?.close();
+		}
+		expect(read).toEqual([
+			[0, 1],
+			[20_000, 1],
+			[40_000, 1],
+			[60_000, 1],
+			[80_000, 0],
+			[200_000, 1],
+			[220_000, 1],
 		]);
 	} finally {
 		discontinuity.mockRestore();
