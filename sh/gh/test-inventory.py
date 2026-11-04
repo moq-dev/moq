@@ -1040,8 +1040,8 @@ def bun_test_paths(root: Path, recipes: list[Recipe]) -> list[str]:
     """Reject bare Bun test-file filters in recipes, shell scripts, workflows, and npm scripts."""
     texts = [(recipe.text, recipe_line(root, recipe)) for recipe in recipes]
     texts += [(text, where) for text, where, _ in workflow_steps(root)]
-    texts += [(path.read_text(), str(path.relative_to(root))) for path in tracked(root, "*.sh")]
-    for manifest in tracked(root, "package.json", "*/package.json"):
+    texts += [(path.read_text(), str(path.relative_to(root))) for path in tracked(root, "*.sh") if path.is_file()]
+    for manifest in (path for path in tracked(root, "package.json", "*/package.json") if path.is_file()):
         texts += [
             (script, f"{manifest.relative_to(root)} scripts.{name}")
             for name, script in json.loads(manifest.read_text()).get("scripts", {}).items()

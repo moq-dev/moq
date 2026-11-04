@@ -391,6 +391,19 @@ class InventoryTest(unittest.TestCase):
         )
         self.assertFalse(any("sh/run.sh:" in error for error in module.inventory(self.root)[1]))
 
+    def test_bun_guard_reads_the_working_tree_after_unstaged_deletions(self):
+        files = {"sh/run.sh": "bun test ./codec.test.ts\n", "web/package.json": '{"scripts": {"test": "bun test"}}'}
+        for name, text in files.items():
+            self.write(name, text)
+        subprocess.run(["git", "add", *files], cwd=self.root, check=True)
+        for name, text in files.items():
+            with self.subTest(name=name):
+                (self.root / name).unlink()
+                try:
+                    self.orphans()
+                finally:
+                    self.write(name, text)
+
     def test_a_js_bench_entry_point_needs_a_caller(self):
         # Nightly's shape: a loop's literal names reach a recipe parameter through a helper's "$@".
         self.write(
