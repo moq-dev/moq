@@ -15,13 +15,28 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 - m1
 - m2
 
-- Confirm the cause first. The likely one: each case's origin cache is
-  `CACHE_BYTES` (64 MiB), and a 64 KiB case writes 64-frame groups
-  (`frames()` caps at 64), so a round can outgrow the cache before a slow
-  binding reads it.
-- Then size the case or its cache so it measures throughput rather than
-  eviction, and keep the other sizes' numbers comparable with past nights.
-- Run every binding's runner locally (`just gh nightly bindings`) before
-  pushing.
+Investigation 2026-11-04:
+
+- [The November 1 binding job](https://github.com/moq-dev/moq/actions/runs/41313466339/job/124868517685)
+  failed in `bench::benchmark_ffi` with `Evicted`.
+- [moq-dev/moq#7446](https://github.com/moq-dev/moq/pull/7446), merged later
+  that day, fixed the cause in the cache policy: carrying debt for a cold
+  victim fell through into shedding the live group's unread frames.
+- The [November 2](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408205493)
+  and [November 3](https://github.com/moq-dev/moq/actions/runs/41656613559/job/125988511175)
+  binding jobs passed. The unchanged benchmark also passes locally at a
+  one-second budget on `701b7196a348ff0b9656d7db7a193673772eeb0c`.
+- The 64 KiB case writes 4 MiB per round, below its 64 MiB origin budget.
+  A local synchronous probe completed 10,000 rounds of every frame size,
+  including cache turnover, without eviction. There is no reproduced
+  failure that justifies changing the case sizes or cache budget.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: retire this stale quest (recommended), or retain it with a
+  newer failing run or reproducer that the merged cache fix does not
+  address. The original failure is fixed and two scheduled runs pass;
+  choosing whether to keep the quest changes its scope, so unattended
+  investigation leaves that decision for the maintainer.
