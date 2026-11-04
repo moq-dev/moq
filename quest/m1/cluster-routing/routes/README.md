@@ -89,7 +89,8 @@ The wire sketch is in [wire](/quest/m1/cluster-routing/routes/wire.md); the bull
   planned; a provable identity, if a use case needs one, makes this route
   identity a public key, independent of P2P. Decided 2026-11-04 (maintainer,
   /quest-unblock): scoped forgery is that use case; a peer proves a route key
-  once per announce stream and its own identity derives from that key
+  once per announce stream, its own identity derives from that key, and every
+  identity it sends while scoped is qualified under it
   ([Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md)).
   Decided 2026-10-26 (maintainer): receivers do not stamp a fresh identity
   per session. In a mesh, two relays stamping their sessions from one origin

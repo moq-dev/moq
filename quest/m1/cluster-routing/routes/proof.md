@@ -5,11 +5,15 @@
 A lite-07 peer proves a route key once per announce stream. The requester
 sends a nonce in ANNOUNCE_REQUEST, and the publisher's ANNOUNCE_OK carries its
 public key and a signature over that nonce, bound to the session. A relay
-files a proven peer's own routing identity, a u64 derived from its key, bare.
-Every identity that peer forwards goes under a key qualified by the proven
-key, so a scoped peer that forges or inflates another origin's identity only
-affects claims inside its own grant. A peer that proves nothing gets a
-per-session key. This lands in lite-07 before the cut.
+files every identity a scoped, proven peer sends, its own included (the
+2026-10-26 rule in [Routes and announces](/quest/m1/cluster-routing/routes/README.md)),
+under H(domain, proven key, id), so a scoped peer that forges or inflates
+another origin's identity only affects claims inside its own grant. Relays
+that share one key file present an origin under the same qualified key
+whichever of them carries it, so a reader of relay l1's own broadcast fails
+over through sibling l2 when l1's direct uplink is lost. Unscoped peers stay
+bare, and a scoped peer that proves nothing gets a per-session key. This lands
+in lite-07 before the cut.
 
 ## Plan
 
@@ -36,6 +40,13 @@ gates the lite-07 cut. Options shown for each:
 - Identity on the wire: ✅ ROUTE keeps its u64 node ID, the first 64 bits of
   H(key, salt), so the router's `Id` type and ROUTE stay as they are. Not
   chosen: the full 32-byte key in each ROUTE.
+
+Own identity, settled in review of
+[moq-dev/moq#7919](https://github.com/moq-dev/moq/pull/7919): it is qualified
+like any other, not filed bare. Filed bare, l1's own origin would reach c1 as
+its bare id but c2 (through l2) as a qualified key, so the two would not fail
+over to each other. Extend the two-uplink fixture so l1 serves its own
+broadcast and loses its direct uplink, and the reader fails over through l2.
 
 Binding: a bare nonce can be relayed (a peer passes another relay's signed OK
 off as its own), so the signature covers the session too. Rust uses the TLS

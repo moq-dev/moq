@@ -99,8 +99,8 @@ separate", in the epic).
 Decided 2026-11-04 (maintainer, /quest-unblock): a scoped peer's identities
 are keyed by a route key the peer proves, specified in
 [Scoped peers prove a route key](/quest/m1/cluster-routing/routes/proof.md).
-A proven peer's own identity is derived from its key and stays bare; every
-identity it forwards is qualified under its proven key. A peer that proves no
+Every identity a scoped, proven peer sends, its own included, is qualified
+under its proven key, so relays sharing a key file fail over as one. A peer that proves no
 key gets a per-session key. `Scope::qualify` still takes the key from the
 caller, so this quest does not wait on the proof. Options shown:
 
