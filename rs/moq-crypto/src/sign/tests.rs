@@ -19,7 +19,7 @@ fn hex(value: &Value) -> Vec<u8> {
 }
 
 fn seed(value: &Value) -> SecretKey {
-	SecretKey::from_seed(Zeroizing::new(hex(value).try_into().unwrap()))
+	SecretKey::from_seed(&hex(value).try_into().unwrap())
 }
 
 fn public(value: &Value) -> PublicKey {
@@ -83,6 +83,26 @@ fn vector_negative() {
 	}
 }
 
+/// A key file written before signing moved to rind loads to the same key and seed.
+#[cfg(unix)]
+#[test]
+fn vector_key_files() {
+	use std::os::unix::fs::PermissionsExt;
+	let dir = tempfile::tempdir().unwrap();
+	for row in vectors()["keys"].as_array().unwrap() {
+		if row["seed"].is_null() {
+			continue;
+		}
+		let seed = hex(&row["seed"]);
+		let path = dir.path().join(row["id"].as_str().unwrap());
+		std::fs::write(&path, format!("{}\n", crate::sign::key::ZBASE32.encode(&seed))).unwrap();
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+		let key = SecretKey::load_or_generate(&path).unwrap();
+		assert_eq!(key.public(), public(&row["endpoint"]), "{}", row["id"]);
+		assert_eq!(key.0.pair.to_seed().as_ref(), seed, "{}", row["id"]);
+	}
+}
+
 #[test]
 fn key_file_persists_and_never_rotates() {
 	let dir = tempfile::tempdir().unwrap();
@@ -128,7 +148,7 @@ fn key_file_readable_by_others_is_refused() {
 
 #[test]
 fn debug_redacts_the_seed() {
-	let key = SecretKey::from_seed(Zeroizing::new([0x42; 32]));
+	let key = SecretKey::from_seed(&[0x42; 32]);
 	let debug = format!("{key:?}");
 	assert!(!debug.contains(&"42".repeat(32)), "{debug}");
 	assert!(debug.contains("<redacted>"), "{debug}");
@@ -452,8 +472,8 @@ fn bun(input: Value) -> Value {
 #[ignore = "requires Bun; run by just test interop"]
 fn sign_interop() {
 	let mut seed = Zeroizing::new([0u8; 32]);
-	aws_lc_rs::rand::fill(seed.as_mut()).unwrap();
-	let key = SecretKey::from_seed(seed.clone());
+	rind::rand::fill(seed.as_mut()).unwrap();
+	let key = SecretKey::from_seed(&seed);
 	let path = moq_net::Path::new(&format!("mesh/{}/agent", key.public())).unwrap();
 	let instance = moq_net::Instance::random();
 
