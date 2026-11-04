@@ -20,6 +20,7 @@ from moq_ffi import (
 from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
+    DatagramInfo,
     Frame,
     Position,
     Subscription,
@@ -28,6 +29,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from .datagram import DatagramProducer, DatagramRequests
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
 
 
@@ -122,24 +124,8 @@ class TrackProducer:
         """Write a single-frame group with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def append_datagram(self, payload: bytes, timestamp: Timestamp | None = None) -> int:
-        """Send a best-effort datagram and return its sequence number.
-
-        Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
-        transport and wire version; there is no stream fallback.
-        """
-        return self._inner.append_datagram(Frame(payload, timestamp)._ffi())
-
-    def insert_datagram(self, sequence: int, payload: bytes, timestamp: Timestamp | None = None) -> None:
-        """Send a best-effort datagram at an explicit sequence number.
-
-        For a caller that allocates its own sequences; :meth:`append_datagram`
-        continues after the largest one.
-        """
-        self._inner.insert_datagram(sequence, Frame(payload, timestamp)._ffi())
-
     def largest(self) -> Position | None:
-        """The newest group written, at its newest frame; ``None`` before any. Datagrams never move it."""
+        """The newest group written, at its newest frame; ``None`` before any."""
         return self._inner.largest()
 
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
@@ -318,6 +304,12 @@ class BroadcastRequests(_Stream[TrackRequest]):
         """Await the next track a subscriber requested but that isn't published yet."""
         return TrackRequest(await self._inner.requested_track())
 
+    def datagrams(self) -> DatagramRequests:
+        """Serve on-demand datagram tracks through their own request queue."""
+        from .datagram import DatagramRequests
+
+        return DatagramRequests(self._inner.datagrams())
+
     def cancel(self) -> None:
         """Stop accepting track requests and release the underlying handle."""
         self._inner.cancel()
@@ -344,6 +336,12 @@ class BroadcastProducer:
     def requests(self) -> BroadcastRequests:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastRequests(self._inner.requests())
+
+    def create_datagrams(self, name: str, info: DatagramInfo | None = None) -> DatagramProducer:
+        """Create a live datagram track, independent of stream tracks with the same name."""
+        from .datagram import DatagramProducer
+
+        return DatagramProducer(self._inner.create_datagrams(name, info))
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
