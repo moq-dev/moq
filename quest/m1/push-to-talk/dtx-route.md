@@ -24,14 +24,15 @@ ended at 8.92 s), and no WebCodecs output maps a chunk back to its input
 the timeline; Safari wasn't measured. `usedtx` was removed in
 [moq-dev/moq#4919](https://github.com/moq-dev/moq/pull/4919).
 
-Measured 2026-11-04 (repro in the Chromium bug tracked by
+Measured 2026-11-04 (repro in
+[chromium#581458361](https://issues.chromium.org/issues/581458361), tracked by
 [Chromium's Opus encoder stamps chunks from their
 input](/quest/m2/chromium-opus-timestamps.md)): with
 `usedtx: true`, Chrome 156 (Linux and macOS) ends 14 s of input at 8.92 s, and it
 also ignores a jump in input timestamps. Firefox 157 keeps the timeline under
 DTX but ignores input jumps. Safari 26.6.2 follows input jumps but never
 applies `usedtx`. WebCodecs §5.6 already requires the input's timestamp, so
-this is a Chromium bug, not a spec gap; the maintainer files it.
+this is a Chromium bug, not a spec gap.
 
 Decided 2026-11-04 (maintainer): measure before choosing. The routes:
 
