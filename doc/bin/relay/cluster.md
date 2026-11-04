@@ -298,4 +298,5 @@ out: static and API peers then share one socket on that port, and a redial
 reuses it.
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
-this relay dialed and holds a session with.
+this relay dials, including peers still retrying, with their live transports and
+how long ago each last connected.

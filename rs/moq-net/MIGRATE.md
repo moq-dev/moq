@@ -4,6 +4,25 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
+
+A stream track no longer carries datagrams. `track::Producer::{append_datagram, insert_datagram}` and `track::Subscriber/Ordered::{poll_recv_datagram, recv_datagram}` are removed; a datagram track is created and read through the broadcast, in a namespace apart from stream tracks, with its own sequence counter.
+
+```rust
+// Before
+let mut track = broadcast.create_track("audio", info)?;
+track.append_datagram(timestamp, payload)?;
+let mut sub = consumer.track("audio")?.subscribe(None).await?;
+let datagram = sub.recv_datagram().await?;
+// After
+let mut audio = broadcast.create_datagrams("audio", datagram::Info::default().with_timescale(scale))?;
+audio.append(timestamp, payload)?;
+let mut reader = consumer.datagrams("audio")?;
+let datagram = reader.recv().await?;
+```
+
+A `datagram::Consumer` is live from when it is created, has a priority (`set_priority`) and no ranges, and ends with `Ok(None)` on the producer's `finish`. A relay forwarding datagrams keeps their sequence with `datagram::Producer::insert`. A `broadcast::Requests` handler serves requested datagram tracks through `Requests::datagrams()`. `Error::NotFetchable` and `StreamError::NotFetchable` are removed, since no group is ever a datagram. Stats count a datagram in `datagrams` and `bytes` only, not as a group, and `stats::Content` has no `datagrams`.
+
 ### `group::on_track` is `track::Info::rescale` ([#7702](https://github.com/moq-dev/moq/pull/7702))
 
 The free function `moq_net::group::on_track(timestamp, timescale)` is removed.
