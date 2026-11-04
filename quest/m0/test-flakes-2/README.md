@@ -100,3 +100,4 @@ Public API: none. Wire: none.
 - [Concurrent PulseAudio harness runs don't share a D-Bus name](/quest/m0/test-flakes-2/pulse-dbus.md) - parallel media runs no longer collide on `org.PulseAudio1`
 - [@moq/net's uni-stream flood test survives reruns](/quest/m0/test-flakes-2/js-stream-flood.md) - "a flood of uni streams yields" passes under `--rerun-each` and load
 - [The JS receive-credit qmux test never completes an oversized frame](/quest/m0/test-flakes-2/receive-credit-qmux.md) - `javascript_partial_frame_gives_way_qmux` stops completing a frame larger than the window on moq-transport-18
+- [The draft-22 wider-fill refusal test is deterministic](/quest/m0/test-flakes-2/ietf-wider-fill.md) - fix its intermittent live-group reset and re-enable both ordering cases without weakening their assertions
