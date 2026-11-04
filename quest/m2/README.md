@@ -279,3 +279,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [fMP4 import at 1-byte chunks is no slower than before](/quest/m2/fmp4-byte-chunk-perf.md) - bisect and fix or accept the ~19% slowdown at 1-byte chunks
 - [The relay bench reports io_uring pool size and RSS](/quest/m2/bench-uring-pool.md) - pool growth regressions show up in normal bench runs
 - [MKV imports ffmpeg's multichannel FLAC](/quest/m2/mkv-flac-channel-mask.md) - a channel-mask-only Vorbis comment is accepted, so default ffmpeg multichannel FLAC needs no remux
+- [The bindings' TrackInfo docs list its real fields](/quest/m2/track-info-docs.md) - Swift, Kotlin and Dart stop naming ordering and latency budget on `TrackInfo`
+- [Kotlin dependencies live in a Gradle version catalog](/quest/m2/kt-version-catalog.md) - one catalog entry per library, so a Dependabot bump can't drag another along
+- [The dev shell builds Kotlin with Gradle 9](/quest/m2/kt-gradle-9.md) - `gradle_9` in the dev shell, so the Android target builds there
+- [The publish support panel lists only codecs publishing accepts](/quest/m2/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe

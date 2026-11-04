@@ -71,7 +71,17 @@ yields covering lite-03 and lite-04, fixed by [moq-dev/moq#7663](https://github.
 The JS close-drain fixture advanced after the setup group's first payload, so a
 zero-delay subscription could expire its sender while the write budget yielded.
 It now reads that group through FIN before starting the next one, fixed by
-[moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658).
+[moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658). The lite-04 case
+of the same test failed once more in the batch for
+[moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431)
+([run 41573678257](https://github.com/moq-dev/moq/actions/runs/41573678257),
+2026-11-03 03:45Z) with `Session: remote error: 0`, the cancellation that PR
+explains. That batch predates #7658's merge at 15:56Z, and no queue run since
+has failed it, so it needs no child of its own (noted 2026-11-03,
+`/quest-plan`).
+
+Added 2026-11-03 (maintainer, `/quest-plan`): three more merge-queue failures
+from 2026-11-03, one child each.
 
 Public API: none. Wire: none.
 
@@ -80,3 +90,6 @@ Public API: none. Wire: none.
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
 - [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
+- [moq-transcode's live multi-rung test survives load](/quest/m0/test-flakes-2/transcode-multi-rung.md) - `live_multi_rung` stops failing queue batches with a cancelled rung group
+- [moq-relay's embedded io_uring stop test survives load](/quest/m0/test-flakes-2/relay-embed-stop.md) - `uring_custom_route_and_quic` stops seeing HTTP accepted after its owner stopped
+- [The JS worklet library-build test survives load](/quest/m0/test-flakes-2/js-worklet-build.md) - the lazy-blob worklet build test stops timing out at bun's 5 seconds

@@ -166,3 +166,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"
 - [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
 - [The flake lane skips hosts that can't map user namespaces](/quest/m0/ci/userns-uid-map.md) - `check flake` skips instead of failing where `/proc/self/uid_map` is unwritable
+- [moq-audio's default-feature test build is clippy-clean and gated](/quest/m0/ci/default-feature-test-lint.md) - the dead `retains`/`fail` under default-feature `--tests` clippy is fixed, and the gate catches it next time
+- [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
+- [Dependabot leaves the workspace-hack to hakari](/quest/m0/ci/dependabot-workspace-hack.md) - cargo group PRs stop hand-editing `rs/workspace-hack/Cargo.toml`
