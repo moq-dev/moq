@@ -173,5 +173,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"
 - [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
 - [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
-- [Renovate keeps the workspace-hack generated](/quest/m0/ci/dependabot-workspace-hack.md) - a protected scheduled Renovate runs `cargo hakari generate` in cargo update PRs, replacing Dependabot's cargo updates
 - [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency
