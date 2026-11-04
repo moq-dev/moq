@@ -1724,7 +1724,8 @@ impl MoqMediaCatalogConsumer {
 	/// Subscribe to this broadcast's catalog snapshots.
 	#[uniffi::constructor]
 	pub async fn subscribe(broadcast: &MoqBroadcastConsumer) -> Result<Arc<MoqMediaCatalogConsumer>, MoqError> {
-		let consumer = moq_mux::catalog::hang::Consumer::new(broadcast.inner.track(hang::catalog::Catalog::DEFAULT_NAME)?);
+		let consumer =
+			moq_mux::catalog::hang::Consumer::new(broadcast.inner.track(hang::catalog::Catalog::DEFAULT_NAME)?);
 		Ok(Arc::new(MoqMediaCatalogConsumer {
 			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
 		}))

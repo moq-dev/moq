@@ -28,12 +28,14 @@ export namespace Snapshot {
 	}
 	export namespace Consumer {
 		export type Config<T> = Pick<Snapshot.Config<T>, "schema"> & {
-			track: Track.Subscriber;
+			priority?: number;
+			track: Pick<Track.Consumer, "subscribe">;
 		};
 	}
 	export class Consumer<T> {
 		constructor(config: Snapshot.Consumer.Config<T>);
 		[Symbol.asyncIterator](): AsyncIterator<Timed<T>>;
+		close(): void;
 		latest(): Promise<Timed<T> | undefined>;
 		next(): Promise<Timed<T> | undefined>;
 	}

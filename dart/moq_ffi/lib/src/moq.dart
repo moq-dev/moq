@@ -10749,14 +10749,17 @@ class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
   MoqJsonSnapshotConsumer._(this._ptr) {
     _MoqJsonSnapshotConsumerFinalizer.attach(this, _ptr, detach: this);
   }
-  MoqJsonSnapshotConsumer({required MoqTrackConsumer track})
-    : _ptr = rustCall(
-        (status) => uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
-          FfiConverterMoqTrackConsumer.lower(track),
-          status,
-        ),
-        moqExceptionErrorHandler,
-      ) {
+  MoqJsonSnapshotConsumer({
+    required MoqBroadcastConsumer broadcast,
+    required String name,
+  }) : _ptr = rustCall(
+         (status) => uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
+           FfiConverterMoqBroadcastConsumer.lower(broadcast),
+           FfiConverterString.lower(name),
+           status,
+         ),
+         moqExceptionErrorHandler,
+       ) {
     _MoqJsonSnapshotConsumerFinalizer.attach(this, _ptr, detach: this);
   }
   factory MoqJsonSnapshotConsumer.lift(Pointer<Void> ptr) {
@@ -18863,12 +18866,13 @@ external void uniffi_moq_ffi_fn_free_moqjsonsnapshotconsumer(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
+@Native<
+  Pointer<Void> Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
 external Pointer<Void>
 uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
-  Pointer<Void> track,
+  Pointer<Void> broadcast,
+  RustBuffer name,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -22150,7 +22154,7 @@ void _checkApiChecksums() {
       60932) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_next() != 12715) {
+  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_next() != 15547) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_demand() !=
@@ -22653,7 +22657,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotconsumer_new() !=
-      11929) {
+      49887) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotproducer_new() !=

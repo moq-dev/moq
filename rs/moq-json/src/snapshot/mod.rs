@@ -815,11 +815,7 @@ mod test {
 		// otherwise open a group of its own.
 		producer.mutate(|_| {}, None).unwrap();
 		assert_eq!(
-			raw
-				.largest()
-				.now_or_never()
-				.flatten()
-				.map(|position| position.group),
+			raw.largest().now_or_never().flatten().map(|position| position.group),
 			Some(1)
 		);
 

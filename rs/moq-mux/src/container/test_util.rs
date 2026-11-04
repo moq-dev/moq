@@ -276,9 +276,7 @@ pub(crate) struct Clocks(crate::catalog::hang::Consumer);
 impl Clocks {
 	/// Subscribe before importing, so the first snapshot is not missed.
 	pub(crate) async fn subscribe(consumer: &moq_net::broadcast::Consumer) -> Self {
-		let track = consumer
-			.track(hang::Catalog::DEFAULT_NAME)
-			.unwrap();
+		let track = consumer.track(hang::Catalog::DEFAULT_NAME).unwrap();
 		Self(crate::catalog::hang::Consumer::new(track))
 	}
 

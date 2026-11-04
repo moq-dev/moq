@@ -58,9 +58,14 @@ impl<T: DeserializeOwned> Consumer<T> {
 		let subscription = moq_net::track::Subscription::default()
 			.with_priority(config.priority)
 			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::ZERO));
+		let name = track.name().to_string();
+		let mut track = Track::Subscribing(track.subscribe(subscription).into_inner());
+		// Join now when the track already resolves, as an in-process one does, so the publisher
+		// sees the reader before its first read; otherwise the first read resolves it.
+		track.resolve(&kio::Waiter::noop());
 		Self {
-			name: track.name().to_string(),
-			track: Track::Subscribing(track.subscribe(subscription).into_inner()),
+			name,
+			track,
 			group: None,
 			decoder: Decoder::new(config),
 			frames_read: 0,
@@ -187,6 +192,15 @@ enum Track {
 }
 
 impl Track {
+	/// Resolve the subscription once it is ready; an error stays for the next read to report.
+	fn resolve(&mut self, waiter: &kio::Waiter) {
+		if let Self::Subscribing(pending) = self
+			&& let Poll::Ready(Ok(subscriber)) = pending.poll_ok(waiter)
+		{
+			*self = Self::Ordered(subscriber.ordered());
+		}
+	}
+
 	fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
 		if let Self::Subscribing(pending) = self {
 			*self = Self::Ordered(std::task::ready!(pending.poll_ok(waiter))?.ordered());

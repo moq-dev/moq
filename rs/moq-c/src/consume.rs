@@ -278,20 +278,17 @@ impl Consume {
 
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task
-		// to keep this entrypoint non-blocking.
+		// Reads wait on SUBSCRIBE_OK, so run them inside the task to keep this entrypoint
+		// non-blocking.
 		self.catalog_task.spawn(
 			on_catalog,
 			|state| &mut state.consume.catalog_task,
-			|mut close| async move {
+			|close| async move {
 				driver
 					.watch(async move {
-						let subscription = hang::catalog::Catalog::default_subscription();
-						let subscribe = Self::subscribe(&broadcast, hang::catalog::Catalog::DEFAULT_NAME, subscription);
-						let Some(catalog) = Self::until_closed(&mut close, subscribe).await? else {
-							return Ok(());
-						};
-						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog.into(), close).await
+						// The consumer subscribes itself at catalog priority.
+						let catalog = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?.into();
+						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog, close).await
 					})
 					.await
 			},

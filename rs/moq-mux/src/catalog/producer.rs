@@ -1134,7 +1134,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<Consumer<E>, moq_net::Error> {
-		Ok(Consumer::new(self.outputs.hang.consume()))
+		Ok(Consumer::new(self.outputs.hang_track.consume()))
 	}
 
 	/// Abort every catalog track with `err`, preventing further edits.
@@ -1888,7 +1888,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
-		let track = catalog.outputs.hang.consume();
+		let track = catalog.outputs.hang_track.consume();
 		assert!(catalog.outputs.hang_track.info().compress, "catalog.json is compressed");
 		assert!(!catalog.outputs.msf_track.info().compress, "the MSF catalog is not");
 		let mut consumer = Consumer::new(track);
@@ -1914,7 +1914,7 @@ mod test {
 	fn mutate_composes_independent_owners() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut plain = Consumer::new(catalog.outputs.hang.consume());
+		let mut plain = Consumer::new(catalog.outputs.hang_track.consume());
 
 		catalog
 			.mutate(|c| {
@@ -2848,7 +2848,7 @@ mod test {
 	fn reservation_gates_until_all_renditions_resolve() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let reserved = catalog.reserve();
@@ -2881,7 +2881,7 @@ mod test {
 	fn live_rendition_owns_its_name_without_gating_the_catalog() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let _unresolved = catalog.rendition::<VideoConfig>("video0").unwrap();
@@ -2905,7 +2905,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
-		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 		let reserved = catalog.reserve();
 
@@ -2943,7 +2943,7 @@ mod test {
 	fn m2ts_counts_as_a_servable_track() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let reserved = catalog.reserve();
@@ -2965,7 +2965,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
-		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let reserved = catalog.reserve();
@@ -3004,7 +3004,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
-		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let net = broadcast
@@ -3043,7 +3043,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
-		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let net = broadcast
@@ -3081,7 +3081,7 @@ mod test {
 	fn reservation_gate_opens_when_unresolved_reservation_is_dropped() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		let reserved = catalog.reserve();
@@ -3109,7 +3109,7 @@ mod test {
 	fn staged_change_waits_for_a_held_reservation() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		let waiter = kio::Waiter::noop();
 
 		// A deferred importer grabs a reservation up front and holds it until it can resolve.
@@ -3455,7 +3455,7 @@ mod test {
 
 	/// The catalog a viewer joining now receives.
 	fn wire(catalog: &Producer) -> Catalog<()> {
-		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		match consumer.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(catalog))) => catalog,
 			_ => panic!("a published catalog"),

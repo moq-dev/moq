@@ -365,13 +365,12 @@ export class Truck {
 		this.#sawStatusSource = true;
 		this.statusState.set("pending");
 
-		const statusTrack = active.track("status").subscribe({ priority: 10 });
-		effect.cleanup(() => statusTrack.close());
-
 		const consumer = new Json.Snapshot.Consumer({
-			track: statusTrack,
+			track: active.track("status"),
 			schema: TruckStatusSchema,
+			priority: 10,
 		});
+		effect.cleanup(() => consumer.close());
 
 		effect.spawn(async () => {
 			for (;;) {

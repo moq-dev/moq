@@ -75,8 +75,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 				json!({ "n": n })
 			);
 			if n == 1 || n == 2 * u64::from(ratio) {
-				let mut join =
-					snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
+				let mut join = snapshot::Consumer::<Value>::new(remote.clone(), Default::default());
 				let received = join.latest().await.unwrap().unwrap();
 				assert_eq!((received.value, received.at), (value(n), Some(at(n))));
 				assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());

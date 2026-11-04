@@ -270,7 +270,11 @@ export class Game {
 		if (!active) return;
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
-		const consumer = new Json.Snapshot.Consumer({ track: active.track("status"), schema: GameStatusSchema, priority: 10 });
+		const consumer = new Json.Snapshot.Consumer({
+			track: active.track("status"),
+			schema: GameStatusSchema,
+			priority: 10,
+		});
 		effect.cleanup(() => consumer.close());
 
 		// Closing the consumer on cleanup unblocks a pending latest() (it returns undefined), so the loop

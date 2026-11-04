@@ -1574,9 +1574,7 @@ mod tests {
 		};
 		publish(vec![Path::from_static("small")], 1);
 
-		let track = consumer
-			.track("t.json")
-			.unwrap();
+		let track = consumer.track("t.json").unwrap();
 		let mut reader = moq_json::snapshot::Consumer::<Value>::new(track, Default::default());
 		let mut next = || {
 			reader
@@ -1795,9 +1793,7 @@ mod tests {
 
 	/// The latest buffered totals frame.
 	async fn read_totals(broadcast: &moq_net::broadcast::Consumer) -> TotalsFrame {
-		let track = broadcast
-			.track(crate::TOTALS)
-			.expect("track");
+		let track = broadcast.track(crate::TOTALS).expect("track");
 		let mut reader = moq_json::snapshot::Consumer::<TotalsFrame>::new(track, Default::default());
 		reader.latest().await.expect("read").expect("frame").value
 	}
@@ -2341,7 +2337,11 @@ mod tests {
 	/// Subscribe to `label`'s presence track on `broadcast`, driving a tick so
 	/// the producer adopts the request.
 	async fn hold_presence(broadcast: &moq_net::broadcast::Consumer, label: &str) -> Reader<PresenceFrame> {
-		let reader = Reader::new(broadcast.track(&presence_track(moq_net::Path::new(label).unwrap())).expect("track"));
+		let reader = Reader::new(
+			broadcast
+				.track(&presence_track(moq_net::Path::new(label).unwrap()))
+				.expect("track"),
+		);
 		drive_tick().await;
 		reader
 	}
@@ -2422,7 +2422,11 @@ mod tests {
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
 		// Let the request reach the stats broadcast's queue before the drain.
-		let mut track = Reader::new(broadcast.track(&presence_track(moq_net::Path::from_static(""))).expect("track"));
+		let mut track = Reader::new(
+			broadcast
+				.track(&presence_track(moq_net::Path::from_static("")))
+				.expect("track"),
+		);
 		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}
@@ -2474,7 +2478,11 @@ mod tests {
 	/// Subscribe to `path`'s prefix track on `broadcast`, driving a tick so the
 	/// producer adopts the request.
 	async fn hold_prefix(broadcast: &moq_net::broadcast::Consumer, path: &str) -> Reader<PrefixFrame> {
-		let reader = Reader::new(broadcast.track(&prefix_track(moq_net::Path::new(path).unwrap())).expect("track"));
+		let reader = Reader::new(
+			broadcast
+				.track(&prefix_track(moq_net::Path::new(path).unwrap()))
+				.expect("track"),
+		);
 		drive_tick().await;
 		reader
 	}
@@ -2669,7 +2677,11 @@ mod tests {
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
-		let mut track = Reader::new(broadcast.track(&prefix_track(moq_net::Path::from_static("acme"))).expect("track"));
+		let mut track = Reader::new(
+			broadcast
+				.track(&prefix_track(moq_net::Path::from_static("acme")))
+				.expect("track"),
+		);
 		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}

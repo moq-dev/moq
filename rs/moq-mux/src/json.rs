@@ -480,7 +480,9 @@ mod test {
 	/// One loop whichever mode the publisher chose, which is the point of the single `Consumer`.
 	/// [`Consumer::from_track`] on an in-process track, whose subscription resolves at once.
 	fn read(track: moq_net::track::Consumer, config: &JsonConfig) -> crate::Result<Consumer<Value>> {
-		Consumer::from_track(track, config).now_or_never().expect("in-process subscription")
+		Consumer::from_track(track, config)
+			.now_or_never()
+			.expect("in-process subscription")
 	}
 
 	fn drain(mut consumer: Consumer<Value>) -> Vec<Value> {

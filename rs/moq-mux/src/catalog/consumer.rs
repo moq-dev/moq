@@ -51,7 +51,9 @@ impl<E: CatalogExt> Consumer<E> {
 	pub async fn new(broadcast: &moq_net::broadcast::Consumer, format: CatalogFormat) -> Result<Self, crate::Error> {
 		Ok(Self {
 			inner: match format {
-				CatalogFormat::Hang => State::Hang(super::hang::Consumer::new(broadcast.track(hang::Catalog::DEFAULT_NAME)?)),
+				CatalogFormat::Hang => State::Hang(super::hang::Consumer::new(
+					broadcast.track(hang::Catalog::DEFAULT_NAME)?,
+				)),
 				CatalogFormat::Msf => {
 					let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None).await?;
 					State::Msf(super::msf::Consumer::new(track))

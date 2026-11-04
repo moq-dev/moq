@@ -36,7 +36,11 @@ export class Consumer<T> {
 
 	constructor(config: Consumer.Config<T>) {
 		this.#track = config.track
-			.subscribe({ ...Moq.Track.Subscription.default(), priority: config.priority ?? 0, delay: { max: Milli.zero } })
+			.subscribe({
+				...Moq.Track.Subscription.default(),
+				priority: config.priority ?? 0,
+				delay: { max: Milli.zero },
+			})
 			.ordered();
 		this.#decoder = new Decoder(config);
 	}

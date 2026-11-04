@@ -34,18 +34,22 @@ try {
 			await request.active.changed();
 			broadcast = request.active.peek();
 		}
-		const track = broadcast.track(Catalog.TRACK).subscribe({ priority: Catalog.PRIORITY.catalog });
+		const track = broadcast.track(Catalog.TRACK);
+		const consumer = new Json.Snapshot.Consumer<Catalog.Root>({
+			track,
+			schema: Catalog.RootSchema,
+			priority: Catalog.PRIORITY.catalog,
+		});
 		try {
 			const { compress } = await track.info();
 			assert.equal(compress, version === "moq-lite-07-wip", "wrong compression metadata");
-			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 			const root = (await consumer.latest())?.value;
 			assert(root, "catalog ended before a snapshot");
 			const video = Object.keys(root.video?.renditions ?? {}).sort();
 			const audio = Object.keys(root.audio?.renditions ?? {}).sort();
 			console.error(`catalog compress=${compress} video=${video.join(",")} audio=${audio.join(",")}`);
 		} finally {
-			track.close();
+			consumer.close();
 		}
 	} finally {
 		request.close();
