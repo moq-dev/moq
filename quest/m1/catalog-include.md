@@ -30,12 +30,12 @@ the catalog root. Its why I wanted to call the section `include` originally."
 - The field arrived in [moq-dev/moq#7312](https://github.com/moq-dev/moq/pull/7312)
   (2026-11-01) and isn't on `release`, so no compatibility alias is needed and
   the catalog `version` stays.
-- Update the [HLS contributions](/quest/m0/hls-contributions.md) quest, or its
-  code if #7836 has landed, to the new name.
+- Update the HLS listing's code, landed in
+  [moq-dev/moq#7836](https://github.com/moq-dev/moq/pull/7836), to the new name.
 
 Public API: breaking but unreleased (Rust `hang`, `@moq/hang`, `@moq/watch`).
 Wire: the catalog JSON key changes; unreleased.
 
 ## Related
 
-- [HLS lists contributions](/quest/m0/hls-contributions.md) - the HLS consumer settled with the shared-timeline rule
+- [HLS lists contributions](https://github.com/moq-dev/moq/pull/7836) - the HLS consumer settled with the shared-timeline rule
