@@ -2572,9 +2572,10 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	let entry: { track: Producer; tail: { covers(start: bigint, end: bigint): boolean } } | undefined;
+	type Entry = { track: Producer; tail: { covers(start: bigint, end: bigint): boolean } };
+	let entry: Entry | undefined;
 	const internal = subscriber as unknown as {
-		runResponses: (stream: unknown, entry: NonNullable<typeof entry>) => Promise<void>;
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
 	};
 	const runResponses = internal.runResponses.bind(internal);
 	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {

@@ -3866,7 +3866,11 @@ mod test {
 		let b = copy();
 		routes.serve(b.consume());
 		assert_eq!(dropped(&mut sub), []);
-		assert_eq!(sub.reoffer_stale(), vec![1..3], "reopened, though the new route never reported it");
+		assert_eq!(
+			sub.reoffer_stale(),
+			vec![1..3],
+			"reopened, though the new route never reported it"
+		);
 		assert_eq!(sub.reoffer_stale(), Vec::<std::ops::Range<u64>>::new());
 		write(&b, 1);
 		write(&b, 2);

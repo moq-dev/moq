@@ -2753,7 +2753,8 @@ export class Subscriber {
 			priority: () => this.#state.update.peek()?.priority ?? 0,
 			maxDelay: () => this.#drift().budget,
 			order: () => this.#state.update.peek()?.order ?? "descending",
-			refuse: (start, end, error) => this.#state.drops.update((drops) => insertDrop(drops, start, end, { error })),
+			refuse: (start, end, error) =>
+				this.#state.drops.update((drops) => insertDrop(drops, start, end, { error })),
 		};
 		return this.#state.asker;
 	}

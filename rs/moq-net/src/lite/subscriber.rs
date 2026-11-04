@@ -4304,23 +4304,24 @@ mod tests {
 		serving.apply_response(&serve, old(1, 2)).unwrap();
 		serving.apply_response(&serve, old(4, 4)).unwrap();
 		serving
-			.apply_response(&serve, lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 1, end: 2 }))
+			.apply_response(
+				&serve,
+				lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 1, end: 2 }),
+			)
 			.unwrap();
 		serving
 			.apply_response(
 				&serve,
-				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(
-					4..=4,
-					&crate::StreamError::App(5),
-					0,
-					version,
-				)),
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..=4, &crate::StreamError::App(5), 0, version)),
 			)
 			.unwrap();
 		// Empty ranges.
 		serving.apply_response(&serve, old(6, 5)).unwrap();
 		serving
-			.apply_response(&serve, lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 6, end: 5 }))
+			.apply_response(
+				&serve,
+				lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 6, end: 5 }),
+			)
 			.unwrap();
 
 		{
