@@ -231,6 +231,10 @@ impl Stream {
 	/// Observe FIN without consuming application bytes, including an empty stream's end.
 	#[cfg(feature = "quic")]
 	pub(crate) fn poll_closed(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+		// A read that met the reset marks every byte read, so only the cached code still says how it ended.
+		if let Some(code) = self.reader.reset {
+			return Poll::Ready(Ok(Some(code)));
+		}
 		let waiter = self.park.hold(cx);
 		let read = self
 			.reader

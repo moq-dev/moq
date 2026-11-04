@@ -288,6 +288,118 @@ fn a_clean_finish_closes_a_stream() {
 	client.join().expect("client thread");
 }
 
+/// A datagram that names no session, or another one, is dropped rather than ending the session.
+#[test]
+fn a_stray_datagram_is_dropped() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let client = tokio_client(format!("https://{}/stray", endpoint.local_addr()), |session| {
+		Box::pin(async move {
+			// Session IDs are client bidi stream IDs, so 1 is never one; an empty datagram names none.
+			for stray in [&[0x01, b'x'][..], &[][..]] {
+				session
+					.connection()
+					.send_datagram(stray, Default::default())
+					.expect("send stray datagram");
+			}
+			session
+				.send_datagram(PAYLOAD, Default::default())
+				.expect("send datagram");
+			let echoed = session.read_datagram().await.expect("read datagram");
+			assert_eq!(&echoed[..], PAYLOAD, "datagram echo");
+			session.close(0, "done");
+			session.closed().await;
+		})
+	});
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
+			let session = request
+				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.await
+				.expect("respond");
+			let datagram = within(&handle, "the datagram", kio::wait(|waiter| session.poll_recv_datagram(waiter)))
+				.await
+				.expect("a stray datagram does not end the session");
+			assert_eq!(&datagram[..], PAYLOAD);
+			session
+				.send_datagram(datagram, Default::default())
+				.expect("send datagram");
+			kio::wait(|waiter| session.poll_closed(waiter)).await;
+		})
+		.expect("worker");
+	client.join().expect("client thread");
+}
+
+/// Leased bytes handed back unread hold the close watch off, rather than being discarded
+/// behind a clean end; once read through a lease, the stream ends.
+#[test]
+fn an_unread_lease_holds_the_close_watch_off() {
+	use bytes::Buf as _;
+	use std::task::{Context, Poll, Waker};
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let client = tokio_client(format!("https://{}/lease", endpoint.local_addr()), |session| {
+		Box::pin(async move {
+			let mut send = session.open_uni(Default::default()).await.expect("open uni");
+			send.write_all(PAYLOAD).await.expect("write");
+			assert!(send.finish().await.expect("FIN delivered").is_none());
+			let mut recv = session.accept_uni().await.expect("accept uni");
+			assert_eq!(read_all(&mut recv).await, b"read");
+			session.close(0, "done");
+			session.closed().await;
+		})
+	});
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
+			let session = request
+				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.await
+				.expect("respond");
+			let mut recv = kio::wait(|waiter| session.poll_accept_uni(waiter))
+				.await
+				.expect("accept uni");
+			// Wanting more than was sent resolves only at the FIN; the lease drops unread.
+			let fin = within(
+				&handle,
+				"the FIN",
+				kio::wait(|waiter| {
+					recv.poll_lease(&mut waiter.context(), PAYLOAD.len() + 1)
+						.map(|lease| lease.map(|lease| lease.is_fin()))
+				}),
+			)
+			.await;
+			assert!(fin.expect("lease"));
+			assert!(recv.poll_closed(&kio::Waiter::noop()).is_pending());
+
+			let mut cx = Context::from_waker(Waker::noop());
+			let Poll::Ready(lease) = recv.poll_lease(&mut cx, PAYLOAD.len()) else {
+				panic!("restored bytes are leasable");
+			};
+			let mut lease = lease.expect("lease");
+			assert_eq!(lease.copy_to_bytes(PAYLOAD.len()), PAYLOAD);
+			lease.release();
+			assert!(matches!(recv.poll_closed(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+
+			// Tell the peer the stream was read through, so it can finish.
+			let send = kio::wait(|waiter| session.poll_open_uni(waiter, Default::default()))
+				.await
+				.expect("open uni");
+			write_finish(send, b"read").await;
+			kio::wait(|waiter| session.poll_closed(waiter)).await;
+		})
+		.expect("worker");
+	client.join().expect("client thread");
+}
+
 /// A whole moq-lite session over WebTransport: subprotocol negotiation, SETUP
 /// on the bidirectional stream, announce, subscribe, and a group on a
 /// unidirectional stream, with the tokio stack as the subscriber. This is the

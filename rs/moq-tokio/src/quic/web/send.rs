@@ -8,6 +8,7 @@ use std::{
 };
 
 use bytes::Buf;
+use futures::FutureExt;
 
 use crate::quic::driver::send;
 use crate::quic::web::{CloseReason, SessionError};
@@ -81,26 +82,34 @@ impl Stream {
 	/// belongs to.
 	fn reset_mut(&mut self, code: u32) {
 		let code = self.close.encode_stream_code(code);
-		let stopped = match &self.state {
-			State::Open(stream) => stream.poll_closed(&kio::Waiter::noop()),
-			State::Finished(stream) => stream.poll_closed(&kio::Waiter::noop()),
-			State::Reset(_) => return,
+		// The driver task can process a STOP_SENDING at any moment. The reset settles, under the
+		// connection lock, whether the peer's stop came first, and only a `stopped` future taken
+		// before the reset can still read that once the stream is consumed. The reset, or the
+		// lost connection that made it fail, settles it at once.
+		let stopped = match std::mem::replace(&mut self.state, State::Reset(Ok(None))) {
+			State::Open(stream) => {
+				let stopped = stream.stopped();
+				match self.header {
+					Some(header) => stream.reset_at(header, code),
+					None => stream.reset(code),
+				}
+				stopped.now_or_never()
+			}
+			State::Finished(stream) => {
+				let stopped = stream.stopped();
+				match self.header {
+					Some(header) => stream.reset_at(header, code),
+					None => stream.reset(code),
+				}
+				stopped.now_or_never()
+			}
+			state @ State::Reset(_) => {
+				self.state = state;
+				return;
+			}
 		};
-		let stopped = match stopped {
-			Poll::Ready(result) => result,
-			Poll::Pending => Ok(None),
-		};
-		match std::mem::replace(&mut self.state, State::Reset(stopped)) {
-			State::Open(stream) => match self.header {
-				Some(header) => stream.reset_at(header, code),
-				None => stream.reset(code),
-			},
-			State::Finished(stream) => match self.header {
-				Some(header) => stream.reset_at(header, code),
-				None => stream.reset(code),
-			},
-			State::Reset(_) => unreachable!(),
-		}
+		let stopped = stopped.expect("a reset settles its stopped future");
+		self.state = State::Reset(stopped);
 	}
 
 	/// Poll until all data was acknowledged, the peer stopped the stream, or the session closed.

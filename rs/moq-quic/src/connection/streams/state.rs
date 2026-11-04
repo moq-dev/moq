@@ -4488,6 +4488,29 @@ mod tests {
 		assert_eq!(stream.lease(0).unwrap().remaining(), 350);
 	}
 
+	/// A read cannot reach the end of a finished stream past leased bytes nobody read, since
+	/// freeing the stream then would discard them. Once they are read, it ends.
+	#[test]
+	fn unread_lease_holds_the_end_off() {
+		let mut client = make(Side::Client);
+		let id = StreamId::new(Side::Server, Dir::Uni, 0);
+		data(&mut client, id, 0, 32, true);
+		let mut pending = Retransmits::default();
+		let mut stream = recv(&mut client, &mut pending, id);
+
+		let lease = stream.lease(0).unwrap();
+		assert!(lease.is_fin());
+		stream.restore(lease);
+		assert!(matches!(stream.read().unwrap().next(0), Err(recv::Error::Blocked)));
+
+		let mut lease = stream.lease(0).unwrap();
+		assert_eq!(lease.remaining(), 32, "the bytes survive");
+		lease.advance(32);
+		stream.release(lease);
+		assert!(matches!(stream.read().unwrap().next(0), Ok(None)));
+		assert!(!client.recv.contains_key(&id), "freed once read");
+	}
+
 	/// Leasing again before handing the last lease back would lose its bytes.
 	#[test]
 	#[should_panic(expected = "leased again before the last lease was handed back")]

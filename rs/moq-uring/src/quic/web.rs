@@ -698,15 +698,22 @@ impl Session {
 	}
 
 	/// Poll for the next datagram after its session header.
+	///
+	/// A datagram that does not name this session, such as another session's on the same
+	/// connection, is dropped: datagrams are unreliable, so a stray one must not end the session.
 	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
-		let datagram = ready!(self.conn.poll_recv_datagram(waiter)).map_err(|e| self.map_err(e))?;
-		let Some(web) = &self.web else {
-			return Poll::Ready(Ok(datagram));
-		};
-		let mut peek: &[u8] = &datagram;
-		match decode_varint(&mut peek) {
-			Some(id) if id == web.session_id => Poll::Ready(Ok(datagram.slice(datagram.len() - peek.len()..))),
-			_ => Poll::Ready(Err(Error::Web("unknown datagram session".into()))),
+		loop {
+			let datagram = ready!(self.conn.poll_recv_datagram(waiter)).map_err(|e| self.map_err(e))?;
+			let Some(web) = &self.web else {
+				return Poll::Ready(Ok(datagram));
+			};
+			let mut peek: &[u8] = &datagram;
+			match decode_varint(&mut peek) {
+				Some(id) if id == web.session_id => {
+					return Poll::Ready(Ok(datagram.slice(datagram.len() - peek.len()..)));
+				}
+				_ => tracing::debug!("dropping a datagram for an unknown session"),
+			}
 		}
 	}
 

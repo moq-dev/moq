@@ -352,16 +352,24 @@ impl Session {
 	}
 
 	/// Poll for a datagram with its WebTransport session header removed.
+	///
+	/// A datagram that does not name this session, such as another session's on the same
+	/// connection, is dropped: datagrams are unreliable, so a stray one must not end the session.
 	pub fn poll_recv_datagram(&self, waiter: &Waiter) -> Poll<Result<Bytes, SessionError>> {
-		let mut datagram = std::task::ready!(self.conn.poll_recv_datagram(waiter)).map_err(|e| self.map_error(e))?;
-		let mut cursor = Cursor::new(&datagram);
-		if let Some(session_id) = self.session_id {
-			let actual = VarInt::decode(&mut cursor).map_err(|_| WebTransportError::UnknownSession)?;
-			if actual != session_id {
-				return Poll::Ready(Err(WebTransportError::UnknownSession.into()));
+		loop {
+			let mut datagram =
+				std::task::ready!(self.conn.poll_recv_datagram(waiter)).map_err(|e| self.map_error(e))?;
+			let Some(session_id) = self.session_id else {
+				return Poll::Ready(Ok(datagram));
+			};
+			let mut cursor = Cursor::new(&datagram);
+			match VarInt::decode(&mut cursor) {
+				Ok(actual) if actual == session_id => {
+					return Poll::Ready(Ok(datagram.split_off(cursor.position() as usize)));
+				}
+				_ => tracing::debug!("dropping a datagram for an unknown session"),
 			}
 		}
-		Poll::Ready(Ok(datagram.split_off(cursor.position() as usize)))
 	}
 
 	/// Sends an application datagram to the remote peer, scheduled by `options`.
@@ -1311,6 +1319,95 @@ mod tests {
 				assert!(recv.read_chunk(1).await.unwrap().is_none());
 			}
 		}
+	}
+
+	/// Both a WebTransport session over `client`/`server`, or both raw QUIC.
+	async fn sessions(
+		framed: bool,
+		client: crate::quic::driver::connection::Connection,
+		server: crate::quic::driver::connection::Connection,
+	) -> (Session, Session) {
+		if !framed {
+			return (Session::raw(client), Session::raw(server));
+		}
+		let (client, server) = tokio::join!(
+			Session::connect(client, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server).await.unwrap().ok().await },
+		);
+		(client.unwrap(), server.unwrap())
+	}
+
+	/// Once a read met the peer's reset, the close watch keeps reporting it rather than a clean end.
+	#[tokio::test]
+	async fn a_read_reset_stays_reset_for_the_close_watch() {
+		for framed in [false, true] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, server) = sessions(framed, client, server).await;
+			let mut send = client.open_uni(Default::default()).await.unwrap();
+			send.write_all(&b"partial"[..]).await.unwrap();
+			let mut recv = server.accept_uni().await.unwrap();
+			send.reset(7);
+			loop {
+				match recv.read_chunk(usize::MAX).await {
+					Ok(Some(_)) => continue,
+					Err(crate::quic::web::recv::Error::Reset(7)) => break,
+					other => panic!("expected the reset, got {other:?}"),
+				}
+			}
+			for _ in 0..2 {
+				assert!(matches!(recv.closed().await, Err(crate::quic::web::recv::Error::Reset(7))));
+			}
+		}
+	}
+
+	/// Leased bytes handed back unread hold the close watch off, rather than being discarded
+	/// behind a clean end; once read through a lease, the stream ends.
+	#[tokio::test]
+	async fn an_unread_lease_holds_the_close_watch_off() {
+		for framed in [false, true] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, server) = sessions(framed, client, server).await;
+			let mut send = client.open_uni(Default::default()).await.unwrap();
+			send.write_all(&b"leased"[..]).await.unwrap();
+			let finished = send.finish();
+			let mut recv = server.accept_uni().await.unwrap();
+			// The FIN is acknowledged, so it has arrived and only the lease holds the end off.
+			assert!(finished.await.unwrap().is_none());
+
+			let mut cx = Context::from_waker(std::task::Waker::noop());
+			let Poll::Ready(lease) = recv.poll_lease(&mut cx, 6) else {
+				panic!("acknowledged bytes are leasable");
+			};
+			let lease = lease.unwrap();
+			assert!(lease.is_fin());
+			drop(lease);
+			assert!(recv.poll_closed(&Waiter::noop()).is_pending());
+
+			let Poll::Ready(lease) = recv.poll_lease(&mut cx, 6) else {
+				panic!("restored bytes are leasable");
+			};
+			let mut lease = lease.unwrap();
+			assert_eq!(lease.copy_to_bytes(6), &b"leased"[..]);
+			lease.release();
+			assert!(matches!(recv.poll_closed(&Waiter::noop()), Poll::Ready(Ok(()))));
+		}
+	}
+
+	/// A datagram that names no session, or another one, is dropped rather than ending the session.
+	#[tokio::test]
+	async fn a_stray_datagram_is_dropped() {
+		let (client, server, _endpoints) = pair().await;
+		let (client, server) = sessions(true, client, server).await;
+		// Session IDs are client bidi stream IDs, so 1 is never one; an empty datagram names none.
+		for stray in [&[0x01, b'x'][..], &[][..]] {
+			client.connection().send_datagram(stray, Default::default()).unwrap();
+		}
+		client.send_datagram(&b"ok"[..], Default::default()).unwrap();
+		let datagram = tokio::time::timeout(std::time::Duration::from_secs(10), server.read_datagram())
+			.await
+			.expect("no datagram arrived")
+			.unwrap();
+		assert_eq!(datagram, &b"ok"[..]);
 	}
 
 	/// Accepted headers buffered before the connection closed precede its terminal error.
