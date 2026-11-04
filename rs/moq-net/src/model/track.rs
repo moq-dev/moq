@@ -3141,9 +3141,11 @@ impl TrackState {
 
 		// Adopt the supplied info only if the track hasn't been accepted yet. Groups
 		// created here charge the same account as any other, so backfill written
-		// before the track is accepted settles its debt like the rest.
+		// before the track is accepted settles its debt like the rest. Without one, the
+		// provisional info claims no publisher max age, not an authored track's zero: the
+		// publisher's real bound is unknown until its metadata arrives.
 		if self.info.is_none() {
-			self.install(info.unwrap_or_default());
+			self.install(info.unwrap_or_else(|| Info::default().with_max_age(None)));
 		}
 		let info = self.info.clone().unwrap();
 
@@ -12156,6 +12158,23 @@ mod test {
 			name,
 			info,
 		)
+	}
+
+	/// A fill that lands before the track's metadata installs provisional info with no
+	/// publisher max age: the real bound is unknown, and an authored track's zero would
+	/// refuse history an unlimited publisher still serves.
+	#[test]
+	fn a_fill_before_metadata_claims_no_max_age() {
+		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
+		let _group = state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(0, group::Bounds::default(), None)
+			.unwrap();
+		let state = state.read();
+		assert_eq!(state.info.as_ref().unwrap().max_age, None);
+		assert_eq!(state.max_age_bound(), None);
 	}
 
 	#[test]
