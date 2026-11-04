@@ -12,8 +12,9 @@ relay closes the publisher's connection with `invalid control encoding`.
 Seen 2026-11-03 in Kixel's T3 tracks
 ([kixelated/t3code#1](https://github.com/kixelated/t3code/pull/1)), which
 worked around it by replacing tracks in the same broadcast instead. Find
-which side encodes or decodes the start group wrongly, fix it, and add a
-relay test that re-serves a path starting at group 1.
+whether [moq-dev/moq#7851](https://github.com/moq-dev/moq/pull/7851)'s FETCH
+budget-boundary fix explains the fresh-broadcast failure before proposing a
+separate codec change or regression test.
 
 On 2026-11-04, a candidate test
 ([checkpoint](https://github.com/moq-dev/moq/blob/425d4046c6b0bd94677a4bc4de715dd257b16856/test/interop/claims.ts)) passed against
