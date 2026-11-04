@@ -72,7 +72,8 @@ export type CaptureOutput = {
 	format: Signal<Format | undefined>;
 
 	// The head of the Web Audio graph, when there is one, so callers can tap the raw capture.
-	// Undefined for decoded samples, which never touch Web Audio.
+	// Its context renders to no device where the browser supports `sinkId`, so nothing connected to
+	// its destination is heard. Undefined for decoded samples, which never touch Web Audio.
 	root: Signal<AudioNode | undefined>;
 };
 
@@ -185,10 +186,19 @@ export class Capture {
 		// the prop or the track's applied getUserMedia constraint, and force the worklet to mix to it.
 		const requestedChannels = effect.get(this.channelCount) ?? requestedChannelCount(source.track);
 
-		const context = new AudioContext({
+		// The worklet delivers samples one render callback at a time, and a device's callback can be long:
+		// Chromium on PipeWire renders 2048 samples (43 ms) per callback even at "interactive", so 60 ms
+		// frames left 36-94 ms apart. Nothing here is audible, so render to no device, which Chromium 155+
+		// paces every 10 ms. Older Chromium paces it at the default device's callback size, as before, and
+		// a browser without `sinkId` ignores it and keeps the default device.
+		// Don't lower latencyHint instead: at 128 samples, a busy host misses callbacks and the capture
+		// clock falls behind.
+		const options: AudioContextOptions & { sinkId: { type: "none" } } = {
 			latencyHint: "interactive",
 			sampleRate,
-		});
+			sinkId: { type: "none" },
+		};
+		const context = new AudioContext(options);
 		effect.cleanup(() => context.close());
 
 		// Nothing guarantees a gesture has happened yet: a pre-granted microphone reaches here on page
