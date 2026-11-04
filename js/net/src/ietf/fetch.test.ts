@@ -831,6 +831,17 @@ test("draft-18: a joining FETCH its subscription cannot answer is refused", asyn
 		expect(refused(await fetch(fx, joining()))).toBe(DOES_NOT_EXIST);
 		client.close();
 	}
+	{
+		// An upstream can report the largest safe frame, making the head end one past it. No
+		// model group holds that many frames, so the head is unavailable rather than an error.
+		using fx = serve(D18);
+		writeGroup(fx.track, 5n, ["5-0", "5-1"], false);
+		hooks.reportedLargest(fx.track, { group: 5n, frame: Number.MAX_SAFE_INTEGER });
+		const { client, ok } = await subscribe(fx);
+		expect(ok.largest).toEqual({ groupId: 5n, objectId: BigInt(Number.MAX_SAFE_INTEGER) });
+		expect(refused(await fetch(fx, joining()))).toBe(DOES_NOT_EXIST);
+		client.close();
+	}
 });
 
 // Request streams race, so a joining FETCH can be read before the SUBSCRIBE it names, as when
