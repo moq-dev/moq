@@ -299,7 +299,7 @@ test("a routed reader serves its relative ranges as the serving copy resolves th
 	front.serve(a.consume());
 	const sub = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 2 }, end: { relative: 1 } }] });
+		.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 2n }, end: { relative: 1n } }] });
 	try {
 		await settle();
 		// The copy holds the groups the anchors count back from, so the ranges end there.
