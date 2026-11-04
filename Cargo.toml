@@ -251,7 +251,7 @@ zeroize = { version = "1", features = ["derive"] }
 # version (#3551).
 kio = { path = "rs/kio" }
 # Common Encryption boxes (kixelated/mp4-atom#268), until a release ships them.
-mp4-atom = { path = "/Users/michael/Projects/mp4-atom" }
+mp4-atom = { git = "https://github.com/michaelstuurman/mp4-atom", rev = "7ff54efdf298288c7fe55bd2744b21ebee431304" }
 
 [profile.dev]
 # Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`
