@@ -6,7 +6,7 @@ use rustls::crypto::aws_lc_rs::default_provider;
 use rustls::crypto::ring::default_provider;
 
 use std::{
-	future::{Future, poll_fn},
+	future::Future,
 	io::{self, IoSliceMut},
 	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
 	num::NonZeroU64,
