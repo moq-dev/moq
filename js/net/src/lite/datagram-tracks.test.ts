@@ -228,3 +228,56 @@ test("lite-07 forwards a priority change made while the previous DATAGRAMS_UPDAT
 		source.close();
 	}
 });
+
+test("lite-06: a request cancelled behind the shared datagram writer sends nothing", async () => {
+	const source = new Origin();
+	const publication = source.createBroadcast(path);
+	const first = publication.broadcast.createDatagrams("a");
+	const second = publication.broadcast.createDatagrams("b");
+	publication.announce();
+	const pair = createMockTransportPair(ALPN_06);
+	// The legacy API's one session queue, stalled on its first write.
+	const sent: Uint8Array[] = [];
+	const stall = Promise.withResolvers<void>();
+	Object.defineProperty(pair.server.datagrams, "writable", {
+		value: new WritableStream<Uint8Array>({
+			write(chunk) {
+				sent.push(chunk);
+				return sent.length === 1 ? stall.promise : undefined;
+			},
+		}),
+	});
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ url, transport: pair.server, publish: source.consume() }),
+	]);
+	const remote = wireOf(client).consume(path);
+	const a = remote.datagrams("a");
+	const b = remote.datagrams("b");
+	const settle = async () => {
+		for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+	};
+	try {
+		await Promise.all([a.info(), b.info()]);
+		while (first.priority.peek() === undefined || second.priority.peek() === undefined)
+			await Promise.race([first.priority.changed(), second.priority.changed()]);
+		first.append(undefined, Uint8Array.of(0xaa));
+		while (sent.length === 0) await settle();
+		// The second request now waits on the writer the first one holds.
+		second.append(undefined, Uint8Array.of(0xbb));
+		await settle();
+		b.close();
+		while (second.priority.peek() !== undefined) await second.priority.changed();
+		stall.resolve();
+		await settle();
+		expect(sent.map((chunk) => chunk.at(-1))).toEqual([0xaa]);
+	} finally {
+		stall.resolve();
+		a.close();
+		b.close();
+		remote.close();
+		client.abort();
+		server.abort();
+		source.close();
+	}
+});

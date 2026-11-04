@@ -243,6 +243,7 @@ export class Consumer {
 	static {
 		consume = (name, state, cursor, priority) => new Consumer(name, state, cursor, priority);
 		hooks.datagramPriority = (consumer) => consumer.#priority;
+		hooks.datagramClosed = (consumer) => consumer.#closed;
 	}
 
 	/** The track's publisher properties, once accepted. */
@@ -269,7 +270,7 @@ export class Consumer {
 		return consume(this.name, this.#state, this.#cursor, this.#priority.peek());
 	}
 
-	/** Read the next datagram, skipping any dropped by the bounded shared buffer. */
+	/** Read the next datagram as a copy this consumer owns, skipping any dropped by the bounded shared buffer. */
 	async recv(): Promise<Datagram | undefined> {
 		for (;;) {
 			const local = this.#closed.peek();
@@ -284,7 +285,10 @@ export class Consumer {
 			const datagram = state.buffer[Number(this.#cursor - state.offset)];
 			if (datagram) {
 				this.#cursor++;
-				return datagram;
+				// The buffered entry is shared by every reader and charged to the byte bound, so
+				// each reader gets its own envelope and payload to change as it likes.
+				const { sequence, timestamp, payload } = datagram;
+				return { sequence, timestamp, payload: payload.slice() };
 			}
 			if (closed !== undefined) return;
 			await Signal.race(state.changed, state.closed, this.#closed);

@@ -94,6 +94,34 @@ test("an abort or local close wakes datagram reads with its exact result", async
 	live.finish();
 });
 
+test("each datagram reader owns its copy, and edits never reach the shared byte bound", async () => {
+	const track = new Datagram.Producer("test").accept();
+	const first = track.consume();
+	const second = track.consume();
+	// Two of these fit the 64 KiB bound; a third evicts exactly one.
+	const size = 30_000;
+	track.append(undefined, new Uint8Array(size).fill(5));
+	track.append(undefined, new Uint8Array(size).fill(6));
+
+	const edited = await first.recv();
+	if (!edited) throw new Error("missing datagram");
+	edited.payload[0] = 9;
+	edited.sequence = 7n;
+	const read = await second.recv();
+	expect(read?.sequence).toBe(0n);
+	expect(read?.payload[0]).toBe(5);
+	expect(read?.payload.byteLength).toBe(size);
+
+	// Replacing a returned payload must not change what eviction subtracts.
+	edited.payload = new Uint8Array(0);
+	track.append(undefined, new Uint8Array(size).fill(7));
+	expect((await second.recv())?.payload[0]).toBe(6);
+	expect((await second.recv())?.payload[0]).toBe(7);
+	first.close();
+	second.close();
+	track.finish();
+});
+
 test("datagram priority is the maximum of live consumers and releases atomically", () => {
 	const track = new Datagram.Producer("test").accept();
 	const low = track.consume();

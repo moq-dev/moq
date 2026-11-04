@@ -1947,6 +1947,7 @@ export class Publisher {
 		const rank = () => sendOrder({ priority: track.priority, publisher: info.priority });
 		const sender = this.#datagramWriter.open(rank());
 		const dispose = hooks.datagramPriority(track).subscribe(() => sender.setPriority(rank()));
+		const left = hooks.datagramClosed(track);
 		const { writer } = sender;
 		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
 		let end = 0n;
@@ -1972,7 +1973,10 @@ export class Publisher {
 					);
 					continue;
 				}
-				await writer.ready;
+				// The legacy writer is shared, so another request's write can hold back this one:
+				// stop waiting once this request ends, and send nothing after it does.
+				const ready = await race([writer.ready.then(() => true), left.then(() => false)]);
+				if (!ready || left.peek() !== undefined) return end;
 				await writer.write(body);
 			}
 		} finally {

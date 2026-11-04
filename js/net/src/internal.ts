@@ -445,6 +445,8 @@ export const hooks: {
 	closeUnusedDatagrams: (producer: datagram.Producer) => boolean;
 	/** Follow this consumer's subscriber priority for transport scheduling. */
 	datagramPriority: (consumer: datagram.Consumer) => Getter<number>;
+	/** Settles once this consumer is closed, the end of whatever request it serves. */
+	datagramClosed: (consumer: datagram.Consumer) => GetPromise<Error | null>;
 	/**
 	 * Declare the end a wire subscription received: repeating it is a no-op, and a mid-group
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
@@ -738,6 +740,9 @@ export const hooks: {
 		throw new Error("datagram module not loaded");
 	},
 	datagramPriority: () => {
+		throw new Error("datagram module not loaded");
+	},
+	datagramClosed: () => {
 		throw new Error("datagram module not loaded");
 	},
 	endTrack: () => {
