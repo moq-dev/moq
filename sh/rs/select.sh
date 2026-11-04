@@ -187,8 +187,11 @@ case "$action" in
         # features only add code, so every test still runs. Cargo rejects a
         # feature of a package outside the selection, hence the explicit picks.
         features=()
+        # The crates the build holds, for their targets' features below.
+        building=$names
         if wants '(moq-video|moq-audio)'; then
             [[ "$packages" == ALL ]] || flags+=(--package moq-video --package moq-audio)
+            building+=" moq-video moq-audio"
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
@@ -197,6 +200,26 @@ case "$action" in
         # The relay's io_uring listener, Linux-only. A moq-uring change selects
         # the relay too, as its dependent.
         if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
+        # Cargo skips a bench or example whose `required-features` are off without
+        # a word, and a bench-only change selects its crate alone, so no dependent
+        # turns them on. Turn on every one the built crates' targets name. All of
+        # them are additive and build wherever the gate runs; moq-uring's targets
+        # compile to nothing off Linux.
+        required=$(
+            set -e
+            cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$building" --arg all "$packages" '
+                ($names | split(" ") | map(select(. != ""))) as $want
+                | .packages[]
+                | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
+                | .name as $name
+                | .targets[]
+                | select(.kind // [] | any(. == "bench" or . == "example"))
+                | (.["required-features"] // [])[]
+                | "\($name)/\(.)"' | sort -u | tr '\n' ' '
+        )
+        for feature in $required; do
+            [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
+        done
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;
