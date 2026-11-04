@@ -24,12 +24,12 @@ so a raw byte stream needs no other importer.
 `ContainerFormat.FMP4` splits each fragment into one frame per sample.
 Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz tick survives a read and republish.
 `Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
-A missing data timestamp stays untimed; the library never substitutes zero or now.
+A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
 and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
 `TrackInfo(compress=True)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
-The JSON producers' `update` / `append` accept `timestamp=moq.Timestamp(...)` (`None` for untimed).
+The JSON producers' `update`, `append`, `push`, and `pop` require a `timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -95,9 +95,9 @@ async def main():
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
         events.write_frame(b'{"cmd": "ready"}')
-        status_track = broadcast.publish_track("status", moq.TrackInfo(compress=True))
+        status_track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
         status = moq.json.SnapshotProducer(broadcast, status_track)
-        status.update({"state": "live", "viewers": 42})
+        status.update({"state": "live", "viewers": 42}, catalog_producer.now())
 
         publication.announce()  # each broadcast mints a fresh instance
         audio.finish()
@@ -128,7 +128,7 @@ shows which module holds each.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `versions=`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `async for grant in session.grants()` yields the `Grant` the relay sent back and each change, `None` until it answers and while a client session reconnects. `grants().grant()` reads it once; cancelling or leaving an `async with` releases the wait.
 - **Tokens.** Pass `tokens=[...]` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session.tokens().set([...])` replaces a client session's tokens before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `await tokens.answered()` returns once the relay accepts them and raises its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
-- **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
+- **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq.Error.UnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A bare `moq.Subscription()`, passing no subscription, and `moq.Subscription.default()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. Pass `delay=moq.Delay(max=None)` for no subscriber limit, or `min=None` to leave the target latency unstated. Decoders take the same `moq.Delay`.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one.
 

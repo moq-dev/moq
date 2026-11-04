@@ -4,7 +4,8 @@
 //! copy), which wakes the driver's transmit wait itself, and the handles wait through
 //! moq-quic's poll forms, which wake them.
 
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, ready};
 
@@ -166,12 +167,12 @@ impl Stream {
 
 	/// Completes when the peer stops the stream. See [`Finished::stopped()`].
 	pub async fn stopped(&self) -> Result<Option<VarInt>, Error> {
-		kio::wait(|waiter| poll_stopped(&self.0.shared, self.0.id, waiter)).await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// [`Self::stopped`], as a poll.
-	pub(crate) fn poll_stopped(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
-		poll_stopped(&self.0.shared, self.0.id, self.0.park.hold(cx))
+	/// Wait for the stream to end, retaining the peer's stop code; see [`Self::stopped`].
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		poll_stopped(&self.0.shared, self.0.id, waiter)
 	}
 
 	/// The identity of this stream.
@@ -219,17 +220,26 @@ impl Finished {
 	/// it). Fails only when the connection ends first, since then the caller cannot read success
 	/// as "every byte arrived".
 	pub async fn stopped(&self) -> Result<Option<VarInt>, Error> {
-		kio::wait(|waiter| poll_stopped(&self.0.shared, self.0.id, waiter)).await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// [`Self::stopped`], as a poll.
-	pub(crate) fn poll_stopped(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
-		poll_stopped(&self.0.shared, self.0.id, self.0.park.hold(cx))
+	/// Wait for the stream to end, retaining the peer's stop code; see [`Self::stopped`].
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		poll_stopped(&self.0.shared, self.0.id, waiter)
 	}
 
 	/// The identity of this stream.
 	pub fn id(&self) -> stream::Id {
 		self.0.id
+	}
+}
+
+impl Future for Finished {
+	type Output = Result<Option<VarInt>, Error>;
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		let this = self.get_mut();
+		poll_stopped(&this.0.shared, this.0.id, this.0.park.hold(cx))
 	}
 }
 
