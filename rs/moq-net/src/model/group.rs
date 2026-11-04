@@ -530,7 +530,7 @@ impl Plain {
 		for entry in state.frames.range(start..).take(end.saturating_sub(local)) {
 			prefetch.push(entry, false);
 		}
-		prefetch.len
+		prefetch.len()
 	}
 
 	/// Shed the oldest inflated frames past [`MAX_CACHE_BYTES`], keeping the newest, once
@@ -1136,7 +1136,7 @@ impl GroupState {
 	/// Resolve the group's terminal state for a reader positioned at `index`.
 	///
 	/// A finished group is still aborted once its frames are released to free memory
-	/// (aged out of the track's max age window, or evicted by the cache pool). A reader
+	/// (idle past the cache pool's expiry window, or evicted under its byte target). A reader
 	/// that already consumed every frame is missing nothing, so it gets the clean end of
 	/// group; one that fell short sees the abort rather than a silently truncated stream.
 	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
@@ -2867,7 +2867,13 @@ impl Handle {
 	fn consumer(&self, state: kio::Consumer<GroupState>) -> Consumer {
 		Consumer {
 			info: self.info,
-			track: self.track.clone(),
+			delivery: Arc::new(Delivery {
+				timescale: self.track.timescale,
+				#[cfg(feature = "async")]
+				ietf: self.track.ietf(),
+				arrived: self.alive.arrived,
+				stale_counted: AtomicBool::new(false),
+			}),
 			cursor: Cursor {
 				state,
 				log: self.alive.log.clone(),
@@ -2886,11 +2892,9 @@ impl Handle {
 			expiry: None,
 			expired: false,
 			adopted: false,
-			stale_counted: Arc::default(),
 			recover: None,
 			idle: None,
 			parked: false,
-			arrived: self.alive.arrived,
 		}
 	}
 
@@ -3042,19 +3046,25 @@ impl Demand {
 /// pays nothing. Inline storage would triple the size of every [`Consumer`], which
 /// moves by value through each layer that hands out a group.
 ///
+/// The frame buffer's allocation also holds its cursor and optional metadata pointers,
+/// keeping an empty prefetch to one pointer without another allocation on the first fill.
 /// Slots hold the public [`frame::Frame`], with a segmented payload set aside in `chains`,
 /// so a whole read of a small frame moves it out of its slot as it did before segments.
 #[derive(Default)]
 struct Prefetch {
+	batch: Option<Box<Batch>>,
+}
+
+struct Batch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
 	// A slot whose frame is in `chains` holds an empty payload.
-	frames: Option<Box<[MaybeUninit<frame::Frame>; Self::CAP]>>,
+	frames: [MaybeUninit<frame::Frame>; Prefetch::CAP],
 	// Segmented payloads for `frames`, allocated by the first batch that carries one.
-	chains: Option<Box<[Option<frame::Chain>; Self::CAP]>>,
+	chains: Option<Box<[Option<frame::Chain>; Prefetch::CAP]>>,
 	// Relay metadata for `frames`, allocated by the first batch that carries any.
-	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
+	fields: Option<Box<[Option<Arc<super::object::Fields>>; Prefetch::CAP]>>,
 	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
-	inflated: Option<Box<[u64; Self::CAP]>>,
+	inflated: Option<Box<[u64; Prefetch::CAP]>>,
 	pos: usize,
 	len: usize,
 }
@@ -3064,7 +3074,8 @@ impl Prefetch {
 
 	/// The inflated size of the stored slice [`Self::pop`] just returned.
 	fn take_inflated(&self) -> Option<u64> {
-		self.inflated.as_ref()?.get(self.pos.checked_sub(1)?).copied()
+		let batch = self.batch.as_ref()?;
+		batch.inflated.as_ref()?.get(batch.pos.checked_sub(1)?).copied()
 	}
 
 	/// Take the next buffered frame whole, copying a segmented payload into one buffer.
@@ -3073,7 +3084,7 @@ impl Prefetch {
 	#[inline(always)]
 	fn pop(&mut self) -> Option<frame::Frame> {
 		let mut frame = self.take()?;
-		if self.chains.is_some() {
+		if self.batch.as_ref().is_some_and(|batch| batch.chains.is_some()) {
 			self.join_chain(&mut frame);
 		}
 		Some(frame)
@@ -3099,46 +3110,62 @@ impl Prefetch {
 
 	#[inline]
 	fn take(&mut self) -> Option<frame::Frame> {
-		if self.pos == self.len {
+		let batch = self.batch.as_mut()?;
+		if batch.pos == batch.len {
 			return None;
 		}
-		let frames = self.frames.as_mut()?;
 		// SAFETY: `pos < len`, so this slot was written by `fill` and not yet taken.
-		let frame = unsafe { frames[self.pos].assume_init_read() };
-		self.pos += 1;
+		let frame = unsafe { batch.frames[batch.pos].assume_init_read() };
+		batch.pos += 1;
 		Some(frame)
 	}
 
 	/// The segmented payload of the frame [`Self::take`] just returned.
 	#[inline]
 	fn take_chain(&mut self) -> Option<frame::Chain> {
-		self.chains.as_mut()?.get_mut(self.pos.checked_sub(1)?)?.take()
+		let batch = self.batch.as_mut()?;
+		batch.chains.as_mut()?.get_mut(batch.pos.checked_sub(1)?)?.take()
 	}
 
 	/// The relay metadata of the frame [`Self::pop`] just returned.
 	fn take_fields(&mut self) -> Option<Arc<super::object::Fields>> {
-		self.fields.as_mut()?.get_mut(self.pos.checked_sub(1)?)?.take()
+		let batch = self.batch.as_mut()?;
+		batch.fields.as_mut()?.get_mut(batch.pos.checked_sub(1)?)?.take()
 	}
 
 	/// Empty a drained batch (`pop` returned `None`) for a refill, which keeps inflated
 	/// sizes beside its frames when it reads a compressed group's stored slices.
 	fn reset(&mut self, inflated: bool) {
-		debug_assert_eq!(self.pos, self.len, "a refill of a non-empty batch would leak frames");
-		self.pos = 0;
-		self.len = 0;
+		let Some(batch) = &mut self.batch else {
+			return;
+		};
+		debug_assert_eq!(batch.pos, batch.len, "a refill of a non-empty batch would leak frames");
+		batch.pos = 0;
+		batch.len = 0;
 		if !inflated {
-			self.inflated = None;
+			batch.inflated = None;
 		}
+	}
+
+	fn len(&self) -> usize {
+		self.batch.as_ref().map_or(0, |batch| batch.len)
 	}
 
 	/// Buffer `entry` at the end of the batch, with its inflated size if `inflated`,
 	/// returning where it ends on the group's pace scale.
 	fn push(&mut self, entry: &Entry, inflated: bool) -> u64 {
-		let at = self.len;
-		let frames = self
-			.frames
-			.get_or_insert_with(|| Box::new([const { MaybeUninit::uninit() }; Self::CAP]));
-		let payload = match (&entry.frame.payload, &mut self.chains) {
+		let batch = self.batch.get_or_insert_with(|| {
+			Box::new(Batch {
+				frames: [const { MaybeUninit::uninit() }; Self::CAP],
+				chains: None,
+				fields: None,
+				inflated: None,
+				pos: 0,
+				len: 0,
+			})
+		});
+		let at = batch.len;
+		let payload = match (&entry.frame.payload, &mut batch.chains) {
 			(Payload::Whole(bytes), Some(slots)) => {
 				slots[at] = None;
 				bytes.clone()
@@ -3149,21 +3176,21 @@ impl Prefetch {
 				Bytes::new()
 			}
 		};
-		frames[at].write(frame::Frame {
+		batch.frames[at].write(frame::Frame {
 			timestamp: entry.frame.timestamp,
 			payload,
 			arrived: entry.frame.arrived,
 		});
 		// Plain frames never allocate the metadata table.
-		match (&entry.fields, &mut self.fields) {
+		match (&entry.fields, &mut batch.fields) {
 			(Some(fields), slots) => slots.get_or_insert_default()[at] = Some(fields.clone()),
 			(None, Some(slots)) => slots[at] = None,
 			(None, None) => {}
 		}
 		if inflated {
-			self.inflated.get_or_insert_default()[at] = entry.inflated;
+			batch.inflated.get_or_insert_default()[at] = entry.inflated;
 		}
-		self.len += 1;
+		batch.len += 1;
 		entry.end
 	}
 
@@ -3234,33 +3261,33 @@ impl Prefetch {
 			end = self.push(entry, compressed);
 		}
 		pace.took(end);
-		self.len
+		self.len()
 	}
 
 	/// Replace a filled batch's stored slices, from local frame `local`, with their inflated
 	/// frames. A frame that fails to inflate ends the batch, failing it if first.
 	fn inflate(&mut self, job: &Inflate, local: usize, meter: &stats::Meter) -> Result<()> {
 		job.run(meter);
-		let Some(frames) = &mut self.frames else {
+		let Some(batch) = &mut self.batch else {
 			return Ok(());
 		};
-		for i in self.pos..self.len {
+		for i in batch.pos..batch.len {
 			match job.get(local + i) {
 				Ok(payload) => {
 					// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
-					unsafe { frames[i].assume_init_mut() }.payload = payload;
-					if let Some(chains) = &mut self.chains {
+					unsafe { batch.frames[i].assume_init_mut() }.payload = payload;
+					if let Some(chains) = &mut batch.chains {
 						chains[i] = None;
 					}
 				}
 				Err(err) => {
-					for slot in &mut frames[i..self.len] {
+					for slot in &mut batch.frames[i..batch.len] {
 						// SAFETY: as above, and `len` drops below them right after.
 						unsafe { slot.assume_init_drop() };
 					}
-					self.len = i;
+					batch.len = i;
 					job.plain.trim();
-					return if i == self.pos { Err(err) } else { Ok(()) };
+					return if i == batch.pos { Err(err) } else { Ok(()) };
 				}
 			}
 		}
@@ -3273,30 +3300,27 @@ impl Prefetch {
 	/// Read once per fill to bump the egress payload counters for the whole batch.
 	fn buffered(&self) -> (u64, u64) {
 		let mut bytes = 0u64;
-		let Some(frames) = &self.frames else {
+		let Some(batch) = &self.batch else {
 			return (0, 0);
 		};
-		for slot in &frames[self.pos..self.len] {
+		for slot in &batch.frames[batch.pos..batch.len] {
 			// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
 			bytes += unsafe { slot.assume_init_ref() }.payload.len() as u64;
 		}
-		if let Some(chains) = &self.chains {
-			bytes += chains[self.pos..self.len]
+		if let Some(chains) = &batch.chains {
+			bytes += chains[batch.pos..batch.len]
 				.iter()
 				.flatten()
 				.map(|chain| chain.len() as u64)
 				.sum::<u64>();
 		}
-		((self.len - self.pos) as u64, bytes)
+		((batch.len - batch.pos) as u64, bytes)
 	}
 }
 
-impl Drop for Prefetch {
+impl Drop for Batch {
 	fn drop(&mut self) {
-		let Some(frames) = &mut self.frames else {
-			return;
-		};
-		for slot in &mut frames[self.pos..self.len] {
+		for slot in &mut self.frames[self.pos..self.len] {
 			// SAFETY: slots in `pos..len` are initialized and were never taken.
 			unsafe { slot.assume_init_drop() };
 		}
@@ -3310,9 +3334,8 @@ pub struct Consumer {
 	// Immutable stream state.
 	info: Info,
 
-	// The parent track's info, inherited from the producer. Its `timescale` lets the
-	// wire publisher emit per-frame timestamps at the right scale for a fetched group.
-	track: track::Info,
+	// Cold metadata shares the allocation that deduplicates expiry across clones.
+	delivery: Arc<Delivery>,
 
 	// Egress payload meter, set by a tagged track via [`Self::with_meter`]. Empty
 	// (no-op) for an untagged group. Also owns unread content discarded by expiry.
@@ -3325,9 +3348,6 @@ pub struct Consumer {
 	// A replacement copy was adopted and has not yet returned a frame that matches. Its
 	// ordinals match this group's only while its Object IDs do.
 	adopted: bool,
-	// Cloned cursors are parallel views of one handed-out delivery. Whichever
-	// observes expiry first records its unread tail; the others must not repeat it.
-	stale_counted: Arc<AtomicBool>,
 	// Handed out from a front's logical track: carries the read across route changes.
 	// Boxed: it is the rare case.
 	recover: Option<Box<super::resume::Recover>>,
@@ -3336,9 +3356,21 @@ pub struct Consumer {
 	idle: Option<Box<Idle<()>>>,
 	// The last frame read parked with no gate set up yet.
 	parked: bool,
-	// When the group was created here. Kept across an adopted replacement copy, which the
-	// group arrived before.
+}
+
+// Poll layers repeatedly move this value; keep cold state shared or lazy.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<Consumer>() <= 184);
+
+/// Per-delivery state shared by a consumer's clones and its frame readers.
+/// Kept across replacement copies, so provenance and arrival remain the original's.
+pub(super) struct Delivery {
+	timescale: Option<Timescale>,
+	#[cfg(feature = "async")]
+	ietf: Option<crate::ietf::Version>,
 	arrived: crate::time::Instant,
+	// Whichever reader observes expiry first records its unread tail only once.
+	pub(super) stale_counted: AtomicBool,
 }
 
 /// Subscriber-specific policy for a group after it was handed out: when it expires, and
@@ -3415,19 +3447,17 @@ impl Clone for Consumer {
 		Self {
 			cursor: self.cursor.clone(),
 			info: self.info,
-			track: self.track.clone(),
+			delivery: self.delivery.clone(),
 			// Inherit the meter without re-counting the group: the original already
 			// counted it when the track handed it out.
 			stats: self.stats.clone(),
 			expiry: self.expiry.clone(),
 			expired: self.expired,
 			adopted: self.adopted,
-			stale_counted: self.stale_counted.clone(),
 			recover: self.recover.clone(),
 			// A clone reads in parallel, so it parks for itself.
 			idle: None,
 			parked: false,
-			arrived: self.arrived,
 		}
 	}
 }
@@ -3676,7 +3706,7 @@ impl Consumer {
 			self.expired = true;
 			// Another read, such as `poll_expired`, may judge a frame read parked before it.
 			Idle::disarm(&mut self.idle);
-			if !self.stale_counted.swap(true, Ordering::Relaxed) {
+			if !self.delivery.stale_counted.swap(true, Ordering::Relaxed) {
 				self.stats.stale(self.cursor.unread_content());
 			}
 		}
@@ -3701,7 +3731,7 @@ impl Consumer {
 
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
-		self.track.timescale
+		self.delivery.timescale
 	}
 
 	/// When the group was created at this hop, before its first frame, on the ambient clock:
@@ -3711,14 +3741,14 @@ impl Consumer {
 	/// from when it landed, as [`frame::Frame::arrived`] does for each frame. A consumer
 	/// resumed onto a replacement copy keeps the original group's arrival.
 	pub fn arrived(&self) -> crate::time::Instant {
-		self.arrived
+		self.delivery.arrived
 	}
 
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every
 	/// object's properties, or `None` for a moq-lite one.
 	#[cfg(feature = "async")]
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
-		self.track.ietf()
+		self.delivery.ietf
 	}
 
 	/// The index of the next frame this consumer will return.
@@ -3837,7 +3867,7 @@ impl Consumer {
 		let expiry = self
 			.expiry
 			.as_ref()
-			.map(|policy| frame::Expiry::new(policy.clone(), stats.clone(), self.stale_counted.clone()));
+			.map(|policy| frame::Expiry::new(policy.clone(), stats.clone(), self.delivery.clone()));
 		let res = self.cursor.poll_next_frame(waiter, &stats, expiry);
 		self.poll_expired_if_blocked(waiter, res)
 	}
@@ -4247,7 +4277,7 @@ impl Cursor {
 			// resets the batch, so an empty one leaves `len == 0` and the terminal checks
 			// below resolve abort/fin/pending.
 			let job = prefetch.fill(state, index, budget, raw)?;
-			if prefetch.len > 0 {
+			if prefetch.len() > 0 {
 				// One stamp covers the whole batch: frames popped from the prefetch
 				// don't re-stamp until the next refill, which `CAP` bounds.
 				state.charge.refresh();
@@ -4290,7 +4320,7 @@ pub struct Fetch {
 
 	/// Maximum age behind the live edge this caller accepts.
 	///
-	/// `None` applies only the publisher's retention bound. An explicit value can
+	/// `None` applies only the publisher's max age. An explicit value can
 	/// tighten, but never relax, that bound.
 	pub max_delay: Option<std::time::Duration>,
 
@@ -5445,7 +5475,7 @@ mod test {
 	}
 
 	/// A finished group is still aborted once its frames are released to free memory (the
-	/// track's max age window, or the cache pool). A reader that already drained every frame
+	/// cache pool's expiry window or byte target). A reader that already drained every frame
 	/// is missing nothing, so it must see the clean end of group rather than the abort.
 	#[test]
 	#[cfg(feature = "async")]

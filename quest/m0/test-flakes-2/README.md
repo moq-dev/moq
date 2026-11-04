@@ -56,6 +56,11 @@ moq-relay's auth-trust test was never load-bound either: its fixture left each
 lease's background `end` POST unserved, so a reused port let one steal the next
 trial's accept. Fixed by [moq-dev/moq#7550](https://github.com/moq-dev/moq/pull/7550).
 
+The embedded relay stop test probed freed ports after its Linux socket-inode
+check had already proved the owner's HTTP and QUIC sockets closed. A successful
+TCP connect could reach a replacement listener. Linux now uses the ownership
+proof alone, fixed by [moq-dev/moq#7823](https://github.com/moq-dev/moq/pull/7823).
+
 The Kotlin flow-cancel test's `unroutable` was not load-bound: its snapshot
 writer became unreachable, so JVM cleanup aborted the track mid-read. The JS
 IETF blind-handle test's one identified cause was the session-closing reset
@@ -89,12 +94,7 @@ Public API: none. Wire: none.
 
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
-- [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
 - [moq-transcode's live multi-rung test survives load](/quest/m0/test-flakes-2/transcode-multi-rung.md) - `live_multi_rung` stops failing queue batches with a cancelled rung group
-- [moq-relay's embedded io_uring stop test survives load](/quest/m0/test-flakes-2/relay-embed-stop.md) - `uring_custom_route_and_quic` stops seeing HTTP accepted after its owner stopped
-- [The JS worklet library-build test survives load](/quest/m0/test-flakes-2/js-worklet-build.md) - the lazy-blob worklet build test stops timing out at bun's 5 seconds
-- [moq-archive's cross-backend recording test survives load](/quest/m0/test-flakes-2/archive-backends-identical.md) - `recordings_are_byte_identical_on_every_backend` stops splitting S3's video objects differently
-- [moq-ffi's panicked-origin supervision test survives load](/quest/m0/test-flakes-2/ffi-origin-panic.md) - a read the origin driver's panic ends always reports `MoqError::Task`
 - [@moq/net's lite subscribe tests wait for the whole request](/quest/m0/test-flakes-2/js-subscribe-fixture.md) - the three lite subscribe-with-track cases pass under forced yields
 - [Concurrent PulseAudio harness runs don't share a D-Bus name](/quest/m0/test-flakes-2/pulse-dbus.md) - parallel media runs no longer collide on `org.PulseAudio1`
 - [@moq/net's uni-stream flood test survives reruns](/quest/m0/test-flakes-2/js-stream-flood.md) - "a flood of uni streams yields" passes under `--rerun-each` and load

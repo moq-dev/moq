@@ -1732,7 +1732,7 @@ fn publish_track_invalid_broadcast() {
 	let info = moq_track_info {
 		priority: 1,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -1767,7 +1767,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: true,
 		refresh: 0,
@@ -1777,6 +1777,41 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+/// A zeroed struct serves only the live edge, and the unlimited flag wins over a stated age,
+/// like `moq_delay.max_unlimited`.
+#[test]
+fn track_info_max_age() {
+	let zeroed = || moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
+
+	assert_eq!(max_age(zeroed()), Some(Duration::ZERO));
+	let stated = moq_track_info {
+		max_age_us: 5_000_000,
+		..zeroed()
+	};
+	assert_eq!(max_age(stated), Some(Duration::from_secs(5)));
+	let unlimited = moq_track_info {
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(unlimited), None);
+	let both = moq_track_info {
+		max_age_us: 5_000_000,
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(both), None);
 }
 
 /// Raw frames, datagrams, and JSON values read back exactly the timestamp written: a 90 kHz
@@ -2288,7 +2323,7 @@ fn raw_track_subscription_options_and_update() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2423,7 +2458,7 @@ fn raw_track_time_anchor() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -3367,7 +3402,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -4115,7 +4150,7 @@ fn track_demand_reports_the_wanted_group() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -4523,8 +4558,18 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"track-dynamic-narrowed");
 	let name = b"data";
-	let track =
-		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	// No publisher age limit, so the requested groups behind the live one stay fresh.
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: true,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let group_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
@@ -7142,6 +7187,55 @@ fn bandwidth_reservations_split_the_estimate() {
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Two viewers split a 3 Mbps receive estimate max-min fair by ceiling, and closing
+/// one hands its share back.
+#[test]
+fn viewers_split_the_receive_estimate() {
+	let estimate = moq_net::bandwidth::Producer::new();
+	let viewers = {
+		let mut state = State::lock();
+		let viewers = moq_net::bandwidth::Viewers::new(estimate.weak());
+		id(i32::from(state.bandwidth.insert_viewers(viewers).unwrap()))
+	};
+	let viewer_rate = |viewer: u32| {
+		let mut bps = 0;
+		let mut present = false;
+		assert_eq!(unsafe { moq_viewer_rate(viewer, &mut bps, &mut present) }, 0);
+		present.then_some(bps)
+	};
+
+	let first = id(moq_viewers_watch(viewers, 4_000_000));
+	let second = id(moq_viewers_watch(viewers, 1_000_000));
+	assert_eq!(viewer_rate(first), None);
+
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(viewer_rate(first), Some(2_000_000));
+	assert_eq!(viewer_rate(second), Some(1_000_000));
+
+	assert_eq!(moq_viewer_update(second, 4_000_000), 0);
+	assert_eq!(viewer_rate(first), Some(1_500_000));
+	assert_eq!(moq_viewers_set_target(viewers, 0, true), 0);
+	assert_eq!(moq_viewers_set_target(viewers, 0, false), 0);
+
+	// Past what a PROBE target carries: refused, and nothing changes.
+	let max = moq_net::bandwidth::Viewers::MAX_TARGET.as_bps();
+	assert_eq!(moq_viewers_watch(viewers, max), crate::MOQ_ERROR_OUT_OF_RANGE);
+	assert_eq!(moq_viewer_update(second, max), crate::MOQ_ERROR_OUT_OF_RANGE);
+	assert_eq!(
+		moq_viewers_set_target(viewers, max + 1, true),
+		crate::MOQ_ERROR_OUT_OF_RANGE
+	);
+	assert_eq!(viewer_rate(first), Some(1_500_000));
+
+	assert_eq!(moq_viewer_close(second), 0);
+	assert_eq!(viewer_rate(first), Some(3_000_000));
+	assert_eq!(moq_viewer_close(first), 0);
+	assert!(moq_viewer_close(first) < 0);
+	assert_eq!(moq_viewers_close(viewers), 0);
 }
 
 /// Two allocator handles share one registry.

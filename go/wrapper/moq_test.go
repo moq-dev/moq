@@ -570,6 +570,53 @@ func TestInsertDatagramAndLargest(t *testing.T) {
 	}
 }
 
+// An omitted max age is zero, MaxAgeUnlimited sets no limit and wins over MaxAge, and a
+// received info republishes unchanged.
+func TestTrackInfoMaxAge(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	two := 2 * time.Second
+	cases := []struct {
+		info *moq.TrackInfo
+		want moq.TrackInfo
+	}{
+		{nil, moq.TrackInfo{}},
+		{&moq.TrackInfo{}, moq.TrackInfo{}},
+		{&moq.TrackInfo{MaxAge: two}, moq.TrackInfo{MaxAge: two}},
+		{&moq.TrackInfo{MaxAgeUnlimited: true}, moq.TrackInfo{MaxAgeUnlimited: true}},
+		{&moq.TrackInfo{MaxAge: two, MaxAgeUnlimited: true}, moq.TrackInfo{MaxAgeUnlimited: true}},
+	}
+	info := func(name string, in *moq.TrackInfo) moq.TrackInfo {
+		track, err := broadcast.PublishTrack(name, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumer, err := track.Consume(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return consumer.Info()
+	}
+	for i, c := range cases {
+		got := info(fmt.Sprint(i), c.info)
+		if got.MaxAge != c.want.MaxAge || got.MaxAgeUnlimited != c.want.MaxAgeUnlimited {
+			t.Errorf("case %d: Info() = %+v, want %+v", i, got, c.want)
+		}
+		again := info(fmt.Sprint("again", i), &got)
+		if again.MaxAge != got.MaxAge || again.MaxAgeUnlimited != got.MaxAgeUnlimited {
+			t.Errorf("case %d: republished Info() = %+v, want %+v", i, again, got)
+		}
+	}
+	if _, err := broadcast.PublishTrack("negative", &moq.TrackInfo{MaxAge: -time.Second}); err == nil {
+		t.Error("a negative max age was accepted")
+	}
+	if err := broadcast.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBroadcastConsumerClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -867,7 +914,10 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("backlog", timedInfo())
+	// No publisher age limit, so the superseded backlog stays readable.
+	info := timedInfo()
+	info.MaxAgeUnlimited = true
+	track, err := broadcast.PublishTrack("backlog", info)
 	if err != nil {
 		t.Fatal(err)
 	}

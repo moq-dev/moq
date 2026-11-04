@@ -35,12 +35,11 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   the application protocol.
 - **WebTransport**: browsers negotiate `h3` and `quic::web::Request` runs the
   HTTP/3 CONNECT handshake (SETTINGS, subprotocol selection, capsule close)
-  over the same adapter via `web-transport-proto`. `quic::web::Session` is
-  a raw or web transport (`Session::raw`). Wrap it with
-  `transport::Session::new(session, address)`, using `moq_net::transport::Address::Uri`
-  for WebTransport or `Setup` for raw QUIC. moq-net boxes the transport with a
-  native `Send` bound, so wrap the session once more in `transport::Local`, which
-  checks the thread on every use, before `connect`/`accept`. They return the
+  over the same driver via `web-transport-proto`. `quic::web::Session` is
+  a raw or web transport (`Session::raw`) implementing moq-net's poll traits directly.
+  moq-net boxes the transport with a native `Send` bound, so wrap the session in
+  `transport::Local::new(session)`, which checks the thread on every use, before
+  `connect`/`accept`. They return the
   session and its driver; poll the driver or await it inside a `Handle::spawn`
   task to run it on the worker. Web mode maps stream and close codes through the
   HTTP/3 error space.

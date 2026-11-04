@@ -462,6 +462,10 @@ struct Side {
 	panic_on_stats: AtomicBool,
 	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
 	wire: moq_net::transport::Wire,
+	/// Whether [`poll::Session::probe`] reports a sender; see [`MockSession::set_probe`].
+	probing: AtomicBool,
+	/// The sender's target, which the session sets.
+	probe: moq_net::transport::Probe,
 	/// What [`poll::Session::receive_window`] reports instead of the memory transport's, if set.
 	receive_window: Mutex<Option<Option<moq_net::transport::ReceiveWindow>>>,
 }
@@ -657,6 +661,13 @@ impl poll::Session for MockSession {
 		Some(self.side.wire.clone())
 	}
 
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		self.side
+			.probing
+			.load(Ordering::Relaxed)
+			.then(|| self.side.probe.clone())
+	}
+
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		match *self.side.receive_window.lock().unwrap() {
 			Some(window) => window,
@@ -694,6 +705,16 @@ impl MockSession {
 	/// Report `stats` from now on.
 	pub fn set_stats(&self, stats: MockStats) {
 		*self.side.stats.lock().unwrap() = stats;
+	}
+
+	/// Report a sender from now on, which a session reads once as it starts.
+	pub fn set_probe(&self, probing: bool) {
+		self.side.probing.store(probing, Ordering::Relaxed);
+	}
+
+	/// The target the session hands this side's sender, or zero without one.
+	pub fn probe_target(&self) -> moq_net::bandwidth::Rate {
+		self.side.probe.target()
 	}
 
 	/// Report `window` as the receive windows in force, as a transport whose limits changed.
@@ -940,6 +961,8 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			panic_on_stats: Default::default(),
 			receive_window: Default::default(),
 			wire: Default::default(),
+			probing: Default::default(),
+			probe: Default::default(),
 		}),
 	};
 

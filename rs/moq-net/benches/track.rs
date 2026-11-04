@@ -134,7 +134,9 @@ use moq_net::{Error, Timestamp, broadcast, cache, group, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// Fanout sizes spanning a direct viewer, a small room, and a large room.
@@ -311,7 +313,9 @@ struct AbortedScan {
 impl AbortedScan {
 	fn new(aborted: usize) -> Self {
 		let broadcast = broadcast::Info::default().produce();
-		let track = broadcast.create_track("bench", None).unwrap();
+		let track = broadcast
+			.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+			.unwrap();
 		let mut stale = Vec::with_capacity(aborted);
 
 		for _ in 0..aborted {
@@ -391,7 +395,9 @@ impl Churn {
 	/// `peak` more viewers join and leave first, and the aggregate poll sees them go.
 	fn new(steady: usize, peak: usize) -> Self {
 		let broadcast = broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("bench", None).unwrap();
+		let mut track = broadcast
+			.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+			.unwrap();
 		let steady = (0..steady).map(|_| track.subscribe(None)).collect();
 		let peak: Vec<_> = (0..peak).map(|_| track.subscribe(None)).collect();
 		let waiter = kio::Waiter::noop();
@@ -437,7 +443,9 @@ impl Aged {
 		let mut reads = Vec::with_capacity(tracks);
 		let tracks = (0..tracks)
 			.map(|i| {
-				let track = broadcast.create_track(format!("bench{i}"), None).unwrap();
+				let track = broadcast
+					.create_track(format!("bench{i}"), moq_net::track::Info::default().with_max_age(None))
+					.unwrap();
 				let mut sub = track.subscribe(
 					track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)),
 				);
@@ -1018,7 +1026,9 @@ fn bench_subscription_ranges(c: &mut Criterion) {
 	for span in SPAN {
 		for ranges in RANGES {
 			let broadcast = broadcast::Info::default().produce();
-			let track = broadcast.create_track("bench", None).unwrap();
+			let track = broadcast
+				.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+				.unwrap();
 			// A gap between neighbors keeps every range distinct in the union.
 			let viewers: Vec<_> = (0..ranges)
 				.map(|i| {
@@ -1043,7 +1053,9 @@ fn bench_range_serving(c: &mut Criterion) {
 	for span in SERVED_SPAN {
 		for ranges in SERVED_RANGES {
 			let broadcast = broadcast::Info::default().produce();
-			let track = broadcast.create_track("bench", None).unwrap();
+			let track = broadcast
+				.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+				.unwrap();
 			// A gap between neighbors keeps every range distinct, and its group cached.
 			for _ in 0..ranges * (span + 1) {
 				let mut group = track.append_group().unwrap();
@@ -1241,7 +1253,10 @@ impl Sparse {
 fn bench_sparse_read(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_sparse_read");
 	group.throughput(Throughput::Elements(2));
-	for (name, info) in [("untimed", track::Info::default()), ("timed", timed())] {
+	for (name, info) in [
+		("untimed", track::Info::default().with_max_age(None)),
+		("timed", timed()),
+	] {
 		for gaps in [16u64, 256, 4096] {
 			group.bench_function(BenchmarkId::new(name, gaps), |b| {
 				b.iter_custom(|iterations| {
@@ -1260,7 +1275,10 @@ fn bench_sparse_read(c: &mut Criterion) {
 
 fn bench_sparse_poll(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_sparse_poll");
-	for (name, info) in [("untimed", track::Info::default()), ("timed", timed())] {
+	for (name, info) in [
+		("untimed", track::Info::default().with_max_age(None)),
+		("timed", timed()),
+	] {
 		for gaps in [16u64, 256, 4096] {
 			group.bench_function(BenchmarkId::new(name, gaps), |b| {
 				b.iter_custom(|iterations| {
@@ -1355,7 +1373,7 @@ struct Expiring {
 
 impl Expiring {
 	fn new(gaps: u64) -> Self {
-		let mut sparse = Sparse::new(track::Info::default(), 0);
+		let mut sparse = Sparse::new(track::Info::default().with_max_age(None), 0);
 		sparse
 			.sub
 			.update(
@@ -1600,7 +1618,9 @@ fn bench_range_widening(c: &mut Criterion) {
 		for cached in WIDENING_CACHED {
 			bench.bench_function(BenchmarkId::new(format!("{readers}r"), cached), |b| {
 				let broadcast = broadcast::Info::default().produce();
-				let track = broadcast.create_track("bench", None).unwrap();
+				let track = broadcast
+					.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+					.unwrap();
 				for _ in 0..cached {
 					let mut group = track.append_group().unwrap();
 					group.write_frame(None, Bytes::from_static(b"x")).unwrap();

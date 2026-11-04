@@ -316,7 +316,11 @@ class SmokeTest {
     @Test
     fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "backlog",
+                    TrackInfo(maxAgeUnlimited = true, timescale = 1_000_000uL),
+                )
             for (ms in 0uL until 3uL) {
                 val group = track.appendGroup()
                 group.writeFrame(
@@ -371,6 +375,21 @@ class SmokeTest {
             assertNull(frame?.timestamp)
             assertNull(consumer.info().timescale)
             track.finish()
+        }
+    }
+
+    @Test
+    fun `an omitted max age is zero and the unlimited flag sets none`() {
+        BroadcastProducer().use { broadcast ->
+            val omitted = broadcast.publishTrack("omitted", null).consume(null).info()
+            assertEquals(java.time.Duration.ZERO, omitted.maxAge)
+            val unlimited =
+                broadcast
+                    .publishTrack("unlimited", TrackInfo(maxAgeUnlimited = true))
+                    .consume(null)
+                    .info()
+            assertNull(unlimited.maxAge)
+            assertTrue(unlimited.maxAgeUnlimited)
         }
     }
 
@@ -677,6 +696,33 @@ class SmokeTest {
                                 "advertised: $advertised",
                             )
                         }
+                    }
+            }
+    }
+
+    @Test
+    fun `viewers watch, update, and release before the session connects`() = runTest {
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                Moq.connect(
+                        "https://${server.localAddr}",
+                        ClientConfig(tls = ClientTls(insecure = true)),
+                    )
+                    .use { moq ->
+                        val viewers: Viewers = moq.viewers()
+                        // The server never accepts, so there is no receive estimate to divide.
+                        val viewer: Viewer = viewers.watch(4_000_000uL)
+                        viewer.use {
+                            assertNull(it.rate())
+                            it.update(1_000_000uL)
+                            assertNull(it.rate())
+                        }
+                        viewers.setTarget(0uL)
+                        viewers.setTarget(null)
+                        // Past what a PROBE target carries: refused.
+                        assertFailsWith<MoqException.OutOfRange> { viewers.watch(1uL shl 53) }
                     }
             }
     }

@@ -134,7 +134,7 @@ impl Reserved {
 		let track = match &options.track {
 			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
 			// Lite05 subscribers know what scale to expect and the model layer accepts
-			// Frame::timestamp on append, plus whatever retention the broadcast declared.
+			// Frame::timestamp on append, plus whatever max age the catalog declared.
 			Some(name) => broadcast.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))?,
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
@@ -199,13 +199,13 @@ impl Reserved {
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
 	fn encode(self, registered: Registered) -> Producer {
-		let retention = self.track.track().info().max_age.unwrap_or(hang::container::MAX_AGE);
+		let history = self.track.track().info().max_age.unwrap_or(hang::container::MAX_AGE);
 		let bitrate = registered.encoder.bitrate();
 		self.track.report_bitrate(bitrate);
 
 		Producer {
 			backlog: Backlog::new(
-				retention,
+				history,
 				registered.encoder.frame_size(),
 				registered.encoder.codec_rate(),
 			),
@@ -513,7 +513,7 @@ impl Producer {
 	}
 
 	/// Whether unencoded history is still retained.
-	#[cfg(any(feature = "capture", test))]
+	#[cfg(feature = "capture")]
 	pub(crate) fn retains(&self) -> bool {
 		!self.backlog.is_empty()
 	}
@@ -611,7 +611,7 @@ impl Producer {
 
 	/// [`finish`](Self::finish) the track with `err`, for a source that failed: subscribers keep
 	/// every packet published, then get `err` instead of the end of stream.
-	#[cfg(any(feature = "capture", test))]
+	#[cfg(feature = "capture")]
 	pub(crate) fn fail(&mut self, err: moq_net::Error) -> Result<(), Error> {
 		self.end(Some(err))
 	}
@@ -885,7 +885,7 @@ mod tests {
 	}
 
 	/// Replay catches up behind the live edge another track already reached; advertising that as
-	/// delay would buffer playback by the retention for the rest of the broadcast.
+	/// delay would buffer playback by the replayed history for the rest of the broadcast.
 	#[tokio::test(start_paused = true)]
 	async fn replayed_history_raises_no_catalog_delay() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();

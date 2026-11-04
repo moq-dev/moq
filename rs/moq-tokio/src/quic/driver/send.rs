@@ -107,6 +107,12 @@ impl Stream {
 		kio::wait(|waiter| self.half.poll_write(waiter, buf)).await
 	}
 
+	/// Poll a write without retaining or copying the caller's buffer.
+	#[cfg(feature = "quic")]
+	pub(crate) fn poll_write_buf(&mut self, cx: &Context<'_>, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		self.half.poll_write(self.park.hold(cx), buf)
+	}
+
 	/// Write all of `buf` into this stream
 	///
 	/// # Cancel safety

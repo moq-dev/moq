@@ -64,8 +64,8 @@ lead to package references.
 ## Working with an agent
 
 Start with the root [`AGENTS.md`](https://github.com/moq-dev/moq/blob/main/AGENTS.md)
-and the nested instructions along the path being changed. Its cross-package
-table identifies the other implementations, bindings, and docs affected by a
-change. See [Coding agents](/setup/agent#working-in-this-repository) for the
-repository workflow; installing the application-building skill is unnecessary
-for a checkout that already contains these instructions.
+and the nested instructions along the path being changed. Its Cross-Package
+Sync section names the implementations and bindings that change together. See
+[Coding agents](/setup/agent#working-in-this-repository) for the repository
+workflow; installing the application-building skill is unnecessary for a
+checkout that already contains these instructions.

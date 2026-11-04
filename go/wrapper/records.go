@@ -142,41 +142,54 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 }
 
 // TrackInfo holds publisher-side track properties: priority, how long a
-// non-latest group is cached (nil for no limit), how many times its first frame
-// a group's later bytes may grow before a joining subscriber asks for a new group
-// (nil never asks), and the timescale in ticks per second (nil means untimed on
-// both publish and receive). Priority is higher first; the zero Priority is the
-// midpoint a nil TrackInfo uses. Compress DEFLATEs each group on the wire to peers
-// that support it; readers always see the original frames.
+// superseded group stays fresh, how many times its first frame a group's later
+// bytes may grow before a joining subscriber asks for a new group (nil never
+// asks), and the timescale in ticks per second (nil means untimed on both publish
+// and receive). Priority is higher first; the zero Priority is the midpoint a nil
+// TrackInfo uses. Compress DEFLATEs each group on the wire to peers that support
+// it; readers always see the original frames.
 type TrackInfo struct {
-	Priority  int8
-	MaxAge    *time.Duration
-	Refresh   *uint32
-	Timescale *uint64
-	Compress  bool
+	Priority int8
+	// MaxAge is how long a superseded group stays fresh. Zero, the default, serves
+	// only the live edge.
+	MaxAge time.Duration
+	// MaxAgeUnlimited ignores MaxAge and sets no publisher limit, leaving only the
+	// cache to bound how long a superseded group is served.
+	MaxAgeUnlimited bool
+	Refresh         *uint32
+	Timescale       *uint64
+	Compress        bool
 }
 
 func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 	if info == nil {
 		return nil, nil
 	}
-	return &ffi.MoqTrackInfo{
-		Priority:  info.Priority,
-		MaxAge:    info.MaxAge,
-		Refresh:   info.Refresh,
-		Timescale: info.Timescale,
-		Compress:  info.Compress,
-	}, bridge.NonNegative(info.MaxAge, "max age")
+	out := &ffi.MoqTrackInfo{
+		Priority:        info.Priority,
+		MaxAgeUnlimited: info.MaxAgeUnlimited,
+		Refresh:         info.Refresh,
+		Timescale:       info.Timescale,
+		Compress:        info.Compress,
+	}
+	if !info.MaxAgeUnlimited {
+		out.MaxAge = &info.MaxAge
+	}
+	return out, bridge.NonNegative(out.MaxAge, "max age")
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
-	return TrackInfo{
-		Priority:  info.Priority,
-		MaxAge:    info.MaxAge,
-		Refresh:   info.Refresh,
-		Timescale: info.Timescale,
-		Compress:  info.Compress,
+	out := TrackInfo{
+		Priority:        info.Priority,
+		MaxAgeUnlimited: info.MaxAgeUnlimited,
+		Refresh:         info.Refresh,
+		Timescale:       info.Timescale,
+		Compress:        info.Compress,
 	}
+	if info.MaxAge != nil && !info.MaxAgeUnlimited {
+		out.MaxAge = *info.MaxAge
+	}
+	return out
 }
 
 // ConnectionStats holds transport metrics for a session (RTT, bandwidth, byte

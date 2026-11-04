@@ -595,7 +595,10 @@ async fn markers_end_a_followed_archive() {
 async fn a_re_added_track_replays_both_runs() {
 	let store = Store::new(Mock::memory(), "rec");
 	let source = broadcast::Info::new().produce();
-	let info = track::Info::default().with_timescale(Timescale::MILLI);
+	// Each run is written before the recorder reads it, so superseded groups must stay fresh.
+	let info = track::Info::default()
+		.with_timescale(Timescale::MILLI)
+		.with_max_age(None);
 	let config = crate::producer::Config::default().with_flush(Duration::from_secs(1));
 	let recording = tokio::spawn(crate::Producer::new(store.clone(), source.consume(), config).run());
 
