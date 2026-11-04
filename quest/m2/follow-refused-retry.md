@@ -28,7 +28,8 @@ just refused followers.
 
 Recommended: after a refusal, the follower also waits on the route table's
 path-scoped `Watch` (crate-private, in `origin.rs`), the generation
-`routed_broadcast` already waits on after an `Unroutable`. It moves on any
+`origin::Consumer::request` (its `Requesting` future) already waits on
+after an `Unroutable`. It moves on any
 change to the routes covering the path, including a handler swap, and
 wakes only what watches that path, so listeners see nothing new. Check that
 re-registering an identical route does bump it; if it doesn't, bump it
@@ -53,5 +54,5 @@ Public API: none. Wire: none.
 ## Related
 
 - [Listing and follow](/quest/m1/api-audit/route/events.md) - `follow` takes over instance changes from announce events
-- [Front parking](/quest/m2/origin-front-parks.md) - the same refusal wait for `routed_broadcast`
+- [Front parking](/quest/m2/origin-front-parks.md) - the same refusal wait for `request`
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - another `Following` addition
