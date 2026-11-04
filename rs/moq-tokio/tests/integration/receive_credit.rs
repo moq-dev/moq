@@ -743,8 +743,8 @@ async fn ietf_largest_unit_completes_under_pressure() {
 }
 
 /// Drive the Bun sender through its commands against a subscriber of `origin` whose
-/// connection window is `window`: a low-priority frame twice the window gives way to a
-/// high-priority one, and the low track then keeps delivering. Waits for the sender to exit.
+/// connection window is `window`: an unsealed low-priority prefix gives way to a high-priority
+/// frame, and the low track then keeps delivering. Waits for the sender to exit.
 async fn javascript_exhausts(
 	version: moq_net::Version,
 	window: usize,
@@ -764,19 +764,11 @@ async fn javascript_exhausts(
 	// Half the window, which only fits once the low frame lets go.
 	commands.write_all(&b"high\n"[..]).await.unwrap();
 	assert_eq!(next_frame(&mut high).await, vec![2u8; window / 2], "{version}");
-	loop {
-		let chunk = kio::clock::timeout(TIMEOUT, partial.read_chunk())
-			.await
-			.expect("stop timed out");
-		match chunk {
-			Ok(Some(_)) => {}
-			Ok(None) => panic!("{version}: a frame larger than the window completed"),
-			Err(err) => {
-				assert!(matches!(err, moq_net::Error::Evicted), "{version}: {err}");
-				break;
-			}
-		}
-	}
+	let err = kio::clock::timeout(TIMEOUT, partial.read_chunk())
+		.await
+		.expect("stop timed out")
+		.expect_err("the partial frame must be evicted");
+	assert!(matches!(err, moq_net::Error::Evicted), "{version}: {err}");
 
 	// The session survives, and the low track keeps delivering what fits.
 	commands.write_all(&b"after\n"[..]).await.unwrap();
@@ -791,8 +783,9 @@ async fn javascript_exhausts(
 }
 
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport server whose
-/// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
-/// receiver stops it, a high-priority frame completes, and a later low group arrives.
+/// connection window is [`WINDOW`] and holds an unsealed low-priority prefix in a frame
+/// declared twice that size. The receiver evicts it, a high-priority frame completes, and a
+/// later low group arrives.
 async fn javascript_partial_frame_gives_way(version: &str) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
