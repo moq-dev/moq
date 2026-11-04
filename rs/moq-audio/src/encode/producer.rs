@@ -199,12 +199,7 @@ impl Reserved {
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
 	fn encode(self, registered: Registered) -> Producer {
-		let history = self
-			.track
-			.track()
-			.info()
-			.max_age
-			.unwrap_or(hang::container::MAX_AGE);
+		let history = self.track.track().info().max_age.unwrap_or(hang::container::MAX_AGE);
 		let bitrate = registered.encoder.bitrate();
 		self.track.report_bitrate(bitrate);
 
