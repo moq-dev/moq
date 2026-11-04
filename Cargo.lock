@@ -5312,7 +5312,6 @@ dependencies = [
  "moq-sock",
  "moq-tokio",
  "notify",
- "pin-project-lite",
  "qmux 0.7.0",
  "rand 0.10.3",
  "rcgen 0.14.10",

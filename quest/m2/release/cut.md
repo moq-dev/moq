@@ -27,6 +27,13 @@ group seed: the merge of release into main keeps main's `rs/moq-stats` and
 `doc/concept/stats.md`. MoQ Pro's VOD `storage.json` moves from the same
 seed to its own epoch.
 
+This cut ships [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234)'s
+MKV buffering fix to release, which stays exposed until then. Backport it to
+`release` separately? ✅ No: defer it to the next main → release cut
+(maintainer, 2026-11-03). A blanket size cap would refuse supported inputs and
+miss the decoder's captured children, as
+[moq-dev/moq#7718](https://github.com/moq-dev/moq/pull/7718) measured.
+
 Recurs once per major release (decided 2026-10-19). The PR that finishes the
 cut shifts the milestones up, as the root [questline](/quest/README.md)
 describes. This epic's remaining publication and adoption quests move to m0,

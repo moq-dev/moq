@@ -148,7 +148,6 @@ per-frame CPU growth since #5926.
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
 - [A step back smaller than the delay keeps the TS export](/quest/m1/ts-small-step-back.md) - audio restarts instead of regressing; video stays within its declared depth
-- [release carries the fanout-threads bench](/quest/m1/release-fanout-bench.md) - a bench-only port of session_fanout_threads for the pre-cut pairing
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Sockets](/quest/m1/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
@@ -162,7 +161,6 @@ per-frame CPU growth since #5926.
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - consumers hold a disabled rendition, and an unmute encodes at once with the mic still open
 - [Buffered audio survives a capture stop and a disable](/quest/m1/audio-across-stop.md) - audio retained by buffered capture is still served, or expires on its own `max_age`, after capture stops or the input is disabled
-- [moq-audio routes sources into several mixes](/quest/m1/audio-mix-router.md) - several mixes with routing, mix-minus, and per-source sync offsets, for the studio's audio mixes
 - [moq-mux presents a broadcast on the publisher's timestamps](/quest/m1/presentation-timeline.md) - `moq play`'s audio-anchored playout timing as a moq-mux API the studio's broadcast sources share
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
@@ -177,13 +175,9 @@ per-frame CPU growth since #5926.
 - [Authored tracks default to a 30 s max-age](/quest/m1/max-age-defaults.md) - raw and media tracks advertise 30 s unless their author chooses otherwise, with explicit unlimited in every binding
 - [HLS export lists a same-codec reconfigure's first group under the new init](/quest/m1/hls-reinit-same-codec.md) - the hand-over pick, whichever of the catalog and the records arrives first, after the catalog `hls` removal is planned
 - [A cancelled MoqTrackDemand wait never loses the next change](/quest/m1/demand-cancel-race.md) - cancelling a `MoqTrackDemand::wanted_changed` call, from any binding, never consumes a demand change
-- [moq-ffi reports an unsupported media configuration as a typed error](/quest/m1/ffi-unsupported-config.md) - `MoqAudioConsumer::subscribe` and the matching video subscribe fail with a typed "unsupported configuration" error
-- [A live keyframe interval change never outruns the declared HLS duration](/quest/m1/js-hls-keyframe-duration.md) - raising a live keyframe interval, even to infinite, never pushes a segment past the declared HLS target duration, and the browser interop cell asserts the catalog `hls` field
 - [One Ed25519 public key type with one z-base-32 codec](/quest/m1/mesh-key-codec.md) - `moq_auth::mesh::EndpointId` is merged into `moq_crypto::sign::PublicKey`
-- [moqsink reports track demand only once the track is in the catalog](/quest/m1/moqsink-demand-catalog.md) - A `moqsink` request pad's `track-demand` stays null until its track is listed in the published catalog, and only then reports `wanted`
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
-- [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
 
 ## Related
 
