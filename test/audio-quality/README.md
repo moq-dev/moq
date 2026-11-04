@@ -176,10 +176,10 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 
 | Trace | Recorded from |
 | --- | --- |
-| `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured |
-| `local-aac` | this harness's AAC publisher through a local relay: the shallow control |
+| `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured, from before `moq import ts` grouped each PES |
+| `local-aac` | this harness's AAC publisher through a local relay, from before it grouped each PES: the shallow control |
 | `relay-mic` | `<moq-publish>` through the public relay: a real microphone with `--mic-broadcast` (the checked-in one is Chrome on a MacBook Air, its built-in microphone), otherwise headless Chromium's fake capture device |
-| `bursty-aac` | a nightly `bursty` AAC row's capture: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
+| `bursty-aac` | a nightly `bursty` AAC row's capture, from when the publisher sent each frame as its own group: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
 | `relay-mic-rtt40` | a page playing a real microphone (Chrome on a MacBook Air) through the public relay with 40 ms of added round trip: the steady-state re-stalls time stretch must remove |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest

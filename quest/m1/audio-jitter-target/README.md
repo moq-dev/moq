@@ -42,7 +42,7 @@ native playback against its budgets.
 
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser plays the measured real-microphone rows with zero steady-state underruns by time-stretching the ring
 - [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - `moq play` copies NetEq's accelerate and preemptive expand, sharing the browser's algorithm and vectors, so its native rows reach zero steady-state underruns
-- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - post-cap nightlies confirm AAC bursty discards about as much audio as Opus bursty and the first row no longer stalls, and every browser row's budgets are re-measured from them
+- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - nightlies after the TS importer groups each PES confirm AAC bursty discards about as much audio as Opus bursty, and the AAC browser budgets are re-measured from them
 
 ## Closes
 
