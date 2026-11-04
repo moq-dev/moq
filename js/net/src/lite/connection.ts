@@ -10,6 +10,7 @@ import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
+import { hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -34,6 +35,7 @@ import {
 	hasAuth,
 	hasDatagrams,
 	hasGoaway,
+	hasHidden,
 	hasPadding,
 	hasProbeRtt,
 	hasSetupStream,
@@ -211,6 +213,13 @@ export class Connection implements Established {
 		// finds this session still active.
 		const leave = () => this.#auth.close();
 		void quic.closed.then(leave, leave);
+		// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
+		// them, and a socket endpoint behind it is unreachable. A server leaves it to the
+		// client, whose origin holds that endpoint.
+		if (client && publish && !hasHidden(version)) {
+			const withholding = hooks.withholdHidden(publish);
+			void quic.closed.then(withholding, withholding);
+		}
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
 			closeViolation(this.#quic, err);

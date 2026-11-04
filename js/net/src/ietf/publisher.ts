@@ -1907,7 +1907,7 @@ export class Publisher {
 		// leaving this one namespace unadvertised.
 		let request: RequestStream | undefined;
 		try {
-			const deadline = new Deadline();
+			const deadline = new Deadline(Milli(ADVERTISE_TIMEOUT_MS));
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
 					const opened = await RequestStream.open(this.#session, deadline, this.#quic);

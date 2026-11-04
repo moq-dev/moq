@@ -96,7 +96,10 @@ Use `Moq.socket.Endpoint` for [point-to-point sessions](/concept/socket), with t
 origin publishing and consuming through the relay. Each endpoint announces one hidden
 broadcast; accepting verifies that the named peer actually dialed this session.
 Every hop needs moq-lite-07 or moq-transport. Lite-07 currently requires explicitly
-offering `moq-lite-07-wip`; older moq-lite hops do not carry these hidden endpoints.
+offering `moq-lite-07-wip`; older moq-lite hops do not carry these hidden endpoints. While
+the endpoint's own client connection is moq-lite before 07, its dials and accepts fail as
+unsupported instead of waiting. A dialer can't tell a peer behind such a hop from one not
+online yet, so its dial waits as for any absent peer.
 
 ```ts
 const connection = await Moq.Connection.connect({
@@ -116,8 +119,8 @@ connection.close();
 
 A server takes `await endpoint.acceptTcp()`, then accepts or rejects that incoming dial.
 The incoming peer and session are unverified claims; `accept()` can fail if the original
-dial has closed. Pending socket acceptance waits until cancellation or closure, without
-an application acceptance timeout.
+dial has closed. A pending dial waits for acceptance until it is cancelled or the endpoint
+or session closes, with no acceptance timeout.
 TCP and track dials have independent accept queues. For independent messages, use
 `dialTrack` / `acceptTrack`: the stream exposes a track producer and an already subscribed
 consumer, reliable and ascending until updated. Both stream types expose `peer` and

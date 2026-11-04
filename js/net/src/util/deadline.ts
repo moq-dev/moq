@@ -1,13 +1,11 @@
-import { Milli, Nano } from "@moq/clock";
+import { type Milli, Nano } from "@moq/clock";
 import { controlTimeout, error, NoStreamCredit } from "../error.ts";
-import { SOCKET } from "../internal.ts";
-import * as Path from "../path.ts";
 import type { OpenOptions, Stream } from "../stream.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
 
 /** Request opens defer their deadline to the create-to-answer budget. @internal */
 export const requestOptions = { timeout: null, waitUntilAvailable: false } satisfies Partial<OpenOptions>;
-/** Milliseconds allowed from a request create to its first answer. @internal */
+/** Milliseconds a discovery or advertisement request allows from its create to its first answer. @internal */
 export const REQUEST_TIMEOUT_MS = 10_000;
 
 // A closed session fails its creates with a session-sourced WebTransportError, or with an
@@ -23,19 +21,21 @@ export interface Abortable {
 	abort(err: Error): void;
 }
 
-/** Own request setup streams, bounding ordinary requests and leaving socket acceptance cancellable. @internal */
+/**
+ * A request's setup: owns every stream it creates, fails a create without credit at once, and
+ * fails the answer once `budget` passes, if given. A track request takes no budget, since the
+ * publisher's application may hold its answer: demand, cancellation, and the session end it,
+ * as in Rust. @internal
+ */
 export class Deadline {
 	/** Creates still waiting on credit: a fetch opens its TRACK stream alongside. */
 	#opening = 0;
 	#owners: Abortable[] = [];
 	#failure?: Error;
-	#bounded: boolean;
+	#budget?: Milli;
 
-	constructor(broadcast?: Path.Valid) {
-		// Socket acceptance is an application decision. Its existing reserved namespace
-		// identifies those requests at both adapters, without adding a wire option.
-		// Demand, cancellation and session closure bound their lifetime instead.
-		this.#bounded = broadcast === undefined || Path.parts(broadcast).at(-2) !== SOCKET;
+	constructor(budget?: Milli) {
+		this.#budget = budget;
 	}
 
 	/**
@@ -74,15 +74,12 @@ export class Deadline {
 		await write();
 	}
 
-	/** Wait for the first answer, using the ordinary budget outside the socket namespace. */
+	/** Wait for the first answer, within the budget if there is one. */
 	async wait<T>(answer: Promise<T>): Promise<T> {
+		const budget = this.#budget;
 		try {
-			if (!this.#bounded) return await answer;
-			return await withTimeout(
-				answer,
-				Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)),
-				`request timed out after ${REQUEST_TIMEOUT_MS}ms`,
-			);
+			if (budget === undefined) return await answer;
+			return await withTimeout(answer, Nano.fromMilli(budget), `request timed out after ${budget}ms`);
 		} catch (cause) {
 			const failure =
 				cause instanceof TimeoutError

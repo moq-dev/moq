@@ -651,3 +651,67 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 		});
 	}
 }
+
+// A moq-lite client session before 07 never carries the endpoint's hidden broadcast, so its peer
+// could never find it. Its dials and accepts fail as unsupported instead of waiting, as in Rust.
+test("a socket endpoint behind a lite-06 client fails its dials and accepts, not the server's", async () => {
+	const clock = time();
+	const ao = new Origin.Producer();
+	const bo = new Origin.Producer();
+	origins.add(ao);
+	origins.add(bo);
+	const a = new socket.Endpoint(ao, Path.from("room"), "alice");
+	const b = new socket.Endpoint(bo, Path.from("room"), "bob");
+	// Already waiting before the session attaches, as when an endpoint's client reconnects.
+	const waiting = a.dialTcp("bob").then(
+		() => undefined,
+		(error: unknown) => error,
+	);
+	const pair = createMockTransportPair(Lite.ALPN_06);
+	const url = new URL("https://localhost/socket");
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client, publish: ao.consume(), consume: ao }),
+		acceptConnection({ url, transport: pair.server, publish: bo.consume(), consume: bo }),
+	]);
+	let heard = false;
+	const next = b.acceptTcp().then(
+		() => {
+			heard = true;
+		},
+		() => {},
+	);
+	try {
+		const unsupported = /unreachable behind a moq-lite hop before 07/;
+		expect(((await waiting) as Error).message).toMatch(unsupported);
+		await expect(a.dialTcp("bob")).rejects.toThrow(unsupported);
+		await expect(a.dialTrack("bob")).rejects.toThrow(unsupported);
+		await expect(a.acceptTcp()).rejects.toThrow(unsupported);
+		await expect(a.acceptTrack()).rejects.toThrow(unsupported);
+		// The server's endpoint keeps accepting, and never heard a dial it can't answer.
+		await clock.advance(Nano.fromSecond(Second(3600)));
+		expect(heard).toBe(false);
+
+		// The session's end releases the endpoint: an accept waits again.
+		client.abort();
+		await client.closed;
+		let accepted: unknown;
+		const accepting = a.acceptTcp().then(
+			(value) => {
+				accepted = value;
+			},
+			(error: unknown) => {
+				accepted = error;
+			},
+		);
+		await clock.advance(Nano.zero);
+		expect(accepted).toBeUndefined();
+		a.close();
+		await accepting;
+	} finally {
+		client.abort();
+		server.abort();
+		a.close();
+		b.close();
+		await next;
+	}
+});

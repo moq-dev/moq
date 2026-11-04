@@ -33,8 +33,8 @@ import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
-import { Deadline, requestOptions } from "../util/deadline.ts";
-import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
+import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { abandoned as demandAbandoned, isAbandoned, unrequested, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min } from "../util/sequence.ts";
 import { bounded, wireSpan } from "../window.ts";
@@ -101,8 +101,8 @@ type Subscription = {
 };
 
 // Out-parameter for #openSubscribe: lets the caller observe partial progress
-// (stream opened, trackAlias registered) so it can clean up on timeout even
-// before the setup promise settles.
+// (stream opened, trackAlias registered) so it can clean up a failed or abandoned setup
+// even before the setup promise settles.
 type SubscribeSetupState = {
 	stream?: RequestStream;
 	// The accepted subscription, which a registered alias names.
@@ -111,8 +111,8 @@ type SubscribeSetupState = {
 	requests?: Requests;
 	/**
 	 * Whether the caller has given up. Setup checks this once the stream exists so a request
-	 * opened after the timeout still unwinds: nothing else settles setup if the peer has
-	 * gone quiet, and the cleanup that fired first saw no stream to tear down.
+	 * opened after that still unwinds: nothing else settles setup if the peer has gone
+	 * quiet, and the cleanup that fired first saw no stream to tear down.
 	 */
 	cancelled?: boolean;
 	/**
@@ -528,7 +528,7 @@ export class Subscriber {
 		if (requestId === undefined) return;
 
 		try {
-			const deadline = new Deadline();
+			const deadline = new Deadline(Milli(REQUEST_TIMEOUT_MS));
 			const request = await deadline.wait(RequestStream.open(this.#session, deadline, this.#quic));
 
 			const run = async () => {
@@ -785,11 +785,11 @@ export class Subscriber {
 
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
-		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
-		// flows back via `state` so the timeout path can clean up the stream
-		// and any registration if setup eventually finishes.
+		// Open the stream and wait for SUBSCRIBE_OK for as long as the track is wanted, since
+		// the publisher's application may hold it. State flows back via `state` so a failed
+		// setup can clean up the stream and any registration if it finishes later.
 		const state: SubscribeSetupState = {};
-		const deadline = new Deadline(broadcast);
+		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, known?.producer);
 
 		// The publisher can be serving before it answers, so waiting only on the response
@@ -809,7 +809,7 @@ export class Subscriber {
 		let maxAge: number | undefined;
 		const abandoned = new Error("subscribe abandoned before it was accepted");
 		try {
-			// Returning demand keeps the same setup and its original deadline.
+			// Returning demand keeps the same setup.
 			const accepted = deadline.wait(setup);
 			for (;;) {
 				const result = await untilAborted(race([accepted, waitAbandoned()]), valid);
@@ -837,7 +837,7 @@ export class Subscriber {
 			);
 			// Runs now for whatever is already open, and again if `setup` settles late.
 			// Retirement is repeated because a late SUBSCRIBE_OK can register an alias after
-			// the first pass. The request ends once: a deadline failure already reset it through
+			// the first pass. The request ends once: a credit failure already reset it through
 			// the same stream, so a second end here does nothing.
 			const cleanup = () => {
 				state.cancelled = true;
@@ -864,8 +864,7 @@ export class Subscriber {
 
 			// Tear down what is already open rather than waiting on `setup`. A peer that
 			// opened the stream and then went quiet never settles it, and deferring would
-			// leave the request outstanding for the life of the session -- which is the
-			// timeout case, not a rare one.
+			// leave the request outstanding for the life of the session.
 			cleanup();
 			setup.then(cleanup, cleanup);
 			return;
@@ -1013,7 +1012,7 @@ export class Subscriber {
 		let stream: RequestStream | undefined;
 		let producer: track.Producer | undefined;
 		let fills: Promise<void> | undefined;
-		const deadline = new Deadline(broadcast);
+		const deadline = new Deadline();
 		try {
 			const setup = async () => {
 				const id = await this.#session.nextRequestId(signal);
@@ -1050,7 +1049,7 @@ export class Subscriber {
 			const ok = await untilAborted(
 				race([
 					deadline.wait(setup()),
-					demandAbandoned(request.demand()).then((): never => {
+					unrequested(request).then((): never => {
 						throw new Error("history read abandoned");
 					}),
 				]),
@@ -1510,7 +1509,7 @@ export class Subscriber {
 
 	// Opens the subscribe stream, sends SUBSCRIBE, and reads the response.
 	// `state` is populated as soon as the stream opens and again when the
-	// trackAlias is registered, so the caller can clean both up on timeout
+	// trackAlias is registered, so the caller can clean both up once it gives up,
 	// even before this promise settles.
 	async #openSubscribe(
 		state: SubscribeSetupState,
@@ -1530,7 +1529,7 @@ export class Subscriber {
 
 		state.stream = await RequestStream.open(this.#session, deadline, this.#quic);
 
-		// The timeout can fire while the open is still in flight, in which case cleanup ran
+		// The caller can give up while the open is still in flight, in which case cleanup ran
 		// with nothing to release. Bail now that the stream is recorded, so settling this
 		// promise hands it back to be torn down.
 		if (state.cancelled) throw new Error("subscribe cancelled before it was sent");

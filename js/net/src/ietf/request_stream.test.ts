@@ -178,7 +178,7 @@ test("a request's deadline ends it through the request, so later ends do nothing
 		});
 		const aborts = spyOn(stream, "abort");
 		const session = { version: Version.DRAFT_18, client: true, openBi: () => stream } as unknown as Session;
-		const deadline = new Deadline();
+		const deadline = new Deadline(Milli(REQUEST_TIMEOUT_MS));
 		const request = await RequestStream.open(session, deadline);
 		const answer = deadline.wait(new Promise<never>(() => {})).catch((e: unknown) => e);
 		await clock.advance(Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)));
@@ -223,7 +223,7 @@ test("a request opening after its deadline is aborted through its owner once and
 			client: true,
 			openBi: () => opening.promise,
 		} as unknown as Session;
-		const deadline = new Deadline();
+		const deadline = new Deadline(Milli(REQUEST_TIMEOUT_MS));
 		const send = mock((request: RequestStream) => request.writer.u8(1));
 		const sending = RequestStream.open(session, deadline).then(send);
 		const answer = deadline.wait(sending).catch((e: unknown) => e);

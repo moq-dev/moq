@@ -564,6 +564,12 @@ export class Request {
 	}
 }
 
+/** Options for {@link Consumer.info}. */
+export interface InfoOptions {
+	/** Abandons the lookup, rejecting with the signal's reason; aborting after it resolves has no effect. */
+	signal?: AbortSignal;
+}
+
 /** Options for {@link Consumer.fetchGroup}. */
 export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
@@ -615,9 +621,19 @@ export class Consumer {
 		return this.#broadcast.subscribe(this.name, options);
 	}
 
-	/** Fetch the track's immutable publisher properties without subscribing. */
-	info(): Promise<Info> {
-		return this.#broadcast.resolveTrackInfo(this.name);
+	/**
+	 * Fetch the track's immutable publisher properties without subscribing. It waits for as long
+	 * as the publisher takes to answer: abort `options.signal` to give up.
+	 */
+	info(options?: InfoOptions): Promise<Info> {
+		const signal = options?.signal;
+		if (!signal) return this.#broadcast.resolveTrackInfo(this.name);
+		if (signal.aborted) return Promise.reject(signal.reason);
+		// Held only until the answer, so the signal abandons the lookup but never keeps the track.
+		const answered = new AbortController();
+		return this.#broadcast
+			.resolveTrackInfo(this.name, AbortSignal.any([signal, answered.signal]))
+			.finally(() => answered.abort());
 	}
 
 	/** Fetch a single group by sequence without holding a live subscription. */

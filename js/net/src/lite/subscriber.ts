@@ -33,7 +33,7 @@ import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
-import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
+import { abandoned, isAbandoned, unwanted, whileWanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
@@ -91,21 +91,18 @@ import {
 // and removals of one name never reaches the announces cap: yield so it cannot starve the host.
 const listingBudget = new Budget();
 
-// Request streams refuse exhausted peer credit, with one deadline covering create and answer.
-export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
-
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
 const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
-// What a subscription has set up so far, so a revocation (or a timeout) can reach it at
+// What a subscription has set up so far, so a revocation (or abandonment) can reach it at
 // any stage.
 interface SubscribeSetup {
 	stream?: Stream;
 	track?: Stream;
 	producer?: track.Producer;
-	// Ends a setup still running once the deadline passed or the grant was revoked.
+	// Ends a setup still running once it failed, nobody wants it, or the grant was revoked.
 	cancel: AbortController;
 	// Set once our grant stops covering the broadcast.
 	revoked?: Error;
@@ -366,7 +363,7 @@ export class Subscriber {
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
 		try {
-			const deadline = new Deadline();
+			const deadline = new Deadline(Milli(REQUEST_TIMEOUT_MS));
 			stream = await deadline.wait(
 				deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions })),
 			);
@@ -1014,34 +1011,35 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
-		// Open the stream under a timeout. The stream handles flow back via `state`
-		// so the timeout path can close them if they finish opening after the deadline,
-		// and `cancel` ends a setup still running once the deadline passed, resetting
-		// its TRACK stream so a peer that never answers can't hold one per attempt.
+		// The publisher's application may hold its answer, so the setup waits for it until the
+		// last subscriber leaves, the broadcast goes, or the session ends. The stream handles
+		// flow back via `state` so a failed setup can close them even if they open later, and
+		// `cancel` ends a setup still running, resetting its TRACK stream.
 		const retire = this.#retirer(state, valid);
 		valid?.addEventListener("abort", retire);
 		if (valid?.aborted) retire();
-		const deadline = new Deadline(broadcast);
+		const left = whileWanted(request.demand(), state.cancel);
+		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, msg, ranges, request, id, deadline);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
-			opened = await deadline.wait(untilAborted(setup, valid));
+			opened = await deadline.wait(untilAborted(untilAborted(setup, valid), left.signal));
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			closeViolation(this.#quic, err);
-			// The setup outlived its deadline waiting for the first response: a control
-			// timeout, not content that arrived late. A revocation says so instead.
-			const e = state.revoked ?? (await sessionCause(this.#quic, err));
+			// Local abandonment commits without yielding after the demand check. A revocation
+			// says so instead.
+			const e = state.revoked ?? (left.signal.aborted ? left.signal.reason : await sessionCause(this.#quic, err));
 			state.cancel.abort(e);
 			valid?.removeEventListener("abort", retire);
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			// Close the streams open now, since a write blocked on flow control may never let
-			// setup settle, and any that open after the timeout once it does. Cover both
-			// branches: setup may resolve late, or it may reject (e.g. encode/decode failure)
-			// after a stream is open.
+			// setup settle, and any that open later once it does. Cover both branches: setup
+			// may resolve late, or it may reject (e.g. encode/decode failure) after a stream
+			// is open.
 			const leave = () => {
 				state.stream?.abort(e);
 				state.track?.close();
@@ -1049,6 +1047,8 @@ export class Subscriber {
 			leave();
 			setup.then(leave, leave);
 			return;
+		} finally {
+			left.stop();
 		}
 		valid?.removeEventListener("abort", retire);
 
@@ -1071,17 +1071,9 @@ export class Subscriber {
 			const id = this.#subscribeNext++;
 			const msg = this.#subscribeMessage(id, broadcast, consumed, producer.name, subscription, ranges);
 			console.debug(`subscribe reopen: id=${id} broadcast=${broadcast} track=${producer.name}`);
-			// Bounded like the first setup, and given up once nobody wants the track, so a peer
-			// that stops reading holds neither the stream nor its entry.
-			// Watched only while the setup runs, so a reopen leaves no watcher behind.
-			const left = new AbortController();
-			const demand = producer.demand();
-			let unwatch: Dispose | undefined;
-			const watch = () => {
-				if (isAbandoned(demand)) left.abort(new StreamError(StreamCode.Cancel, { message: "cancel" }));
-				else unwatch = Signal.race(demand.wanted, hooks.demandReleased(demand)).changed(watch);
-			};
-			watch();
+			// Given up once nobody wants the track, like the first setup, so a peer that stops
+			// reading holds neither the stream nor its entry.
+			const left = whileWanted(producer.demand(), state.cancel);
 			let sent: Promise<Stream> | undefined;
 			valid?.addEventListener("abort", retire);
 			try {
@@ -1096,7 +1088,7 @@ export class Subscriber {
 					framing,
 					state,
 				);
-				const deadline = new Deadline(broadcast);
+				const deadline = new Deadline();
 				sent = this.#sendSubscribe(state, msg, deadline);
 				stream = await deadline.wait(untilAborted(untilAborted(sent, valid), left.signal));
 				current = { id, msg };
@@ -1119,7 +1111,7 @@ export class Subscriber {
 				);
 				return;
 			} finally {
-				unwatch?.();
+				left.stop();
 				valid?.removeEventListener("abort", retire);
 			}
 		}
@@ -1283,7 +1275,7 @@ export class Subscriber {
 	// Open the subscribe stream and accept the request (so the application's track.Subscriber
 	// resolves and incoming groups have a producer to write into) with the track's immutable
 	// properties. `state.stream` is populated as soon as it opens, and `state.track` once
-	// answered, so the caller can clean them up on timeout even before this promise settles.
+	// answered, so the caller can clean them up once it gives up, even before this promise settles.
 	//
 	// On lite-05+ the properties come from a TRACK stream, held open until the SUBSCRIBE is
 	// answered, and the SUBSCRIBE goes out alongside it rather than a round trip after: it is
@@ -1346,7 +1338,7 @@ export class Subscriber {
 			// Either failing fails the subscription: a reset TRACK rejects the request, so the
 			// origin can try another route, and the caller resets the SUBSCRIBE.
 			const [answered, stream] = await Promise.all([info, sending]);
-			// The deadline passed as TRACK_INFO landed: the request is already rejected, so don't
+			// The setup ended as TRACK_INFO landed: the request is already rejected, so don't
 			// accept it again.
 			state.cancel.signal.throwIfAborted();
 			const model = this.#toModelInfo(answered.info);
@@ -1425,7 +1417,7 @@ export class Subscriber {
 	async #sendSubscribe(state: SubscribeSetup, msg: Subscribe, deadline: Deadline): Promise<Stream> {
 		const stream = await deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions }));
 		state.stream = stream;
-		// The deadline passed while the open waited: the late-setup handler resets the stream, so
+		// The setup ended while the open waited: the late-setup handler resets the stream, so
 		// don't send a SUBSCRIBE on it first.
 		state.cancel.signal.throwIfAborted();
 		await stream.writer.u53(StreamId.Subscribe);
@@ -1520,7 +1512,7 @@ export class Subscriber {
 		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
-		const deadline = new Deadline(broadcast);
+		const deadline = new Deadline();
 		const { info, stream } = await deadline.wait(this.#trackInfo(broadcast, instance, track, hold, deadline));
 		if (hold && !hold.aborted) hold.addEventListener("abort", () => stream.close(), { once: true });
 		else stream.close();
@@ -1617,10 +1609,10 @@ export class Subscriber {
 			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
 
-			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
-			// Subscriber.close() closing the group releases every caller at any stage, and resets
-			// the streams the setup opened.
-			const deadline = new Deadline(broadcast);
+			// Lite has no FETCH_OK, and the publisher's application may hold its answer. Every
+			// caller leaving, or Subscriber.close() closing the group, releases the setup at any
+			// stage and resets the streams it opened.
+			const deadline = new Deadline();
 			const setup = deadline.wait(
 				this.#fetchSetup(broadcast, consumed, track, sequence, priority, group, deadline, maxDelay),
 			);

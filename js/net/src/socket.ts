@@ -2,7 +2,8 @@
  * Point-to-point sessions over one hidden broadcast per endpoint.
  *
  * Sessions use the existing MoQ wire and need lite-07 (currently an explicit
- * `moq-lite-07-wip` offer) or moq-transport on every hop.
+ * `moq-lite-07-wip` offer) or moq-transport on every hop. While the endpoint's origin
+ * has a moq-lite client session before 07, dials and accepts fail as unsupported.
  * Their track names are secrets and are never listed. See the socket concept page.
  *
  * @module
@@ -26,6 +27,8 @@ const reliable: Track.Subscription = {
 };
 const cancelled = () => new StreamError(StreamCode.Cancel, { message: "socket operation cancelled" });
 const ended = () => new StreamError(StreamCode.SessionClosed, { message: "socket endpoint closed" });
+// Unsupported has no registered stream code, as in Rust: it maps to Internal.
+const unreachable = () => new Error("socket endpoint is unreachable behind a moq-lite hop before 07");
 
 function abandoned(request: Track.Request): boolean {
 	return !hooks.requestWanted(request).peek() || hooks.demandReleased(request.demand()).peek() !== undefined;
@@ -196,7 +199,14 @@ class Queue {
 	}
 }
 
-/** Announces one endpoint, dials peers under the same prefix, and accepts each protocol separately. */
+/**
+ * Announces one endpoint, dials peers under the same prefix, and accepts each protocol separately.
+ *
+ * Every hop between two endpoints must carry hidden broadcasts: moq-lite-07 or moq-transport.
+ * While the origin has a moq-lite client session before 07, whose peer never hears this
+ * endpoint, dials and accepts fail as unsupported. Nothing tells a dialer that its peer sits
+ * behind such a hop, so a dial to it waits as for a peer not announced yet.
+ */
 export class Endpoint {
 	/** This endpoint's id, a single plain segment. */
 	readonly id: string;
@@ -214,12 +224,14 @@ export class Endpoint {
 	#serving = false;
 	#sessions = new Set<Session>();
 	#unclose: Dispose;
+	#withheld: Getter<number>;
 
 	/** Publish this endpoint on origin, which must also reach its peers. */
 	constructor(origin: Origin.Producer, prefix: Path.Valid, id: string) {
 		this.id = id;
 		this.prefix = Path.from(prefix);
 		this.#origin = origin;
+		this.#withheld = hooks.hiddenWithheld(origin);
 		this.#publication = origin.createBroadcast(endpointPath(this.prefix, id));
 		this.#unclose = hooks.onClosed(this.#publication.broadcast, () => this.close());
 		this.#publication.announce();
@@ -247,25 +259,41 @@ export class Endpoint {
 	}
 
 	async #next<S extends Stream>(protocol: Protocol, options?: Options): Promise<Incoming<S>> {
-		const signal = this.#signal(options);
-		signal.throwIfAborted();
-		const queue = this.#queues[protocol];
-		queue.listening = true;
-		if (!this.#serving) {
-			this.#serving = true;
-			void this.#serve();
-		}
-		for (;;) {
-			await waitFor(queue.dials, (dials) => dials.size > 0, signal);
+		const abort = new AbortController();
+		const signal = AbortSignal.any([this.#signal(options), abort.signal]);
+		const unwatch = this.#reachable(abort);
+		try {
 			signal.throwIfAborted();
-			const first = queue.dials.peek().entries().next().value;
-			if (!first) continue;
-			const [request, dispose] = first;
-			dispose();
-			queue.dials.mutate((dials) => dials.delete(request));
-			if (!abandoned(request)) return makeIncoming<S>(this, protocol, request);
-			request.reject(cancelled());
+			const queue = this.#queues[protocol];
+			queue.listening = true;
+			if (!this.#serving) {
+				this.#serving = true;
+				void this.#serve();
+			}
+			for (;;) {
+				await waitFor(queue.dials, (dials) => dials.size > 0, signal);
+				signal.throwIfAborted();
+				const first = queue.dials.peek().entries().next().value;
+				if (!first) continue;
+				const [request, dispose] = first;
+				dispose();
+				queue.dials.mutate((dials) => dials.delete(request));
+				if (!abandoned(request)) return makeIncoming<S>(this, protocol, request);
+				request.reject(cancelled());
+			}
+		} finally {
+			unwatch();
 		}
+	}
+
+	// Abort with unsupported while a session withholds this endpoint from its peer, until disposed.
+	#reachable(abort: AbortController): Dispose {
+		const check = () => {
+			if (this.#withheld.peek() > 0) abort.abort(unreachable());
+		};
+		const unwatch = this.#withheld.subscribe(check);
+		check();
+		return unwatch;
 	}
 
 	async #serve(): Promise<void> {
@@ -346,6 +374,7 @@ export class Endpoint {
 		let consumer: Track.Subscriber | undefined;
 		let producer: Track.Producer | undefined;
 		let stop: Dispose = () => {};
+		const unreached = this.#reachable(abort);
 		try {
 			const remote = await this.#remote(peer, name, signal, (value) => {
 				following = value;
@@ -366,6 +395,7 @@ export class Endpoint {
 			throw error;
 		} finally {
 			stop();
+			unreached();
 			abort.abort(cancelled());
 		}
 	}
@@ -386,6 +416,7 @@ export class Endpoint {
 		};
 		const stop = hooks.requestWanted(request).subscribe(check);
 		const release = hooks.demandReleased(demand).subscribe(check);
+		const unreached = this.#reachable(abort);
 		let following: Origin.Following | undefined;
 		let consumer: Track.Subscriber | undefined;
 		let stopError: Dispose = () => {};
@@ -415,6 +446,7 @@ export class Endpoint {
 		} finally {
 			stop();
 			release();
+			unreached();
 			stopError();
 		}
 	}

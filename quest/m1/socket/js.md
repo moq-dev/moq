@@ -29,7 +29,8 @@ broadcast, instead of waiting forever; test it against a lite-06 connection.
 Add the Rust/JS pairs to `just test interop`, and document the export in
 `doc/lib/js/net.md`.
 
-The JS implementation, documentation, relay lanes, and endpoint/session benchmark
+The JS implementation, documentation, relay lanes, endpoint/session benchmark,
+the lite-06 unsupported check, and the lifecycle-bounded track requests below
 are present. Every new session subscribes from absolute group 0. The controlled
 metadata-before-burst regressions stay enabled: lite-07 passes, while draft 18
 stalls and drafts 20/22 lose the earlier track groups on the uncorrected base.
@@ -52,10 +53,12 @@ Decisions:
 
 - ✅ 2026-11-04 (maintainer): JS request-setup budgets use general lifecycle
   bounds, like Rust. Every on-request track request (subscribe, track info,
-  fetch) waits for its answer until demand ends, the caller cancels, stream
+  fetch, fill) waits for its answer until demand ends, the caller cancels, stream
   credit fails fast, or the session closes; no fixed application-answer budget
   and no `.socket/<id>` namespace exemption. Not chosen: transport-only phase
-  budgets.
+  budgets. Announcement discovery and namespace advertisements are not track
+  requests and keep their ten-second bound; `track.Consumer.info()` takes an
+  optional `signal`, its counterpart of dropping Rust's pending `info()`.
 - ✅ 2026-11-04 (maintainer): [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883)'s
   generic adapter default preserves filterless live joins. Not chosen:
   canonical from-zero. #7883 is reworked separately to do that; socket

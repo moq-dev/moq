@@ -4,13 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track requests wait for their answer instead of timing out
+
+A subscription, `info()`, or `fetchGroup()` the publisher hasn't answered no longer fails
+with `StreamCode.ControlTimeout` after ten seconds, since the publisher's application may
+hold its answer, as Rust allows. It waits until the last subscriber closes, the fetch's
+`signal` aborts, the broadcast or session closes, or the publisher refuses it. A request
+still fails at once with `NoStreamCredit` when the peer grants no stream. To give up
+sooner, close the subscriber or abort the fetch on a timer of your own. Announcement
+discovery keeps its ten-second bound.
+
 ### Socket endpoints are available
 
 The additive `socket` namespace exports `Endpoint`, `TcpStream`, and `TrackStream`.
 Use `dialTcp` / `acceptTcp` or `dialTrack` / `acceptTrack` on endpoints sharing a prefix;
 cancel pending operations with an `AbortSignal`, and explicitly close endpoints when done.
 The existing wire is unchanged. Every hop must support moq-lite-07 (currently an
-explicit `moq-lite-07-wip` offer) or moq-transport.
+explicit `moq-lite-07-wip` offer) or moq-transport; while the endpoint's own client
+connection is moq-lite before 07, its dials and accepts fail as unsupported.
 
 ### Relative group anchors are `bigint`
 

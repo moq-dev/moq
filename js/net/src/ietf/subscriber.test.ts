@@ -944,7 +944,7 @@ test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
 	track.close();
 });
 
-test.each(["acceptance", "timeout"])("returning demand preserves pending setup until %s", async (outcome) => {
+test.each(["acceptance", "refusal"])("returning demand preserves pending setup until %s", async (outcome) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
@@ -1018,9 +1018,13 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		expect(await info).toMatchObject({ priority: 127 - 128 });
 		expect(returned.closed.peek()).toBeUndefined();
 	} else {
-		await clock.advance(Nano.fromMilli(Milli(4_000)));
+		// No answer budget: an hour later the same setup still waits for the publisher.
+		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		expect(returned.closed.peek()).toBeUndefined();
+		await peer.writer.u53(RequestError.id);
+		await new RequestError({ errorCode: 0x10, reasonPhrase: "not here" }).encode(peer.writer, VERSION);
 		expect(await info).toBeInstanceOf(Error);
-		expect(((await info) as Error).message).toContain("request timed out after 10000ms");
+		expect(((await info) as Error).message).toContain("not here");
 	}
 	expect(opening).toHaveBeenCalledTimes(1);
 });
