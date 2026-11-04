@@ -138,20 +138,29 @@ async def sockets(results: list[dict]) -> None:
                     stream.producer.finish()
                     assert [item async for item in stream.consumer] == []
 
-                # Start accepts before dialing; all setup and messages remain in the measurement.
-                start = time.perf_counter()
-                accepts = [asyncio.create_task(accept(server)) for server in servers]
-                # Scheduling barrier: each accept has reached its first suspension before dials run.
-                polled = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(polled.set_result, None)
-                await polled
-                await asyncio.gather(*(dial(server) for server in servers for _ in range(sessions)), *accepts)
+                async def step() -> None:
+                    accepts = [asyncio.create_task(accept(server)) for server in servers]
+                    # Each accept reaches its first suspension before any dial can run.
+                    polled = asyncio.get_running_loop().create_future()
+                    asyncio.get_running_loop().call_soon(polled.set_result, None)
+                    await polled
+                    await asyncio.wait_for(
+                        asyncio.gather(*(dial(server) for server in servers for _ in range(sessions)), *accepts),
+                        ROUND_TIMEOUT,
+                    )
+
+                for _ in range(WARMUP):
+                    await step()
+                start, rounds = time.perf_counter(), 0
+                while time.perf_counter() - start < BUDGET:
+                    await step()
+                    rounds += 1
                 elapsed = time.perf_counter() - start
                 results.append(
                     {
                         "name": f"socket/{protocol}/endpoints={endpoints}/sessions={sessions}",
                         "unit": "sessions/s",
-                        "value": endpoints * sessions / elapsed,
+                        "value": rounds * endpoints * sessions / elapsed,
                     }
                 )
                 client.close()
