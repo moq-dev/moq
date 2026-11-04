@@ -236,6 +236,7 @@ features:
     just rs net-features --all
     just rs coroutines
     just rs quic-features --all
+    just rs crypto-key
     just rs tokio-features --all
     just rs media-features --all
     bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
@@ -265,6 +266,19 @@ coroutines:
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
     bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
 
+# Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport and aws-lc-rs, then lint and test it alone; a workspace build unifies the default features back in.
+crypto-key:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    graph=$(cargo tree --locked -p moq-crypto --no-default-features --features serde -e normal --prefix none)
+    if grep -E '^(aws-lc-rs|moq-net) ' <<<"$graph"; then
+        echo "moq-crypto without sign or e2ee must not depend on moq-net or aws-lc-rs" >&2
+        exit 1
+    fi
+    bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --all-targets -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --features serde --all-targets -- -D warnings
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-crypto --no-default-features --features serde
+
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
 quic-features *args:
@@ -293,9 +307,11 @@ media-features *args:
 # nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
 # skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
 # wrapper enforces lint findings from the same compile. `--tests` builds library,
-# binary, and integration-test targets, including binary-only crates; benches and
-# examples compile and lint in Nightly's `features`. `build.warnings` denies
-# warnings without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
+# binary, and integration-test targets, including binary-only crates. The gate
+# (sh/rs/select.sh's `test`) adds `--benches --examples` and the features those
+# targets require, so their lints fail the PR rather than Nightly; nextest's
+# default filter leaves the benches unrun. `build.warnings` denies warnings
+# without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
 
 # Run library, binary, and integration tests, enforcing clippy from the same compile.
 [positional-arguments]

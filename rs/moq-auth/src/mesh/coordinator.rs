@@ -21,10 +21,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use moq_crypto::sign::PublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use super::{CHALLENGE_LEN, Challenge, EndpointId, EnrollRequest, Enrollment, ErrorCode, ErrorReply, Member, Proof};
+use super::{CHALLENGE_LEN, Challenge, EnrollRequest, Enrollment, ErrorCode, ErrorReply, Member, Proof};
 use crate::{Claims, Key, Pattern};
 
 /// How long a challenge stays valid.
@@ -103,7 +104,7 @@ struct StoredKey {
 #[non_exhaustive]
 pub struct Device {
 	/// Its endpoint ID.
-	pub endpoint: EndpointId,
+	pub endpoint: PublicKey,
 	/// Its unique, DNS-safe name.
 	pub name: String,
 	/// The tags of the enrollment key it joined with.
@@ -176,7 +177,7 @@ struct Inner {
 	store: Store,
 	/// The sequence of the last challenge each endpoint was granted with. Only an
 	/// enrolled device gets an entry, so it grows with the devices and nothing else.
-	used: HashMap<EndpointId, u64>,
+	used: HashMap<PublicKey, u64>,
 }
 
 /// The mesh coordinator: issues challenges, enrolls devices, and refreshes their tokens.
@@ -208,7 +209,7 @@ impl Coordinator {
 		// than after an enrollment key is spent.
 		config
 			.key
-			.sign(&claims(EndpointId::from_bytes([0; 32]), kio::clock::wall(), None))?;
+			.sign(&claims(PublicKey::from_bytes([0; 32]), kio::clock::wall(), None))?;
 		Ok(Self {
 			config: Arc::new(config),
 			secret: Arc::new(rind::hmac::Key::new(&rind::hmac::HMAC_SHA256, &random(32))),
@@ -360,7 +361,7 @@ impl Coordinator {
 
 	/// Revoke a device: its next refresh fails, and it cannot enroll again.
 	/// Returns whether the device exists.
-	pub fn revoke_device(&self, endpoint: EndpointId) -> crate::Result<bool> {
+	pub fn revoke_device(&self, endpoint: PublicKey) -> crate::Result<bool> {
 		let mut inner = self.inner.lock().unwrap();
 		let found = self.commit(&mut inner, |store| {
 			let device = store.devices.iter_mut().find(|device| device.endpoint == endpoint);
@@ -446,7 +447,7 @@ impl Coordinator {
 	}
 
 	/// Record `endpoint` as enrolled, or update its name and tags if it already is.
-	fn admit(&self, store: &mut Store, endpoint: EndpointId, name: Option<&str>, tags: Vec<String>) -> Reply<()> {
+	fn admit(&self, store: &mut Store, endpoint: PublicKey, name: Option<&str>, tags: Vec<String>) -> Reply<()> {
 		refuse_revoked(store, endpoint)?;
 		let devices = &mut store.devices;
 		let current = devices.iter().position(|device| device.endpoint == endpoint);
@@ -471,7 +472,7 @@ impl Coordinator {
 	}
 
 	/// Sign a token for an enrolled `endpoint` and list the mesh.
-	fn issue(&self, store: &Store, endpoint: EndpointId) -> Reply<Enrollment> {
+	fn issue(&self, store: &Store, endpoint: PublicKey) -> Reply<Enrollment> {
 		let internal = |err: crate::Error| ErrorReply::new(ErrorCode::ServerError, err.to_string());
 		let now = kio::clock::wall();
 		// `exp` is whole seconds on the wire; truncate so the reply matches the token.
@@ -524,7 +525,7 @@ impl Coordinator {
 	}
 }
 
-fn refuse_revoked(store: &Store, endpoint: EndpointId) -> Reply<()> {
+fn refuse_revoked(store: &Store, endpoint: PublicKey) -> Reply<()> {
 	if store
 		.devices
 		.iter()
@@ -536,9 +537,9 @@ fn refuse_revoked(store: &Store, endpoint: EndpointId) -> Reply<()> {
 }
 
 /// The grant every mesh token carries: publish under its own ID, subscribe to the mesh.
-fn claims(endpoint: EndpointId, issued: kio::clock::Wall, expires: Option<kio::clock::Wall>) -> Claims {
+fn claims(endpoint: PublicKey, issued: kio::clock::Wall, expires: Option<kio::clock::Wall>) -> Claims {
 	Claims::default()
-		.with_publish([endpoint.publish()])
+		.with_publish([Pattern::subtree(&format!("mesh/{endpoint}")).expect("a z-base-32 segment is a valid path")])
 		.with_subscribe([Pattern::subtree("mesh").expect("a valid path")])
 		.with_issued(issued)
 		.with_expires(expires)
@@ -562,7 +563,7 @@ fn sanitize(name: &str) -> String {
 }
 
 /// `name`, or `name-2`, `name-3`, ... when another endpoint holds it.
-fn unique_name(devices: &[Device], endpoint: EndpointId, name: &str) -> String {
+fn unique_name(devices: &[Device], endpoint: PublicKey, name: &str) -> String {
 	let taken = |candidate: &str| {
 		devices
 			.iter()
@@ -699,21 +700,21 @@ mod tests {
 	#[test]
 	fn names_stay_unique() {
 		let device = |byte, name: &str| Device {
-			endpoint: EndpointId::from_bytes([byte; 32]),
+			endpoint: PublicKey::from_bytes([byte; 32]),
 			name: name.into(),
 			tags: Vec::new(),
 			enrolled: kio::clock::wall(),
 			revoked: false,
 		};
 		let devices = vec![device(1, "robot"), device(2, "robot-2")];
-		assert_eq!(unique_name(&devices, EndpointId::from_bytes([1; 32]), "robot"), "robot");
+		assert_eq!(unique_name(&devices, PublicKey::from_bytes([1; 32]), "robot"), "robot");
 		assert_eq!(
-			unique_name(&devices, EndpointId::from_bytes([3; 32]), "robot"),
+			unique_name(&devices, PublicKey::from_bytes([3; 32]), "robot"),
 			"robot-3"
 		);
 		let long = "a".repeat(MAX_NAME);
 		let devices = vec![device(1, &long)];
-		let name = unique_name(&devices, EndpointId::from_bytes([3; 32]), &long);
+		let name = unique_name(&devices, PublicKey::from_bytes([3; 32]), &long);
 		assert_eq!(name.len(), MAX_NAME);
 		assert!(name.ends_with("-2"));
 	}
