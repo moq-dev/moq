@@ -21,6 +21,11 @@ cat >"$fixture/bin/direnv" <<'MOCK'
 #!/usr/bin/env bash
 [[ $1 == allow ]] && exit 0
 [[ ${FAIL_DIRENV:-0} == 0 ]] || exit 1
+# Emulate nix-direnv reloading its cached profile after evaluation fails.
+if [[ ${NIX_FALLBACK:-0} != 0 && -z ${NIX_DIRENV_DID_FALLBACK:-} ]]; then
+    printf 'export NIX_DIRENV_DID_FALLBACK=1;export TOOLCHAIN=cached;\n'
+    exit 0
+fi
 printf 'export TOOLCHAIN=fallback\n'
 MOCK
 chmod +x "$fixture/bin/nix" "$fixture/bin/direnv"
@@ -45,7 +50,9 @@ for file in flake.nix flake.lock; do
 done
 
 # A fallback capture replaces partial Nix output as well as its environment.
+touch "$snapshot.stale"
 FAIL_NIX=1 bash "$hook"
+[[ ! -e $snapshot.stale ]]
 [[ $(bash -c 'source "$1"; printf "%s" "$TOOLCHAIN"' -- "$snapshot") == fallback ]]
 [[ $(wc -l <"$snapshot") -eq 2 ]]
 
@@ -56,6 +63,17 @@ if FAIL_NIX=1 FAIL_DIRENV=1 bash "$hook"; then
     exit 1
 fi
 cmp "$snapshot" "$fixture/captured"
+[[ ! -e $snapshot.tmp ]]
+
+# nix-direnv's cached profile may belong to another flake, so it must not be
+# stamped as current, even when the marker was inherited.
+touch "$snapshot.stale"
+if FAIL_NIX=1 NIX_FALLBACK=1 NIX_DIRENV_DID_FALLBACK=1 bash "$hook"; then
+    echo 'nix-direnv fallback was accepted' >&2
+    exit 1
+fi
+cmp "$snapshot" "$fixture/captured"
+[[ -e $snapshot.stale ]]
 [[ ! -e $snapshot.tmp ]]
 
 echo 'Codex snapshot capture: regression tests passed'

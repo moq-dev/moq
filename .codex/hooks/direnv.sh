@@ -54,11 +54,22 @@ fi
 # this, a stale DIRENV_DIFF from the parent process makes direnv assume the env
 # is already loaded and emit nothing.
 unset DIRENV_DIR DIRENV_DIFF DIRENV_WATCHES DIRENV_FILE DIRENV_LAYOUT
+# nix-direnv sets this when the flake fails to evaluate and it reloads its
+# cached profile instead. Unset any inherited value so the export below
+# reports it.
+unset NIX_DIRENV_DID_FALLBACK
 
 direnv allow . 2>>"$PWD/.direnv/codex-hook.log"
 # Discard any partial output from a failed Nix capture.
 printf '%s\n' "$flake_stamp" >"$env_tmp"
 direnv export bash >>"$env_tmp" 2>>"$PWD/.direnv/codex-hook.log"
+# That profile may belong to another flake, so stamping it would certify the
+# wrong environment. Keep the previous snapshot instead.
+if grep -q 'NIX_DIRENV_DID_FALLBACK' "$env_tmp"; then
+    echo "codex-env: nix-direnv fell back to a cached environment; keeping the previous snapshot" \
+        >>"$PWD/.direnv/codex-hook.log"
+    exit 1
+fi
 mv "$env_tmp" "$env_file"
 rm -f "$env_file.stale"
 
