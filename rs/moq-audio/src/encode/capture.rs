@@ -856,18 +856,28 @@ mod tests {
 					epoch,
 				} = fixture(false);
 				let mut observer = capture.consume();
-				let bus = Bus::new(BusConfig::default()).unwrap();
-				let mut bus_run = Box::pin(bus.capture(capture.consume(), Strip::default()).unwrap().run());
+				let (bus, mut bus_driver) = Bus::new(BusConfig::default()).unwrap();
+				let strip = Strip::default();
+				let program = bus.mix();
+				program.route(&strip);
+				let mut program = program.reader();
+				let mut mix = |frames: usize| {
+					bus_driver.advance(frames);
+					match program.poll_read(&kio::Waiter::noop()) {
+						Poll::Ready(Some(block)) => block.data,
+						_ => panic!("the program mix is live"),
+					}
+				};
+				let mut bus_run = Box::pin(bus.capture(capture.consume(), strip).unwrap().run());
 				// Register the bus channel and park its reader before the first mix read.
 				assert!(
 					std::future::poll_fn(|cx| Poll::Ready(std::future::Future::poll(bus_run.as_mut(), cx)))
 						.await
 						.is_pending()
 				);
-				let mut mixed = vec![0.0; 1920];
 				let mut bus_pcm = Vec::new();
 				let mut expected = Vec::new();
-				bus.read(&mut mixed);
+				mix(960);
 				let capture_task = tokio::task::spawn_local(capture.run());
 				let encode_task = tokio::spawn(driver.run());
 				let mut track = subscribe(&broadcast).await;
@@ -897,15 +907,12 @@ mod tests {
 							.as_ref(),
 						&*observed.data
 					);
-					bus.read(&mut mixed);
-					bus_pcm.extend_from_slice(&mixed);
+					bus_pcm.extend_from_slice(&mix(960));
 					expected.extend_from_slice(&observed.data);
 				}
 				// The bus begins with 50 ms of silence to absorb jitter; drain that
 				// fixed latency and compare every input sample in order.
-				let mut tail = vec![0.0; 4800];
-				bus.read(&mut tail);
-				bus_pcm.extend_from_slice(&tail);
+				bus_pcm.extend_from_slice(&mix(2400));
 				assert_eq!(&bus_pcm[4800..], expected);
 				drop(bus_run);
 				let captured = epoch + Duration::from_millis(240);
@@ -940,7 +947,7 @@ mod tests {
 					..
 				} = fixture(false);
 				let mut observer = capture.consume();
-				let bus = Bus::new(BusConfig::default()).unwrap();
+				let (bus, _bus_driver) = Bus::new(BusConfig::default()).unwrap();
 				let bus_task = tokio::spawn(bus.capture(capture.consume(), Strip::default()).unwrap().run());
 				let capture_task = tokio::task::spawn_local(capture.run());
 				let encode_task = tokio::spawn(driver.run());

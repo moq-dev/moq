@@ -20,6 +20,7 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use hang::moq_net;
 
+use super::listed::{Listed, Watch};
 use super::pad::{CapsOutcome, Names, ProducerOptions, PushOutcome, caps_supported};
 use super::request_pad::{MoqSinkPad, Notifications, PadLifecycle};
 use super::session::{
@@ -70,6 +71,8 @@ struct State {
 	broadcast: moq_net::origin::Publication,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
+	/// Follows the published catalog, so a pad reports demand once its track is listed.
+	watch: Watch,
 	/// The configured track names this run ended, which it never publishes again.
 	names: Names,
 	/// How long a clean end keeps the finished broadcast up before its EOS.
@@ -577,6 +580,16 @@ impl MoqSink {
 			})?;
 		let completion = session.completion();
 		let wall = super::wall::Wall::new(&catalog);
+		let element = self.obj().downgrade();
+		let watch = Watch::start(&catalog, move |listed| {
+			if let Some(element) = element.upgrade() {
+				element.imp().expose_listed(listed);
+			}
+		})
+		.map_err(|err| {
+			gst::error!(CAT, obj = self.obj(), "failed to start session: {err:?}");
+			gst::StateChangeError
+		})?;
 		let updates = {
 			let mut control = self.control.lock().unwrap();
 			control.live = Some(State {
@@ -584,6 +597,7 @@ impl MoqSink {
 				broadcast,
 				catalog: Some(catalog),
 				wall,
+				watch,
 				names: Names::default(),
 				linger,
 				drained: false,
@@ -928,7 +942,13 @@ impl MoqSink {
 									let changes = caps.zip(catalog).and_then(|(caps, catalog)| {
 										observe_caps(state, catalog, sink_pad, &mut lifecycle, &caps).0
 									});
-									changes.or_else(|| lifecycle.restore_bandwidth(state.session.bandwidth(), sink_pad))
+									changes.or_else(|| {
+										lifecycle.restore_bandwidth(
+											state.session.bandwidth(),
+											sink_pad,
+											state.watch.listed(),
+										)
+									})
 								}
 							}
 						}
@@ -1112,6 +1132,31 @@ impl MoqSink {
 		self.post_current(message);
 	}
 
+	/// Report demand on every live pad whose track the catalog `listed` follows now lists.
+	///
+	/// Called from the watch after it records a published catalog. A pad that activates meanwhile
+	/// reads the same record under the control lock, so whichever runs second exposes it.
+	fn expose_listed(&self, listed: &std::sync::Arc<Listed>) {
+		let updates = {
+			let control = self.control.lock().unwrap();
+			let Some(state) = control
+				.live
+				.as_ref()
+				.filter(|state| state.is_open() && std::sync::Arc::ptr_eq(state.watch.listed(), listed))
+			else {
+				return;
+			};
+			self.pads_locked(&control)
+				.into_iter()
+				.filter_map(|pad| {
+					let changes = pad.lifecycle().expose_listed(state.session.bandwidth(), &pad, listed)?;
+					Some(PadUpdate { pad, changes })
+				})
+				.collect::<Vec<_>>()
+		};
+		self.notify_updates(updates);
+	}
+
 	fn notify_updates(&self, updates: Vec<PadUpdate>) {
 		for update in updates {
 			update.pad.notify_changes(update.changes);
@@ -1255,7 +1300,10 @@ fn observe_caps(
 	let outcome = lifecycle.media.observe_caps(&state.broadcast, catalog, options);
 	lifecycle.completion = Some(state.session.completion());
 	match outcome {
-		CapsOutcome::Active(track) => (Some(lifecycle.activate(track, state.session.bandwidth(), pad)), true),
+		CapsOutcome::Active(track) => {
+			let changes = lifecycle.activate(track, state.session.bandwidth(), pad, state.watch.listed());
+			(Some(changes), true)
+		}
 		CapsOutcome::Failed(reason) => (Some(lifecycle.fail(reason)), false),
 		CapsOutcome::Unchanged => (None, true),
 	}
@@ -1361,10 +1409,44 @@ mod tests {
 	}
 
 	fn video_frame(pad: &gst::Pad) {
+		frame(pad, super::super::pad::h264_keyframe_au());
+	}
+
+	fn frame(pad: &gst::Pad, data: Bytes) {
 		assert!(pad.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
-		let mut buffer = gst::Buffer::from_slice(super::super::pad::h264_keyframe_au());
+		let mut buffer = gst::Buffer::from_slice(data);
 		buffer.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
 		assert_eq!(pad.chain(buffer), Ok(gst::FlowSuccess::Ok));
+	}
+
+	fn demand(pad: &gst::Pad) -> Option<gst::Structure> {
+		pad.property("track-demand")
+	}
+
+	/// Wait for `track-demand` to satisfy `ready`, woken by its notification rather than a timer.
+	///
+	/// The catalog watch reports from the runtime, so a published catalog reaches the pad shortly after
+	/// the call that published it. The timeout only bounds a regression.
+	fn await_demand(pad: &gst::Pad, ready: impl Fn(&Option<gst::Structure>) -> bool) -> Option<gst::Structure> {
+		let (tx, rx) = std::sync::mpsc::channel();
+		let handler = pad.connect_notify(Some("track-demand"), move |_, _| {
+			let _ = tx.send(());
+		});
+		let state = loop {
+			let state = demand(pad);
+			if ready(&state) {
+				break state;
+			}
+			rx.recv_timeout(Duration::from_secs(10))
+				.expect("track-demand never reached the expected state");
+		};
+		pad.disconnect(handler);
+		state
+	}
+
+	/// Wait for the catalog listing `pad`'s track to expose its demand.
+	fn listed_demand(pad: &gst::Pad) -> gst::Structure {
+		await_demand(pad, Option::is_some).unwrap()
 	}
 
 	fn next_catalog(
@@ -1677,6 +1759,8 @@ mod tests {
 		let _second_reader = broadcast.track("second").unwrap().subscribe(None);
 		video_frame(&first);
 		video_frame(&second);
+		listed_demand(&first);
+		listed_demand(&second);
 		let grant = |pad: &gst::Pad| {
 			pad.property::<Option<gst::Structure>>("track-demand")
 				.expect("active demand")
@@ -1716,6 +1800,90 @@ mod tests {
 		);
 	}
 
+	const VP8_KEYFRAME: Bytes = Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]);
+
+	// The startup trap: an encoder that waits for `wanted` before its first frame would never publish
+	// the catalog that viewers need to want it. Demand stays null until that catalog is out, however
+	// the track is subscribed, and a sibling still owing its config holds it for both.
+	#[test]
+	fn demand_waits_for_the_published_catalog_to_list_the_track() {
+		let run = CatalogRun::new();
+		let video = run.pad("camera");
+		let text = run.pad("subtitles");
+		let mut catalog = run.start();
+		assert!(negotiate(&video, &h264_caps()));
+		assert!(negotiate(
+			&text,
+			&gst::Caps::builder("text/x-raw").field("format", "utf8").build()
+		));
+		let broadcast = run
+			.0
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.unwrap()
+			.broadcast
+			.consume();
+		let _reader = broadcast.track("camera").unwrap().subscribe(None);
+		assert!(
+			next_catalog(&mut catalog).is_pending(),
+			"the video config is still owed"
+		);
+		assert!(
+			demand(&video).is_none(),
+			"a direct subscriber does not expose unlisted media"
+		);
+		assert!(
+			demand(&text).is_none(),
+			"listed text still waits for the gated first catalog"
+		);
+
+		video_frame(&video);
+		let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+			panic!("the keyframe publishes the first catalog")
+		};
+		assert!(first.video.renditions.contains_key("camera"));
+		assert_eq!(listed_demand(&video).get::<bool>("wanted"), Ok(true));
+		assert_eq!(listed_demand(&text).get::<bool>("wanted"), Ok(false));
+	}
+
+	// Opaque data has no catalog entry, by design, so it keeps the demand it reports at negotiation.
+	#[test]
+	fn opaque_demand_is_reported_at_negotiation() {
+		let run = CatalogRun::new();
+		let levels = run.pad("levels");
+		let _pending = run.pad("camera");
+		let mut catalog = run.start();
+		assert!(negotiate(
+			&levels,
+			&gst::Caps::new_empty_simple("application/octet-stream")
+		));
+		assert!(next_catalog(&mut catalog).is_pending());
+		assert_eq!(demand(&levels).unwrap().get::<bool>("wanted"), Ok(false));
+		let broadcast = run
+			.0
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.unwrap()
+			.broadcast
+			.consume();
+		let _reader = broadcast.track("levels").unwrap().subscribe(None);
+		let wanted = await_demand(&levels, |state| {
+			state
+				.as_ref()
+				.is_some_and(|state| state.get::<bool>("wanted") == Ok(true))
+		});
+		assert!(wanted.is_some());
+		assert!(next_catalog(&mut catalog).is_pending(), "the catalog never lists it");
+	}
+
 	#[test]
 	fn codec_renegotiation_rebinds_bandwidth_to_the_new_track() {
 		let run = CatalogRun::new();
@@ -1738,7 +1906,10 @@ mod tests {
 			.session
 			.replace_bandwidth(moq_net::bandwidth::Allocator::new(estimate.consume()));
 
-		assert!(negotiate(&video, &h264_caps()));
+		// VP8 first: its rendition can be listed at CAPS, while H.264 byte-stream owes its SPS, so the
+		// replacement below stays unlisted until its keyframe.
+		let vp8 = gst::Caps::builder("video/x-vp8").build();
+		assert!(negotiate(&video, &vp8));
 		let broadcast = run
 			.0
 			.imp()
@@ -1751,20 +1922,17 @@ mod tests {
 			.broadcast
 			.consume();
 		let _old_reader = broadcast.track("camera").unwrap().subscribe(None);
-		assert_eq!(
-			video
-				.property::<Option<gst::Structure>>("track-demand")
-				.unwrap()
-				.get::<bool>("wanted"),
-			Ok(true)
-		);
+		frame(&video, VP8_KEYFRAME);
+		assert_eq!(listed_demand(&video).get::<bool>("wanted"), Ok(true));
 
-		let vp8 = gst::Caps::builder("video/x-vp8").build();
-		assert!(video.send_event(gst::event::Caps::new(&vp8)));
+		assert!(video.send_event(gst::event::Caps::new(&h264_caps())));
 		let _new_reader = broadcast.track("camera/1").unwrap().subscribe(None);
-		let rebound = video
-			.property::<Option<gst::Structure>>("track-demand")
-			.expect("renegotiation keeps demand reporting active");
+		assert!(
+			demand(&video).is_none(),
+			"a replacement reports nothing until a catalog lists camera/1, even to a direct subscriber"
+		);
+		video_frame(&video);
+		let rebound = listed_demand(&video);
 		assert_eq!(rebound.get::<bool>("wanted"), Ok(true));
 		assert_eq!(rebound.get::<u64>("grant-bps"), Ok(4_000_000));
 	}
@@ -1806,8 +1974,10 @@ mod tests {
 			.consume();
 		let _first_reader = broadcast.track("first").unwrap().subscribe(None);
 		let _second_reader = broadcast.track("second").unwrap().subscribe(None);
-		assert!(first.property::<Option<gst::Structure>>("track-demand").is_some());
-		assert!(second.property::<Option<gst::Structure>>("track-demand").is_some());
+		video_frame(&first);
+		video_frame(&second);
+		listed_demand(&first);
+		listed_demand(&second);
 
 		assert!(completion.fail());
 		run.0

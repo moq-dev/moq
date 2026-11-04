@@ -1159,8 +1159,9 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 /// CPU pixel format and size (see [`moq_video_decoder_output`]).
 ///
 /// The catalog `index` selects which video rendition to subscribe to, matching
-/// the existing `moq_consume_video` selection model. Only H.264 is
-/// supported; a non-H.264 rendition fails on the terminal callback.
+/// the existing `moq_consume_video` selection model. A codec or description the native
+/// decoders cannot open reports [`MOQ_ERROR_UNSUPPORTED_CONFIG`](crate::MOQ_ERROR_UNSUPPORTED_CONFIG)
+/// on the terminal callback, before any decoded reads.
 ///
 /// An unknown `output->format` or an invalid `output->width`/`height` fails
 /// here, before subscribing. Each frame is produced in the requested layout by

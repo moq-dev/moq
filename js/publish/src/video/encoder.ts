@@ -64,7 +64,10 @@ export interface Config {
 
 	/**
 	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
-	 * group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
+	 * group's deltas outweigh the track's refresh ratio. The broadcast declares the longest
+	 * interval as its catalog's `media.join.interval` when media is first listed, which then bounds
+	 * every GOP: a live change past it, including to infinite, is capped there until a new network
+	 * broadcast declares again. (default: 2000 milliseconds)
 	 */
 	keyframeInterval?: Milli;
 
@@ -369,7 +372,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.order, effect);
+			this.#encode(track, broadcast.order, broadcast.join, effect);
 		});
 
 		// Reserve against the connection while a subscriber is attached. Wait for a ceiling so we
@@ -405,7 +408,7 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, order: Order, join: Getter<Catalog.U53 | undefined>, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
@@ -534,7 +537,11 @@ export class Encoder {
 							}
 							lastEncoded = frame.timestamp as Micro;
 
-							const interval = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							// The catalog's declared join interval is the longest GOP, fixed for the network
+							// broadcast, so a live raise past it stops there.
+							const requested = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							const declared = join.peek();
+							const interval = declared === undefined ? requested : Milli(Math.min(requested, declared));
 
 							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
 							// caller asked for one, or a join wants a group past the largest. No spacing: the

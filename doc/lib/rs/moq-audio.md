@@ -20,11 +20,19 @@ capture or playback is enabled.
 | `decode` | Opus (up to 7.1), PCM, and AAC-LC (mono or stereo) back to PCM, resampled to the rate you want |
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's) for caller-supplied PCM or the built-in devices |
+| `bus` | Routes sources into several mixes, each with its own meter and mix-minus, advanced on the caller's clock |
 
 Open one `capture::Producer`, give a consumer to each bus channel or encoder,
 and run the producer alongside them. They share samples and capture timestamps;
 a slow reader loses only its own expired audio. Dropping the producer releases
 the device, and a device failure ends every reader with the same error.
+
+The bus owns no clock: whoever owns the audio clock, such as a program
+clock on `kio::clock` or a device callback, advances its one driver by the
+frames that clock moved, so tests step it on virtual time. Each mix sums only
+the sources routed into it, and its readers get blocks stamped with their
+position on that clock, so a reader that falls behind skips its own audio
+without stalling the mix.
 
 Without a subscriber the encoder keeps raw PCM
 up to the track's `max_age`, then encodes that history before continuing live when

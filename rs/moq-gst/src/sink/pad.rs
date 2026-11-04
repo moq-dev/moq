@@ -12,6 +12,7 @@ use bytes::Bytes;
 use hang::moq_net;
 use moq_mux::import;
 
+use super::listed::Listed;
 use super::session::CAT;
 use super::timeline::{SegmentInfo, classify_segment, frame_micros};
 
@@ -387,9 +388,20 @@ impl Pad {
 		self.failed
 	}
 
-	/// A watch-only handle to the active track's subscriber demand.
-	pub(super) fn demand(&self) -> Option<moq_net::track::Demand> {
-		self.track.as_ref().map(Sink::demand)
+	/// A watch-only handle to the active track's subscriber demand, once viewers can find the track.
+	///
+	/// A media or text rendition is found through the catalog, so its demand waits for a published
+	/// catalog that lists it: before then nobody can want it, and an encoder that paused on that
+	/// would keep it out of the catalog for good. Opaque data has no catalog entry by design; its
+	/// subscribers name the track directly, so its demand is live from negotiation.
+	pub(super) fn demand(&self, listed: &Listed) -> Option<moq_net::track::Demand> {
+		let track = self.track.as_ref()?;
+		match track {
+			Sink::Opaque(_) => {}
+			Sink::Media(_) | Sink::Text(_) if listed.contains(&track.name()) => {}
+			Sink::Media(_) | Sink::Text(_) => return None,
+		}
+		Some(track.demand())
 	}
 
 	/// (Re)build the producer when the pad's caps change, under `track` when the pad was given a name.

@@ -1280,6 +1280,41 @@ test("the default keyframe interval is the declared join interval", async () => 
 	}
 });
 
+// The declared join interval is the longest GOP when media is first listed: a 3000ms interval
+// declares 3000ms, and a live change at 2500ms, after a keyframe at 0, is held to it.
+async function liveInterval(changed: Milli): Promise<{ keys: number[]; interval?: number }> {
+	using recording = await installRecording();
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("interval.hang"),
+	});
+	const config = new Signal<Config | undefined>({ keyframeInterval: Milli(3000) });
+	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never, config });
+	try {
+		await settle();
+		for (let ms = 0; ms < 16000; ms += 100) {
+			if (ms === 2500) config.set({ keyframeInterval: changed });
+			await recording.send(ms);
+		}
+		return { keys: [...recording.keys], interval: (await readCatalog(broadcast))?.media?.join?.interval };
+	} finally {
+		encoder.close();
+		broadcast.close();
+	}
+}
+
+test("a live keyframe interval raise is capped at the declared join interval", async () => {
+	const capped = { keys: [0, 3000, 6000, 9000, 12000, 15000], interval: 3000 };
+	expect(await liveInterval(Milli(6000))).toEqual(capped);
+	// Infinite is not a valid Milli, but a config is not checked.
+	expect(await liveInterval(Number.POSITIVE_INFINITY as Milli)).toEqual(capped);
+	// Within the declaration, a cut applies as asked.
+	const cut = await liveInterval(Milli(1000));
+	expect(cut.interval).toBe(3000);
+	expect(cut.keys.slice(0, 4)).toEqual([0, 2500, 3500, 4500]);
+});
+
 test("an unwatched rendition reserves nothing and encodes at its configured bitrate", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("unwatched.hang") });

@@ -1059,6 +1059,17 @@ try {
 		predicate: (state) => state.audioContext === "running",
 	});
 
+	// @moq/publish declares its longest GOP, the fixture's keyframe interval over its 20 ms audio
+	// groups, as the join interval an HLS export numbers segments on.
+	const interval = await player
+		.locator(SELECTORS.watch)
+		.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.media?.join?.interval);
+	check(
+		interval === KEYFRAME_INTERVAL_MS,
+		"declared join interval",
+		() => `the catalog declares media.join.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
+	);
+
 	if (values.focused) {
 		console.error("  focused case run: cold-start grading and unrelated cases are not selected");
 		await waitForState(player, playerErrors, {
