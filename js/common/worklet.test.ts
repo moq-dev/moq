@@ -12,10 +12,9 @@ import { worklet } from "./vite-plugin-worklet";
 // consumers drop that asset (a 404), and an esbuild IIFE throws at load. The blob stays the default,
 // loaded lazily, with the hostable file emitted beside it.
 //
-// A bundler child process would outlive `vite build` and be reaped by init, so its CPU escapes the
-// build's accounting and it lingers after the build.
-// Check the plugin's modules with its real compiler, without Vite's build setup. The full library
-// build and its child-process check run in the nightly test/worklet/matrix.ts on the real worklets.
+// No bundler child may outlive the plugin's compile and escape its CPU accounting. Check the load
+// hooks with the real in-process compiler here; full Vite library output and build-lifecycle checks
+// run nightly in test/worklet/matrix.ts on the real worklets.
 test("worklet modules load a lazy blob or a hosted script, leaving no child process", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "worklet-"));
 	try {

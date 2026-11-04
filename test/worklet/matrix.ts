@@ -44,7 +44,7 @@ try {
 		root,
 		logLevel: "silent",
 		plugins: [worklet()],
-		build: { outDir: lib, minify: false, lib: { entry: join(root, "lib.js"), formats: ["es"], fileName: "index" } },
+		build: { outDir: lib, lib: { entry: join(root, "lib.js"), formats: ["es"], fileName: "index" } },
 	});
 	// Check the completed Vite build before consumer bundlers or Chromium can spawn children.
 	const children = spawnSync("pgrep", ["-l", "-P", String(process.pid)], { encoding: "utf8" });
