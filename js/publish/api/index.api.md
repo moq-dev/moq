@@ -123,6 +123,7 @@ export class Broadcast {
 	readonly catalog: CatalogProducer;
 	close(): void;
 	readonly in: Signals.Readonlys<BroadcastInput>;
+	readonly join: Signals.Signal<Clock.Milli | undefined>;
 	readonly net: Signals.Getter<Net.Broadcast.Producer | undefined>;
 	text(name: string): Rendition<Hang.Catalog.TextConfig>;
 	video(name: string): Rendition<Hang.Catalog.Video.VideoConfig>;

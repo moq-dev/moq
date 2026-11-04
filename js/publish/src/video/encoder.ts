@@ -408,7 +408,7 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, order: Order, join: Getter<Catalog.U53 | undefined>, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, order: Order, join: Getter<Milli | undefined>, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
