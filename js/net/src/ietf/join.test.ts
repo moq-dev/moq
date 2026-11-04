@@ -1,7 +1,8 @@
 import { expect, jest, onTestFinished, test } from "bun:test";
-import { Elapsed, Instant, Milli, Nano, now, timeout } from "@moq/clock";
+import { Elapsed, Instant, Manual, Milli, Nano, now, timeout } from "@moq/clock";
 import * as Connection from "../connection/index.ts";
 import { StreamCode } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -61,7 +62,10 @@ async function subscribed(version: IetfVersion = VERSION) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
-	const consumer = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const consumer = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }] });
 	onTestFinished(() => {
 		consumer.close();
 		session.close();
@@ -153,7 +157,7 @@ function liveStream(
 	const header = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: group,
-		subGroupId: 0,
+		subGroupId: 0n,
 		publisherPriority: 0,
 		flags: flags(start === 0),
 	});
@@ -617,3 +621,37 @@ for (const version of VERSIONS) {
 		expect(sent.mock.calls).toHaveLength(version === VERSION ? 2 : 0);
 	});
 }
+
+// A completed join must not remain a gate on the group's later cache misses.
+test("an evicted joined group is fetched again as standalone history", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	onTestFinished(() => installed.close());
+	const { subscriber, consumer, fetching, fetch, client } = await join();
+	if (!fetch) throw new Error("no joining FETCH");
+	await accept(fetching);
+	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
+	await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
+	const first = await consumer.recvGroup();
+	expect(await frames(first)).toEqual(["h0", "h1", "t2"]);
+	first?.close();
+	await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["new"]));
+	// Twice the model's 30-second idle cache window, with deterministic time.
+	await clock.advance(Nano.fromMilli(Milli(60_000)));
+	expect(hooks.cachedGroup(consumer, GROUP)).toBeUndefined();
+	const broadcast = subscriber.consume(Path.from("room"));
+	onTestFinished(() => broadcast.close());
+	const pending = broadcast.track("video").fetchGroup(GROUP);
+	const stream = await nextStream(client);
+	if (!stream) throw new Error("no standalone FETCH");
+	expect(await stream.reader.u53()).toBe(Fetch.id);
+	const standalone = await Fetch.decode(stream.reader, VERSION);
+	expect(standalone.type.kind).toBe("standalone");
+	await stream.writer.u53(FetchOk.id);
+	await new FetchOk({ endOfTrack: false, endLocation: { group: GROUP, object: 3n } }).encode(stream.writer, VERSION);
+	await subscriber.handleFetch(await head(standalone.requestId, ["h0", "h1", "t2"]));
+	const group = await pending;
+	expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
+	group.close();
+	consumer.close();
+});

@@ -22,9 +22,9 @@ Decided 2026-10-25 (maintainer), from the spike:
   pause markers, which they already tolerate being absent.
 
 Decided 2026-11-02 (maintainer): removing the HLS records, the per-rendition
-`hls` field, and A/V segment alignment moved to m0 as
-[HLS export on a declared grid](/quest/m0/hls-media-grid.md), which also adds
-`media.join.interval`, moves `clock` to `media.clock`, and settles the
+`hls` field, and A/V segment alignment moved to m0 as the HLS grid,
+landed in [moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652), which also added
+`media.join.interval`, moved `clock` to `media.clock`, and settled the
 segmentation rules decided here on 2026-10-27/28. It places groups by their
 first frame's pts; this quest swaps that for the group start, without
 changing the segment numbers.
@@ -42,6 +42,5 @@ discontinuity marker groups.
 
 ## Required
 
-- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - supplies the grid and removes the records; this quest only swaps its first-frame pts placement for group starts
 - [Rust groups by start](/quest/m1/time-addressing/model.md) - the Rust API these consume
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - the JS API these consume

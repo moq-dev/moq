@@ -2,6 +2,7 @@ package moq_test
 
 import (
 	"context"
+	"errors"
 	"math"
 	"runtime"
 	"testing"
@@ -85,4 +86,69 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 		t.Fatal("release ended the track subscription")
 	}
 	runtime.KeepAlive(retired)
+}
+
+// Viewers are wired through the session: watch, update, override the target,
+// and release a viewer without disturbing the registry. The moq-ffi tests
+// cover how the estimate divides.
+func TestViewersWatchUpdateAndClose(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	relay := startRelay(t, ctx, "127.0.0.1:0")
+	defer relay.server.Close()
+	client, err := moq.Dial(ctx, "https://"+relay.addr, moq.ClientConfig{
+		TLS:  moq.ClientTLS{Insecure: true},
+		Once: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	waitConnects(t, ctx, client.Session(), 1)
+
+	viewers := client.Session().Viewers()
+	first, err := viewers.Watch(4_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := viewers.Watch(1_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Whether QUIC has a receive estimate yet varies, but a slice never exceeds its ceiling.
+	if rate := second.Rate(); rate != nil && *rate > 1_000_000 {
+		t.Fatalf("rate = %d, above its 1000000 ceiling", *rate)
+	}
+	if err := second.Update(500_000); err != nil {
+		t.Fatal(err)
+	}
+	if rate := second.Rate(); rate != nil && *rate > 500_000 {
+		t.Fatalf("rate = %d, above its 500000 ceiling", *rate)
+	}
+	zero := uint64(0)
+	if err := viewers.SetTarget(&zero); err != nil {
+		t.Fatal(err)
+	}
+	if err := viewers.SetTarget(nil); err != nil {
+		t.Fatal(err)
+	}
+	// Past what a PROBE target carries: refused.
+	if _, err := viewers.Watch(1 << 53); !errors.Is(err, moq.ErrOutOfRange) {
+		t.Fatalf("Watch(2^53) = %v, want ErrOutOfRange", err)
+	}
+
+	// Closing one viewer leaves the others and the registry usable.
+	second.Close()
+	if err := first.Update(2_000_000); err != nil {
+		t.Fatal(err)
+	}
+	if rate := first.Rate(); rate != nil && *rate > 2_000_000 {
+		t.Fatalf("rate = %d, above its 2000000 ceiling", *rate)
+	}
+	first.Close()
+	last, err := client.Session().Viewers().Watch(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last.Close()
 }

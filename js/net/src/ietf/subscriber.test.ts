@@ -10,7 +10,7 @@ import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type * as track from "../track.ts";
+import * as track from "../track.ts";
 import * as demandUtil from "../util/demand.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
@@ -24,6 +24,7 @@ import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
+import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_18;
@@ -768,7 +769,10 @@ async function subscribeTrack({
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe(subscription);
+	const consumer = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe(subscription ?? { ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }] });
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
@@ -780,7 +784,7 @@ async function subscribeTrack({
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({ trackAlias: ALIAS, properties }).encode(peer.writer, version);
 
-	return { subscriber, track };
+	return { subscriber, track: consumer };
 }
 
 // A refusal already ended the request: a reset back would tell the publisher we failed.
@@ -823,7 +827,7 @@ function stampedGroup(groupId: bigint): GroupMessage {
 	return new GroupMessage({
 		trackAlias: ALIAS,
 		groupId,
-		subGroupId: 0,
+		subGroupId: 0n,
 		publisherPriority: 0,
 		flags: { ...groupFlags(true), hasExtensions: true },
 	});
@@ -894,7 +898,7 @@ test("older peer without priority property inherits the default publisher priori
 	const group = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 3n,
-		subGroupId: 0,
+		subGroupId: 0n,
 		publisherPriority: 0,
 		flags: { ...groupFlags(true), hasPriority: false },
 	});
@@ -903,19 +907,18 @@ test("older peer without priority property inherits the default publisher priori
 	track.close();
 });
 
-test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async () => {
+test("an info-only lookup waits for TRACK_STATUS_OK instead of abandoning", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const info = subscriber.consume(Path.from("room")).track("video").info();
 	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("missing SUBSCRIBE stream");
-	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	await Subscribe.decode(peer.reader, VERSION);
+	if (!peer) throw new Error("missing TRACK_STATUS stream");
+	expect(await peer.reader.u53()).toBe(TrackStatusRequest.id);
+	await TrackStatusRequest.decode(peer.reader, VERSION);
 
-	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({
-		trackAlias: ALIAS,
+	await peer.writer.u53(TrackStatusOk.id);
+	await new TrackStatusOk({
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
 	expect((await info).priority).toBe(127 - 37);
@@ -1093,7 +1096,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	await Subscribe.decode(peer.reader, VERSION);
 
 	const flags = { ...groupFlags(true), hasPriority: false };
-	const group = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags });
+	const group = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0n, publisherPriority: 0, flags });
 	const arriving = subscriber.handleGroup(group, new Reader(undefined, encodeObjects([0]), VERSION));
 	const pending = await Promise.race([arriving.then(() => false), Promise.resolve(true)]);
 	expect(pending).toBe(true);
@@ -1111,7 +1114,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	const explicit = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 4n,
-		subGroupId: 0,
+		subGroupId: 0n,
 		publisherPriority: 9,
 		flags: groupFlags(true),
 	});
@@ -1135,13 +1138,13 @@ test("a group served from partway through is dropped", async () => {
 
 	// FIRST_OBJECT clear, and the first object's delta is its absolute id.
 	const flags = groupFlags(false);
-	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags });
+	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0n, publisherPriority: 0, flags });
 	await subscriber.handleGroup(header, new Reader(undefined, encodeObjects([5, 0, 0]), VERSION));
 
 	// The next group is served whole, and it is the one the track delivers.
 	const whole = groupFlags(true);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 4n, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4n, subGroupId: 0n, publisherPriority: 0, flags: whole }),
 		new Reader(undefined, encodeObjects([0, 0]), VERSION),
 	);
 
@@ -1161,7 +1164,7 @@ test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
 
 	const flags = groupFlags(false);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0n, publisherPriority: 0, flags }),
 		new Reader(undefined, encodeObjects([0, 0]), VERSION),
 	);
 
@@ -1186,7 +1189,7 @@ test("an END_OF_GROUP status on a marked stream finishes the group", async () =>
 	// Objects 0..4, then object 5 as a zero-length END_OF_GROUP (0x3) status.
 	const objects = new Uint8Array([...encodeObjects([0, 0, 0, 0, 0]), 0, 0, 0x3]);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0n, publisherPriority: 0, flags }),
 		new Reader(undefined, objects, VERSION),
 	);
 
@@ -1211,13 +1214,13 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
 
 	const flags = groupFlags(false);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0n, publisherPriority: 0, flags }),
 		new Reader(undefined, encodeObjects([3]), VERSION),
 	);
 
 	const whole = groupFlags(true);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 4n, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4n, subGroupId: 0n, publisherPriority: 0, flags: whole }),
 		new Reader(undefined, encodeObjects([0]), VERSION),
 	);
 
@@ -1243,7 +1246,7 @@ test.each([
 		new GroupMessage({
 			trackAlias: ALIAS,
 			groupId: 3n,
-			subGroupId: 0,
+			subGroupId: 0n,
 			publisherPriority: 0,
 			flags: groupFlags(firstObject),
 		}),
@@ -1253,7 +1256,7 @@ test.each([
 		new GroupMessage({
 			trackAlias: ALIAS,
 			groupId: 4n,
-			subGroupId: 0,
+			subGroupId: 0n,
 			publisherPriority: 0,
 			flags: groupFlags(true),
 		}),
@@ -1275,7 +1278,7 @@ test("a group that claims its first object must start at zero", async () => {
 	const { subscriber, track } = await subscribeTrack();
 
 	const flags = groupFlags(true);
-	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags });
+	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0n, publisherPriority: 0, flags });
 	await subscriber.handleGroup(header, new Reader(undefined, encodeObjects([5, 0, 0]), VERSION));
 
 	const group = await track.ordered().nextGroup();
@@ -1311,7 +1314,7 @@ for (const [name, firstObject, bytes] of [
 		const header = new GroupMessage({
 			trackAlias: ALIAS,
 			groupId: 3n,
-			subGroupId: 0,
+			subGroupId: 0n,
 			publisherPriority: 0,
 			flags: groupFlags(firstObject),
 		});
@@ -1337,7 +1340,7 @@ test("every object in a chunk reaches the reader before it wakes", async () => {
 	const header = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 3n,
-		subGroupId: 0,
+		subGroupId: 0n,
 		publisherPriority: 0,
 		flags: groupFlags(true),
 	});
@@ -1403,7 +1406,7 @@ test("object extension limit accepts 64 KiB and stops one byte over before readi
 			const header = new GroupMessage({
 				trackAlias: ALIAS,
 				groupId: 3n,
-				subGroupId: 0,
+				subGroupId: 0n,
 				publisherPriority: 0,
 				flags: { ...groupFlags(true), hasExtensions: true },
 			});
@@ -1459,12 +1462,12 @@ test("an object datagram is a datagram group", async () => {
 		);
 
 	// Past object 0, an unbound alias, a status other than Normal, and no Timestamp on a timed track.
-	await send({ objectId: 1 });
+	await send({ objectId: 1n });
 	await send({ trackAlias: ALIAS + 1n });
 	await send({ endOfGroup: false, body: { status: 3 } });
-	await send({ groupId: 5n, objectId: 0 });
+	await send({ groupId: 5n, objectId: 0n });
 	const properties = encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
-	await send({ groupId: 9n, objectId: 0, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
+	await send({ groupId: 9n, objectId: 0n, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
 
 	const datagram = await track.recvDatagram();
 	expect(datagram?.sequence).toBe(9n);
@@ -1531,7 +1534,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const message = new GroupMessage({
 			trackAlias: ALIAS,
 			groupId: 0n,
-			subGroupId: 0,
+			subGroupId: 0n,
 			publisherPriority: 0,
 			flags: { ...groupFlags(true), hasEnd: false },
 		});

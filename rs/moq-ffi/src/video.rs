@@ -818,7 +818,7 @@ impl MoqVideoProducer {
 			};
 			Ok(moq_video::encode::Producer::with_track(
 				track,
-				state.catalog.reserve().with_hls_hint(gop),
+				state.catalog.reserve().with_interval(gop),
 				rendition,
 			)?)
 		})?;

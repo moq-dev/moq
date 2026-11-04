@@ -685,7 +685,10 @@ impl<T> Polled<T> {
 		let _call = Call(&self.calls);
 		// The waiter this call polls the state with, on the bridge's waker.
 		let mut park = kio::Park::default();
-		host(kio::wait(|waiter| self.poll(waiter, &mut park, &mut poll))).await
+		let result = host(kio::wait(|waiter| self.poll(waiter, &mut park, &mut poll))).await;
+		// A driver can fail after the poll's check, then close the state this read sees.
+		self.check()?;
+		result
 	}
 
 	fn poll<R>(
@@ -723,6 +726,11 @@ impl<T> Polled<T> {
 	/// Read the state synchronously, or `None` once it is gone.
 	pub fn peek<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
 		self.state.lock().as_ref().map(f)
+	}
+
+	/// Modify the state synchronously, between polls, or `None` once it is gone.
+	pub fn peek_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+		self.state.lock().as_mut().map(f)
 	}
 
 	/// Whether [Self::cancel] or [Self::take] has run.
@@ -1412,6 +1420,33 @@ mod tests {
 	/// Poll `future` once with a no-op waker.
 	fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
 		future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+	}
+
+	#[tokio::test]
+	async fn polled_failure_during_a_read_overrides_the_origins_end() {
+		for panicked in [false, true] {
+			let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+			let completed = kio::Producer::new(None);
+			let announced = Polled::new(origin.consume().announced()).supervised(Background {
+				result: Some(completed.consume()),
+			});
+			let mut driver = Some(driver);
+			let result = announced
+				.wait(|announced, waiter| {
+					// The driver completes after supervision was checked, but before the
+					// read sees its teardown. This interleaving must not hide a failure.
+					*completed.write().ok().unwrap() =
+						Some(if panicked { Err(moq_tokio::Error::Panic) } else { Ok(()) });
+					drop(driver.take());
+					Poll::Ready(Ok(ready!(announced.poll_next(waiter))))
+				})
+				.await;
+			if panicked {
+				assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+			} else {
+				assert!(matches!(result, Ok(None)), "{result:?}");
+			}
+		}
 	}
 
 	#[tokio::test]

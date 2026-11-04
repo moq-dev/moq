@@ -29,6 +29,8 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Mesh libraries](/quest/m2/mesh/README.md) - an `Endpoint` reaches any enrolled node by endpoint ID over relays or a sparse direct overlay, with address hints and a `.status` track; the mesh binary and UI live in Kixel
+- [`@moq/net` broadcasts expose their requests](/quest/m2/net-broadcast-requests.md) - a JS broadcast serves tracks it never created, on demand, like Rust
+- [`@moq/crypto` loads a stored signing key](/quest/m2/crypto-key-load.md) - one device key proves mesh identity and signs broadcasts
 - [Announce credit](/quest/m2/announce-credit.md) - a subscriber bounds an Announce Stream's routes with credit at the wire, so a path flood never closes a session
 - [JS announced coalescing](/quest/m2/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m2/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
@@ -85,6 +87,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Route wakes](/quest/m2/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
+- [A route stream's interest is a set of prefixes](/quest/m2/route-interest-prefixes.md) - one Announce Stream covers several subtrees, with floors and certification proved over the set
 - [Fewer allocations in announce fan-out](/quest/m2/announce-fanout-allocs.md) - a deep path costs no more allocations per subscriber than a shallow one
 - [moq-room scales to large rooms](/quest/m2/room-bench.md) - a benchmark measures `Room` with large participant counts, and polling narrows only if it shows a slope
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions
@@ -99,6 +102,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [PulseAudio capture periods](/quest/m2/pulseaudio-capture-period.md) - capture on cpal's PulseAudio host arrives in short periods, not the server's 2 s default fragment, proven on the null sink's monitor
 - [Bindings size profile](/quest/m2/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [Value merge-patch diff](/quest/m2/json-value-diff.md) - benchmarks decide between moq-json's generic serializer diff, a ported `Value` diff, and compression alone
+- [Measure what a catalog republish costs per rendition edit](/quest/m2/catalog-republish-cost.md) - bench whole-catalog re-serialization across track counts, then decide deltas or a bound
+- [A JSON snapshot consumer resyncs after a bad frame](/quest/m2/json-snapshot-resync.md) - a decode failure drops the group with a typed error, so `@moq/room` and moq-boy resume at the next snapshot
 - [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
@@ -224,16 +229,21 @@ lite-07; bitrate enforcement is not part of this release.
 - [moq-hls exposes each rendition's bound source](/quest/m2/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
+- [moq-bench reports sub-millisecond latency](/quest/m2/bench-latency-resolution.md) - steady-window latency resolves finer than 1 ms
+- [Benchmark series stay meaningful](/quest/m2/bench-hygiene.md) - a warm `burst` variant, stale series pruned, and slow-group `bytes` kept out of series names
 - [The memory bench finishes at 1 MiB frames](/quest/m2/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
 - [Audio's Latest start reaches back](/quest/m2/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
 - [moq-lite tails count drops](/quest/m2/lite-tail-drop-count.md) - SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
 - [Re-run the SPS fuzzer on h264-reader](/quest/m2/sps-fuzz-h264-reader.md) - the H.264 SPS overflow is rechecked on the new parser
+- [Drop the H.265 SPS pre-walk once scuffle is fixed](/quest/m2/scuffle-sps-bump.md) - waiting on ScuffleCloud/scuffle#653 and #654 releases, then bump and drop the walk
 - [Audio track changes are gapless](/quest/m2/gapless-audio-switch.md) - no silence beyond a frame on audio format or rendition changes, enforced by media QA
 - [PCM encodes in one pass](/quest/m2/pcm-bulk-encode.md) - the PCM encoder converts a frame in bulk instead of one sample at a time
 - [We own our WebRTC stack](/quest/m2/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [PUBLISH_DONE says why](/quest/m2/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
+- [A revoked announce resets instead of FINning](/quest/m2/announce-revoke-reset.md) - a PUBLISH_NAMESPACE revoked after its OK resets with INTERNAL_ERROR, per draft-22 §6.4.2.3
 - [moq repair refuses a live recording](/quest/m2/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair mp4` off a file still being written
 - [The error-queue reader decodes truncated control data](/quest/m2/errqueue-truncation.md) - `MSG_ERRQUEUE` keeps what fit on `MSG_CTRUNC`, like the receive paths
+- [The QUIC driver tells an MTU probe from an oversized send](/quest/m2/quic-emsgsize-classify.md) - a non-probe `EMSGSIZE` is logged and counted instead of dropped silently
 - [moq-quic's internal dev-dependencies are path-only](/quest/m2/quic-dev-dep-path.md) - moq-congestion is a path dev-dependency
 - [moq-mux's AAC config reports SBR](/quest/m2/aac-sbr-config.md) - moq-audio reads backward-compatible SBR from the config
 - [fMP4 decode times from the declared reorder depth](/quest/m2/fmp4-declared-clock.md) - `DeclaredClock` replaces the sub-GOP cadence cap, as in TS, FLV, and MKV
@@ -261,6 +271,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Open-GOP MPEG-2 export trims leading B-pictures in zero-stuffed CBR streams](/quest/m2/pes-hold-open-gop.md) - A TS export starting or resuming inside an open GOP of MPEG-2 video drops the orphaned leading B-pictures even when their PES ends on zero stuffing, as CBR encoders emit, without ever trimming part of a reference picture whose start code straddles two PES packets
 - [The lite publisher tells transport faults from cancels](/quest/m2/publish-cancel-classify.md) - `rs/moq-net`'s lite publisher no longer counts every `Error::Transport` as a clean cancel
 - [moq-publish hides previews that show nothing](/quest/m2/publish-empty-previews.md) - `<moq-publish>` hides a preview that renders nothing
+- [A loading video preview takes no space](/quest/m2/publish-video-loading.md) - a `<video>` preview stays hidden until it reports its media size, so the empty publish player never keeps the 300x150 placeholder ratio
 - [moq-quic's sim pair fails a test that sends an oversized packet](/quest/m2/quic-sim-mtu.md) - A moq-quic test whose endpoint sends a datagram larger than the simulated path MTU fails, instead of the `Pair` silently dropping it
 - [A stalled reader within budget gets no Old resets through a relay](/quest/m2/relay-capped-credit-test.md) - A test proves that a subscriber which stalls before its first read, behind a relay over a transport with capped stream credit, receives no `Old` stream resets for groups still within its max-delay budget, and reads them in order once it resumes
 - [In-memory transports refuse a request without stream credit](/quest/m2/sim-credit-open.md) - moq-net's in-memory test transports model the peer's bidirectional stream credit, and `poll_open_request` returns `Ok(None)`
@@ -268,8 +279,10 @@ lite-07; bitrate enforcement is not part of this release.
 - [The test inventory follows every branch selection](/quest/m2/test-inventory-followups.md) - `sh/gh/test-inventory.py` judges every check by the dispatcher branch its caller actually selects, including the cargo-fuzz caller check, the recipe-runs-tests check
 - [tls:// sessions report their negotiated ALPN](/quest/m2/tls-link-alpn.md) - A session accepted on a `tls://` listener reports the negotiated moq ALPN in `Link::alpn`, as raw QUIC, WebTransport, and WebSocket sessions already do, so admission and logs see the protocol on every transport
 - [PUBLISH token renewal is consistent across pause and forward, and the multi-token cost is profiled](/quest/m2/token-auth-followups.md) - on a moq-transport session, a REQUEST_UPDATE carrying an AUTHORIZATION TOKEN on a PUBLISH gets the same answer whether the PUBLISH is paused or forwarding
+- [HTTP auth servers see which request named a token](/quest/m2/auth-http-request-kind.md) - the HTTP auth contract forwards `auth::Request`'s `kind()` and `path()`
 - [moq-uring's handle lifecycle tests cover the newly spawned queue and a woken close watcher](/quest/m2/uring-lifecycle-tests.md) - two regressions cover the shutdown paths moq-dev/moq#7309 added
 - [Watch tests wait for the change they expect](/quest/m2/watch-test-waits.md) - `js/watch` tests wait for the signal or state they assert on instead of a fixed number of event-loop yields, so they neither flake under load nor pass before the change happens
+- [JS eviction tests prove the eviction happened](/quest/m2/track-test-eviction-asserts.md) - `track.test.ts`'s eviction tests fail with eviction off
 - [Nightly runs zizmor's online workflow audits](/quest/m2/workflow-audit-followups.md) - nightly runs zizmor's online audits
 - [moq auth sign mints capped tokens](/quest/m2/auth-sign-caps.md) - CLI flags for the bitrate caps
 - [QUIC-LB forwarding reads the cluster's peers and reports its counts](/quest/m2/quic-lb-forward-extras.md) - a cluster-API peer map and forward counters
@@ -286,3 +299,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [The dev shell builds Kotlin with Gradle 9](/quest/m2/kt-gradle-9.md) - `gradle_9` in the dev shell, so the Android target builds there
 - [The publish support panel lists only codecs publishing accepts](/quest/m2/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
 - [A hung Python test fails instead of hanging the suite](/quest/m2/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
+- [Chromium's Opus encoder stamps chunks from their input](/quest/m2/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk

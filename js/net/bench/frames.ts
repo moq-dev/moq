@@ -101,7 +101,7 @@ const ietf: Protocol = {
 			const header = new IetfGroup({
 				trackAlias: IETF_ALIAS,
 				groupId: groupId++,
-				subGroupId: 0,
+				subGroupId: 0n,
 				publisherPriority: 0,
 				flags: IETF_FLAGS,
 			});

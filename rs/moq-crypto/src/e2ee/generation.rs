@@ -7,13 +7,17 @@ use std::sync::{Arc, Mutex};
 use crate::e2ee::Epoch;
 use crate::e2ee::credential::{Credential, append_bytes};
 use crate::e2ee::error::Result;
-use crate::e2ee::key::TrackKey;
+use crate::e2ee::key::{Claim, TrackKey};
 use crate::e2ee::limits::{KEY_LABEL, NAME_KEY_LABEL, NAME_MAC_LABEL};
 use crate::e2ee::name::{self, Name};
-use crate::e2ee::track;
+use crate::e2ee::{datagram, track};
 use rind::{aead, hmac};
 
 /// Grouped-frame versus datagram key domain.
+///
+/// A stream track and a datagram track of one semantic name share a physical name but allocate
+/// sequences independently, so the domain alone keeps a group's frame 0 and the datagram at
+/// that sequence from sharing a key and nonce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Domain {
 	Group = 0x00,
@@ -24,10 +28,20 @@ struct Inner {
 	credential: Credential,
 	epoch: Epoch,
 	names: name::Keys,
-	// Keyed by semantic name. Never evicted: re-deriving a key would reset its budget and, for a
-	// producer, its sequences. Bounded by the semantic names the application produces, serves, or
-	// subscribes to, for as long as it holds the generation.
-	keys: Mutex<HashMap<String, track::Keys>>,
+	// One map per domain, keyed by semantic name. Never evicted: re-deriving a key would reset its
+	// budget and, for a producer, its sequences. Bounded by the semantic names the application
+	// produces, serves, or subscribes to, for as long as it holds the generation.
+	groups: Mutex<HashMap<String, Claim>>,
+	datagrams: Mutex<HashMap<String, Claim>>,
+}
+
+impl Inner {
+	fn claims(&self, domain: Domain) -> &Mutex<HashMap<String, Claim>> {
+		match domain {
+			Domain::Group => &self.groups,
+			Domain::Datagram => &self.datagrams,
+		}
+	}
 }
 
 /// A consume-only generation bound to a discovered epoch.
@@ -65,7 +79,8 @@ impl Consumer {
 			credential,
 			epoch,
 			names,
-			keys: Mutex::default(),
+			groups: Mutex::default(),
+			datagrams: Mutex::default(),
 		}))
 	}
 
@@ -94,25 +109,33 @@ impl Consumer {
 	///
 	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes.
 	pub(crate) fn consume(&self, track: moq_net::track::Subscriber, semantic: &str) -> Result<track::Consumer> {
-		Ok(track::Consumer::new(track, self.keys(semantic)?))
+		Ok(track::Consumer::new(track, self.keys(semantic, Domain::Group)?.key))
 	}
 
-	/// The keys for `semantic`, shared with every earlier subscription to or claim of it.
-	pub(crate) fn keys(&self, semantic: &str) -> Result<track::Keys> {
-		let mut keys = self.0.keys.lock().expect("generation keys");
-		if let Some(keys) = keys.get(semantic) {
-			return Ok(keys.clone());
-		}
-		let derived = self.derive(semantic)?;
-		Ok(keys.entry(semantic.to_string()).or_insert(derived).clone())
-	}
-
-	/// Derive fresh keys for `semantic`, with their own accounting.
-	fn derive(&self, semantic: &str) -> Result<track::Keys> {
-		Ok(track::Keys::new(
-			self.key(semantic, Domain::Group)?,
-			self.key(semantic, Domain::Datagram)?,
+	/// Decrypt a net datagram track named by the physical name of `semantic`, whose datagram key it binds.
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes.
+	pub(crate) fn consume_datagrams(
+		&self,
+		track: moq_net::datagram::Consumer,
+		semantic: &str,
+	) -> Result<datagram::Consumer> {
+		Ok(datagram::Consumer::new(
+			track,
+			self.keys(semantic, Domain::Datagram)?.key,
 		))
+	}
+
+	/// The `domain` key for `semantic`, shared with every earlier subscription to or claim of it.
+	pub(crate) fn keys(&self, semantic: &str, domain: Domain) -> Result<Claim> {
+		let mut claims = self.0.claims(domain).lock().expect("generation keys");
+		if let Some(claim) = claims.get(semantic) {
+			return Ok(claim.clone());
+		}
+		let derived = Claim::new(self.key(semantic, domain)?);
+		Ok(claims.entry(semantic.to_string()).or_insert(derived).clone())
 	}
 
 	pub(crate) fn key(&self, semantic: &str, domain: Domain) -> Result<TrackKey> {
@@ -154,9 +177,9 @@ fn scope(info: &mut Vec<u8>, credential: &Credential, epoch: &Epoch) {
 
 /// A publisher-minted generation whose clones share permanent track claims.
 ///
-/// A claim holds a semantic name's keys and its sequences' high-water mark, so a track
-/// created, reserved, or served again under the name resumes above every sequence it allocated
-/// before, on any broadcast of the generation.
+/// A claim holds a semantic name's key for stream or datagram tracks and that kind's sequence
+/// high-water mark, so a track created, reserved, or served again under the name resumes above
+/// every sequence its kind allocated before, on any broadcast of the generation.
 #[derive(Clone, Debug)]
 pub struct Producer {
 	// Its keys are the claims: never released, since reopening a track would restart its nonce counters.
@@ -205,8 +228,8 @@ impl Producer {
 	///
 	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes, and then `track` is aborted.
 	pub(crate) fn produce(&self, track: moq_net::track::Producer, semantic: &str) -> Result<track::Producer> {
-		match self.claim(semantic) {
-			Ok(keys) => Ok(track::Producer::new(track, keys)),
+		match self.claim(semantic, Domain::Group) {
+			Ok(claim) => Ok(track::Producer::new(track, claim)),
 			// Its subscribers should see the refusal, not the track vanish.
 			Err(err) => {
 				let _ = track.abort(moq_net::Error::Cancel);
@@ -215,38 +238,70 @@ impl Producer {
 		}
 	}
 
-	/// Claim a semantic name, and so its physical name, for good, returning its keys and
-	/// sequences. Claiming it again resumes the earlier claim.
+	/// Protect a net datagram track named by the physical name of `semantic`, claiming it for
+	/// this generation.
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes.
-	pub(crate) fn claim(&self, semantic: &str) -> Result<track::Keys> {
-		self.consumer.keys(semantic)
-	}
-
-	/// The keys for `semantic` without claiming it: its claim's if it has one, otherwise fresh
-	/// keys that hold nothing until [`Self::adopt`].
-	///
-	/// # Errors
-	///
-	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes.
-	pub(crate) fn peek(&self, semantic: &str) -> Result<track::Keys> {
-		if let Some(keys) = self.consumer.0.keys.lock().expect("generation keys").get(semantic) {
-			return Ok(keys.clone());
+	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes, and then `track` is aborted.
+	pub(crate) fn produce_datagrams(
+		&self,
+		track: moq_net::datagram::Producer,
+		semantic: &str,
+	) -> Result<datagram::Producer> {
+		match self.claim(semantic, Domain::Datagram) {
+			Ok(claim) => Ok(datagram::Producer::new(track, claim)),
+			Err(err) => {
+				track.abort(moq_net::Error::Cancel);
+				Err(err)
+			}
 		}
-		self.consumer.derive(semantic)
 	}
 
-	/// Claim `semantic` with keys from [`Self::peek`], resuming any claim made since instead.
-	pub(crate) fn adopt(&self, semantic: &str, keys: track::Keys) -> track::Keys {
-		let mut claims = self.consumer.0.keys.lock().expect("generation keys");
-		claims.entry(semantic.to_string()).or_insert(keys).clone()
+	/// Claim a semantic name in `domain`, and so its physical name, for good, returning its key
+	/// and sequences. Claiming it again resumes the earlier claim.
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes.
+	pub(crate) fn claim(&self, semantic: &str, domain: Domain) -> Result<Claim> {
+		self.consumer.keys(semantic, domain)
 	}
 
-	/// How many semantic names this generation holds keys for.
+	/// The `domain` key for `semantic` without claiming it: its claim's if it has one, otherwise
+	/// a fresh one that holds nothing until [`Self::adopt`].
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`](crate::e2ee::Error::Identity) if `semantic` exceeds 65535 bytes.
+	pub(crate) fn peek(&self, semantic: &str, domain: Domain) -> Result<Claim> {
+		if let Some(claim) = self
+			.consumer
+			.0
+			.claims(domain)
+			.lock()
+			.expect("generation keys")
+			.get(semantic)
+		{
+			return Ok(claim.clone());
+		}
+		Ok(Claim::new(self.consumer.key(semantic, domain)?))
+	}
+
+	/// Claim `semantic` in `domain` with a key from [`Self::peek`], resuming any claim made
+	/// since instead.
+	pub(crate) fn adopt(&self, semantic: &str, domain: Domain, claim: Claim) -> Claim {
+		let mut claims = self.consumer.0.claims(domain).lock().expect("generation keys");
+		claims.entry(semantic.to_string()).or_insert(claim).clone()
+	}
+
+	/// How many semantic names this generation holds keys for, across both domains.
 	#[cfg(test)]
 	pub(crate) fn claims(&self) -> usize {
-		self.consumer.0.keys.lock().expect("generation keys").len()
+		let inner = &self.consumer.0;
+		[Domain::Group, Domain::Datagram]
+			.into_iter()
+			.map(|domain| inner.claims(domain).lock().expect("generation keys").len())
+			.sum()
 	}
 }

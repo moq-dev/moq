@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit.
+`max_age_present` is gone and `max_age_us` always applies: drop the assignment where you set it to true, and set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on it being false for no limit.
+Recompile against the new header, since an old binary's `max_age_present` byte now reads as `max_age_unlimited`, and zero-initialize the struct (`moq_track_info info = {0};`) or assign every member, since an indeterminate member is undefined behavior.
+
+### Datagrams are a track of their own
+
+A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
+
+- `moq_publish_track_datagram` numbers datagrams on their own, apart from groups, and `moq_datagram.sequence` is that number. Don't compare it with group sequences.
+- `moq_consume_datagrams` receives only the datagrams sent once its subscription is answered. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
+- moq-transport carries no datagrams.
+
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.

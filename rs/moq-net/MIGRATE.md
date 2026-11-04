@@ -4,6 +4,45 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.
+A track that relied on unlimited history requests it explicitly before it is created, with `with_max_age(None)`, or sets a window, such as `hang::container::MAX_AGE` for media.
+A relay or cache bounds what it keeps with its own pool, not the publisher's default.
+Readers asking for history still set a sufficient `Delay::max` and range.
+Received metadata is unchanged: a track that arrives without a max age keeps `None`, and the wire is unchanged.
+
+```rust
+// Before: no publisher limit
+track::Info::default();
+// After: the same, stated explicitly
+track::Info::default().with_max_age(None);
+```
+
+### A zero `Allocator::set_target` leaves the peer's PROBE target ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+A session with a sender now probes to the larger of its allocator's target and the PROBE target its peer sends, so `Allocator::set_target(Some(Rate::ZERO))` stops probing for this side's reservations only. A peer that advertises a target still raises the probe; a reservation's `Consumer::probed` stays `false`, since nothing probes for it.
+The new `Viewers::watch`, `Viewers::set_target`, and `Viewer::update` return `Result` and refuse ceilings summing above `Viewers::MAX_TARGET` with `Error::BoundsExceeded`.
+
+### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
+
+A stream track no longer carries datagrams. `track::Producer::{append_datagram, insert_datagram}` and `track::Subscriber/Ordered::{poll_recv_datagram, recv_datagram}` are removed; a datagram track is created and read through the broadcast, in a namespace apart from stream tracks, with its own sequence counter.
+
+```rust
+// Before
+let mut track = broadcast.create_track("audio", info)?;
+track.append_datagram(timestamp, payload)?;
+let mut sub = consumer.track("audio")?.subscribe(None).await?;
+let datagram = sub.recv_datagram().await?;
+// After
+let mut audio = broadcast.create_datagrams("audio", datagram::Info::default().with_timescale(scale))?;
+audio.append(timestamp, payload)?;
+let mut reader = consumer.datagrams("audio")?;
+let datagram = reader.recv().await?;
+```
+
+A `datagram::Consumer` is live from when it is created, has a priority (`set_priority`) and no ranges, and ends with `Ok(None)` on the producer's `finish`. A relay forwarding datagrams keeps their sequence with `datagram::Producer::insert`. A `broadcast::Requests` handler serves requested datagram tracks through `Requests::datagrams()`. `Error::NotFetchable` and `StreamError::NotFetchable` are removed, since no group is ever a datagram. Stats count a datagram in `datagrams` and `bytes` only, not as a group, and `stats::Content` has no `datagrams`.
+
 ### `group::on_track` is `track::Info::rescale` ([#7702](https://github.com/moq-dev/moq/pull/7702))
 
 The free function `moq_net::group::on_track(timestamp, timescale)` is removed.

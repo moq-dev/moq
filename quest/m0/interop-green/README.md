@@ -65,7 +65,3 @@ The P2P data-channel test timed out once, in 41668668824, and passes
 locally; triage it if it recurs.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Confirm scheduled open-GOP recovery passes](/quest/m0/interop-green/open-gop-fixture.md) - a scheduled Interop run passes the open-GOP case with the typed fixture and direct effect/page error reporting
