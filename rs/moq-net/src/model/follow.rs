@@ -266,8 +266,9 @@ impl Following {
 			// routes may have gone, and another instance's, beneath the same announcement,
 			// taken the path over. It also ends once the caller lets go of it, so only its
 			// instance no longer serving the path makes whatever serves it now next, unless a
-			// change it absorbed is owed.
+			// change it absorbed is owed. After a refusal, only a route change asks again.
 			if !self.unseen
+				&& !self.refused
 				&& self.follow.serving().is_some()
 				&& let Some(last) = self.last.as_ref().map(broadcast::WeakConsumer::consume)
 				&& last.poll_closed(waiter).is_ready()
@@ -711,6 +712,33 @@ mod tests {
 			available(&mut announced).await.info().instance.as_ref(),
 			Some(&instance)
 		);
+	}
+
+	/// A refusal after the instance handed out closed is not asked again on every call: the
+	/// closed instance's handover is settled until the serving route changes.
+	#[kio::test]
+	async fn announced_waits_after_refusing_a_closed_instances_successor() {
+		let origin = Hop::new(1).unwrap().produce();
+		let claim = origin.requests_route("", route(&Instance::random()), None).unwrap();
+		let exact = origin.publish("live", route(&Instance::random())).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let _first = available(&mut announced).await;
+		drop(exact);
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async {
+				requested(&claim).await.reject(Error::Unroutable);
+			}
+		);
+		assert!(matches!(
+			result.expect("the refusal must answer"),
+			Err(Error::Unroutable)
+		));
+		let ((), again) = futures::join!(
+			none(&mut announced),
+			kio::clock::timeout(Duration::from_secs(1), claim.requested_broadcast())
+		);
+		assert!(again.is_err(), "the refusing route was asked again");
 	}
 
 	/// A path no pattern can spell is refused rather than followed through the whole scope,
