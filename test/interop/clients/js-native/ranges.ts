@@ -63,7 +63,8 @@ try {
 			});
 			try {
 				const seen: bigint[] = [];
-				for (let group = await reader.recvGroup(); group; group = await reader.recvGroup()) {
+				const ordered = reader.ordered();
+				for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 					seen.push(group.sequence);
 					try {
 						for (const size of [1024, 513, 513]) {
