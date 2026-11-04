@@ -3805,7 +3805,6 @@ struct Fallback {
 	offset: usize,
 	discarded: usize,
 	pts: Option<Timestamp>,
-	in_tail: bool,
 	pes: Option<(usize, Option<Timestamp>)>,
 }
 
@@ -3945,7 +3944,6 @@ impl<E: CatalogExt> AacStream<E> {
 							offset,
 							discarded: self.resync.discarded,
 							pts,
-							in_tail,
 							pes,
 						});
 						Err(None)
@@ -3994,14 +3992,12 @@ impl<E: CatalogExt> AacStream<E> {
 									self.resync.refund(found.discarded);
 									offset = found.offset;
 									pts = found.pts;
-									in_tail = found.in_tail;
 									pes = found.pes;
 								}
 								None => {
 									if in_tail && let Some((_, base)) = pes.take() {
 										pts = base;
 									}
-									in_tail = false;
 									offset = next;
 								}
 							}
@@ -4555,7 +4551,6 @@ impl<E: CatalogExt> LegacyStream<E> {
 							offset,
 							discarded: self.resync.discarded,
 							pts,
-							in_tail,
 							pes,
 						});
 						Err(None)
@@ -4615,14 +4610,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 									self.resync.refund(found.discarded);
 									offset = found.offset;
 									pts = found.pts;
-									in_tail = found.in_tail;
 									pes = found.pes;
 								}
 								None => {
 									if in_tail && let Some((_, base)) = pes.take() {
 										pts = base;
 									}
-									in_tail = false;
 									offset = next;
 								}
 							}
