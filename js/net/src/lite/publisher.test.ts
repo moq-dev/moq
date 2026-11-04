@@ -1069,6 +1069,32 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
+// A huge declared skip goes out as one SUBSCRIBE_SKIP, at a cost independent of its length.
+// Mirrors Rust.
+test("lite-07 skips a huge run at once", async () => {
+	const FAR = 1n << 61n;
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		sub.track.skipGroups(1n, FAR);
+		sub.track.finish();
+		sub.track.close();
+		const codes: number[] = [];
+		const skips: bigint[][] = [];
+		for (;;) {
+			const resp = await decodeSubscribeResponseMaybe(sub.client.reader, Version.DRAFT_07);
+			if (!resp) break;
+			if ("drop" in resp) codes.push(resp.drop.error);
+			if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
+			if ("end" in resp) break;
+		}
+		expect([codes, skips]).toEqual([[], [[1n, FAR - 1n]]]);
+	} finally {
+		await sub.close();
+	}
+});
+
 for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	for (const transport of [900, 1400]) {
 		test(`lite ${version}: datagram bodies fit the wire and ${transport}-byte transport`, async () => {

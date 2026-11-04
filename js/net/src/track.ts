@@ -2463,9 +2463,9 @@ export class Subscriber {
 	// Owe again every run this cursor gave up as stale, reported or not: an update reopens the
 	// verdict. A group still cached is offered again as a widened skip is, and whatever is still
 	// stale under the new terms is given up and reported again. Returns the runs taken back. A
-	// resumed reader reports only what its routes' copies give up, so it keeps its reports.
+	// resumed reader takes back what it queued and what its serving route's copy reported.
 	#reofferStale(): Run[] {
-		if (this.#resume) return [];
+		if (this.#resume) return this.#resume.reofferStale();
 		const taken: Run[] = [];
 		for (const run of this.#reportedStale) {
 			this.#reported = removeRun(this.#reported, run.start, run.end);

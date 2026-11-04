@@ -9342,13 +9342,13 @@ impl Subscriber {
 
 	/// Re-offer what this reader gave up as stale through [`Self::poll_drop`], as a wire
 	/// whose every update reopens its stale drops does: each run is judged again under the
-	/// new terms. Returns the runs taken back, which are owed again. A front's reader
-	/// reports only what its copies give up, so it keeps its reports.
+	/// new terms. Returns the runs taken back, which are owed again. A front's reader takes
+	/// back what it queued and what its serving route's copy reported.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reoffer_stale(&mut self) -> Vec<ops::Range<u64>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.reoffer_stale(),
-			Inner::Resume(..) => Vec::new(),
+			Inner::Resume(resume, _) => resume.reoffer_stale(),
 		}
 	}
 
@@ -23549,6 +23549,58 @@ mod test {
 		// A dropped sequence may be created again.
 		producer.give_up(2..3, Hole::drop(StreamError::Cancel));
 		write_group(&producer, 2);
+	}
+
+	/// Skips are kept and reported as runs: a huge `skip_groups` or append gap costs one
+	/// entry and one report, whatever its length.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_huge_skip_costs_one_run() {
+		const FAR: u64 = 1 << 61;
+		let waiter = kio::Waiter::noop();
+		// Presented just after group 0, since its sequence in milliseconds overflows.
+		let write_far = |producer: &Producer| {
+			let mut group = producer.create_group(group::Info { sequence: FAR }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
+		};
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		write_group(&producer, 0);
+		producer.skip_groups(1..FAR);
+		assert_eq!(producer.state.read().drops.iter().count(), 1);
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..FAR, Hole::Skip)));
+		write_far(&producer);
+		assert_eq!(drain_groups(&mut subscriber), [0, FAR]);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		write_group(&producer, 0);
+		write_far(&producer);
+		producer.append_group().unwrap().finish().unwrap();
+		assert_eq!(producer.state.read().drops.iter().count(), 1);
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..FAR, Hole::Skip)));
+		assert_eq!(drain_groups(&mut subscriber), [0, FAR, FAR + 1]);
+	}
+
+	/// A dropped sequence may be created again, as a group stream wins over its drop, such as
+	/// one whose group was aborted: only a skip is final.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_aborted_sequence_is_created_again() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		group.abort(Error::Stream(StreamError::Cancel)).unwrap();
+		write_group(&producer, 0);
+		producer.append_group().unwrap().finish().unwrap();
+		assert!(producer.state.read().drops.is_empty());
+		let mut read = drain_groups(&mut subscriber);
+		read.dedup();
+		assert_eq!(read.last(), Some(&1));
 	}
 
 	/// `skip_groups` leaves a cached group and a reason already given alone.

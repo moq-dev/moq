@@ -4318,7 +4318,10 @@ impl TrackRun {
 			self.owe(reopened);
 			// A group whose stream already reset as stale is judged again under the new terms:
 			// one still cached, in range, and fresh under the new budget is served again. The
-			// rest is dropped again, by run, on the next poll.
+			// rest is dropped again, by run, on the next poll. A run an earlier update left to
+			// drop again is judged again too, since these terms may serve it.
+			let pending = std::mem::take(&mut self.redrop);
+			self.expired.extend(pending.iter().cloned());
 			for run in std::mem::take(&mut self.expired).iter() {
 				let (groups, gone) = self.track.reoffer_groups(run.clone());
 				self.owe(
@@ -6871,6 +6874,41 @@ mod serve_group_test {
 		assert_eq!(*log.writes.lock().unwrap(), [0, 4, 1, 0, 1, 1, 3, 2, 1, 1, 1, 2, 3, 0]);
 	}
 
+	/// A huge declared skip goes out as one SUBSCRIBE_SKIP, at a cost independent of its
+	/// length, and the end settles over it.
+	#[kio::test]
+	async fn lite07_skips_a_huge_run_at_once() {
+		const FAR: u64 = 1 << 61;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		track.skip_groups(1..FAR);
+		write_group(&mut track, FAR, 1);
+		track.finish().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
+
+		let writes = log.writes.lock().unwrap().clone();
+		let mut buf = writes.as_slice();
+		let (mut skips, mut drops) = (Vec::new(), 0);
+		while !buf.is_empty() {
+			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, Version::Lite07).unwrap();
+			buf = &buf[size..];
+			match msg {
+				lite::SubscribeResponse::Skip(skip) => skips.push((skip.start, skip.end)),
+				lite::SubscribeResponse::Drop(_) => drops += 1,
+				_ => {}
+			}
+		}
+		assert_eq!((skips, drops), (vec![(1, FAR - 1)], 0));
+	}
+
 	/// A relay that holds only the first group of a backlog answers with the largest its
 	/// source reported, so a live joiner downstream starts at the newest group rather than
 	/// the oldest one the budget serves.
@@ -7087,6 +7125,50 @@ mod serve_group_test {
 				"widen={widen}: still stale, it is dropped again under update 1"
 			);
 		}
+	}
+
+	/// A run one update left to drop again is judged again under the next update that
+	/// arrives before it goes out, rather than dropped under terms that may serve it.
+	#[kio::test]
+	async fn a_pending_redrop_is_judged_again_under_a_later_update() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let budget = Duration::from_millis(500);
+		let subscriber =
+			track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(budget)));
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		write_group(&mut track, 1, 1000);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
+		write_group(&mut track, 2, 3000);
+		run.ctx.outcomes.dropped.lock().unwrap().push((0, StreamError::Old));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(0, 0, 0)]);
+
+		// Update 1 keeps the budget, so group 0 is left to drop again; update 2 widens it
+		// before that drop goes out.
+		for (update, max_delay) in [(1, budget), (2, Duration::from_secs(10))] {
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay,
+				min_delay: None,
+				ranges: vec![lite::Range::span(None, 0, None, None)],
+				order: Order::Descending,
+				update,
+			});
+		}
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			run.ctx.outcomes.opened.load(Ordering::Relaxed),
+			opened + 2,
+			"group 0 is served again under update 2, beside group 2"
+		);
+		assert_eq!(drop_updates(&mut writer, &log, Version::Lite07).await, [(0, 0, 0)]);
 	}
 
 	/// Lite-05 and later name every sequence below the end that the subscription never

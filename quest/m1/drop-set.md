@@ -121,6 +121,20 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
   (`skipGroups`, `appendGroup`).
 - ✅ **Draft:** SKIP names only sequences the publisher declared it will never
   produce, and it is final.
+- ✅ **Run-length tracking** (refinement, same session): skipped and dropped
+  groups are kept as runs, never one entry per sequence, in Rust and JS: the
+  track's hole set, the implicit `append_group` skip, `skip_groups`, and what
+  the publisher reports. A huge `skip_groups` or append gap costs one run and
+  one SUBSCRIBE_SKIP (`a_huge_skip_costs_one_run`,
+  `lite07_skips_a_huge_run_at_once`, and their JS mirrors).
+- ✅ **`create_group` refuses a skipped sequence and allows a dropped one**
+  (refinement, same session): a group stream wins over its drop, which fills
+  answering a miss and `claim_sequence` retries of an aborted sequence need.
+- **A `create_group` gap error** (maintainer's idea, same session): not
+  implemented. No principled bound exists in the model: the cache and the
+  budget bound bytes and time, not sequence counts, a gap costs one run
+  whatever its length, and under time addressing every group leaves a gap
+  between starts. Left to the maintainer in the PR's `## Waiting`.
 - Not chosen: eager skip on `create_group` with a late group winning over
   it (the shipped design, which inferred SKIP from a gap that out-of-order
   creation makes meaningless); refusing every `create_group` below the last

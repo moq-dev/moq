@@ -436,6 +436,8 @@ export interface ResumeSource {
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
 	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
 	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] };
+	/** See {@link hooks.reofferStale}: the stale runs queued here and those the serving copy reported. */
+	reofferStale(): Run[];
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }

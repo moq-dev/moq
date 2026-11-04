@@ -607,6 +607,20 @@ class Reader implements ResumeSource {
 		return { groups: groups.map((group) => this.#handOut(serving, group)), givenUp };
 	}
 
+	/**
+	 * Take back every stale run: those queued here, and those the serving copy reported, which
+	 * its cursor owes again. Only the serving copy's verdicts count, so a replaced copy's are left
+	 * alone. Mirrors the Rust `Reader::reoffer_stale`.
+	 */
+	reofferStale(): Run[] {
+		const taken: Run[] = [];
+		for (const run of this.#drops) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
+		this.#drops = this.#drops.filter((run) => run.stale === undefined);
+		const serving = this.#serving();
+		if (serving) for (const run of hooks.reofferStale(serving.sub)) insertRun(taken, run.start, run.end);
+		return taken;
+	}
+
 	cachedGroup(sequence: bigint, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];

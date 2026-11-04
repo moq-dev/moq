@@ -3348,3 +3348,22 @@ test("a resumed reader re-offers a group its serving copy still caches", () => {
 	front.consumer.close();
 	a.close();
 });
+
+// A front's reader takes back the stale runs its serving route's copy reported, so a relay's
+// publisher re-offers them under a new update rather than keep them reported. Mirrors Rust.
+test("a resumed reader takes back its stale reports", () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(60_000) } });
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	hooks.dropTrackGroups(ta.producer, 1n, 3n, staleHole(60_000));
+	expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 3n, stale: 60_000 });
+	expect(hooks.reofferStale(sub)).toEqual([{ start: 1n, end: 3n }]);
+	expect(hooks.reofferStale(sub)).toEqual([]);
+	sub.close();
+	front.consumer.close();
+	a.close();
+});

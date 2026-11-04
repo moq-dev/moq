@@ -4868,7 +4868,9 @@ test("an append skips the holes created groups left below it", () => {
 			next.kind !== "idle";
 			next = hooks.tryRecvGroup(reader, true)
 		) {
-			got.push(next.kind === "group" ? next.group.sequence : [next.start, next.end, next.skip === true]);
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
+			else throw new Error(`unexpected ${next.kind}`);
 		}
 		return got;
 	};
@@ -4962,4 +4964,35 @@ test("a received stale run settles the suffix a narrower range asks for", () => 
 	expect(hooks.tryDrop(reader)).toBeUndefined();
 	reader.close();
 	producer.close();
+});
+
+// Skips are kept and reported as runs: a huge skipGroups or append gap costs one run and one
+// report, whatever its length. Mirrors Rust.
+test("a huge skip costs one run", () => {
+	const FAR = 1n << 61n;
+	for (const append of [false, true]) {
+		const producer = new TrackProducer("test");
+		producer.accept({});
+		const reader = producer.subscribe({ delay: { max: null } });
+		producer.createGroup(0n).finish();
+		if (append) {
+			producer.createGroup(FAR).finish();
+			producer.appendGroup().finish();
+		} else {
+			producer.skipGroups(1n, FAR);
+			producer.createGroup(FAR).finish();
+		}
+		const got: unknown[] = [];
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
+		}
+		const groups = append ? [0n, FAR, FAR + 1n] : [0n, FAR];
+		expect(got.filter((entry) => typeof entry === "bigint")).toEqual(groups);
+		expect(got.filter((entry) => typeof entry !== "bigint")).toEqual([[1n, FAR, true]]);
+	}
 });

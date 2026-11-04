@@ -901,6 +901,13 @@ impl Subscriber {
 		self.reader().reoffer_groups(run)
 	}
 
+	/// Take back every stale run this reader queued or the serving route's copy reported;
+	/// see [`track::Subscriber::reoffer_stale`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn reoffer_stale(&mut self) -> Vec<std::ops::Range<u64>> {
+		self.reader().reoffer_stale()
+	}
+
 	/// Poll for sequences the serving copy gave up that no copy may still deliver; see
 	/// [`track::Subscriber::poll_drop`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -1873,6 +1880,26 @@ impl Reader {
 		let index = self.copies.len() - 1;
 		let groups = groups.into_iter().map(|group| self.hand_out(index, group)).collect();
 		(groups, given_up)
+	}
+
+	/// Take back every stale run: those queued here, and those the serving copy reported,
+	/// which its cursor owes again. Only the serving copy's verdicts count (see
+	/// [`Self::poll_drop`]), so a replaced copy's are left alone.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn reoffer_stale(&mut self) -> Vec<std::ops::Range<u64>> {
+		let mut runs: Vec<_> = self
+			.drops
+			.iter()
+			.filter(|(_, (hole, _))| hole.stale_budget().is_some())
+			.map(|(run, _)| run.clone())
+			.collect();
+		for run in &runs {
+			self.drops.remove(run.clone());
+		}
+		if let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) {
+			runs.extend(sub.reoffer_stale());
+		}
+		runs
 	}
 
 	/// The next run the serving copy gave up that `delivered` lacks and no other copy may
@@ -3790,6 +3817,23 @@ mod test {
 		let (groups, given_up) = sub.reoffer_groups(0..3);
 		assert_eq!(groups.iter().map(|group| group.sequence).collect::<Vec<_>>(), [0]);
 		assert_eq!(given_up, std::iter::once(1..3).collect::<RangeSet<u64>>());
+	}
+
+	/// A front's reader takes back the stale runs its serving route's copy reported, so a
+	/// relay's publisher re-offers them under a new update rather than keep them reported.
+	#[test]
+	fn a_resumed_reader_takes_back_its_stale_reports() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		a.give_up(1..3, track::Hole::stale(HOUR));
+		assert_eq!(dropped(&mut sub), [(1..3, StreamError::Old)]);
+		assert_eq!(sub.reoffer_stale(), [1..3]);
+		assert_eq!(sub.reoffer_stale(), Vec::<std::ops::Range<u64>>::new());
 	}
 
 	/// A run a replaced route held back is dropped with that route: the route serving next

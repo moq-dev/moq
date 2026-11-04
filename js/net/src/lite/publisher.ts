@@ -1436,6 +1436,17 @@ export class Publisher {
 									if (served) served.splice(0, served.length, ...removeRun(served, start, end));
 								};
 								for (const run of hooks.reofferStale(track)) owe(run.start, run.end);
+								// A stale drop not sent yet, such as one an earlier update left to drop
+								// again, is judged again under these terms too.
+								for (const pending of pendingDrops.filter(
+									(d) => toStreamCode(d.error) === StreamCode.Old,
+								))
+									insertRun(expired, pending.start, pending.end);
+								pendingDrops.splice(
+									0,
+									pendingDrops.length,
+									...pendingDrops.filter((d) => toStreamCode(d.error) !== StreamCode.Old),
+								);
 								// A group whose stream already reset as stale: one still cached, in range, and
 								// fresh under the new budget is served again; the rest is dropped again, by run.
 								for (const run of expired.splice(0)) {
