@@ -67,6 +67,8 @@ mod pcm;
 mod resample;
 #[cfg(any(feature = "bus", feature = "playback"))]
 mod ring;
+#[cfg(any(feature = "bus", feature = "playback"))]
+mod stretch;
 
 pub mod aec;
 #[cfg(feature = "bus")]
