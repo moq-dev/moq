@@ -1975,8 +1975,9 @@ export class Publisher {
 				}
 				// The legacy writer is shared, so another request's write can hold back this one:
 				// stop waiting once this request ends, and send nothing after it does.
-				const ready = await race([writer.ready.then(() => true), left.then(() => false)]);
-				if (!ready || left.peek() !== undefined) return end;
+				// Raced directly, so a ready writer drops its close listener rather than keep one per send.
+				await race([writer.ready, left]);
+				if (left.peek() !== undefined) return end;
 				await writer.write(body);
 			}
 		} finally {
