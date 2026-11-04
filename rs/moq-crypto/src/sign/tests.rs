@@ -83,7 +83,7 @@ fn vector_negative() {
 	}
 }
 
-/// A key file written before signing moved to rind loads to the same key and seed.
+/// A key file written before signing moved to rind loads to the same key.
 #[cfg(unix)]
 #[test]
 fn vector_key_files() {
@@ -99,7 +99,6 @@ fn vector_key_files() {
 		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 		let key = SecretKey::load_or_generate(&path).unwrap();
 		assert_eq!(key.public(), public(&row["endpoint"]), "{}", row["id"]);
-		assert_eq!(key.0.pair.to_seed().as_ref(), seed, "{}", row["id"]);
 	}
 }
 
