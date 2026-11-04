@@ -47,7 +47,7 @@ Open, for the implementer to bring to the maintainer:
   all.
 
 Idea for later (maintainer, 2026-10-30, from the
-[fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) iteration
+[fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664) iteration
 in [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388)): instead of
 moq-quic granting `MAX_STREAM_DATA` automatically as a stream is read, the
 application could pause a stream, or grant it an explicit
