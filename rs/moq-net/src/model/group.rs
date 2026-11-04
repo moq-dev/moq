@@ -5310,6 +5310,7 @@ mod test {
 
 	/// A frame count past the old 8192-frame cap is held whole while it fits the tail.
 	#[test]
+	#[cfg_attr(miri, ignore = "each write takes Miri ~30 ms, so 10,000 run past its SLOW mark")]
 	fn a_group_has_no_frame_cap() {
 		let mut producer = Info { sequence: 0 }.produce();
 		for _ in 0..10_000 {
