@@ -378,6 +378,7 @@ mod tests {
 			run.samples = samples.clone();
 		}
 		let moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 			traf: vec![traf],
 		};

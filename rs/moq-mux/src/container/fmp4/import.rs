@@ -741,6 +741,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			trak.edts = None;
 
 			let single_moov = Moov {
+				pssh: Vec::new(),
 				mvhd: moov.mvhd.clone(),
 				trak: vec![trak],
 				mvex: Some(mp4_atom::Mvex {
@@ -773,25 +774,25 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let (mut config, colr, pasp, spatial) = match codec {
 			mp4_atom::Codec::Avc1(avc1) => (
 				self.init_h264(false, &avc1.avcc, &avc1.visual, container)?,
-				avc1.colr.as_ref(),
+				avc1.colr.as_slice(),
 				avc1.pasp.as_ref(),
 				avc1.spatial.as_deref(),
 			),
 			mp4_atom::Codec::Avc3(avc3) => (
 				self.init_h264(true, &avc3.avcc, &avc3.visual, container)?,
-				avc3.colr.as_ref(),
+				avc3.colr.as_slice(),
 				avc3.pasp.as_ref(),
 				avc3.spatial.as_deref(),
 			),
 			mp4_atom::Codec::Hev1(hev1) => (
 				self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
-				hev1.colr.as_ref(),
+				hev1.colr.as_slice(),
 				hev1.pasp.as_ref(),
 				hev1.spatial.as_deref(),
 			),
 			mp4_atom::Codec::Hvc1(hvc1) => (
 				self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
-				hvc1.colr.as_ref(),
+				hvc1.colr.as_slice(),
 				hvc1.pasp.as_ref(),
 				hvc1.spatial.as_deref(),
 			),
@@ -808,7 +809,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(vp08.visual.width as _);
 				config.coded_height = Some(vp08.visual.height as _);
 				config.container = container;
-				(config, vp08.colr.as_ref(), vp08.pasp.as_ref(), vp08.spatial.as_deref())
+				(
+					config,
+					vp08.colr.as_slice(),
+					vp08.pasp.as_ref(),
+					vp08.spatial.as_deref(),
+				)
 			}
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
@@ -829,7 +835,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(vp09.visual.width as _);
 				config.coded_height = Some(vp09.visual.height as _);
 				config.container = container;
-				(config, vp09.colr.as_ref(), vp09.pasp.as_ref(), vp09.spatial.as_deref())
+				(
+					config,
+					vp09.colr.as_slice(),
+					vp09.pasp.as_ref(),
+					vp09.spatial.as_deref(),
+				)
 			}
 			mp4_atom::Codec::Av01(av01) => {
 				let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av01.av1c));
@@ -837,13 +848,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(av01.visual.width as _);
 				config.coded_height = Some(av01.visual.height as _);
 				config.container = container;
-				(config, av01.colr.as_ref(), av01.pasp.as_ref(), av01.spatial.as_deref())
+				(
+					config,
+					av01.colr.as_slice(),
+					av01.pasp.as_ref(),
+					av01.spatial.as_deref(),
+				)
 			}
 			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
 		// The codec config outranks the colr box a muxer added, which only fills its gaps.
-		let colr = colr.map(super::colr_color).transpose()?.flatten();
+		// An entry may carry an ICC profile beside its code points; only the code points say anything.
+		let colr = colr
+			.iter()
+			.find(|colr| matches!(colr, mp4_atom::Colr::Nclx { .. } | mp4_atom::Colr::Nclc { .. }))
+			.map(super::colr_color)
+			.transpose()?
+			.flatten();
 		crate::codec::color::fill(&mut config.color, colr.as_ref(), "colr");
 		(config.projection, config.stereo) = super::spatial(spatial)?;
 		if let Some(pasp) = pasp {
@@ -1451,6 +1473,7 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 	// Build a per-track moof containing only this traf, and a per-track mdat
 	// with only the samples belonging to this track.
 	let mut adjusted_moof = Moof {
+		pssh: Vec::new(),
 		mfhd: moof.mfhd.clone(),
 		traf: vec![match run.dropped {
 			true => kept(traf, run)?,
@@ -1896,6 +1919,7 @@ mod tests {
 	// Only the headers are supplied. The declared mdat may never finish.
 	fn media_header(id: u32, decode_time: u64, offsets: &[usize], size: u32, len: Option<usize>) -> Vec<u8> {
 		let mut moof = Moof {
+			pssh: Vec::new(),
 			mfhd: Default::default(),
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {
@@ -2030,6 +2054,7 @@ mod tests {
 	// A moof of one traf on track `id` carrying `trun`, whose samples are a byte and 1024 ticks each.
 	fn runs_moof(id: u32, trun: Vec<mp4_atom::Trun>) -> Vec<u8> {
 		let moof = Moof {
+			pssh: Vec::new(),
 			mfhd: Default::default(),
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {

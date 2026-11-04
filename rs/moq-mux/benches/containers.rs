@@ -201,6 +201,7 @@ fn interleaved(init: &[u8], tracks: usize, runs: usize, fragments: usize, payloa
 	let mut out = BytesMut::from(&init[..cursor.position() as usize]);
 	for fragment in 0..fragments {
 		let mut moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd {
 				sequence_number: fragment as u32 + 1,
 			},

@@ -782,6 +782,7 @@ pub(super) fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> 
 	let mdat_data: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 
 	let build_moof = |data_offset| mp4_atom::Moof {
+		pssh: Vec::new(),
 		mfhd: mp4_atom::Mfhd { sequence_number },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
@@ -997,7 +998,7 @@ pub(crate) fn synthesize_video_trak(
 	// Codecs that carry an out-of-band config record require `description`.
 	let require_description = || description.ok_or_else(|| Error::MissingVideoDescription(config.codec.to_string()));
 
-	let colr = color_colr(config.color.as_ref());
+	let colr: Vec<_> = color_colr(config.color.as_ref()).into_iter().collect();
 	let sample_entry = match &config.codec {
 		VideoCodec::H264(h264) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
@@ -1806,6 +1807,7 @@ mod tests {
 		// hand-built moof+mdat with explicit per-sample durations is enough.
 		let timescale = moq_net::Timescale::MICRO;
 		let moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd { sequence_number: 0 },
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {
@@ -2229,6 +2231,7 @@ mod tests {
 
 		let timescale = moq_net::Timescale::new(24_000).unwrap();
 		let moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd { sequence_number: 0 },
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {

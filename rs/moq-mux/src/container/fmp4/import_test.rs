@@ -765,6 +765,7 @@ async fn separated_runs_keep_their_samples() {
 		..Default::default()
 	};
 	let mut moof = mp4_atom::Moof {
+		pssh: Vec::new(),
 		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 		traf: vec![
 			mp4_atom::Traf {
@@ -868,6 +869,7 @@ fn empty_samples_are_refused() {
 	let (init, (video_id, timescale), _) = bbb_init();
 	for explicit in [false, true] {
 		let moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {
@@ -922,6 +924,7 @@ fn absolute_sample_bases_are_refused() {
 	let (init, (video_id, timescale), _) = bbb_init();
 	for base in [0, 1024, u64::MAX] {
 		let moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {
@@ -995,6 +998,7 @@ async fn shared_sample_bytes_are_refused() {
 	];
 	for trafs in cases {
 		let mut moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 			traf: trafs.iter().map(|(traf, _)| traf.clone()).collect(),
 		};
@@ -1050,6 +1054,7 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 	let non_sync = 0x0001_0000;
 	let entries = [(tick, 0, 0xA), (2 * tick, non_sync, 0xB), (0, non_sync, 0xC)];
 	let moof = mp4_atom::Moof {
+		pssh: Vec::new(),
 		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
@@ -1142,6 +1147,7 @@ fn fieldless_runs_do_not_stall_the_segment_scan() {
 	// repeating the traf can't multiply it.
 	for (trafs, runs, mdat) in [(1, 1000, 6), (1000, 1, 1 << 16)] {
 		let moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd { sequence_number: 2 },
 			traf: vec![traf(runs); trafs],
 		};
@@ -1246,6 +1252,7 @@ async fn audio_presents_from_its_edit() {
 /// One video fragment decoding from `dts`, a sample per `(cts, flags, byte)` lasting `tick`.
 fn video_fragment(track_id: u32, dts: u64, tick: u64, entries: &[(u64, u32, u8)]) -> Vec<u8> {
 	let moof = mp4_atom::Moof {
+		pssh: Vec::new(),
 		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
@@ -2323,6 +2330,7 @@ async fn a_mid_gop_join_keeps_tracks_on_the_same_groups_in(passthrough: bool) {
 /// the importer needs to slice them back out.
 fn audio_fragment(base_media_decode_time: u64, duration: u32, size: u32) -> Vec<u8> {
 	let moof = mp4_atom::Moof {
+		pssh: Vec::new(),
 		mfhd: mp4_atom::Mfhd { sequence_number: 0 },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
@@ -2411,6 +2419,7 @@ fn rejected_fragment_keeps_the_first_error() {
 /// Like [`audio_fragment`] but carrying `samples` samples, the shape a real segmenter emits.
 fn audio_fragment_samples(base_media_decode_time: u64, duration: u32, size: u32, samples: usize) -> Vec<u8> {
 	let moof = mp4_atom::Moof {
+		pssh: Vec::new(),
 		mfhd: mp4_atom::Mfhd { sequence_number: 0 },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
@@ -2516,6 +2525,7 @@ fn fragment_jitter_uses_sample_endpoints() {
 		let mut import = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 		import.decode(&init).unwrap();
 		let moof = mp4_atom::Moof {
+			pssh: Vec::new(),
 			mfhd: mp4_atom::Mfhd { sequence_number: 0 },
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {
@@ -3069,6 +3079,7 @@ fn webvtt_init(header: &str) -> Vec<u8> {
 /// One fragment carrying `samples` back to back, each lasting `duration` ms from `decode_time`.
 fn webvtt_fragment(decode_time: u64, samples: &[Vec<u8>], duration: u32) -> Vec<u8> {
 	let moof = mp4_atom::Moof {
+		pssh: Vec::new(),
 		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
@@ -3199,6 +3210,7 @@ fn empty_and_multiple_webvtt_cues_are_supported() {
 fn oversized_text_sample_is_refused_before_staging() {
 	let size = super::MAX_HELD_BYTES + 1;
 	let moof = mp4_atom::Moof {
+		pssh: Vec::new(),
 		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
@@ -3667,7 +3679,7 @@ fn unsignalled_color_stays_absent() {
 	let mp4_atom::Codec::Avc1(avc1) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
 		panic!("expected avc1");
 	};
-	assert_eq!(avc1.colr, None);
+	assert!(avc1.colr.is_empty());
 
 	let catalog = run_fmp4(&init);
 	let video = catalog.video.renditions.values().next().unwrap();

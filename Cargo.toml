@@ -250,6 +250,8 @@ zeroize = { version = "1", features = ["derive"] }
 # the member, and the next publish that reaches both fails to resolve a single
 # version (#3551).
 kio = { path = "rs/kio" }
+# Common Encryption boxes (kixelated/mp4-atom#268), until a release ships them.
+mp4-atom = { path = "/Users/michael/Projects/mp4-atom" }
 
 [profile.dev]
 # Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`
