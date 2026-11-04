@@ -95,7 +95,6 @@ Public API: none. Wire: none.
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
 - [moq-transcode's live multi-rung test survives load](/quest/m0/test-flakes-2/transcode-multi-rung.md) - `live_multi_rung` stops failing queue batches with a cancelled rung group
-- [moq-archive's cross-backend recording test survives load](/quest/m0/test-flakes-2/archive-backends-identical.md) - `recordings_are_byte_identical_on_every_backend` stops splitting S3's video objects differently
 - [moq-ffi's panicked-origin supervision test survives load](/quest/m0/test-flakes-2/ffi-origin-panic.md) - a read the origin driver's panic ends always reports `MoqError::Task`
 - [The scheduled macOS WebSocket version test completes reliably](/quest/m0/test-flakes-2/macos-websocket.md) - fix the scheduled timeout while preserving newest-version negotiation assertions
 - [@moq/net's lite subscribe tests wait for the whole request](/quest/m0/test-flakes-2/js-subscribe-fixture.md) - the three lite subscribe-with-track cases pass under forced yields
