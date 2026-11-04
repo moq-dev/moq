@@ -421,8 +421,8 @@ impl Session {
 
 	/// Change the underlying connection's flow-control limits; see
 	/// [`Connection::set_limits`].
-	pub fn set_limits(&self, limits: super::Limits) -> Result<(), super::Error> {
-		self.conn.set_limits(limits).map_err(Into::into)
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
+		self.conn.set_limits(limits)
 	}
 
 	/// Assemble the web flavor and spawn its capsule reader.

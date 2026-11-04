@@ -204,9 +204,6 @@ pub enum Error {
 	/// This endpoint closed the connection locally.
 	#[error("locally closed")]
 	Closed,
-	/// The flow-control limits are ones a peer would refuse, so none were applied.
-	#[error("invalid quic limits: {0}")]
-	Limits(#[from] LimitsError),
 	/// The transport settings are ones the QUIC stack refuses.
 	#[error("invalid quic config: {0}")]
 	Config(#[from] moq_quic::ConfigError),

@@ -9,7 +9,7 @@ How to update your code for each breaking change, newest first.
 Construct an endpoint with `quic::Endpoint::new(config, socket)` instead of `new(socket, config)`.
 Rename `quic::Connection::remote_addr()` to `remote_address()`; it now reports the live peer address, following migration instead of caching the handshake address.
 `Connection::close(code, reason)` takes a UTF-8 `&str` instead of bytes, matching the core and Tokio driver.
-`Connection::set_limits` returns `quic::LimitsError` directly instead of wrapping it in `quic::Error::Limits`.
+`Connection::set_limits` and `quic::web::Session::set_limits` return `quic::LimitsError` directly; `quic::Error::Limits` is removed.
 
 On `quic::Connection` and `quic::web::Session`, rename `read_datagram()` to `recv_datagram()`.
 On both layers' `send::Stream` and `send::Finished`, rename `stopped()` to `closed()`; results and acknowledgement semantics are unchanged.
@@ -94,7 +94,7 @@ Read the worker's time with `kio::clock::now()` inside it.
 
 ### QUIC limits are `moq_quic::Limits` (#5871)
 
-`quic::Limits` is `moq_quic::Limits`, where each `None` field keeps that limit, and an invalid one fails `set_limits` with `Error::Limits` instead of `WindowRange` or `StreamsRange`.
+`quic::Limits` is `moq_quic::Limits`, where each `None` field keeps that limit, and an invalid one fails `set_limits` with `LimitsError` instead of `WindowRange` or `StreamsRange`.
 Start from `quic::Limits::default()` and set only the fields you change.
 
 ### The `noq` feature is `quic` (#5664)
