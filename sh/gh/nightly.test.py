@@ -123,7 +123,7 @@ class NightlyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(calls[-1], "just dart bench")
         self.assertIn("failed: just py bench", result.stderr)
-        for runner in ("rust-ffi", "rust-net", "go", "python", "kotlin", "cpp", "dart"):
+        for runner in ("rust-ffi", "rust-net", "rust-background", "go", "python", "kotlin", "cpp", "dart"):
             self.assertIn(f"/{runner}.json", result.stderr)
 
     def test_bench_targets_share_one_invocation(self):

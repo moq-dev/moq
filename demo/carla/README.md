@@ -225,7 +225,7 @@ A steering wheel works through the
 the keys it is absolute: rim angle is steering angle and pedal travel is
 throttle and brake. It takes over only once it moves with the throttle
 released, so a resting foot cannot claim control, and losing an armed wheel
-cuts the throttle and brakes. Click its name in the header to calibrate an
+cuts the throttle and brakes. Click its name on the map to calibrate an
 unfamiliar layout; the result is stored per device.
 
 ## Checks
