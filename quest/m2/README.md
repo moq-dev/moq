@@ -29,6 +29,8 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Mesh libraries](/quest/m2/mesh/README.md) - an `Endpoint` reaches any enrolled node by endpoint ID over relays or a sparse direct overlay, with address hints and a `.status` track; the mesh binary and UI live in Kixel
+- [`@moq/net` broadcasts expose their requests](/quest/m2/net-broadcast-requests.md) - a JS broadcast serves tracks it never created, on demand, like Rust
+- [`@moq/crypto` loads a stored signing key](/quest/m2/crypto-key-load.md) - one device key proves mesh identity and signs broadcasts
 - [Announce credit](/quest/m2/announce-credit.md) - a subscriber bounds an Announce Stream's routes with credit at the wire, so a path flood never closes a session
 - [JS announced coalescing](/quest/m2/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m2/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
