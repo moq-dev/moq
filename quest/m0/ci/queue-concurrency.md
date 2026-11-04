@@ -21,7 +21,7 @@ the repository's `added_to_merge_queue`, `removed_from_merge_queue` and
 `merged` issue events, removed and unmerged entries included. A never-empty
 hour is a UTC clock hour the queue held an entry throughout; burst latency is
 final enqueue to merge for PRs merged in those hours (nearest-rank p90). Builds
-are the `Queue` jobs of `merge_group` runs. Host load is the mean host-wide
+are the `Queue` jobs of `merge_group` runs that start in the window. Host load is the mean host-wide
 CPU busy share that cargo's `--timings` sampled during each build's compile
 phases (the runner's container shares the host's `/proc/stat`); builds that
 compile nothing have none. The 2026-11-02 day reproduces the landing quest's

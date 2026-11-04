@@ -7,8 +7,9 @@ Occupancy comes from the repository's `added_to_merge_queue`,
 `removed_from_merge_queue` and `merged` issue events, so removed and unmerged
 entries count too. A never-empty hour is a UTC clock hour the queue held an
 entry throughout; latency is a merged PR's final enqueue to its merge. Builds
-are the Queue jobs of `merge_group` runs, and host CPU is the mean host-wide
-busy percentage cargo sampled during each build's compile phases.
+are the Queue jobs of `merge_group` runs that start in the window, and host CPU
+is the mean host-wide busy percentage cargo sampled during each build's compile
+phases.
 
 Reads through `gh api` (REST only) and caches per-build responses in
 CACHE_DIR, so a rerun is cheap.
@@ -26,8 +27,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 REPO = "moq-dev/moq"
-QUEUE_EVENTS = {"added_to_merge_queue", "removed_from_merge_queue", "merged"}
+# A merged entry is removed and merged in the same second; order ties this way.
+QUEUE_EVENTS = ["added_to_merge_queue", "removed_from_merge_queue", "merged"]
 HOUR = timedelta(hours=1)
+# Finds the entries already queued, and builds already waiting, when a window opens.
+LOOKBACK = timedelta(days=1)
 
 
 def ts(s):
@@ -72,7 +76,7 @@ def stays(events):
         by_pr[e["pr"]].append(e)
     out = []
     for pr, evs in by_pr.items():
-        evs.sort(key=lambda e: (e["at"], e["event"] != "added_to_merge_queue"))
+        evs.sort(key=lambda e: (e["at"], QUEUE_EVENTS.index(e["event"])))
         added = None
         for e in evs:
             if e["event"] == "added_to_merge_queue":
@@ -117,7 +121,7 @@ def builds(start, end, cache):
                     "started": ts(job["started_at"]),
                     "completed": ts(job["completed_at"]),
                     "runner": job["runner_name"],
-                    "cpu": cached(cache, f"cpu-{run['id']}-{job['id']}.json", lambda r=run, j=job: host_cpu(r, j)),
+                    "job": job,
                 }
             )
     return out
@@ -126,7 +130,7 @@ def builds(start, end, cache):
 def host_cpu(run, job):
     """Mean host-wide CPU busy % from the job's cargo --timings upload; cargo
     samples /proc/stat, which the runner's container shares with the host."""
-    arts = gh(f"repos/{REPO}/actions/runs/{run['id']}/artifacts")["artifacts"]
+    arts = gh(f"repos/{REPO}/actions/runs/{run}/artifacts")["artifacts"]
     art = next((a for a in arts if a["name"] == "cargo-timings" and not a["expired"]), None)
     if not art:
         return None
@@ -176,7 +180,7 @@ def num(x, unit=""):
     return "n/a" if x is None else f"{x:.1f}{unit}"
 
 
-def report(entries, jobs, start, end):
+def report(entries, jobs, start, end, cache):
     busy = nonempty(entries, start, end)
     first = start.replace(minute=0, second=0, microsecond=0)
     first += HOUR if first < start else timedelta()
@@ -199,7 +203,12 @@ def report(entries, jobs, start, end):
     jobs = [j for j in jobs if start <= j["started"] < end]
     outcomes = Counter(j["conclusion"] for j in jobs)
     minutes = [(j["completed"] - j["started"]).total_seconds() / 60 for j in jobs]
-    cpu = [j["cpu"] for j in jobs if j["cpu"] is not None]
+    cpu = [
+        c
+        for j in jobs
+        if (c := cached(cache, f"cpu-{j['run']}-{j['job']['id']}.json", lambda j=j: host_cpu(j["run"], j["job"])))
+        is not None
+    ]
     overlaps = sum(
         1
         for i, a in enumerate(jobs)
@@ -239,11 +248,10 @@ def main():
     bounds = [ts(a) for a in sys.argv[2:]]
     windows = list(zip(bounds[::2], bounds[1::2], strict=True))
     lo, hi = min(w[0] for w in windows), max(w[1] for w in windows)
-    # A day of lookback finds the entries already queued when a window opens.
-    entries = stays(queue_events(lo - timedelta(days=1)))
-    jobs = builds(lo, hi, cache)
+    entries = stays(queue_events(lo - LOOKBACK))
+    jobs = builds(lo - LOOKBACK, hi, cache)
     for start, end in windows:
-        report(entries, jobs, start, end)
+        report(entries, jobs, start, end, cache)
 
 
 if __name__ == "__main__":
