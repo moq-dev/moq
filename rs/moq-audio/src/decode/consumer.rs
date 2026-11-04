@@ -206,9 +206,10 @@ impl Consumer {
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
 		// slow to take its first, and the publisher should never see a stated zero min first.
 		let mut subscriber = track
-			.subscribe(playout.subscription(
-				moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio),
-			))
+			.subscribe(
+				playout
+					.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio)),
+			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
 		// start, like any other join. Move the local cursor, not Subscription::ranges: the

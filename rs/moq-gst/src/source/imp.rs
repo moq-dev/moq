@@ -1090,10 +1090,24 @@ fn reconcile(
 		Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
 	};
 	for (name, config) in &playable.video.renditions {
-		insert(name, TrackKind::Video, video_caps(config), &config.container, config.warmup, config);
+		insert(
+			name,
+			TrackKind::Video,
+			video_caps(config),
+			&config.container,
+			config.warmup,
+			config,
+		);
 	}
 	for (name, config) in &playable.audio.renditions {
-		insert(name, TrackKind::Audio, audio_caps(config), &config.container, config.warmup, config);
+		insert(
+			name,
+			TrackKind::Audio,
+			audio_caps(config),
+			&config.container,
+			config.warmup,
+			config,
+		);
 	}
 
 	// A disabled rendition keeps its pad even when an enabled alternative displaced its reader,

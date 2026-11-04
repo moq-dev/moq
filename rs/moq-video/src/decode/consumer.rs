@@ -328,9 +328,8 @@ impl Reader {
 			.subscribe(
 				// The whole delay from the first request, as the container keeps it, so the
 				// publisher never sees a stated zero min before the container's update.
-				playout.subscription(
-					moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video),
-				),
+				playout
+					.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video)),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement

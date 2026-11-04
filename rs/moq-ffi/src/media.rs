@@ -1563,9 +1563,7 @@ mod read_tests {
 		let delay = Duration::from_millis(200);
 		for video in [false, true] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
-			let track = broadcast
-				.create_track("media", hang::container::track_info(0))
-				.unwrap();
+			let track = broadcast.create_track("media", hang::container::track_info(0)).unwrap();
 			let mut catalog = moq_mux::catalog::hang::Catalog::default();
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 			audio.warmup = Some(warmup);
