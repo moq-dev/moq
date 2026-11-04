@@ -5,6 +5,9 @@ import { Effect, Signal } from "@moq/signals";
 import { Order } from "../order";
 import type { StreamTrack } from "./types";
 
+// A probe chunk's bytes: an Annex B start code, which the probe requires of H.264 and HEVC.
+const ANNEX_B = { byteLength: 4, copyTo: (dest: Uint8Array) => dest.set([0, 0, 0, 1]) };
+
 mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
 const { Capture } = await import("./capture");
 const { Encoder } = await import("./encoder");
@@ -438,7 +441,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 
 		// Only the probe flushes; report the configured codec, as Chrome does.
 		async flush(): Promise<void> {
-			const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+			const chunk = { type: "key", timestamp: 0, ...ANNEX_B };
 			this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
 		}
 
@@ -462,13 +465,12 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: live,
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture,
 	});
 
@@ -558,7 +560,7 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 
 		// Only the probe flushes; report the configured codec, as Chrome does.
 		async flush(): Promise<void> {
-			const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+			const chunk = { type: "key", timestamp: 0, ...ANNEX_B };
 			this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
 		}
 
@@ -577,13 +579,12 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: live,
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition, order: new Order() } as never,
+		broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
 		capture,
 	});
 

@@ -7,6 +7,7 @@ use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqGroupConsumer;
 use crate::consumer::MoqTrackConsumer;
 use crate::consumer::{MoqAnchor, MoqDelay, MoqOrder, MoqRange, MoqSubscription, moq_subscription_defaults};
+use crate::datagram::*;
 use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
 use crate::json::{
 	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConsumer,
@@ -46,9 +47,18 @@ fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
 		priority: 0,
 		max_age: None,
+		max_age_unlimited: false,
 		refresh: None,
 		timescale: Some(1_000_000),
 		compress: false,
+	}
+}
+
+/// [`timed_info`] with no publisher age limit, for a test that reads superseded groups.
+fn unlimited_info() -> MoqTrackInfo {
+	MoqTrackInfo {
+		max_age_unlimited: true,
+		..timed_info()
 	}
 }
 
@@ -183,7 +193,7 @@ fn assert_protocol(err: &MoqError, scope: crate::error::MoqErrorScope, kind: cra
 }
 
 #[tokio::test]
-async fn detached_cancels_inner_on_drop() {
+async fn call_cancels_inner_on_drop() {
 	struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
 
 	impl Drop for DropSignal {
@@ -194,7 +204,7 @@ async fn detached_cancels_inner_on_drop() {
 
 	let (started_tx, started_rx) = tokio::sync::oneshot::channel();
 	let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-	let outer = tokio::spawn(crate::ffi::detached(async move {
+	let outer = tokio::spawn(crate::ffi::run(async move {
 		let _drop = DropSignal(Some(dropped_tx));
 		started_tx.send(()).unwrap();
 		std::future::pending::<Result<(), MoqError>>().await
@@ -202,13 +212,13 @@ async fn detached_cancels_inner_on_drop() {
 
 	kio::clock::timeout(TIMEOUT, started_rx)
 		.await
-		.expect("timed out waiting for detached task to start")
+		.expect("timed out waiting for call to start")
 		.unwrap();
 	outer.abort();
 	assert!(outer.await.unwrap_err().is_cancelled());
 	kio::clock::timeout(TIMEOUT, dropped_rx)
 		.await
-		.expect("timed out waiting for detached task to be dropped")
+		.expect("timed out waiting for call to be dropped")
 		.unwrap();
 }
 
@@ -793,7 +803,7 @@ async fn audio_raw_publish_from_many_threads() {
 		"tone".into(),
 		snapshot.audio["tone"].clone(),
 		MoqAudioDecoderOutput {
-			// The track's whole retention: reading starts only after finish, and the budget
+			// The track's whole max age: reading starts only after finish, and the budget
 			// ages groups by wall clock, so a stalled host would otherwise skip the start.
 			delay: Some(MoqDelay {
 				min: Some(Duration::ZERO),
@@ -1230,27 +1240,20 @@ async fn raw_audio_codec_default_frame() {
 async fn raw_track_datagram_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast
-		.publish_track(
+		.create_datagrams(
 			"events".into(),
-			Some(MoqTrackInfo {
+			Some(MoqDatagramInfo {
 				priority: 0,
-				max_age: None,
-				refresh: None,
 				timescale: Some(1_000_000),
-				compress: false,
 			}),
 		)
 		.unwrap();
-	let consumer = track.consume(None).unwrap();
+	let consumer = track.consume().unwrap();
 	let payload = b"hello datagram".to_vec();
 
-	let sequence = track
-		.append_datagram(MoqFrame {
-			payload: payload.clone(),
-			timestamp: Some(us(123_456)),
-		})
-		.unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
+	// A local reader receives what is sent after it was created, before its first read.
+	let sequence = track.append(Some(us(123_456)), payload.clone()).unwrap();
+	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
 		.await
 		.expect("timed out waiting for datagram")
 		.unwrap()
@@ -1267,6 +1270,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		max_age: Some(Duration::from_millis(2_500)),
+		max_age_unlimited: false,
 		refresh: Some(2),
 		timescale: Some(90_000),
 		compress: true,
@@ -1277,6 +1281,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info();
 	assert_eq!(got.priority, 7);
 	assert_eq!(got.max_age, Some(Duration::from_millis(2_500)));
+	assert!(!got.max_age_unlimited);
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
 	assert!(got.compress);
@@ -1351,6 +1356,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 				Some(MoqTrackInfo {
 					priority: 0,
 					max_age: None,
+					max_age_unlimited: false,
 					refresh: None,
 					timescale: Some(timestamp.scale),
 					compress: false,
@@ -1416,7 +1422,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let clock = broadcast
-		.with_state(|state| Ok(state.catalog.snapshot().clock))
+		.with_state(|state| Ok(state.catalog.snapshot().media.clock))
 		.unwrap();
 	// Withhold publication so only the explicit clock read can fix it before the first frame.
 	let reserved = broadcast.with_state(|state| Ok(state.catalog.reserve())).unwrap();
@@ -1436,7 +1442,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 		.unwrap();
 	assert_eq!(
 		broadcast
-			.with_state(|state| Ok(state.catalog.snapshot().clock))
+			.with_state(|state| Ok(state.catalog.snapshot().media.clock))
 			.unwrap(),
 		clock
 	);
@@ -1454,6 +1460,7 @@ async fn json_snapshot_roundtrip() {
 	let info = MoqTrackInfo {
 		priority: 0,
 		max_age: None,
+		max_age_unlimited: false,
 		timescale: Some(1_000_000),
 		refresh: None,
 		compress: true,
@@ -1527,6 +1534,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compress: false,
@@ -1754,6 +1762,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compress: false,
@@ -2006,6 +2015,23 @@ async fn track_request_demand_survives_accept() {
 	);
 }
 
+/// A datagram handler keeps its broadcast alive independently of the stream handler.
+#[tokio::test]
+async fn requested_datagrams_outlive_the_broadcast_handle() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let requests = broadcast.requests().unwrap();
+	let datagrams = requests.datagrams().unwrap();
+	let consumer = broadcast.consume().unwrap().datagrams("events".into()).unwrap();
+	drop(requests);
+	drop(broadcast);
+	let request = datagrams.requested().await.unwrap();
+	assert_eq!(request.name().unwrap(), "events");
+	assert_eq!(request.priority().unwrap(), Some(0));
+	let producer = request.accept(None).unwrap();
+	producer.append(None, b"beep".to_vec()).unwrap();
+	assert_eq!(consumer.recv().await.unwrap().unwrap().payload, b"beep");
+}
+
 #[tokio::test]
 async fn track_request_demand_ends_on_rejection() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -2066,8 +2092,8 @@ async fn dynamic_track_request() {
 	track.finish().unwrap();
 }
 
-#[tokio::test(start_paused = true)]
-async fn raw_untimed_frames_and_datagrams_roundtrip() {
+#[tokio::test]
+async fn raw_untimed_frames_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("untimed".into(), None).unwrap();
 	let consumer = track.consume(None).unwrap();
@@ -2093,19 +2119,10 @@ async fn raw_untimed_frames_and_datagrams_roundtrip() {
 	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(frame.payload, b"group");
 	assert_eq!(frame.timestamp, None);
-	track
-		.append_datagram(MoqFrame {
-			payload: b"datagram".to_vec(),
-			timestamp: None,
-		})
-		.unwrap();
-	let datagram = consumer.recv_datagram().await.unwrap().unwrap();
-	assert_eq!(datagram.payload, b"datagram");
-	assert_eq!(datagram.timestamp, None);
 	track.finish().unwrap();
 }
 
-/// An explicitly timed raw track refuses frames and datagrams without a timestamp.
+/// An explicitly timed raw track refuses frames without a timestamp.
 #[test]
 fn raw_writes_need_a_timestamp() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -2126,7 +2143,6 @@ fn raw_writes_need_a_timestamp() {
 		)
 	};
 	assert!(refused(track.write_frame(untimed()).unwrap_err()));
-	assert!(refused(track.append_datagram(untimed()).unwrap_err()));
 	let group = track.append_group().unwrap();
 	assert!(refused(group.write_frame(untimed()).unwrap_err()));
 }
@@ -2202,28 +2218,6 @@ async fn timestamps_are_exact() {
 			.unwrap();
 		assert_eq!(frame.timestamp, Some(timestamp));
 	}
-
-	// An inserted datagram keeps the exact tick too.
-	let tick = MoqTimestamp {
-		value: 1,
-		scale: 90_000,
-	};
-	track
-		.insert_datagram(
-			7,
-			MoqFrame {
-				payload: b"datagram".to_vec(),
-				timestamp: Some(tick),
-			},
-		)
-		.unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
-	assert_eq!(datagram.sequence, 7);
-	assert_eq!(datagram.timestamp, Some(tick));
 
 	for invalid in [
 		MoqTimestamp { value: 0, scale: 0 },
@@ -2940,7 +2934,7 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		&broadcast,
 		named("high"),
 		MoqVideoInit {
-			lower: Some(low.clone()),
+			lower: Some(MoqMediaProducer::Track { producer: low.clone() }),
 			..video_init(MoqVideoFormat::Avc3, h264_init())
 		},
 	)
@@ -2966,6 +2960,99 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		}
 	};
 	assert!(disabled.video["low"].enabled);
+}
+
+/// A byte-stream rung above another sits one priority below it, so a grant short of both funds
+/// the lower one first. Disabled, it drops what is written to it, and enabled again it resumes at
+/// the next keyframe in the stream.
+#[tokio::test]
+async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
+	let estimate = moq_net::bandwidth::Producer::new();
+	let bandwidth = crate::bandwidth::MoqAllocator::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+
+	let named = |name: &str| MoqMediaTarget::Named {
+		name: Some(name.into()),
+	};
+	let low =
+		MoqMediaTrackStreamProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::Avc3, h264_init()))
+			.unwrap();
+	let high = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		named("high"),
+		MoqVideoInit {
+			lower: Some(MoqMediaProducer::Stream { producer: low.clone() }),
+			..video_init(MoqVideoFormat::Avc3, h264_init())
+		},
+	)
+	.unwrap();
+
+	let low_track = consumer.subscribe_track("low".into(), None).await.unwrap();
+	let high_track = consumer.subscribe_track("high".into(), None).await.unwrap();
+	assert_eq!(low_track.info().priority, hang::catalog::PRIORITY.video);
+	assert_eq!(high_track.info().priority, hang::catalog::PRIORITY.video - 1);
+
+	// The higher rung asks for more, but strict priority fills the lower one first.
+	let low_reservation = bandwidth.reserve(&low.demand().unwrap(), 2_000_000);
+	let high_reservation = bandwidth.reserve(&high.demand().unwrap(), 4_000_000);
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(low_reservation.rate(), Some(2_000_000));
+	assert_eq!(high_reservation.rate(), Some(1_000_000));
+
+	// Each keyframe ends in its own slice bytes, to tell which one went out.
+	let keyframe = |last: u8| {
+		let mut bytes = h264_init();
+		bytes.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, last]);
+		bytes
+	};
+	let delta = [0, 0, 0, 1, 0x41, 0x9a, 0x21, 0x22];
+	// The splitter emits an access unit once the next one starts, hence the trailing deltas.
+	let write = |bytes: &[&[u8]]| {
+		for bytes in bytes {
+			high.write(bytes.to_vec()).unwrap();
+		}
+	};
+	let next_frame = async || {
+		loop {
+			let frame = kio::clock::timeout(TIMEOUT, high_track.read_frame())
+				.await
+				.expect("timed out waiting for a frame")
+				.unwrap()
+				.expect("the track ended");
+			// The discontinuity marker is empty.
+			if !frame.payload.is_empty() {
+				return frame.payload;
+			}
+		}
+	};
+	let high_enabled = async |enabled: bool| loop {
+		let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
+			.await
+			.expect("timed out waiting for catalog")
+			.unwrap()
+			.expect("expected a catalog");
+		if catalog.video.get("high").is_some_and(|high| high.enabled == enabled) {
+			assert!(catalog.video["low"].enabled);
+			break;
+		}
+	};
+
+	write(&[&keyframe(0x21), &delta, &delta]);
+	assert!(next_frame().await.ends_with(&[0x21]));
+
+	high.set_enabled(false).unwrap();
+	high_enabled(false).await;
+	// The stream keeps flowing, but none of it goes out, the keyframe included.
+	write(&[&delta, &keyframe(0x23), &delta, &delta]);
+
+	high.set_enabled(true).unwrap();
+	write(&[&delta, &keyframe(0x24), &delta, &delta]);
+	high_enabled(true).await;
+	assert!(next_frame().await.ends_with(&[0x24]), "resumed on another keyframe");
 }
 
 /// A keyframe whose SPS names another level is a new decoder identity, so the track producer moves
@@ -4296,7 +4383,7 @@ async fn video_decode_start() {
 			rendition.clone(),
 			MoqVideoDecoderOutput {
 				start,
-				// The track's whole retention, so a slow host does not skip the first group.
+				// The track's whole max age, so a slow host does not skip the first group.
 				delay: Some(MoqDelay {
 					min: Some(Duration::ZERO),
 					max: Some(Duration::from_secs(30)),
@@ -5121,7 +5208,6 @@ async fn raw_track_next_group_is_repeatable() {
 
 /// The first group read commits the cursor either way: mixing arrival and sequence
 /// reads on one track is refused rather than silently interleaving two cursors.
-/// Datagrams are a separate cursor, so they flow regardless of the commitment.
 #[tokio::test]
 async fn raw_track_group_order_commits_on_first_read() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -5163,21 +5249,6 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.unwrap()
 		.expect("expected a group");
 	assert_eq!(group.sequence(), 1);
-
-	// Datagrams never commit and keep working after a commitment.
-	let sequence = track
-		.append_datagram(MoqFrame {
-			payload: b"beep".to_vec(),
-			timestamp: Some(us(0)),
-		})
-		.unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for a datagram")
-		.unwrap()
-		.expect("expected a datagram");
-	assert_eq!(datagram.sequence, sequence);
-	assert_eq!(datagram.payload, b"beep".to_vec());
 }
 
 fn raw_track() -> (
@@ -5191,102 +5262,11 @@ fn raw_track() -> (
 	(broadcast, track, consumer)
 }
 
-fn datagram_frame(payload: &[u8]) -> MoqFrame {
-	MoqFrame {
-		payload: payload.to_vec(),
-		timestamp: Some(us(1)),
-	}
-}
-
 fn group_frame(payload: &[u8]) -> MoqFrame {
 	MoqFrame {
 		payload: payload.to_vec(),
 		timestamp: Some(us(0)),
 	}
-}
-
-/// A pending group-lane read must not stall `recv_datagram` on the same subscription.
-async fn pending_group_does_not_block_datagram<F, Fut, T>(start_group: F)
-where
-	F: FnOnce(Arc<crate::consumer::MoqTrackConsumer>) -> Fut,
-	Fut: Future<Output = Result<T, MoqError>> + Send + 'static,
-	T: Send + 'static,
-{
-	let (_broadcast, track, consumer) = raw_track();
-
-	let group_read = {
-		let consumer = consumer.clone();
-		spawn_parked(start_group(consumer)).await
-	};
-	assert!(!group_read.is_finished(), "group read should still be pending");
-
-	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram behind a pending group read")
-		.unwrap()
-		.expect("expected a datagram");
-	assert_eq!(datagram.sequence, sequence);
-	assert_eq!(datagram.payload, b"beep".to_vec());
-	assert!(!group_read.is_finished(), "group read should stay pending");
-
-	track.write_frame(group_frame(b"group")).unwrap();
-	kio::clock::timeout(TIMEOUT, group_read)
-		.await
-		.expect("timed out waiting for the parked group")
-		.expect("group read panicked")
-		.unwrap();
-}
-
-/// A pending datagram read must not stall a group-lane read on the same subscription.
-async fn pending_datagram_does_not_block_group<F, Fut, T>(start_group: F)
-where
-	F: FnOnce(Arc<crate::consumer::MoqTrackConsumer>) -> Fut,
-	Fut: Future<Output = Result<T, MoqError>> + Send + 'static,
-	T: Send + 'static,
-{
-	let (_broadcast, track, consumer) = raw_track();
-
-	let datagram_read = {
-		let consumer = consumer.clone();
-		spawn_parked(async move { consumer.recv_datagram().await }).await
-	};
-	assert!(!datagram_read.is_finished(), "datagram read should still be pending");
-
-	track.write_frame(group_frame(b"group")).unwrap();
-	kio::clock::timeout(TIMEOUT, start_group(consumer.clone()))
-		.await
-		.expect("timed out waiting for a group behind a pending datagram read")
-		.unwrap();
-	assert!(!datagram_read.is_finished(), "datagram read should stay pending");
-
-	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, datagram_read)
-		.await
-		.expect("timed out waiting for the parked datagram")
-		.expect("datagram read panicked")
-		.unwrap()
-		.expect("expected a datagram");
-	assert_eq!(datagram.sequence, sequence);
-	assert_eq!(datagram.payload, b"beep".to_vec());
-}
-
-/// `insert_datagram` sends at the caller's sequence, and later appends continue past it.
-#[tokio::test]
-async fn raw_track_insert_datagram_keeps_its_sequence() {
-	let (_broadcast, track, consumer) = raw_track();
-
-	track.insert_datagram(7, datagram_frame(b"seven")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for the inserted datagram")
-		.unwrap()
-		.expect("expected a datagram");
-	assert_eq!(datagram.sequence, 7);
-	assert_eq!(datagram.payload, b"seven".to_vec());
-	assert_eq!(datagram.timestamp.map(micros), Some(1));
-
-	assert_eq!(track.append_datagram(datagram_frame(b"next")).unwrap(), 8);
 }
 
 /// `largest` follows the newest group and its newest frame.
@@ -5324,183 +5304,6 @@ async fn broadcast_consumer_closed_resolves_on_close() {
 		.expect("timed out waiting for closed")
 		.expect("closed panicked")
 		.unwrap();
-}
-
-#[tokio::test]
-async fn raw_track_pending_next_group_does_not_block_datagram() {
-	pending_group_does_not_block_datagram(|consumer| async move { consumer.next_group().await }).await;
-}
-
-#[tokio::test]
-async fn raw_track_pending_recv_group_does_not_block_datagram() {
-	pending_group_does_not_block_datagram(|consumer| async move { consumer.recv_group().await }).await;
-}
-
-#[tokio::test]
-async fn raw_track_pending_read_frame_does_not_block_datagram() {
-	pending_group_does_not_block_datagram(|consumer| async move { consumer.read_frame().await }).await;
-}
-
-#[tokio::test]
-async fn raw_track_pending_datagram_does_not_block_next_group() {
-	pending_datagram_does_not_block_group(|consumer| async move { consumer.next_group().await }).await;
-}
-
-#[tokio::test]
-async fn raw_track_pending_datagram_does_not_block_recv_group() {
-	pending_datagram_does_not_block_group(|consumer| async move { consumer.recv_group().await }).await;
-}
-
-#[tokio::test]
-async fn raw_track_pending_datagram_does_not_block_read_frame() {
-	pending_datagram_does_not_block_group(|consumer| async move { consumer.read_frame().await }).await;
-}
-
-#[tokio::test]
-async fn raw_track_update_during_pending_group_still_reads_datagram() {
-	let (_broadcast, track, consumer) = raw_track();
-
-	let group_read = {
-		let consumer = consumer.clone();
-		spawn_parked(async move { consumer.next_group().await }).await
-	};
-
-	consumer
-		.update(MoqSubscription {
-			priority: 10,
-			delay: MoqDelay {
-				min: Some(Duration::ZERO),
-				max: Some(Duration::from_millis(25)),
-			},
-			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0 },
-				end: None,
-			}]),
-			order: None,
-		})
-		.unwrap();
-
-	let sequence = track.append_datagram(datagram_frame(b"after-update")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram after update")
-		.unwrap()
-		.expect("expected a datagram");
-	assert_eq!(datagram.sequence, sequence);
-	assert_eq!(datagram.payload, b"after-update".to_vec());
-
-	track.write_frame(group_frame(b"group")).unwrap();
-	kio::clock::timeout(TIMEOUT, group_read)
-		.await
-		.expect("timed out waiting for the parked group")
-		.expect("group read panicked")
-		.unwrap()
-		.expect("expected a group");
-}
-
-#[tokio::test]
-async fn raw_track_dropping_a_pending_group_read_does_not_cancel_datagrams() {
-	let (_broadcast, track, consumer) = raw_track();
-
-	let group_read = {
-		let consumer = consumer.clone();
-		spawn_parked(async move { consumer.next_group().await }).await
-	};
-	group_read.abort();
-	match group_read.await {
-		Err(err) if err.is_cancelled() => {}
-		Err(err) => panic!("aborted group read should join as cancelled, got {err}"),
-		Ok(_) => panic!("aborting the call should cancel only that future"),
-	}
-
-	let sequence = track.append_datagram(datagram_frame(b"still-open")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram after a cancelled group read")
-		.unwrap()
-		.expect("expected a datagram");
-	assert_eq!(datagram.sequence, sequence);
-
-	track.write_frame(group_frame(b"group")).unwrap();
-	let group = kio::clock::timeout(TIMEOUT, consumer.next_group())
-		.await
-		.expect("timed out waiting for a group after the cancelled read")
-		.unwrap()
-		.expect("expected a group");
-	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
-		.await
-		.expect("timed out waiting for the group's frame")
-		.unwrap()
-		.expect("expected a frame");
-	assert_eq!(frame.payload, b"group".to_vec());
-}
-
-#[tokio::test]
-async fn raw_track_dropping_a_pending_datagram_read_does_not_cancel_groups() {
-	let (_broadcast, track, consumer) = raw_track();
-
-	let datagram_read = {
-		let consumer = consumer.clone();
-		spawn_parked(async move { consumer.recv_datagram().await }).await
-	};
-	datagram_read.abort();
-	match datagram_read.await {
-		Err(err) if err.is_cancelled() => {}
-		Err(err) => panic!("aborted datagram read should join as cancelled, got {err}"),
-		Ok(_) => panic!("aborting the call should cancel only that future"),
-	}
-
-	track.write_frame(group_frame(b"group")).unwrap();
-	let group = kio::clock::timeout(TIMEOUT, consumer.next_group())
-		.await
-		.expect("timed out waiting for a group after a cancelled datagram read")
-		.unwrap()
-		.expect("expected a group");
-	assert_eq!(group.sequence(), 0);
-
-	let sequence = track.append_datagram(datagram_frame(b"later")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for a datagram after the cancelled read")
-		.unwrap()
-		.expect("expected a datagram");
-	assert_eq!(datagram.sequence, sequence);
-}
-
-#[tokio::test]
-async fn raw_track_handle_cancel_aborts_both_pending_lanes() {
-	let (_broadcast, _track, consumer) = raw_track();
-
-	let group_read = {
-		let consumer = consumer.clone();
-		spawn_parked(async move { consumer.next_group().await }).await
-	};
-	let datagram_read = {
-		let consumer = consumer.clone();
-		spawn_parked(async move { consumer.recv_datagram().await }).await
-	};
-
-	consumer.cancel();
-
-	match kio::clock::timeout(TIMEOUT, group_read)
-		.await
-		.expect("timed out waiting for cancelled group read")
-		.expect("group read panicked")
-	{
-		Err(MoqError::Cancelled) => {}
-		Err(err) => panic!("handle cancel should fail the group read, got {err:?}"),
-		Ok(_) => panic!("handle cancel should fail the group read"),
-	}
-
-	match kio::clock::timeout(TIMEOUT, datagram_read)
-		.await
-		.expect("timed out waiting for cancelled datagram read")
-		.expect("datagram read panicked")
-	{
-		Err(MoqError::Cancelled) => {}
-		Err(err) => panic!("handle cancel should fail the datagram read, got {err:?}"),
-		Ok(_) => panic!("handle cancel should fail the datagram read"),
-	}
 }
 
 /// An empty completed group is not track EOF: `read_frame` waits for a later
@@ -6157,6 +5960,136 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 			return;
 		}
 	}
+}
+
+/// A server publishing `path` and a client following it over default versions, which
+/// negotiate lite-06: the server's broadcast, the client's view of it, the client's session,
+/// and what keeps the server side alive.
+async fn datagram_connection(
+	path: &str,
+	versions: Vec<String>,
+) -> (
+	Arc<MoqBroadcastProducer>,
+	Arc<MoqBroadcastConsumer>,
+	Arc<MoqSession>,
+	impl Sized,
+) {
+	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		versions: versions.clone(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = kio::clock::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accepting.accept().await.unwrap().expect("a session");
+		request.accept(None, None).await.expect("handshake failed")
+	});
+	let broadcast = create_announced(&server_origin, path);
+
+	let viewer = MoqOriginProducer::new(MoqOriginConfig::default());
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		versions,
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(viewer.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let session = kio::clock::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let server_session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+	let followed = viewer.consume().follow(path.into(), None).unwrap();
+	let remote = kio::clock::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out waiting for the broadcast")
+		.unwrap();
+	(broadcast, remote, session, (server, server_origin, server_session))
+}
+
+/// A native datagram-only reader reaches a publisher on the default lite-06 path.
+#[tokio::test]
+async fn datagrams_cross_a_default_connection() {
+	let (broadcast, remote, session, _server) = datagram_connection("sensor", vec![]).await;
+	let producer = broadcast
+		.create_datagrams(
+			"events".into(),
+			Some(MoqDatagramInfo {
+				timescale: Some(90_000),
+				priority: 7,
+			}),
+		)
+		.unwrap();
+	let consumer = remote.datagrams("events".into()).unwrap();
+	assert_eq!(consumer.info().await.unwrap().timescale, Some(90_000));
+	producer.priority_changed(None).await.unwrap();
+	producer
+		.append(
+			Some(MoqTimestamp {
+				value: 1,
+				scale: 90_000,
+			}),
+			b"tick".to_vec(),
+		)
+		.unwrap();
+	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(datagram.payload, b"tick");
+	assert_eq!(
+		datagram.timestamp,
+		Some(MoqTimestamp {
+			value: 1,
+			scale: 90_000
+		})
+	);
+	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
+}
+
+/// An on-demand datagram-only track reaches a reader on the default lite-06 path while a
+/// stream handler leaves the name unanswered: the datagram handler's answer serves it.
+#[tokio::test]
+async fn requested_datagrams_cross_a_default_connection() {
+	requested_datagrams_cross(vec![], "moq-lite-06").await;
+}
+
+#[tokio::test]
+async fn requested_datagrams_cross_lite07() {
+	requested_datagrams_cross(vec!["moq-lite-07-wip".into()], "moq-lite-07-wip").await;
+}
+
+/// Reads a datagram track a datagram handler accepts over `versions`, which negotiate
+/// `negotiated`, while the broadcast's stream handler stays alive and never answers.
+async fn requested_datagrams_cross(versions: Vec<String>, negotiated: &str) {
+	let (broadcast, remote, session, _server) = datagram_connection("sensor", versions).await;
+	let requests = broadcast.requests().unwrap();
+	let datagrams = requests.datagrams().unwrap();
+	let consumer = remote.datagrams("events".into()).unwrap();
+	let request = kio::clock::timeout(TIMEOUT, datagrams.requested())
+		.await
+		.unwrap()
+		.unwrap();
+	let producer = request.accept(None).unwrap();
+	consumer.info().await.unwrap();
+	producer.append(None, b"only".to_vec()).unwrap();
+	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(datagram.payload, b"only");
+	assert_eq!(session.state().version.as_deref(), Some(negotiated));
 }
 
 /// A replacement session from the same publisher re-announces every route while the old one
@@ -8422,7 +8355,7 @@ async fn shutdown_delivers_the_finished_track() {
 		let closing = publisher.clone();
 		kio::clock::timeout(
 			TIMEOUT,
-			crate::ffi::detached(async move {
+			crate::ffi::run(async move {
 				let group = track.append_group()?;
 				group.write_frame(MoqFrame {
 					timestamp: Some(us(0)),
@@ -8504,7 +8437,9 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 #[tokio::test]
 async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
 		let group = track.append_group().unwrap();
 		group
@@ -8716,7 +8651,9 @@ async fn auth_tokens_join_and_leave_the_union() {
 #[tokio::test]
 async fn time_anchors_start_at_the_containing_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
 		let group = track.append_group().unwrap();
 		group
@@ -8947,7 +8884,9 @@ fn raw_group_read_frame_cancelled_unfreed_does_not_block_the_next() {
 #[tokio::test]
 async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	let consumer = track
 		.consume(Some(MoqSubscription {
 			delay: MoqDelay {
@@ -9058,7 +8997,9 @@ async fn raw_next_group_wakes_read_frame_after_unlocking() {
 async fn raw_track_concurrent_reads_take_every_group_once() {
 	const GROUPS: u64 = 200;
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	// No age limit, so a group nobody has read yet is never skipped for a newer one.
 	let consumer = track
 		.consume(Some(MoqSubscription {
@@ -9190,4 +9131,224 @@ fn shutdown_waits_for_a_polled_call() {
 	shutdown.join().unwrap();
 	let parked = parked.join().unwrap();
 	assert!(matches!(parked, Err(MoqError::Cancelled)), "{parked:?}");
+}
+
+/// A cancelled foreign wait can remain allocated until the host frees it. It must neither
+/// consume another demand change nor prevent a second call from observing that change.
+#[tokio::test]
+async fn demand_cancelled_before_free_leaves_the_change() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let demand = track.demand().unwrap();
+	assert_eq!(demand.wanted_changed().await.unwrap(), None);
+	let mut abandoned = Box::pin(demand.wanted_changed());
+	assert!(
+		abandoned
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+			.is_pending()
+	);
+	ffi_caught_up().await;
+	let consumer = track.consume(None).unwrap();
+	let wanted = kio::clock::timeout(TIMEOUT, demand.wanted_changed())
+		.await
+		.expect("the abandoned wait stole the change")
+		.unwrap();
+	assert!(wanted.is_some());
+	drop(abandoned);
+	drop(consumer);
+}
+
+/// Setup, rather than the first packet, decides whether a rendition is usable.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn audio_subscribe_configuration_boundary() {
+	use crate::audio::MoqAudioConsumer;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("audio".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+	// The names alone cannot decide: the AAC-LC description may declare SBR,
+	// and a present, malformed OpusHead must never be replaced by catalog fields.
+	for (codec, description, channels, supported) in [
+		("opus", None, 2, true),
+		("opus", Some(opus_head()), 2, true),
+		("opus", Some(vec![]), 2, false),
+		("opus", Some(opus_head()[..18].to_vec()), 2, false),
+		("opus", None, 6, false),
+		("pcm", None, 6, true),
+		("pcm", Some(vec![]), 2, false),
+		("flac", None, 2, false),
+		("unknown", None, 2, false),
+		("mp4a.40.bad", None, 2, false),
+		("mp4a.40.2", Some(vec![0x11, 0x90]), 2, true),
+		("mp4a.40.2", Some(vec![0x12, 0x10, 0x56, 0xe5, 0x98]), 2, false),
+		("mp4a.40.2", Some(vec![0x11]), 2, false),
+		// Frequency index 15 promises a 24-bit rate that is absent from these two bytes.
+		("mp4a.40.2", Some(vec![0x17, 0x90]), 2, false),
+		("mp4a.40.2", None, 6, false),
+		("mp4a.40.5", None, 2, false),
+	] {
+		let mut config = sibling_audio("");
+		config.codec = codec.into();
+		config.description = description;
+		config.channel_count = channels;
+		let result = MoqAudioConsumer::subscribe(&consumer, "audio".into(), config, audio_output()).await;
+		if supported {
+			result.unwrap().cancel();
+		} else {
+			let error = result.err();
+			assert!(
+				matches!(&error, Some(MoqError::UnsupportedConfig { .. })),
+				"{codec}/{channels}: {error:?}"
+			);
+		}
+	}
+	// An output layout the decoder cannot produce is refused too. A zero output rate
+	// is a caller error no rendition avoids, and a missing track is not a refusal.
+	let layout = crate::audio::MoqAudioDecoderOutput {
+		channels: Some(0),
+		..audio_output()
+	};
+	assert!(matches!(
+		MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), layout).await,
+		Err(MoqError::UnsupportedConfig { .. })
+	));
+	let rate = crate::audio::MoqAudioDecoderOutput {
+		sample_rate: Some(0),
+		..audio_output()
+	};
+	assert!(matches!(
+		MoqAudioConsumer::subscribe(&consumer, "audio".into(), sibling_audio(""), rate).await,
+		Err(MoqError::Audio { .. })
+	));
+	let missing = MoqAudioConsumer::subscribe(&consumer, "missing".into(), sibling_audio(""), audio_output()).await;
+	assert!(matches!(missing, Err(MoqError::Audio { .. })));
+	let _limited = broadcast
+		.publish_track(
+			"limited".into(),
+			Some(MoqTrackInfo {
+				priority: 0,
+				max_age: Some(Duration::from_millis(10)),
+				max_age_unlimited: false,
+				refresh: None,
+				timescale: None,
+				compress: false,
+			}),
+		)
+		.unwrap();
+	let retained = MoqAudioConsumer::subscribe(
+		&consumer,
+		"limited".into(),
+		sibling_audio(""),
+		crate::audio::MoqAudioDecoderOutput {
+			delay: Some(MoqDelay {
+				min: Some(Duration::from_millis(20)),
+				max: None,
+			}),
+			..audio_output()
+		},
+	)
+	.await;
+	assert!(matches!(retained, Err(MoqError::Audio { .. })));
+	broadcast.close().unwrap();
+}
+
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn video_subscribe_configuration_boundary() {
+	use crate::video::{MoqVideoConsumer, MoqVideoDecoderOutput};
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _track = broadcast.publish_track("video".into(), None).unwrap();
+	let consumer = broadcast.consume().unwrap();
+	for (codec, description, supported) in [
+		("avc1.42001e", None, true),
+		("avc1.42001e", Some(vec![]), false),
+		("avc1.42001e", Some(vec![1, 0x42, 0, 0x1e]), false),
+		// hvc1 requires hvcC before any backend is opened, even on HEVC-capable hosts.
+		("hvc1.1.6.L93.B0", None, false),
+		("vp09.02.10.10", None, false),
+		("avc1.invalid", None, false),
+		("unknown", None, false),
+	] {
+		let config = MoqVideo {
+			codec: codec.into(),
+			description,
+			enabled: true,
+			container: MoqContainer::Legacy,
+			preference: 0,
+			label: None,
+			broadcast: None,
+			instance: None,
+			track: None,
+			coded: None,
+			display_aspect: None,
+			bitrate: None,
+			framerate: None,
+		};
+		let result = MoqVideoConsumer::subscribe(
+			&consumer,
+			"video".into(),
+			config.clone(),
+			MoqVideoDecoderOutput::default(),
+		)
+		.await;
+		if supported {
+			result.unwrap().cancel();
+			let missing =
+				MoqVideoConsumer::subscribe(&consumer, "missing".into(), config, MoqVideoDecoderOutput::default())
+					.await;
+			assert!(matches!(missing, Err(MoqError::Video { .. })));
+		} else {
+			assert!(matches!(result, Err(MoqError::UnsupportedConfig { .. })), "{codec}");
+		}
+	}
+	broadcast.close().unwrap();
+}
+
+#[tokio::test]
+async fn datagram_demand_is_independent_and_aggregates_priority() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let stream = broadcast.publish_track("events".into(), None).unwrap();
+	let demand = stream.demand().unwrap();
+	let producer = broadcast.create_datagrams("events".into(), None).unwrap();
+	assert_eq!(producer.priority().unwrap(), None);
+	producer.append(None, b"before".to_vec()).unwrap();
+	let first = broadcast.consume().unwrap().datagrams("events".into()).unwrap();
+	let second = producer.consume().unwrap();
+	first.set_priority(-5).unwrap();
+	second.set_priority(10).unwrap();
+	assert_eq!(producer.priority().unwrap(), Some(10));
+	assert_eq!(demand.wanted(), None);
+	producer
+		.insert(MoqDatagram {
+			sequence: 7,
+			timestamp: None,
+			payload: b"seven".to_vec(),
+		})
+		.unwrap();
+	let received = first.recv().await.unwrap().unwrap();
+	assert_eq!(received.sequence, 7);
+	assert_eq!(received.timestamp, None);
+	assert_eq!(received.payload, b"seven");
+	assert_eq!(producer.append(None, b"eight".to_vec()).unwrap(), 8);
+	second.cancel();
+	assert_eq!(producer.priority_changed(Some(10)).await.unwrap(), Some(-5));
+	stream.finish().unwrap();
+	assert_eq!(first.recv().await.unwrap().unwrap().payload, b"eight");
+	producer.finish().unwrap();
+	assert!(first.recv().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn datagram_cancel_releases_demand_and_wakes_reads() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let producer = broadcast.create_datagrams("events".into(), None).unwrap();
+	let consumer = producer.consume().unwrap();
+	let pending = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv().await }).await
+	};
+	consumer.cancel();
+	assert!(matches!(pending.await.unwrap(), Err(MoqError::Cancelled)));
+	assert_eq!(producer.priority_changed(Some(0)).await.unwrap(), None);
 }

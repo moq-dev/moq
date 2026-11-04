@@ -368,20 +368,31 @@ impl<E: catalog::Catalog> Import<E> {
 		self.sections.contains_key(&pid) || Pid::new(pid).is_ok_and(|pid| self.streams.contains_key(&pid))
 	}
 
-	/// The TR 101 290 intervals this importer times, and its clock, for another to take over.
-	pub(super) fn timing(&self) -> (&Health, Option<u64>) {
-		(&self.health, self.liveness.now())
+	/// The TR 101 290 intervals this importer times, for another to take over.
+	pub(super) fn timing(&self) -> &Health {
+		&self.health
 	}
 
-	/// Take over the TR 101 290 intervals `health` timed on `pid` at clock reading `now`, from a
+	/// Input bytes held for a later call, such as behind a suspected clock step.
+	#[cfg(test)]
+	pub(super) fn held(&self) -> usize {
+		self.demux.held()
+	}
+
+	/// The TR 101 290 intervals, for a caller to advance while no packet routes to this program.
+	pub(super) fn timing_mut(&mut self) -> &mut Health {
+		&mut self.health
+	}
+
+	/// Take over the TR 101 290 intervals `health` timed on `pid`, from a
 	/// program that read the same packets, to count the PID from here on. See
 	/// [`Health::hand_over`].
-	pub(super) fn take_over(&mut self, pid: u16, (health, now): (&Health, Option<u64>)) {
+	pub(super) fn take_over(&mut self, pid: u16, health: &Health) {
 		let cadenced = Pid::new(pid)
 			.ok()
 			.and_then(|pid| self.streams.get(&pid))
 			.is_some_and(Stream::cadenced);
-		health.hand_over(pid, &mut self.health, cadenced, now, self.liveness.now());
+		health.hand_over(pid, &mut self.health, cadenced);
 	}
 
 	/// A reservation on this program's timebase, so every stream shifts by its offset.
@@ -438,7 +449,11 @@ impl<E: catalog::Catalog> Import<E> {
 			};
 			match self.steps.judge(demux, &routes) {
 				super::step::Verdict::Route => {}
-				super::step::Verdict::Hold => break,
+				// Held input keeps its arrival, and is graded once routed.
+				super::step::Verdict::Hold => {
+					demux.drain();
+					return self.flush_batch();
+				}
 				super::step::Verdict::Restart(step) => {
 					let remainder = demux.remainder();
 					demux.drain();
@@ -449,6 +464,8 @@ impl<E: catalog::Catalog> Import<E> {
 			let Some(packet) = demux.next() else { break };
 			self.packet(&packet)?;
 		}
+		// Every packet this chunk completed is read: grade the input through its arrival.
+		self.health.flush();
 		demux.drain();
 		self.flush_batch()
 	}
@@ -520,7 +537,11 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// Every packet is graded, but only the media PIDs and the clock route on the
 		// verdict: PSI and section PIDs keep their reassemblers' own.
-		self.health.packet(pkt, continuation, self.liveness.now());
+		let at = super::health::At {
+			count: packet.count,
+			arrival: packet.arrival,
+		};
+		self.health.packet(pkt, continuation, at);
 		let continuation = Pid::new(pid)
 			.ok()
 			.filter(|pid| self.streams.contains_key(pid) || self.pcr_pid == Some(*pid))
@@ -569,9 +590,6 @@ impl<E: catalog::Catalog> Import<E> {
 				self.place_pcr(pcr, offset)?;
 				self.liveness.pcr(pcr);
 				self.si.pcr(pcr, packet.count);
-				if let Some(now) = self.liveness.now() {
-					self.health.tick(now);
-				}
 				if self.supports_mpegts {
 					let ready = self.mux_rate.ready();
 					if self.mux_rate.pcr(pcr, packet.count) {
@@ -914,9 +932,7 @@ impl<E: catalog::Catalog> Import<E> {
 			section.finish()?;
 			self.pending.remove(&pid);
 			self.headers.remove(&pid);
-			let name = section.entry.name.clone();
 			drop(section);
-			self.retire_track(Some(name))?;
 		}
 		// A private PES stream follows the PMT's PCR_PID: refused while there is none to place
 		// its PES by, and routed again once there is, or once the PID carries another type.
@@ -1145,15 +1161,6 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 	}
 
-	/// Retire the timeline of a track whose route has ended. Every route mints its own name, so
-	/// nothing enrolls it again, and a source revising its PMT holds only its live routes.
-	fn retire_track(&mut self, name: Option<String>) -> anyhow::Result<()> {
-		if let Some(name) = name {
-			self.catalog.retire(&name)?;
-		}
-		Ok(())
-	}
-
 	/// End the route on `pid` for a PMT that dropped or revised its stream, as the end of input
 	/// ends every route: the PES it began goes out, what waits on the clock is placed from the
 	/// PCRs so far or counted unplaced (refusing the import, as end of input does, if no media
@@ -1180,9 +1187,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		if let Some(section) = self.sections.remove(&pid.as_u16()) {
 			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
-			let name = section.entry.name.clone();
 			drop(section);
-			self.retire_track(Some(name))?;
 		}
 		self.unclocked.remove(&pid);
 		if let Some(stream) = self.streams.get_mut(&pid)
@@ -1211,9 +1216,7 @@ impl<E: catalog::Catalog> Import<E> {
 		if let Some(stream) = self.streams.remove(&pid) {
 			// Finishing can publish a held frame, which its counters then include.
 			self.keep_stats(pid, stream.stats());
-			let name = stream.track_name();
 			drop(stream);
-			self.retire_track(name)?;
 		}
 		if unplaced > 0 {
 			*self.unplaced.entry(pid.as_u16()).or_default() += unplaced;
@@ -1263,7 +1266,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let is_video = stream.video();
 		let is_clock = matches!(stream, Stream::Clock);
 		if pes.pts.is_some() && stream.cadenced() {
-			self.health.pts(pid.as_u16(), self.liveness.now());
+			self.health.pts(pid.as_u16(), self.health.now());
 		}
 		// Resolve the wrap at PES start so every elementary stream and private section shares
 		// the program timeline, including streams discovered after a wrap.
@@ -1550,17 +1553,13 @@ impl<E: catalog::Catalog> Import<E> {
 		self.pending.remove(&pid);
 		self.headers.remove(&pid);
 		if let Some(section) = self.retire_section(pid) {
-			let name = section.entry.name.clone();
 			section.abort(moq_net::Error::Unsupported);
-			self.retire_track(Some(name))?;
 		}
 		// MPEG-1/2 video still paces the program once its PES are refused.
 		let clock = match self.retire_stream(pid) {
 			Some(stream) => {
 				let video = stream.video();
-				let name = stream.track_name();
 				stream.abort(moq_net::Error::Unsupported);
-				self.retire_track(name)?;
 				video
 			}
 			None => false,
@@ -1790,7 +1789,7 @@ impl<E: catalog::Catalog> Import<E> {
 			);
 		}
 		let first = self.identity.replace(identity).is_none();
-		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
+		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.health.now());
 		let moved = self.pmt.as_ref().is_none_or(|(pid, _)| *pid != entry.pmt_pid);
 		if moved {
 			if let Some((from, _)) = &self.pmt {
@@ -1997,20 +1996,12 @@ impl<E: catalog::Catalog> Import<E> {
 }
 
 impl<E: catalog::Catalog> Drop for Import<E> {
-	/// End the input unless it already ended, then retire every route's HLS records: each route
-	/// mints its own name, so nothing publishes it again.
+	/// End the input unless it already ended.
 	fn drop(&mut self) {
 		if !self.finished
 			&& let Err(err) = self.finish()
 		{
 			tracing::warn!(%err, "failed to finish a dropped TS import");
-		}
-		for stream in std::mem::take(&mut self.streams).into_values() {
-			let name = stream.track_name();
-			drop(stream);
-			if let Some(name) = name {
-				self.catalog.retire_dropped(&name);
-			}
 		}
 	}
 }
@@ -2239,8 +2230,8 @@ impl<E: catalog::Catalog> Drop for VerbatimEntry<E> {
 /// track and catalog entry and places each section on the PCR clock.
 struct SectionStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	/// Clears this track's catalog entry on drop; its name retires the timeline when the route ends.
-	entry: VerbatimEntry<E>,
+	/// Clears this track's catalog entry on drop.
+	_entry: VerbatimEntry<E>,
 	reassembler: SectionReassembler,
 	/// Sections waiting for the next PCR or the timebase's offset, in input order.
 	held: VecDeque<Held>,
@@ -2268,7 +2259,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		};
 		Ok(Self {
 			track,
-			entry,
+			_entry: entry,
 			reassembler: SectionReassembler::default(),
 			held: VecDeque::new(),
 			staging: Arc::default(),
@@ -2425,8 +2416,8 @@ fn adjust_splice(section: &mut [u8], offset: Offset) {
 /// header begins in it.
 struct PesPacketStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	/// Clears this track's catalog entry on drop; its name retires the timeline when the route ends.
-	entry: VerbatimEntry<E>,
+	/// Clears this track's catalog entry on drop.
+	_entry: VerbatimEntry<E>,
 	/// The PMT `stream_type`, which says whether an unbounded PES is video.
 	stream_type: u8,
 	/// Whole PES waiting for the PCR after them or the timebase's offset, in input order, each
@@ -2492,7 +2483,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		};
 		Ok(Self {
 			track,
-			entry,
+			_entry: entry,
 			stream_type,
 			held: VecDeque::new(),
 			lost: false,
@@ -3478,14 +3469,6 @@ impl<E: catalog::Catalog> Stream<E> {
 		})
 	}
 
-	/// The MoQ track name this route publishes, decoded or verbatim, once its track exists.
-	fn track_name(&self) -> Option<String> {
-		match self {
-			Stream::PesPacket(stream) => Some(stream.entry.name.clone()),
-			stream => stream.media_track_name(),
-		}
-	}
-
 	/// The MoQ track name of a decoded media stream, once its (lazily created) track
 	/// exists. `None` for verbatim/clock/ignored streams (verbatim self-registers).
 	fn media_track_name(&self) -> Option<String> {
@@ -3889,10 +3872,7 @@ impl<E: CatalogExt> AacStream<E> {
 					"AAC format changed mid-stream, starting a new track"
 				);
 				import.finish()?;
-				let name = import.name().to_string();
-				// The name is never published again, so its HLS records end once its recorder is gone.
 				self.import = None;
-				self.timebase.retire(&name)?;
 			}
 			let import = match &mut self.import {
 				Some(import) => {
@@ -3934,7 +3914,7 @@ impl<E: CatalogExt> AacStream<E> {
 					let mut config = aac::config(&asc)?;
 					config.container = self.container.clone();
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
-					// and carries the catalog's declared media retention onto the track.
+					// and carries the catalog's declared media max age onto the track.
 					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
 					let track = self
 						.broadcast
@@ -4485,10 +4465,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					"audio format changed mid-stream, starting a new track"
 				);
 				import.finish()?;
-				let name = import.name().to_string();
-				// The name is never published again, so its HLS records end once its recorder is gone.
 				self.import = None;
-				self.timebase.retire(&name)?;
 			}
 			let import = match &mut self.import {
 				Some(import) => import,
@@ -4499,7 +4476,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 						container: self.container.clone(),
 					};
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
-					// and carries the catalog's declared media retention onto the track. A track
+					// and carries the catalog's declared media max age onto the track. A track
 					// after a format change reserves anew on the same timebase.
 					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
 					let track = self.broadcast.unique_track(
@@ -4707,8 +4684,8 @@ pub(super) mod test {
 
 	/// A drift budget no test timeline comes close to, so the reader sees every group.
 	///
-	/// The media track's full retention window, so a reader started after importing can
-	/// still read every retained group. These tests import a whole file first, which the default
+	/// The media track's full max age, so a reader started after importing can
+	/// still read every fresh group. These tests import a whole file first, which the default
 	/// [`Duration::ZERO`] budget collapses to the live
 	/// edge: completeness has to be asked for.
 	const RECORDING_MAX_AGE: std::time::Duration = Duration::from_secs(30);
@@ -6001,26 +5978,6 @@ pub(super) mod test {
 		);
 	}
 
-	/// Where the only audio rendition's HLS records end, once the catalog finishes.
-	async fn hls_audio_end<E: crate::catalog::hang::CatalogExt>(
-		consumer: &moq_net::broadcast::Consumer,
-		catalog: &mut crate::catalog::Producer<E>,
-	) -> Option<Timestamp> {
-		catalog.finish().unwrap();
-		let snapshot = catalog.snapshot();
-		let hls = snapshot.audio.renditions.values().next().unwrap().hls.as_ref().unwrap();
-		let mut records = crate::hls::Consumer::subscribe(consumer, hls).await.unwrap();
-		let mut end = None;
-		while let Some(event) = records.next().await.unwrap() {
-			if let crate::hls::Event::Push { entry, .. } = event
-				&& entry.is_stop()
-			{
-				end = Some(entry.pts);
-			}
-		}
-		end
-	}
-
 	/// Read every retained frame of the single audio rendition in `catalog`.
 	async fn read_audio_frames<E: crate::catalog::hang::CatalogExt>(
 		consumer: &moq_net::broadcast::Consumer,
@@ -6378,7 +6335,7 @@ pub(super) mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -6402,11 +6359,6 @@ pub(super) mod test {
 			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
 			[0xAA, 0xBB].map(|fill| adts_frame(40, fill)[7..].to_vec()).to_vec(),
 			"the last frame was held for a confirmation that could never arrive"
-		);
-		// Both 1024-sample frames at 48 kHz, including the one completed by the EOF drain.
-		assert_eq!(
-			hls_audio_end(&consumer, &mut catalog).await,
-			Some(Timestamp::from_millis(1_042).unwrap())
 		);
 	}
 
@@ -6443,7 +6395,6 @@ pub(super) mod test {
 		let mono = [mp2_frame(0xAA), mp2_frame(0xBB)].concat();
 		import.decode(&audio_pes_packet(MP2_PID, 0, 90_000, &mono)).unwrap();
 		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let records = catalog.hls_tracks();
 		let both = [stereo(0xCC), stereo(0xDD)].concat();
 		import.decode(&audio_pes_packet(MP2_PID, 1, 180_000, &both)).unwrap();
 		import.decode(&audio_pes_packet(MP2_PID, 2, 270_000, &both)).unwrap();
@@ -6453,7 +6404,6 @@ pub(super) mod test {
 		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 		assert_ne!(name, &first, "the stereo frames publish under a new name");
 		assert_eq!(config.channel_count, 2);
-		assert_eq!(catalog.hls_tracks(), records, "the mono track's HLS records retire");
 		import.finish().unwrap();
 		let frames = read_audio_frames(&consumer, &catalog).await;
 		assert_eq!(frames[0].payload, stereo(0xCC), "the new track starts at the change");
@@ -6491,7 +6441,6 @@ pub(super) mod test {
 		));
 		import.decode(&mux.out).unwrap();
 		let first = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let records = catalog.hls_tracks();
 
 		mux.out.clear();
 		for pts in [180_000, 270_000] {
@@ -6509,7 +6458,6 @@ pub(super) mod test {
 		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 		assert_ne!(name, &first, "the 44.1 kHz frames publish under a new name");
 		assert_eq!(config.sample_rate, 44_100);
-		assert_eq!(catalog.hls_tracks(), records, "the 48 kHz track's HLS records retire");
 		let recorded: Vec<_> = snapshot.ext.mpegts.tracks.keys().cloned().collect();
 		assert_eq!(
 			recorded,
@@ -6771,7 +6719,7 @@ pub(super) mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -6814,11 +6762,6 @@ pub(super) mod test {
 				}
 			)]),
 			"the drained frame was published without a trace"
-		);
-		// Both 1152-sample frames at 16 kHz, including the one completed by the EOF drain.
-		assert_eq!(
-			hls_audio_end(&consumer, &mut catalog).await,
-			Some(Timestamp::from_millis(1_144).unwrap())
 		);
 	}
 
@@ -7670,7 +7613,7 @@ pub(super) mod test {
 			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
 		)
 		.unwrap();
-		let provisional = catalog.snapshot().clock.expect("a clock");
+		let provisional = catalog.snapshot().media.clock.expect("a clock");
 		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
@@ -7683,7 +7626,7 @@ pub(super) mod test {
 		import
 			.decode(&audio_pes_packet(DATA_PID, 0, 3_600 * 90_000, &[0xDE, 0xAD]))
 			.unwrap();
-		let anchored = catalog.snapshot().clock.expect("a clock");
+		let anchored = catalog.snapshot().media.clock.expect("a clock");
 		assert_ne!(anchored, provisional, "the first PES anchors the clock");
 		assert!(clocks.drain().is_empty(), "rate measurement still holds the catalog");
 		import.finish().unwrap();
@@ -8328,7 +8271,7 @@ pub(super) mod test {
 			import.decode(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]).as_slice()).unwrap();
 		}
 		// The encoder restarts: the clock declares the break and the media resumes 20 s
-		// ahead. Under the track's 30 s retention window, so a subscribe still reaches
+		// ahead. Within the track's 30 s max age, so a subscribe still reaches
 		// back to the first frame; the exported-clock tests cover the 30 s leap itself.
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
 		for pid in [PCR_PID, PEER_PID] {
@@ -9698,7 +9641,7 @@ pub(super) mod test {
 	async fn damaged_opus_pes_is_not_half_published() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
 			.ensure_stream(
@@ -9724,11 +9667,6 @@ pub(super) mod test {
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
 		let frames = read_track(&consumer, &name, crate::container::Kind::Audio).await;
 		assert_eq!(frames.len(), 2, "no packet from the damaged PES is published");
-		// The last PES starts at 1.0667 s and holds one 20 ms packet, recorded in milliseconds.
-		assert_eq!(
-			hls_audio_end(&consumer, &mut catalog).await,
-			Some(Timestamp::from_millis(1_086).unwrap())
-		);
 	}
 
 	/// An aborted track is a feed-wide publishing failure, never a damaged media unit.
@@ -9929,7 +9867,7 @@ pub(super) mod test {
 		let at = mux.out.len() - 188;
 		mux.out[at..].copy_from_slice(&video_pes(VIDEO, 7, 90_000 + 7 * FRAME, None, &last));
 		mux.out.extend_from_slice(&clock_break_packet(VIDEO));
-		// Inside the track's 30 s retention, so the reader still reaches the first pass.
+		// Inside the track's 30 s max age, so the reader still reaches the first pass.
 		mux.gops(VIDEO, 20 * 90_000, 2);
 		let frames = video_frames(&mux.out).await;
 		assert_eq!(frames.len(), 16);
@@ -11413,7 +11351,6 @@ pub(super) mod test {
 		let state = |import: &super::Import<Ext>| {
 			let snapshot = catalog.snapshot();
 			(
-				catalog.hls_tracks(),
 				snapshot.ext.mpegts.tracks.len(),
 				import.streams.len() + import.sections.len() + import.listed.len() + import.retired_stats.len(),
 			)

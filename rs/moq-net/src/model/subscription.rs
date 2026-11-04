@@ -201,9 +201,7 @@ pub enum Anchor {
 	/// after it is known and every sequence below that one is accounted for (started,
 	/// dropped, or never to start). Until then reads stop at the first held group that
 	/// may still start, so at the live edge at most that one group past the end is read
-	/// before its first frame shows where it starts. A datagram skips all of that: it is
-	/// judged on its own, its timestamp against the range's times and its sequence against
-	/// the range's absolute groups and the relative ones resolved so far. An untimed track
+	/// before its first frame shows where it starts. An untimed track
 	/// refuses it with [`Error::TimestampMismatch`](crate::Error::TimestampMismatch).
 	Time(Timestamp),
 }

@@ -9,16 +9,15 @@ diff --git a/rs/moq-relay/src/cluster.rs b/rs/moq-relay/src/cluster.rs
 index 6e3e22cbc..7bc6d15cf 100644
 --- a/rs/moq-relay/src/cluster.rs
 +++ b/rs/moq-relay/src/cluster.rs
-@@ -1728,7 +1728,11 @@ impl Cluster {
- 				moq_tokio::Status::Connected if connection.is_none() => {
- 					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
- 				}
--				moq_tokio::Status::Disconnected => connection = None,
-+				// MUTATION: a lost peer link is never redialed.
-+				moq_tokio::Status::Disconnected => {
-+					drop(reconnect);
-+					return std::future::pending().await;
-+				}
- 				moq_tokio::Status::Migrating => {}
- 				_ => {}
- 			}
+@@ -2170,6 +2170,11 @@ impl Cluster {
+ 		let mut observation = monitor.state();
+ 		loop {
+ 			dial.observe(id, &observation);
++			// MUTATION: a lost peer link is never redialed.
++			if observation.phase == moq_tokio::connection::Phase::Disconnected {
++				drop(reconnect);
++				return std::future::pending().await;
++			}
+ 			observation = monitor.state_changed(observation.revision).await?;
+ 		}
+ 	}

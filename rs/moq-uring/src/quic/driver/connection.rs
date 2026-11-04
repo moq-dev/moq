@@ -4,7 +4,7 @@ use kio::clock::Instant;
 use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use bytes::{Buf, Bytes};
 use moq_quic::endpoint::ConnectionHandle;
@@ -164,7 +164,7 @@ impl Inner {
 
 	/// Close the connection with a full-width application code.
 	///
-	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// The [`moq_net::transport::poll::Session::close`] surface narrows codes
 	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
 	/// space, which needs the whole varint range.
 	pub(crate) fn close_code(&self, code: u64, reason: &str) {
@@ -183,8 +183,7 @@ impl Inner {
 /// Created by [`Endpoint`](super::Endpoint) (or its
 /// [`client::connect`](crate::quic::client::connect) /
 /// [`server::accept`](crate::quic::server::accept) shorthands), already
-/// established. Clones share the connection; each carries its own parking so
-/// concurrent pending operations don't trample each other's wakeups. Dropping
+/// established. Clones share the connection. Dropping
 /// the last handle, streams included, closes the connection with code 0.
 ///
 /// Once the connection ends, or the worker driving it is dropped, every
@@ -197,22 +196,18 @@ impl Inner {
 /// it, or the packet is never built and the peer idles out instead.
 pub struct Connection {
 	shared: Shared,
-	// Retains this clone's waiter registrations across polls.
-	park: kio::Park,
 	/// The negotiated ALPN, cached at establishment so `protocol()` can
 	/// borrow from the handle.
 	alpn: Option<String>,
 	/// The SNI the client presented, cached likewise.
 	server_name: Option<String>,
-	/// The peer's address when the handshake completed.
-	remote: SocketAddr,
 	handshake: crate::quic::handshake::Info,
 }
 
 impl Connection {
 	/// Close the connection with a full-width application code.
 	///
-	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// The [`moq_net::transport::poll::Session::close`] surface narrows codes
 	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
 	/// space, which needs the whole varint range.
 	pub(crate) fn close_code(&self, code: u64, reason: &str) {
@@ -267,14 +262,13 @@ impl Connection {
 	///
 	/// Only records the close: the driver task frames the CONNECTION_CLOSE, so keep the worker
 	/// running until [`Self::closed`] resolves.
-	pub fn close(&self, error_code: VarInt, reason: &[u8]) {
-		self.shared
-			.close_code(error_code.into_inner(), &String::from_utf8_lossy(reason));
+	pub fn close(&self, error_code: VarInt, reason: &str) {
+		self.shared.close_code(error_code.into_inner(), reason);
 	}
 
 	/// Wait for the connection to close, returning why.
 	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| poll_closed(&self.shared, waiter)).await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// The connection's statistics.
@@ -294,10 +288,9 @@ impl Connection {
 		self.shared.conn.borrow().peer_identity()
 	}
 
-	/// The peer's address as of the handshake; a peer that migrates later
-	/// keeps its connection but not this value.
-	pub fn remote_addr(&self) -> SocketAddr {
-		self.remote
+	/// The peer's current UDP address, following any migration.
+	pub fn remote_address(&self) -> SocketAddr {
+		self.shared.conn.borrow().remote_address()
 	}
 
 	/// The SNI the client presented, or `None` if it sent none. Always `None`
@@ -317,9 +310,8 @@ impl Connection {
 	///
 	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate)
 	/// refuses.
-	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), Error> {
-		self.shared.conn.borrow_mut().set_limits(limits)?;
-		Ok(())
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), crate::quic::LimitsError> {
+		self.shared.conn.borrow_mut().set_limits(limits)
 	}
 
 	/// The wire counters this connection updates as it sends and receives.
@@ -330,11 +322,6 @@ impl Connection {
 	/// The target this connection probes up to, or `None` when its congestion controller cannot probe.
 	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
 		self.shared.probe.clone()
-	}
-
-	/// Receive streams evicted to free a stuck receive window.
-	pub(crate) fn streams_evicted(&self) -> u64 {
-		self.shared.conn.borrow().stats().credit.evicted
 	}
 
 	/// The receive windows now in force: the connection's, and the most one stream holds.
@@ -349,10 +336,8 @@ impl Clone for Connection {
 		self.shared.hold();
 		Self {
 			shared: self.shared.clone(),
-			park: kio::Park::default(),
 			alpn: self.alpn.clone(),
 			server_name: self.server_name.clone(),
-			remote: self.remote,
 			handshake: self.handshake,
 		}
 	}
@@ -451,7 +436,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	}
 	result?;
 
-	let (alpn, server_name, remote) = {
+	let (alpn, server_name) = {
 		let conn = shared.conn.borrow();
 		let (alpn, server_name) = match conn.handshake_data() {
 			Some(data) => (
@@ -460,17 +445,14 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 			),
 			None => (None, None),
 		};
-		let remote = conn.remote_address();
-		(alpn, server_name, remote)
+		(alpn, server_name)
 	};
 
 	shared.hold();
 	let conn = Connection {
 		shared,
-		park: kio::Park::default(),
 		alpn,
 		server_name,
-		remote,
 		handshake: crate::quic::handshake::Info { deadline },
 	};
 	guard.shared = None;
@@ -500,12 +482,12 @@ impl Connection {
 impl Connection {
 	/// Accept the next unidirectional stream the peer opens.
 	pub async fn accept_uni(&self) -> Result<recv::Stream, Error> {
-		kio::wait(|waiter| accept_uni(&self.shared, waiter)).await
+		kio::wait(|waiter| self.poll_accept_uni(waiter)).await
 	}
 
 	/// Accept the next bidirectional stream the peer opens.
 	pub async fn accept_bi(&self) -> Result<(send::Stream, recv::Stream), Error> {
-		kio::wait(|waiter| accept_bi(&self.shared, waiter)).await
+		kio::wait(|waiter| self.poll_accept_bi(waiter)).await
 	}
 
 	/// Open a unidirectional stream scheduled by `options`, once the peer's stream credit
@@ -514,9 +496,7 @@ impl Connection {
 	/// # Panics
 	/// - when `options.group` belongs to another connection
 	pub async fn open_uni(&self, options: send::Options<'_>) -> Result<send::Stream, Error> {
-		kio::wait(|waiter| open(&self.shared, Dir::Uni, options, waiter))
-			.await
-			.map(|(send, _)| send)
+		kio::wait(|waiter| self.poll_open_uni(waiter, options)).await
 	}
 
 	/// Open a bidirectional stream scheduled by `options`, once the peer's stream credit
@@ -525,62 +505,54 @@ impl Connection {
 	/// # Panics
 	/// - when `options.group` belongs to another connection
 	pub async fn open_bi(&self, options: send::Options<'_>) -> Result<(send::Stream, recv::Stream), Error> {
-		kio::wait(|waiter| open(&self.shared, Dir::Bi, options, waiter))
-			.await
-			.map(|(send, recv)| (send, recv.expect("bidirectional")))
+		kio::wait(|waiter| self.poll_open_bi(waiter, options)).await
 	}
 
 	/// Receive the next datagram.
-	pub async fn read_datagram(&self) -> Result<Bytes, Error> {
-		kio::wait(|waiter| recv_datagram(&self.shared, waiter)).await
+	pub async fn recv_datagram(&self) -> Result<Bytes, Error> {
+		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
 	/// [`Self::accept_uni`], as a poll.
-	pub(crate) fn poll_accept_uni(&mut self, cx: &Context<'_>) -> Poll<Result<recv::Stream, Error>> {
-		accept_uni(&self.shared, self.park.hold(cx))
+	pub fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<recv::Stream, Error>> {
+		accept_uni(&self.shared, waiter)
 	}
 
 	/// [`Self::accept_bi`], as a poll.
-	pub(crate) fn poll_accept_bi(&mut self, cx: &Context<'_>) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
-		accept_bi(&self.shared, self.park.hold(cx))
+	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
+		accept_bi(&self.shared, waiter)
 	}
 
 	/// [`Self::open_uni`], as a poll.
-	pub(crate) fn poll_open_uni(
-		&mut self,
-		cx: &Context<'_>,
-		options: send::Options<'_>,
-	) -> Poll<Result<send::Stream, Error>> {
-		open(&self.shared, Dir::Uni, options, self.park.hold(cx)).map_ok(|(send, _)| send)
+	pub fn poll_open_uni(&self, waiter: &kio::Waiter, options: send::Options<'_>) -> Poll<Result<send::Stream, Error>> {
+		open(&self.shared, Dir::Uni, options, waiter).map_ok(|(send, _)| send)
 	}
 
 	/// [`Self::open_bi`], as a poll.
-	pub(crate) fn poll_open_bi(
-		&mut self,
-		cx: &Context<'_>,
+	pub fn poll_open_bi(
+		&self,
+		waiter: &kio::Waiter,
 		options: send::Options<'_>,
 	) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
-		open(&self.shared, Dir::Bi, options, self.park.hold(cx))
-			.map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
+		open(&self.shared, Dir::Bi, options, waiter).map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
 	}
 
-	/// [`Self::read_datagram`], as a poll.
-	pub(crate) fn poll_recv_datagram(&mut self, cx: &Context<'_>) -> Poll<Result<Bytes, Error>> {
-		recv_datagram(&self.shared, self.park.hold(cx))
+	/// [`Self::recv_datagram`], as a poll.
+	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		recv_datagram(&self.shared, waiter)
 	}
 
 	/// [`Self::closed`], as a poll.
-	pub(crate) fn poll_closed(&mut self, cx: &Context<'_>) -> Poll<Error> {
-		poll_closed(&self.shared, self.park.hold(cx))
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		poll_closed(&self.shared, waiter)
 	}
 
-	/// The connection's counters in [`web_transport_trait::Stats`] shape.
-	pub(crate) fn transport_stats(&self) -> impl web_transport_trait::Stats + use<> {
+	/// The connection's metrics for moq-net.
+	pub(crate) fn transport_stats(&self) -> impl moq_net::transport::Metrics + use<> {
 		let stats = self.stats();
 		Stats {
-			bytes_sent: stats.udp_tx.bytes,
-			bytes_received: stats.udp_rx.bytes,
 			bytes_lost: stats.path.lost_bytes,
+			streams_evicted: stats.credit.evicted,
 			packets_sent: stats.udp_tx.datagrams,
 			packets_received: stats.udp_rx.datagrams,
 			packets_lost: stats.path.lost_packets,
@@ -660,12 +632,10 @@ impl std::fmt::Debug for Connection {
 	}
 }
 
-/// A snapshot of moq-quic's counters in [`web_transport_trait::Stats`]
-/// shape.
+/// A snapshot of moq-quic's metrics for moq-net.
 struct Stats {
-	bytes_sent: u64,
-	bytes_received: u64,
 	bytes_lost: u64,
+	streams_evicted: u64,
 	packets_sent: u64,
 	packets_received: u64,
 	packets_lost: u64,
@@ -674,15 +644,10 @@ struct Stats {
 	bandwidth: Option<u64>,
 }
 
-impl web_transport_trait::Stats for Stats {
-	fn bytes_sent(&self) -> Option<u64> {
-		Some(self.bytes_sent)
+impl moq_net::transport::Metrics for Stats {
+	fn streams_evicted(&self) -> Option<u64> {
+		Some(self.streams_evicted)
 	}
-
-	fn bytes_received(&self) -> Option<u64> {
-		Some(self.bytes_received)
-	}
-
 	fn bytes_lost(&self) -> Option<u64> {
 		Some(self.bytes_lost)
 	}

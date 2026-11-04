@@ -9,6 +9,7 @@ import {
 	failSafe,
 	looksLikeWheel,
 	type PadLike,
+	PedalHold,
 	pickAxis,
 	pickButton,
 	readPedal,
@@ -141,6 +142,51 @@ function sample(patch: Partial<WheelSample> = {}): WheelSample {
 		...patch,
 	};
 }
+
+describe("PedalHold", () => {
+	test("does nothing until a takeover starts it", () => {
+		expect(new PedalHold().update(sample({ brake: 0 }))).toBe(false);
+	});
+
+	test("keeps released pedals from releasing the takeover brake", () => {
+		// Steering-only takeover: the stationary, released brake pedal must not
+		// slew the takeover's full brake away.
+		const hold = new PedalHold();
+		hold.start();
+		expect(hold.update(sample({ steering: 0.3 }))).toBe(true);
+		expect(hold.update(sample({ steering: -0.5, brake: 0.01 }))).toBe(true);
+		// Touching the brake pedal hands the pedals to the wheel.
+		expect(hold.update(sample({ brake: 0.3 }))).toBe(false);
+		expect(hold.update(sample({ brake: 0.3 }))).toBe(false);
+	});
+
+	test("keeps an accelerator held across the takeover from ramping the throttle", () => {
+		const hold = new PedalHold();
+		hold.start();
+		expect(hold.update(sample({ throttle: 0.8 }))).toBe(true);
+		expect(hold.update(sample({ throttle: 0.8, steering: 0.4 }))).toBe(true);
+		expect(hold.update(sample({ throttle: 0.6 }))).toBe(false);
+	});
+
+	test("restarts from a new baseline when the wheel is lost", () => {
+		const hold = new PedalHold();
+		hold.start();
+		expect(hold.update(sample())).toBe(true);
+		expect(hold.update(undefined)).toBe(true);
+		// A replacement device's resting positions are its baseline, not movement.
+		expect(hold.update(sample({ throttle: 0.8 }))).toBe(true);
+		hold.start();
+		expect(hold.update(sample({ throttle: 0.4 }))).toBe(true);
+	});
+
+	test("ends when another input changes the pedals", () => {
+		const hold = new PedalHold();
+		hold.start();
+		expect(hold.update(sample())).toBe(true);
+		hold.stop();
+		expect(hold.update(sample())).toBe(false);
+	});
+});
 
 describe("arbitrate", () => {
 	test("a wheel sitting still does not take control from the keyboard", () => {

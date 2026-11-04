@@ -64,9 +64,9 @@ nix develop --command env SESSION_ALLOCS=1 cargo bench --locked -p moq-net --fea
 
 Throughput counts delivered datagrams. Every one must arrive with its sequence
 and payload; the memory transport loses none at these cadences, so a drop fails
-instead of looking cheaper. `SESSION_ALLOCS=1` prints allocations, allocated
-bytes and, where Linux perf counters are readable, user instructions per
-delivered datagram or viewer-group. All three exclude the cache tick. Bytes sum
+instead of looking cheaper. `SESSION_ALLOCS=1` prints the group consumer size,
+allocations, allocated bytes and, where Linux perf counters are readable, user instructions per
+delivered datagram or viewer-group. The counts exclude the cache tick. Bytes sum
 requested allocation and reallocation sizes, including growth in place; they
 measure neither live memory nor bytes copied. A multiplexed instruction counter
 fails the run instead of reporting an undercount. Every task runs on the bench's
@@ -84,6 +84,29 @@ nix develop --command just rs test -p moq-tokio --release -E 'test(benchmark_dat
 It reports offered and lost datagrams, bottleneck queue drops, QUIC DATAGRAM frames
 that delivered no datagram, reordered arrivals and append-to-receive latency per viewer, and fails if the loopback
 viewer loses any. It runs nightly.
+
+Native transport allocation cost is measured through moq-net's real poll interface,
+including QUIC opens, writes, receive leases and FINs, on long-lived loopback connections:
+
+```bash
+nix develop --command cargo bench --locked -p moq-tokio --bench fanout -- native_transport
+nix develop --command env NATIVE_ALLOCS=1 cargo bench --locked -p moq-tokio --bench fanout -- native_transport
+```
+
+The allocation mode warms each shape, then counts allocations and requested allocation/reallocation
+bytes over 64 batches, per delivered stream. Setup and destruction are outside the counters;
+all QUIC tasks run on the benchmark's current-thread runtime. Payload size and streams per batch
+vary independently. Every delivered payload is compared byte for byte. The ordinary timing
+series runs nightly with `fanout`.
+
+The io\_uring `web_headers` target varies stalled partial headers independently of ready uni/bi
+streams. It then completes every fragmented header and checks its payload and FIN, so a busy
+peer cannot hide a parser or stream-credit failure behind fast ready streams. It runs in the
+nightly io\_uring leg:
+
+```bash
+nix develop --command cargo bench --locked -p moq-uring --bench web_headers
+```
 
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
 (2.5 ms packets) at per-packet and the 20 ms default. Frames are 200 bytes:
@@ -282,6 +305,118 @@ The maintainer's 24-core `desktop` workstation is the profiling host: it
 keeps `kernel.perf_event_paranoid=-1`. Profile there only while it is quiet,
 with no other agents running and load near zero, since other work on the
 host shows up as lock waits and CPU the relay did not cause.
+
+### Instructions
+
+Count instructions and cycles (user and kernel) per delivered frame, with
+fixed-period instruction stacks for source attribution:
+
+```bash
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_RUNTIME_ROUNDS=5 \
+  BENCH_INSTRUCTION_PERIOD=10000019 \
+  nix develop --command just bench-profile instructions chat 4 io-uring-workers cdff3c8f95
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 \
+  nix develop --command just bench-profile instructions video 4 tokio-workers cdff3c8f95
+# A bisect step: every listed base and the current tree, rotated in each round.
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_GENERATOR=21d6da9fc1 \
+  nix develop --command just bench-profile instructions chat 4 io-uring-workers "fe722cec9f 2d73eea67d e84ffb3de3"
+```
+
+Choose disjoint allowed CPU sets, with at least one relay CPU per worker.
+Hybrid CPUs require performance cores, and count their `cpu_core` events.
+The relay and generator keep these affinities for every revision. Instructions
+mode runs alone.
+
+Each base builds into its own target under `target/bench/revisions/<sha>`,
+from a detached worktree in `.tmp/` that the run removes when it exits, so a
+later run reuses that build. The revisions build side by side on every allowed
+CPU, since fat LTO links on one thread, `BENCH_BUILD_JOBS` (default 4) at a
+time: each link takes gigabytes, so lower it on a host with little memory.
+Every round measures each base and the
+current tree back to back, rotating which goes first, for
+`BENCH_RUNTIME_ROUNDS` rounds (default 3). The revisions are each other's
+control, so there is no unprofiled run per revision. One generator drives them
+all: the current tree's, unless `BENCH_GENERATOR` names a revision. Hold it
+fixed across a bisect's runs, so client changes (flow control, subscription
+options) can't move what an old relay spends per frame.
+
+The run ends with each revision's median and range at each worker count in
+`instructions-summary.json`, including the groups the generator confirmed lost
+between the reports bracketing each counter window and the host's highest
+one-minute load during it. Admission only waits for room when the run starts,
+so judge cells by the load they actually ran under.
+
+After seven seconds of warmup, acknowledged perf enable/disable commands bound
+five seconds of relay counters. `instructions/instructions.json` records both
+acknowledgement brackets, their uncertainty, and the delivered frames linearly
+interpolated between the generator's surrounding 500 ms reports at those same
+boundaries. This is a sampled delivery estimate, not exact frame accounting.
+Missing, uncounted, or multiplexed counters and unbracketed delivery fail the run.
+Lost or throttled instruction samples also fail. Inspect the host's sample-rate
+limit and buffers before choosing a larger fixed period for the whole comparison;
+some sample-rate limits throttle on every interrupt, regardless of the period.
+On the profiling host, a 1,000 Hz limit throttled every sample even at a period
+of 10,000,019. Temporarily raising `kernel.perf_event_max_sample_rate` to 100,000
+allowed complete captures. Save and restore the original setting around the
+whole gated run; the driver records the observed limit and changes no sysctls.
+The host sampler lasts nineteen seconds, so delivery reports bracket both edges
+of the counter window and cover the sampling window after it. The normal
+`summary.json` still describes its own final throughput window; use
+`instructions.json` for instruction comparisons.
+
+`BENCH_INSTRUCTION_PERIOD` defaults to 1,000,003 retired instructions per
+sample. The fixed-period recording covers the five seconds after the counter
+window, not the window itself, so sampling interrupts, which run as the relay's
+kernel instructions, stay out of the counts. `instructions.folded` weights each
+stack by that period; scale stacks to a frame by their share of samples.
+`perf.data`, raw `stat.json`, `perf.log`, thread names, CPU sets, and delivery
+reports remain with the evidence. Both counters and samples cover only the
+relay.
+
+Compare equivalent delivery and loss. Instructions reduce frequency noise, but
+not batching: a relay contending with other host work handles more frames per
+wakeup, so each frame costs fewer instructions. On the profiling host, cells
+measured under a one-minute load above about 9 read 5-20% low, so compare
+cells from quiet stretches within one run. Pinning does not remove interference
+from other host work.
+
+### Fan-out
+
+Relay instruction counts move with host load (see Instructions above), which
+hides steps of a few percent. `just bench-fanout` counts the chat fan-out
+without a relay process or sockets, so the counts are the code's alone:
+
+```bash
+nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
+nix develop --command just bench-fanout "" "model" "1 512"
+```
+
+Two scenarios run every subscriber count on one thread:
+
+- `model`: one finished group a cycle through the track model, which every
+  subscriber takes before parking again, as moq-net's `track_fanout_group`
+  bench does. It builds against every revision since
+  [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+- `session`: one publisher session into a relay origin and one viewer session
+  out of it per subscriber, over `transport::memory`, on one current-thread
+  runtime. It counts the publisher, relay, and viewer sessions together, but no
+  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
+  revision whose session API predates this harness reports it unsupported.
+
+Each `bench/fanout/<scenario>` crate builds against each base's and the current
+tree's own crates and lock, `BENCH_BUILD_JOBS` at a time, into
+`target/bench/fanout/`, or
+`BENCH_FANOUT_TARGET` where a build cache might evict that during a long sweep. Each
+count pins the harness to one CPU (`BENCH_FANOUT_CPU`, by default the last
+allowed one) and takes its user instructions from `perf stat` for a run of
+zero cycles and one of many; the difference over the groups delivered is
+`fanout-summary.json`. Each process draws its own hash seeds, which move a
+count by up to about 0.5%, so each is the median of three. `BENCH_FANOUT_CALLGRIND=1`, with `valgrind` on `PATH`, also keeps
+callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
+`python3 bench/fanout.py functions ZERO FULL UNITS` ranks functions by
+instructions per group, and `python3 bench/fanout.py compare BASE CURRENT
+SUBSCRIBERS` ranks what moved between two revisions' `callgrind/` directories. `BENCH_FANOUT_VERSION` picks the session's protocol
+version (default `moq-lite-06`).
 
 ### Heap
 
@@ -494,7 +629,10 @@ without it), a resume cycle that never gets its slice, or an unavailable CPU
 clock fail the run; timing never does. The nightly runs
 `--smoke`, whose racing sweep runs every mode and a rotated query at 4 URLs x 2
 reconnects x 64 characters, and keeps its run directory as the `bench-browser`
-artifact.
+artifact. `consoles.jsonl` beside `report.json` retains page console messages and
+uncaught errors, including failed setup and samples. Each entry identifies its
+page, role, variant, workload, round and pass; `time` is Unix milliseconds.
+Console levels do not change the benchmark's existing failure checks.
 
 The in-memory frame, retained-history, gap ledger, bandwidth allocation, cached-group
 replay, resume-history, buffered-group, and peer grant paths also run directly in Chromium:

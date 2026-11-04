@@ -29,6 +29,7 @@ caught by hand. actionlint 1.7.12 (the pinned dev shell's) already fails
 `just gh check` on both main and `release` for a duplicated key in a
 workflow job and in a local action's `action.yml` (checked 2026-10-31), so
 the gate would have refused them. The rest of the tracked YAML is not
-workflow code; [Biome YAML](/quest/m2/biome-yaml.md) will parse it.
+workflow code; the [formatter migration](/quest/m2/formatter-defaults.md) will
+parse it.
 
 Public API: none. Wire: none.

@@ -3,10 +3,10 @@
 //! One [`Config`] (`--quic-*`) carries the per-connection knobs (stream limits,
 //! GSO, timeouts) that each backend applies. They mean the same thing whichever
 //! way a connection was opened, so it is spelled once and shared by
-//! [`crate::connect`] and [`crate::listen`] rather than owned by either.
+//! the MoQ `connect` and `listen` helpers (`net` feature) rather than owned by either.
 //!
 //! The knobs that only apply when accepting (the QUIC preferred address and the
-//! QUIC-LB connection-ID encoding) live on [`crate::listen::Config`] instead.
+//! QUIC-LB connection-ID encoding) live on `listen::Config` instead.
 //! Not every backend honors every knob, see the field docs.
 
 use std::path::PathBuf;
@@ -25,11 +25,8 @@ pub mod demux;
 #[cfg(feature = "driver")]
 pub mod driver;
 
-/// WebTransport over [`driver`], formerly the `web-transport-moq` crate.
-///
-/// Public only so the workspace's tests can dial a bare session; not a stable API.
+/// WebTransport over the moq-quic [`driver`], usable without a MoQ session.
 #[cfg(feature = "quic")]
-#[doc(hidden)]
 pub mod web;
 
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
@@ -679,9 +676,7 @@ pub struct Resolved {
 	pub idle_timeout: Duration,
 	/// Keep-alive interval, `None` or zero to derive it from the negotiated idle timeout.
 	///
-	/// Unset by default, since the interval depends on the peer's idle timeout;
-	/// [`keep_alive_interval`](Self::keep_alive_interval) is what it comes to
-	/// against a peer that does not shorten ours.
+	/// Unset by default, since the interval depends on the peer's idle timeout.
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,

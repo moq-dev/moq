@@ -27,7 +27,7 @@ carries [publisher instances](#publisher-instances).
 | **Track** | A live sequence of groups, delivered out of order until closed. | Track |
 | **Group** | A sequence of frames delivered reliably and in order, on its own QUIC stream. | Group |
 | **Frame** | A sized chunk of bytes. | Object |
-| **Datagram** | One unreliable frame sent as a QUIC datagram instead of a group. | Datagram |
+| **Datagram** | One unreliable payload of a datagram track, sent as a QUIC datagram. | Datagram |
 
 A broadcast is named by a path: non-empty segments joined by `/`, such as
 `room/alice`. A path never starts or ends with `/` or doubles one, and a `\`
@@ -285,7 +285,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 | --- | --- |
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
-| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's retention window alone to bound it. |
+| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's max age alone to bound it. |
 | **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
@@ -298,10 +298,11 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A reader that has read every group its ranges cover waits rather than
-ends, since the track goes on: a moq-lite-07 publisher ends a bounded
-subscription once it covered it, and the copy stays cached for the same ranges
-until an update asks for groups it did not cover, wider or shifted. A group they cover below the live feed that the cache lacks (evicted
+served. A reader that has accounted for every group its bounded ranges cover
+ends, and repeated reads end immediately too. Widening the ranges resumes reading.
+A moq-lite-07 publisher ends a bounded subscription once it covered it, and the
+copy stays cached for the same ranges until an update asks for groups it did not
+cover, wider or shifted. A group they cover below the live feed that the cache lacks (evicted
 before the subscriber first looked for it, skipped, or below where the feed
 starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
@@ -322,7 +323,7 @@ than the live and default starts. An untimed track refuses a time anchor. At the
 edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
-frame, and the next one waits on it. A datagram is judged by its own timestamp.
+frame, and the next one waits on it.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
@@ -371,12 +372,16 @@ until then too, so a player starting at the latest waits for the answer instead
 of starting from what the ended feed left. A reader's latest group stays within
 the groups it limits itself to, and ends once the track does.
 
-The publisher may declare a retention window per track. Omission sets no limit;
-zero keeps only the live edge. Relays preserve that declaration, and may still
-evict sooner under their own cache ceiling. Media tracks explicitly use 30
-seconds so a segmented egress can still find its segments. Retention ages a
-group by the same two clocks as max delay and always keeps the newest group.
-A fetch obeys the same window, and may name a tighter max delay of its own.
+The publisher may declare a max age per track: how long a superseded group stays
+fresh. On the wire, omission sets no limit; zero makes a group stale as soon as
+its successor arrives. Relays preserve that declaration, and may still cap it
+lower under their own ceiling. The Rust and JS libraries give an authored track
+zero, the live edge only, unless its publisher asks for more or for no limit;
+media tracks declare 30 seconds, so a segmented egress can still find its
+segments. A relay bounds what it keeps with its own cache, not the publisher's
+default. Max age ages a group by the
+same two clocks as max delay and never makes the newest group stale. A fetch
+obeys the same bound, and may name a tighter max delay of its own.
 IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
 Put together, a conference might use:
@@ -430,22 +435,29 @@ keyframes do not use this mechanism.
 
 ## Datagrams
 
-Since moq-lite 05, a publisher can send a tiny single-frame group as a QUIC
-datagram: unreliable, unordered, under about 1200 bytes, and never
-retransmitted. It suits real-time audio and sensor data. There is no stream
-fallback, so a datagram that doesn't fit isn't delivered that way.
+A track is either a stream track, made of groups, or a datagram track, decided
+when the publisher creates it. A datagram track is a series of QUIC datagrams:
+unreliable, unordered, under about 1200 bytes, and never retransmitted. Each
+has the datagram track's own sequence number and a timestamp, and no group. It
+suits real-time audio and sensor data. There is no stream fallback, so a
+datagram that doesn't fit isn't delivered.
 
-A datagram shares its subscription's priority and group order with streams,
-so a low-priority datagram waits behind higher-priority groups instead of
-jumping the queue. From a native Rust publisher over QUIC or WebTransport,
-a full send buffer drops the lowest-priority subscription's
-oldest datagram.
+Datagram tracks have a namespace apart from stream tracks, so `audio` as
+datagrams and `audio` as streams are two independent tracks. Nothing on the
+wire says which kind a name is: the application knows from its catalog or by
+convention, so a broadcast's track listing never includes a datagram track. In
+Rust, `broadcast.create_datagrams(name, info)` publishes one and
+`broadcast.datagrams(name)` reads it.
 
-Nothing caches a datagram. A subscription gets the ones inside its group
-range, and a new one may get the few still in the publisher's short send
-buffer, but `FETCH` never returns one. A publisher that knows the sequence was
-a datagram refuses with `NOT_FETCHABLE` (moq-lite-07), otherwise with
-`NOT_FOUND`. Use a group for anything a late joiner needs.
+A datagram subscription is live from when it starts: it has no ranges, order,
+or max delay, only a priority, which a subscriber can change. A datagram still
+waits behind higher-priority traffic instead of jumping the queue. Nothing
+caches a datagram, and `FETCH` never returns one, so use a stream track for
+anything a late joiner needs.
+
+Datagram tracks need a transport with datagrams, so not WebSocket or TCP. The
+draft's [Datagrams](/draft/moq-lite#datagrams) section specifies them, and each
+library's API docs say which versions carry them.
 
 ## What moq-lite leaves out
 

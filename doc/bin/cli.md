@@ -478,8 +478,10 @@ MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
 so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
-`--cluster-api-url`) share `--connect-bind` with `--connect`, and each binds
-it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
+`--cluster-api-url`) bind `--connect-bind`'s address. On port 0, each cluster
+session takes its own ephemeral port, so a redial leaves from a fresh one. A
+fixed port pins every WAN cluster dial to it, while LAN dials still take
+ephemeral ports. `--connect` binds it too, so a fixed `--connect-bind` port with
 both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
 `--connect` (unset `MOQ_CONNECT` if it supplies the URL).
 
@@ -502,8 +504,9 @@ See [Authentication](/bin/relay/auth).
 
 ## Retention and latency
 
-`import --max-age` (default 30 s) tells relays how long to keep old groups
-fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export mp4`,
+`import --max-age` (default 30 s) tells relays how long a superseded media group stays
+fresh and fetchable, which the [HLS gateway](/bin/hls) depends on. `import archive`
+refuses it: a replay advertises no max age, and the archive's retention bounds what it serves. `export fmp4`, `export mp4`,
 `export h264`, and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.

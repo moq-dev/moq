@@ -103,7 +103,7 @@ impl FrameBounds {
 		Self(crate::lite::FramesBench::new(ranges))
 	}
 
-	/// The first and last frame served of `group`, as a served group or datagram looks
+	/// The first and last frame served of `group`, as a served group looks
 	/// them up.
 	pub fn serve(&self, group: u64) -> (u64, Option<u64>) {
 		self.0.serve(group)
@@ -137,7 +137,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 30;
+const LITE_KINDS: u8 = 33;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 27;
@@ -238,49 +238,23 @@ fn ietf_paths(data: &[u8], version: ietf::Version) {
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp or an inflated size, whether the
-	// session negotiated the `ietf` extension, or which draft its track came from, so try
-	// every reading.
-	let negotiated: &[bool] = match version.has_ietf() {
-		true => &[false, true],
-		false => &[false],
-	};
+	// The body doesn't say whether it carries a timestamp, so try both readings.
 	let mut any = false;
-	for &negotiated in negotiated {
-		for timescale in [Some(crate::Timescale::MILLI), None] {
-			for ietf in [
-				None,
-				Some(ietf::Version::Draft18),
-				Some(ietf::Version::Draft20),
-				Some(ietf::Version::Draft22),
-			] {
-				for compressed in [false, true] {
-					let framing = lite::Framing {
-						timescale,
-						ietf,
-						compressed,
-					};
-					let Ok(decoded) =
-						lite::Datagram::decode(Bytes::copy_from_slice(data), version, negotiated, |_| framing)
-					else {
-						continue;
-					};
-					any = true;
-					let Some(decoded) = decoded else {
-						continue;
-					};
-
-					let Ok(first) = decoded.encode_bytes(version) else {
-						continue;
-					};
-
-					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
-						.expect("could not decode our own encoding")
-						.expect("encoded group decoded as padding");
-					assert_eq!(echo, decoded, "datagram did not survive a round trip");
-				}
-			}
-		}
+	for timed in [true, false] {
+		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
+			continue;
+		};
+		any = true;
+		let Some(decoded) = decoded else {
+			continue;
+		};
+		let Ok(first) = decoded.encode_bytes(version) else {
+			continue;
+		};
+		let echo = lite::Datagram::decode(first, version, |_| timed)
+			.expect("could not decode our own encoding")
+			.expect("encoded datagram decoded as padding");
+		assert_eq!(echo, decoded, "datagram did not survive a round trip");
 	}
 	any
 }
@@ -307,7 +281,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		6 => roundtrip::<lite::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
 		7 => roundtrip::<lite::SubscribeOk, _>(rest, &mut Vec::new(), version),
 		8 => roundtrip::<lite::SubscribeStart, _>(rest, &mut Vec::new(), version),
-		9 => roundtrip::<lite::SubscribeEnd, _>(rest, &mut Vec::new(), version),
+		9 => roundtrip::<lite::SubscribeFinish, _>(rest, &mut Vec::new(), version),
 		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
 		11 => roundtrip::<lite::SubscribeDrop, _>(rest, &mut Vec::new(), version),
 		12 => roundtrip::<lite::SubscribeResponse, _>(rest, &mut Vec::new(), version),
@@ -328,6 +302,9 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		27 => roundtrip::<lite::AuthReply, _>(rest, &mut Vec::new(), version),
 		28 => roundtrip::<crate::setup::Client, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
 		29 => roundtrip::<crate::setup::Server, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
+		30 => roundtrip::<lite::Datagrams<'_>, _>(rest, &mut Vec::new(), version),
+		31 => roundtrip::<lite::DatagramsUpdate, _>(rest, &mut Vec::new(), version),
+		32 => roundtrip::<lite::DatagramsInfo, _>(rest, &mut Vec::new(), version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -474,13 +451,18 @@ pub fn bump_publisher_bytes(
 	registry.bump_publisher_bytes(path, tier, n);
 }
 
-/// An allocator's probe target as its session follows it, for the bandwidth bench.
+/// A probe target as its session follows it, for the bandwidth bench.
 pub struct ProbeTarget(crate::bandwidth::Target);
 
 impl ProbeTarget {
 	/// Follow `allocator`'s target.
 	pub fn new(allocator: &crate::bandwidth::Allocator) -> Self {
 		Self(allocator.target())
+	}
+
+	/// Follow `viewers`' target, as the session sending it as PROBE does.
+	pub fn viewers(viewers: &crate::bandwidth::Viewers) -> Self {
+		Self(viewers.target())
 	}
 
 	/// The target in bits per second once it moved, without parking.
@@ -655,9 +637,7 @@ impl LiteSample {
 				subscribe: 3,
 				sequence: 1_234,
 				timestamp: Some(1_234_567_890),
-				inflated: None,
 				payload: bytes::Bytes::new(),
-				ietf: None,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -689,15 +669,9 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => {
-				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Framing {
-					timescale: Some(crate::Timescale::MILLI),
-					ietf: None,
-					compressed: false,
-				})
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
 				.map(|_| 1)
-				.unwrap()
-			}
+				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}

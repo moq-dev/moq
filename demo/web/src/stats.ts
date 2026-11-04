@@ -64,8 +64,8 @@ interface Snapshot {
 	bytes?: number;
 	frames?: number;
 	groups?: number;
-	// Single-frame groups carried over unreliable QUIC datagrams: a subset of `groups`,
-	// with their payload already in `frames` / `bytes`.
+	// Datagrams of datagram tracks: they belong to no group, so they count in neither
+	// `groups` nor `frames`, while their payload is in `bytes`.
 	datagrams?: number;
 }
 type BroadcastFrame = Record<string, Snapshot>;
@@ -264,7 +264,7 @@ interface Sample {
 	ingress: number; // cumulative ingress bytes
 	announce: number; // cumulative announce-control bytes (both directions)
 	fetches: number; // cumulative group fetches requested
-	datagrams: number; // cumulative single-frame groups sent as QUIC datagrams
+	datagrams: number; // cumulative datagrams of datagram tracks, apart from groups
 	broadcasters: number;
 	viewers: number;
 	tracks: number;

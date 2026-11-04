@@ -128,7 +128,7 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
-/// A datagram-delivered frame, tagged with a per-track sequence number.
+/// A datagram payload with its own sequence and optional timestamp.
 typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.
@@ -198,6 +198,13 @@ typedef BandwidthConsumer = MoqBandwidthConsumer;
 /// One track's standing claim on an [Allocator].
 typedef Reservation = MoqReservation;
 
+/// Divides one connection's receive estimate among the broadcasts watched over it.
+typedef Viewers = MoqViewers;
+
+/// One watched broadcast's standing claim on [Viewers]; holding it requests
+/// PROBE, disposing it releases the claim.
+typedef Viewer = MoqViewer;
+
 /// Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame.
 typedef RateControl = MoqRateControl;
 
@@ -233,3 +240,18 @@ typedef ProtocolKind = MoqProtocolKind;
 
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 typedef ProtocolException = MoqProtocolException;
+
+/// Writes live datagrams with an independent sequence counter and no cache.
+typedef DatagramProducer = MoqDatagramProducer;
+
+/// Reads a live datagram track in arrival order from its own cursor.
+typedef DatagramConsumer = MoqDatagramConsumer;
+
+/// A requested datagram track awaiting acceptance or rejection.
+typedef DatagramRequest = MoqDatagramRequest;
+
+/// Serves on-demand datagram tracks through their own request queue.
+typedef DatagramRequests = MoqDatagramRequests;
+
+/// Publisher priority and optional timestamp scale fixed for a datagram track.
+typedef DatagramInfo = MoqDatagramInfo;

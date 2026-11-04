@@ -112,6 +112,31 @@ bool same_time(const moq::Timestamp &a, const moq::Timestamp &b)
 	return a.value * b.scale == b.value * a.scale;
 }
 
+// A datagram-only request reaches its own handler and demand.
+void datagram_tracks()
+{
+	auto broadcast = ok(moq::BroadcastProducer::init(), "datagram broadcast");
+	auto stream = ok(broadcast->publish_track("events", std::nullopt), "stream");
+	auto requests = ok(broadcast->requests(), "requests");
+	auto datagrams = ok(requests->datagrams(), "datagram requests");
+	auto source = ok(broadcast->consume(), "broadcast consumer");
+	auto consumer = ok(source->datagrams("events"), "datagram consumer");
+	ok(consumer->set_priority(12), "priority update");
+	auto request = ok(datagrams->requested().get(), "datagram request");
+	CHECK(ok(request->name(), "request name") == "events");
+	auto producer = ok(request->accept(std::nullopt), "accept datagrams");
+	CHECK(ok(producer->priority(), "aggregate priority") == 12);
+	CHECK(!ok(stream->demand(), "stream demand")->wanted());
+	ok(producer->insert({7, std::nullopt, bytes("seven")}), "insert datagram");
+	auto received = ok(consumer->recv().get(), "receive datagram");
+	CHECK(received && received->sequence == 7 && received->payload == bytes("seven"));
+	consumer->cancel();
+	CHECK(!ok(producer->priority_changed(12).get(), "released demand"));
+	ok(producer->finish(), "finish datagrams");
+	datagrams->cancel();
+	ok(broadcast->close(), "close datagram broadcast");
+}
+
 // Timestamps are exact records: a 90 kHz tick and a present zero read back as written, an
 // untimed frame reads back untimed, and a record past the bounds is refused.
 void timestamp_roundtrip()
@@ -167,7 +192,7 @@ void audio_roundtrip()
 	CHECK(snapshot.has_value());
 	moq::AudioDecoderOutput decoded{};
 	decoded.format = moq::AudioSampleFormat::kF32;
-	// The track's whole retention: reading starts only after finish, and the budget ages
+	// The track's whole max age: reading starts only after finish, and the budget ages
 	// groups by wall clock, so a stalled host would otherwise skip the start.
 	decoded.delay = moq::Delay{std::chrono::seconds(0), std::chrono::seconds(30)};
 	auto consumer = ok(moq::AudioConsumer::subscribe(receiver, "tone", snapshot->audio.at("tone"), decoded).get(),
@@ -236,6 +261,7 @@ void audio_roundtrip()
 int main()
 {
 	timestamp_roundtrip();
+	datagram_tracks();
 	subscription_defaults();
 	audio_roundtrip();
 	auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
