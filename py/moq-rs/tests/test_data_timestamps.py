@@ -47,19 +47,19 @@ def test_timedelta_conversions():
 
 
 @pytest.mark.parametrize("mode", ["snapshot", "stream"])
-@pytest.mark.parametrize("timestamp", TIMESTAMPS)
-async def test_json_timestamp_round_trip(mode: str, timestamp: moq.Timestamp | None):
+@pytest.mark.parametrize("timestamp", [timestamp for timestamp in TIMESTAMPS if timestamp is not None])
+async def test_json_timestamp_round_trip(mode: str, timestamp: moq.Timestamp):
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("value", moq.TrackInfo(timescale=None if timestamp is None else timestamp.scale))
+    track = broadcast.publish_track("value", moq.TrackInfo(timescale=timestamp.scale))
     consumer = track.consume()
     value = {"n": 1}
     if mode == "snapshot":
         snapshot = moq.json.SnapshotProducer(broadcast, track)
-        snapshot.update(value, timestamp=timestamp)
+        snapshot.update(value, timestamp)
         snapshot.finish()
     else:
         stream = moq.json.StreamProducer(broadcast, track)
-        stream.append(value, timestamp=timestamp)
+        stream.append(value, timestamp)
         stream.finish()
     frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
     assert frame is not None

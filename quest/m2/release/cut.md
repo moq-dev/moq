@@ -27,6 +27,13 @@ group seed: the merge of release into main keeps main's `rs/moq-stats` and
 `doc/concept/stats.md`. MoQ Pro's VOD `storage.json` moves from the same
 seed to its own epoch.
 
+This cut ships [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234)'s
+MKV buffering fix to release, which stays exposed until then. Backport it to
+`release` separately? ✅ No: defer it to the next main → release cut
+(maintainer, 2026-11-03). A blanket size cap would refuse supported inputs and
+miss the decoder's captured children, as
+[moq-dev/moq#7718](https://github.com/moq-dev/moq/pull/7718) measured.
+
 Recurs once per major release (decided 2026-10-19). The PR that finishes the
 cut shifts the milestones up, as the root [questline](/quest/README.md)
 describes. This epic's remaining publication and adoption quests move to m0,
@@ -47,6 +54,14 @@ From the 2026-10-25 pre-cut run:
 - Raise each wrapper's moq-ffi version floor (for example Kotlin's
   `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
   [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
+
+From [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702), which
+merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
+
+- Publish `main`'s code-free `rs/moq-e2ee` stub, whose README points at
+  moq-crypto, as moq-e2ee's final release. It must take a version above
+  crates.io's current `max_version` (0.0.20 on 2026-11-02); check with
+  `curl -s https://crates.io/api/v1/crates/moq-e2ee`.
 
 The [2026-10-22 release audit](https://github.com/moq-dev/moq/pull/7176)
 closed with its fixes rechecked together. At source candidate
