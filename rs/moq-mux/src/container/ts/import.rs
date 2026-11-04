@@ -1042,7 +1042,7 @@ impl<E: catalog::Catalog> Import<E> {
 				container: self.container.clone(),
 				tail: Vec::new(),
 				tail_pts: None,
-				tail_pes: None,
+				tail_pes: PesStarts::default(),
 				resync: Resync::new(pid.as_u16(), ".aac"),
 				burst: std::time::Duration::ZERO,
 			})),
@@ -1136,7 +1136,7 @@ impl<E: catalog::Catalog> Import<E> {
 			container: self.container.clone(),
 			tail: Vec::new(),
 			tail_pts: None,
-			tail_pes: None,
+			tail_pes: PesStarts::default(),
 			resync: Resync::new(pid.as_u16(), descriptor.track_suffix),
 		}))
 	}
@@ -3739,7 +3739,50 @@ struct Fallback {
 	offset: usize,
 	discarded: usize,
 	pts: Option<Timestamp>,
-	pes: Option<(usize, Option<Timestamp>)>,
+	pes: PesStarts,
+}
+
+/// Where each PES begins in an audio buffer, oldest first, while no frame has taken its PTS:
+/// the first frame beginning at or past a start takes it (ISO 13818-1).
+///
+/// A start at the same offset as the last replaces it, since a PES holding no bytes has no
+/// frame to time, so the count stays within the buffer's bytes.
+#[derive(Clone, Default)]
+struct PesStarts(VecDeque<(usize, Option<Timestamp>)>);
+
+impl PesStarts {
+	/// A PES with PTS `pts` begins at `at`.
+	fn begin(&mut self, at: usize, pts: Option<Timestamp>) {
+		if self.0.back().is_some_and(|&(last, _)| last == at) {
+			self.0.pop_back();
+		}
+		self.0.push_back((at, pts));
+	}
+
+	/// The PTS for a frame beginning at `offset`, when it is the first to begin in its PES.
+	fn reach(&mut self, offset: usize) -> Option<Option<Timestamp>> {
+		let mut pts = None;
+		while let Some(&(at, base)) = self.0.front()
+			&& at <= offset
+		{
+			pts = Some(base);
+			self.0.pop_front();
+		}
+		pts
+	}
+
+	/// A resync abandoned the carried tail for `next`, whose bytes may still be the tail's: the
+	/// candidate there takes the earliest PTS left, or that of its PES if later.
+	fn abandon(&mut self, next: usize) -> Option<Option<Timestamp>> {
+		self.reach(next).or_else(|| self.0.pop_front().map(|(_, base)| base))
+	}
+
+	/// The buffer now starts at `offset`, which every remaining start lies past.
+	fn cut(&mut self, offset: usize) {
+		for (at, _) in &mut self.0 {
+			*at -= offset;
+		}
+	}
 }
 
 /// What a resync needs to know about the codec it is scanning for.
@@ -3794,9 +3837,8 @@ struct AacStream<E: CatalogExt = ()> {
 	/// PTS for the frame the tail begins, computed when it was cut. The PES PTS only
 	/// covers frames that begin in that PES.
 	tail_pts: Option<Timestamp>,
-	/// Where in `tail` a PES begins whose PTS no frame has taken yet, with that PTS, while a
-	/// frame carried into it is still arriving in pieces.
-	tail_pes: Option<(usize, Option<Timestamp>)>,
+	/// Where in `tail` each PES begins whose PTS no frame has taken yet.
+	tail_pes: PesStarts,
 	resync: Resync,
 	// Completed audio duration since the last video PES, measured independently for each PID.
 	burst: std::time::Duration,
@@ -3826,12 +3868,12 @@ impl<E: CatalogExt> AacStream<E> {
 			pes_base
 		};
 		let mut in_tail = carried > 0;
-		// Where the PES PTS takes over: past the tail it continues, or, for a later piece of the
-		// same PES, wherever an earlier piece left it unapplied.
-		let mut pes = match pending.continuation {
-			true => self.tail_pes.take(),
-			false => Some((carried, pes_base)),
-		};
+		// Where each PES PTS takes over: past the tail this PES continues, and wherever an
+		// earlier PES or piece left one unapplied in the tail.
+		let mut pes = std::mem::take(&mut self.tail_pes);
+		if !pending.continuation {
+			pes.begin(carried, pes_base);
+		}
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
 		let mut burst = std::time::Duration::ZERO;
@@ -3841,11 +3883,8 @@ impl<E: CatalogExt> AacStream<E> {
 		// carried only if nothing later in the buffer confirms.
 		let mut fallback = None;
 		while offset + adts::MIN_HEADER_LEN <= data.len() {
-			if let Some((at, base)) = pes
-				&& offset >= at
-			{
+			if let Some(base) = pes.reach(offset) {
 				pts = base;
-				pes = None;
 			}
 			in_tail &= offset < carried;
 
@@ -3874,11 +3913,11 @@ impl<E: CatalogExt> AacStream<E> {
 						// and confirm: waiting here would swallow the real frames inside the
 						// range this one claims. A byte of a real ADTS header is 0xFF often
 						// enough for this to matter.
-						fallback.get_or_insert(Fallback {
+						fallback.get_or_insert_with(|| Fallback {
 							offset,
 							discarded: self.resync.discarded,
 							pts,
-							pes,
+							pes: pes.clone(),
 						});
 						Err(None)
 					} else if !confirm {
@@ -3911,7 +3950,7 @@ impl<E: CatalogExt> AacStream<E> {
 					// keeps the candidate, so it keeps the timestamp it was found with.
 					match self.resync.recover(data, offset, &SyncWord::ADTS) {
 						Recover::At(next) => {
-							if in_tail && let Some((_, base)) = pes.take() {
+							if in_tail && let Some(base) = pes.abandon(next) {
 								pts = base;
 							}
 							in_tail = false;
@@ -3929,7 +3968,7 @@ impl<E: CatalogExt> AacStream<E> {
 									pes = found.pes;
 								}
 								None => {
-									if in_tail && let Some((_, base)) = pes.take() {
+									if in_tail && let Some(base) = pes.abandon(next) {
 										pts = base;
 									}
 									offset = next;
@@ -4033,17 +4072,15 @@ impl<E: CatalogExt> AacStream<E> {
 
 		// Keep any partial frame (cut mid-frame, or even mid-header) for the next PES,
 		// with the PTS it should carry.
-		if let Some((at, base)) = pes
-			&& offset >= at
-		{
+		if let Some(base) = pes.reach(offset) {
 			pts = base;
-			pes = None;
 		}
 		if offset < data.len() {
 			self.tail = data[offset..].to_vec();
 		}
 		self.tail_pts = pts;
-		self.tail_pes = pes.map(|(at, base)| (at - offset, base));
+		pes.cut(offset);
+		self.tail_pes = pes;
 
 		Ok(published)
 	}
@@ -4071,7 +4108,7 @@ impl<E: CatalogExt> AacStream<E> {
 		self.burst = std::time::Duration::ZERO;
 		self.tail.clear();
 		self.tail_pts = None;
-		self.tail_pes = None;
+		self.tail_pes = PesStarts::default();
 		self.resync.desynced();
 	}
 
@@ -4403,9 +4440,8 @@ struct LegacyStream<E: CatalogExt = ()> {
 	/// PTS for the frame the tail begins, computed when it was cut. The PES PTS
 	/// only covers frames that begin in that PES.
 	tail_pts: Option<Timestamp>,
-	/// Where in `tail` a PES begins whose PTS no frame has taken yet, with that PTS, while a
-	/// frame carried into it is still arriving in pieces.
-	tail_pes: Option<(usize, Option<Timestamp>)>,
+	/// Where in `tail` each PES begins whose PTS no frame has taken yet.
+	tail_pes: PesStarts,
 	resync: Resync,
 }
 
@@ -4437,23 +4473,20 @@ impl<E: CatalogExt> LegacyStream<E> {
 			pes_base
 		};
 		let mut in_tail = carried > 0;
-		// Where the PES PTS takes over: past the tail it continues, or, for a later piece of the
-		// same PES, wherever an earlier piece left it unapplied.
-		let mut pes = match pending.continuation {
-			true => self.tail_pes.take(),
-			false => Some((carried, pes_base)),
-		};
+		// Where each PES PTS takes over: past the tail this PES continues, and wherever an
+		// earlier PES or piece left one unapplied in the tail.
+		let mut pes = std::mem::take(&mut self.tail_pes);
+		if !pending.continuation {
+			pes.begin(carried, pes_base);
+		}
 
 		let mut offset = 0;
 		// Earliest candidate passed over for declaring a frame longer than the buffer holds,
 		// carried only if nothing later in the buffer confirms.
 		let mut fallback = None;
 		while offset + self.descriptor.min_header_len <= data.len() {
-			if let Some((at, base)) = pes
-				&& offset >= at
-			{
+			if let Some(base) = pes.reach(offset) {
 				pts = base;
-				pes = None;
 			}
 			in_tail &= offset < carried;
 
@@ -4481,11 +4514,11 @@ impl<E: CatalogExt> LegacyStream<E> {
 						// identical. Remember it, but prefer any later candidate that does fit
 						// and confirm: waiting here would swallow the real frames inside the
 						// range this one claims.
-						fallback.get_or_insert(Fallback {
+						fallback.get_or_insert_with(|| Fallback {
 							offset,
 							discarded: self.resync.discarded,
 							pts,
-							pes,
+							pes: pes.clone(),
 						});
 						Err(None)
 					} else if !confirm {
@@ -4529,7 +4562,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					// keeps the candidate, so it keeps the timestamp it was found with.
 					match self.resync.recover(data, offset, &self.descriptor.into()) {
 						Recover::At(next) => {
-							if in_tail && let Some((_, base)) = pes.take() {
+							if in_tail && let Some(base) = pes.abandon(next) {
 								pts = base;
 							}
 							in_tail = false;
@@ -4547,7 +4580,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 									pes = found.pes;
 								}
 								None => {
-									if in_tail && let Some((_, base)) = pes.take() {
+									if in_tail && let Some(base) = pes.abandon(next) {
 										pts = base;
 									}
 									offset = next;
@@ -4609,17 +4642,15 @@ impl<E: CatalogExt> LegacyStream<E> {
 
 		// Keep any partial frame (cut mid-frame, or even mid-header) for the next
 		// PES, with the PTS it should carry.
-		if let Some((at, base)) = pes
-			&& offset >= at
-		{
+		if let Some(base) = pes.reach(offset) {
 			pts = base;
-			pes = None;
 		}
 		if offset < data.len() {
 			self.tail = data[offset..].to_vec();
 		}
 		self.tail_pts = pts;
-		self.tail_pes = pes.map(|(at, base)| (at - offset, base));
+		pes.cut(offset);
+		self.tail_pes = pes;
 
 		Ok(published)
 	}
@@ -4646,7 +4677,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 	fn desync(&mut self) {
 		self.tail.clear();
 		self.tail_pts = None;
-		self.tail_pes = None;
+		self.tail_pes = PesStarts::default();
 		self.resync.desynced();
 	}
 
@@ -6572,6 +6603,43 @@ pub(super) mod test {
 					.map(|frame| frame.timestamp.as_micros())
 					.collect::<Vec<_>>(),
 				[1_000_000, 1_000_000 + step, 2_000_000],
+				"{stream_type:?}"
+			);
+		}
+	}
+
+	/// A frame waiting for the next header to confirm it keeps the PES that began after it
+	/// pending, so a later PES does not take that PES's PTS from the frame beginning in it.
+	#[tokio::test(start_paused = true)]
+	async fn each_pes_timestamp_waits_for_its_first_frame_behind_an_unconfirmed_one() {
+		const PID: u16 = 0x61;
+		for stream_type in [StreamType::AdtsAac, StreamType::Mpeg1Audio] {
+			let (frame, step): (fn(u8) -> Vec<u8>, u128) = match stream_type {
+				StreamType::AdtsAac => (|fill| adts_frame(65, fill), 21_333),
+				_ => (mp2_frame, 72_000),
+			};
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			import.decode(&synth_pmt(&[(stream_type, PID)], false)).unwrap();
+			let (b, c) = (frame(0xbb), frame(0xcc));
+			// The second PES finishes `b` but holds too little of `c` to confirm it.
+			for (cc, pts, payload) in [
+				(0, 90_000, [&frame(0xaa)[..], &b[..20]].concat()),
+				(1, 180_000, [&b[20..], &c[..3]].concat()),
+				(2, 270_000, [&c[3..], &frame(0xdd)[..]].concat()),
+			] {
+				import.decode(&audio_pes_packet(PID, cc, pts, &payload)).unwrap();
+			}
+			import.finish().unwrap();
+			let frames = read_audio_frames(&consumer, &catalog).await;
+			assert_eq!(
+				frames
+					.iter()
+					.map(|frame| frame.timestamp.as_micros())
+					.collect::<Vec<_>>(),
+				[1_000_000, 1_000_000 + step, 2_000_000, 3_000_000],
 				"{stream_type:?}"
 			);
 		}
