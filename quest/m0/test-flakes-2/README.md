@@ -56,6 +56,11 @@ moq-relay's auth-trust test was never load-bound either: its fixture left each
 lease's background `end` POST unserved, so a reused port let one steal the next
 trial's accept. Fixed by [moq-dev/moq#7550](https://github.com/moq-dev/moq/pull/7550).
 
+The embedded relay stop test probed freed ports after its Linux socket-inode
+check had already proved the owner's HTTP and QUIC sockets closed. A successful
+TCP connect could reach a replacement listener. Linux now uses the ownership
+proof alone, fixed by [moq-dev/moq#7823](https://github.com/moq-dev/moq/pull/7823).
+
 The Kotlin flow-cancel test's `unroutable` was not load-bound: its snapshot
 writer became unreachable, so JVM cleanup aborted the track mid-read. The JS
 IETF blind-handle test's one identified cause was the session-closing reset
