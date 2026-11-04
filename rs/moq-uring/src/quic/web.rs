@@ -421,7 +421,7 @@ impl Session {
 
 	/// Change the underlying connection's flow-control limits; see
 	/// [`Connection::set_limits`].
-	pub fn set_limits(&self, limits: super::Limits) -> Result<(), super::Error> {
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 		self.conn.set_limits(limits)
 	}
 
@@ -627,7 +627,7 @@ impl Session {
 				opening.uni = Some((SendStream::new(inner, &self.handles, None), header));
 			}
 			let (send, header) = opening.uni.as_mut().unwrap();
-			let result = ready!(send.poll_header(cx, header)).map_err(Error::from);
+			let result = ready!(send.poll_header(opening.park.hold(cx), header)).map_err(Error::from);
 			let (mut send, _) = opening.uni.take().unwrap();
 			result?;
 			send.set_priority(options.priority);
@@ -688,7 +688,7 @@ impl Session {
 				));
 			}
 			let (send, _, header) = slot.as_mut().unwrap();
-			let result = ready!(send.poll_header(cx, header)).map_err(Error::from);
+			let result = ready!(send.poll_header(opening.park.hold(cx), header)).map_err(Error::from);
 			let (mut send, recv, _) = slot.take().unwrap();
 			result?;
 			send.set_priority(options.priority);
@@ -778,7 +778,7 @@ impl Session {
 		kio::wait(|w| self.poll_open_bi(w, options)).await
 	}
 	/// Receive a datagram with its session header removed.
-	pub async fn read_datagram(&self) -> Result<Bytes, Error> {
+	pub async fn recv_datagram(&self) -> Result<Bytes, Error> {
 		kio::wait(|w| self.poll_recv_datagram(w)).await
 	}
 	/// Wait until the session's connection has closed.
@@ -951,8 +951,6 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 		let mut send = Some(send);
 		let mut finished = None;
 		kio::wait(|waiter| {
-			let cx = waiter.context();
-
 			// Stop writing once the connection is gone; the deadline is the
 			// only other thing that ends this.
 			if conn.poll_closed(waiter).is_ready() {
@@ -960,7 +958,7 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 			}
 			if let Some(stream) = &mut send {
 				while frame.has_remaining() {
-					match stream.poll_write(&cx, &mut frame) {
+					match stream.poll_write_buf(waiter, &mut frame) {
 						Poll::Ready(Ok(_)) => {}
 						// The stream is unusable, so the connection close below
 						// is all the peer is going to get.
@@ -1084,6 +1082,7 @@ fn unmap_err(err: Error) -> Error {
 /// Incrementally reads one QUIC varint off a stream, never past it.
 #[derive(Default)]
 struct VarRead {
+	park: kio::Park,
 	buf: [u8; 8],
 	have: usize,
 }
@@ -1108,7 +1107,7 @@ impl VarRead {
 				}
 				return Poll::Ready(VarPoll::Value(value));
 			}
-			match ready!(recv.poll_read(cx, &mut &mut self.buf[self.have..need])) {
+			match ready!(recv.poll_read_buf(self.park.hold(cx), &mut &mut self.buf[self.have..need])) {
 				Ok(Some(n)) => self.have += n,
 				Ok(None) | Err(_) => return Poll::Ready(VarPoll::End),
 			}

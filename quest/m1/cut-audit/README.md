@@ -41,9 +41,11 @@ internal and can ship after the cut:
 [resume as producer replacement](/quest/m2/resume-redesign.md),
 [moq-transport request leases](/quest/m2/ietf-request-lease.md),
 [group heads filled in place](/quest/m2/ietf-fill-refill.md),
-[one relay serve path](/quest/m2/relay-serve-path.md),
-moqsrc pad actors and publish rendition identity (both since landed). Other
-redesign evidence went into the quests that already own the mechanism:
+moqsrc pad actors and publish rendition identity (both since landed). The
+[one relay serve path](/quest/m1/session-policy/uring.md) proposal moved into
+m1 on 2026-11-04, as part of moving session policy into moq-net before the
+cut. Other redesign evidence went into the quests that already own the
+mechanism:
 [subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [drop set](/quest/m1/drop-set.md),
 [per-origin routes](/quest/m1/cluster-routing/routes/README.md),
