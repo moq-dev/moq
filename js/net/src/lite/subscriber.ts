@@ -25,7 +25,6 @@ import * as Instance from "../instance.ts";
 import { hiddenBelow, hooks, maxDelayOf, minDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
-import { receiveFrame } from "../payload.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -50,7 +49,7 @@ import {
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
-import { frameDecoder, type Group as GroupMessage, readFrames, type WireFrame } from "./group.ts";
+import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -1699,49 +1698,12 @@ export class Subscriber {
 	// the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, info: TrackInfo): Promise<void> {
 		try {
-			const decode = frameDecoder({
-				scale: info.timescale ?? 0,
-				compress: info.compress,
-			});
-
-			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
-			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
-			// demand, not by the stream ending. `idling` is watched across frames as one stable
-			// promise; the check is level-triggered, so a coalesced fetch that arrives before we
-			// cancel re-arms and resumes.
-			const idle: unique symbol = Symbol("idle");
-			let idling = groupUnwanted(group).then((): typeof idle => idle);
-			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
-			// kept and awaited again rather than abandoned with its frame.
-			let pending: Promise<WireFrame | undefined> | undefined;
-			for (;;) {
-				// Buffered frames are written without an await, as in a group stream.
-				let frame = pending === undefined ? stream.reader.tryDecode(decode) : undefined;
-				if (!frame) {
-					pending ??= stream.reader.decodeMaybe(decode);
-					const next = await race([pending, group.closed, idling]);
-					if (next === idle) {
-						if (group.isClosed) break;
-						if (group.demand().wanted.peek()) {
-							idling = groupUnwanted(group).then((): typeof idle => idle);
-							continue;
-						}
-						// Abandoned mid-group: the truncated group must never end clean.
-						throw new StreamError(StreamCode.Cancel, { message: "cancel" });
-					}
-					pending = undefined;
-					// Reset the stream with the group's error, such as Unauthorized on revocation.
-					if (next instanceof Error) throw next;
-					if (!next) break;
-					frame = next;
-				}
-				if (frame.payload) hooks.writeGroupFrame(group, frame as netGroup.Frame, frame.inflated);
-				else if (!(await receiveFrame(stream.reader, group, frame))) {
-					const closed = group.closed.peek();
-					if (closed instanceof Error) throw closed;
-					break;
-				}
-			}
+			// One guard covers both header waits and a stalled payload. Abandonment aborts
+			// the group before resetting the stream, releasing the shared frame pump too.
+			await untilAbandoned(
+				group,
+				readFrames(stream.reader, group, { scale: info.timescale ?? 0, compress: info.compress }),
+			);
 
 			group.finish();
 			stream.close();
