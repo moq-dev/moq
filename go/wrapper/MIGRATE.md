@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Catalog renditions carry their warmup ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`ffi.MoqVideo` and `ffi.MoqAudio` (`media.Video` and `media.Audio`) gain `Warmup`, the catalog's decoder warmup, nil when absent. `media.NewTrackConsumer` and the audio and video `Subscribe` read it from the rendition and start that much earlier; a negative one is refused with an error. Only unkeyed struct literals change.
+
 ### Separate datagram tracks
 
 Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `BroadcastProducer.CreateDatagrams(name, info)` and `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)` assigns a sequence and `Insert(Datagram)` preserves one. `DatagramConsumer.Recv(ctx)` and `All(ctx)` read its independent cursor. `DatagramInfo` carries priority and optional timescale. Watch `Priority()` / `PriorityChanged(ctx, last)` and serve on-demand tracks through `BroadcastRequests.Datagrams()` / `DatagramRequests.Requested(ctx)`.
