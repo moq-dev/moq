@@ -138,9 +138,12 @@ struct Listing {
 	uni: LinkedHashSet<Arc<str>>,
 	/// Bi streams the peer opened, with the opener's track info, not yet accepted.
 	bi: LinkedHashMap<Arc<str>, track::Info>,
-	/// This side's bi opens waiting for an answer, by track name, and whether the peer
-	/// listed it.
-	opening: HashMap<Arc<str>, bool>,
+	/// This side reading the opener's half of each bi stream it accepted, by track name,
+	/// until the opener's half leaves the listing. The opener learns of the accept from
+	/// this demand, not from the answer's listing: a listing drops a track that comes and
+	/// goes before its reader reaches it, so an answer dropped at once would never be
+	/// seen, and the application may not read the opener's half before it hears back.
+	reading: HashMap<Arc<str>, kio::Pending<track::Subscribing>>,
 	/// How the listing ended: `Ok` once the peer's broadcast ended, or why it failed.
 	end: Option<Result<(), Error>>,
 }
@@ -175,10 +178,12 @@ impl Listing {
 				Poll::Ready(Ok(Some(event))) => event,
 				Poll::Ready(Ok(None)) => {
 					self.end = Some(Ok(()));
+					self.reading.clear();
 					return;
 				}
 				Poll::Ready(Err(err)) => {
 					self.end = Some(Err(err));
+					self.reading.clear();
 					return;
 				}
 			};
@@ -203,14 +208,11 @@ impl Listing {
 				}
 				(false, Kind::Bi, None) => {
 					self.bi.remove(&name);
+					// The opener dropped its half, so it resolved or gave up.
+					self.reading.remove(&name);
 				}
-				// An answer seen once stays seen: the opener reads whatever it wrote.
-				(true, Kind::Bi, Some(_)) => {
-					if let Some(answered) = self.opening.get_mut(&name) {
-						*answered = true;
-					}
-				}
-				(true, Kind::Bi, None) => {}
+				// An open learns of its answer from the peer reading it, not the listing.
+				(true, Kind::Bi, _) => {}
 				// This side's uni streams live only in its own broadcast.
 				(true, Kind::Uni, _) => {}
 			}
@@ -325,15 +327,7 @@ impl Socket {
 	pub fn open_bi(&self, info: impl Into<Option<track::Info>>) -> Result<kio::Pending<OpenBi>, Error> {
 		let inner = &self.inner;
 		let track: Arc<str> = inner.open(Kind::Bi).into();
-		// Registered first, so a poll that reads the peer's answer before this returns keeps it.
-		inner.listing.lock().opening.insert(track.clone(), false);
-		let producer = match inner.create_track(track.to_string(), info) {
-			Ok(producer) => producer,
-			Err(err) => {
-				inner.listing.lock().opening.remove(&track);
-				return Err(err);
-			}
-		};
+		let producer = inner.create_track(track.to_string(), info)?;
 		Ok(kio::Pending::new(OpenBi {
 			inner: inner.clone(),
 			track,
@@ -382,6 +376,11 @@ impl Socket {
 	/// Poll for the next bi stream the peer opened, answering it with a track that mirrors
 	/// the opener's info; `None` once the peer's broadcast ended, and [`Error::Closed`]
 	/// once this side closed. Skips streams as [`Self::poll_accept_uni`] does.
+	///
+	/// The socket reads the opener's half until the opener drops it, which is how the
+	/// opener learns of the accept. As with any stream, the answer reaches the opener only
+	/// while this side holds it: finishing it at once is fine, dropping it before the
+	/// opener reads it is not.
 	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<Option<Bi>, Error>> {
 		let inner = &self.inner;
 		loop {
@@ -419,6 +418,8 @@ impl Socket {
 				Err(Error::Duplicate) => continue,
 				Err(err) => return Poll::Ready(Err(err)),
 			};
+			// How the opener learns of the accept.
+			inner.listing.lock().reading.insert(track, consumer.subscribe(None));
 			return Poll::Ready(Ok(Some(Bi { producer, consumer })));
 		}
 	}
@@ -469,18 +470,14 @@ pub struct OpenBi {
 	track: Arc<str>,
 	/// This side's track, handed over once the peer answers.
 	producer: Option<track::Producer>,
-	/// Whether anyone reads this side's track, which only the peer does once it accepted.
+	/// Whether anyone reads this side's track, which the peer does from its accept on.
 	demand: track::Demand,
 }
 
 impl OpenBi {
-	/// Poll for the peer's answer: its half listed, or its subscription to this side's
-	/// half. Fails with [`Error::Unroutable`] once the peer's broadcast ends without one,
-	/// and with [`Error::Closed`] once this side closed, even if the answer came.
-	///
-	/// The subscription counts because a listing drops an add its reader never reached
-	/// once the track leaves it: a peer that finishes its half at once and only reads
-	/// would otherwise never be seen to answer.
+	/// Poll for the peer's answer, which it gives by reading this side's half. Fails with
+	/// [`Error::Unroutable`] once the peer's broadcast ends without one, and with
+	/// [`Error::Closed`] once this side closed, even if the answer came.
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bi, Error>> {
 		let inner = &self.inner;
 		// This side's track went with its broadcast, and a peer that keeps its own up
@@ -490,16 +487,13 @@ impl OpenBi {
 		}
 		// Polled until it parks, so a later change wakes this.
 		while let Poll::Ready(Ok(_)) = self.demand.poll_wanted_changed(waiter) {}
-		let read = self.demand.wanted().is_some();
-		let mut listing = inner.listing.lock();
-		listing.drain(waiter, inner.role, &inner.remote);
-		if read || listing.opening.get(&self.track) == Some(&true) {
-			listing.opening.remove(&self.track);
-			drop(listing);
+		if self.demand.wanted().is_some() {
 			let consumer = inner.remote.track(&self.track)?;
 			let producer = self.producer.take().ok_or(Error::Closed)?;
 			return Poll::Ready(Ok(Bi { producer, consumer }));
 		}
+		let mut listing = inner.listing.lock();
+		listing.drain(waiter, inner.role, &inner.remote);
 		match &listing.end {
 			Some(Ok(())) => Poll::Ready(Err(Error::Unroutable)),
 			Some(Err(err)) => Poll::Ready(Err(err.clone())),
@@ -513,14 +507,6 @@ impl kio::Task for OpenBi {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		self.poll_ok(waiter)
-	}
-}
-
-impl Drop for OpenBi {
-	fn drop(&mut self) {
-		if self.producer.is_some() {
-			self.inner.listing.lock().opening.remove(&self.track);
-		}
 	}
 }
 

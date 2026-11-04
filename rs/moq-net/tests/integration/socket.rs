@@ -475,10 +475,53 @@ async fn each_open_is_a_new_track() {
 	assert_eq!(recv(&opened.consumer).await, b"pong");
 }
 
-/// A peer that accepts a bi stream, finishes its half at once, and only reads still
-/// answers the open, though its half left the listing before the opener read it.
+/// Open a bi stream from `dialer`, and have `accepted` accept it, write one group, and
+/// finish its half before the open is polled, never reading the opener's half itself.
+/// The opener still resolves and reads what the peer wrote.
+async fn a_finished_answer_reaches_the_opener(dialer: &Socket, accepted: &Socket) {
+	let open = dialer.open_bi(None).unwrap();
+	let answered = kio::clock::timeout(TIMEOUT, accepted.accept_bi())
+		.await
+		.expect("accept timeout")
+		.unwrap()
+		.expect("a stream");
+	send(&answered.producer, b"greeting");
+	answered.producer.finish().unwrap();
+	// Held, finished, as any stream is until the peer reads it.
+	let answer = answered.producer;
+	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
+
+	let opened = kio::clock::timeout(TIMEOUT, open)
+		.await
+		.expect("open timeout")
+		.expect("open");
+	assert_eq!(recv(&opened.consumer).await, b"greeting");
+	drop(answer);
+}
+
+/// A finished answer reaches the opener through a relay.
 #[kio::test]
-async fn a_finished_answer_still_answers_the_open() {
+async fn a_finished_answer_reaches_the_opener_through_a_relay() {
+	let fixture = Fixture::new().await;
+	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
+	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
+	a_finished_answer_reaches_the_opener(&dialer, &accepted).await;
+}
+
+/// A finished answer reaches the opener on one origin, with no session between them.
+#[kio::test]
+async fn a_finished_answer_reaches_the_opener_on_one_origin() {
+	let shared = origin(1);
+	let mut listener = Listener::new(&shared, "room").unwrap();
+	let (dialer, accepted) = connect(&shared, &mut listener, "alice").await;
+	a_finished_answer_reaches_the_opener(&dialer, &accepted).await;
+}
+
+/// A peer that accepts a bi stream and drops its half at once, only reading, still
+/// answers the open: its half left the listing before the opener could see it, and it
+/// has not subscribed to the opener's half yet either.
+#[kio::test]
+async fn a_dropped_answer_still_answers_the_open() {
 	let fixture = Fixture::new().await;
 	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
 	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
@@ -489,25 +532,16 @@ async fn a_finished_answer_still_answers_the_open() {
 		.expect("accept timeout")
 		.unwrap()
 		.expect("a stream");
-	answered.producer.finish().unwrap();
 	drop(answered.producer);
-	// Long enough for the answer to come and go before the open is polled.
+	let request = answered.consumer;
 	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
 
-	let (opened, read) = kio::clock::timeout(TIMEOUT, async {
-		futures::join!(
-			async {
-				let opened = open.await.expect("open");
-				send(&opened.producer, b"request");
-				opened
-			},
-			recv(&answered.consumer)
-		)
-	})
-	.await
-	.expect("open timeout");
-	assert_eq!(read, b"request");
-	drop(opened);
+	let opened = kio::clock::timeout(TIMEOUT, open)
+		.await
+		.expect("open timeout")
+		.expect("open");
+	send(&opened.producer, b"request");
+	assert_eq!(recv(&request).await, b"request");
 }
 
 /// A fixed-name track sits beside the streams: accept skips it, and the peer reads it by
