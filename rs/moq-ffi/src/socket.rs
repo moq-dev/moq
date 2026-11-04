@@ -314,6 +314,7 @@ mod tests {
 		assert_eq!((client.peer(), server.peer()), ("b".into(), "a".into()));
 		assert_eq!(client.session(), server.session());
 		let producer = client.producer();
+		let reader = client.consumer();
 		let consumer = server.consumer();
 		drop(client);
 		producer.write_frame(frame(b"one")).unwrap();
@@ -324,6 +325,7 @@ mod tests {
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().payload, b"two");
 		assert!(consumer.read_frame().await.unwrap().is_none());
 		server.producer().finish().unwrap();
+		assert!(reader.read_frame().await.unwrap().is_none());
 	}
 
 	#[tokio::test]
@@ -399,6 +401,7 @@ mod tests {
 		let (client, server) = (client.unwrap(), server.unwrap());
 		assert_eq!(client.session(), server.session());
 		let producer = client.producer();
+		let reverse = server.producer();
 		let consumer = server.consumer();
 		drop(server);
 		assert!(consumer.info().max_age_unlimited);
@@ -413,6 +416,8 @@ mod tests {
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().payload, b"first");
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().payload, b"later");
 		assert!(consumer.read_frame().await.unwrap().is_none());
+		reverse.finish().unwrap();
+		assert!(client.consumer().read_frame().await.unwrap().is_none());
 	}
 
 	#[tokio::test]

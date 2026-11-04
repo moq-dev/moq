@@ -46,7 +46,7 @@ async def test_tcp_halves_fin_and_peer_identity():
     assert (a.id, a.prefix, client.peer, server.peer) == ("a", "room", "b", "a")
     assert client.session == server.session
     assert len(client.session) == 32
-    producer, consumer = client.producer, server.consumer
+    producer, reader, consumer = client.producer, client.consumer, server.consumer
     # Releasing the stream cannot release either half kept by the application.
     del client
     gc.collect()
@@ -57,6 +57,7 @@ async def test_tcp_halves_fin_and_peer_identity():
     gc.collect()
     assert [frame.payload async for frame in consumer] == [b"one", b""]
     server.producer.finish()
+    assert await reader.read_frame() is None
     a.close()
     b.close()
 
@@ -119,7 +120,7 @@ async def test_track_default_retains_ascending_messages_and_subscription():
     server = await (await incoming).accept()
     client = await dial
     assert (client.peer, server.peer, client.session) == ("b", "a", server.session)
-    producer, consumer = client.producer, server.consumer
+    producer, reverse, consumer = client.producer, server.producer, server.consumer
     del server
     gc.collect()
     assert consumer.info().max_age is None
@@ -132,6 +133,8 @@ async def test_track_default_retains_ascending_messages_and_subscription():
         (0, [b"first"]),
         (1, [b"later"]),
     ]
+    reverse.finish()
+    assert await client.consumer.read_frame() is None
     a.close()
     b.close()
 
