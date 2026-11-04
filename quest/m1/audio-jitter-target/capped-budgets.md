@@ -20,6 +20,16 @@ dropped.
 
 ## Plan
 
+Decided 2026-11-04 (maintainer, on
+[moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898)): land one group
+per PES as is. The extra AAC `wide` re-stalls are for Watch's time stretch to
+absorb, and this quest no longer expects AAC `wide` to stop running dry.
+Options shown:
+
+- ✅ Land as is
+- Land only the budgets, holding the importer change until time stretch lands
+- Keep the change and deepen AAC's target
+
 [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) re-measured every
 browser row from the 2026-10-29 to 2026-11-04 nightlies (its body keeps each
 night's metrics) and changed the publisher: `moq import ts` used to send each
@@ -32,9 +42,8 @@ minute against Opus `bursty`'s 117.4. Replaying their captures with each PES's
 arrival slots handed to its frames oldest first, as one group, halved the AAC
 `bursty` and `wide` discards (worst `bursty` night 362.7 to 190.1 ms a minute)
 and lowered both rows' target by 20 to 60 ms. That shallower target doubled AAC
-`wide`'s player re-stalls (mean 3.0 to 6.6 a minute), which is the 0.95
-quantile's trade and [Watch](/quest/m1/audio-jitter-target/watch.md)'s time
-stretch to absorb, not a reason to deepen the target here.
+`wide`'s player re-stalls (mean 3.0 to 6.6 a minute), the 0.95 quantile's trade
+that [Watch](/quest/m1/audio-jitter-target/watch.md)'s time stretch absorbs.
 
 Grade the same `chromium-aac-*` rows. If AAC `bursty` still discards several
 times what Opus `bursty` does, compare the rows' `.arrivals.ndjson` captures:
