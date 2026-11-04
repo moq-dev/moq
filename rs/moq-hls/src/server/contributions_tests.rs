@@ -185,6 +185,111 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_failed_parent_catalog_stops_its_contributions() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let child = Instance::random();
+	let Published {
+		publication: _parent,
+		catalog: parent_catalog_track,
+		video,
+		audio,
+	} = publish(&origin, "room/live", &root, &parent_catalog());
+	frames(&video, 0);
+	frames(&audio, 0);
+	let contribution = publish(&origin, "room/ladder", &child, &catalog());
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	master(&server, "contribution/", true).await;
+	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	parent_catalog_track.abort(moq_net::Error::Cancel).unwrap();
+	let deadline = kio::clock::now() + Duration::from_secs(10);
+	// A live contribution's playlist waits for media this test never writes, so bound each request.
+	while !matches!(
+		kio::clock::timeout(Duration::from_secs(1), request(&server, &uri)).await,
+		Ok((StatusCode::NOT_FOUND, _))
+	) {
+		assert!(
+			kio::clock::now() < deadline,
+			"the contribution outlived its parent catalog"
+		);
+		kio::clock::sleep(Duration::from_millis(10)).await;
+	}
+	assert!(
+		!request(&server, "/room/live/master.m3u8")
+			.await
+			.1
+			.contains("contribution/")
+	);
+	let mut catalog = contribution.catalog.demand();
+	kio::clock::timeout(Duration::from_secs(1), async {
+		while catalog.wanted_changed().await.unwrap().is_some() {}
+	})
+	.await
+	.expect("the contribution catalog is released");
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let child = Instance::random();
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
+	frames(&parent.video, 0);
+	let mut value = catalog();
+	let mut contribution = publish(&origin, "room/ladder", &child, &value);
+	frames(&contribution.video, 0);
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	master(&server, "contribution/", true).await;
+	let uri = format!("/room/live/@{root}/contribution/rung%2Fa/video/same/@{child}/media.m3u8");
+	assert_eq!(request(&server, &uri).await.0, StatusCode::OK);
+	// Reconfigure onto another track; the predecessor ends with its own track.
+	let next = contribution
+		.publication
+		.create_track("next", hang::container::track_info(1))
+		.unwrap();
+	let video = value.video.renditions.get_mut("same").unwrap();
+	video.track = Some("next".into());
+	video.coded_width = Some(640);
+	contribution
+		.catalog
+		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
+		.unwrap();
+	master(&server, "RESOLUTION=640x240", true).await;
+	contribution.video.finish().unwrap();
+	let held = server
+		.router()
+		.oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+		.await
+		.unwrap();
+	assert_eq!(held.status(), StatusCode::OK);
+	frames(&next, 3);
+	next.finish().unwrap();
+	drop(held);
+	let deadline = kio::clock::now() + Duration::from_secs(10);
+	let ended = loop {
+		let (status, playlist) = request(&server, &uri).await;
+		if status == StatusCode::OK && playlist.contains("#EXT-X-ENDLIST") {
+			break playlist;
+		}
+		assert!(
+			kio::clock::now() < deadline,
+			"the playlist never ended: {status} {playlist}"
+		);
+		kio::clock::sleep(Duration::from_millis(10)).await;
+	};
+	assert!(ended.contains("#EXT-X-MEDIA-SEQUENCE:0"), "{ended}");
+	assert!(ended.contains("#EXT-X-DISCONTINUITY"), "{ended}");
+	// Past the idle window, the ended playlist still lists its predecessor's segments.
+	// Let the idle task start its timer, and run once it fires, before a request renews demand.
+	kio::clock::sleep(Duration::from_millis(10)).await;
+	tokio::time::advance(Duration::from_secs(13)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
+	let (status, after) = request(&server, &uri).await;
+	assert_eq!(status, StatusCode::OK);
+	assert_eq!(after, ended);
+}
+
+#[tokio::test(start_paused = true)]
 #[tracing_test::traced_test]
 async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 	let origin = moq_tokio::origin::spawn();

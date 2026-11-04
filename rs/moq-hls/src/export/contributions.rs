@@ -105,9 +105,13 @@ impl Producer {
 		}
 	}
 
+	/// Stop following every contribution for good. Closing the state under the same lock
+	/// makes this terminal: a [`sync`](Self::sync) racing past its catalog await finds the
+	/// state closed and cannot re-add entries or spawn follow tasks.
 	pub fn clear(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.entries.clear();
+			state.close();
 		}
 	}
 
@@ -217,8 +221,20 @@ impl Producer {
 
 fn compatible(parent: Media, contribution: Option<Media>) -> bool {
 	contribution.is_some_and(|media| {
-		parent.interval().is_some() && parent.interval() == media.interval() && parent.clock == media.clock
+		parent.interval().is_some()
+			&& parent.interval() == media.interval()
+			&& match (parent.clock, media.clock) {
+				(None, None) => true,
+				(Some(parent), Some(media)) => same_instant(parent.wall, media.wall),
+				_ => false,
+			}
 	})
+}
+
+/// Whether two wall timestamps name the same instant, whatever scale each is encoded in.
+/// `Timestamp` equality is structural, so `1000/1000` and `1000000/1000000` differ.
+fn same_instant(a: moq_net::Timestamp, b: moq_net::Timestamp) -> bool {
+	a.value() as u128 * b.scale().as_u64() as u128 == b.value() as u128 * a.scale().as_u64() as u128
 }
 
 async fn follow_instances(mut instances: follow::Instances, current: kio::Producer<Current>, context: Context) {
@@ -264,6 +280,40 @@ async fn follow_instances(mut instances: follow::Instances, current: kio::Produc
 #[cfg(all(test, feature = "server"))]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn clocks_compare_as_instants_across_scales() {
+		let mut parent = Media::default();
+		parent.join = hang::catalog::Join::new(Duration::from_secs(2));
+		let mut child = parent;
+		assert!(compatible(parent, Some(child)));
+		parent.clock = Some(hang::catalog::Clock::new(moq_net::Timestamp::from_scale(1_000, 1_000).unwrap()).unwrap());
+		assert!(!compatible(parent, Some(child)), "only one side declares a clock");
+		child.clock =
+			Some(hang::catalog::Clock::new(moq_net::Timestamp::from_scale(1_000_000, 1_000_000).unwrap()).unwrap());
+		assert!(compatible(parent, Some(child)), "the same instant in another scale");
+		child.clock =
+			Some(hang::catalog::Clock::new(moq_net::Timestamp::from_scale(1_000_001, 1_000_000).unwrap()).unwrap());
+		assert!(!compatible(parent, Some(child)));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_sync_after_clear_adds_nothing() {
+		let origin = moq_tokio::origin::spawn();
+		let _parent = origin.publish("room/live", Default::default()).unwrap();
+		let source = crate::resolved(&origin, "room/live").await;
+		let mut catalog = Catalog::default();
+		catalog.contributions.insert(
+			"child".into(),
+			Contribution::new(moq_net::path::Relative::new("./child").unwrap()),
+		);
+		let (spawner, _driver) = driver::Spawner::new();
+		let contributions = Producer::new(origin.consume(), Duration::from_secs(16), spawner);
+		contributions.clear();
+		// A watcher already past its catalog await syncs after the clear.
+		contributions.sync(&source, &catalog);
+		assert!(contributions.state.read().entries.is_empty());
+	}
 
 	#[tokio::test(start_paused = true)]
 	async fn a_cold_lookup_waits_for_the_first_follow_event() {

@@ -442,8 +442,13 @@ impl Drop for Demand {
 				let mut claim = rendition.claim.lock().expect("claim lock poisoned");
 				let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
 				if watcher.requests == 0 {
-					watcher.media.take();
 					rendition.media.handle.lock().expect("media lock poisoned").track.take();
+					// A finished window keeps listing what it listed, inherited predecessor rows
+					// included. Its finished watcher stays, so no request follows the ended track again.
+					if rendition.live.finished() {
+						return;
+					}
+					watcher.media.take();
 					// A resumed watcher never rewrites already-addressed segments or lists a
 					// partial segment it had open when the last player left.
 					claim.start = claim.next;

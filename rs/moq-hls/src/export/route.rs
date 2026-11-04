@@ -110,8 +110,13 @@ impl Route {
 		let contribution = if tail != 0 {
 			match &parts[..end] {
 				[.., parent, directory, id, kind, _, child]
-					if directory == "contribution" && instance_id(parent).is_some() && Kind::parse(kind).is_some() =>
+					if directory == "contribution"
+						&& instance_id(parent).is_some()
+						&& Kind::parse(kind).is_some()
+						&& instance_id(child).is_some() =>
 				{
+					// Every slot has the contribution shape; otherwise the ordinary arms below
+					// parse the untouched parts as a longer broadcast path.
 					let contribution = Contribution {
 						id: id.clone(),
 						instance: instance_id(child)?,
@@ -329,5 +334,21 @@ mod tests {
 		assert_eq!(own.broadcast, "room/@parent/contribution/id");
 		assert!(own.contribution.is_none());
 		assert!(Route::parse("/room%2Flive/@parent/contribution/id/video/main/@child/media.m3u8").is_none());
+		// Contribution-shaped but for the child slot: an ordinary URL on a longer broadcast path.
+		let own = Route::parse("/room/@parent/contribution/id/video/@run/audio/seg/media.m3u8").unwrap();
+		assert_eq!(own.broadcast, "room/@parent/contribution/id/video");
+		assert!(own.contribution.is_none());
+		match own.resource {
+			Resource::Media {
+				instance,
+				kind,
+				rendition,
+			} => {
+				assert_eq!(instance, "run");
+				assert_eq!(kind, Kind::Audio);
+				assert_eq!(rendition, "seg");
+			}
+			_ => panic!("wrong resource"),
+		}
 	}
 }

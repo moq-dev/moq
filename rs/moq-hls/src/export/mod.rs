@@ -557,6 +557,11 @@ async fn watch_catalog(
 		}
 	};
 	renditions.finish(result);
+	// The parent catalog lists the contributions: once it ends or fails, stop following and
+	// advertising them too.
+	if let Some(contributions) = &contributions {
+		contributions.clear();
+	}
 }
 
 #[cfg(test)]
