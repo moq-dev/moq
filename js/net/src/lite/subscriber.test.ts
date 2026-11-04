@@ -40,6 +40,7 @@ import {
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeStart,
+	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Minted, SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
@@ -1344,11 +1345,12 @@ test.each(
 		for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
 		await track.info();
 		await request.reading;
-		await drainReactions();
-		const wire = new Reader(undefined, new Uint8Array(Buffer.concat(request.written)), version);
-		await wire.u53();
-		await Subscribe.decode(wire, version);
-		expect(await wire.done()).toBe(true);
+		// An explicit change orders after any update caused by TRACK_INFO, even if its encoding yields.
+		track.update({ priority: 4, delay: { max: Milli(10_000) } });
+		const update = await SubscribeUpdate.decode(subscribe, version);
+		expect([update.priority, update.maxDelay]).toEqual([4, 10_000]);
+		track.close();
+		expect(await subscribe.done()).toBe(true);
 	} finally {
 		track.close();
 		subscriber.close();
