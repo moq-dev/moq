@@ -1,4 +1,5 @@
-//! A step of the source's clock onto another timeline ends the import's instance.
+//! A change of source, its clock stepping onto another timeline or its PAT naming another
+//! program, ends the import's instance.
 //!
 //! The stimulus is a real capture played twice, the second pass on another clock: the whole
 //! multiplex steps at one packet, with every continuity counter broken once and no
@@ -171,7 +172,7 @@ fn an_unflagged_switch_restarts_either_way() {
 
 			// The new instance takes everything from the second pass's first timestamp, which
 			// is where the old one stopped reading: none of it is published twice or lost.
-			assert!(rest.ends_with(first_timed(&data[second..])), "{expected} {chunk}");
+			assert!(data[second..].ends_with(&rest), "{expected} {chunk}");
 			assert!(rest.len() >= first_timed(&data[second..]).len(), "{expected} {chunk}");
 
 			// What follows imports as a broadcast of its own.
@@ -181,64 +182,55 @@ fn an_unflagged_switch_restarts_either_way() {
 	}
 }
 
-/// PSI immediately before the step already routed to the old instance. The replacement must
-/// use that map for the first keyframe, even when no table repeats before the next GOP.
-#[tokio::test(start_paused = true)]
-async fn a_restart_keeps_the_program_map_before_its_first_media() {
-	let second = shift(CLIP, |_| -SWITCH);
-	let first_media = CLIP.len() - first_timed(CLIP).len();
-	let pmt = CLIP
+/// A source switch whose PAT names another `transport_stream_id` before its first clock
+/// reading restarts at that PAT, where the old program's identity check would otherwise fail
+/// the whole import. The new instance reads the PAT itself, however the input is split.
+#[test]
+fn another_identity_restarts_at_its_pat() {
+	let mut second = shift(CLIP, |_| -SWITCH);
+	for pkt in second.as_chunks_mut::<188>().0 {
+		if pid(pkt) != 0 {
+			continue;
+		}
+		// A single-section PAT behind a zero pointer_field: retag its transport_stream_id.
+		assert_eq!(pkt[1] & 0x40, 0x40);
+		let section = 5 + usize::from(pkt[4]);
+		let len = 3 + (usize::from(pkt[section + 1] & 0x0f) << 8 | usize::from(pkt[section + 2]));
+		pkt[section + 3..section + 5].copy_from_slice(&7u16.to_be_bytes());
+		let crc = super::psi::CRC.checksum(&pkt[section..section + len - 4]);
+		pkt[section + len - 4..section + len].copy_from_slice(&crc.to_be_bytes());
+	}
+	let pat = second
 		.as_chunks::<188>()
 		.0
 		.iter()
-		.find_map(|packet| {
-			if pid(packet) != 0 {
-				return None;
-			}
-			let start = if packet[3] & 0x20 != 0 {
-				5 + usize::from(packet[4])
-			} else {
-				4
-			};
-			let section = start + 1 + usize::from(packet[start]);
-			Some((u16::from(packet[section + 10] & 0x1f) << 8) | u16::from(packet[section + 11]))
-		})
-		.unwrap();
-	let mut data = CLIP.to_vec();
-	data.extend_from_slice(&second[..first_media]);
-	data.extend(
-		second[first_media..]
-			.as_chunks::<188>()
-			.0
-			.iter()
-			.filter(|packet| ![0, pmt].contains(&pid(*packet)))
-			.flatten(),
-	);
-	let (err, rest) = feed(&data, 188);
-	assert!(err.unwrap().is::<Restart>());
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut initial = crate::catalog::hang::Catalog::<Ext>::default();
-	initial.ext.mpegts.mux_rate = Some(400_000);
-	let catalog =
-		crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default().with_catalog(initial)).unwrap();
-	let mut import = Import::new(broadcast, catalog.reserve());
-	import.decode(&rest).unwrap();
-	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.video.renditions.len(), 1, "the first keyframe config resolves");
-	assert_eq!(snapshot.audio.renditions.len(), 1, "the first audio config resolves");
+		.position(|pkt| pid(pkt) == 0)
+		.unwrap()
+		* 188;
 	assert!(
-		matches!(
-			consumer
-				.track(hang::Catalog::DEFAULT_NAME)
-				.unwrap()
-				.poll_largest(&kio::Waiter::noop()),
-			std::task::Poll::Ready(Some(_))
-		),
-		"every config is known, so the catalog has published before EOF"
+		second.len() - pat > first_timed(&second).len(),
+		"the new PAT precedes the new clock"
 	);
-	import.finish().unwrap();
+	let mut data = CLIP.to_vec();
+	data.extend_from_slice(&second);
+	for chunk in [data.len(), 188 * 7, 1_000] {
+		let (err, rest) = feed(&data, chunk);
+		let err = err.expect("the switch ends the instance");
+		let restart = err
+			.downcast_ref::<Restart>()
+			.unwrap_or_else(|| panic!("{chunk}: {err:#}"));
+		assert_eq!(
+			restart.step,
+			Step::Identity {
+				transport_stream_id: 7,
+				program_number: 1
+			},
+			"{chunk}"
+		);
+		assert_eq!(rest, second[pat..], "{chunk}: the new instance starts at its PAT");
+		let (err, _) = feed(&rest, chunk);
+		assert!(err.is_none(), "{chunk}: {err:?}");
+	}
 }
 
 /// A clock that steps forward by less than the bound, such as across lost packets, carries
@@ -281,7 +273,7 @@ fn a_stream_the_new_source_lacks_is_not_waited_for() {
 		matches!(restart.step, Step::Rewind { flagged: false, .. }),
 		"{restart:?}"
 	);
-	assert!(rest.ends_with(first_timed(&without)));
+	assert!(without.ends_with(&rest) && rest.len() >= first_timed(&without).len());
 }
 
 /// One clock stepping without the rest is not another source, so the import judges it as

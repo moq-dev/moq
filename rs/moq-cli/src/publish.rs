@@ -352,7 +352,7 @@ pub struct Publish {
 	report: Option<crate::report::Stats>,
 	// How long a stdin import keeps its broadcast up after EOF; see [`Self::with_linger`].
 	linger: std::time::Duration,
-	// How a stdin TS import republishes when its source's clock steps; see [`Self::stdin`].
+	// How a stdin TS import republishes when its source changes; see [`Self::stdin`].
 	republish: Option<Republish>,
 }
 
@@ -475,8 +475,8 @@ impl Publish {
 	/// Build a publisher decoding `format` from stdin into a new broadcast at `name` on
 	/// `origin`, retaining its announcement control alongside the decoder's fill handle.
 	///
-	/// A TS import whose source's clock steps onto another timeline ([`ts::Restart`]), such as
-	/// a changeover between two encoders whose clocks were never locked, finishes the broadcast
+	/// A TS import whose source changes ([`ts::Restart`]), such as a changeover between two
+	/// encoders whose clocks were never locked or whose PATs name another program, finishes the broadcast
 	/// and republishes the rest of the input at `name` under a new instance.
 	pub(super) fn stdin(
 		origin: &moq_net::origin::Producer,
@@ -746,13 +746,12 @@ struct Publication {
 	report: Option<crate::report::Stats>,
 	/// How long the finished broadcasts stay up after EOF.
 	linger: std::time::Duration,
-	/// How a step of the source's clock republishes, or `None` to end the import there.
+	/// How a change of source republishes, or `None` to end the import there.
 	republish: Option<Republish>,
 }
 
-/// How a stdin TS import republishes its path when the source's clock steps onto another
-/// timeline ([`ts::Restart`]): as a new broadcast under a new instance, with the same catalog
-/// sections.
+/// How a stdin TS import republishes its path when the source changes ([`ts::Restart`]): as a
+/// new broadcast under a new instance, with the same catalog sections.
 struct Republish {
 	origin: moq_net::origin::Producer,
 	name: String,
@@ -830,7 +829,7 @@ struct Reader<R> {
 /// The finished broadcasts then stay servable for the linger, so a subscriber that saw the
 /// final catalog only at EOF can still request them.
 ///
-/// A step of the source's clock ends the instance there. With `republish`, the rest of the
+/// A change of source ([`ts::Restart`]) ends the instance there. With `republish`, the rest of the
 /// input publishes a new instance on the same path; otherwise the import fails with it.
 async fn decode(
 	decoder: PublishDecoder,
@@ -882,8 +881,8 @@ async fn decode(
 }
 
 impl Instance {
-	/// Read and decode until EOF, returning `None`, or until a step of the source's clock ends
-	/// the instance.
+	/// Read and decode until EOF, returning `None`, or until a change of source ends the
+	/// instance.
 	async fn read<R: tokio::io::AsyncRead + Unpin>(
 		&mut self,
 		reader: &mut Reader<R>,
@@ -928,12 +927,12 @@ impl Instance {
 		}
 	}
 
-	/// The source's clock stepped: finish this instance before the step, and replace it with a
-	/// new one on the same path that takes the rest of the input.
+	/// The source changed: finish this instance before the change, and replace it with a new one
+	/// on the same path that takes the rest of the input.
 	fn restart(&mut self, republish: &Republish, restart: ts::Restart, log: &mut ts::stats::Log) -> anyhow::Result<()> {
 		let mut restart = restart;
 		loop {
-			tracing::warn!(step = %restart.step, "the source's clock stepped; republishing");
+			tracing::warn!(step = %restart.step, "the source changed; republishing");
 			self.decoder.finish()?;
 			if let Some(stats) = self.decoder.stats() {
 				self.report_mpegts(&stats);
@@ -1025,7 +1024,7 @@ impl Instance {
 }
 
 /// Decode `chunk` into `decoder`, announcing `pending` once its catalog goes out, or return the
-/// step of the source's clock that ended the instance.
+/// change of source that ended the instance.
 fn feed(
 	decoder: &mut PublishDecoder,
 	pending: &mut Option<Pending>,
@@ -2339,10 +2338,12 @@ pub(crate) mod tests {
 		import.await.unwrap();
 	}
 
-	/// An unflagged rewind puts its leading PAT/PMT before the step. A live stitched export
-	/// still receives the replacement's first picture, rather than waiting for its next GOP.
+	/// An unflagged rewind puts its leading PAT/PMT before the step. The replacement carries no
+	/// program map over, so it starts at the source's next keyframe after the tables repeat. A
+	/// live stitched export joins that first group, rather than waiting for a later one, and the
+	/// old program drains through the cut.
 	#[tokio::test(start_paused = true)]
-	async fn a_stitched_republish_starts_with_its_first_picture() {
+	async fn a_stitched_republish_joins_the_first_group() {
 		use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 		use mpeg2ts::ts::TsPacketReader;
 		use std::task::Poll;
@@ -2423,36 +2424,41 @@ pub(crate) mod tests {
 				}
 				let mut payload = BytesMut::from(pes.data.as_slice());
 				let mut nals = moq_mux::codec::annexb::NalIterator::new(&mut payload);
+				// HEVC slices only: the export may repeat parameter sets at a keyframe.
 				let mut slices = Vec::new();
-				for nal in nals.by_ref() {
-					let nal = nal.unwrap();
-					if matches!(nal[0] & 31, 1..=5) {
+				let mut keyframe = false;
+				let mut all: Vec<_> = nals.by_ref().map(Result::unwrap).collect();
+				all.extend(nals.flush().unwrap());
+				for nal in all {
+					let kind = (nal[0] >> 1) & 0x3f;
+					if kind < 32 {
+						keyframe |= (16..=23).contains(&kind);
 						slices.push(nal);
 					}
 				}
-				if let Some(nal) = nals.flush().unwrap()
-					&& matches!(nal[0] & 31, 1..=5)
-				{
-					slices.push(nal);
-				}
-				pictures.push((pes.header.pts.unwrap().as_u64(), slices));
+				pictures.push((pes.header.pts.unwrap().as_u64(), keyframe, slices));
 			}
 			pictures
 		};
 		let source = pictures(CLIP);
+		let keyframes: Vec<_> = source.iter().filter(|picture| picture.1).collect();
+		assert!(
+			keyframes.len() >= 2 && keyframes[0].2 != keyframes[1].2,
+			"the clip has a second, distinct group"
+		);
 		let replacement = pictures(&output[1]);
 		assert_eq!(
-			replacement.first().map(|picture| &picture.1),
-			source.first().map(|picture| &picture.1),
-			"the replacement's first coded picture goes out"
+			replacement.first().map(|picture| &picture.2),
+			Some(&keyframes[1].2),
+			"the export joins the replacement's first group: the source's second keyframe"
 		);
 		// Compare picture bytes: Hang normalizes PTS to microseconds, which can lose a 90 kHz tick.
 		assert_eq!(
 			pictures(&output[0])
 				.iter()
 				.max_by_key(|picture| picture.0)
-				.map(|picture| &picture.1),
-			source.iter().max_by_key(|picture| picture.0).map(|picture| &picture.1),
+				.map(|picture| &picture.2),
+			source.iter().max_by_key(|picture| picture.0).map(|picture| &picture.2),
 			"the old program drains through the cut"
 		);
 	}

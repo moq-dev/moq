@@ -150,10 +150,6 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// The PMT PID the latest PAT names for the imported program, with its reassembler.
 	/// Several programs' PMTs may share one.
 	pmt: Option<(Pid, SectionReassembler)>,
-	/// The last complete source PAT and selected PMT, so a replacement can route the input
-	/// from the step even when those tables already routed before it. Codec configs stay fresh.
-	pat_sections: Arc<[bytes::Bytes]>,
-	pmt_section: Option<bytes::Bytes>,
 	/// PMT sections dropped for a CRC mismatch, keyed by PID.
 	crc_errors: BTreeMap<u16, u64>,
 	/// Per elementary-stream-PID codec routing.
@@ -291,8 +287,6 @@ impl<E: catalog::Catalog> Import<E> {
 			restarts: Vec::new(),
 			claims_changed: false,
 			pmt: None,
-			pat_sections: Arc::default(),
-			pmt_section: None,
 			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
@@ -429,9 +423,9 @@ impl<E: catalog::Catalog> Import<E> {
 	/// without `discontinuity_indicator`, forward by more than 10 s or back, or the streams
 	/// stepping back after a flagged break. Until the streams have spoken, which a cadenced one
 	/// does within 0.7 s, the input after a suspected step is held rather than published, up to
-	/// half a group's bytes. The restart's input carries the current PAT/PMT ahead of the unread
-	/// packets, so a new importer can route their first keyframe. Every later call repeats the
-	/// restart; [`finish`](Self::finish) ends the instance before the step.
+	/// half a group's bytes. A PAT naming another `transport_stream_id` or program number
+	/// restarts too, at that PAT. Every later call repeats the restart; [`finish`](Self::finish)
+	/// ends the instance before the step.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
@@ -455,10 +449,21 @@ impl<E: catalog::Catalog> Import<E> {
 					.and_then(|pid| streams.get(&pid))
 					.is_some_and(|stream| !matches!(stream, Stream::Ignored))
 			};
+			let (program, identity) = (self.program, self.identity);
+			// A PAT whose selection fails switches nothing; routing it reports the failure.
+			let switched = |pat: &psi::Pat| {
+				let entry = select(program, pat).ok().flatten()?.0;
+				let (transport_stream_id, program_number) = (pat.transport_stream_id, entry.program_number);
+				(identity? != (transport_stream_id, program_number)).then_some(super::Step::Identity {
+					transport_stream_id,
+					program_number,
+				})
+			};
 			let routes = super::step::Routes {
 				pcr_pid: self.pcr_pid.map(|pid| pid.as_u16()),
 				timed: &timed,
 				now: self.liveness.now(),
+				switched: &switched,
 			};
 			match self.steps.judge(demux, &routes) {
 				super::step::Verdict::Route => {}
@@ -468,7 +473,7 @@ impl<E: catalog::Catalog> Import<E> {
 					return self.flush_batch();
 				}
 				super::step::Verdict::Restart(step) => {
-					let remainder = self.restart_input(demux);
+					let remainder = demux.remainder();
 					demux.drain();
 					self.flush_batch()?;
 					return Err(super::Restart { step, remainder }.into());
@@ -481,21 +486,6 @@ impl<E: catalog::Catalog> Import<E> {
 		self.health.flush();
 		demux.drain();
 		self.flush_batch()
-	}
-
-	/// Seed the unread input with its current program map, which may precede the step.
-	fn restart_input(&self, demux: &Demux) -> bytes::Bytes {
-		let mut input = Vec::new();
-		psi::packets(&mut input, (Pid::PAT, demux.pat_counter()), &self.pat_sections);
-		if let (Some((pid, reassembler)), Some(section)) = (&self.pmt, &self.pmt_section) {
-			psi::packets(
-				&mut input,
-				(pid.as_u16(), reassembler.continuity.counter()),
-				std::slice::from_ref(section),
-			);
-		}
-		input.extend_from_slice(&demux.remainder());
-		input.into()
 	}
 
 	/// Cut the snapshot groups for whatever SI committed since the last call, and flush the
@@ -758,11 +748,7 @@ impl<E: catalog::Catalog> Import<E> {
 				continue;
 			}
 			if let Some(pmt) = Pmt::parse(&section) {
-				if self.program.is_some_and(|program| program != pmt.program_number) {
-					continue;
-				}
 				self.handle_pmt(pmt)?;
-				self.pmt_section = Some(section.into());
 				self.seed_clock(packet)?;
 			}
 		}
@@ -1823,25 +1809,12 @@ impl<E: catalog::Catalog> Import<E> {
 	/// reassembler there, and the catalog's `program.pmtPid` with it.
 	///
 	/// Every PAT is checked, so a program added mid-stream ends an unselected import, a
-	/// selected program that disappears ends a selected one, and a PAT naming the program under
-	/// another identity ends either; media already published stays.
+	/// selected program that disappears ends a selected one; media already published stays. A
+	/// PAT naming the program under another identity never reaches a [`decode`](Self::decode),
+	/// which restarts at it, so only an import reading one program of several refuses it.
 	pub(super) fn handle_pat(&mut self, pat: &psi::Pat) -> anyhow::Result<()> {
-		// program_number 0 is the network PID association, not a program.
-		let programs: Vec<_> = pat.programs.iter().filter(|entry| entry.program_number != 0).collect();
-		let numbers = || programs.iter().map(|entry| entry.program_number).collect::<Vec<_>>();
-		let entry = match self.program {
-			Some(program) => match programs.iter().find(|entry| entry.program_number == program) {
-				Some(entry) => entry,
-				None => anyhow::bail!(
-					"transport stream has no program {program}; its PAT lists {}",
-					list_programs(&numbers())
-				),
-			},
-			None => match programs.as_slice() {
-				[] => return Ok(()),
-				[entry] => entry,
-				_ => return Err(MultipleProgramsError { programs: numbers() }.into()),
-			},
+		let Some((entry, alone)) = select(self.program, pat)? else {
+			return Ok(());
 		};
 		let identity = (pat.transport_stream_id, entry.program_number);
 		if let Some((transport_stream_id, program_number)) = self.identity
@@ -1853,7 +1826,6 @@ impl<E: catalog::Catalog> Import<E> {
 				identity.1
 			);
 		}
-		self.pat_sections.clone_from(&pat.sections);
 		let first = self.identity.replace(identity).is_none();
 		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.health.now());
 		let moved = self.pmt.as_ref().is_none_or(|(pid, _)| *pid != entry.pmt_pid);
@@ -1871,9 +1843,9 @@ impl<E: catalog::Catalog> Import<E> {
 			self.claims_changed = true;
 		}
 		// Alongside another program, a PID could be that program's.
-		self.alone = programs.len() == 1;
+		self.alone = alone;
 		if first || moved {
-			self.record_program_identity(pat.transport_stream_id, entry)?;
+			self.record_program_identity(pat.transport_stream_id, &entry)?;
 		}
 		Ok(())
 	}
@@ -2083,6 +2055,29 @@ impl<E: catalog::Catalog> Drop for Import<E> {
 pub struct MultipleProgramsError {
 	/// The program numbers the PAT lists, in PAT order.
 	pub programs: Vec<u16>,
+}
+
+/// The entry `pat` lists for `program`, or for its only program when none is selected, and
+/// whether it is the only one. `None` while an unselected PAT lists no program.
+fn select(program: Option<u16>, pat: &psi::Pat) -> anyhow::Result<Option<(psi::Association, bool)>> {
+	// program_number 0 is the network PID association, not a program.
+	let programs: Vec<_> = pat.programs.iter().filter(|entry| entry.program_number != 0).collect();
+	let numbers = || programs.iter().map(|entry| entry.program_number).collect::<Vec<_>>();
+	let entry = match program {
+		Some(program) => match programs.iter().find(|entry| entry.program_number == program) {
+			Some(entry) => entry,
+			None => anyhow::bail!(
+				"transport stream has no program {program}; its PAT lists {}",
+				list_programs(&numbers())
+			),
+		},
+		None => match programs.as_slice() {
+			[] => return Ok(None),
+			[entry] => entry,
+			_ => return Err(MultipleProgramsError { programs: numbers() }.into()),
+		},
+	};
+	Ok(Some((**entry, programs.len() == 1)))
 }
 
 fn list_programs(programs: &[u16]) -> String {
@@ -3011,18 +3006,13 @@ impl Framer {
 
 /// Reads whole PATs off PID 0: reassembles its sections, drops any whose CRC fails, and
 /// collects the rest until every section of a version is in.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct PatReader {
 	sections: SectionReassembler,
 	table: psi::PatAssembler,
 }
 
 impl PatReader {
-	/// The last payload counter, to continue a program map across an import restart.
-	pub(super) fn counter(&self) -> Option<u8> {
-		self.sections.continuity.counter()
-	}
-
 	/// Consume one packet on PID 0, counting each section dropped for a bad CRC into
 	/// `crc_error`. Returns the whole PAT if this packet completed one.
 	pub(super) fn push(&mut self, pkt: &[u8; TsPacket::SIZE], crc_error: &mut u64) -> Option<psi::Pat> {
@@ -6135,7 +6125,7 @@ pub(super) mod test {
 			"{restart:?}"
 		);
 		assert!(
-			looped.ends_with(&restart.remainder[2 * 188..]) && restart.remainder.len() - 2 * 188 <= data.len(),
+			looped.ends_with(&restart.remainder) && restart.remainder.len() <= data.len(),
 			"the new instance starts at the wrap"
 		);
 		import.finish().unwrap();
@@ -8518,11 +8508,7 @@ pub(super) mod test {
 				flagged: true
 			}
 		);
-		assert_eq!(
-			&restart.remainder[2 * 188..],
-			after,
-			"the unread media starts at the break after its PAT/PMT"
-		);
+		assert_eq!(restart.remainder, after, "the new instance starts at the break");
 		import.finish().unwrap();
 	}
 
@@ -10044,7 +10030,7 @@ pub(super) mod test {
 			matches!(restart.step, crate::container::ts::Step::Rewind { flagged: true, .. }),
 			"{restart:?}"
 		);
-		assert_eq!(&restart.remainder[2 * 188..], &mux.out[at..]);
+		assert_eq!(restart.remainder, mux.out[at..]);
 	}
 
 	/// The same restart unflagged, as a looping playout wraps to the top of its file.
@@ -10803,8 +10789,8 @@ pub(super) mod test {
 			"the first snapshot carries the PID"
 		);
 		assert_eq!(
-			first.clock,
-			catalog.snapshot().clock,
+			first.media.clock,
+			catalog.snapshot().media.clock,
 			"the first snapshot carries the anchored clock"
 		);
 		import.decode(&pes_fragment(PID, false, 1, &body)).unwrap();
@@ -11348,7 +11334,6 @@ pub(super) mod test {
 				program_number,
 				pmt_pid: Pid::new(0x20).unwrap(),
 			}],
-			sections: Default::default(),
 		};
 		for (selected, transport_stream_id, program_number) in [(None, 2, 1), (None, 1, 2), (Some(1), 2, 1)] {
 			let (_catalog, import) = psi_import();
