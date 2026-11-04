@@ -14,15 +14,14 @@ m1, and defer new capabilities without changing their intended outcome.
 Dependencies on m1 remain explicit. An implementation that discovers a new
 necessary API break brings that decision to the maintainer before proceeding.
 
-The first follow-through is [release execution](/quest/m2/release/README.md).
-
 Decided 2026-11-03 (maintainer, Kixel's quest audit): [byte streams](/quest/m2/stream/README.md)
-and the [mesh libraries](/quest/m2/mesh/README.md) rank first in m2. Kixel's
-daemon builds on them from `main` through a git submodule
-([moq-dev/kixel.ai#12](https://github.com/moq-dev/kixel.ai/pull/12)), so it
-needs them merged, not released. They stay out of m1 so the cut does not
-wait on them; each starts as soon as its m1 prerequisites (sockets,
-fastest-reader pacing, outbound federation) land.
+and the [mesh libraries](/quest/m2/mesh/README.md) rank first in m2, ahead
+of [release execution](/quest/m2/release/README.md). Kixel's daemon builds on
+them from `main` through a git submodule, so it needs them merged, not
+released. They stay out of m1 so the cut does not wait on them; each starts
+as soon as its m1 prerequisites (sockets, fastest-reader pacing, outbound
+federation) land.
+
 Rate-grant work targets the next unpublished lite version after finalized
 lite-07; bitrate enforcement is not part of this release.
 
