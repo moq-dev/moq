@@ -50,20 +50,19 @@ Decided 2026-11-03 (maintainer, on
 
 - ✅ **Latency: at most 300 ms of playout on top of one-way delivery.** "We
   can't ever expect 300ms latency if it takes more than 300ms to deliver a
-  packet." Queueing on the path (bufferbloat) is delivery, not playout, and no
-  clocked live start or other startup machinery is added. The runner reports
-  per press `delivery` (the slowest frame the onset waited on, from its first
-  sample's capture, so packetization, queueing and retransmission count) and
-  `playout` (the rest); projected device output (~73 ms) is reported apart.
-  The player's target is its delay plus measured jitter plus one frame
+  packet." Queueing on the path (bufferbloat) is delivery, not playout, so the
+  bufferbloat profile is not graded on latency, and no clocked live start or
+  other startup machinery is added. The runner reports per separated press
+  `delivery` (the slowest frame the onset waited on, from its first sample's
+  capture, so packetization and retransmission count), `playout` (the rest, up
+  to the render onset on the render clock), and projected device `output`
+  apart. The player's target is its delay plus measured jitter plus one frame
   (`js/watch/src/audio/latency.ts`); the frame is packetization, already in
-  delivery. Graded on 2026-11-04 UTC runs of the merged head, over the 15
-  separated presses: the reproduction's playout was median 296 ms (279-424),
-  with 9 presses at or under 300 ms, 4 more under 320 ms, and two at 384 and
-  424 ms. Behind bufferbloat it was median 331 ms (301-595), with four presses
-  above 500 ms; delivery took 333-514 ms, and only 493 of 908 frames arrived,
-  since the 64 kbit/s link carries about half the stream. The tails are not
-  yet attributed; the player's jitter allowance is the likely term.
+  delivery. On the reproduction at 2026-11-04 UTC, playout was 166/262/310 ms
+  (min/median/max), with 14 of 15 presses at or under 300 ms and one at 310
+  ms. Behind bufferbloat, for information, playout was 333/494/708 ms beside
+  delivery of 310-546 ms, likely the jitter term following that spread (not
+  attributed).
 - ✅ **No encoder recovery on re-enable.** Asked first why a fatal encoder error
   is expected at all: it is not. No push-to-talk run reported one (the runner
   fails on `out.error`), and no issue reports a publisher encoder failure; the
@@ -77,12 +76,13 @@ Decided 2026-11-03 (maintainer, on
 
 The first full bufferbloat run also found one 60 ms frame submitted to
 WebCodecs 0.3 ms before release that never produced output: disabling closes
-the encoder synchronously and can discard queued codec work.
+the encoder synchronously and can discard queued codec work. It recurred in 3
+of 7 runs on 2026-11-04, each a frame submitted under 1 ms before release.
 [Buffered audio across stop](/quest/m1/audio-across-stop.md) keeps the codec
 across a disable and flushes it before the discontinuity, which drains that
 tail to its original track. Once it lands, rerun the proof; the runner
-deliberately fails on this loss. Grade the rerun against the latency goal
-above; a complete rerun within it finishes this epic.
+deliberately fails on this loss. A complete rerun whose reproduction holds the
+latency goal above finishes this epic.
 
 ## Required
 
