@@ -2067,30 +2067,33 @@ async fn broadcast_websocket_uses_newest_version() {
 
 	let expected_version: moq_net::Version = NEWEST_LITE.parse().expect("invalid version");
 
-	let server_handle = tokio::spawn(async move {
+	let accept = async {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let session = request
+			.with_publisher(&pub_origin)
+			.ok()
+			.await
+			.expect("server accept failed");
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
-		let _broadcast = broadcast;
-		let _track = track;
-		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(())
-	});
+		session
+	};
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, cc) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
-		.await
-		.expect("client connect timed out")
-		.expect("client connect failed");
+	let connect = async {
+		kio::clock::timeout(TIMEOUT, connect_once(client, url))
+			.await
+			.expect("client connect timed out")
+			.expect("client connect failed")
+	};
+	// The client can establish before the server reads SETUP. Keep it alive until
+	// both sides negotiate, or accept() can discard the closed peer and wait again.
+	let (session, (_client, cc)) = tokio::join!(accept, connect);
 
 	assert_eq!(cc.version(), Some(expected_version), "client negotiated stale version");
 
 	drop(cc);
-	server_handle
-		.await
-		.expect("server task panicked")
-		.expect("server task failed");
+	let _ = session.closed().await;
 }
 
 /// Regression guard: a Tokio runtime's session machine must run under the span
