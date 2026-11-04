@@ -76,6 +76,13 @@ rejection, and separate rooted publish grants. Each pins moq-lite-07-wip or IETF
 draft 18, 20, or 22; older moq-lite hops do not carry hidden endpoints. These lanes
 run in the normal in-tree test when native JS is selected. `just test interop --sockets` runs them alone.
 
+On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
+relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
+after each replacement while an existing reader resumes. The case also repeats the
+automatic failed-source lifecycle 64 times. A missing-group FETCH
+crosses both hops with the unlimited subscriber budget, checking its optional
+millisecond encoding at the safe-integer boundary.
+
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than
 shutdown. No sleep stands in for drain completion. A missing group, error, or

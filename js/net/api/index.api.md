@@ -608,7 +608,7 @@ export namespace Track {
 		time?: never;
 	} | {
 		absolute?: never;
-		relative: number;
+		relative: bigint;
 		time?: never;
 	} | {
 		absolute?: never;

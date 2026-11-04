@@ -5,6 +5,7 @@ import { hooks } from "../internal.ts";
 import { decodePayload, receiveFrame, type WirePayload } from "../payload.ts";
 import type { Cursor, Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
+import { toNumber } from "../util/bigint.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, type Version } from "./version.ts";
@@ -100,7 +101,7 @@ export function frameDecoder({ scale, compress = false }: FrameFormat): (c: Curs
 		const payload = compress ? c.read(size) : decodePayload(c, size);
 		// Commit the delta only after the last read: an incomplete decode gets retried.
 		prevTs += delta;
-		const timestamp = timescale === undefined ? undefined : new Time.Timestamp(Number(prevTs), timescale);
+		const timestamp = timescale === undefined ? undefined : new Time.Timestamp(toNumber(prevTs), timescale);
 		return { size, payload, inflated, timestamp };
 	};
 }
