@@ -4939,7 +4939,7 @@ impl TrackRun {
 		match self.start {
 			None => self.skipped.insert(range, hole),
 			Some(_) => {
-				self.drop_range(range, &hole, writer)?;
+				self.forward_range(range, &hole, writer)?;
 			}
 		}
 		Ok(true)
@@ -4968,6 +4968,31 @@ impl TrackRun {
 		}
 	}
 
+	/// Forward a verdict the cursor reached on `range`, as [`Self::drop_range`] does. On lite-07
+	/// it also replaces what it overrides: a skip any drop already sent, and a final drop a stale
+	/// one, which the next update would otherwise reopen. A reader the earlier drop ended stays
+	/// ended.
+	fn forward_range(
+		&mut self,
+		range: Range<u64>,
+		hole: &Hole,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
+	) -> Result<bool, Error> {
+		if self.ctx.version.has_skip()
+			&& let Some(served) = &mut self.served
+		{
+			let replaces = match hole {
+				Hole::Skip => Some(&self.dropped),
+				Hole::Drop { stale: None, .. } => Some(&self.dropped_stale),
+				Hole::Drop { .. } => None,
+			};
+			for run in replaces.into_iter().flat_map(|runs| runs.overlapping(&range)) {
+				served.remove(run.start.max(range.start)..run.end.min(range.end));
+			}
+		}
+		self.drop_range(range, hole, writer)
+	}
+
 	/// Give up, as `hole` says, whatever part of `range` this subscription has not been
 	/// served or given up yet. Returns whether any was buffered.
 	fn drop_range(
@@ -4982,34 +5007,20 @@ impl TrackRun {
 		if range.is_empty() {
 			return Ok(false);
 		}
-		let mut gaps: RangeSet<u64> = served.gaps(&range).collect();
+		let gaps: RangeSet<u64> = served.gaps(&range).collect();
 		if self.ctx.version.has_skip() {
-			// A skip replaces any drop already sent, so the subscriber learns the groups were
-			// never produced, and a final drop replaces a stale one, which the next update
-			// would otherwise reopen. A reader the earlier drop ended stays ended.
-			let replaces = match hole {
-				Hole::Skip => &self.dropped,
-				hole if hole.stale_budget().is_none() => &self.dropped_stale,
-				Hole::Drop { .. } => &RangeSet::new(),
-			};
-			let replaced: Vec<_> = replaces
-				.overlapping(&range)
-				.map(|run| run.start.max(range.start)..run.end.min(range.end))
-				.collect();
-			for run in replaced {
-				self.dropped_stale.remove(run.clone());
-				gaps.insert(run);
-			}
-			match hole {
-				Hole::Skip => {
-					for run in gaps.iter() {
-						self.dropped.remove(run.clone());
+			for gap in gaps.iter() {
+				match hole {
+					Hole::Skip => {
+						self.dropped.remove(gap.clone());
+						self.dropped_stale.remove(gap.clone());
 					}
-				}
-				Hole::Drop { .. } => {
-					self.dropped.extend(gaps.iter().cloned());
-					if hole.stale_budget().is_some() {
-						self.dropped_stale.extend(gaps.iter().cloned());
+					Hole::Drop { .. } => {
+						self.dropped.insert(gap.clone());
+						match hole.stale_budget() {
+							Some(_) => self.dropped_stale.insert(gap.clone()),
+							None => self.dropped_stale.remove(gap.clone()),
+						}
 					}
 				}
 			}
@@ -5158,7 +5169,7 @@ impl TrackRun {
 		// The subscriber now owes itself everything from the start, so a range given up
 		// above it is named as it would have been after the start.
 		for (range, hole) in skipped.iter() {
-			self.drop_range(range.start.max(start)..range.end, hole, writer)?;
+			self.forward_range(range.start.max(start)..range.end, hole, writer)?;
 		}
 		Ok(())
 	}
@@ -7120,8 +7131,8 @@ mod serve_group_test {
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			assert!(run.start.is_some(), "{version}: started");
 			let stale = Hole::stale(Duration::from_secs(1));
-			run.drop_range(1..3, &stale, &mut writer).unwrap();
-			run.drop_range(1..2, &Hole::drop(StreamError::Cancel), &mut writer)
+			run.forward_range(1..3, &stale, &mut writer).unwrap();
+			run.forward_range(1..2, &Hole::drop(StreamError::Cancel), &mut writer)
 				.unwrap();
 			write_group(&mut track, 2, 2);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}

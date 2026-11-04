@@ -1297,15 +1297,6 @@ export class Publisher {
 			if (!served) return true;
 			const gaps = runGaps(served, start, end);
 			if (hasSkip(this.version)) {
-				// A skip replaces any drop already sent, so the subscriber learns the groups were
-				// never produced, and a final drop replaces a stale one, which the next update would
-				// otherwise reopen. A reader the earlier drop ended stays ended.
-				const replaces = hole.skip ? dropped : hole.stale === undefined ? droppedStale : [];
-				for (const run of replaces) {
-					const from = max(run.start, start);
-					const to = min(run.end, end);
-					if (from < to) insertRun(gaps, from, to);
-				}
 				for (const gap of gaps) {
 					if (hole.skip) {
 						dropped = removeRun(dropped, gap.start, gap.end);
@@ -1323,6 +1314,21 @@ export class Publisher {
 				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
 			}
 			return true;
+		};
+
+		// Forward a verdict the reader reached on `[start, end)`, as `drop` does. On lite-07 it also
+		// replaces what it overrides: a skip any drop already sent, and a final drop a stale one,
+		// which the next update would otherwise reopen. A reader the earlier drop ended stays ended.
+		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
+			if (served && hasSkip(this.version)) {
+				const replaces = hole.skip ? dropped : hole.stale === undefined ? droppedStale : [];
+				for (const run of replaces) {
+					const from = max(run.start, start);
+					const to = min(run.end, end);
+					if (from < to) served.splice(0, served.length, ...removeRun(served, from, to));
+				}
+			}
+			return drop(start, end, hole);
 		};
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
@@ -1395,7 +1401,7 @@ export class Publisher {
 						// What was given up below the start is never named, so a wider budget may serve it.
 						if (range.start < startSequence)
 							hooks.unreport(track, range.start, min(range.end, startSequence));
-						if (!(await drop(max(range.start, startSequence), range.end, range))) return false;
+						if (!(await forward(max(range.start, startSequence), range.end, range))) return false;
 					}
 					skipped.length = 0;
 				}
@@ -1526,7 +1532,7 @@ export class Publisher {
 						throw recv.error;
 					case "drop":
 						if (!startSent) skipped.push(recv);
-						else if (!(await drop(recv.start, recv.end, recv))) return false;
+						else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
