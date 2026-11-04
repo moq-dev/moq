@@ -1,3 +1,5 @@
+//! Outgoing WebTransport streams, their finish handles, and errors.
+
 use std::{
 	io,
 	pin::Pin,
@@ -5,11 +7,11 @@ use std::{
 	task::{Context, Poll},
 };
 
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 use futures::FutureExt;
 
 use crate::quic::driver::send;
-use crate::quic::web::{CloseReason, SessionError, WriteError};
+use crate::quic::web::{CloseReason, SessionError};
 
 /// A stream that can be used to send bytes. See [`crate::quic::driver::send::Stream`].
 ///
@@ -19,7 +21,7 @@ use crate::quic::web::{CloseReason, SessionError, WriteError};
 /// This wrapper is mainly needed for error codes, which is unfortunate.
 /// WebTransport uses u32 error codes and they're mapped in a reserved HTTP/3 error space.
 #[derive(Debug)]
-pub struct SendStream {
+pub struct Stream {
 	state: State,
 	close: Arc<CloseReason>,
 	/// The end of the WebTransport header this side wrote first, which a reset must still deliver.
@@ -27,7 +29,7 @@ pub struct SendStream {
 	id: crate::quic::driver::stream::Id,
 }
 
-/// Where the stream is, since `web_transport_trait` finishes and resets through `&mut self`.
+/// The mutable terminal state required by moq-net's poll trait.
 #[derive(Debug)]
 enum State {
 	Open(send::Stream),
@@ -36,7 +38,7 @@ enum State {
 	Reset(Result<Option<crate::quic::driver::VarInt>, send::Error>),
 }
 
-impl SendStream {
+impl Stream {
 	pub(crate) fn new(mut stream: send::Stream, close: Arc<CloseReason>, header: Option<send::Offset>) -> Self {
 		stream.set_drop_reset(header, close.encode_stream_code(0));
 		Self {
@@ -49,26 +51,26 @@ impl SendStream {
 
 	/// Decode the peer's stop code, and report a session error, or a stop for a session
 	/// that is gone, as the session's close reason.
-	fn map_error(&self, e: send::Error) -> WriteError {
+	fn map_error(&self, e: send::Error) -> Error {
 		match e {
 			send::Error::Stopped(code) => match self.close.decode_stream_code(code) {
-				Some(code) => WriteError::Stopped(code),
+				Some(code) => Error::Stopped(code),
 				None => match self.close.session_gone(code) {
-					Some(err) => WriteError::SessionError(err),
-					None => WriteError::InvalidStopped(code),
+					Some(err) => Error::SessionError(err),
+					None => Error::InvalidStopped(code),
 				},
 			},
-			e => match WriteError::from(e) {
-				WriteError::SessionError(e) => WriteError::SessionError(self.close.map(e)),
+			e => match Error::from(e) {
+				Error::SessionError(e) => Error::SessionError(self.close.map(e)),
 				e => e,
 			},
 		}
 	}
 
-	fn open(&mut self) -> Result<&mut send::Stream, WriteError> {
+	fn open(&mut self) -> Result<&mut send::Stream, Error> {
 		match &mut self.state {
 			State::Open(stream) => Ok(stream),
-			_ => Err(WriteError::ClosedStream),
+			_ => Err(Error::ClosedStream),
 		}
 	}
 
@@ -78,15 +80,16 @@ impl SendStream {
 	///
 	/// The WebTransport header still reaches the peer, so it can tell which session the reset
 	/// belongs to.
-	pub fn reset(&mut self, code: u32) {
+	fn reset_mut(&mut self, code: u32) {
 		let code = self.close.encode_stream_code(code);
-		let header = self.header;
-		// The peer's stop code still wins if it arrived first, which only a `stopped` future
-		// taken before the reset learns, and the reset settles it.
+		// The driver task can process a STOP_SENDING at any moment. The reset settles, under the
+		// connection lock, whether the peer's stop came first, and only a `stopped` future taken
+		// before the reset can still read that once the stream is consumed. The reset, or the
+		// lost connection that made it fail, settles it at once.
 		let stopped = match std::mem::replace(&mut self.state, State::Reset(Ok(None))) {
 			State::Open(stream) => {
 				let stopped = stream.stopped();
-				match header {
+				match self.header {
 					Some(header) => stream.reset_at(header, code),
 					None => stream.reset(code),
 				}
@@ -94,7 +97,7 @@ impl SendStream {
 			}
 			State::Finished(stream) => {
 				let stopped = stream.stopped();
-				match header {
+				match self.header {
 					Some(header) => stream.reset_at(header, code),
 					None => stream.reset(code),
 				}
@@ -105,53 +108,67 @@ impl SendStream {
 				return;
 			}
 		};
-		self.state = State::Reset(stopped.expect("a reset settles its stopped future"));
+		let stopped = stopped.expect("a reset settles its stopped future");
+		self.state = State::Reset(stopped);
 	}
 
-	/// Wait until the stream has been stopped and return the error code. See
-	/// [`send::Finished::stopped`].
-	///
-	/// Unlike the driver, this returns None if the code is not a valid WebTransport error code.
-	pub async fn stopped(&self) -> Result<Option<u32>, SessionError> {
-		let stopped = match &self.state {
-			State::Open(stream) => stream.stopped().await,
-			State::Finished(stream) => stream.stopped().await,
-			State::Reset(stopped) => stopped.clone(),
+	/// Poll until all data was acknowledged, the peer stopped the stream, or the session closed.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<u32>, Error>> {
+		let result = match &self.state {
+			State::Open(stream) => stream.poll_closed(waiter),
+			State::Finished(stream) => stream.poll_closed(waiter),
+			State::Reset(result) => Poll::Ready(result.clone()),
 		};
-		match stopped {
-			Ok(Some(code)) => match self.close.session_gone(code) {
-				Some(err) => Err(err),
-				None => Ok(self.close.decode_stream_code(code)),
-			},
+		result.map(|result| match result {
 			Ok(None) => Ok(None),
-			Err(err) => match WriteError::from(err) {
-				WriteError::SessionError(err) => Err(self.close.map(err)),
-				err => unreachable!("only the connection fails a stopped wait: {err}"),
+			Ok(Some(code)) => match self.map_error(send::Error::Stopped(code)) {
+				Error::Stopped(code) => Ok(Some(code)),
+				err => Err(err),
 			},
+			Err(err) => Err(self.map_error(err)),
+		})
+	}
+
+	/// Wait until all data was acknowledged, the peer stopped the stream, or the session closed.
+	pub async fn stopped(&self) -> Result<Option<u32>, Error> {
+		kio::wait(|w| self.poll_closed(w)).await
+	}
+
+	/// Finish sending, retaining a handle to acknowledgements and peer cancellation.
+	pub fn finish(mut self) -> Finished {
+		self.finish_mut();
+		Finished {
+			stream: self,
+			park: Default::default(),
 		}
 	}
 
+	/// Reset the stream while still delivering its WebTransport header.
+	pub fn reset(mut self, code: u32) {
+		self.reset_mut(code);
+	}
+
 	/// Write from `buf`, returning the size written. See [`send::Stream::write`].
-	pub async fn write(&mut self, buf: &mut impl Buf) -> Result<usize, WriteError> {
+	pub async fn write(&mut self, buf: &mut impl Buf) -> Result<usize, Error> {
 		let result = self.open()?.write(buf).await;
 		result.map_err(|e| self.map_error(e))
 	}
 
 	/// Write all of `buf` to the stream. See [`send::Stream::write_all`].
-	pub async fn write_all(&mut self, buf: impl Buf) -> Result<(), WriteError> {
+	pub async fn write_all(&mut self, buf: impl Buf) -> Result<(), Error> {
 		let result = self.open()?.write_all(buf).await;
 		result.map_err(|e| self.map_error(e))
 	}
 
 	/// Mark the stream as finished, such that no more data can be written. See
-	/// [`send::Stream::finish`]. Fails if it was already finished or reset.
-	pub fn finish(&mut self) -> Result<(), WriteError> {
-		self.open()?;
-		let State::Open(stream) = std::mem::replace(&mut self.state, State::Reset(Ok(None))) else {
-			unreachable!("checked above");
-		};
-		self.state = State::Finished(stream.finish());
-		Ok(())
+	/// [`send::Stream::finish`]. Does nothing if it was already finished or reset.
+	fn finish_mut(&mut self) {
+		if matches!(self.state, State::Open(_)) {
+			let State::Open(stream) = std::mem::replace(&mut self.state, State::Reset(Ok(None))) else {
+				unreachable!()
+			};
+			self.state = State::Finished(stream.finish());
+		}
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
@@ -189,12 +206,12 @@ impl SendStream {
 	/// > sessions.
 	/// > The [crate::quic::driver::stream::Id::index] might not increment by 1 like expected when using raw QUIC.
 	/// > This is why the Javascript WebTransport API does not expose the Stream ID.
-	pub fn quic_id(&self) -> crate::quic::driver::stream::Id {
+	pub fn id(&self) -> crate::quic::driver::stream::Id {
 		self.id
 	}
 }
 
-impl tokio::io::AsyncWrite for SendStream {
+impl tokio::io::AsyncWrite for Stream {
 	fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
 		match &mut self.state {
 			State::Open(stream) => Pin::new(stream).poll_write(cx, buf),
@@ -208,42 +225,153 @@ impl tokio::io::AsyncWrite for SendStream {
 
 	fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
 		// Already finished or reset, so there is nothing left to shut.
-		let _ = self.finish();
+		self.finish_mut();
 		Poll::Ready(Ok(()))
 	}
 }
 
-impl web_transport_trait::SendStream for SendStream {
-	type Error = WriteError;
+impl moq_net::transport::poll::SendStream for Stream {
+	type Error = Error;
+	type Group = send::Group;
 
-	fn set_priority(&mut self, order: i32) {
-		Self::set_priority(self, order.into());
+	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		self.poll_write_buf(waiter, &mut buf)
 	}
-
-	fn reset(&mut self, code: u32) {
-		Self::reset(self, code);
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+		let result = self.open()?.poll_write_buf(&waiter.context(), buf);
+		result.map_err(|e| self.map_error(e))
 	}
-
+	fn set_priority(&mut self, priority: i64) {
+		Self::set_priority(self, priority);
+	}
+	fn set_group(&mut self, group: &Self::Group) {
+		Self::set_group(self, Some(group));
+	}
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		Self::finish(self)
+		Self::finish_mut(self);
+		Ok(())
 	}
-
-	async fn write(&mut self, mut buf: &[u8]) -> Result<usize, Self::Error> {
-		Self::write(self, &mut buf).await
+	fn reset(&mut self, code: u32) {
+		Self::reset_mut(self, code);
 	}
-
-	async fn write_buf<B: Buf + Send>(&mut self, buf: &mut B) -> Result<usize, Self::Error> {
-		Self::write(self, buf).await
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+		Self::poll_closed(self, waiter).map(|result| match result {
+			Ok(None) => Ok(()),
+			Ok(Some(code)) => Err(Error::Stopped(code)),
+			Err(err) => Err(err),
+		})
 	}
+}
 
-	async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), Self::Error> {
-		self.write_all(chunk).await
+impl moq_net::transport::poll::SendGroup for send::Group {
+	fn set_priority(&mut self, priority: i64) {
+		Self::set_priority(self, priority);
 	}
+}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		match self.stopped().await? {
-			Some(code) => Err(WriteError::Stopped(code)),
-			None => Ok(()),
+/// A finished stream whose data keeps transmitting until acknowledged or stopped.
+#[derive(Debug)]
+pub struct Finished {
+	stream: Stream,
+	park: kio::Park,
+}
+impl Finished {
+	/// Poll until the peer acknowledges or stops the stream, or the session closes.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<u32>, Error>> {
+		self.stream.poll_closed(waiter)
+	}
+	/// Wait until the peer acknowledges or stops the stream, or the session closes.
+	pub async fn stopped(&self) -> Result<Option<u32>, Error> {
+		self.stream.stopped().await
+	}
+	/// Reset the stream while still delivering its WebTransport header.
+	pub fn reset(self, code: u32) {
+		self.stream.reset(code);
+	}
+	/// Set the stream's priority within its send group.
+	pub fn set_priority(&mut self, priority: i64) {
+		self.stream.set_priority(priority);
+	}
+	/// Return the stream's priority within its send group.
+	pub fn priority(&self) -> i64 {
+		self.stream.priority()
+	}
+	/// Move the stream to a send group, or out with `None`.
+	pub fn set_group(&mut self, group: Option<&send::Group>) {
+		self.stream.set_group(group);
+	}
+	/// Return the underlying QUIC stream ID.
+	pub fn id(&self) -> crate::quic::driver::stream::Id {
+		self.stream.id()
+	}
+}
+impl Future for Finished {
+	type Output = Result<Option<u32>, Error>;
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		let this = &mut *self;
+		this.stream.poll_closed(this.park.hold(cx))
+	}
+}
+
+/// An error when writing to [`crate::quic::web::send::Stream`]. Similar to [`crate::quic::driver::send::Error`].
+#[derive(Clone, thiserror::Error, Debug)]
+#[non_exhaustive]
+pub enum Error {
+	/// The peer stopped accepting this stream with its application code.
+	#[error("STOP_SENDING: {0}")]
+	Stopped(u32),
+
+	/// The peer stopped the stream with a code outside the WebTransport registry.
+	#[error("invalid STOP_SENDING: {0}")]
+	InvalidStopped(crate::quic::driver::VarInt),
+
+	/// The session carrying the stream failed.
+	#[error("session error: {0}")]
+	SessionError(#[from] SessionError),
+
+	/// The stream was already finished or reset.
+	#[error("stream closed")]
+	ClosedStream,
+}
+
+impl From<crate::quic::driver::send::Error> for Error {
+	fn from(e: crate::quic::driver::send::Error) -> Self {
+		match e {
+			crate::quic::driver::send::Error::Stopped(code) => {
+				match web_transport_proto::error_from_http3(code.into_inner()) {
+					Some(code) => Error::Stopped(code),
+					None => Error::InvalidStopped(code),
+				}
+			}
+			crate::quic::driver::send::Error::Connection(e) => Error::SessionError(e.into()),
+			// Only datagrams fail otherwise, and they report a session error.
+			e => Error::SessionError(e.into()),
 		}
 	}
 }
+
+impl moq_net::transport::Error for Error {
+	fn close_kind(&self) -> moq_net::transport::CloseKind {
+		match self {
+			Self::SessionError(e) => e.close_kind(),
+			_ => moq_net::transport::CloseKind::Transport,
+		}
+	}
+	fn session_error(&self) -> Option<(u32, String)> {
+		if let Error::SessionError(e) = self {
+			return e.session_error();
+		}
+
+		None
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		match self {
+			Error::Stopped(code) => Some(*code),
+			_ => None,
+		}
+	}
+}
+
+/// The driver's send groups and scheduling options.
+pub use crate::quic::driver::send::{Group, Options};

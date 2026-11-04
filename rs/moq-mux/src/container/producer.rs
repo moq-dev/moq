@@ -1016,8 +1016,8 @@ mod tests {
 			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
 	}
 
-	/// The media track's full retention window, so readers started after publishing
-	/// can still consume every retained group.
+	/// The media track's full max age, so readers started after publishing
+	/// can still consume every fresh group.
 	const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
@@ -1401,7 +1401,7 @@ mod tests {
 	/// continuity from adjacent sequences.
 	#[tokio::test]
 	async fn discontinuity_publishes_an_empty_group() {
-		// The resumed clock jumps forty minutes, so both the retention window and the
+		// The resumed clock jumps forty minutes, so both the max age and the
 		// drift budget have to cover it or the pre-discontinuity group reads as ancient.
 		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(discontinuity_max_age);

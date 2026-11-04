@@ -1301,7 +1301,8 @@ export class Subscriber {
 		if (!hasTrackStream(this.version)) {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
 			const framing = { compress: false, timescale: 0, scale: undefined };
-			const entry = this.#register(id, msg, ranges, request.accept(), framing, state);
+			// Nor a max age: no publisher limit, not the authored default.
+			const entry = this.#register(id, msg, ranges, request.accept({ maxAge: null }), framing, state);
 			const stream = await this.#sendSubscribe(state, msg, deadline);
 			// The first response MUST be a SUBSCRIBE_OK (older drafts only).
 			const resp = await decodeSubscribeResponse(stream.reader, this.version);
@@ -1345,7 +1346,8 @@ export class Subscriber {
 			// accept it again.
 			state.cancel.signal.throwIfAborted();
 			const model = this.#toModelInfo(answered.info);
-			const producer = request.accept(model);
+			// A TRACK_INFO without a max age sets no publisher limit, not the authored default.
+			const producer = request.accept({ ...model, maxAge: model.maxAge ?? null });
 			const framing = {
 				compress: answered.info.compress,
 				timescale: answered.info.timescale ?? 0,
@@ -1399,7 +1401,7 @@ export class Subscriber {
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
-			// for a late group anyway, and no longer than the publisher keeps one.
+			// for a late group anyway, and no longer than the publisher keeps one fresh.
 			tail: new Tail({
 				grace: () => hooks.tailGrace(producer),
 			}),
@@ -2164,7 +2166,7 @@ export class Subscriber {
 		return setup.probe;
 	}
 
-	async runProbe(signal?: AbortSignal): Promise<void> {
+	async runProbe(signal?: AbortSignal, target?: Getter<number>): Promise<void> {
 		if (!this.#probe) return;
 		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
 		const scope = new Effect();
@@ -2177,9 +2179,12 @@ export class Subscriber {
 		// input ends the session. Drop the estimates so consumers know they're stale.
 		try {
 			// Lite-05+ gates PROBE on the peer advertising Probe >= Report in its SETUP.
+			// Only a peer that probes up to a target is sent one; a Report-level peer ignores it.
+			let increase = false;
 			if (hasSetupStream(this.version) && this.#peerSetup) {
 				const level = await this.#peerProbeLevel(this.#peerSetup, scope);
 				if (level === undefined || level < ProbeLevel.Report) return;
+				increase = level >= ProbeLevel.Increase;
 			}
 			if (this.#goingAway() || abort.aborted) return;
 			const opening = Stream.open(this.#quic, { version: this.version });
@@ -2191,6 +2196,7 @@ export class Subscriber {
 			}
 			scope.cleanup(() => stream.close());
 			await scope.race(stream.writer.u53(StreamId.Probe));
+			if (target && increase) this.#sendTarget(stream, target, scope);
 			for (;;) {
 				const probe = await scope.race(Probe.decodeMaybe(stream.reader, this.version));
 				if (!probe) break;
@@ -2213,6 +2219,43 @@ export class Subscriber {
 			abort.removeEventListener("abort", stop);
 			this.#probe.set({});
 		}
+	}
+
+	// Send `target` on the PROBE stream whenever it changes, in order, while `scope` lives.
+	// Nothing is sent while it is zero, until it retracts a target already sent. One write is
+	// in flight at a time, and the next sends the latest target, so a peer that stops reading
+	// holds one target however often it changes.
+	#sendTarget(stream: Stream, target: Getter<number>, scope: Effect): void {
+		let sent = 0;
+		let writing = false;
+		const write = async () => {
+			writing = true;
+			try {
+				for (;;) {
+					// The wire carries whole bits per second.
+					const next = Math.floor(target.peek());
+					if (next === sent) return;
+					sent = next;
+					// Zero reads as unknown on the wire, which retracts the last target.
+					await new Probe({ bitrate: next > 0 ? next : undefined }).encode(stream.writer, this.version);
+				}
+			} catch {
+				// The writer and reader are independent, so a failed write does not end the
+				// reads: end the probe here, which also closes the stream.
+				scope.close();
+			} finally {
+				writing = false;
+			}
+		};
+		scope.run((effect) => {
+			effect.get(target);
+			if (!writing) void write();
+		});
+		// A close queues behind a write the peer is not reading, which would hold the stream
+		// open past the probe; a reset rejects that write and frees the stream.
+		scope.cleanup(() => {
+			if (writing) stream.abort(new StreamError(StreamCode.Cancel, { message: "probe ended" }));
+		});
 	}
 
 	/**

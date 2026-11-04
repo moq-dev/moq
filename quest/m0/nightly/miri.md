@@ -26,6 +26,12 @@ quest until a scheduled run containing that fix records the job duration,
 strict and epoch pass durations, slowest test, and headroom against both
 budgets. Do not dispatch Nightly by hand to obtain it.
 
+In the same log, confirm moq-net's `model::frame::` tests ran (the strict
+pass selects them in `sh/rs/miri.sh`), including the lock-free single-delivery
+path [moq-dev/moq#7508](https://github.com/moq-dev/moq/pull/7508) added; extend
+the selection if any are missed. (Folded in from moq-dev/moq#7748's
+`miri-frame.md`, 2026-11-04, whose `rust-src` half #7812 landed.)
+
 Act on those timings before optimizing. Earlier local measurements on 24
 cores took 11.5 min wall: strict pass 118 tests in 109 s, epoch pass 94 in
 307 s. These are desktop measurements, not proof of the 4-core ARM budget.
