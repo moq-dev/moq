@@ -2480,6 +2480,50 @@ test("draft-22: an absolute subscribe is no join", async () => {
 });
 
 /**
+ * A filterless SUBSCRIBE without a fill joins the latest group, as a relay cache always served
+ * one; only an explicit absolute {0, 0} replays the groups before it. Ascending order sends
+ * history first, so the first stream tells them apart.
+ */
+test.each(IETF_VERSIONS)("version %d: only an explicit zero start replays history", async (version) => {
+	const zero: Filter.Filter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+	for (const [filter, expected] of [
+		[{ kind: "unfiltered" }, [1n]],
+		[zero, [0n, 1n]],
+	] as const) {
+		const fx = fixture(version);
+		// Unlimited max age, so the first group is still served once its successor exists.
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		writeGroup(track, 1);
+		writeGroup(track, 1);
+
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				groupOrder: "ascending",
+				filter,
+			}),
+		);
+
+		try {
+			const served: bigint[] = [];
+			for (const _ of expected) {
+				const stream = await nextUni(fx.uni);
+				if (!stream) throw new Error(`${version} ${filter.kind}: missing group stream`);
+				served.push((await GroupMessage.decode(new Reader(stream, undefined, version), version)).groupId);
+			}
+			expect(served).toEqual([...expected]);
+		} finally {
+			fx.close();
+			client.close();
+		}
+	}
+});
+
+/**
  * The draft's own current-group join: a Next Object subscription for the live tail, plus a
  * StartGroup=1 fill for the head already published. The two must meet exactly, so the head
  * arrives once, on the fetch stream, and the subscription picks up at the next object.

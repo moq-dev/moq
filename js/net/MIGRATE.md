@@ -7,11 +7,12 @@ How to update your code for each breaking change, newest first.
 ### Absolute IETF subscriptions keep their prefix
 
 Explicit group ranges now keep their requested start when the subscription answer
-arrives after its first data. IETF publishers honor absolute and unfiltered starts
-on all supported drafts instead of silently joining at the live edge. Use a live
-range when only the current group is wanted. An omitted or unfiltered initial
-IETF filter without a fill now includes retained history from group 0 instead
-of joining live. There is no API or wire-format change.
+arrives after its first data. IETF publishers honor absolute starts on all
+supported drafts instead of silently joining at the live edge. A start of group 0
+goes out as an explicit absolute {0, 0} filter; on draft 20, which spells it with no
+fields, that is a present but empty LOCATION_FILTER. A `Subscribe` with an
+unfiltered filter now omits LOCATION_FILTER, and a SUBSCRIBE without one still
+joins live. There is no API change.
 
 ### Relative group anchors are `bigint`
 

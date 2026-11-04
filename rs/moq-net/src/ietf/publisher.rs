@@ -2125,7 +2125,7 @@ impl Publisher {
 		// bound the subscription before subscribing so the ratio never judges it. From the
 		// start of its group, so a relay's copy holds the group's head for its other readers,
 		// as a live join would; the resolved range trims below.
-		let fixed = subscribe_range(msg, LiveEdge::default());
+		let fixed = filter_range(msg.filter, LiveEdge::default());
 		if let Some(start) = fixed.start {
 			ServeRange {
 				start: Some(Location { object: 0, ..start }),
@@ -2163,7 +2163,7 @@ impl Publisher {
 		// current-group join (Next Object plus a StartGroup=1 fill) cover the group with no gap
 		// and no overlap.
 		let edge = live_edge(track);
-		let mut range = subscribe_range(msg, edge);
+		let mut range = filter_range(msg.filter, edge);
 		let fill = msg
 			.fill
 			.filter(|_| msg.forward && Filter::is_draft20(self.version))
@@ -4953,7 +4953,15 @@ impl TrackServe {
 		let edge = live_edge(&cache);
 		if let Some(filter) = update.filter {
 			self.filter = filter;
-			self.requested = filter_range(filter, edge);
+			// Unfiltered on an update widens back to zero. A fresh live join here
+			// would discard history before an empty relay can request its fill.
+			self.requested = match filter {
+				Filter::Unfiltered if Filter::is_draft20(self.version) => ServeRange {
+					start: Some(Location { group: 0, object: 0 }),
+					end: None,
+				},
+				_ => filter_range(filter, edge),
+			};
 		}
 		let mut range = self.requested;
 		if let Ok(mut bounds) = self.bounds.write() {
@@ -10052,7 +10060,7 @@ mod serve_tests {
 	/// including all of it once a narrowing retired the live stream.
 	#[kio::test]
 	async fn widening_with_a_fill_streams_the_current_group_once() {
-		let open = Filter::Relative(1);
+		let open = Filter::Unfiltered;
 		// The live stream stops after object 1, which the widening lifts.
 		let capped = Filter::Absolute {
 			start: Location { group: 1, object: 0 },
@@ -10166,7 +10174,7 @@ mod serve_tests {
 		let mut serving = std::pin::pin!(
 			h.publisher
 				.clone()
-				.run_subscribe_stream(stream, subscribe(Filter::Relative(1), None))
+				.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
 		);
 		serve_until(serving.as_mut(), "the current group is open", || {
 			occurrences(&h.log, b"live") == 1
@@ -10322,6 +10330,111 @@ mod serve_tests {
 				0,
 				"the head is outside the requested range"
 			);
+		}
+	}
+
+	/// A filterless SUBSCRIBE without a fill joins the latest group, as a relay cache always
+	/// served one; only an explicit absolute {0, 0} replays the groups before it.
+	#[kio::test]
+	async fn only_an_explicit_zero_start_replays_history() {
+		let zero = Filter::Absolute {
+			start: Location::default(),
+			end: None,
+		};
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
+				let mut h = serve(version);
+				for (sequence, payload) in [(0, b"history"), (1, b"latest!")] {
+					let mut group = h.track.create_group(group::Info { sequence }).unwrap();
+					group.write_frame(timestamp(), payload.as_slice()).unwrap();
+					group.finish().unwrap();
+				}
+
+				run_live(&mut h, subscribe(filter, None)).await;
+
+				assert_eq!(occurrences(&h.log, b"latest!"), 1, "{version} {filter:?}");
+				assert_eq!(occurrences(&h.log, b"history"), history, "{version} {filter:?}");
+				assert_eq!(occurrences(&h.log, FETCH_STREAM), 0, "{version} {filter:?}");
+			}
+		}
+	}
+
+	/// The same through a relay: once an earlier reader warmed the relay's copy from group 0,
+	/// a filterless SUBSCRIBE still joins the latest group, and only an explicit {0, 0}
+	/// replays the cached history.
+	#[cfg(feature = "async")]
+	#[kio::test]
+	async fn a_relay_copy_replays_history_only_to_an_explicit_zero_start() {
+		const TIMEOUT: Duration = Duration::from_secs(5);
+		let zero = Filter::Absolute {
+			start: Location::default(),
+			end: None,
+		};
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
+				let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+				let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+				let track = broadcast
+					.create_track("video", crate::track::Info::timed().with_max_age(None))
+					.unwrap();
+				for (sequence, payload) in [(0, b"history"), (1, b"latest!")] {
+					let mut group = track.create_group(group::Info { sequence }).unwrap();
+					group.write_frame(timestamp(), payload.as_slice()).unwrap();
+					group.finish().unwrap();
+				}
+				let (relay, _sessions) = crate::lite::ietf::test_hop(&upstream, "room", [false, false]).await;
+
+				// An earlier reader of the relay asked from group 0, so its copy holds both.
+				let warm = kio::clock::timeout(TIMEOUT, relay.consume().request("room", None))
+					.await
+					.expect("no broadcast")
+					.unwrap();
+				let mut reader = kio::clock::timeout(
+					TIMEOUT,
+					warm.track("video").unwrap().subscribe(
+						crate::track::Subscription::default()
+							.with_range(0..)
+							.with_order(crate::track::Order::Ascending)
+							.with_delay(crate::track::Delay::default().with_max(None)),
+					),
+				)
+				.await
+				.expect("no subscription")
+				.unwrap();
+				for expected in [0, 1] {
+					let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+						.await
+						.expect("no group")
+						.unwrap()
+						.expect("track finished");
+					assert_eq!(group.sequence, expected, "{version} {filter:?}");
+				}
+
+				let session = ScriptedSession::per_stream(vec![Vec::new()]);
+				let peer_setup = peer::PeerSetup::default();
+				peer_setup.set(peer::Peer::default());
+				let mut h = Serve {
+					publisher: Publisher::new(
+						crate::time::sim(),
+						crate::driver::Transport::new(session.clone()),
+						relay.consume(),
+						Control::new(false),
+						None,
+						peer_setup,
+						version,
+					),
+					log: session.log.clone(),
+					session,
+					track,
+					_origin: relay,
+					_broadcast: broadcast,
+				};
+				run_live(&mut h, subscribe(filter, None)).await;
+
+				assert_eq!(occurrences(&h.log, b"latest!"), 1, "{version} {filter:?}");
+				assert_eq!(occurrences(&h.log, b"history"), history, "{version} {filter:?}");
+				drop(reader);
+			}
 		}
 	}
 
@@ -18316,22 +18429,14 @@ struct GroupSlice {
 	until: Option<u64>,
 }
 
-/// A fill supplies a live join's head; an unfiltered live half must not resend it.
-fn subscribe_range(msg: &ietf::Subscribe<'_>, edge: LiveEdge) -> ServeRange {
-	if msg.filter == Filter::Unfiltered && msg.fill.is_some() {
-		return ServeRange::default();
-	}
-	filter_range(msg.filter, edge)
-}
-
 /// The Locations a single Location Filter selects, resolved against the live edge.
 fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
 	match filter {
-		// The unrestricted range is the absolute start {0, 0} on the wire.
-		Filter::Unfiltered => ServeRange {
-			start: Some(Location::default()),
-			end: None,
-		},
+		// No restriction. moq-lite starts at the beginning of the latest group, which is
+		// the join point it is built around; a subscription passes objects as they are
+		// published, so an absent filter is not a request to replay history. A subscriber
+		// that wants the track from its start names the absolute {0, 0} instead.
+		Filter::Unfiltered => ServeRange::default(),
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the
 		// already-published head of the current group, is outside the requested range,
 		// so the join is mid-group by construction. The draft pairs this with a fill
@@ -18521,10 +18626,21 @@ mod range_tests {
 		);
 	}
 
-	/// An unfiltered subscription starts at the beginning, including cached groups.
+	/// An absent filter is "no restriction on what is forwarded", not a request for
+	/// history, so it joins at the live edge.
 	#[test]
-	fn an_unfiltered_subscription_starts_at_zero() {
+	fn an_unfiltered_subscription_stays_live() {
 		let msg = subscribe(Filter::Unfiltered);
+		assert_eq!(filter_range(msg.filter, EDGE), ServeRange::default());
+	}
+
+	/// An explicit absolute {0, 0} is the request for history the absent filter is not.
+	#[test]
+	fn an_absolute_zero_start_includes_history() {
+		let msg = subscribe(Filter::Absolute {
+			start: Location::default(),
+			end: None,
+		});
 		assert_eq!(
 			filter_range(msg.filter, EDGE),
 			ServeRange {
@@ -18623,7 +18739,7 @@ mod range_tests {
 	#[test]
 	fn relative_without_an_edge_stays_live() {
 		let msg = subscribe(Filter::Relative(3));
-		assert_eq!(subscribe_range(&msg, LiveEdge::default()), ServeRange::default());
+		assert_eq!(filter_range(msg.filter, LiveEdge::default()), ServeRange::default());
 	}
 
 	/// A group created but not yet written has no objects, so the largest sits in an

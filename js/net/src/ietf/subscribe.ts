@@ -7,7 +7,7 @@ import * as Namespace from "./namespace.ts";
 import { type MessageLocation, Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
 import * as Properties from "./properties.ts";
-import type { IetfVersion } from "./version.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 /**
  * The GROUP_ORDER wire values.
@@ -58,17 +58,15 @@ export function joinFilter(
 	start?: bigint,
 	end?: bigint,
 ): { filter: Filter.Filter; fill?: Filter.Fill } {
+	// Even {0, 0} is spelled absolute: an absent filter is a live join, not history.
 	if (start !== undefined) {
 		return {
-			filter:
-				start === 0n && end === undefined
-					? { kind: "unfiltered" }
-					: {
-							kind: "absolute",
-							startGroup: start,
-							startObject: 0n,
-							endGroup: end === undefined ? undefined : end - 1n,
-						},
+			filter: {
+				kind: "absolute",
+				startGroup: start,
+				startObject: 0n,
+				endGroup: end === undefined ? undefined : end - 1n,
+			},
 		};
 	}
 	const filter: Filter.Filter = { kind: "nextObject" };
@@ -157,7 +155,10 @@ export class Subscribe {
 		params.maxAge = this.maxAge;
 		params.groupOrder = encodeGroupOrder(this.groupOrder);
 		params.forward = this.forward;
-		params.subscriptionFilter = this.filter;
+		// Unfiltered is the absent parameter, which a publisher reads as a live join.
+		if (this.filter.kind !== "unfiltered") {
+			params.subscriptionFilter = this.filter;
+		}
 
 		// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-22. An older peer reads
 		// either as an unknown parameter, which is a protocol violation, so they are
@@ -206,8 +207,16 @@ export class Subscribe {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on SUBSCRIBE");
 		}
 
-		// An absent LOCATION_FILTER means the subscription is unfiltered.
-		const filter = params.subscriptionFilter ?? { kind: "unfiltered" as const };
+		// An absent LOCATION_FILTER is filterless: a live join, not a request for history.
+		// Draft-20 spells an open absolute {0, 0} with no fields, which the codec reads as
+		// unfiltered. Present, it is the explicit start a subscriber names for history.
+		const decoded = params.subscriptionFilter;
+		const filter: Filter.Filter =
+			decoded === undefined
+				? { kind: "unfiltered" }
+				: decoded.kind === "unfiltered" && version === Version.DRAFT_20
+					? { kind: "absolute", startGroup: 0n, startObject: 0n }
+					: decoded;
 		const rawFill = params.fillParameters;
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 

@@ -15,7 +15,10 @@ use super::{Location, Param, Version};
 /// relative start is always open ended.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
-	/// Every Object in the track, encoded by omitting the parameter.
+	/// No restriction, encoded by omitting the parameter.
+	///
+	/// A subscription without a filter passes the Objects published from now on, so it
+	/// joins live rather than replaying history; [`Self::Absolute`] from {0, 0} asks for that.
 	Unfiltered,
 
 	/// The next Object after the live edge: `{Largest.Group, Largest.Object + 1}`.
@@ -86,8 +89,9 @@ impl Filter {
 	/// Encode the draft-20 field list, without the enclosing length prefix.
 	fn encode_fields(&self, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
 		match *self {
-			// Zero fields. The draft defines an open ended absolute {0, 0} as equivalent, so
-			// that spelling normalizes to this one rather than colliding with NextObject.
+			// Zero fields, as an open ended absolute {0, 0} is too: the draft defines them as
+			// equivalent, and two zero fields would be NextObject. Only presence tells them
+			// apart: Unfiltered is omitted, and SUBSCRIBE reads a present empty value as {0, 0}.
 			Self::Unfiltered => {}
 			Self::NextObject => {
 				w.varint(0)?;
@@ -405,6 +409,9 @@ mod tests {
 		assert!(value(origin, FIELDS).is_empty());
 		assert_eq!(round_trip(origin, FIELDS), Filter::Unfiltered);
 		assert_ne!(value(origin, FIELDS), value(Filter::NextObject, FIELDS));
+		// Presence is what keeps an explicit {0, 0} apart from a filterless SUBSCRIBE.
+		assert!(origin.param_present());
+		assert!(!Filter::Unfiltered.param_present());
 	}
 
 	/// The fourth field bounds the last object in the end group. Dropping it on decode

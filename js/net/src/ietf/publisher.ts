@@ -501,7 +501,7 @@ export class Publisher {
 		const subscribe = (source: broadcast.Consumer) => {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
-			const fixed = subscribeRange(msg, {});
+			const fixed = filterRange(msg.filter, {});
 			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
 			return hooks.parked(
 				source.track(msg.trackName).subscribe({
@@ -701,7 +701,7 @@ export class Publisher {
 				msg.fill && msg.forward && Filter.isDraft20(version)
 					? fillRange(msg.fill, msg.filter, edge.largest)
 					: undefined;
-			const requested = subscribeRange(msg, edge);
+			const requested = filterRange(msg.filter, edge);
 			// A copy, since an update moves the cursor in place and must not move the bounds too.
 			const range = { ...afterFill(requested, fill, edge) };
 			// What the subscriber asked for, which only a narrowing changes: the fill's split
@@ -861,9 +861,15 @@ export class Publisher {
 							? fillRange(msg.fill, msg.filter, snapshot.largest)
 							: undefined;
 					if (params.subscriptionFilter !== undefined || selected) {
-						// A fill-only update keeps the range it already has.
+						// An update's unfiltered range explicitly lowers the floor to zero;
+						// an initial unfiltered subscription still joins the live group. A
+						// fill-only update keeps the range it already has.
 						const requested: ServeRange =
-							params.subscriptionFilter === undefined ? bounds.peek() : filterRange(msg.filter, snapshot);
+							params.subscriptionFilter === undefined
+								? bounds.peek()
+								: msg.filter.kind === "unfiltered"
+									? { start: { group: 0n, object: 0n } }
+									: filterRange(msg.filter, snapshot);
 						const tail = afterFill(requested, selected, snapshot);
 						range.start = tail.start;
 						range.end = tail.end;
@@ -2932,18 +2938,15 @@ function liveEdge(track: TrackSubscriber): LiveEdge {
 	};
 }
 
-/** A fill supplies a live join's head; an unfiltered live half must not resend it. */
-function subscribeRange(msg: Subscribe, edge: LiveEdge): ServeRange {
-	if (msg.filter.kind === "unfiltered" && msg.fill !== undefined) return {};
-	return filterRange(msg.filter, edge);
-}
-
 /** The Locations a single Location Filter selects, resolved against the live edge. */
 function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
 	switch (filter.kind) {
-		// The unrestricted range is the absolute start {0, 0} on the wire.
+		// No restriction. moq-lite starts at the beginning of the latest group, which is the
+		// join point it is built around; a subscription passes objects as they are published,
+		// so an absent filter is not a request to replay history. A subscriber that wants the
+		// track from its start names the absolute {0, 0} instead.
 		case "unfiltered":
-			return { start: { group: 0n, object: 0n } };
+			return {};
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the already
 		// published head of the current group, is outside the requested range, so the join is
 		// mid-group by construction. The draft pairs this with a fill, or a joining FETCH

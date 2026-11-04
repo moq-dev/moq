@@ -12411,12 +12411,7 @@ fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Joi
 			}),
 			fetch: false,
 		},
-		// An absolute {0, 0} with no end is defined as unfiltered, so it spells itself.
-		Some(0) if end.is_none() => Join {
-			filter: Filter::Unfiltered,
-			fill: None,
-			fetch: false,
-		},
+		// Even {0, 0} is spelled absolute: an absent filter is a live join, not history.
 		Some(start) => Join {
 			filter: Filter::Absolute {
 				start: ietf::Location {
@@ -12511,14 +12506,17 @@ mod filter_tests {
 		);
 	}
 
-	/// The whole track has a spelling of its own: an absent filter is unrestricted.
+	/// The whole track is an explicit absolute {0, 0}, since an absent filter joins live.
 	#[test]
-	fn the_whole_track_is_unfiltered() {
+	fn the_whole_track_is_absolute_zero() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			assert_eq!(
 				subscribe_join(Some(0), None, version),
 				Join {
-					filter: Filter::Unfiltered,
+					filter: Filter::Absolute {
+						start: ietf::Location::default(),
+						end: None,
+					},
 					fill: None,
 					fetch: false,
 				}
@@ -15738,16 +15736,12 @@ mod joining_fetch_tests {
 				let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Subscribe::decode_msg).unwrap();
 				assert_eq!(
 					msg.filter,
-					if start == 0 {
-						Filter::Unfiltered
-					} else {
-						Filter::Absolute {
-							start: ietf::Location {
-								group: start,
-								object: 0,
-							},
-							end: None,
-						}
+					Filter::Absolute {
+						start: ietf::Location {
+							group: start,
+							object: 0,
+						},
+						end: None,
 					},
 					"{version} from {start}"
 				);

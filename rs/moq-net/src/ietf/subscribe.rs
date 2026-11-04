@@ -120,8 +120,17 @@ impl<'a> Message<'a> for Subscribe<'a> {
 
 		let subscriber_priority = subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE);
 		let group_order = group_order.unwrap_or(GroupOrder::Descending);
-		// An absent LOCATION_FILTER means the subscription is unfiltered.
-		let filter = filter.unwrap_or(Filter::Unfiltered);
+		let filter = match filter {
+			// An absent LOCATION_FILTER is filterless: a live join, not a request for history.
+			None => Filter::Unfiltered,
+			// Draft-20 spells an open absolute {0, 0} with no fields, which the codec reads as
+			// unfiltered. Present, it is the explicit start a subscriber names for history.
+			Some(Filter::Unfiltered) if version == Version::Draft20 => Filter::Absolute {
+				start: Location::default(),
+				end: None,
+			},
+			Some(filter) => filter,
+		};
 
 		Ok(Self {
 			request_id,
@@ -951,6 +960,69 @@ mod tests {
 		assert_eq!(msg.subscriber_priority, 64);
 		assert_eq!(msg.group_order, GroupOrder::Ascending);
 		assert_eq!(encode_message(&msg, Version::Draft22), body);
+	}
+
+	/// A filterless SUBSCRIBE omits LOCATION_FILTER and stays filterless, while an explicit
+	/// open {0, 0} keeps its own spelling on every draft: draft-18's Absolute Start tag,
+	/// draft-20's present zero-length value, and draft-22's Absolute Start type.
+	#[test]
+	fn absolute_zero_is_distinct_from_filterless() {
+		let zero = Filter::Absolute {
+			start: Location::default(),
+			end: None,
+		};
+		for (version, explicit) in [
+			// LOCATION_FILTER's key is 0x21, a delta of 1 after SUBSCRIBER_PRIORITY.
+			(Version::Draft18, &[0x01, 0x03, 0x03, 0x00, 0x00][..]),
+			(Version::Draft20, &[0x01, 0x00][..]),
+			(Version::Draft22, &[0x01, 0x02, 0x00, 0x00][..]),
+		] {
+			let msg = |filter| Subscribe {
+				new_group: None,
+				max_age: None,
+				request_id: RequestId(1),
+				track_namespace: crate::Path::from_static("live"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Descending,
+				filter,
+				fill: None,
+				properties_wanted: true,
+				forward: true,
+				rendezvous: false,
+				range_filters: false,
+				authorization_token: None,
+			};
+
+			let filterless = encode_message(&msg(Filter::Unfiltered), version);
+			let absolute = encode_message(&msg(zero), version);
+			assert!(
+				absolute.windows(explicit.len()).any(|w| w == explicit),
+				"{version}: {absolute:x?}"
+			);
+			assert_eq!(absolute.len(), filterless.len() + explicit.len(), "{version}");
+			assert_eq!(
+				decode_message::<Subscribe>(&filterless, version).unwrap().filter,
+				Filter::Unfiltered,
+				"{version}"
+			);
+			assert_eq!(
+				decode_message::<Subscribe>(&absolute, version).unwrap().filter,
+				zero,
+				"{version}"
+			);
+		}
+
+		// Draft-22's explicit None type is still filterless.
+		#[rustfmt::skip]
+		let none = subscribe_body(&[
+			0x01, // Number of Parameters
+			0x21, 0x00, // LOCATION_FILTER (0x21): None
+		]);
+		assert_eq!(
+			decode_message::<Subscribe>(&none, Version::Draft22).unwrap().filter,
+			Filter::Unfiltered
+		);
 	}
 
 	/// FORWARD=0 is legal on every draft, a paused request rather than a session error.
