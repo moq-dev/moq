@@ -1157,8 +1157,10 @@ impl Connection {
 			self.path.congestion.on_cwnd_limited();
 		}
 
-		// Send MTU probe if necessary
-		if buf.is_empty() && self.state.is_established() {
+		// Send MTU probe if necessary. Only probe validated paths: probes bypass the
+		// anti-amplification check above, and until a migrated path is validated, its budget is
+		// needed for PATH_CHALLENGE.
+		if buf.is_empty() && self.state.is_established() && self.path.validated {
 			let space_id = SpaceId::Data;
 			let probe_size = self
 				.path
