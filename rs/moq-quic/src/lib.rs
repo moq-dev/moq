@@ -13,14 +13,6 @@
 
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(dead_code, reason = "test builds compile helpers only some tests call"))]
-#![cfg_attr(
-	not(any(feature = "aws-lc-rs", feature = "ring")),
-	allow(
-		dead_code,
-		unused_imports,
-		reason = "without a crypto provider only the mux connection is reachable"
-	)
-)]
 
 use std::{
 	net::{IpAddr, SocketAddr},
@@ -32,8 +24,8 @@ mod coding;
 mod constant_time;
 mod entropy;
 // Not part of the public API: compiled only for the crate's own tests, the benches, and
-// the `fuzz/` harness. The connection target needs ring or aws-lc-rs for the endpoint's keys.
-#[cfg(all(any(test, feature = "fuzz"), any(feature = "aws-lc-rs", feature = "ring")))]
+// the `fuzz/` harness. The connection target uses rind for the endpoint's keys.
+#[cfg(any(test, feature = "fuzz"))]
 #[doc(hidden)]
 pub mod fuzz;
 mod range_set;
@@ -41,7 +33,7 @@ mod range_set;
 #[cfg(any(test, feature = "sim"))]
 #[doc(hidden)]
 pub mod sim;
-#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
+#[cfg(test)]
 mod tests;
 mod transport_parameters;
 mod varint;
