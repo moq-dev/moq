@@ -3745,13 +3745,11 @@ impl<E: CatalogExt> AacStream<E> {
 		// deliver a multi-frame PES newest first, its oldest frame waiting behind the rest.
 		let mut open = None;
 		let result = self.split(pending, batched, &mut open);
-		let closed = match (open, &mut self.import) {
-			(Some(end), Some(import)) => import.cut(Some(end)),
-			_ => Ok(()),
-		};
-		let published = result?;
-		closed?;
-		Ok(published)
+		// A failed cut is a publishing failure, which outranks a damaged unit the caller recovers from.
+		if let (Some(end), Some(import)) = (open, &mut self.import) {
+			import.cut(Some(end))?;
+		}
+		result
 	}
 
 	/// Publish the frames `pending` completes into one group, leaving `open` at where its last frame
@@ -4366,13 +4364,11 @@ impl<E: CatalogExt> LegacyStream<E> {
 		// One group per PES, closed even by an error: see `AacStream::write`.
 		let mut open = None;
 		let result = self.split(pending, &mut open);
-		let closed = match (open, &mut self.import) {
-			(Some(end), Some(import)) => import.cut(Some(end)),
-			_ => Ok(()),
-		};
-		let published = result?;
-		closed?;
-		Ok(published)
+		// A failed cut is a publishing failure, which outranks a damaged unit the caller recovers from.
+		if let (Some(end), Some(import)) = (open, &mut self.import) {
+			import.cut(Some(end))?;
+		}
+		result
 	}
 
 	/// Publish the frames `pending` completes into one group, leaving `open` at where its last frame
