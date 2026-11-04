@@ -7,7 +7,7 @@ the wire: ANNOUNCE_REQUEST carries an initial route credit, the subscriber
 raises it later on its side of the stream, and the publisher never holds more
 live advertisements on the stream than the credit. A peer that floods distinct
 paths is held to the credit instead of closing the session at the 100k
-announce cap, so a flood of `.dial/*` sockets cannot drop a cluster link or the
+announce cap, so a flood of distinct paths cannot drop a cluster link or the
 other announcements it carries. Rust and JS implement it on the next
 unpublished lite version after lite-07.
 
@@ -30,8 +30,8 @@ Decided 2026-11-01 with the maintainer (the follow-up to the
   budget.
 - Declined: per-route refusal (frees the subscriber but not the publisher,
   and the flood still crosses the wire once), and aggregating to a covering
-  prefix at the limit (loses the per-path inventory a socket `Listener`
-  needs).
+  prefix at the limit (loses the per-path inventory a reader watching many
+  broadcasts needs).
 - The publisher withholds routes beyond the credit, coalesced to the latest
   state per path as it already does, and sends them as an ANNOUNCE_END or a
   credit raise frees room. Which withheld route goes first is the
