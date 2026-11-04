@@ -741,6 +741,9 @@ type Start = { sequence: bigint; start: Timestamp };
 let cachedMirror: (producer: Producer, sequence: bigint, from: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: bigint) => boolean;
+// The sequences in `[start, end)` the producer caches, unsorted, costing the smaller of the span
+// and the cache; assigned in its static block.
+let cachedIn: (producer: Producer, start: bigint, end: bigint) => bigint[];
 // Mirror the cached groups in `[start, end)` that `offer` accepts into a sink again, cut ones
 // included as a fresh sink gets them, for a reader whose floor moved below them; assigned in
 // the producer's static block.
@@ -992,6 +995,15 @@ export class Producer {
 		cachedHolds = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
+		};
+		cachedIn = (producer, start, end) => {
+			if (end - start <= BigInt(producer.#cached.size)) {
+				const found: bigint[] = [];
+				for (let sequence = start; sequence < end; sequence++)
+					if (producer.#cached.has(sequence)) found.push(sequence);
+				return found;
+			}
+			return [...producer.#cached.keys()].filter((sequence) => sequence >= start && sequence < end);
 		};
 		cachedMirror = (producer, sequence, from) => {
 			const entry = producer.#cached.get(sequence);
@@ -2409,22 +2421,25 @@ export class Subscriber {
 	}
 
 	// Fresh reads of the cached groups in `[start, end)` this cursor admits and no longer judges
-	// stale, each expiring against the budget, and the runs still given up. A resumed reader holds
-	// no cache of its own, so it re-offers none. Mirrors the Rust `reoffer_groups`.
+	// stale, each expiring against the budget, and the runs still given up. A resumed reader asks
+	// its serving route's copy. Mirrors the Rust `reoffer_groups`.
 	#reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] } {
+		if (this.#resume) return this.#resume.reofferGroups(start, end);
 		const groups: GroupConsumer[] = [];
-		const givenUp: Run[] = [];
-		const producer = this.#resume ? undefined : this.#state.producer;
+		let givenUp: Run[] = [{ start, end }];
+		const producer = this.#state.producer;
+		if (!producer) return { groups, givenUp };
 		const drift = this.#drift();
 		const cap = this.#cursor.peek().end;
-		for (let sequence = start; sequence < end; sequence++) {
+		// Only what the cache holds, so a long run of groups long gone costs nothing.
+		const cached = cachedIn(producer, start, end).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+		for (const sequence of cached) {
 			const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
-			const group =
-				producer && admitted && !this.#staleAt(sequence, drift)
-					? cachedMirror(producer, sequence, 0)
-					: undefined;
-			if (group) groups.push(this.#guard(group));
-			else insertRun(givenUp, sequence, sequence + 1n);
+			if (!admitted || this.#staleAt(sequence, drift)) continue;
+			const group = cachedMirror(producer, sequence, 0);
+			if (!group) continue;
+			groups.push(this.#guard(group));
+			givenUp = removeRun(givenUp, sequence, sequence + 1n);
 		}
 		return { groups, givenUp };
 	}

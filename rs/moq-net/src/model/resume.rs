@@ -894,6 +894,13 @@ impl Subscriber {
 		reader.window.covered_by(from, cap, accounted)
 	}
 
+	/// Fresh reads of the groups in `run` the serving route's copy still caches and judges
+	/// fresh, and the runs still given up; see [`track::Subscriber::reoffer_groups`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn reoffer_groups(&mut self, run: std::ops::Range<u64>) -> (Vec<group::Consumer>, RangeSet<u64>) {
+		self.reader().reoffer_groups(run)
+	}
+
 	/// Poll for sequences the serving copy gave up that no copy may still deliver; see
 	/// [`track::Subscriber::poll_drop`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -1849,6 +1856,23 @@ impl Reader {
 				return Poll::Pending;
 			}
 		}
+	}
+
+	/// Fresh reads of the groups in `run` the serving copy still caches and judges fresh,
+	/// handed out as any group of that copy is, and the runs still given up: all of `run`
+	/// while no copy serves.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn reoffer_groups(&mut self, run: std::ops::Range<u64>) -> (Vec<group::Consumer>, RangeSet<u64>) {
+		let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) else {
+			let mut given_up = RangeSet::new();
+			given_up.insert(run);
+			return (Vec::new(), given_up);
+		};
+		let (groups, given_up) = sub.reoffer_groups(run);
+		// The serving copy is the newest one.
+		let index = self.copies.len() - 1;
+		let groups = groups.into_iter().map(|group| self.hand_out(index, group)).collect();
+		(groups, given_up)
 	}
 
 	/// The next run the serving copy gave up that `delivered` lacks and no other copy may
@@ -3750,6 +3774,22 @@ mod test {
 		b.supersede_stale(None);
 		kio::clock::sleep(budget).await;
 		assert_eq!(dropped(&mut sub), [], "no verdict under the new terms");
+	}
+
+	/// A front's reader re-offers what its serving route's copy still caches and judges fresh,
+	/// and gives up the rest, so a relay's publisher re-serves an expired stream through it.
+	#[test]
+	fn a_resumed_reader_reoffers_a_group_its_serving_copy_still_caches() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let (groups, given_up) = sub.reoffer_groups(0..3);
+		assert_eq!(groups.iter().map(|group| group.sequence).collect::<Vec<_>>(), [0]);
+		assert_eq!(given_up.iter().cloned().collect::<Vec<_>>(), [1..3]);
 	}
 
 	/// A run a replaced route held back is dropped with that route: the route serving next

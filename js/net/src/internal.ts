@@ -434,6 +434,8 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
+	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
+	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] };
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }

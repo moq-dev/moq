@@ -595,6 +595,18 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
+	/**
+	 * Fresh reads of the groups in `[start, end)` the serving copy still caches and judges fresh,
+	 * handed out as any group of that copy is, and the runs still given up: all of them while no
+	 * copy serves. Mirrors the Rust `Reader::reoffer_groups`.
+	 */
+	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] } {
+		const serving = this.#serving();
+		if (!serving) return { groups: [], givenUp: [{ start, end }] };
+		const { groups, givenUp } = hooks.reofferGroups(serving.sub, start, end);
+		return { groups: groups.map((group) => this.#handOut(serving, group)), givenUp };
+	}
+
 	cachedGroup(sequence: bigint, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];

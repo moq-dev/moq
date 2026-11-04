@@ -3329,3 +3329,22 @@ test("a route whose IETF session closed before subscribing moves the track to th
 	front.consumer.close();
 	b.close();
 });
+
+// A front's reader re-offers what its serving route's copy still caches and judges fresh, and gives
+// up the rest, so a relay's publisher re-serves an expired stream through it. Mirrors Rust.
+test("a resumed reader re-offers a group its serving copy still caches", () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(60_000) } });
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	const { groups, givenUp } = hooks.reofferGroups(sub, 0n, 3n);
+	expect(groups.map((group) => group.sequence)).toEqual([0n]);
+	expect(givenUp).toEqual([{ start: 1n, end: 3n }]);
+	for (const group of groups) group.close();
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
