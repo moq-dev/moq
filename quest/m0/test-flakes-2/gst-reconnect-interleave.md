@@ -5,7 +5,8 @@
 `restarts_under_reconnects_interleave_on_one_pad` in
 `rs/moq-gst/src/source/imp.rs` passes reliably in a loaded `just check` and
 in the merge queue, fixed at its cause under the
-[epic](/quest/m0/test-flakes-2/README.md)'s rules. Done when the PR explains
+[epic](/quest/m0/test-flakes-2/README.md)'s rules, and runs again with its
+`#[ignore]` removed. Done when the PR explains
 each failure below and shows the loaded run that reproduced it now passing.
 
 ## Plan
@@ -13,6 +14,13 @@ each failure below and shows the loaded run that reproduced it now passing.
 Planned 2026-11-04 with the maintainer, from
 [moq-dev/moq#7888](https://github.com/moq-dev/moq/pull/7888)'s suggested
 follow-ups. No quest or open PR tracked it.
+
+Ignored, decided 2026-11-04 (maintainer, on
+[moq-dev/moq#7917](https://github.com/moq-dev/moq/pull/7917)): the test is
+`#[ignore]`d with a reason naming this quest, so it stops failing
+merge-queue batches. The PR that fixes it removes the
+`#[ignore]`, re-enabling the test, and shows it passing in the loaded runs
+below.
 
 Failures seen so far, each passing when run alone:
 

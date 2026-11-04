@@ -22,6 +22,9 @@ moq-quic, moq-tokio, qmux and moq-uring onto it as
 `UnsupportedCpu(#[from] ...)` with `#[error(transparent)]`. This quest does
 the same for the three crates it left, so it starts once that PR lands.
 
+- ✅ #7873 lands as is, with the type in `provider`; this quest moves it
+  later (maintainer, 2026-11-04, on
+  [moq-dev/moq#7917](https://github.com/moq-dev/moq/pull/7917)).
 - **The type must not need rustls.** In #7873, `provider` pulls in rustls,
   since it also holds `provider()` and `install_default()`. moq-auth's core
   build has no rustls (only its `client` feature does), and the e2ee feature
