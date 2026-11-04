@@ -1,0 +1,26 @@
+# [M] Backport the relay and auth hardening to release
+
+## Goal
+
+The `release` branch's relay refuses connection paths with `.` or `..` segments before asking the auth server, and `release`'s auth client refuses redirects from the auth server, matching main. `release`'s relay also serves its HTTP routes with main's response hardening and ops-listener checks, and withdraws a moq-transport advertisement a peer starves of send credit, with the published API unchanged. The fixes ship in the next patch release a human cuts.
+
+## Plan
+
+Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run).
+
+- **Dot segments:** [moq-dev/moq#7366](https://github.com/moq-dev/moq/pull/7366) makes `Auth::admit` in `rs/moq-relay/src/auth.rs` refuse any path segment that is `.` or `..`, percent-encoded or not. Before it, a raw-QUIC SETUP path like `/tenant-a/../tenant-b?jwt=b` reached the auth server unresolved. Port it once #7366 merges.
+- **Auth redirects:** on `release`, `rs/moq-auth/src/client.rs:35` builds the client without a redirect policy, so reqwest follows up to 10 redirects and re-sends the credential's JSON body on a 307/308. Main refuses since [moq-dev/moq#6384](https://github.com/moq-dev/moq/pull/6384) (`redirect::Policy::none()`, plus an error naming the redirect). Found by the agent on [moq-dev/moq#7298](https://github.com/moq-dev/moq/pull/7298), which fixes the cluster client but not this one.
+- Hand-port rather than cherry-pick where `release` lacks main's structure, as [moq-dev/moq#7389](https://github.com/moq-dev/moq/pull/7389) did, with a regression test for each on `release`.
+- Version bumps stay with a human: several backports combine into one patch release, so this PR bumps nothing.
+
+Added 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run):
+
+- **Relay HTTP hardening:** port [moq-dev/moq#7210](https://github.com/moq-dev/moq/pull/7210) (merged): `/fetch` serves bytes as `application/octet-stream`, `/fetch` and `/announced` send `nosniff` and `private, no-store` (refusals included), and the ops listener refuses any request with `Origin` and any `Host` or URI authority that isn't the accepted socket's destination. `release` has its own `rs/moq-relay/src/fetch.rs` and `internal.rs`; port the behavior and #7210's tests, not its layout.
+- **Withdraw without credit:** port [moq-dev/moq#7414](https://github.com/moq-dev/moq/pull/7414) (merged), keeping `release`'s published API: a withdrawn PUBLISH_NAMESPACE or REQUEST_UPDATE that a peer starves of send credit is reset in both directions instead of pinning the announce loop. Port its zero- and partial-credit withdrawal tests for the drafts `release` speaks.
+- **Landed:** the dot-segment and auth-redirect items above merged into `release` on 2026-11-02 in [moq-dev/moq#7599](https://github.com/moq-dev/moq/pull/7599), which also settles the redirect follow-up that [moq-dev/moq#7298](https://github.com/moq-dev/moq/pull/7298) and [moq-dev/moq#7278](https://github.com/moq-dev/moq/pull/7278) suggested. What remains is the two ports above, then the patch release. [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596) (open) holds this quest's main-side checkpoint.
+
+Public API: none. Wire: none; as on main, a withdrawal resets a partially written request without waiting for peer credit.
+
+## Related
+
+- [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - the earlier backport in the same patch release

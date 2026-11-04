@@ -20,8 +20,8 @@ grow/drain cycles to expose reclamation CPU, copies and allocation churn.
 Preserve arrival cursors, live-edge protection and useful cache retention.
 Correct the accounting explanation with the chosen implementation.
 
-Coordinate with [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) if
-its representation has changed. Land the benchmark now, but any shrink of the
+Front eviction ([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993))
+kept the group's `kio::log` representation and sheds by advancing its base. Land the benchmark now, but any shrink of the
 `arrival`/`evict` deques waits on
 [log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md)'s verdict,
 since that quest may move `TrackState` arrival order onto the kio log.

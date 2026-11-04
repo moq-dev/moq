@@ -1,8 +1,4 @@
 #![warn(missing_docs)]
-#![cfg_attr(
-	test,
-	expect(clippy::disallowed_methods, reason = "tests read the host clock directly")
-)]
 
 //! Media muxers and demuxers for MoQ.
 //!
@@ -34,13 +30,19 @@
 //! - [`Linger`] keeps a cleanly ended broadcast up for a fixed time, so a
 //!   subscriber that arrives after the end still gets its tail.
 
-pub mod binary;
+#[cfg(any(test, feature = "fuzz"))]
+mod allocation;
 pub mod catalog;
 mod clock;
 pub mod codec;
 pub mod container;
 mod error;
 pub mod follow;
+// Not part of the public API: compiled only for the crate's own tests and for the `fuzz/`
+// harness.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fuzz;
 pub mod hls;
 pub mod import;
 mod jitter;
@@ -57,15 +59,3 @@ pub use error::*;
 pub use linger::Linger;
 pub use pace::Pacer;
 pub use source::{Binding, Source};
-
-/// Translate a catalog entry's declared compression into the flag the codecs take.
-///
-/// An unrecognized algorithm is an error rather than a fallback to plaintext: reading its frames
-/// raw would hand the caller garbage.
-pub(crate) fn compression(compression: Option<&hang::catalog::Compression>) -> Result<bool> {
-	match compression {
-		None => Ok(false),
-		Some(hang::catalog::Compression::Deflate) => Ok(true),
-		Some(other) => Err(Error::UnsupportedCompression(other.to_string())),
-	}
-}

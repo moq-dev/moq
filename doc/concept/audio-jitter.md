@@ -347,20 +347,36 @@ constant offset between tracks cancels out of `measured`: a video encoder that
 flushes 200 ms behind the audio encoder produces the same video target as one
 that does not, and its frames would all arrive 200 ms late for the shared clock.
 
-The catalog `delay` field carries that offset: how far a rendition's
-timestamps trail those the broadcast's other renditions already wrote, measured
-by the publisher and never lowered. It is an addend, not a floor, because nothing on
-this page contains it. The shared playout is the largest requirement among the
-renditions actually subscribed:
+The catalog `delay` field carries that offset. It is an addend, not a floor,
+because nothing on this page contains it, and it is never lowered.
+
+A publisher that knows the offset states it, and it is used as given. The
+receiver already adds a frame duration on top, so an encoder configured not to
+reorder or queue frames, whose frames trail by no more than their own duration,
+states zero. moq-video does so for a backend that confirmed its preset, and
+moq-audio for Opus and PCM captured at the codec's rate, since a resampler
+holds input. Anything else is measured: the least a rendition's
+timestamps trailed those the broadcast's other renditions already wrote, over a
+window of a second or a group of its media, whichever is longer, keeping the
+largest of those windows. A measured value is reported only once a window
+closes.
+
+Lateness only some frames have is left out, since `measured` already contains
+it. A B-frame written after a later reference picture trails that picture and
+another rendition's, and the audio written beside it trails them too. The
+reference pictures do not, and every window holds one.
+
+The shared playout is the largest requirement among the renditions actually
+subscribed:
 
 ```
 playout = max over subscribed renditions of (delay + target)
 ```
 
 A receiver **must not** subtract one rendition's `delay` from another's. Each is
-a lifetime maximum taken against whichever rendition was ahead, so two values need not
-share an origin: if the earliest rendition later drifts behind another, their
-difference understates the real spread. The maximum never under-buffers,
+taken against whichever rendition was ahead and only ever rises, so two values
+need not share an origin: if the earliest rendition later drifts behind another,
+their difference understates the real spread. The maximum never under-buffers,
 because the subscribed renditions' spread is measured from an earliest baseline
 no earlier than the broadcast's, so it never exceeds the largest `delay` among
 them. The cost is over-buffering by the smallest subscribed `delay` when the
@@ -472,9 +488,11 @@ or one beyond the track's retention window, is an error at configuration time.
 Supported or refused, not warned about and continued.
 
 In the browser this is the numeric `delay` setting; natively it is
-`decode::Options::delay`, where `None` selects the estimator. The two spell the
-same thing the same way on purpose. It is distinct from `max_delay`, which is the
-live-edge skip budget and not a buffer.
+`decode::Options::delay.min` with `decode::Options::estimate` set to `false`.
+`estimate` defaults to `true`, which runs the estimator instead and never goes
+below that `min`. The two spell the same thing the same way on purpose. It is
+distinct from `delay.max`, which is the live-edge skip budget and not a buffer.
+The same `min` is where a cold join starts.
 
 ## Constants
 

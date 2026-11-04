@@ -10,7 +10,7 @@ moq-net's types by default and against a wrapper's types when handed one.
 ## Plan
 
 See the [questline](/quest/m2/net-wrap/README.md) for the decisions: generics
-with moq-net's types as the default, no `Send` bounds wasm can't meet, and
+with moq-net's types as the default, no `Send` bounds beyond moq-net's own, and
 the methods exactly as moq-net has them today.
 
 - Every handle a writer or reader can get from moq-net's public API,
@@ -29,7 +29,7 @@ the methods exactly as moq-net has them today.
   - Requests: a broadcast producer's `requests` returns its own
     `broadcast::Requests`, whose `requested_track` yields its own
     `track::Request`, so generic code serves undeclared names (as
-    [E2EE undeclared names](/quest/m2/e2ee/undeclared-names.md) needs). A
+    `moq_crypto::e2ee::broadcast::Requests` does). A
     `track::Requests`'s `requested_fill` yields its own `track::Fill`, whose
     `accept` returns its own group producer and whose `drop_groups` names
     the rest dropped.
@@ -37,7 +37,8 @@ the methods exactly as moq-net has them today.
     wrapper's own subscriber, so E2EE decrypts behind it; `Resolving` and
     `Fetching` resolve to the wrapper's logical metadata and groups.
   - Adapters: a subscriber's `ordered` returns its own `track::Ordered`
-    with the same group, datagram, and control surface. moq-json's snapshot
+    with the same group and control surface; datagrams leave stream tracks
+    with [Datagram tracks](/quest/m1/datagram-tracks/README.md). moq-json's snapshot
     and window consumers, moq-mux, and moq-stats read through `ordered()`,
     so without it they stay concrete.
   - Listing (maintainer, 2026-10-24): a broadcast consumer's `tracks`

@@ -1,7 +1,5 @@
 //! Packet-level defenses and path changes
 
-use std::any::Any;
-
 use super::*;
 use crate::crypto::{self, KeyPair, Keys};
 
@@ -16,10 +14,10 @@ struct Limited(Arc<dyn crypto::ClientConfig>);
 impl crypto::ClientConfig for Limited {
 	fn start_session(
 		self: Arc<Self>,
-		version: u32,
+		version: Version,
 		server_name: &str,
 		params: &TransportParameters,
-	) -> Result<Box<dyn crypto::Session>, ConnectError> {
+	) -> Result<Box<dyn crypto::Session>, crate::endpoint::ConnectError> {
 		let inner = self.0.clone().start_session(version, server_name, params)?;
 		Ok(Box::new(LimitedSession(inner)))
 	}
@@ -65,10 +63,10 @@ impl crypto::Session for LimitedSession {
 	fn initial_keys(&self, dst_cid: ConnectionId, side: Side) -> Keys {
 		limit(self.0.initial_keys(dst_cid, side))
 	}
-	fn handshake_data(&self) -> Option<Box<dyn Any>> {
+	fn handshake_data(&self) -> Option<crypto::HandshakeData> {
 		self.0.handshake_data()
 	}
-	fn peer_identity(&self) -> Option<Box<dyn Any>> {
+	fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
 		self.0.peer_identity()
 	}
 	fn is_handshaking(&self) -> bool {
@@ -104,8 +102,9 @@ impl crypto::Session for LimitedSession {
 fn aead_integrity_limit() {
 	let _guard = subscribe();
 	let mut pair = pair_with(|_| {});
-	let mut config = ClientConfig::new(Arc::new(Limited(Arc::new(client_crypto()))));
-	config.transport = Arc::new(transport());
+	let quic = Arc::new(crypto::rustls::QuicClientConfig::new(Arc::new(client_crypto())));
+	let mut config = client::Config::from_crypto(Arc::new(Limited(quic)));
+	config.transport = transport();
 	let (client_ch, server_ch) = pair.connect_with(config);
 
 	for sent in 1..=INTEGRITY_LIMIT + 1 {
@@ -146,7 +145,7 @@ fn duplicate_packet_is_discarded() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(MSG).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..]).unwrap();
 	pair.drive_client();
 	assert_eq!(pair.server.inbound.len(), 1);
 	let duplicate = pair.server.inbound[0].clone();
@@ -159,13 +158,13 @@ fn duplicate_packet_is_discarded() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
-	assert_eq!(chunks.next(usize::MAX), Err(ReadError::Blocked));
-	let _ = chunks.finalize();
+	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
+	chunks.finalize();
 }
 
 /// Rebuilds a Retry datagram with `src_cid`, under a valid integrity tag
 fn forge_retry(retry: &[u8], src_cid: &[u8], orig_dst_cid: ConnectionId) -> Vec<u8> {
-	let version = u32::from_be_bytes(retry[1..5].try_into().unwrap());
+	let version = Version::from_wire(u32::from_be_bytes(retry[1..5].try_into().unwrap())).unwrap();
 	let dst_cid_end = 6 + retry[5] as usize;
 	let src_cid_end = dst_cid_end + 1 + retry[dst_cid_end] as usize;
 	let mut packet = retry[..dst_cid_end].to_vec();
@@ -316,7 +315,7 @@ fn path_validation_failure_reverts() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(MSG).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..]).unwrap();
 	pair.drive();
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
 }
@@ -354,5 +353,5 @@ fn ipv4_rebinding_keeps_path_state() {
 fn ipv6_rebinding_resets_path_state() {
 	let (before, after) = rtt_after_rebinding(Ipv6Addr::LOCALHOST.into());
 	assert_ne!(before, after);
-	assert_eq!(after, TransportConfig::default().initial_rtt);
+	assert_eq!(after, transport::Config::default().initial_rtt);
 }

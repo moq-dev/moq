@@ -21,13 +21,13 @@ pub enum SettingsError {
 	WebTransportUnsupported,
 
 	#[error("connection error")]
-	ConnectionError(#[from] crate::quic::driver::ConnectionError),
+	ConnectionError(#[from] crate::quic::driver::connection::Error),
 
 	#[error("read error")]
-	ReadError(#[from] crate::quic::driver::ReadError),
+	ReadError(#[from] crate::quic::driver::recv::Error),
 
 	#[error("write error")]
-	WriteError(#[from] crate::quic::driver::WriteError),
+	WriteError(#[from] crate::quic::driver::send::Error),
 }
 
 pub struct Settings {
@@ -35,10 +35,10 @@ pub struct Settings {
 		dead_code,
 		reason = "a reference to the send/recv stream, so we don't close it until dropped"
 	)]
-	send: crate::quic::driver::SendStream,
+	send: crate::quic::driver::send::Stream,
 
 	#[allow(dead_code, reason = "held so the stream stays open until dropped")]
-	recv: crate::quic::driver::RecvStream,
+	recv: crate::quic::driver::recv::Stream,
 
 	/// The peer's other unidirectional streams that arrived before its control stream, their
 	/// headers read or still reading, for the session to take over. Behind a lock only so the
@@ -48,7 +48,7 @@ pub struct Settings {
 
 impl Settings {
 	// Establish the H3 connection.
-	pub async fn connect(conn: &crate::quic::driver::Connection) -> Result<Self, SettingsError> {
+	pub async fn connect(conn: &crate::quic::driver::connection::Connection) -> Result<Self, SettingsError> {
 		let recv = Self::accept(conn);
 		let send = Self::open(conn);
 
@@ -69,8 +69,8 @@ impl Settings {
 	/// kept, not dropped, since closing a QPACK stream ends the peer's HTTP/3 connection. Each
 	/// one kept holds the peer's stream credit, which bounds how many it can open first.
 	async fn accept(
-		conn: &crate::quic::driver::Connection,
-	) -> Result<(crate::quic::driver::RecvStream, Vec<Pin<Box<PendingUni>>>), SettingsError> {
+		conn: &crate::quic::driver::connection::Connection,
+	) -> Result<(crate::quic::driver::recv::Stream, Vec<Pin<Box<PendingUni>>>), SettingsError> {
 		let mut accept = std::pin::pin!(futures::stream::unfold(conn.clone(), |conn| async {
 			Some((conn.accept_uni().await, conn))
 		}));
@@ -101,7 +101,9 @@ impl Settings {
 
 		Ok((recv, early))
 	}
-	async fn open(conn: &crate::quic::driver::Connection) -> Result<crate::quic::driver::SendStream, SettingsError> {
+	async fn open(
+		conn: &crate::quic::driver::connection::Connection,
+	) -> Result<crate::quic::driver::send::Stream, SettingsError> {
 		let mut settings = web_transport_proto::Settings::default();
 		settings.enable_webtransport(1);
 

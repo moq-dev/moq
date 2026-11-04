@@ -8,7 +8,6 @@
 		"@moq/auth": "workspace:*",
 		"@moq/boy": "workspace:*",
 		"@moq/clock": "workspace:*",
-		"@moq/flate": "workspace:*",
 		"@moq/hang": "workspace:*",
 		"@moq/json": "workspace:*",
 		"@moq/libav": "workspace:*",

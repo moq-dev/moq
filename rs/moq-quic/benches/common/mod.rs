@@ -8,25 +8,30 @@
 //! host descheduling the benchmark does not inflate them.
 
 use std::{
-	any::Any,
 	collections::{HashMap, VecDeque},
 	net::{Ipv6Addr, SocketAddr},
+	num::NonZeroU64,
 	sync::{Arc, Mutex},
+	task::{Poll, Waker},
 	time::Duration,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cpu_time::ThreadTime;
 use criterion::{
 	Criterion,
 	measurement::{Measurement, ValueFormatter, WallTime},
 };
-use moq_clock::Instant;
-use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
+use kio::clock::Instant;
+use moq_congestion::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
 use moq_quic::{
-	ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent, Endpoint,
-	EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError, ServerConfig, StreamEvent, StreamId,
-	TransportConfig, VarInt, fuzz::Plaintext,
+	ConnectionId, ConnectionIdGenerator, RandomConnectionIdGenerator, VarInt, client,
+	connection::Connection,
+	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received as Inbound},
+	fuzz::Plaintext,
+	recv, send, server,
+	stream::{Dir, Id as StreamId},
+	transport,
 };
 
 /// The most datagrams one `poll_transmit` may batch, as a GSO-capable socket would take.
@@ -98,6 +103,79 @@ impl Default for Setup {
 	}
 }
 
+/// What one of the application's waiters waits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Task {
+	/// Data, a FIN, or a reset to read on a stream the peer opened.
+	Read(ConnectionHandle, StreamId),
+	/// The end of a stream this side opened, to answer a STOP_SENDING.
+	End(ConnectionHandle, StreamId),
+}
+
+impl Task {
+	fn conn(self) -> ConnectionHandle {
+		match self {
+			Self::Read(ch, _) | Self::End(ch, _) => ch,
+		}
+	}
+}
+
+/// Queues its task when woken, as an executor's run queue would.
+struct Wake {
+	task: Task,
+	ready: Arc<Mutex<Vec<Task>>>,
+}
+
+impl std::task::Wake for Wake {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		self.ready.lock().unwrap().push(self.task);
+	}
+}
+
+/// The application's parked waiters, so it only runs what the connection woke.
+#[derive(Default)]
+struct Tasks {
+	waiters: HashMap<Task, kio::Waiter>,
+	/// Tasks woken, or newly started, since the application last ran them.
+	ready: Arc<Mutex<Vec<Task>>>,
+}
+
+impl Tasks {
+	/// The waiter for `task`, made on first use.
+	fn waiter(&mut self, task: Task) -> &kio::Waiter {
+		let ready = &self.ready;
+		self.waiters.entry(task).or_insert_with(|| {
+			let wake = Wake {
+				task,
+				ready: ready.clone(),
+			};
+			kio::Waiter::new(Waker::from(Arc::new(wake)))
+		})
+	}
+
+	/// Runs `task` on the application's next pass.
+	fn start(&mut self, task: Task) {
+		self.ready.lock().unwrap().push(task);
+	}
+
+	/// Forgets `task`, which will not wait again.
+	fn done(&mut self, task: Task) {
+		self.waiters.remove(&task);
+	}
+
+	/// Takes the woken tasks of connection `ch`, leaving the others queued.
+	fn woken(&mut self, ch: ConnectionHandle) -> Vec<Task> {
+		let mut ready = self.ready.lock().unwrap();
+		let (ours, rest) = ready.drain(..).partition(|task| task.conn() == ch);
+		*ready = rest;
+		ours
+	}
+}
+
 /// One endpoint and its connections, with an application that drains whatever arrives.
 pub(crate) struct Peer {
 	pub(crate) endpoint: Endpoint,
@@ -107,6 +185,7 @@ pub(crate) struct Peer {
 	pub(crate) received: Received,
 	/// Wall time spent in [`Peer::process`], to time one side of an exchange.
 	pub(crate) busy: Duration,
+	tasks: Tasks,
 	inbound: VecDeque<(SocketAddr, BytesMut)>,
 	outbound: Vec<(SocketAddr, BytesMut)>,
 	buf: Vec<u8>,
@@ -121,6 +200,7 @@ impl Peer {
 			sink: Sink::Read,
 			received: Received::default(),
 			busy: Duration::ZERO,
+			tasks: Tasks::default(),
 			inbound: VecDeque::new(),
 			outbound: Vec::new(),
 			buf: Vec::new(),
@@ -140,10 +220,20 @@ impl Peer {
 
 		for (remote, data) in std::mem::take(&mut self.inbound) {
 			buf.clear();
-			match self.endpoint.handle(now, remote, None, None, data, &mut buf) {
+			match self.endpoint.handle(
+				now,
+				Inbound {
+					remote,
+					local_ip: None,
+					ecn: None,
+					data,
+					arrival: None,
+				},
+				&mut buf,
+			) {
 				Some(DatagramEvent::NewConnection(incoming)) => {
 					buf.clear();
-					match self.endpoint.accept(incoming, now, &mut buf, None) {
+					match self.endpoint.accept(incoming, now, &mut buf) {
 						Ok((ch, conn)) => {
 							self.conns.insert(ch, conn);
 						}
@@ -163,6 +253,9 @@ impl Peer {
 			}
 		}
 
+		// The bench loop is the driver: it polls every connection each round anyway, so its
+		// transmit wait never needs to wake.
+		let driver = kio::Waiter::noop();
 		for (&ch, conn) in self.conns.iter_mut() {
 			if conn.poll_timeout().is_some_and(|at| at <= now) {
 				conn.handle_timeout(now);
@@ -172,30 +265,31 @@ impl Peer {
 					conn.handle_event(event);
 				}
 			}
-			while let Some(event) = conn.poll() {
-				match event {
-					Event::ConnectionLost { reason } => panic!("connection lost: {reason}"),
-					Event::Stream(StreamEvent::Opened { .. }) if self.sink == Sink::Ignore => {}
-					Event::Stream(StreamEvent::Opened { dir }) => {
-						while let Some(id) = conn.streams().accept(dir) {
-							drain(conn, id, self.sink, &mut self.received);
-						}
+			if let Some(reason) = conn.error() {
+				panic!("connection lost: {reason}");
+			}
+			if self.sink != Sink::Ignore {
+				for dir in [Dir::Uni, Dir::Bi] {
+					while let Some(id) = conn.streams().accept(dir) {
+						self.tasks.start(Task::Read(ch, id));
 					}
-					Event::Stream(StreamEvent::Readable { id }) => drain(conn, id, self.sink, &mut self.received),
-					// The application answers STOP_SENDING the way a writer does: it gives up.
-					Event::Stream(StreamEvent::Stopped { id, error_code }) => {
-						let _ = conn.send_stream(id).reset(error_code);
-					}
-					Event::DatagramReceived => {
-						while conn.datagrams().recv().is_some() {
-							self.received.datagrams += 1;
-						}
-					}
-					_ => {}
+				}
+			}
+			while conn.datagrams().recv().is_some() {
+				self.received.datagrams += 1;
+			}
+			// Runs what woke, then what those runs woke in turn.
+			loop {
+				let woken = self.tasks.woken(ch);
+				if woken.is_empty() {
+					break;
+				}
+				for task in woken {
+					run(conn, task, self.sink, &mut self.received, &mut self.tasks);
 				}
 			}
 			buf.clear();
-			while let Some(transmit) = conn.poll_transmit(now, MAX_DATAGRAMS, &mut buf) {
+			while let Poll::Ready(transmit) = conn.poll_transmit(&driver, now, MAX_DATAGRAMS, &mut buf) {
 				split(&mut self.outbound, &transmit, &buf);
 				buf.clear();
 			}
@@ -210,80 +304,101 @@ impl Peer {
 	}
 }
 
-/// Reads or stops one stream, recording what the application saw.
-fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Received) {
+/// Runs one woken task, forgetting it once it will not wait again.
+fn run(conn: &mut Connection, task: Task, sink: Sink, received: &mut Received, tasks: &mut Tasks) {
+	let done = match task {
+		Task::Read(_, id) => drain(conn, id, sink, received, tasks.waiter(task)),
+		// The application answers STOP_SENDING the way a writer does: it gives up.
+		Task::End(_, id) => match conn.send_stream(id).poll_end(tasks.waiter(task)) {
+			Poll::Pending => false,
+			Poll::Ready(Ok(send::End::Stopped(code))) => {
+				let _ = conn.send_stream(id).reset(code);
+				true
+			}
+			Poll::Ready(_) => true,
+		},
+	};
+	if done {
+		tasks.done(task);
+	}
+}
+
+/// Reads or stops one stream, recording what the application saw, and returns whether it is done
+/// with the stream rather than parked on it with `waiter`.
+fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Received, waiter: &kio::Waiter) -> bool {
 	if let Sink::Lease(want) = sink {
-		return lease(conn, id, want, received);
+		return lease(conn, id, want, received, waiter);
 	}
 	if sink == Sink::Ignore {
-		return;
+		return false;
 	}
 	let mut stream = conn.recv_stream(id);
 	if sink == Sink::Stop {
 		if stream.stop(VarInt::from_u32(0)).is_ok() {
 			received.stopped += 1;
 		}
-		return;
+		return true;
 	}
 	// A stream already stopped, finished, or reset is gone.
 	let Ok(mut chunks) = stream.read() else {
-		return;
+		return true;
 	};
-	loop {
-		match chunks.next(usize::MAX) {
-			Ok(Some(chunk)) => received.bytes += chunk.bytes.len() as u64,
-			Ok(None) => {
+	let done = loop {
+		match chunks.poll_next(waiter, usize::MAX) {
+			Poll::Ready(Ok(Some(chunk))) => received.bytes += chunk.bytes.len() as u64,
+			Poll::Ready(Ok(None)) => {
 				received.finished += 1;
-				break;
+				break true;
 			}
-			Err(ReadError::Blocked) => break,
-			Err(ReadError::Reset(_)) => {
+			Poll::Pending => break false,
+			Poll::Ready(Err(recv::Error::Reset(_))) => {
 				received.reset += 1;
-				break;
+				break true;
 			}
 			#[allow(
 				unreachable_patterns,
 				reason = "unreachable today, but keeps the suite compiling against a rewrite's new variants"
 			)]
-			Err(err) => panic!("read failed: {err}"),
+			Poll::Ready(Err(err)) => panic!("read failed: {err}"),
 		}
-	}
-	let _ = chunks.finalize();
+	};
+	chunks.finalize();
+	done
 }
 
-/// Leases one stream until it waits, releasing whatever it leased.
+/// Leases one stream until it waits, releasing whatever it leased, and returns whether it is done
+/// with the stream rather than parked on it with `waiter`.
 ///
 /// A stream that ends is stopped, as a driver does when its reader drops, which is what
 /// discards its lease.
-fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Received) {
+fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Received, waiter: &kio::Waiter) -> bool {
 	loop {
-		let ended = match conn.recv_stream(id).lease(want) {
-			Ok(_) => None,
-			Err(LeaseError::Blocked(_) | LeaseError::ClosedStream) => return,
-			Err(LeaseError::Reset(_)) => Some(&mut received.reset),
-			Err(LeaseError::Evicted) => Some(&mut received.evicted),
-			Err(err) => panic!("lease failed: {err}"),
-		};
-		if let Some(count) = ended {
-			*count += 1;
-			let _ = conn.recv_stream(id).stop(VarInt::from_u32(0));
-			return;
-		}
-		let fin = conn.leased(id).expect("leased above").is_fin();
 		let mut stream = conn.recv_stream(id);
-		// Taken a chunk at a time, as moq-net hands a frame's payload on.
-		loop {
-			let chunk = stream.take(usize::MAX);
-			if chunk.is_empty() {
-				break;
+		let mut lease = match stream.poll_lease(waiter, want) {
+			Poll::Ready(Ok(lease)) => lease,
+			Poll::Pending => return false,
+			Poll::Ready(Err(recv::Error::Closed)) => return true,
+			Poll::Ready(Err(err)) => {
+				match err {
+					recv::Error::Reset(_) => received.reset += 1,
+					recv::Error::Evicted => received.evicted += 1,
+					err => panic!("lease failed: {err}"),
+				}
+				let _ = stream.stop(VarInt::from_u32(0));
+				return true;
 			}
+		};
+		let fin = lease.is_fin();
+		// Taken a chunk at a time, as moq-net hands a frame's payload on.
+		while lease.has_remaining() {
+			let chunk = lease.copy_to_bytes(lease.chunk().len());
 			received.bytes += chunk.len() as u64;
 		}
-		let _ = stream.release();
+		stream.release(lease);
 		if fin {
 			received.finished += 1;
 			let _ = stream.stop(VarInt::from_u32(0));
-			return;
+			return true;
 		}
 	}
 }
@@ -293,7 +408,7 @@ fn split(out: &mut Vec<(SocketAddr, BytesMut)>, transmit: &moq_quic::Transmit, b
 	let data = &buf[..transmit.size];
 	let segment = transmit.segment_size.unwrap_or(data.len());
 	for datagram in data.chunks(segment) {
-		out.push((transmit.destination, BytesMut::from(datagram)));
+		out.push((transmit.remote, BytesMut::from(datagram)));
 	}
 }
 
@@ -319,20 +434,16 @@ impl Pair {
 		let log = server_cids.clone();
 		// Fixed seeds make packet number skips and key update timing the same on every run, and
 		// on both sides of a comparison.
-		let mut server_endpoint = EndpointConfig::default();
-		server_endpoint
-			.rng_seed(Some([0xff; 32]))
-			.cid_generator(Arc::new(move || {
-				Box::new(Recording {
-					inner: RandomConnectionIdGenerator::new(8),
-					log: log.clone(),
-				})
-			}));
-		let server = Endpoint::new(
-			Arc::new(server_endpoint),
-			Some(server_config(setup.server_receive_window)),
-			false,
-		);
+		let mut server_endpoint = endpoint::Config::default();
+		server_endpoint.rng_seed = Some([0xff; 32]);
+		server_endpoint.cid_generator = Some(Arc::new(move || {
+			Box::new(Recording {
+				inner: RandomConnectionIdGenerator::new(8),
+				log: log.clone(),
+			})
+		}));
+		server_endpoint.server = Some(server_config(setup.server_receive_window));
+		let server = Endpoint::new(server_endpoint, false).unwrap();
 		let server = Peer::new(server, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 4433));
 
 		let mut pair = Self {
@@ -347,18 +458,24 @@ impl Pair {
 
 		let client_config = client_config(setup.client_send_window, setup.client_probe_target > 0);
 		for index in 0..setup.clients {
-			let mut config = EndpointConfig::default();
+			let mut config = endpoint::Config::default();
 			let cid_len = setup.client_cid_len;
 			let mut seed = [0; 32];
 			seed[..8].copy_from_slice(&(index as u64).to_le_bytes());
-			config
-				.rng_seed(Some(seed))
-				.cid_generator(Arc::new(move || Box::new(RandomConnectionIdGenerator::new(cid_len))));
-			let mut endpoint = Endpoint::new(Arc::new(config), None, false);
+			config.rng_seed = Some(seed);
+			config.cid_generator = Some(Arc::new(move || Box::new(RandomConnectionIdGenerator::new(cid_len))));
+			let mut endpoint = Endpoint::new(config, false).unwrap();
 			let port = 10_000 + u16::try_from(index).expect("too many clients");
 			let addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
 			let (ch, conn) = endpoint
-				.connect(pair.now, client_config.clone(), pair.server.addr, "localhost")
+				.connect(
+					pair.now,
+					Dial {
+						config: &client_config,
+						remote: pair.server.addr,
+						server_name: "localhost",
+					},
+				)
 				.expect("connect");
 			let mut client = Peer::new(endpoint, addr);
 			let mut conn = conn;
@@ -385,6 +502,18 @@ impl Pair {
 	pub(crate) fn client(&mut self) -> &mut Connection {
 		assert_eq!(self.clients.len(), 1, "pair has more than one client");
 		self.clients[0].conn()
+	}
+
+	/// Opens a stream on the only client and writes all of `data` to it, with the client's
+	/// application watching how the stream ends, so it answers a STOP_SENDING.
+	pub(crate) fn open_uni(&mut self, data: &Bytes) -> StreamId {
+		assert_eq!(self.clients.len(), 1, "pair has more than one client");
+		let client = &mut self.clients[0];
+		let (&ch, conn) = client.conns.iter_mut().next().expect("client has a connection");
+		let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
+		assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), data.len());
+		client.tasks.start(Task::End(ch, id));
+		id
 	}
 
 	/// Runs every peer once and delivers what they sent, returning whether anything moved.
@@ -556,10 +685,17 @@ pub(crate) fn deliver(pair: &mut Pair, datagram: BytesMut) {
 	let remote = pair.clients[0].addr;
 	let server = &mut pair.server;
 	server.buf.clear();
-	match server
-		.endpoint
-		.handle(pair.now, remote, None, None, datagram, &mut server.buf)
-	{
+	match server.endpoint.handle(
+		pair.now,
+		Inbound {
+			remote,
+			local_ip: None,
+			ecn: None,
+			data: datagram,
+			arrival: None,
+		},
+		&mut server.buf,
+	) {
 		Some(DatagramEvent::ConnectionEvent(ch, event)) => server.conns.get_mut(&ch).unwrap().handle_event(event),
 		_ => panic!("forged datagram was not routed to the connection"),
 	}
@@ -583,9 +719,10 @@ pub(crate) fn flush(pair: &mut Pair, empty: usize) -> Vec<BytesMut> {
 	let mut out = Vec::new();
 	let server = &mut pair.server;
 	let conn = server.conns.values_mut().next().unwrap();
+	let driver = kio::Waiter::noop();
 	loop {
 		server.buf.clear();
-		while let Some(transmit) = conn.poll_transmit(pair.now, MAX_DATAGRAMS, &mut server.buf) {
+		while let Poll::Ready(transmit) = conn.poll_transmit(&driver, pair.now, MAX_DATAGRAMS, &mut server.buf) {
 			split(&mut out, &transmit, &server.buf);
 			server.buf.clear();
 		}
@@ -604,33 +741,32 @@ pub(crate) fn flush(pair: &mut Pair, empty: usize) -> Vec<BytesMut> {
 /// Room for the largest burst of datagrams a benchmark queues or receives at once.
 const DATAGRAM_BUFFER: usize = 64 << 20;
 
-fn transport(receive_window: VarInt, send_window: u64, probe: bool) -> Arc<TransportConfig> {
-	let mut transport = TransportConfig::default();
+fn transport(receive_window: VarInt, send_window: u64, probe: bool) -> transport::Config {
+	let mut transport = transport::Config::default();
+	transport.congestion = Arc::new(Unlimited { probe });
+	// Pinned, so black hole detection cannot shrink packets after a benchmark's losses.
+	transport.initial_mtu = 1452;
+	transport.min_mtu = 1452;
+	transport.idle_timeout = None;
+	transport.limits.max_streams = NonZeroU64::new(4096);
+	transport.limits.stream_receive_window = NonZeroU64::new(16 << 20);
+	// `None` is the default window, so a zero would silently lift the limit instead.
+	transport.limits.receive_window = Some(NonZeroU64::new(receive_window.into_inner()).expect("zero receive window"));
+	transport.limits.send_window = Some(NonZeroU64::new(send_window).expect("zero send window"));
+	transport.datagram.receive_buffer = Some(DATAGRAM_BUFFER);
+	transport.datagram.send_buffer = DATAGRAM_BUFFER;
 	transport
-		.congestion_controller_factory(Arc::new(Unlimited { probe }))
-		// Pinned, so black hole detection cannot shrink packets after a benchmark's losses.
-		.initial_mtu(1452)
-		.min_mtu(1452)
-		.max_idle_timeout(None)
-		.max_concurrent_uni_streams(VarInt::from_u32(4096))
-		.max_concurrent_bidi_streams(VarInt::from_u32(4096))
-		.stream_receive_window(VarInt::from_u32(16 << 20))
-		.receive_window(receive_window)
-		.send_window(send_window)
-		.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
-		.datagram_send_buffer_size(DATAGRAM_BUFFER);
-	Arc::new(transport)
 }
 
-fn server_config(receive_window: VarInt) -> Arc<ServerConfig> {
-	let mut config = ServerConfig::with_crypto(Arc::new(Plaintext));
-	config.transport_config(transport(receive_window, SEND_WINDOW, false));
-	Arc::new(config)
+fn server_config(receive_window: VarInt) -> server::Config {
+	let mut config = Plaintext::server();
+	config.transport = transport(receive_window, SEND_WINDOW, false);
+	config
 }
 
-fn client_config(send_window: u64, probe: bool) -> ClientConfig {
-	let mut config = ClientConfig::new(Arc::new(Plaintext));
-	config.transport_config(transport(VarInt::MAX, send_window, probe));
+fn client_config(send_window: u64, probe: bool) -> client::Config {
+	let mut config = Plaintext::client();
+	config.transport = transport(VarInt::MAX, send_window, probe);
 	config
 }
 
@@ -685,8 +821,8 @@ impl Controller for Unlimited {
 		None
 	}
 
-	fn metrics(&self) -> ControllerMetrics {
-		ControllerMetrics {
+	fn metrics(&self) -> Metrics {
+		Metrics {
 			congestion_window: WINDOW,
 			probe_inflight: self.probe.then_some(WINDOW),
 			..Default::default()
@@ -700,13 +836,9 @@ impl Controller for Unlimited {
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(*self)
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
-	}
 }
 
-impl ControllerFactory for Unlimited {
+impl Factory for Unlimited {
 	fn build(self: Arc<Self>, _init: Init) -> Box<dyn Controller> {
 		Box::new(*self)
 	}

@@ -1,4 +1,4 @@
-# Nightly passes on main
+# [S] Nightly passes on main
 
 ## Goal
 
@@ -16,6 +16,10 @@ Decided 2026-10-24 (maintainer), from a triage of run
 child per distinct cause, each landing on its own. The PR gate keeps
 skipping benches and examples; a green Nightly catches them within a day.
 
+Decided 2026-10-27 (maintainer), from the coverage audit's triage of run
+[40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673): more
+children for the causes nothing owned.
+
 This README's own work, after the children:
 
 - Nightly's multi-step jobs (Features first) keep going past a failed step
@@ -28,10 +32,3 @@ This README's own work, after the children:
   threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
-- [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
-- [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module
-- [moq-quic rustdoc](/quest/m0/nightly/quic-rustdoc.md) - `--all-features` rustdoc for moq-quic builds and a lane checks it

@@ -6,8 +6,8 @@ description: Where each layer the bindings wrap lives in every language
 # Layers
 
 The bindings keep Rust's layers. moq-net sits at the root of each package, and
-each layer above it has its own namespace: `media`, `json`, `flate`, `audio`,
-and `video`. Rust's other crates, such as moq-auth and moq-room, have no
+each layer above it has its own namespace: `media`, `json`, `audio`, and
+`video`. Rust's other crates, such as moq-auth and moq-room, have no
 binding. A type keeps its short name in every language, so Python's
 `moq.json.SnapshotProducer` is `Json.SnapshotProducer` in Swift. Find the layer
 below, then look up its methods in that language's API reference.
@@ -42,6 +42,12 @@ Sessions, origins, broadcasts, tracks, and groups: `Client`, `Server`,
 | C++ | `moq::` | `moq::BroadcastProducer` |
 | C | `moq_session_*`, `moq_origin_*`, `moq_publish_track_*`, `moq_consume_track_*` | `moq_publish_track` |
 
+On-demand broadcast requests in every binding can answer with held content
+without announcing an exact route. The answer uses the prefix route's
+continuous sequence space at that path. Use a fresh publication for a job
+that may restart independently; see [work on demand](/concept/identity#work-on-demand)
+and the [Go](/lib/go/) and [C](/lib/c/) binding references.
+
 ## media
 
 The catalog, encoded-media imports, and container-decoded reads, merging
@@ -65,8 +71,7 @@ and `GroupConsumer`.
 JSON tracks as a latest value with merge-patch deltas, an append log, or a
 sliding window of records: `SnapshotProducer`, `SnapshotConsumer`,
 `StreamProducer`, `StreamConsumer`, `WindowProducer`, and `WindowConsumer`.
-The catalog has no window mode, so a window track is not advertised there, and
-the C API has no window yet.
+The catalog has no window mode, so a window track is not advertised there.
 
 | Language | Module | Example |
 | --- | --- | --- |
@@ -81,21 +86,9 @@ the C API has no window yet.
 
 Go code usually imports it under an alias, next to `encoding/json`.
 
-## flate
-
-Opaque payloads as a latest value or an append log, optionally compressed:
-`SnapshotProducer` and `StreamProducer`.
-
-| Language | Module | Example |
-| --- | --- | --- |
-| Rust | [`moq_flate`](/lib/rs/moq-flate) | `moq_flate::snapshot::Producer` |
-| Python | `moq.flate` | `moq.flate.SnapshotProducer` |
-| Go | `moq.dev/moq/flate` | `flate.SnapshotProducer` |
-| Kotlin | `dev.moq.flate` | `dev.moq.flate.SnapshotProducer` |
-| Swift | `Flate` | `Flate.SnapshotProducer` |
-| Dart | `package:moq/flate.dart` | `flate.SnapshotProducer` |
-| C++ | `moq::Flate*` | `moq::FlateSnapshotProducer` |
-| C | `moq_publish_binary_*` | `moq_publish_binary_snapshot` |
+Compression is the track's, not this layer's: publish a JSON track with
+`compress` set on its track info, and a consumer reads it like any other.
+Opaque bytes go on a raw net track.
 
 ## audio
 

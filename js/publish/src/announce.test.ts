@@ -96,7 +96,7 @@ test("a subscriber arriving at announce time sees every rendition in its first c
 	const net = env.broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 	const group = await net.track(Broadcast.CATALOG_TRACK).subscribe().ordered().nextGroup();
-	expect(group?.sequence).toBe(0);
+	expect(group?.sequence).toBe(0n);
 	const catalog = (await group?.readJson()) as Catalog.Root;
 	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
@@ -165,14 +165,14 @@ test.each(["audio", "video"] as const)("enabling %s keeps the announcement while
 	expect(env.announcing.peek()).toBe(true);
 });
 
-test("capture gaps keep the broadcast epoch and same-identity track sequences", async () => {
+test("capture gaps keep the broadcast instance and its track sequences", async () => {
 	using env = setup();
 	await start(env);
 	const net = env.broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer");
-	const request = env.broadcast.in.origin.peek()?.request(env.broadcast.in.name.peek(), { announced: true });
-	if (!request) throw new Error("expected an announced request");
-	const epoch = request.active.peek()?.epoch;
+	const request = env.broadcast.in.origin.peek()?.follow(env.broadcast.in.name.peek());
+	if (!request) throw new Error("expected a follower");
+	const instance = request.active.peek()?.instance;
 	const active: boolean[] = [];
 	const stop = request.active.subscribe((value) => active.push(value !== undefined));
 	const media = net.track("audio").subscribe();
@@ -183,7 +183,7 @@ test("capture gaps keep the broadcast epoch and same-identity track sequences", 
 		await settle();
 		const track = env.audio.rendition.track.peek();
 		if (!track) throw new Error("expected the demanded audio track");
-		expect(track.appendGroup().sequence).toBe(0);
+		expect(track.appendGroup().sequence).toBe(0n);
 
 		// Both devices may be absent during a swap or retry, even though both remain selected.
 		env.video.source.set(undefined);
@@ -194,19 +194,19 @@ test("capture gaps keep the broadcast epoch and same-identity track sequences", 
 		env.audio.settled.set(false);
 		await settle();
 		expect(env.announcing.peek()).toBe(true);
-		expect(request.active.peek()?.epoch).toBe(epoch);
+		expect(request.active.peek()?.instance).toBe(instance);
 
 		await start(env);
 		expect(env.broadcast.net.peek()).toBe(net);
 		expect(env.audio.rendition.track.peek()).toBe(track);
-		expect(track.appendGroup().sequence).toBe(1);
+		expect(track.appendGroup().sequence).toBe(1n);
 
 		// A different device format uses the broadcast's existing fresh-track mechanism.
 		env.audio.rendition.config.set({ ...audioConfig, sampleRate: Catalog.u53(44100) });
 		await settle();
 		expect((await catalog.latest())?.value.audio?.renditions.audio?.track).toBe("audio/1");
 		expect(track.closed.peek()).toBeNull();
-		expect(request.active.peek()?.epoch).toBe(epoch);
+		expect(request.active.peek()?.instance).toBe(instance);
 		expect(active).not.toContain(false);
 	} finally {
 		stop();

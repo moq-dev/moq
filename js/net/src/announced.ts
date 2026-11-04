@@ -33,10 +33,9 @@ export interface Announce {
  * What an announcement stream yields.
  *
  * `start`: a route now covers the prefix. `update`: the route covering it changed
- * hops or cost, in place. `restart`: another publisher instance now serves the prefix (a
- * newer epoch, or another route without one), so request it afresh; what was already
- * resolved stays on the old one until dropped or its route goes. `end`: no route covers it
- * any more.
+ * hops or cost, in place. `restart`: another instance now serves the prefix, so request it
+ * afresh; what was already resolved stays on the old one until dropped or its route goes.
+ * `end`: no route covers it any more.
  *
  * @public
  */
@@ -55,6 +54,15 @@ export interface Options {
 	 * list everything. Subscribing to a hidden path by name works either way.
 	 */
 	hidden?: boolean;
+
+	/**
+	 * Also report every route that could serve a path in scope, not just those whose literal
+	 * name matches it. A route is a prefix serving everything beneath it, so a scope listing
+	 * `.chat` names at any depth still reports a route at `room`, which can serve
+	 * `room/lobby.chat`. Code that routes or forwards needs these; listing broadcasts does
+	 * not. Requests resolve through covering routes either way.
+	 */
+	covering?: boolean;
 }
 
 /** Reactive backing state shared by announcement producers and consumers. */

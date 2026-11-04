@@ -60,6 +60,12 @@ function clamp(value: number, min: number, max: number): number {
 	return Math.min(Math.max(Math.trunc(value), min), max);
 }
 
+// Where a group stream starts: its group, and its first object in that group.
+interface Start {
+	sequence: bigint;
+	object: number;
+}
+
 /**
  * Ranks one subscription's group streams against each other, and re-ranks them whenever the
  * set changes or the subscription is updated.
@@ -77,7 +83,7 @@ function clamp(value: number, min: number, max: number): number {
 export class Priority {
 	#track: track.Subscriber;
 	#publisher: number;
-	#streams = new Map<Writer, { sequence: number; object: number }>();
+	#streams = new Map<Writer, Start>();
 	#dispose: Dispose;
 	#closed = false;
 
@@ -92,7 +98,7 @@ export class Priority {
 	}
 
 	/** The send order for a stream starting at this group and object, before it opens. */
-	rank(sequence: number, object: number): number {
+	rank(sequence: bigint, object: number): number {
 		const subscription = this.#track.subscription.peek();
 		return sendOrder({
 			priority: subscription?.priority ?? 0,
@@ -102,7 +108,7 @@ export class Priority {
 	}
 
 	/** Rank a stream by its first object now and after ranking changes, until {@link remove}. */
-	add(stream: Writer, sequence: number, object: number) {
+	add(stream: Writer, sequence: bigint, object: number) {
 		this.#streams.set(stream, { sequence, object });
 
 		// Also covers the stream itself: opening one can block on transport capacity, so an
@@ -133,34 +139,35 @@ export class Priority {
 		if (this.#streams.size === 0) this.#dispose();
 	}
 
-	// Earlier objects win within one group, so a fill precedes its live rest. Group order
-	// still dominates, and identical starts tie without counting themselves.
-	#position(sequence: number, object: number, order: track.Order = "descending"): number {
+	// How many streams go ahead of one starting here.
+	#position(sequence: bigint, object: number, order: track.Order = "descending"): number {
+		const start = { sequence, object };
 		let ahead = 0;
 		for (const other of this.#streams.values()) {
-			if (
-				other.sequence === sequence
-					? other.object < object
-					: order === "ascending"
-						? other.sequence < sequence
-						: other.sequence > sequence
-			)
-				ahead++;
+			if (compareStarts(other, start, order) < 0) ahead++;
 		}
 		return ahead;
 	}
 
+	// Sorted once, so ranking every stream costs one sort rather than a scan per stream: a
+	// stream's position is how many sort strictly ahead of it.
 	#rerank() {
 		const subscription = this.#track.subscription.peek();
 		const priority = subscription?.priority ?? 0;
-		for (const [stream, { sequence, object }] of this.#streams) {
-			stream.setPriority(
-				sendOrder({
-					priority,
-					publisher: this.#publisher,
-					position: this.#position(sequence, object, subscription?.order),
-				}),
-			);
+		const order = subscription?.order ?? "descending";
+		const queue = [...this.#streams].sort(([, a], [, b]) => compareStarts(a, b, order));
+		let position = 0;
+		for (let i = 0; i < queue.length; i++) {
+			const [stream, start] = queue[i];
+			if (i > 0 && compareStarts(queue[i - 1][1], start, order) !== 0) position = i;
+			stream.setPriority(sendOrder({ priority, publisher: this.#publisher, position }));
 		}
 	}
+}
+
+// Negative when `a` goes before `b`. Group order dominates, earlier objects win within one
+// group so a fill precedes its live rest, and identical starts tie.
+function compareStarts(a: Start, b: Start, order: track.Order): number {
+	if (a.sequence !== b.sequence) return a.sequence < b.sequence === (order === "ascending") ? -1 : 1;
+	return a.object - b.object;
 }

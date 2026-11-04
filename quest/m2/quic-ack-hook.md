@@ -39,7 +39,7 @@ unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
 Each QUIC driver, moq-tokio's `quic::driver` and moq-uring's, gets the hook
-first, in the shape of [the driver poll waits](/quest/m1/quic-api/poll.md),
+first, in the drivers' caller-owned waiter shape,
 with an async wrapper:
 
 ```rust
@@ -50,22 +50,20 @@ impl send::Stream {
 ```
 
 The same pair goes on `send::Finished`, the handle `finish(self)` returns
-([quic-api streams](/quest/m1/quic-api/streams.md)); if that quest lands an
-opaque `send::Offset`, the methods take it instead of a `u64`. The
-`send::Error` says why the bytes will never be acknowledged: a reset, the
-peer's STOP_SENDING, the connection's loss, or an offset past the data
-written. Both drivers forward to `moq-quic`'s own `poll_acked` wait, which
-[waits](/quest/m1/quic-api/waits.md) makes of today's `acked(offset)` and
-`StreamEvent::Acked`. Four traps, each settled in moq-quic where the wait
+([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)), and the methods take its opaque `send::Offset`, which only
+`offset()` mints, instead of a `u64`. The `send::Error` says why the bytes will
+never be acknowledged: a reset, the peer's STOP_SENDING, or the connection's
+loss. Both drivers forward to `moq-quic`'s own `send::Stream::poll_acked`
+wait, which replaced `StreamEvent::Acked`. Four traps, each settled in moq-quic where the wait
 lives:
 
 - A finished stream whose every byte was acknowledged must not look like a
   reset one. moq-quic answers from the queryable send-stream end
-  [streams](/quest/m1/quic-api/streams.md) keeps until the id is released:
+  it keeps until the id is released:
   finished, with no reset or STOP_SENDING, means delivered.
-- An offset past the data written returns an error, never a panic, since a
-  panic under the connection lock poisons it for every handle (streams
-  makes moq-quic return it).
+- An offset past the data written cannot be built, and a foreign one panics
+  before moq-tokio takes the connection lock, since a panic under the lock
+  poisons it for every handle.
 - `reset_at` below the acknowledged prefix, or STOP_SENDING after a reset
   (which truncates to 0), shrinks the acknowledged prefix. The waiters fail
   anyway; keep the prefix a `poll_acked` reports monotonic.
@@ -99,10 +97,3 @@ close.
 Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
 [viewer lag histogram](/quest/m2/qos/lag-histogram.md) and the
 [delivery-delay histogram](/quest/m2/delivery-delay.md).
-
-## Required
-
-- [QUIC driver poll waits](/quest/m1/quic-api/poll.md) - the `&self, &kio::Waiter`
-  driver shape `poll_acked` takes
-- [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the trait
-  shape the moq-net method takes

@@ -6,7 +6,7 @@ use super::{
 	mtud::MtuDiscovery,
 	spaces::{PacketSpace, SentPacket},
 };
-use crate::{Duration, Instant, TIMER_GRANULARITY, TransportConfig, congestion, packet::SpaceId};
+use crate::{Duration, Instant, TIMER_GRANULARITY, congestion, packet::SpaceId, transport};
 
 #[cfg(feature = "qlog")]
 use qlog::events::{ExData, quic::RecoveryMetricsUpdated};
@@ -52,11 +52,11 @@ pub(super) struct PathData {
 	generation: u64,
 }
 
-/// Builds the configured congestion controller for a path starting now.
-fn build_congestion(now: Instant, config: &TransportConfig) -> Box<dyn congestion::Controller> {
-	config.congestion_controller_factory.clone().build(congestion::Init {
+/// Builds the configured congestion controller for a path starting now at `mtu`.
+fn build_congestion(now: Instant, mtu: u16, config: &transport::Config) -> Box<dyn congestion::Controller> {
+	config.congestion.clone().build(congestion::Init {
 		now,
-		mtu: config.get_initial_mtu(),
+		mtu,
 		rtt: config.initial_rtt,
 		max_pacing_rate: config.max_outgoing_bytes_per_second,
 	})
@@ -69,29 +69,29 @@ impl PathData {
 		peer_max_udp_payload_size: Option<u16>,
 		generation: u64,
 		now: Instant,
-		config: &TransportConfig,
+		config: &transport::Config,
 	) -> Self {
+		let mut mtud = config.mtu.as_ref().filter(|_| allow_mtud).map_or_else(
+			|| MtuDiscovery::disabled(config.get_initial_mtu(), config.min_mtu),
+			|mtud_config| MtuDiscovery::new(config.get_initial_mtu(), config.min_mtu, mtud_config.clone()),
+		);
+		// A migration's new path already knows the peer's limit, which binds with or without
+		// discovery.
+		if let Some(peer_max_udp_payload_size) = peer_max_udp_payload_size {
+			mtud.on_peer_max_udp_payload_size_received(peer_max_udp_payload_size);
+		}
 		Self {
 			remote,
 			rtt: RttEstimator::new(config.initial_rtt),
 			sending_ecn: true,
-			congestion: build_congestion(now, config),
+			// Sized for the MTU discovery starts at, which a known peer limit may have lowered
+			congestion: build_congestion(now, mtud.current_mtu(), config),
 			challenge: None,
 			challenge_pending: false,
 			validated: false,
 			total_sent: 0,
 			total_recvd: 0,
-			mtud: config.mtu_discovery_config.as_ref().filter(|_| allow_mtud).map_or_else(
-				|| MtuDiscovery::disabled(config.get_initial_mtu(), config.min_mtu),
-				|mtud_config| {
-					MtuDiscovery::new(
-						config.get_initial_mtu(),
-						config.min_mtu,
-						peer_max_udp_payload_size,
-						mtud_config.clone(),
-					)
-				},
-			),
+			mtud,
 			first_packet_after_rtt_sample: None,
 			in_flight: InFlight::new(),
 			first_packet: None,
@@ -126,10 +126,10 @@ impl PathData {
 	///
 	/// This is useful when it is known the underlying path has changed.
 	#[cfg(test)]
-	pub(super) fn reset(&mut self, now: Instant, config: &TransportConfig) {
+	pub(super) fn reset(&mut self, now: Instant, config: &transport::Config) {
 		self.rtt = RttEstimator::new(config.initial_rtt);
-		self.congestion = build_congestion(now, config);
 		self.mtud.reset(config.get_initial_mtu(), config.min_mtu);
+		self.congestion = build_congestion(now, self.mtud.current_mtu(), config);
 	}
 
 	/// Indicates whether we're a server that hasn't validated the peer's address and hasn't

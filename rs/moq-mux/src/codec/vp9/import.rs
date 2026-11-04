@@ -63,10 +63,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// Apply a resolved config, updating the catalog rendition in place.
+	/// Apply a resolved config, minting a track when the decoder identity changes.
 	///
-	/// A changed config just re-mirrors the rendition; there are no fixed tracks to reject a
-	/// reconfiguration.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.catalog.publish(&mut self.track, config)
 	}
@@ -119,6 +117,13 @@ impl Import {
 	/// Mark a timeline break and restart measurement without lowering advertised values.
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
 		self.track.discontinuity()
+	}
+
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> crate::Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)
 	}
 
 	/// Close the current group and open the next one at `sequence`.

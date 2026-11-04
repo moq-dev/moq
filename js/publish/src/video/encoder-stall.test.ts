@@ -110,8 +110,12 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	// An on-time audio rendition shares the broadcast, writing each capture as it happens.
 	const audio = new Estimator();
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -128,7 +132,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	const send = async (millis = 40) => {
 		await clock.advance(Nano.fromMilli(Milli(millis)));
 		const timestamp = Nano.toMicro(Nano(clock.now()));
-		audio.write(timestamp, order);
+		audio.write(timestamp, order, true);
 		controller.enqueue(new Input(timestamp) as never);
 		await clock.advance(Nano.zero);
 	};

@@ -58,7 +58,7 @@ strip c "$c_out/include/moq.h" "$out/current/moq.h"
 # uniffi-bindgen-cpp reads the metadata from a library for any target, so the
 # x86_64 release library works on any host.
 gh release download "$ffi_tag" --repo moq-dev/moq --pattern '*-x86_64-unknown-linux-gnu-libmoq_ffi.so' --output "$work/libmoq_ffi.so"
-lib=$(cargo build --locked -p moq-ffi --lib --message-format=json |
+lib=$(cargo build-ffi --lib --message-format=json |
     jq -r 'select(.reason == "compiler-artifact" and .target.name == "moq_ffi") | .filenames[] | select(test("\\.(so|dylib)$"))' | tail -1)
 if [[ -z "$lib" ]]; then
     echo "cargo build -p moq-ffi produced no shared library" >&2

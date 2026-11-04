@@ -80,9 +80,8 @@ impl Version {
 	}
 
 	/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
-	/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload`
-	/// and is routed over the existing subscription. Added in lite-05; older versions never
-	/// send or accept datagram bodies.
+	/// Group datagrams route one frame over an existing subscription; lite-07 adds a
+	/// leading type and padding. Older than lite-05 never sends or accepts datagrams.
 	pub fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
@@ -108,7 +107,7 @@ impl Version {
 		)
 	}
 
-	/// Whether either endpoint may open a Padding Stream (0x2). Added in lite-07.
+	/// Whether datagrams have a type and either endpoint may send padding streams or datagrams.
 	pub(crate) fn has_padding(self) -> bool {
 		!matches!(
 			self,
@@ -183,6 +182,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
+	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
+	pub(crate) fn has_min_delay(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
 	/// earlier fetch is bounded by the publisher's retention alone.
 	pub(crate) fn has_fetch_max_delay(self) -> bool {
@@ -219,12 +227,26 @@ impl Version {
 		)
 	}
 
-	/// Whether subscription completion waits for the subscriber's FIN.
+	/// Whether a copy's fills stop at the start its publisher resolved from the budget.
+	/// Lite-06 resolves the start, but drops media time and sends FETCH without a max
+	/// delay, so nothing judges a group below that start against a reader's budget.
+	pub(crate) fn fills_from_start(self) -> bool {
+		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
+	}
+
+	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
+	/// its tail accounting settles. SUBSCRIBE_FINISH says which groups are owed, so that is
+	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
+		self.has_track_stream()
+	}
+
+	/// Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH and past a covered
+	/// bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's history.
+	/// The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
+	/// Added in lite-07; before it the publisher FINs once the track ends.
+	pub(crate) fn keeps_subscribe_open(self) -> bool {
+		self.has_ranges()
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
@@ -275,11 +297,19 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements and track requests carry the publisher epoch, the
-	/// identity that says two routes serve the same bytes. Added in lite-07.
-	/// Older versions carry nothing, so a received route has no epoch and is
-	/// never resumed through another route.
-	pub fn has_epoch(self) -> bool {
+	/// Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end
+	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
+	pub(crate) fn has_end_error(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether announcements carry their instance and epoch, and track requests the
+	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an instance for each announcement.
+	pub fn has_instance(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -306,6 +336,16 @@ impl Version {
 		)
 	}
 
+	/// Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement that
+	/// continues what a live one served beneath its prefix. Added in lite-07. Older
+	/// versions send an ANNOUNCE_START, which the receiver treats as another instance.
+	pub(crate) fn has_announce_takeover(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group,
 	/// so a join at any hop reaches the publisher. Added in lite-07; older peers see a
 	/// track that never refreshes.
@@ -318,7 +358,7 @@ impl Version {
 
 	/// Whether received frame timestamps are the publisher's media time. Lite05/06 stamp an
 	/// untimed track's payloads with their send time, which a receiver cannot tell from it,
-	/// so it drops every timestamp received on them and the track arrives untimed.
+	/// so it passes them through as the track's time without checking them for a rewind.
 	pub(crate) fn has_media_time(self) -> bool {
 		!matches!(
 			self,

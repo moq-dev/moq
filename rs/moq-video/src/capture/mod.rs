@@ -113,8 +113,9 @@ pub enum Source {
 
 	/// A screen or window chosen through the Linux system picker.
 	///
-	/// Clone the selection for demand-driven reopens; create a new one to ask
-	/// for a different source. Restoration depends on compositor support.
+	/// Clone the selection to reopen the same source, as an on-demand capture
+	/// does for each viewer; create a new one to ask for a different source.
+	/// Restoration depends on compositor support.
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	Portal(portal::Selection),
 }
@@ -356,6 +357,12 @@ impl Stream {
 		Ok(Some(Frame::new(surface, frame.timestamp)))
 	}
 
+	/// How many captured frames no [`read`](Self::read) returned, because a newer one replaced
+	/// them while the reader was busy.
+	pub(crate) fn skipped(&self) -> u64 {
+		self.chan.skipped()
+	}
+
 	/// Width of the captured frames in pixels.
 	pub fn width(&self) -> u32 {
 		self.width
@@ -412,7 +419,7 @@ impl Synthetic {
 	}
 
 	/// Deliver a frame acquired at `captured`.
-	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: moq_clock::Instant) {
+	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: kio::clock::Instant) {
 		self.chan.push_at(surface, captured);
 	}
 
@@ -424,6 +431,11 @@ impl Synthetic {
 	/// End the stream, as a device that stops delivering does.
 	pub(crate) fn close(&self) {
 		self.chan.close();
+	}
+
+	/// Whether the stream reading this device was dropped, as a closed camera is.
+	pub(crate) fn released(&self) -> bool {
+		Arc::strong_count(&self.chan) == 1
 	}
 }
 

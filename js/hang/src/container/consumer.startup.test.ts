@@ -1,18 +1,18 @@
-import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { expect, onTestFinished, spyOn, test } from "bun:test";
+import { Manual, Micro, Milli, Nano } from "@moq/clock";
 import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
-// Drain the in-memory readers and their continuations without advancing mocked time.
-const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
-
 function setup(maxDelay = 100) {
-	jest.useFakeTimers();
+	const clock = new Manual();
+	const installed = clock.install();
+	// Drain the in-memory readers and their continuations without moving time.
+	const flush = () => clock.advance(Nano.zero);
 	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 		format: new Format("video"),
-		maxDelay: Milli(maxDelay),
+		delay: { max: Milli(maxDelay) },
 	});
 	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -31,10 +31,10 @@ function setup(maxDelay = 100) {
 			await reading;
 		} finally {
 			warn.mockRestore();
-			jest.useRealTimers();
+			installed.close();
 		}
 	});
-	return { track, consumer, results, warn };
+	return { track, consumer, results, warn, flush };
 }
 
 // Each item as "gap <µs>+<µs>", "<group>@<µs>" for a frame, or "end <group>@<µs>".
@@ -61,11 +61,11 @@ for (const emptySuccessor of [false, true]) {
 	test.each([0, 100])(
 		`Consumer starts across a hole after an empty reset (empty successor: ${emptySuccessor}, maxDelay: %s)`,
 		async (maxDelay) => {
-			const { track, results, warn } = setup(maxDelay);
-			const stale = track.createGroup(16);
+			const { track, results, warn, flush } = setup(maxDelay);
+			const stale = track.createGroup(16n);
 			await flush();
 			if (emptySuccessor) {
-				const empty = track.createGroup(17);
+				const empty = track.createGroup(17n);
 				empty.finish();
 				await flush();
 			}
@@ -73,7 +73,7 @@ for (const emptySuccessor of [false, true]) {
 			await flush();
 			expect(results).toEqual([]);
 
-			const sequence = emptySuccessor ? 19 : 18;
+			const sequence = emptySuccessor ? 19n : 18n;
 			const live = track.createGroup(sequence);
 			for (let i = 0; i < 5; i++) write(live, 1_000_000 + i * 33_333);
 			await flush();
@@ -91,14 +91,14 @@ for (const emptySuccessor of [false, true]) {
 }
 
 test("Consumer preserves a declared marker before its first media across a hole", async () => {
-	const { track, results, warn } = setup();
-	const marker = track.createGroup(16);
+	const { track, results, warn, flush } = setup();
+	const marker = track.createGroup(16n);
 	write(marker, 0, true);
 	marker.finish();
 	await flush();
 	expect(items(results)).toEqual(["end 16@0"]);
 
-	const live = track.createGroup(18);
+	const live = track.createGroup(18n);
 	write(live, 50_000);
 	await flush();
 	// Group 17 never arrived, so the media after the marker is past a gap. It spans the declared
@@ -109,21 +109,21 @@ test("Consumer preserves a declared marker before its first media across a hole"
 });
 
 test.each([false, true])("Consumer still waits for a gap after media (playhead reset: %s)", async (reset) => {
-	const { track, consumer, results, warn } = setup(1000);
-	const first = track.createGroup(16);
+	const { track, consumer, results, warn, flush } = setup(1000);
+	const first = track.createGroup(16n);
 	write(first, 0);
 	first.finish();
 	await flush();
 	expect(items(results)).toEqual(["16@0"]);
 
 	if (reset) {
-		const marker = track.createGroup(17);
+		const marker = track.createGroup(17n);
 		write(marker, 0, true);
 		marker.finish();
 		await flush();
 		expect(items(results)).toEqual(["16@0", "end 17@0"]);
 	}
-	const sequence = reset ? 20 : 19;
+	const sequence = reset ? 20n : 19n;
 	const later = track.createGroup(sequence);
 	write(later, 50_000);
 	await flush();
@@ -131,11 +131,11 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	expect(frames(results)).toHaveLength(1);
 
 	// Supply the missing, timestamp-contiguous bridge and prove the queued frame survives.
-	const bridge = track.createGroup(sequence - 1);
+	const bridge = track.createGroup(sequence - 1n);
 	write(bridge, 0);
 	bridge.finish();
 	await flush();
 	// The bridge closes the hole, so nothing reads as a gap.
-	expect(items(results)).toEqual(["16@0", ...(reset ? ["end 17@0"] : []), `${sequence - 1}@0`, `${sequence}@50000`]);
+	expect(items(results)).toEqual(["16@0", ...(reset ? ["end 17@0"] : []), `${sequence - 1n}@0`, `${sequence}@50000`]);
 	expect(warn).not.toHaveBeenCalled();
 });

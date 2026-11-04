@@ -144,10 +144,10 @@ fn requests() {
 		let target = format!("{s}/0");
 		let target_path = Path::new(&target).unwrap();
 		allocs(&format!("origin/request_str/{name}"), 2_000, 1, || {
-			local(&|| consumer.request_broadcast(target.as_str(), None))
+			local(&|| consumer.request(target.as_str(), None))
 		});
 		allocs(&format!("origin/request_path/{name}"), 2_000, 1, || {
-			local(&|| consumer.request_broadcast(&target_path, None))
+			local(&|| consumer.request(&target_path, None))
 		});
 
 		// A rooted handle joins its root onto every path it is given.
@@ -155,12 +155,12 @@ fn requests() {
 		let rooted = consumer.scope(root, &Patterns::from(Pattern::all())).unwrap();
 		let rooted_target = format!("{rest}/0");
 		allocs(&format!("origin/request_rooted_str/{name}"), 2_000, 1, || {
-			local(&|| rooted.request_broadcast(rooted_target.as_str(), None))
+			local(&|| rooted.request(rooted_target.as_str(), None))
 		});
 
 		let missing = format!("{s}/missing");
 		allocs(&format!("origin/unroutable_str/{name}"), 2_000, 1, || {
-			let result = consumer.request_broadcast(missing.as_str(), None).now_or_never();
+			let result = consumer.request(missing.as_str(), None).now_or_never();
 			assert!(matches!(result, Some(Err(moq_net::Error::Unroutable))));
 		});
 	}

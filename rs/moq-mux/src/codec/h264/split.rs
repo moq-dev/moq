@@ -31,14 +31,14 @@ pub struct Split {
 	/// NAL here until the next start code arrives or [`flush`](Self::flush) drains it.
 	tail: BytesMut,
 	current: Avc3Frame,
-	/// Retained SPS NALs from the latest keyframe that carried them, re-injected
+	/// Retained SPS NALs from the init or latest keyframe that carried them, re-injected
 	/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
 	/// different set, so a mid-stream reinit drops the superseded ones.
 	sps: ParameterSets,
 	/// Retained PPS NALs. A keyframe may carry several (slices reference them by
 	/// id); all are kept and re-injected, but a new GOP's set supersedes them.
 	pps: ParameterSets,
-	zero: Option<moq_clock::Instant>,
+	zero: Option<kio::clock::Instant>,
 	pending: Vec<crate::container::Frame>,
 }
 
@@ -88,6 +88,36 @@ impl Split {
 		}
 	}
 
+	/// Consume a complete init buffer as the stream's leading bytes, and retain its parameter sets.
+	///
+	/// The init's sets replace the retained ones, so a reset before the first keyframe still
+	/// re-injects them. Header NALs still waiting for a picture belong to the configuration this
+	/// init replaces, so they are dropped. A picture the init carries stays open, so it completes
+	/// with the caller's next timestamp rather than a generated one.
+	pub(crate) fn initialize(&mut self, data: &[u8]) -> Result<Vec<crate::container::Frame>> {
+		let pts = self.pts(None)?;
+		// The init's leading start code ends any NAL still in flight.
+		self.end_tail(pts)?;
+		if !self.current.contains_slice {
+			self.current = Avc3Frame::default();
+		}
+		let mut frames = self.decode(data, pts)?;
+		// The init is complete, so its final NAL ends with it.
+		self.end_tail(pts)?;
+		frames.append(&mut self.pending);
+		InBandCodec::H264.adopt_init(data, &mut [&mut self.sps, &mut self.pps])?;
+		Ok(frames)
+	}
+
+	/// Decode the buffered final NAL, which the caller says is complete, without closing its access unit.
+	fn end_tail(&mut self, pts: moq_net::Timestamp) -> Result<()> {
+		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
+			self.decode_nal(nal, pts)?;
+		}
+		self.tail.clear();
+		Ok(())
+	}
+
 	/// Decode a buffer where frame boundaries are unknown, returning the access
 	/// units it can complete. The leading start code of the *next* access unit is
 	/// what signals the previous one is complete, so the final NAL of the in-flight
@@ -118,10 +148,7 @@ impl Split {
 	/// (or at end of stream) so the final NAL isn't left buffered.
 	pub fn flush(&mut self, pts: impl Into<Option<moq_net::Timestamp>>) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
-			self.decode_nal(nal, pts)?;
-		}
-		self.tail.clear();
+		self.end_tail(pts)?;
 		self.maybe_start_frame(pts)?;
 		Ok(std::mem::take(&mut self.pending))
 	}
@@ -238,10 +265,7 @@ impl Split {
 
 	/// Drop any in-flight access unit, and any frame completed but not yet returned.
 	///
-	/// Pre-reset NALs would otherwise leak into a later frame with the wrong
-	/// timestamp, and a frame queued before a failed [`decode`](Self::decode) would
-	/// surface on the next call. The parameter-set cache is kept so subsequent
-	/// keyframes stay self-contained.
+	/// The retained parameter sets, including those supplied by the init, survive.
 	pub fn reset(&mut self) {
 		self.current = Avc3Frame::default();
 		self.tail.clear();
@@ -267,24 +291,38 @@ impl Split {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
-		let zero = self.zero.get_or_insert_with(moq_clock::Instant::now);
+		let zero = self.zero.get_or_insert_with(kio::clock::Instant::now);
 		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 
-/// True if an SEI NAL carries a recovery-point message (payload type 6), the
+/// True if an SEI NAL carries a well-formed recovery-point message (payload type 6), the
 /// open-GOP random-access marker. The NAL header byte precedes the SEI RBSP.
 fn sei_has_recovery_point(nal: &[u8]) -> bool {
-	let Some(ebsp) = nal.get(1..) else {
+	use h264_reader::nal::sei::{
+		HeaderType, SeiMessage,
+		recovery_point::{RecoveryPoint, RecoveryPointError},
+	};
+	use h264_reader::rbsp::BitReaderError;
+
+	const SEI_RECOVERY_POINT: u32 = 6;
+
+	let Some(rbsp) = crate::codec::annexb::rbsp_bytes(nal, 1) else {
 		return false;
 	};
-	let rbsp = h264_parser::nal::ebsp_to_rbsp(ebsp);
-	let Ok(messages) = h264_parser::sei::SeiMessage::parse(&rbsp) else {
-		return false;
-	};
-	messages
-		.iter()
-		.any(|m| matches!(m.payload, h264_parser::sei::SeiPayload::RecoveryPoint { .. }))
+	crate::codec::annexb::sei_messages(&rbsp)
+		.filter(|&(kind, _)| kind == SEI_RECOVERY_POINT)
+		.any(|(_, payload)| {
+			let msg = SeiMessage {
+				payload_type: HeaderType::RecoveryPoint,
+				payload,
+			};
+			// Data after the fields is a payload extension, which a later spec revision may define.
+			matches!(
+				RecoveryPoint::read(&msg),
+				Ok(_) | Err(RecoveryPointError::ReaderError(BitReaderError::RemainingData))
+			)
+		})
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
@@ -401,6 +439,111 @@ mod tests {
 		assert!(!tail[0].keyframe);
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn reset_keeps_headers_but_discards_pictures_and_queued_frames() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let delta: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		let aud: &[u8] = &[0x09, 0x10];
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps])).unwrap().is_empty());
+		// The last NAL may instead be an incomplete slice: it must not survive.
+		assert!(split.decode(&annexb(&[&[0x61]]), ts()).unwrap().is_empty());
+		split.reset();
+		let next = moq_net::Timestamp::from_micros(1_000).unwrap();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+		assert_eq!(frames[0].timestamp, next);
+
+		// After the first picture, even a slice-less prefix belongs to the discarded AU.
+		assert!(decode_one(&mut split, &mut annexb(&[sps, pps, aud]), ts()).is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+
+		// The delta queues the preceding IDR, then an invalid NAL fails decode.
+		assert!(split.decode(&annexb(&[idr, delta, &[0x80], aud]), ts()).is_err());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1, "neither the queued IDR nor the partial delta survives");
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].timestamp, next);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn reset_discards_damaged_prefix_before_first_picture() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let aud: &[u8] = &[0x09, 0x10];
+		let delta: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		let mut split = Split::new();
+		assert!(
+			split
+				.decode(&annexb(&[aud, sps, pps, RECOVERY_SEI, &[0x80], aud]), ts())
+				.is_err()
+		);
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[aud, delta]), ts());
+		assert_eq!(frames.len(), 1);
+		assert!(
+			!frames[0].keyframe,
+			"a damaged recovery point cannot mark the next picture"
+		);
+		assert_eq!(frames[0].payload, annexb(&[aud, delta]));
+	}
+
+	/// A picture inside the init completes with the caller's next timestamp rather than a
+	/// generated one, and a later init replaces the retained sets rather than adding to them.
+	#[tokio::test(start_paused = true)]
+	async fn initialize_keeps_framing_and_replaces_retained_sets() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		let pps0: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let pps1: &[u8] = &[0x68, 0x4e, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let next = moq_net::Timestamp::from_micros(5_000).unwrap();
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps0, idr])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps0, idr]));
+		assert_eq!(frames[0].timestamp, next);
+
+		// Without a reset, the open unit drops the superseded init's headers too.
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps0, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[sps, pps0])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[sps, pps0, idr]),
+			"the superseded PPS is not sent"
+		);
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[sps, pps0, idr]),
+			"the superseded PPS is not retained"
+		);
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[sps, pps0, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[sps, pps0])).unwrap().is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[sps, pps0, idr]),
+			"the superseded PPS is dropped"
+		);
+	}
+
 	/// A source that defines two PPS once, then sends a bare IDR (no inline
 	/// parameter sets): both cached PPS must be re-injected on the keyframe, not
 	/// just the last one. Regression for the multi-PPS collapse.
@@ -460,9 +603,9 @@ mod tests {
 		assert_eq!(tail[0].payload.as_ref(), annexb(&[sps, pps, idr]).freeze().as_ref());
 	}
 
-	/// A recovery-point SEI (payload type 6) with `recovery_frame_cnt == 0`,
-	/// followed by the recovery point's flag byte, then the RBSP stop bit.
-	const RECOVERY_SEI: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+	/// A recovery-point SEI (payload type 6, size 1): `recovery_frame_cnt == 0`, clear flags,
+	/// and payload alignment in `0x84`, then the RBSP stop bit.
+	const RECOVERY_SEI: &[u8] = &[0x06, 0x06, 0x01, 0x84, 0x80];
 
 	/// Open-GOP broadcast H.264: the random-access point is a non-IDR I-slice
 	/// flagged by a recovery-point SEI, not an IDR. The splitter must still flag
@@ -506,6 +649,46 @@ mod tests {
 		assert_eq!(
 			second[0].payload.as_ref(),
 			annexb(&[aud, RECOVERY_SEI, sps, pps, islice]).freeze().as_ref()
+		);
+	}
+
+	/// A recovery point after a payload larger than h264-reader's 1 MiB `SeiReader` cap is still found.
+	#[test]
+	fn recovery_point_after_a_large_payload() {
+		let size = (1 << 20) + 1;
+		let mut sei = vec![0x06, 0x05]; // user_data_unregistered
+		sei.extend(std::iter::repeat_n(0xff, size / 255));
+		sei.push((size % 255) as u8);
+		sei.extend(std::iter::repeat_n(0x01, size));
+		sei.extend_from_slice(&RECOVERY_SEI[1..]);
+		assert!(sei_has_recovery_point(&sei));
+		assert!(!sei_has_recovery_point(&sei[..sei.len() - RECOVERY_SEI.len() + 1]));
+	}
+
+	/// A type-6 SEI without the recovery-point fields is not a random-access marker.
+	#[test]
+	fn malformed_recovery_point_is_ignored() {
+		// Empty payload, then a payload cut off inside `recovery_frame_cnt`.
+		assert!(!sei_has_recovery_point(&[0x06, 0x06, 0x00, 0x80]));
+		assert!(!sei_has_recovery_point(&[0x06, 0x06, 0x01, 0x00, 0x80]));
+		// A malformed message before a valid one doesn't hide it.
+		assert!(sei_has_recovery_point(&[0x06, 0x06, 0x00, 0x06, 0x01, 0x84, 0x80]));
+	}
+
+	/// An empty recovery-point SEI before a non-IDR slice leaves that slice a delta frame.
+	#[tokio::test(start_paused = true)]
+	async fn empty_recovery_point_slice_is_delta() {
+		let aud: &[u8] = &[0x09, 0x10];
+		let sei: &[u8] = &[0x06, 0x06, 0x00, 0x80];
+		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+
+		let mut split = Split::new();
+		let frames = decode_one(&mut split, &mut annexb(&[aud, sei, pslice]), ts());
+
+		assert_eq!(frames.len(), 1);
+		assert!(
+			!frames[0].keyframe,
+			"an empty recovery-point SEI must not flag a keyframe"
 		);
 	}
 

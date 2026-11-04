@@ -11,9 +11,15 @@ use super::{Message, Version};
 ///
 /// An empty token means the credential the connection already presented (the
 /// URL, a client certificate), or nothing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Auth {
 	pub token: Bytes,
+}
+
+impl std::fmt::Debug for Auth {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Auth").field("token_len", &self.token.len()).finish()
+	}
 }
 
 impl<'a> Message<'a> for Auth {

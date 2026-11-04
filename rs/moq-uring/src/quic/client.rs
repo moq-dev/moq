@@ -5,14 +5,13 @@ use std::net::SocketAddr;
 use super::{Connection, Error, Identity};
 use crate::udp;
 
-/// Where to dial, as whom, and who to trust.
+/// How to dial: as whom, and who to trust.
+///
+/// Where to dial is an argument to [`connect`] and
+/// [`Endpoint::connect`](super::Endpoint::connect), so one config serves every peer.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// The address to dial.
-	pub peer: SocketAddr,
-	/// The name sent as SNI and verified against the server's certificate.
-	pub server_name: String,
 	/// ALPN protocols to offer, in preference order. Required: QUIC without an
 	/// application protocol is refused.
 	pub alpn: Vec<String>,
@@ -29,26 +28,24 @@ pub struct Config {
 	pub identity: Option<Identity>,
 	/// The per-connection transport settings (timeouts, stream limits,
 	/// congestion control).
-	pub transport: super::Transport,
+	pub transport: super::transport::Config,
 }
 
-impl Config {
-	/// Dial `peer`, verifying it as `server_name`, with default settings.
-	pub fn new(peer: SocketAddr, server_name: impl Into<String>) -> Self {
+impl Default for Config {
+	fn default() -> Self {
 		Self {
-			peer,
-			server_name: server_name.into(),
 			alpn: Vec::new(),
 			verify: true,
 			roots: Vec::new(),
 			system_roots: true,
 			identity: None,
-			transport: super::Transport::default(),
+			transport: super::transport::Config::default(),
 		}
 	}
 }
 
-/// Dial [`Config::peer`] over `socket`, driving the handshake to completion.
+/// Dial `remote` over `socket`, verifying it as `server_name`, and drive the
+/// handshake to completion.
 ///
 /// Shorthand for a dial-only [`Endpoint`](super::Endpoint) and one
 /// [`connect`](super::Endpoint::connect) through it. The connection's driver
@@ -56,7 +53,12 @@ impl Config {
 /// [`Connection`] with [`crate::transport::Session::new`] and
 /// [`moq_net::transport::Address::Setup`], then [`crate::transport::Local`], to
 /// hand it to `moq_net::Client::connect`, or use the stream API directly.
-pub async fn connect(socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
+pub async fn connect(
+	socket: udp::Socket,
+	config: &Config,
+	remote: SocketAddr,
+	server_name: &str,
+) -> Result<Connection, Error> {
 	let endpoint = super::Endpoint::new(socket, super::endpoint::Config::default())?;
-	endpoint.connect(config).await
+	endpoint.connect(config, remote, server_name).await
 }

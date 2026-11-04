@@ -1,12 +1,10 @@
-# [M] Unify dependency features with cargo-hakari
+# [S] Unify dependency features with cargo-hakari
 
 ## Goal
 
-Every CI job, the queue gate, Nightly's platform jobs, and the FFI builds
-compile each dependency with the same features, so mbx's cache hits across
-them. A cargo-hakari workspace-hack crate pins the union of the dependency
-features, and the gate fails when it is out of date. Record mbx's hit rate across
-jobs, and their CPU time, before and after.
+The FFI builds compile each dependency with the same features as each other,
+so mbx's cache hits across them, and Nightly's hosted platform jobs record
+their hit rate and CPU time before and after the workspace-hack.
 
 ## Plan
 
@@ -15,30 +13,19 @@ from guppy's authors, rather than only trimming CI's feature permutations. mbx
 keys every compilation on its inputs, so a dependency built with a different
 feature set in another job is a miss, however warm the cache.
 
-- Generate the workspace-hack crate with `cargo hakari generate`, and add a
-  `cargo hakari generate --diff` and `cargo hakari manage-deps --dry-run` check to
-  `just check`.
-- moq publishes crates with release-plz, and a published crate cannot depend on
-  an unpublished workspace-hack. Use hakari's supported setup for published
-  workspaces, and prove a release-plz dry run still publishes.
-- Keep the feature-contract checks testing each crate's own declarations: the
-  `quic-features` recipe in `rs/justfile` (moq-quic has no native runtime),
-  `sh/rs/media-features.sh` (minimal builds exclude codecs and rendering), and
-  `sh/rs/net-features.sh` and `sh/rs/tokio-features.sh`. A workspace-hack would
-  inject the union into them and hide a missing declaration. Exclude the crates
-  they guard from the hack, or run those checks with it disabled
-  (`cargo hakari disable`), and show each still fails on a planted violation.
-- Unifying features means some packages build features they don't use. Measure
-  whether that costs more CPU than the cache hits save; target, profile, and
-  `RUSTFLAGS` differences still split keys.
-- Measure the baseline here, before generating the hack: across jobs, which
-  compilations one job misses although another job built the same crate at
-  the same version, grouped by what differs (features, profile, `RUSTFLAGS`,
-  target). Repeat it after, from the same commit.
+[moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985) added
+`rs/workspace-hack` as a path-only dev-dependency of every member outside
+`.config/hakari.toml`'s excludes. Test, lint, and bench builds now unify;
+library-only builds do not, since dev-dependencies stay out of them. That
+leaves the FFI builds (`cargo build --release -p moq-ffi` in the bindings and
+release workflows), which also split on their own flags: the Dart build passes
+the host triple as `--target` and adds the `testing` feature. Align those
+invocations rather than add the hack to them, unless the PR's decision on the
+layout says otherwise.
 
-Decided 2026-10-27 (maintainer): this quest no longer waits on
-[Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md). It measures its own
-before and after baseline, so the cross-job miss report moved here from that
-quest, which stays a waiting quest for the R2 numbers alone.
+Nightly's macOS and Windows jobs read and write R2, so their before and after
+can only come from scheduled Nightlies on `main`
+(`gh run list --workflow nightly.yml --branch main --event schedule`): compare
+the mbx summaries of the last run before the merge with the first two after.
 
 Public API: none; the workspace-hack crate is not published.

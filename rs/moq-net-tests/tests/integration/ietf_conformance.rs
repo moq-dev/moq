@@ -7,7 +7,7 @@ use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 use moq_net::{Hop, Version, broadcast, origin};
 use std::sync::Arc;
 
-// Moxygen c27ae6358df62a1195da479b2e07c50dd8174279, moqtest/Utils.cpp.
+// Moxygen's moqtest/Utils.cpp, pinned in nix/moxygen-sources.nix.
 const PREFIX: &str = "moq-test-00";
 const NAMESPACE: &str = "moq-test-00/0/0/0/1/2/2/1024/100/50/1/1/1/-1/-1/0";
 
@@ -29,10 +29,10 @@ async fn routing(version: &str, cluster: bool) {
 	let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
 	let serving = prefix.clone();
 	let answer = broadcast.consume();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		let request = serving.requested_broadcast().await.unwrap();
 		assert_eq!(request.path().as_str(), NAMESPACE);
-		moq_net::fuzz::accept(request, answer);
+		request.serve(answer);
 	});
 
 	let mut options = MockConnectOptions::new(version);
@@ -56,8 +56,13 @@ async fn routing(version: &str, cluster: bool) {
 	options.client_subscribe = Some(reader.clone());
 	links.push(connect_mock(options).await);
 
-	reader.consume().routed(NAMESPACE).await.unwrap();
-	let remote = reader.consume().request_broadcast(NAMESPACE, None).await.unwrap();
+	let remote = reader
+		.consume()
+		.follow(NAMESPACE, None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap();
 	let mut subscription = remote.track("test").unwrap().subscribe(None).await.unwrap();
 	crate::support::harness::subscribed(&track).await;
 	let mut group = track.append_group().unwrap();
@@ -74,14 +79,14 @@ async fn routing(version: &str, cluster: bool) {
 	drop((links, prefix, broadcast, track));
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn conformance_namespaces_route_through_one_relay() {
 	for version in ["moq-transport-18"] {
 		routing(version, false).await;
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn conformance_namespaces_route_through_a_lite_cluster() {
 	for version in ["moq-transport-18"] {
 		routing(version, true).await;

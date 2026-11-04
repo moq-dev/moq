@@ -12,6 +12,7 @@ use bytes::Bytes;
 use hang::moq_net;
 use moq_mux::import;
 
+use super::listed::Listed;
 use super::session::CAT;
 use super::timeline::{SegmentInfo, classify_segment, frame_micros};
 
@@ -44,6 +45,15 @@ impl Sink {
 			Sink::Media(media) => media.track.name(),
 			Sink::Text(text) => text.producer.name().to_owned(),
 			Sink::Opaque(producer) => producer.name().to_owned(),
+		}
+	}
+
+	/// A watch-only handle to this track's subscriber demand.
+	fn demand(&self) -> moq_net::track::Demand {
+		match self {
+			Sink::Media(media) => media.track.demand(),
+			Sink::Text(text) => text.producer.track().demand(),
+			Sink::Opaque(producer) => producer.demand(),
 		}
 	}
 }
@@ -389,6 +399,22 @@ impl Pad {
 	/// True once this pad has been invalidated by a bad caps/bitstream; the caller drops its buffers.
 	pub fn is_failed(&self) -> bool {
 		self.failed
+	}
+
+	/// A watch-only handle to the active track's subscriber demand, once viewers can find the track.
+	///
+	/// A media or text rendition is found through the catalog, so its demand waits for a published
+	/// catalog that lists it: before then nobody can want it, and an encoder that paused on that
+	/// would keep it out of the catalog for good. Opaque data has no catalog entry by design; its
+	/// subscribers name the track directly, so its demand is live from negotiation.
+	pub(super) fn demand(&self, listed: &Listed) -> Option<moq_net::track::Demand> {
+		let track = self.track.as_ref()?;
+		match track {
+			Sink::Opaque(_) => {}
+			Sink::Media(_) | Sink::Text(_) if listed.contains(&track.name()) => {}
+			Sink::Media(_) | Sink::Text(_) => return None,
+		}
+		Some(track.demand())
 	}
 
 	/// (Re)build the producer when the pad's caps change, under `track` when the pad was given a name.
@@ -1293,7 +1319,6 @@ pub(crate) fn h264_keyframe_au() -> Bytes {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1495,7 +1520,7 @@ mod tests {
 		let vp8 = gst::Caps::builder("video/x-vp8").build();
 		pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera")));
 		let drained = async { while records.recv_group().await.unwrap().is_some() {} };
-		let ended = tokio::time::timeout(Duration::from_secs(1), drained).await;
+		let ended = kio::clock::timeout(Duration::from_secs(1), drained).await;
 		assert!(ended.is_ok(), "the old track's records end");
 	}
 
@@ -1608,7 +1633,10 @@ mod tests {
 		let mut track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		for index in 0..17 {
@@ -1999,7 +2027,10 @@ mod tests {
 			.consume()
 			.track("audiolevels")
 			.expect("the opaque track is published")
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(1)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1))),
+			)
 			.await
 			.expect("subscribe to the opaque track")
 			.ordered();
@@ -2062,7 +2093,7 @@ mod tests {
 			subscriber,
 			moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Data),
 		);
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+		let frame = kio::clock::timeout(std::time::Duration::from_secs(1), media.read())
 			.await
 			.expect("LOC media read timed out")
 			.unwrap();

@@ -163,8 +163,11 @@ pub struct Decoder {
 }
 
 impl Decoder {
-	/// Build a decoder for the catalog's video config. Errors if the codec is
-	/// not supported by the native backends.
+	/// Build a decoder for the catalog's video config.
+	///
+	/// A codec or description this build cannot decode is
+	/// [`Error::UnsupportedCodec`]. A backend that exists for the codec but fails to
+	/// open is [`Error::NoDecoder`], a fault rather than a property of the track.
 	pub fn new(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
 		// CMAF samples are length-prefixed whatever the sample entry; Legacy and LOC
 		// carry Annex-B exactly when the parameter sets are in band.
@@ -174,7 +177,8 @@ impl Decoder {
 				let conversion = match (cmaf || !h264.inline, catalog.description.as_ref()) {
 					(false, _) => Conversion::Passthrough,
 					(true, Some(avcc)) => {
-						let params = h264::Avcc::parse(avcc).map_err(moq_mux::Error::from)?;
+						let params = h264::Avcc::parse(avcc)
+							.map_err(|err| Error::UnsupportedCodec(format!("invalid avcC description: {err}")))?;
 						let keyframe_prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
 						Conversion::LengthPrefixed {
 							length_size: params.length_size,
@@ -182,9 +186,9 @@ impl Decoder {
 						}
 					}
 					(true, None) if cmaf => {
-						return Err(Error::Codec(anyhow::anyhow!(
-							"CMAF H.264 track is missing its avcC description"
-						)));
+						return Err(Error::UnsupportedCodec(
+							"CMAF H.264 track is missing its avcC description".into(),
+						));
 					}
 					(true, None) => {
 						tracing::warn!("avc1 track has no avcC description; reading it as Annex-B");
@@ -198,11 +202,10 @@ impl Decoder {
 					Conversion::Passthrough
 				} else {
 					let hvcc = catalog.description.as_ref().ok_or_else(|| {
-						Error::Codec(anyhow::anyhow!(
-							"length-prefixed H.265 track is missing its hvcC description"
-						))
+						Error::UnsupportedCodec("length-prefixed H.265 track is missing its hvcC description".into())
 					})?;
-					let params = h265::Hvcc::parse(hvcc).map_err(moq_mux::Error::from)?;
+					let params = h265::Hvcc::parse(hvcc)
+						.map_err(|err| Error::UnsupportedCodec(format!("invalid hvcC description: {err}")))?;
 					let keyframe_prefix =
 						annexb::build_prefix(params.vps.iter().chain(params.sps.iter()).chain(params.pps.iter()));
 					Conversion::LengthPrefixed {
@@ -654,7 +657,7 @@ mod tests {
 			.unwrap();
 		producer.finish().unwrap();
 
-		let broadcast = origin.consume().request_broadcast("test", None).await.unwrap();
+		let broadcast = origin.consume().request("test", None).await.unwrap();
 		let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -682,7 +685,10 @@ mod tests {
 		let track = subscriber
 			.track(name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30))),
+			)
 			.await
 			.unwrap();
 		let mut track =
@@ -908,7 +914,7 @@ mod tests {
 		let Err(err) = super::Decoder::new(&catalog, &config) else {
 			panic!("software AV1 decode unexpectedly opened");
 		};
-		assert!(matches!(err, crate::Error::NoDecoder(_)));
+		assert!(matches!(err, crate::Error::UnsupportedCodec(_)), "{err:?}");
 	}
 
 	#[test]

@@ -11,18 +11,19 @@
 //!   per platform: a microphone via cpal (CoreAudio / WASAPI / ALSA) everywhere,
 //!   or macOS system audio via ScreenCaptureKit. `capture::Source` picks between
 //!   them and `capture::devices` lists the inputs and hands back the ids it
-//!   takes. Requires the `capture` feature, so these names are unlinked here:
+//!   takes. Open `capture::Producer` once, give each bus or encoder a consumer,
+//!   and drive its `run` alongside them. Requires the `capture` feature:
 //!   they don't exist in a default build.
 //! - [`encode`] encodes PCM and publishes it through `moq_mux::container`,
 //!   registering the rendition in the `hang` catalog. Two entry points:
-//!   - `encode::Control::new` returns a `Control` handle and the `Driver`
-//!     that captures the microphone. The handle starts, stops, and replaces
-//!     the input while preserving one track identity, and reports the active
-//!     device, failures, and post-processing level.
-//!   - `encode::publish_capture` is the turnkey shorthand. It encodes strictly
-//!     on demand: the track and catalog are advertised up front, but the device
-//!     opens only while a subscriber is listening and is released when the last
-//!     one leaves.
+//!   - `encode::Control::new` takes a capture consumer and returns a `Control`
+//!     and `Driver`. The handle starts, stops, and replaces this track's reader,
+//!     preserving track identity without controlling the shared device.
+//!   - `encode::publish_capture` is the turnkey shorthand for an already-open
+//!     capture consumer. Its rendition is registered before processing samples.
+//!     Capture keeps running while raw audio
+//!     waits for a subscriber, then encodes that history and continues live.
+//!     Set `encode::Capture::on_demand` to false to encode continuously instead.
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`]. It reads AAC-LC
@@ -36,10 +37,10 @@
 //!   meter, into one program feed that the caller reads on its own clock: a
 //!   studio's program audio. Behind the default-on `bus` feature.
 //! - `aec` keeps the speaker out of the microphone, which is what a conference
-//!   on a laptop needs to not send itself back. `playback::Engine::canceller`
-//!   builds cloneable `aec::Control` handles from the mix it is playing and
-//!   `capture::Config::aec` attaches their adaptive state to one microphone at
-//!   a time. Requires the `aec` feature, which implies both of the above.
+//!   on a laptop needs to not send itself back. [`aec::Processor`] processes PCM
+//!   supplied by any audio stack without enabling device features. The `aec`
+//!   feature wires `playback::Engine::canceller` to
+//!   `capture::Config::aec` and implies both device features.
 //!
 //! [`Format`] mirrors WebCodecs `AudioData.format`; the helpers convert between
 //! any supported layout and the interleaved `f32` representation libopus
@@ -67,7 +68,6 @@ mod resample;
 #[cfg(any(feature = "bus", feature = "playback"))]
 mod ring;
 
-#[cfg(feature = "aec")]
 pub mod aec;
 #[cfg(feature = "bus")]
 pub mod bus;

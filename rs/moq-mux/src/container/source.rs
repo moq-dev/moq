@@ -69,12 +69,12 @@ enum SourceState {
 	Ended,
 }
 
-/// The track a source reads: its broadcast's path, the publisher instance that broadcast must
-/// be, and the track's name there.
+/// The track a source reads: its broadcast's path, the instance that broadcast must have, and
+/// the track's name there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
 	path: moq_net::Path,
-	epoch: Option<moq_net::Epoch>,
+	instance: Option<moq_net::Instance>,
 	track: String,
 }
 
@@ -83,13 +83,13 @@ impl Target {
 	fn of(source: &crate::Source, name: &str, config: &impl Reference) -> Option<Self> {
 		Some(Self {
 			path: source.resolve_reference(config.broadcast())?,
-			epoch: config.epoch().cloned(),
+			instance: config.instance().cloned(),
 			track: config.track(name).to_string(),
 		})
 	}
 
 	fn request(&self, source: &crate::Source) -> SourceState {
-		let binding = source.request_path(&self.path, self.epoch.as_ref());
+		let binding = source.request_path(&self.path, self.instance.as_ref());
 		SourceState::Requesting(binding, self.track.clone())
 	}
 }
@@ -117,6 +117,8 @@ struct Splice {
 pub(crate) struct ExportSource {
 	/// The rendition's ID in the catalog.
 	name: String,
+	source: crate::Source,
+	priority_control: Option<crate::source::Priority>,
 	target: Target,
 	state: SourceState,
 	/// Wire format, consumed when the subscription resolves into a consumer.
@@ -128,7 +130,7 @@ pub(crate) struct ExportSource {
 	after: Option<u64>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
-	/// OpusHead). Some once the codec config is available — from the catalog
+	/// OpusHead). Some once the codec config is available - from the catalog
 	/// `description`, or synthesized by the transform.
 	description: Option<Bytes>,
 	/// Video codec used to derive geometry from its configuration or keyframes.
@@ -266,7 +268,7 @@ impl ExportSource {
 	) -> Result<Self, crate::Error> {
 		let target = Target {
 			path: source.path().clone(),
-			epoch: None,
+			instance: None,
 			track: name.to_string(),
 		};
 		let media = HangContainer::Legacy(crate::container::Kind::Data);
@@ -277,6 +279,8 @@ impl ExportSource {
 	fn new(source: &crate::Source, name: &str, target: Target, media: HangContainer, max_delay: Duration) -> Self {
 		Self {
 			name: name.to_string(),
+			source: source.clone(),
+			priority_control: None,
 			state: target.request(source),
 			target,
 			media: Some(media),
@@ -444,6 +448,15 @@ impl ExportSource {
 		}
 	}
 
+	/// Receive group handles and wait for all input bytes while frame delivery is backpressured.
+	pub fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		match &mut self.state {
+			SourceState::Active(consumer) => consumer.poll_received(waiter),
+			SourceState::Ended => Poll::Ready(()),
+			_ => Poll::Pending,
+		}
+	}
+
 	/// Read normalized media or a clean group boundary.
 	pub fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
 		loop {
@@ -506,7 +519,8 @@ impl ExportSource {
 			if sibling {
 				self.instance = Some(broadcast.clone());
 			}
-			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
+			let mut subscription = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(self.max_delay));
 			if let Some(after) = self.after {
 				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
@@ -515,7 +529,7 @@ impl ExportSource {
 				Err(_) if self.instance_ended(waiter) => return self.end(),
 				Err(err) => return Poll::Ready(Err(err.into())),
 			};
-			self.state = SourceState::Subscribing(track.subscribe(subscription));
+			self.state = SourceState::Subscribing(track.subscribe(self.source.subscription(subscription)));
 		}
 
 		// Resolve the subscription before reading any frames.
@@ -536,6 +550,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
+			self.priority_control = Some(self.source.control(track.control())?);
 			let consumer = Consumer::new(track, media);
 			let consumer = match self.live {
 				true => consumer.live(),
@@ -616,6 +631,7 @@ impl ExportSource {
 						return Poll::Ready(Ok(Some(Event::Cut { observed })));
 					}
 					None => {
+						self.priority_control = None;
 						self.finish_ends();
 						return Poll::Ready(Ok(None));
 					}
@@ -667,6 +683,7 @@ impl ExportSource {
 	pub(crate) fn stop(&mut self) {
 		self.finish_ends();
 		self.state = SourceState::Ended;
+		self.priority_control = None;
 		self.instance = None;
 	}
 
@@ -674,6 +691,7 @@ impl ExportSource {
 	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
 		self.finish_ends();
 		self.state = SourceState::Ended;
+		self.priority_control = None;
 		Poll::Ready(Ok(None))
 	}
 
@@ -875,7 +893,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let mut read = async || {
-			tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
+			kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
 				.ok()
 				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
@@ -902,7 +920,7 @@ mod tests {
 		let mut late = ExportSource::for_audio(&source, "late", &config, Duration::from_secs(10))
 			.unwrap()
 			.unwrap();
-		let ended = tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| late.poll_read(waiter))).await;
+		let ended = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| late.poll_read(waiter))).await;
 		assert!(
 			matches!(ended, Ok(Ok(None))),
 			"{:?}",
@@ -934,7 +952,7 @@ mod tests {
 				.unwrap();
 			// Subscribe before anything is written, so the failure and the instance's end arrive
 			// together.
-			let settle = tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
+			let settle = kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
 			assert!(settle.await.is_err(), "nothing is written yet");
 			let mut group = track.append_group().unwrap();
 			let held = match failure {
@@ -955,10 +973,10 @@ mod tests {
 				}
 			};
 			drop(sibling);
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			assert!(export.instance_ended(&kio::Waiter::noop()), "the instance has gone");
 
-			let read = tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
+			let read = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
 				.expect("the read settles");
 			assert!(
@@ -996,7 +1014,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let mut read = async || {
-			tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
+			kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
 				.expect("the read settles")
 				.unwrap()
@@ -1028,7 +1046,7 @@ mod tests {
 			let observed = kio::wait(|waiter| {
 				let _ = export.poll_read(waiter);
 				match live.track.subscription() {
-					Some(subscription) => Poll::Ready(subscription.max_delay),
+					Some(subscription) => Poll::Ready(subscription.delay.max),
 					None => Poll::Pending,
 				}
 			})
@@ -1083,8 +1101,7 @@ mod tests {
 			.unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let consumer = subscriber.consume();
-		consumer.routed("room").await.unwrap();
-		let remote = consumer.request_broadcast("room", None).await.unwrap();
+		let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 		let source = crate::Source::new(consumer, remote);
 		let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_secs(1))
 			.unwrap()
@@ -1100,7 +1117,7 @@ mod tests {
 			group.finish().unwrap();
 		};
 		let mut read = async || {
-			tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
+			kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
 				.ok()
 				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
@@ -1108,7 +1125,7 @@ mod tests {
 
 		assert_eq!(read().await, None, "subscribed, with nothing published yet");
 		write(0);
-		tokio::time::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		// A PES carrying several frames publishes them in one pass, before the publisher's
 		// session runs again, and the export reads the first group in the meantime.
 		for sequence in 1..4 {
@@ -1161,8 +1178,7 @@ mod tests {
 				.unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			let consumer = subscriber.consume();
-			consumer.routed("room").await.unwrap();
-			let remote = consumer.request_broadcast("room", None).await.unwrap();
+			let remote = consumer.follow("room", None).unwrap().available().await.unwrap();
 			let source = crate::Source::new(consumer, remote);
 
 			// MPEG-1 audio from TS: one 24 ms frame per group, a PES of five written at once.
@@ -1178,7 +1194,7 @@ mod tests {
 			// About two seconds of it, so the budget's backlog reaches back about 450 ms.
 			for n in 0..17 {
 				pes(n);
-				tokio::time::sleep(Duration::from_millis(120)).await;
+				kio::clock::sleep(Duration::from_millis(120)).await;
 			}
 
 			let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_millis(450))
@@ -1186,7 +1202,7 @@ mod tests {
 				.unwrap()
 				.live();
 			let mut read = async || {
-				tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
+				kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 					.await
 					.ok()
 					.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
@@ -1198,7 +1214,7 @@ mod tests {
 			}
 			// The next PES moves the live edge on before the rest of the backlog lands.
 			pes(17);
-			tokio::time::sleep(Duration::from_millis(120)).await;
+			kio::clock::sleep(Duration::from_millis(120)).await;
 			pes(18);
 			held.open();
 			while let Some(Some(timestamp)) = read().await {
@@ -1239,7 +1255,7 @@ mod tests {
 					.unwrap()
 					.continuing(&previous);
 			let mut poll = async || {
-				tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| next.poll_read(waiter))).await
+				kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| next.poll_read(waiter))).await
 			};
 
 			// A keyframe at zero then deltas up to 967 ms, past 900 ms but no place to start.
@@ -1285,7 +1301,10 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let consumer = Consumer::new(
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))),
+			track.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+			),
 			HangContainer::Legacy(crate::container::Kind::Audio),
 		);
 		export.state = SourceState::Active(Box::new(consumer));

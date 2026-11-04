@@ -8,90 +8,39 @@
 //! parses and serializes on its own side.
 
 use std::sync::Arc;
+use std::task::{Poll, ready};
 
 use serde_json::Value;
 
-use crate::consumer::{MoqTrackConsumer, timestamp_us};
+use crate::consumer::MoqTrackConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
-use crate::ffi::Task;
+use crate::ffi::Polled;
+use crate::media::MoqTimestamp;
 use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 
-/// Options for a JSON snapshot track (lossy latest-value mode).
+/// Options for a JSON snapshot producer (lossy latest-value mode).
 ///
-/// The same config is passed to both the producer and the consumer, but the consumer reads only
-/// [`compression`](Self::compression); [`deltas`](Self::deltas) is producer-only.
+/// Compression is the track's: set `compress` on the [`MoqTrackInfo`](crate::producer::MoqTrackInfo)
+/// the track is created with. A consumer reads either kind with no option of its own.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonSnapshotConfig {
 	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
 	/// group with a full snapshot. How long a group runs is set by the track's `refresh` ratio
-	/// instead. Ignored by the consumer.
+	/// instead.
 	#[uniffi(default = true)]
 	pub deltas: bool,
-
-	/// DEFLATE-compress each group. Must match on the producer and consumer.
-	#[uniffi(default = false)]
-	pub compression: bool,
 }
 
-fn compression(on: bool) -> moq_json::Compression {
-	if on {
-		moq_json::Compression::Deflate
-	} else {
-		moq_json::Compression::None
-	}
-}
-
-impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::Config {
-	fn from(config: MoqJsonSnapshotConfig) -> Self {
-		let mut out = moq_json::snapshot::Config::default();
-		out.deltas = config.deltas;
-		out.compression = compression(config.compression);
-		out
-	}
-}
-
-impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::consumer::Config {
-	fn from(config: MoqJsonSnapshotConfig) -> Self {
-		let mut out = moq_json::snapshot::consumer::Config::default();
-		out.compression = compression(config.compression);
-		out
-	}
-}
-
-/// Options for a JSON stream track (lossless append-log mode).
+/// Options for a JSON window producer (a sliding run of records).
 ///
-/// The same config is passed to both the producer and the consumer.
-#[derive(Clone, uniffi::Record)]
-pub struct MoqJsonStreamConfig {
-	/// DEFLATE-compress the group. Must match on the producer and consumer.
-	#[uniffi(default = false)]
-	pub compression: bool,
-}
-
-impl From<MoqJsonStreamConfig> for moq_json::stream::Config {
-	fn from(config: MoqJsonStreamConfig) -> Self {
-		let mut out = moq_json::stream::Config::default();
-		out.compression = compression(config.compression);
-		out
-	}
-}
-
-/// Options for a JSON window track (a sliding run of records).
-///
-/// The same config is passed to both the producer and the consumer, but the consumer reads only
-/// [`compression`](Self::compression); [`checkpoint_records`](Self::checkpoint_records) is
-/// producer-only.
+/// Compression is the track's, as for [`MoqJsonSnapshotConfig`].
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonWindowConfig {
-	/// DEFLATE-compress each group. Must match on the producer and consumer.
-	#[uniffi(default = false)]
-	pub compression: bool,
-
 	/// Maximum records retained and restated when a group rolls, or null to restate the whole
 	/// window. Bounds the producer's memory for a window that is never popped: a reader that keeps
 	/// up still sees every record, while one joining later gets a skip event for the older ones.
-	/// Must be at least one. Ignored by the consumer.
+	/// Must be at least one.
 	#[uniffi(default = None)]
 	pub checkpoint_records: Option<u64>,
 }
@@ -100,7 +49,7 @@ impl TryFrom<MoqJsonWindowConfig> for moq_json::window::ProducerConfig {
 	type Error = MoqError;
 
 	fn try_from(config: MoqJsonWindowConfig) -> Result<Self, MoqError> {
-		let mut out = moq_json::window::ProducerConfig::default().with_compression(config.compression);
+		let mut out = moq_json::window::ProducerConfig::default();
 		if let Some(records) = config.checkpoint_records {
 			let records = usize::try_from(records)
 				.ok()
@@ -114,12 +63,6 @@ impl TryFrom<MoqJsonWindowConfig> for moq_json::window::ProducerConfig {
 	}
 }
 
-impl From<MoqJsonWindowConfig> for moq_json::window::ConsumerConfig {
-	fn from(config: MoqJsonWindowConfig) -> Self {
-		moq_json::window::ConsumerConfig::default().with_compression(config.compression)
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	// The `#[uniffi(default = ...)]` attributes have to be literals, so they restate moq-json's
@@ -129,21 +72,7 @@ mod tests {
 	fn record_defaults_match_moq_json() {
 		let snapshot = moq_json::snapshot::Config::default();
 		assert!(snapshot.deltas, "update #[uniffi(default)] on deltas");
-		assert_eq!(
-			snapshot.compression,
-			moq_json::Compression::None,
-			"update #[uniffi(default)] on compression"
-		);
-		assert_eq!(
-			moq_json::stream::Config::default().compression,
-			moq_json::Compression::None,
-			"update #[uniffi(default)] on MoqJsonStreamConfig::compression"
-		);
 		let window = moq_json::window::ProducerConfig::default();
-		assert!(
-			!window.compression,
-			"update #[uniffi(default)] on MoqJsonWindowConfig::compression"
-		);
 		assert_eq!(
 			window.checkpoint_records, None,
 			"update #[uniffi(default)] on MoqJsonWindowConfig::checkpoint_records"
@@ -160,7 +89,7 @@ mod tests {
 /// still reads the cached group first.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value>>>>,
@@ -217,10 +146,10 @@ impl MoqJsonSnapshotProducer {
 	/// `track` must come from `broadcast`; otherwise the catalog advertises a track the broadcast
 	/// does not carry.
 	///
-	/// The catalog carries `json.tracks.<name>` (`mode: snapshot`, and `compression: deflate` when
-	/// set) for as long as the producer lives; finishing or dropping it retires the entry. Takes
+	/// The catalog carries `json.tracks.<name>` (`mode: snapshot`) for as long as the producer
+	/// lives; finishing or dropping it retires the entry. Takes
 	/// over `track`, whose handle is closed afterward. Errors if the catalog already carries an
-	/// entry under the track's name.
+	/// entry under the track's name, or if `track` has no timescale, since every update is timed.
 	#[uniffi::constructor]
 	pub fn new(
 		broadcast: &MoqBroadcastProducer,
@@ -229,7 +158,7 @@ impl MoqJsonSnapshotProducer {
 	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
-		let config = moq_mux::json::Config::default().with_compression(config.compression);
+		let config = moq_mux::json::Config::default();
 		let this = track.adopt(|track| {
 			let producer =
 				broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config, options)?))?;
@@ -244,17 +173,15 @@ impl MoqJsonSnapshotProducer {
 
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
 	/// document. A no-op if unchanged from the previous update.
-	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp_us = None))]
-	pub fn update(&self, value: String, timestamp_us: Option<u64>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock, which
+	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
+	pub fn update(&self, value: String, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
+		let timestamp = timestamp.try_into()?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.update(moq_net::Timed {
-			value: &value,
-			at: timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?,
-		})?;
+		producer.update(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -279,10 +206,8 @@ impl MoqJsonSnapshotProducer {
 pub struct MoqJsonValue {
 	/// The JSON document.
 	pub value: String,
-	/// The frame's timestamp on the broadcast clock in microseconds, or null when untimed.
-	/// Rounded down to a whole microsecond, so a tick on a track like 90 kHz may not survive a
-	/// read and republish exactly.
-	pub timestamp_us: Option<u64>,
+	/// The frame's timestamp on the broadcast clock, or null when untimed.
+	pub timestamp: Option<MoqTimestamp>,
 }
 
 impl MoqJsonValue {
@@ -290,61 +215,61 @@ impl MoqJsonValue {
 		let Some(timed) = timed else { return Ok(None) };
 		Ok(Some(Self {
 			value: serde_json::to_string(&timed.value)?,
-			timestamp_us: timed.at.map(timestamp_us).transpose()?,
+			timestamp: timed.at.map(Into::into),
 		}))
 	}
-}
-
-struct SnapshotConsumer {
-	inner: moq_json::snapshot::Consumer<Value>,
 }
 
 /// Consumes a JSON snapshot track, yielding each reconstructed state or skipping to the newest.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotConsumer {
-	task: Task<SnapshotConsumer>,
+	reads: Polled<moq_json::snapshot::Consumer<Value>>,
 }
 
 #[uniffi::export]
 impl MoqJsonSnapshotConsumer {
 	/// Read `track` as a JSON snapshot track (lossy latest-value).
 	///
-	/// Pass the same [`MoqJsonSnapshotConfig::compression`] the producer used. Takes over
-	/// `track`, whose handle is closed afterward; errors if it has already read a group.
+	/// Reads a compressed track the same as a plain one. Takes over `track`, whose handle is
+	/// closed afterward; errors if it has already read a group.
 	#[uniffi::constructor]
-	pub fn new(track: &MoqTrackConsumer, config: MoqJsonSnapshotConfig) -> Result<Arc<Self>, MoqError> {
+	pub fn new(track: &MoqTrackConsumer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let (track, driver) = track.take()?;
-		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, config.into());
+		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
-			task: Task::new(SnapshotConsumer { inner: consumer }).supervised(driver),
+			reads: Polled::new(consumer).supervised(driver),
 		}))
 	}
 
 	/// Get the next state in order. Returns `None` once the track ends.
 	///
-	/// Groups older than the subscription's `max_delay` are skipped, so a playhead
+	/// Groups older than the subscription's `delay.max` are skipped, so a playhead
 	/// reader sets that budget to its distance behind live.
 	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
-		self.task
-			.run(|mut state| async move { MoqJsonValue::new(state.inner.next().await?) })
-			.await
+		let value = self
+			.reads
+			.wait(|consumer, waiter| Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?)))
+			.await?;
+		MoqJsonValue::new(value)
 	}
 
 	/// Skip to the newest state, or wait for one. Returns `None` once the track ends.
 	///
 	/// Skipped states are gone; a later `next()` continues after this one.
 	pub async fn latest(&self) -> Result<Option<MoqJsonValue>, MoqError> {
-		self.task
-			.run(|mut state| async move { MoqJsonValue::new(state.inner.latest().await?) })
-			.await
+		let value = self
+			.reads
+			.wait(|consumer, waiter| Poll::Ready(Ok(ready!(consumer.poll_latest(waiter))?)))
+			.await?;
+		MoqJsonValue::new(value)
 	}
 
 	/// Cancel all current and future `next()` and `latest()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -353,7 +278,7 @@ impl MoqJsonSnapshotConsumer {
 /// Publishes an ordered log of JSON records, one record per append.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamProducer {
 	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value>>>,
@@ -384,15 +309,12 @@ impl MoqJsonStreamProducer {
 	///
 	/// The catalog carries `json.tracks.<name>` (`mode: stream`) for as long as the producer
 	/// lives. Takes over `track`, whose handle is closed afterward. Errors if the catalog already
-	/// carries an entry under the track's name.
+	/// carries an entry under the track's name, or if `track` has no timescale, since every append
+	/// is timed.
 	#[uniffi::constructor]
-	pub fn new(
-		broadcast: &MoqBroadcastProducer,
-		track: &MoqTrackProducer,
-		config: MoqJsonStreamConfig,
-	) -> Result<Arc<Self>, MoqError> {
+	pub fn new(broadcast: &MoqBroadcastProducer, track: &MoqTrackProducer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let config = moq_mux::json::Config::default().with_compression(config.compression);
+		let config = moq_mux::json::Config::default();
 		track.adopt(|track| {
 			let producer = broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?))?;
 			Ok(Self {
@@ -402,17 +324,15 @@ impl MoqJsonStreamProducer {
 	}
 
 	/// Append one record to the log. `value` is a JSON document.
-	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp_us = None))]
-	pub fn append(&self, value: String, timestamp_us: Option<u64>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock, which
+	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
+	pub fn append(&self, value: String, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
+		let timestamp = timestamp.try_into()?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.append(moq_net::Timed {
-			value: &value,
-			at: timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?,
-		})?;
+		producer.append(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -431,44 +351,42 @@ impl MoqJsonStreamProducer {
 	}
 }
 
-struct StreamConsumer {
-	inner: moq_json::stream::Consumer<Value>,
-}
-
 /// Consumes an ordered log of JSON records, yielding every record in order.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamConsumer {
-	task: Task<StreamConsumer>,
+	reads: Polled<moq_json::stream::Consumer<Value>>,
 }
 
 #[uniffi::export]
 impl MoqJsonStreamConsumer {
 	/// Read `track` as a JSON stream track (lossless append-log).
 	///
-	/// Pass the same [`MoqJsonStreamConfig::compression`] the producer used. Takes over `track`,
-	/// whose handle is closed afterward; errors if it has already read a group.
+	/// Reads a compressed track the same as a plain one. Takes over `track`, whose handle is
+	/// closed afterward; errors if it has already read a group.
 	#[uniffi::constructor]
-	pub fn new(track: &MoqTrackConsumer, config: MoqJsonStreamConfig) -> Result<Arc<Self>, MoqError> {
+	pub fn new(track: &MoqTrackConsumer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let (track, driver) = track.take()?;
-		let consumer = moq_json::stream::Consumer::<Value>::new(track, config.into());
+		let consumer = moq_json::stream::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
-			task: Task::new(StreamConsumer { inner: consumer }).supervised(driver),
+			reads: Polled::new(consumer).supervised(driver),
 		}))
 	}
 
 	/// Get the next record. Returns `None` once the track ends.
 	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
-		self.task
-			.run(|mut state| async move { MoqJsonValue::new(state.inner.next().await?) })
-			.await
+		let value = self
+			.reads
+			.wait(|consumer, waiter| Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?)))
+			.await?;
+		MoqJsonValue::new(value)
 	}
 
 	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -484,7 +402,7 @@ impl MoqJsonStreamConsumer {
 /// restated in a fresh group, by a task this producer runs until it is finished or dropped.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_json::window::Producer<Value>>>>,
@@ -553,12 +471,16 @@ impl MoqJsonWindowProducer {
 	///
 	/// Not advertised in the broadcast's catalog, which has no window mode; a reader names the
 	/// track itself. Takes over `track`, whose handle is closed afterward. Errors if
-	/// [`MoqJsonWindowConfig::checkpoint_records`] is zero.
+	/// [`MoqJsonWindowConfig::checkpoint_records`] is zero, or if `track` has no timescale, since
+	/// every edit is timed.
 	#[uniffi::constructor]
 	pub fn new(track: &MoqTrackProducer, config: MoqJsonWindowConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = config.try_into()?;
 		let this = track.adopt(|track| {
+			if track.info().timescale.is_none() {
+				return Err(moq_net::Error::TimestampMismatch.into());
+			}
 			Ok(Self {
 				demand: track.demand(),
 				inner: Arc::new(std::sync::Mutex::new(Some(moq_json::window::Producer::new(
@@ -572,20 +494,20 @@ impl MoqJsonWindowProducer {
 	}
 
 	/// Append one record to the back of the window. `value` is a JSON document.
-	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp_us = None))]
-	pub fn push(&self, value: String, timestamp_us: Option<u64>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock, which
+	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
+	pub fn push(&self, value: String, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let value: Value = serde_json::from_str(&value)?;
-		let at = timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
-		self.edit(|producer| producer.push(moq_net::Timed { value: &value, at }))
+		let at = timestamp.try_into()?;
+		self.edit(|producer| producer.push(moq_net::Timed::from(&value).at(at)))
 	}
 
 	/// Drop `count` records from the front of the window, clamped to what it holds.
-	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp_us = None))]
-	pub fn pop(&self, count: u64, timestamp_us: Option<u64>) -> Result<(), MoqError> {
-		let at = timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
-		self.edit(|producer| producer.pop(moq_net::Timed { value: count, at }))
+	/// `timestamp` is on the broadcast clock, which
+	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
+	pub fn pop(&self, count: u64, timestamp: MoqTimestamp) -> Result<(), MoqError> {
+		let at = timestamp.try_into()?;
+		self.edit(|producer| producer.pop(moq_net::Timed::from(count).at(at)))
 	}
 
 	/// Close the open group, so the next push or pop opens a new one whose header restates the
@@ -647,10 +569,10 @@ pub enum MoqJsonWindowEvent {
 pub struct MoqJsonWindowTimed {
 	/// The change to the window.
 	pub event: MoqJsonWindowEvent,
-	/// The frame's timestamp on the broadcast clock in microseconds, or null when untimed.
+	/// The frame's timestamp on the broadcast clock, or null when untimed.
 	/// A record first learned of from a group's restatement (after a join, or while behind)
 	/// carries that frame's time, not its original push time.
-	pub timestamp_us: Option<u64>,
+	pub timestamp: Option<MoqTimestamp>,
 }
 
 impl MoqJsonWindowTimed {
@@ -679,34 +601,30 @@ impl MoqJsonWindowTimed {
 		};
 		Ok(Some(Self {
 			event,
-			timestamp_us: timed.at.map(timestamp_us).transpose()?,
+			timestamp: timed.at.map(Into::into),
 		}))
 	}
-}
-
-struct WindowConsumer {
-	inner: moq_json::window::Consumer<Value>,
 }
 
 /// Consumes a sliding window of JSON records, yielding each push, pop, and skip in order.
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowConsumer {
-	task: Task<WindowConsumer>,
+	reads: Polled<moq_json::window::Consumer<Value>>,
 }
 
 #[uniffi::export]
 impl MoqJsonWindowConsumer {
 	/// Read `track` as a JSON window track.
 	///
-	/// Pass the same [`MoqJsonWindowConfig::compression`] the producer used. Takes over `track`,
-	/// whose handle is closed afterward; errors if it has already read a group.
+	/// Reads a compressed track the same as a plain one. Takes over `track`, whose handle is
+	/// closed afterward; errors if it has already read a group.
 	#[uniffi::constructor]
-	pub fn new(track: &MoqTrackConsumer, config: MoqJsonWindowConfig) -> Result<Arc<Self>, MoqError> {
+	pub fn new(track: &MoqTrackConsumer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let (track, driver) = track.take()?;
-		let consumer = moq_json::window::Consumer::<Value>::new(track, config.into());
+		let consumer = moq_json::window::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
-			task: Task::new(WindowConsumer { inner: consumer }).supervised(driver),
+			reads: Polled::new(consumer).supervised(driver),
 		}))
 	}
 
@@ -714,15 +632,17 @@ impl MoqJsonWindowConsumer {
 	///
 	/// Group rolls never surface: a restated record this reader already has yields nothing.
 	pub async fn next(&self) -> Result<Option<MoqJsonWindowTimed>, MoqError> {
-		self.task
-			.run(|mut state| async move { MoqJsonWindowTimed::new(state.inner.next().await?) })
-			.await
+		let event = self
+			.reads
+			.wait(|consumer, waiter| Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?)))
+			.await?;
+		MoqJsonWindowTimed::new(event)
 	}
 
 	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }

@@ -2,14 +2,16 @@
 
 ## Goal
 
-A moq-lite-07 SUBSCRIBE replaces FETCH. One subscription asks for any number
+A moq-lite-07 SUBSCRIBE replaces FETCH for anything wider than one group. One subscription asks for any number
 of group ranges, past or live, bounded by group or by time, in ascending or
 descending order, and the
 publisher serves their union from one cursor without sending a group twice.
 Every sequence in range either arrives or is named by a SUBSCRIBE_DROP, so
 nothing blocks on a cache miss. Relays fill misses upstream with ranges, not
 one request per group, including over moq-transport where group numbers may be
-sparse. Lite FETCH is removed from lite-07.
+sparse. Lite-07 FETCH is single-group only: one group, or a slice within one
+group, which SUBSCRIBE cannot express (maintainer, 2026-11-03, replacing the
+earlier removal).
 
 ## Plan
 
@@ -26,11 +28,11 @@ relay bounds a sparse FETCH only if the model can request ranges:
   historical requests also obey that cap and publisher max-age. An omitted
   FETCH budget means publisher max-age alone; translation to a range must
   not accidentally give it the live SUBSCRIBE zero-delay default. SUBSCRIBE_UPDATE
-  replaces the list. Lite FETCH is removed from
-  lite-07; published versions keep it, answered through the same model.
+  replaces the list. Lite-07 FETCH is single-group only (decided 2026-11-03,
+  replacing its removal); published versions keep it, answered through the same model.
 - **Holes.** SUBSCRIBE_DROP (restored in lite-07) names every sequence in the
   requested ranges the publisher won't deliver: never existed, expired, or
-  refused upstream. Datagram groups are always dropped in a past range (#4982). The
+  refused upstream. On lite-01..06 datagram groups are always dropped in a past range (#4982); on lite-07 ranges never cover datagrams ([Datagram tracks](/quest/m1/datagram-tracks/README.md)). The
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
@@ -42,9 +44,13 @@ relay bounds a sparse FETCH only if the model can request ranges:
   upstream's live group (which arrives via SUBSCRIBE), so it never blocks.
   moq-transport caps a FETCH at the Largest Object, so it can return the live
   group's existing prefix but never wait for its future objects. Downstream,
-  an IETF FETCH is served from the model's ranges, ending at the Largest
-  Object's group, which it reads whole even while open (maintainer,
-  2026-10-25): the cache cannot know an open group's real Largest Object.
+  our publishers answer only a one-group FETCH or fill and refuse wider ones
+  (maintainer, 2026-10-28,
+  [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), until
+  [hole markers](/quest/m2/ietf-hole-marker.md) let a cache that knows every
+  group answer a range. A FETCH of the open largest group reads it whole
+  (maintainer, 2026-10-25): the cache cannot know an open group's real
+  Largest Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
   flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be
@@ -61,10 +67,10 @@ relay bounds a sparse FETCH only if the model can request ranges:
   still caps every range, so `Absolute(0)..` means everything not stale.
   A relay that cannot resolve a relative end locally forwards it upstream as
   relative over lite-07; a moq-transport bridge resolves it to an absolute
-  Group ID first ([Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
-  decided 2026-10-27).
+  Group ID first, from its cache or the Largest Object of a live join
+  (decided 2026-10-27).
 - **Time ends** (maintainer, 2026-10-17, for DVR seek in the
-  [archive line](/quest/m1/archive/README.md)). A range end may also be
+  [archive design](/doc/concept/archives.md)). A range end may also be
   `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
   the cache from its groups' timestamps, or a `track::Requests` handler such as
   an archive consumer. A start resolves to the group containing pts, and an
@@ -75,16 +81,10 @@ relay bounds a sparse FETCH only if the model can request ranges:
   [lite-07 finalizes](/quest/m1/lite07-finalize.md), which this line gates. This amends the 09-29
   premise that ranges are group-only because a group's timestamp isn't always
   known: timed tracks know it, and untimed ones refuse. The cache half landed in its own PR after #5929.
-  A datagram is judged on its own (maintainer, 2026-10-20): its timestamp
-  against the range's times, its sequence against the absolute and resolved
-  relative groups, never through the settle walk. Refusing time anchors on
-  datagram tracks was considered and can't work: nothing signals that a track
-  carries datagrams, and the lite draft lets a publisher send any single-frame
-  group as a datagram, including a copy of one it also streams. Datagrams stay
-  ephemeral (maintainer, 2026-10-20): a buffered datagram never indexes where
-  its group starts, so a time end settles across a sequence that arrived only
-  as a datagram, and a stream copy of that group arriving later is read even
-  if it starts past the end.
+  A datagram was judged on its own (maintainer, 2026-10-20). Superseded
+  2026-11-01 (maintainer): datagrams become their own track kind
+  ([Datagram tracks](/quest/m1/datagram-tracks/README.md)), so on lite-07
+  a range never covers a datagram.
 - Ranges are whole groups: a range always starts at a group's first frame
   (maintainer, on [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)). The IETF joining FETCH for the
   live group's uncached prefix stays, because today's bridge relies on it
@@ -98,14 +98,11 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow, so a subscription's range count cannot multiply per-group cost
-- [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity, and the on-demand request surface
-- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - FETCH removed from lite-07 in Rust, JS, and the draft
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net`'s on-demand request surface and `fetchGroup` as a range
+- [Lite-07 FETCH is single-group only](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups, in Rust, JS, and the draft
 - [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - what each lite cursor is owed and dropped lives in the model, and `TrackRun` only translates it per version
 
 ## Related
 
-- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
 - [Rust groups by start](/quest/m1/time-addressing/model.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times

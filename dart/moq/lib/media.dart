@@ -75,6 +75,9 @@ typedef ContainerInit = MoqContainerInit;
 /// A width and height pair, in pixels.
 typedef Dimensions = MoqDimensions;
 
+/// Where an audio or video decoder starts on a track that already holds groups: `latest` for a live player.
+typedef DecodeStart = MoqDecodeStart;
+
 /// A weak catalog handle that closes with its broadcast.
 typedef CatalogProducer = MoqMediaCatalogProducer;
 
@@ -104,21 +107,3 @@ typedef GroupConfig = MoqMediaGroupConfig;
 
 /// The packaging advertised for a media track.
 typedef Container = MoqContainer;
-
-/// Duration view over a media frame's presentation time.
-extension MediaFrameDuration on MoqMediaFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over a gap.
-extension MediaReadGapDuration on GapMoqMediaRead {
-  /// The furthest presentation point already read.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over an encoder end.
-extension MediaReadEndDuration on EndMoqMediaRead {
-  /// Where the stopped encoder's media stops.
-  Duration get end => Duration(microseconds: endUs);
-}

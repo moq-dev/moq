@@ -41,14 +41,14 @@ import (
 
 const readChunk = 64 * 1024
 
-// media.TrackConsumer max delay: how much reordering the jitter buffer tolerates.
-const maxDelay = time.Second
+// How far a read may fall behind live before it skips. A gap fails the run, which a reader skipping
+// behind live would cause itself: the matrix starts every subscriber at once, and a runtime starved
+// by the others can fall a second behind. That is this reader's speed, not the delivery under test.
+// A track's max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
+const maxDelay = 5 * time.Second
 
 // finishLinger is how long a finished publisher stays up for the late readers.
 const finishLinger = 10 * time.Second
-
-// durationPtr is d as the optional duration the wrapper's options take.
-func durationPtr(d time.Duration) *time.Duration { return &d }
 
 // Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 const (
@@ -70,7 +70,6 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64)
 	defer ticker.Stop()
 
 	data := make([]byte, audioBatchSamples*len(tones)*4)
-	timestampUs := uint64(0)
 	phase := 0
 	for {
 		select {
@@ -84,12 +83,12 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64)
 				binary.LittleEndian.PutUint32(data[(i*len(tones)+c)*4:], math.Float32bits(float32(sample)))
 			}
 		}
-		if err := audio.Write(moqaudio.Frame{Timestamp: time.Duration(timestampUs) * time.Microsecond, Data: data}); err != nil {
+		// Stamped on the sample clock, so every batch time is exact.
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.Timestamp{Value: uint64(phase), Scale: audioRate}, Data: data}); err != nil {
 			fmt.Fprintf(os.Stderr, "tone: %v\n", err)
 			return
 		}
 		phase += audioBatchSamples
-		timestampUs += audioBatchUs
 	}
 }
 
@@ -145,10 +144,11 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	defer client.Close()
 
 	// Hold the producer for the lifetime of the publish loop; Close unpublishes.
-	producer, err := client.CreateBroadcast(broadcast)
+	publication, err := client.CreateBroadcast(broadcast)
 	if err != nil {
 		return err
 	}
+	producer := publication.Broadcast()
 	defer producer.Close()
 
 	catalog, err := moqmedia.NewCatalogProducer(producer)
@@ -175,7 +175,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	if err := producer.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := publication.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %v Hz tone) to %s\n", broadcast, tones, url)
@@ -236,10 +236,11 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := producer.Close(); err != nil {
 		return err
 	}
-	health, err := client.CreateBroadcast(broadcast + ".health")
+	healthPublication, err := client.CreateBroadcast(broadcast + ".health")
 	if err != nil {
 		return err
 	}
+	health := healthPublication.Broadcast()
 	defer health.Close()
 	live, err := health.PublishTrack("live", nil)
 	if err != nil {
@@ -251,7 +252,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := live.Finish(); err != nil {
 		return err
 	}
-	if err := health.Announce(moq.AnnounceRoute{}); err != nil {
+	if err := healthPublication.Announce(moq.AnnounceRoute{}); err != nil {
 		return err
 	}
 	ack, err := os.Open(finishAck)
@@ -304,7 +305,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 		return err
 	}
 	defer announcements.Cancel()
-	announced, err := client.AnnouncedBroadcast(broadcast)
+	announced, err := client.Follow(broadcast, nil)
 	if err != nil {
 		return err
 	}
@@ -336,7 +337,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	for id, video = range catalog.Video {
 		break
 	}
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: durationPtr(maxDelay)}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{Max: maxDelay}}})
 	if err != nil {
 		return err
 	}
@@ -401,7 +402,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 			break
 		}
 	}
-	healthAnnounced, err := client.AnnouncedBroadcast(broadcast + ".health")
+	healthAnnounced, err := client.Follow(broadcast+".health", nil)
 	if err != nil {
 		return err
 	}
@@ -427,8 +428,9 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	if err != nil {
 		return err
 	}
-	if frame == nil || string(frame.Payload) != "session-alive" || frame.Timestamp != nil {
-		return errors.New("unexpected session health payload or timestamp")
+	// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+	if frame == nil || string(frame.Payload) != "session-alive" {
+		return errors.New("unexpected session health payload")
 	}
 	frame, err = group.ReadFrame(ctx)
 	if err != nil {
@@ -459,8 +461,8 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 	codec, _, _ := strings.Cut(rendition.Codec, ".")
 	out += "." + codec
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
-		Format:   moq.AudioSampleFormatF32,
-		MaxDelay: durationPtr(maxDelay),
+		Format: moq.AudioSampleFormatF32,
+		Delay:  moq.Delay{Max: maxDelay},
 	})
 	if err != nil {
 		return err
@@ -498,7 +500,7 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 		}
 		samples := len(frame.Data) / frameBytes
 
-		fmt.Fprintf(log, "%d %d\n", frame.Timestamp.Microseconds(), samples)
+		fmt.Fprintf(log, "%d %d\n", moq.TimestampToDuration(frame.Timestamp).Microseconds(), samples)
 		if _, err := pcm.Write(frame.Data); err != nil {
 			return err
 		}
@@ -532,7 +534,7 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		return finishSubscribe(readCtx, client, broadcast, frames)
 	}
 
-	announced, err := client.AnnouncedBroadcast(broadcast)
+	announced, err := client.Follow(broadcast, nil)
 	if err != nil {
 		return err
 	}
@@ -559,7 +561,7 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		break
 	}
 
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: durationPtr(maxDelay)}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{Max: maxDelay}}})
 	if err != nil {
 		return err
 	}

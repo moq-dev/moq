@@ -87,7 +87,7 @@ impl Addr {
 	}
 
 	/// The same peer and addresses, requested at `url`.
-	#[cfg(feature = "_transport")]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) fn with_url(&self, url: Url) -> Self {
 		Self {
 			url,
@@ -216,6 +216,7 @@ pub(crate) struct Legacy {
 			"moq-lite-06",
 			"moq-lite-07-wip",
 			"moq-transport-18",
+			"moq-transport-20",
 			"moq-transport-22"
 		),
 		hide = true
@@ -495,7 +496,7 @@ pub struct Config {
 	/// The URL to dial.
 	///
 	/// Supports WebTransport (`https`/`http`), WebSocket (`ws`/`wss`), raw QUIC
-	/// (`moqt`/`moql`), qmux over `tcp`/`unix`, and `iroh`. The URL path is the
+	/// (`moqt`/`moql`), and qmux over `tcp`/`unix`. The URL path is the
 	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
 	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
 	/// self-signed fingerprint; `https://` connects directly.
@@ -599,7 +600,8 @@ pub struct Config {
 
 	/// Restrict the client to specific MoQ protocol version(s).
 	///
-	/// By default, the client offers all supported versions and lets the server choose.
+	/// By default, the client offers every supported version except the opt-in `moq-lite-07-wip`
+	/// and lets the server choose.
 	/// Use this to force a specific version, e.g. `--connect-version moq-lite-02`.
 	/// Can be specified multiple times to offer a subset of versions.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -617,6 +619,7 @@ pub struct Config {
 			"moq-lite-06",
 			"moq-lite-07-wip",
 			"moq-transport-18",
+			"moq-transport-20",
 			"moq-transport-22"
 		)
 	)]
@@ -775,7 +778,7 @@ mod addr_tests {
 	#[test]
 	fn fixed_addresses_require_a_supported_nonempty_target() {
 		let peer: net::SocketAddr = "127.0.0.1:443".parse().unwrap();
-		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+		for scheme in ["http", "ws", "tcp", "unix"] {
 			let url = format!("{scheme}://relay.example/path").parse().unwrap();
 			assert_eq!(Addr::pinned(url, [peer]), Err(Error::UnsupportedScheme(scheme.into())));
 		}

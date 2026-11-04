@@ -19,8 +19,8 @@ const config = Catalog.AudioConfigSchema.parse({
 test("arrival capture stamps a later group before a stalled earlier group", async () => {
 	let now = 10;
 	const clock = spyOn(performance, "now").mockImplementation(() => now);
-	const early = new Group.Producer(0);
-	const late = new Group.Producer(1);
+	const early = new Group.Producer(0n);
+	const late = new Group.Producer(1n);
 	const captured: Arrival[] = [];
 	const read = async (group: Group.Consumer) => {
 		for await (const frame of arrivals(group, { decoder: new Legacy.Format("audio"), config }))
@@ -54,7 +54,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 });
 
 test("arrival capture excludes duration markers", async () => {
-	const group = new Group.Producer(7);
+	const group = new Group.Producer(7n);
 	group.writeFrame({
 		timestamp: Time.Timestamp.fromMicros(100_000),
 		payload: Legacy.encodeFrame(new Uint8Array(), Micro(100_000)),
@@ -78,7 +78,7 @@ test("the observer shares playback demand and closes without ending playback", a
 	const published = publishedPublication.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	publishedPublication.announce();
-	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
 		track: new Signal("audio"),
@@ -93,11 +93,11 @@ test("the observer shares playback demand and closes without ending playback", a
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		expect(track.subscription.peek()).toMatchObject({ priority: Catalog.PRIORITY.audio, maxDelay: 250 });
+		expect(track.subscription.peek()).toMatchObject({ priority: Catalog.PRIORITY.audio, delay: { max: 250 } });
 		const player = published
 			.consume()
 			.track("audio")
-			.subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: Milli(250) });
+			.subscribe({ priority: Catalog.PRIORITY.audio, delay: { max: Milli(250) } });
 		await capture.close();
 		expect(player.closed.peek()).toBeUndefined();
 		player.close();
@@ -121,7 +121,7 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 	const published = publishedPublication.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	publishedPublication.announce();
-	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
 		track: new Signal("audio"),
@@ -136,7 +136,7 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		expect(track.subscription.peek()).toMatchObject({ maxDelay: 2000 });
+		expect(track.subscription.peek()).toMatchObject({ delay: { max: 2000 } });
 	} finally {
 		await capture.close();
 		source.close();
@@ -151,7 +151,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 	const published = publishedPublication.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	publishedPublication.announce();
-	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
 		track: new Signal("audio"),
@@ -195,7 +195,7 @@ test("a reset group truncates its arrivals without failing capture", async () =>
 });
 
 test("arrival durations come from Opus packets despite missing or differently sized packets", async () => {
-	const group = new Group.Producer(0);
+	const group = new Group.Producer(0n);
 	for (const [timestamp, toc] of [
 		[0, 0x78],
 		[100_000, 0x00],
@@ -219,7 +219,7 @@ test("arrival durations come from Opus packets despite missing or differently si
 });
 
 test("arrival capture uses AAC's codec duration when the container leaves it implicit", async () => {
-	const group = new Group.Producer(0);
+	const group = new Group.Producer(0n);
 	group.writeFrame({
 		timestamp: Time.Timestamp.fromMicros(0),
 		payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
@@ -234,7 +234,7 @@ test("arrival capture uses AAC's codec duration when the container leaves it imp
 });
 
 test("arrival capture refuses a packet with no usable duration", async () => {
-	const group = new Group.Producer(0);
+	const group = new Group.Producer(0n);
 	group.writeFrame({
 		timestamp: Time.Timestamp.fromMicros(0),
 		payload: Legacy.encodeFrame(new Uint8Array([0x7b]), Micro(0)),

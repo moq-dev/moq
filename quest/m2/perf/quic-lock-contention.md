@@ -36,20 +36,28 @@ since the async-to-poll adapter and leases that hold the lock both go first.
 Levers, only where the profile shows a cost:
 
 - A per-stream staging queue: a write hands its owned `Bytes` (the `Buf`
-  API from [streams](/quest/m1/quic-api/streams.md)) to the stream, bounded
+  API from [moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)) to the stream, bounded
   by the stream's flow-control window so backpressure is unchanged, and the
   connection task moves it into moq-quic under its own lock.
 - Dispatch a whole GRO batch per connection in one message, coordinated
   with [the I/O boundary redesign](/quest/m2/quic-io-boundary.md), whose
   "one `handle` call takes a whole GRO batch" is the state-machine half.
 - Stream handles that carry a slab key instead of a `StreamId`, removing
-  moq-quic's per-stream lookups (the driver's own maps go with
-  [waits](/quest/m1/quic-api/waits.md)). FxHash is cheap, so this is last
+  moq-quic's per-stream lookups (the driver's own maps are already gone,
+  now that moq-quic owns its waits). FxHash is cheap, so this is last
   and only on evidence.
 
 The maintainer wants the connection state free of runtime borrow checks
-altogether (2026-10-25); [borrow-free state](/quest/m2/perf/quic-borrow-free.md)
-designs that, and this profile is its baseline.
+altogether (2026-10-25). The borrow-free mechanism report
+([moq-dev/moq#7531](https://github.com/moq-dev/moq/pull/7531)) measured the
+designs on one core: the `Mutex` costs 1.1 to 3.5% over context passing, and a
+driver-owned channel (this quest's staging queue in full) costs about 4.5k
+instructions per stream plus about 320 per extra write. Its recommendation is
+to keep the `Mutex` and `RefCell` on the data path and not build the channel
+design: they cost 1.1 to 3.5% and under 1% over context passing on one core,
+and the channel costs 5 to 29% more. Adopting a design, or keeping the lock, is
+still decided separately; this profile is the contended baseline that decision
+weighs.
 
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.
@@ -57,11 +65,8 @@ staging queue and batch dispatch should need none.
 ## Required
 
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the adapter's per-operation boxing, which would otherwise dominate the profile
-- [Streams](/quest/m1/quic-api/streams.md) - owned writes and lock-free leases
-- [Waits](/quest/m1/quic-api/waits.md) - moves the waiter tables under the lock this profiles
 
 ## Related
 
-- [Borrow-free state](/quest/m2/perf/quic-borrow-free.md) - the lock-free designs this profile is the baseline for
 - [Relay egress profile](/quest/m2/quic-egress-profile.md) - the transmit side of the same path
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - the allocation profile of the same workload

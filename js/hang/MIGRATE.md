@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
+
+Following `@moq/net`, a `Container.Consumer` read's `group` is a `bigint`, as is the `group` that `Hls.Segmenter` and `Hls.Recorder` take in `frame` and `stop` and an `Hls.Entry` carries. An HLS `Record` on the wire still holds its group as a JSON number, so a group past 2^53 throws when it is recorded.
+Pass and compare group sequences as bigints, such as `recorder.frame(group.sequence, pts)` and `read.group === 3n`.
+
+### `Container.Consumer` takes a `delay` ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
+
+`ConsumerProps.maxDelay` is `delay: GetterInit<Moq.Track.Delay>`, where `@moq/net`'s `Track.Delay` is `{ min?: Milli | null; max?: Milli | null }` and an omitted field is zero. The consumer reads a `null` `min` as zero.
+Replace `maxDelay: d` with `delay: { max: d }`, or derive it from a signal. `max: null` is no limit.
+`min` is the playout delay: the consumer starts at the group covering the live edge less `min` plus any `warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within `max`, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
+
 ### The catalog rendition cap is removed
 
 `Catalog.MAX_RENDITIONS` and `Catalog.TooManyRenditions` are gone: `checkRenditions`, `encode`, and `watch` accept any number of renditions.

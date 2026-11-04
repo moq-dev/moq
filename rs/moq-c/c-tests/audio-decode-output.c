@@ -51,7 +51,8 @@ static void on_catalog(void *data, int32_t id) {
 }
 
 static void check_frame(Context *c, const moq_audio_frame *frame) {
-    CHECK(frame->timestamp_us == 123000 + c->frames * 1000000 / 48000);
+    CHECK(frame->timestamp.scale == 1000000);
+    CHECK(frame->timestamp.value == 123000 + c->frames * 1000000 / 48000);
     size_t bytes = c->format == MOQ_AUDIO_SAMPLE_FORMAT_S16 ? 2 : 4;
     CHECK(frame->data_size % (bytes * c->channels) == 0);
     size_t count = frame->data_size / (bytes * c->channels);
@@ -96,27 +97,29 @@ static void on_read(void *data, int32_t id) {
 
 int main(void) {
     Context c = {.mutex = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER};
-    moq_audio_decoder_output invalid = {999, 0, 0, 0};
+    moq_audio_decoder_output invalid = {999, 0, 0, {0}};
     CHECK(moq_decode_audio(INT32_MAX, 0, &invalid, on_read, &c) == -15);
     CHECK(moq_decode_audio(INT32_MAX, 0, NULL, on_read, &c) == -6);
 
     int32_t origin = moq_origin_create();
     CHECK(origin > 0);
     const char *path = "audio-decode-output";
-    int32_t broadcast = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path));
-    CHECK(broadcast > 0);
-    CHECK(moq_publish_announce((uint32_t)broadcast, NULL) == 0);
+    uint32_t broadcast = 0;
+    int32_t publication = moq_origin_create_broadcast((uint32_t)origin, path, strlen(path), &broadcast);
+    CHECK(publication > 0);
+    CHECK(moq_publication_announce((uint32_t)publication, NULL) == 0);
+    CHECK(moq_publication_free((uint32_t)publication) == 0);
     moq_audio_encoder_input input = {MOQ_AUDIO_SAMPLE_FORMAT_F32, 48000, 2};
     moq_audio_encoder_output output = {"pcm", 3, 0, 0, 0, 0};
     int32_t producer = moq_encode_audio((uint32_t)broadcast, "audio", 5, &input, &output, 0);
     CHECK(producer > 0);
     float pcm[960 * 2];
     for (size_t sample = 0; sample < 960; sample++) { pcm[sample * 2] = 0.25f; pcm[sample * 2 + 1] = -0.5f; }
-    moq_audio_frame frame = {123000, (const uint8_t *)pcm, sizeof(pcm)};
+    moq_audio_frame frame = {{123000, 1000000}, (const uint8_t *)pcm, sizeof(pcm)};
     CHECK(moq_encode_audio_frame((uint32_t)producer, &frame) == 0);
     CHECK(moq_encode_audio_finish((uint32_t)producer) == 0);
 
-    CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), on_broadcast, &c) > 0);
+    CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c) > 0);
     pthread_mutex_lock(&c.mutex);
     wait_until(&c, &c.broadcast);
     pthread_mutex_unlock(&c.mutex);
@@ -126,13 +129,20 @@ int main(void) {
     wait_until(&c, &c.catalog);
     pthread_mutex_unlock(&c.mutex);
 
+    bool enabled = false;
+    CHECK(moq_consume_audio_enabled((uint32_t)c.catalog, 0, &enabled) == 0);
+    CHECK(enabled);
+    CHECK(moq_consume_audio_enabled((uint32_t)c.catalog, 1, &enabled) == MOQ_ERROR_NO_INDEX);
+    CHECK(enabled); // An error preserves the destination.
+    CHECK(moq_consume_audio_enabled((uint32_t)c.catalog, 0, NULL) == MOQ_ERROR_INVALID_POINTER);
+
     // Each decode reads the finished track from the start. Its budget is the track's whole
     // retention, since the budget ages groups by wall clock and a stalled host would skip them.
     const uint32_t formats[] = {MOQ_AUDIO_SAMPLE_FORMAT_F32, MOQ_AUDIO_SAMPLE_FORMAT_F32_PLANAR, MOQ_AUDIO_SAMPLE_FORMAT_S16};
     for (size_t format = 0; format < sizeof(formats) / sizeof(formats[0]); format++) {
         for (uint32_t channels = 1; channels <= 2; channels++) {
             c.format = formats[format]; c.channels = channels; c.frames = 0; c.decode_done = 0;
-            moq_audio_decoder_output decoded = {c.format, 48000, channels, 30000000};
+            moq_audio_decoder_output decoded = {c.format, 48000, channels, {.max_us = 30000000}};
             int32_t decoder = moq_decode_audio((uint32_t)c.catalog, 0, &decoded, on_read, &c);
             CHECK(decoder > 0);
             pthread_mutex_lock(&c.mutex);

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"moq.dev/moq"
 	moqmedia "moq.dev/moq/media"
@@ -50,18 +49,20 @@ func ExampleClient_CreateBroadcast() {
 	}
 	defer client.Close()
 
-	broadcast, err := client.CreateBroadcast("me/mic")
+	publication, err := client.CreateBroadcast("me/mic")
 	if err != nil {
 		log.Fatal(err)
 	}
+	broadcast := publication.Broadcast()
 
 	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		log.Fatal(err)
 	}
-	_ = broadcast.Announce(moq.AnnounceRoute{})
+	_ = publication.Announce(moq.AnnounceRoute{})
 
-	pts := 20 * time.Millisecond
+	// 20 ms in, counted on the Opus 48 kHz sample clock.
+	pts := moq.Timestamp{Value: 960, Scale: 48_000}
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {
 		log.Fatal(err)
 	}

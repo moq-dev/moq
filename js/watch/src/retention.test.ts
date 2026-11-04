@@ -1,9 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
-import { type Micro, Milli, Nano, now } from "@moq/clock";
+import { type Micro, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Derived, Effect, Signal } from "@moq/signals";
 import { nextMedia, subscribeMedia } from "./media";
 import { Sync } from "./sync";
 
@@ -60,7 +60,7 @@ async function pendingListeners(run: () => Promise<void>): Promise<number> {
 test("waits on a stable clock leave nothing behind", async () => {
 	const sync = new Sync({ delay: Milli(10) });
 	// Let the delay effect run before anchoring.
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	sync.received(Nano.toMilli(Nano(now())));
 
 	const wait = async () => {
@@ -80,8 +80,9 @@ test("waits on a stable clock leave nothing behind", async () => {
 // the effect's teardown. Retention anywhere along it grows with the frame count.
 test("a long subscription through the player path leaves nothing behind", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	// A tiny publisher window, so the track's own replay cache stays flat too.
-	const track = broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI, maxAge: Milli(1) });
+	// No maxAge: the track's cache keeps every group here for its fixed 30s idle window whatever
+	// the track declares, and holds no reactions or listeners while it does.
+	const track = broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	const format = new Container.Legacy.Format("audio");
 	const producer = new Container.Legacy.Producer(track, format);
 
@@ -91,10 +92,13 @@ test("a long subscription through the player path leaves nothing behind", async 
 		broadcast: broadcast.consume(),
 		track: "audio",
 		priority: 0,
-		maxDelay: sync.out.maxDelay,
+		delay: new Derived([sync.out.delay, sync.out.maxDelay], (min, max) => ({ min, max })),
 	});
 	if (!sub) throw new Error("no subscription");
-	const consumer = new Container.Consumer(sub, { format, maxDelay: sync.out.maxDelay });
+	const consumer = new Container.Consumer(sub, {
+		format,
+		delay: new Derived([sync.out.maxDelay], (max) => ({ max })),
+	});
 
 	// Presentations overlap, as a decoder's outputs do, so the clock's sleeps are shared.
 	const presenting = new Set<Promise<unknown>>();

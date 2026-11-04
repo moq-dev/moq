@@ -21,7 +21,7 @@ impl MoqAllocator {
 		Self { allocator }
 	}
 
-	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+	#[cfg(feature = "audio")]
 	pub(crate) fn inner(&self) -> &moq_net::bandwidth::Allocator {
 		&self.allocator
 	}
@@ -63,7 +63,7 @@ impl MoqReservation {
 		Self { inner }
 	}
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
 		self.inner.consume()
 	}
@@ -85,6 +85,84 @@ impl MoqReservation {
 	pub fn update(&self, max_bps: u64) {
 		let _guard = crate::ffi::enter();
 		self.inner.update(moq_net::bandwidth::Rate::from_bps(max_bps));
+	}
+}
+
+/// How a [`MoqRateControl`] maps a reservation's grant onto the bitrate a sender produces.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MoqRatePolicy {
+	/// The most the sender produces, normally its configured bitrate. The grant only lowers it.
+	pub max_bps: u64,
+	/// The next lower rendition's `max_bps`, when this one is encoded beside lower renditions
+	/// of the same source. A grant below `(max_bps + 2 * lower_bps) / 3` then disables this
+	/// one, since the lower rendition serves viewers better than a starved copy of this one.
+	/// Absent for the lowest or only rendition, which never disables.
+	#[uniffi(default = None)]
+	pub lower_bps: Option<u64>,
+}
+
+/// What a sender following a [`MoqRateControl`] should be doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqRateTarget {
+	/// Produce at this bitrate, and advertise the rendition as enabled.
+	Enabled {
+		/// The bitrate to produce at, in bits per second.
+		bitrate_bps: u64,
+	},
+	/// Stop sending, and advertise the rendition as disabled until a later target enables it.
+	Disabled,
+}
+
+impl From<moq_mux::rate::Target> for MoqRateTarget {
+	fn from(target: moq_mux::rate::Target) -> Self {
+		match target {
+			moq_mux::rate::Target::Enabled(rate) => Self::Enabled {
+				bitrate_bps: rate.as_bps(),
+			},
+			moq_mux::rate::Target::Disabled => Self::Disabled,
+		}
+	}
+}
+
+/// Turns a reservation's grant into a sender's target, the way moq-ffi's own encoders follow it.
+///
+/// Drops apply at once, raises climb at most 25% per second, and moves under 5% are ignored,
+/// so a jittering grant doesn't retune the sender on every frame. For a sender that encodes
+/// on its own, such as a pre-encoded track whose encoder the caller retunes: call
+/// [`update`](Self::update) on every frame and apply what it returns.
+#[derive(uniffi::Object)]
+pub struct MoqRateControl {
+	inner: std::sync::Mutex<moq_mux::rate::Control>,
+}
+
+#[uniffi::export]
+impl MoqRateControl {
+	/// Start at the policy's `max_bps`, until a grant says otherwise.
+	#[uniffi::constructor]
+	pub fn new(policy: MoqRatePolicy) -> Arc<Self> {
+		let mut native = moq_mux::rate::Policy::new(moq_net::bandwidth::Rate::from_bps(policy.max_bps));
+		native.lower = policy.lower_bps.map(moq_net::bandwidth::Rate::from_bps);
+		Arc::new(Self {
+			inner: std::sync::Mutex::new(moq_mux::rate::Control::new(native)),
+		})
+	}
+
+	/// What the sender should currently be doing.
+	pub fn target(&self) -> MoqRateTarget {
+		self.inner.lock().unwrap().target().into()
+	}
+
+	/// Feed `reservation`'s current grant, returning the new target when it moved enough to
+	/// apply, or `None` to keep doing what the last target said.
+	///
+	/// A rendition only disables while a session probes for the reservation, since nothing
+	/// else could raise the grant to resume it. A missing grant (no estimate) holds the target.
+	pub fn update(&self, reservation: &MoqReservation) -> Option<MoqRateTarget> {
+		let _guard = crate::ffi::enter();
+		let grant = reservation.inner.consume();
+		let mut control = self.inner.lock().unwrap();
+		control.set_probed(grant.probed());
+		control.update(grant.peek(), kio::clock::now()).map(Into::into)
 	}
 }
 
@@ -203,7 +281,40 @@ mod tests {
 		assert_eq!(reserved.rate(), Some(1_000_000));
 	}
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	/// A rung follows its reservation's grant down, but never disables while no session
+	/// probes for it, since nothing could then raise the grant to resume it. A missing
+	/// grant holds the target.
+	#[test]
+	fn a_rate_control_disables_only_while_probed() {
+		let estimate = moq_net::bandwidth::Producer::new();
+		let bandwidth = allocator(&estimate);
+		let broadcast = MoqBroadcastProducer::new().unwrap();
+
+		let track = named_track(&broadcast, "a");
+		let _sub = track.consume(None).unwrap();
+		let reserved = bandwidth.reserve(&track.demand().unwrap(), 6_000_000);
+		let control = MoqRateControl::new(MoqRatePolicy {
+			max_bps: 6_000_000,
+			lower_bps: Some(2_000_000),
+		});
+		assert_eq!(control.target(), MoqRateTarget::Enabled { bitrate_bps: 6_000_000 });
+		assert_eq!(control.update(&reserved), None);
+
+		// Below the 3.33 Mbps boundary, but unprobed: follow it like any sender.
+		estimate
+			.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+			.unwrap();
+		assert_eq!(
+			control.update(&reserved),
+			Some(MoqRateTarget::Enabled { bitrate_bps: 3_000_000 })
+		);
+
+		estimate.set(None).unwrap();
+		assert_eq!(control.update(&reserved), None);
+		assert_eq!(control.target(), MoqRateTarget::Enabled { bitrate_bps: 3_000_000 });
+	}
+
+	#[cfg(feature = "video")]
 	#[test]
 	fn a_share_wakes_a_parked_thread() {
 		use std::sync::atomic::Ordering;
@@ -232,6 +343,10 @@ mod tests {
 			std::thread::yield_now();
 		}
 		// The inner changed() may not have parked yet; give it a turn.
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the test thread has no runtime; it gives the follower's runtime thread a real turn"
+		)]
 		std::thread::sleep(std::time::Duration::from_millis(50));
 		let _sub = track.consume(None).unwrap();
 		estimate
@@ -245,15 +360,13 @@ mod tests {
 /// An owned bandwidth estimate; holding it requests estimates until released.
 #[derive(uniffi::Object)]
 pub struct MoqBandwidthConsumer {
-	inner: std::sync::Mutex<Option<moq_net::bandwidth::Consumer>>,
-	changed: crate::ffi::Task<()>,
+	inner: crate::ffi::Polled<moq_net::bandwidth::Consumer>,
 }
 
 impl MoqBandwidthConsumer {
 	pub(crate) fn new(inner: moq_net::bandwidth::Consumer) -> Self {
 		Self {
-			inner: std::sync::Mutex::new(Some(inner)),
-			changed: crate::ffi::Task::new(()),
+			inner: crate::ffi::Polled::new(inner),
 		}
 	}
 }
@@ -263,36 +376,26 @@ impl MoqBandwidthConsumer {
 	/// The current estimate in bits per second, or None while unavailable.
 	pub fn rate(&self) -> Option<u64> {
 		self.inner
-			.lock()
-			.unwrap()
-			.as_ref()
-			.and_then(moq_net::bandwidth::Consumer::peek)
+			.peek(moq_net::bandwidth::Consumer::peek)
+			.flatten()
 			.map(moq_net::bandwidth::Rate::as_bps)
 	}
 
 	/// Wait for the estimate to change and return the new [`rate`](Self::rate), erroring when
 	/// its producer closes.
 	pub async fn rate_changed(&self) -> Result<Option<u64>, MoqError> {
-		self.changed
-			.run(|_guard| async move {
-				moq_net::kio::wait(|waiter| {
-					let mut inner = self.inner.lock().unwrap();
-					let inner = inner.as_mut().ok_or(MoqError::Cancelled)?;
-					inner.poll_changed(waiter).map(|result| {
-						result
-							.map(|rate| rate.map(moq_net::bandwidth::Rate::as_bps))
-							.map_err(Into::into)
-					})
-				})
-				.await
+		self.inner
+			.wait(|inner, waiter| {
+				std::task::Poll::Ready(Ok(
+					std::task::ready!(inner.poll_changed(waiter))?.map(moq_net::bandwidth::Rate::as_bps)
+				))
 			})
 			.await
 	}
 
 	/// Release this consumer's demand, including a pending wait.
 	pub fn cancel(&self) {
-		self.inner.lock().unwrap().take();
-		self.changed.cancel();
+		self.inner.cancel();
 	}
 }
 
@@ -309,7 +412,7 @@ mod consumer_tests {
 		tokio::time::pause();
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
-		assert!(producer.is_used());
+		assert!(producer.demand().wanted());
 		let mut changed = std::pin::pin!(consumer.rate_changed());
 		assert!(
 			changed
@@ -328,7 +431,7 @@ mod consumer_tests {
 				.is_pending()
 		);
 		consumer.cancel();
-		assert!(!producer.is_used());
+		assert!(!producer.demand().wanted());
 		assert_eq!(consumer.rate(), None);
 		assert!(matches!(changed.await, Err(MoqError::Cancelled)));
 	}
@@ -337,9 +440,9 @@ mod consumer_tests {
 	fn dropping_the_owned_consumer_releases_demand() {
 		let producer = moq_net::bandwidth::Producer::new();
 		let consumer = MoqBandwidthConsumer::new(producer.consume());
-		assert!(producer.is_used());
+		assert!(producer.demand().wanted());
 		drop(consumer);
-		assert!(!producer.is_used());
+		assert!(!producer.demand().wanted());
 	}
 
 	#[tokio::test]

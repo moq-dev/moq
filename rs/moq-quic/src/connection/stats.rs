@@ -164,7 +164,7 @@ pub struct PathStats {
 	pub lost_plpmtud_probes: u64,
 	/// The amount of packets sent on this path that resend in-flight stream data to probe for
 	/// bandwidth (also counted by `sent_packets`); see
-	/// [`Connection::set_probe_target`](crate::Connection::set_probe_target)
+	/// [`Connection::set_probe_target`](crate::connection::Connection::set_probe_target)
 	pub sent_bandwidth_probes: u64,
 	/// The bytes of those packets, which carry no new data
 	pub sent_bandwidth_probe_bytes: u64,
@@ -177,7 +177,7 @@ pub struct PathStats {
 /// Connection statistics
 #[derive(Debug, Default, Copy, Clone)]
 #[non_exhaustive]
-pub struct ConnectionStats {
+pub struct Stats {
 	/// Statistics about UDP datagrams transmitted on a connection
 	pub udp_tx: UdpStats,
 	/// Statistics about UDP datagrams received on a connection
@@ -196,14 +196,14 @@ pub struct ConnectionStats {
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CreditStats {
-	/// Bytes leased with [`RecvStream::lease()`](crate::RecvStream::lease) and not consumed yet,
+	/// Bytes leased with [`recv::Stream::lease()`](crate::recv::Stream::lease) and not consumed yet,
 	/// which keep their credit
 	pub leased: u64,
 	/// Bytes the peer may still send before it needs more credit, including credit not yet
 	/// advertised
 	pub available: u64,
 	/// Streams evicted so far because incomplete leases filled the window; see
-	/// [`RecvStream::lease()`](crate::RecvStream::lease)
+	/// [`recv::Stream::lease()`](crate::recv::Stream::lease)
 	pub evicted: u64,
 	/// The most credit the peer has had spent at once, leased or not yet read: how close the
 	/// connection came to filling its receive window

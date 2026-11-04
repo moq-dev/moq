@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use windows::Foundation::{Metadata::ApiInformation, TypedEventHandler};
 use windows::Graphics::Capture::{

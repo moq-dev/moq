@@ -68,6 +68,15 @@ kind.
   before the viewer read the catalog; one broadcast per catalog removes the
   collisions, the race, and the cap with less code, and needs no JS track
   request API.
+- **One feedback writer per name** (2026-11-02, maintainer). Each player
+  publishes its own `.echo` broadcast with only its own counts. A second
+  player on the same connection that resolves the same feedback path, for
+  the same catalog or another, publishes nothing and warns until the first
+  one leaves; the application gives each player its own name. Reason: sharing one broadcast between
+  players needed a departed sum, a per-player ledger, and join-time baselines
+  to keep the counters cumulative, and four review rounds of
+  [moq-dev/moq#7222](https://github.com/moq-dev/moq/pull/7222) each found
+  another edge case in them.
 - **Trust is the token prefix** (2026-09-29). Whoever the application's
   tokens let publish under the echo path may report, and no report is
   authenticated beyond that.
@@ -85,8 +94,8 @@ kind.
     [#2733](https://github.com/moq-dev/moq/issues/2733)-style counters land.
 - **Encoding**: cumulative counters about once a second through
   `moq_json::snapshot` on one track with `compress: true`, produced whenever
-  stats are enabled. The [m1 compression migration](/quest/m1/compress/migrate.md)
-  removes `.z` siblings; follow the delta policy it retains on the single track. An unsubscribed stats track never leaves the process.
+  stats are enabled. The [m1 compression migration](https://github.com/moq-dev/moq/pull/7046)
+  removed the `.z` siblings and kept merge-patch deltas on the single track. An unsubscribed stats track never leaves the process.
   Gauges are carried but never summed.
 - **On main.** Every change is additive: optional sections on
   `#[non_exhaustive]` catalog types, and new types. The line left the
@@ -111,13 +120,12 @@ connection view and the dashboard flow.
 
 ## Required
 
-- [Rust reporters](/quest/m2/stats/rust.md) - the player, encoders, and
-  gateways publish stats and feedback, as the CLI remuxes do
-- [Browser reporters](/quest/m2/stats/js.md) - `<moq-publish>` publishes
-  stats and `<moq-watch>` publishes feedback
+- [Rust reporters](/quest/m2/stats/rust.md) - the player and gateways
+  publish stats and feedback, as the CLI remuxes and capture do
 - [Preflight](/quest/m2/stats/preflight.md) - a bounded test run over a
   broadcast reports which media layer is broken and why
 - [Client health in use](/quest/m2/stats/health-consumers.md) - a per-connection media counter, consumers of the grade, and re-measured limits
+- [The media test checks browser feedback](/quest/m2/stats/feedback-media-test.md) - a browser publishes feedback and Rust reads it back with `moq export echo`
 
 ## Related
 
@@ -126,4 +134,4 @@ connection view and the dashboard flow.
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report
 - [Latency ledger](/quest/m2/latency-ledger.md) - adds the viewer's latency
-  stages to the same stats and feedback snapshots
+  stages to the same feedback snapshot

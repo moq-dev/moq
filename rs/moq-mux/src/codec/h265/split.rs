@@ -27,7 +27,7 @@ pub struct Split {
 	/// NAL here until the next start code arrives or [`flush`](Self::flush) drains it.
 	tail: BytesMut,
 	current: Au,
-	/// Retained VPS NALs from the latest keyframe that carried them, re-injected
+	/// Retained VPS NALs from the init or latest keyframe that carried them, re-injected
 	/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
 	/// different set, so a mid-stream reinit drops the superseded ones.
 	vps: ParameterSets,
@@ -36,7 +36,7 @@ pub struct Split {
 	/// Retained PPS NALs. A keyframe may carry several (slices reference them by
 	/// id); all are kept and re-injected, but a new GOP's set supersedes them.
 	pps: ParameterSets,
-	zero: Option<moq_clock::Instant>,
+	zero: Option<kio::clock::Instant>,
 	pending: Vec<crate::container::Frame>,
 }
 
@@ -86,6 +86,36 @@ impl Split {
 		}
 	}
 
+	/// Consume a complete init buffer as the stream's leading bytes, and retain its parameter sets.
+	///
+	/// The init's sets replace the retained ones, so a reset before the first keyframe still
+	/// re-injects them. Header NALs still waiting for a picture belong to the configuration this
+	/// init replaces, so they are dropped. A picture the init carries stays open, so it completes
+	/// with the caller's next timestamp rather than a generated one.
+	pub(crate) fn initialize(&mut self, data: &[u8]) -> Result<Vec<crate::container::Frame>> {
+		let pts = self.pts(None)?;
+		// The init's leading start code ends any NAL still in flight.
+		self.end_tail(pts)?;
+		if !self.current.contains_slice {
+			self.current = Au::default();
+		}
+		let mut frames = self.decode(data, pts)?;
+		// The init is complete, so its final NAL ends with it.
+		self.end_tail(pts)?;
+		frames.append(&mut self.pending);
+		InBandCodec::H265.adopt_init(data, &mut [&mut self.vps, &mut self.sps, &mut self.pps])?;
+		Ok(frames)
+	}
+
+	/// Decode the buffered final NAL, which the caller says is complete, without closing its access unit.
+	fn end_tail(&mut self, pts: moq_net::Timestamp) -> Result<()> {
+		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
+			self.decode_nal(nal, pts)?;
+		}
+		self.tail.clear();
+		Ok(())
+	}
+
 	/// Decode a buffer where frame boundaries are unknown, returning the access
 	/// units it can complete. The leading start code of the *next* access unit is
 	/// what signals the previous one is complete, so the final NAL of the in-flight
@@ -116,10 +146,7 @@ impl Split {
 	/// (or at end of stream) so the final NAL isn't left buffered.
 	pub fn flush(&mut self, pts: impl Into<Option<moq_net::Timestamp>>) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
-			self.decode_nal(nal, pts)?;
-		}
-		self.tail.clear();
+		self.end_tail(pts)?;
 		self.maybe_start_frame(pts)?;
 		Ok(std::mem::take(&mut self.pending))
 	}
@@ -243,10 +270,7 @@ impl Split {
 
 	/// Drop any in-flight access unit, and any frame completed but not yet returned.
 	///
-	/// Pre-reset NALs would otherwise leak into a later frame with the wrong
-	/// timestamp, and a frame queued before a failed [`decode`](Self::decode) would
-	/// surface on the next call. The parameter-set cache is kept so subsequent
-	/// keyframes stay self-contained.
+	/// The retained parameter sets, including those supplied by the init, survive.
 	pub fn reset(&mut self) {
 		self.current = Au::default();
 		self.tail.clear();
@@ -274,7 +298,7 @@ impl Split {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
-		let zero = self.zero.get_or_insert_with(moq_clock::Instant::now);
+		let zero = self.zero.get_or_insert_with(kio::clock::Instant::now);
 		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
@@ -324,6 +348,95 @@ mod tests {
 		let mut frames = split.decode(buf, pts).unwrap();
 		frames.extend(split.flush(pts).unwrap());
 		frames
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn reset_keeps_headers_but_discards_pictures_and_queued_frames() {
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS])).unwrap().is_empty());
+		assert!(split.decode(&annexb(&[&[0x02, 0x01]]), ts()).unwrap().is_empty());
+		split.reset();
+		let next = moq_net::Timestamp::from_micros(1_000).unwrap();
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, annexb(&[VPS, SPS, PPS, IDR]));
+		assert_eq!(frames[0].timestamp, next);
+
+		assert!(decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS, AUD]), ts()).is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, annexb(&[VPS, SPS, PPS, IDR]));
+
+		// A completed IDR and a partial delta both await a reset after decode fails.
+		assert!(split.decode(&annexb(&[IDR, TRAIL, &[0x80, 0x01], AUD]), ts()).is_err());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 1, "neither the queued IDR nor the partial delta survives");
+		assert_eq!(frames[0].payload, annexb(&[VPS, SPS, PPS, IDR]));
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].timestamp, next);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn reset_discards_damaged_prefix_before_first_picture() {
+		let mut split = Split::new();
+		assert!(
+			split
+				.decode(&annexb(&[AUD, VPS, SPS, PPS, PREFIX_SEI, &[0x80, 0x01], AUD]), ts())
+				.is_err()
+		);
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[AUD, TRAIL]), ts());
+		assert_eq!(frames.len(), 1);
+		assert!(!frames[0].keyframe);
+		assert_eq!(frames[0].payload, annexb(&[AUD, TRAIL]));
+	}
+
+	/// A picture inside the init completes with the caller's next timestamp rather than a
+	/// generated one, and a later init replaces the retained sets rather than adding to them.
+	#[tokio::test(start_paused = true)]
+	async fn initialize_keeps_framing_and_replaces_retained_sets() {
+		// PPS with pps_pic_parameter_set_id 1.
+		let pps1: &[u8] = &[0x44, 0x01, 0x41, 0x72, 0xb4, 0x62, 0x40];
+		let next = moq_net::Timestamp::from_micros(5_000).unwrap();
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS, IDR])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].payload, annexb(&[VPS, SPS, PPS, IDR]));
+		assert_eq!(frames[0].timestamp, next);
+
+		// Without a reset, the open unit drops the superseded init's headers too.
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS])).unwrap().is_empty());
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[VPS, SPS, PPS, IDR]),
+			"the superseded PPS is not sent"
+		);
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[VPS, SPS, PPS, IDR]),
+			"the superseded PPS is not retained"
+		);
+
+		let mut split = Split::new();
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS, pps1])).unwrap().is_empty());
+		assert!(split.initialize(&annexb(&[VPS, SPS, PPS])).unwrap().is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(
+			frames[0].payload,
+			annexb(&[VPS, SPS, PPS, IDR]),
+			"the superseded PPS is dropped"
+		);
 	}
 
 	/// Length-prefix each NAL with a 4-byte big-endian length: the hvc1 wire shape.

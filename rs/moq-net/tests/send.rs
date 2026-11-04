@@ -1,5 +1,5 @@
 //! Compile these downstream futures at Rust's default recursion limit.
-#![cfg(all(feature = "async", not(target_family = "wasm")))]
+#![cfg(feature = "async")]
 
 fn require_send(_: impl Send) {}
 

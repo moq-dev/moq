@@ -1011,10 +1011,13 @@ mod tests {
 		let ago = Duration::from_secs(60);
 		let _ = moq_net::time::Instant::now();
 		tokio::time::advance(ago).await;
-		let clock = moq_mux::Clock::at(moq_net::time::Instant::now() - ago, moq_clock::wall() - ago).unwrap();
+		let clock = moq_mux::Clock::at(moq_net::time::Instant::now() - ago, kio::clock::wall() - ago).unwrap();
 		let mut input = moq_net::broadcast::Info::default().produce();
-		let source =
-			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();
+		let source = moq_mux::catalog::Producer::new(
+			&mut input,
+			moq_mux::catalog::Config::default().with_clock(clock.clone()),
+		)
+		.unwrap();
 
 		let mut output = moq_net::broadcast::Info::default().produce();
 		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();
@@ -1034,7 +1037,7 @@ mod tests {
 			.unwrap();
 		let mut subscriber = status.consume();
 		tokio::time::advance(Duration::from_secs(3)).await;
-		status.update(moq_net::Timed::from(&1).at(adopted.now())).unwrap();
+		status.update(&1, adopted.now()).unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let std::task::Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {

@@ -47,7 +47,8 @@ export function kindFromSegment(segment: string): Kind | undefined {
  * Split a room-relative broadcast path into identity and kind.
  *
  * The last segment is the kind; everything before it is the identity. Returns
- * `undefined` when there is no identity, or the last segment is not a kind.
+ * `undefined` when there is no identity, the last segment is not a kind, or the `/`
+ * before it is escaped.
  */
 export function parse(path: Path.Valid): Parsed | undefined {
 	const parts = Path.parts(path);
@@ -56,7 +57,12 @@ export function parse(path: Path.Valid): Parsed | undefined {
 	const kind = kindFromSegment(parts[parts.length - 1]);
 	if (!kind) return undefined;
 
-	return { identity: Path.from(...parts.slice(0, -1)), kind };
+	try {
+		// Only an identity ending in half an escape is refused, when that `/` was escaped.
+		return { identity: Path.from(path.slice(0, path.lastIndexOf("/"))), kind };
+	} catch {
+		return undefined;
+	}
 }
 
 /** The broadcast path a participant publishes for `kind`. */

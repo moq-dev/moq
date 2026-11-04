@@ -29,7 +29,7 @@ export class Producer<T> {
 	#group?: Moq.Group.Producer;
 
 	// The sequence of the newest group written, which a joiner's wanted group has to pass.
-	#largest?: number;
+	#largest?: bigint;
 	// The newest timestamp written, which a refresh restates the window at. An edit may carry an
 	// older timestamp than its group's first frame, and a new group may not start before that one.
 	#at?: Time.Timestamp;
@@ -48,7 +48,7 @@ export class Producer<T> {
 	}
 
 	// Restate the window in a new group once a joiner wants one past the largest written.
-	#refresh(wanted: number | undefined): void {
+	#refresh(wanted: bigint | undefined): void {
 		if (this.#finished || wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
 
 		// Nobody awaits a refresh, so a failed write has no caller to report to. Abort the track rather
@@ -110,7 +110,7 @@ export class Producer<T> {
 
 	#write(encoded: Encoded & { commit(): void }, at: Time.Timestamp | undefined): void {
 		// A throw leaves the edit uncommitted and the retained window unchanged. The next edit opens a
-		// new group because the attempted frame advanced the group-local compression state.
+		// new group, since a consumer may hold the group the frame was meant for.
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle
 			// before opening the next one, so a failure below doesn't leave a closed group behind.
@@ -159,6 +159,11 @@ export class Producer<T> {
 	/** Finish the track, closing any open group. */
 	finish(): void {
 		this.#close();
+	}
+
+	/** Abort the track with `err`, so readers see the cause rather than a complete window. Idempotent. */
+	abort(err: Error): void {
+		this.#close(err);
 	}
 
 	#close(abort?: Error): void {

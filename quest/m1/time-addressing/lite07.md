@@ -4,7 +4,7 @@
 
 moq-lite-07 carries no group sequence numbers: a GROUP names its start and
 its predecessor's start, GROUP_END says where a whole group ends, and every
-subscription bound, drop, and datagram is a time. Rust speaks it, the lite
+subscription bound and drop is a time. Datagrams keep a sequence of their own ([Datagram tracks](/quest/m1/datagram-tracks/README.md)). Rust speaks it, the lite
 draft specifies it, and lite-01..06 are unchanged.
 
 ## Plan
@@ -19,11 +19,22 @@ Decided 2026-10-25 (maintainer), from the spike:
   arrived, and a reset aborts. A relay closes an expired or partial group
   instead of resetting it, which changes the draft's reset rule for those
   groups (around line 760).
-- SUBSCRIBE and SUBSCRIBE_UPDATE bounds, SUBSCRIBE_START and its largest,
-  SUBSCRIBE_END, SUBSCRIBE_DROP, and datagrams address by start. Drops name
+- SUBSCRIBE and SUBSCRIBE_UPDATE bounds, SUBSCRIBE_OK and its largest,
+  SUBSCRIBE_END, and SUBSCRIBE_DROP address by start. Datagrams keep their own sequence (maintainer, 2026-11-01). Drops name
   time spans with no group to deliver, not sequence ranges. `Relative(n)`
   stays a group count.
 - Positions stay (start, frame index), preserving transport frame offsets.
+- SUBSCRIBE_UPDATE's `Wanted Group` (a sequence plus one) and SUBSCRIBE_OK's
+  `Group` and `Largest Group` are sequences too, and change with the rest.
+- `Timescale` 0 stays and means scale-less: keys and frame timestamps are
+  bare numbers, and a scale-less frame carries its group's key (decided
+  2026-11-03, maintainer: ingested legacy tracks with bare keys still cross
+  lite-07; see [the model](/quest/m1/time-addressing/model.md)). FRAME and
+  datagrams always carry a timestamp. The untimed cases of
+  TIMESTAMP_MISMATCH, Time anchors, and arrival-age-only expiry become the
+  scale-less cases. The rule that a Group's frame
+  0 not start before a lower-sequence Group's becomes the strictly
+  increasing start.
 
 Update `drafts/draft-lcurley-moq-lite.md` (fields, the group-end rules, and the
 lite-07 changelog) and `doc/concept/moq-lite.md`, and run `just drafts check`
@@ -31,7 +42,7 @@ and `just test interop --all`.
 
 Public API: none beyond [the model](/quest/m1/time-addressing/model.md).
 Wire: lite-07-wip GROUP, GROUP_END, SUBSCRIBE, SUBSCRIBE_UPDATE,
-SUBSCRIBE_START, SUBSCRIBE_END, SUBSCRIBE_DROP, and datagrams change.
+SUBSCRIBE_OK, SUBSCRIBE_END, and SUBSCRIBE_DROP change.
 
 ## Required
 

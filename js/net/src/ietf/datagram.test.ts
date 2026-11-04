@@ -4,12 +4,12 @@ import { encodeVarint } from "../stream.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_22];
+const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 
 function single(publisherPriority?: number): ObjectDatagram {
 	return new ObjectDatagram({
 		trackAlias: 3n,
-		groupId: 42,
+		groupId: 42n,
 		publisherPriority,
 		endOfGroup: true,
 		properties: Uint8Array.of(0x10, 0x05),
@@ -33,7 +33,7 @@ test("roundtrips on every draft", async () => {
 test("an explicit object id and a status", async () => {
 	const datagram = new ObjectDatagram({
 		trackAlias: 1n,
-		groupId: 2,
+		groupId: 2n,
 		objectId: 0,
 		publisherPriority: 128,
 		endOfGroup: false,

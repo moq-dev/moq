@@ -5,8 +5,9 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
 fi
 
-# Full check for the Kotlin packages: regenerate the bindings + native lib
-# (sh/kt/generate.sh), then run the raw-bindings and wrapper JVM tests.
+# Full check for the Kotlin packages: check formatting (sh/kt/format.sh),
+# regenerate the bindings + native lib (sh/kt/generate.sh), then run the
+# raw-bindings and wrapper JVM tests.
 #
 # Unlike generation, this needs a JDK and Gradle. Both ship in the `nix
 # develop` dev shell (see flake.nix ktDeps), so a missing one is an error
@@ -16,6 +17,9 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KT_DIR="$(cd "$SCRIPT_DIR/../../kt" && pwd)"
+
+# Formatting needs only ktfmt, so it fails before the slower generation.
+bash "$SCRIPT_DIR/format.sh" --check
 
 bash "$SCRIPT_DIR/generate.sh"
 
@@ -32,7 +36,7 @@ fi
 
 # The Gradle daemon, and the Kotlin daemon it starts, outlive the build, so the next check
 # skips their warm-up. A GitHub Actions runner kills whatever a job leaves running, found by
-# its RUNNER_TRACKING_ID, so Gradle runs without the job's variables: the merge queue's
+# its RUNNER_TRACKING_ID, so Gradle runs without the job's variables: the landing worker's
 # persistent runner then keeps the daemons for its next job. A daemon keeps the environment it
 # started with, so this also keeps the job's tokens out of it; each build gets its client's.
 gradle() (

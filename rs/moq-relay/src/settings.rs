@@ -56,10 +56,6 @@ pub struct Settings {
 
 	#[usage(env = "MOQ_DRAIN_TIMEOUT", cli("--drain-timeout"))]
 	drain_timeout: Option<String>,
-
-	#[cfg(feature = "iroh")]
-	#[usage(flatten)]
-	iroh: moq_tokio::settings::Iroh,
 }
 
 #[derive(usage_rs::Config)]
@@ -139,6 +135,9 @@ struct ClusterLan {
 struct Auth {
 	#[usage(env = "MOQ_AUTH_URL", cli("--auth-url"))]
 	url: Option<String>,
+
+	#[usage(env = "MOQ_AUTH_ROOT", cli("--auth-root"))]
+	root: Option<Vec<String>>,
 
 	#[usage(env = "MOQ_AUTH_PUBLIC", cli("--auth-public"), parse = "list_by_comma")]
 	public: Option<Vec<String>>,

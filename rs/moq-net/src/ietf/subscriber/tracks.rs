@@ -42,6 +42,7 @@ pub(super) fn listing_end(done: &ietf::PublishDone, version: Version) -> Result<
 
 /// A paused upstream subscription and the request stream that controls it.
 pub(super) struct Upstream {
+	pub(super) token_grant: Option<crate::auth::RequestGrant>,
 	pub(super) stream: Stream<Transport, Version>,
 	pub(super) messages: Messages,
 	pub(super) request_id: RequestId,
@@ -433,13 +434,8 @@ impl Subscriber {
 				request_id,
 				prefix: prefix.clone(),
 				forward: false,
-				subscriber_priority: None,
 				group_order: None,
-				filter: None,
 				properties_wanted: true,
-				new_group: None,
-				range_filters: false,
-				track_filter: false,
 				authorization_token: None,
 			},
 		)?;
@@ -452,18 +448,20 @@ impl Subscriber {
 			Cancelled,
 			Message(Option<Framed>),
 		}
+		// A peer streaming skips must not hold the session's other tasks.
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			let event = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Ok(Event::Closed));
 				}
 				if live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Ok(Event::Cancelled));
 				}
-				ready!(stream.writer.poll_flush(&mut cx))?;
+				ready!(stream.writer.poll_flush(waiter))?;
 				messages
-					.poll_next(&mut stream.reader, &mut cx)
+					.poll_next(&mut stream.reader, waiter)
 					.map(|next| next.map(Event::Message))
 			})
 			.await?;
@@ -510,6 +508,12 @@ impl Subscriber {
 		// made stay ours.
 		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), prefix), "subscribe_tracks cancelled");
 		let Stream { mut writer, mut reader } = stream;
+		// The request never reached the peer whole, so it holds nothing to wait on.
+		if !writer.is_flushed() {
+			reader.abort(&Error::Cancel);
+			writer.abort(&Error::Cancel);
+			return Ok(());
+		}
 		match request_stream::fin_cancels(self.version) {
 			true => {
 				let _ = writer.finish();
@@ -517,12 +521,12 @@ impl Subscriber {
 			false => writer.abort(&Error::Cancel),
 		}
 		kio::wait(|waiter| {
-			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() {
+			if session.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			loop {
-				match ready!(messages.poll_next(&mut reader, &mut cx)) {
+				ready!(budget.poll_yield(waiter));
+				match ready!(messages.poll_next(&mut reader, waiter)) {
 					Ok(Some(_)) => continue,
 					Ok(None) | Err(_) => return Poll::Ready(()),
 				}
@@ -626,15 +630,16 @@ impl Subscriber {
 		self.state.lock().subscribes.insert(
 			request_id,
 			TrackState {
-				epoch: self.epoch.clone(),
 				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done))
 			},
 		);
 		let mut messages = Messages::new(self.session.clone(), self.control.client());
 		let accepted = async {
-			stream
-				.writer
-				.encode_message(&ietf::Subscribe {
+			// Flushed while waiting for the answer, so the entry going still ends a request
+			// the peer's send window holds back.
+			stream.writer.buffer_message(
+				ietf::Subscribe::ID,
+				&ietf::Subscribe {
 					max_age: None,
 					new_group: None,
 					request_id,
@@ -650,10 +655,12 @@ impl Subscriber {
 					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
-					epoch: self.epoch.clone(),
-				})
-				.await?;
-			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream, &mut messages));
+				},
+			)?;
+			let mut response = std::pin::pin!(async {
+				kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
+				self.read_subscribe_response(&mut stream, &mut messages).await
+			});
 			let answered = kio::wait(|waiter| {
 				if gone(waiter) {
 					return Poll::Ready(None);
@@ -712,6 +719,7 @@ impl Subscriber {
 			return Ok(None);
 		}
 		Ok(Some(Upstream {
+			token_grant: None,
 			stream,
 			messages,
 			request_id,
@@ -749,6 +757,61 @@ impl Subscriber {
 		mut stream: Stream<Transport, Version>,
 		msg: ietf::Publish<'static>,
 	) -> Result<(), Error> {
+		let token_grant = if let Some(token) = msg
+			.authorization_token
+			.clone()
+			.filter(|_| self.auth.token_decides(crate::auth::Direction::Subscribe))
+		{
+			let credit = kio::Producer::<()>::default();
+			let hold: crate::auth::Hold = std::sync::Arc::new(credit.consume());
+			let verdict = self.auth.verify_request(
+				token.0,
+				Some(hold),
+				crate::auth::RequestKind::Publish,
+				&msg.track_namespace,
+			);
+			let session = self.session.clone();
+			let verified = kio::wait(|waiter| {
+				if session.poll_closed(waiter).is_ready()
+					|| request_stream::poll_withdrawn(&mut stream, request_stream::fin_cancels(self.version), waiter)
+						.is_ready()
+				{
+					return Poll::Ready(None);
+				}
+				verdict.poll_grant(waiter).map(Some)
+			})
+			.await;
+			let Some(verified) = verified else {
+				drop(verdict);
+				kio::wait(|waiter| {
+					if session.poll_closed(waiter).is_ready() || credit.poll_wanted_changed(waiter, true).is_ready() {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				})
+				.await;
+				return Ok(());
+			};
+			match crate::auth::RequestGrant::new(
+				&self.runtime,
+				verdict,
+				verified,
+				msg.track_namespace.clone(),
+				crate::auth::RequestKind::Publish,
+				None,
+			) {
+				Ok(grant) => Some(grant),
+				Err(refusal) => {
+					let (kind, err) = (request::Kind::Publish, &refusal.error);
+					request_stream::buffer_error(&mut stream.writer, kind, err, &refusal.reason, self.version)?;
+					// Dropping an unfinished writer resets it, which could discard the refusal.
+					return request_stream::deliver(&mut stream.writer).await;
+				}
+			}
+		} else {
+			None
+		};
 		let key: TrackKey = (msg.track_namespace.clone(), msg.track_name.as_ref().into());
 		let info = accepted_info(&msg.properties, self.version);
 		let flate = self.peer_setup.get().await.flate;
@@ -840,11 +903,10 @@ impl Subscriber {
 		self.state.lock().subscribes.insert(
 			request_id,
 			TrackState {
-				epoch: self.epoch.clone(),
 				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done))
 			},
 		);
-		let ok = async {
+		let ok = crate::auth::RequestGrant::guard(token_grant.as_ref(), async {
 			self.bind_alias(request_id, msg.track_alias)?;
 			// PUBLISH_OK is a REQUEST_OK on draft-22. FORWARD=0 holds it paused on draft-18;
 			// on draft-22 the PUBLISH our FORWARD=0 asked for already is.
@@ -862,9 +924,11 @@ impl Subscriber {
 					new_group: None,
 				},
 			)?;
-			std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await
-		}
-		.await;
+			kio::wait(|waiter| stream.writer.poll_flush(waiter)).await
+		})
+		.await
+		.map_err(|refusal| refusal.error)
+		.and_then(|result| result);
 		if let Err(err) = ok {
 			tracing::debug!(broadcast = %key.0, track = %key.1, %err, "failed to hold publish");
 			self.remove_subscribe(request_id);
@@ -877,6 +941,7 @@ impl Subscriber {
 		}
 		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), &key.0), track = %key.1, id = %request_id, "holding publish");
 		let upstream = Upstream {
+			token_grant,
 			stream,
 			messages: Messages::new(self.session.clone(), self.control.client()),
 			request_id,
@@ -892,7 +957,7 @@ impl Subscriber {
 	/// Watch a paused subscription until it ends, its entry is let go, or a subscription
 	/// takes it to resume.
 	async fn watch(&self, key: TrackKey, mut upstream: Upstream, handoff: kio::Shared<Handoff>) {
-		let mut session = self.session.clone();
+		let session = self.session.clone();
 		enum Step {
 			Closed,
 			Gone,
@@ -901,22 +966,34 @@ impl Subscriber {
 		}
 		let end = loop {
 			let step = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() {
+				if session.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Step::Closed);
 				}
-				if let Poll::Ready(handoff) = handoff.poll(waiter, |handoff| match handoff.gone || handoff.wanted {
-					true => Poll::Ready(()),
-					false => Poll::Pending,
-				}) {
+				// A held subscription is handed over only once flushed, so resumes and pauses
+				// can't pile up behind a peer withholding credit.
+				let flushed = match upstream.stream.writer.poll_flush(waiter) {
+					Poll::Ready(Err(err)) => return Poll::Ready(Step::Message(Err(err))),
+					Poll::Ready(Ok(())) => true,
+					Poll::Pending => false,
+				};
+				if let Poll::Ready(handoff) =
+					handoff.poll(waiter, |handoff| match handoff.gone || (handoff.wanted && flushed) {
+						true => Poll::Ready(()),
+						false => Poll::Pending,
+					}) {
 					return Poll::Ready(match handoff.gone {
 						true => Step::Gone,
 						false => Step::Wanted,
 					});
 				}
+				if let Some(grant) = &upstream.token_grant
+					&& let Poll::Ready(refusal) = grant.poll_ended(waiter)
+				{
+					return Poll::Ready(Step::Message(Err(refusal.error)));
+				}
 				upstream
 					.messages
-					.poll_next(&mut upstream.stream.reader, &mut cx)
+					.poll_next(&mut upstream.stream.reader, waiter)
 					.map(Step::Message)
 			})
 			.await;
@@ -967,7 +1044,13 @@ impl Subscriber {
 		};
 		tracing::debug!(broadcast = %key.0, track = %key.1, ?end, "held subscription ended");
 		self.remove_subscribe(upstream.request_id);
-		let _ = upstream.stream.writer.finish();
+		// A pause still held back would go out truncated behind a FIN.
+		match upstream.stream.writer.is_flushed() {
+			true => {
+				let _ = upstream.stream.writer.finish();
+			}
+			false => upstream.stream.writer.abort(&Error::Cancel),
+		}
 		// A failed upstream fails the copy, as it would while forwarding. TRACK_ENDED leaves it
 		// idle: the end is past groups it never saw, so a returning reader's SUBSCRIBE learns
 		// where, as for a copy whose subscription was cancelled.
@@ -1077,14 +1160,15 @@ impl Subscriber {
 		});
 	}
 
-	/// Pause a subscription nobody reads that is its track's entry, and hold it again.
-	pub(super) async fn pause(&self, key: TrackKey, mut upstream: Upstream) {
+	/// Pause a subscription nobody reads that is its track's entry, and hold it again. The
+	/// held watch flushes the pause, so the entry going still ends it under send pressure.
+	pub(super) fn pause(&self, key: TrackKey, mut upstream: Upstream) {
 		self.park_subscribe(upstream.request_id);
 		let pause = Forward {
 			forward: false,
 			..Default::default()
 		};
-		match self.write_forward(&mut upstream.stream.writer, &pause).await {
+		match self.buffer_forward(&mut upstream.stream.writer, &pause) {
 			Ok(()) => {
 				upstream.owed += 1;
 				tracing::debug!(broadcast = %key.0, track = %key.1, "subscription paused");
@@ -1110,7 +1194,6 @@ impl Subscriber {
 		}
 		let parked = TrackState {
 			alias: held.alias,
-			epoch: held.epoch.clone(),
 			tail: std::mem::take(&mut held.tail),
 			..TrackState::pending(
 				std::mem::take(&mut held.name),
@@ -1127,15 +1210,17 @@ impl Subscriber {
 		}
 	}
 
-	/// Set a held subscription's Forward State with REQUEST_UPDATE.
-	pub(super) async fn write_forward(
+	/// Buffer the REQUEST_UPDATE setting a held subscription's Forward State, for the
+	/// caller to flush.
+	pub(super) fn buffer_forward(
 		&self,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		forward: &Forward,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id();
-		writer
-			.encode_message(&ietf::SubscribeUpdate {
+		writer.buffer_message(
+			ietf::SubscribeUpdate::ID,
+			&ietf::SubscribeUpdate {
 				max_age: forward.max_age,
 				request_id,
 				subscriber_priority: forward.priority.map(super::super::priority::to_wire),
@@ -1144,8 +1229,8 @@ impl Subscriber {
 				authorization_token: None,
 				new_group: forward.new_group,
 				fill: forward.fill,
-			})
-			.await
+			},
+		)
 	}
 
 	/// Check the answer to a REQUEST_UPDATE a held subscription still owes. It carries
@@ -1248,17 +1333,21 @@ mod tests {
 		listening: Listening,
 		version: Version,
 		_broadcast: crate::broadcast::Producer,
-		_driver: moq_clock::sim::JoinHandle<()>,
+		_driver: kio::clock::sim::JoinHandle<()>,
 	}
 
 	async fn settle() {
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		kio::clock::sleep(Duration::from_millis(1)).await;
 	}
 
 	fn harness(version: Version) -> Harness {
-		let (session, peer) = memory::pair(memory::Config::default());
+		harness_with(version, memory::Config::default())
+	}
+
+	fn harness_with(version: Version, config: memory::Config) -> Harness {
+		let (session, peer) = memory::pair(config);
 		let (tasks, mut task_set) = TaskSet::new();
-		let driver = moq_clock::sim::spawn(async move { kio::wait(|waiter| task_set.poll(waiter)).await });
+		let driver = kio::clock::sim::spawn(async move { kio::wait(|waiter| task_set.poll(waiter)).await });
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
 			crate::driver::Transport::new(session.clone()),
@@ -1292,14 +1381,15 @@ mod tests {
 			let id = stream.reader.varint().await.unwrap();
 			(id, stream.reader.decode::<ietf::Body>().await.unwrap())
 		};
-		moq_clock::timeout(TIMEOUT, read)
+		kio::clock::timeout(TIMEOUT, read)
 			.await
 			.expect("the subscriber sent nothing")
 	}
 
+	/// One message in one write, so a peer holding one message per stream still delivers it.
 	async fn write<'m, M: ietf::Message<'m> + std::fmt::Debug>(stream: &mut PeerStream, id: u64, msg: &M) {
-		stream.writer.varint(id).await.unwrap();
-		stream.writer.encode(msg).await.unwrap();
+		stream.writer.buffer_message(id, msg).unwrap();
+		kio::wait(|waiter| stream.writer.poll_flush(waiter)).await.unwrap();
 		settle().await;
 	}
 
@@ -1318,7 +1408,7 @@ mod tests {
 	impl Harness {
 		/// Accept the SUBSCRIBE_TRACKS and establish it.
 		async fn establish(&mut self) -> PeerStream {
-			let mut stream = moq_clock::timeout(
+			let mut stream = kio::clock::timeout(
 				TIMEOUT,
 				Stream::accept(&mut crate::driver::Transport::new(self.peer.clone()), self.version),
 			)
@@ -1356,14 +1446,14 @@ mod tests {
 		) -> (
 			crate::track::Consumer,
 			kio::Pending<crate::track::Subscribing>,
-			moq_clock::sim::JoinHandle<()>,
+			kio::clock::sim::JoinHandle<()>,
 		) {
 			let mut dynamic = self._broadcast.requests();
 			let track = self._broadcast.consume().track(name).unwrap();
 			let reader = track.subscribe(None);
 			let request = dynamic.requested_track().await.expect("no track requested");
 			let mut subscriber = self.subscriber.clone();
-			let serving = moq_clock::sim::spawn(async move {
+			let serving = kio::clock::sim::spawn(async move {
 				subscriber
 					.run_subscribe(Path::from_static("bcast"), dynamic, None, request)
 					.await;
@@ -1378,7 +1468,7 @@ mod tests {
 		) -> (
 			crate::track::Consumer,
 			crate::track::Subscriber,
-			moq_clock::sim::JoinHandle<()>,
+			kio::clock::sim::JoinHandle<()>,
 		) {
 			let (track, reader, serving) = self.read_track("video").await;
 			let (id, body) = read(video).await;
@@ -1390,7 +1480,7 @@ mod tests {
 				largest: None,
 			};
 			write(video, ietf::RequestOk::ID, &ok).await;
-			let reader = moq_clock::timeout(TIMEOUT, reader)
+			let reader = kio::clock::timeout(TIMEOUT, reader)
 				.await
 				.expect("never accepted")
 				.unwrap();
@@ -1401,7 +1491,7 @@ mod tests {
 		async fn resume_and_pause(
 			&mut self,
 			video: &mut PeerStream,
-		) -> (crate::track::Consumer, moq_clock::sim::JoinHandle<()>) {
+		) -> (crate::track::Consumer, kio::clock::sim::JoinHandle<()>) {
 			let (track, reader, serving) = self.resume(video).await;
 			drop(reader);
 			let (id, body) = read(video).await;
@@ -1417,8 +1507,7 @@ mod tests {
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(self.peer.clone()), self.version)
 				.await
 				.unwrap();
-			stream.writer.varint(ietf::Publish::ID).await.unwrap();
-			stream.writer.encode(&publish).await.unwrap();
+			stream.writer.encode_message(&publish).await.unwrap();
 
 			let mut ours = Stream::accept(&mut self.subscriber.session.clone(), self.version)
 				.await
@@ -1428,7 +1517,7 @@ mod tests {
 			let body: ietf::Body = ours.reader.decode().await.unwrap();
 			let mut subscriber = self.subscriber.clone();
 			let version = self.version;
-			moq_clock::sim::spawn(async move {
+			kio::clock::sim::spawn(async move {
 				let msg = body.message::<ietf::Publish>(version).unwrap().into_owned();
 				let _ = subscriber.serve_publish(ours, msg).await;
 			});
@@ -1437,9 +1526,46 @@ mod tests {
 		}
 	}
 
+	/// Readers coming and going while the peer withholds credit on a held track never pile
+	/// updates up behind it: the held subscription is handed over only once its pause is out,
+	/// and a reader leaving meanwhile stops waiting for it.
+	#[kio::test]
+	async fn churn_under_withheld_credit_buffers_one_resume_and_pause() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			// One message in flight per stream, so a peer that stops reading withholds credit.
+			let config = memory::Config {
+				stream_buffer: 0,
+				..Default::default()
+			};
+			let mut h = harness_with(version, config);
+			let _listing = h.establish().await;
+			let mut video = h.publish("video", 1).await;
+
+			for _ in 0..3 {
+				let (track, reader, serving) = h.read_track("video").await;
+				settle().await;
+				drop(reader);
+				drop(track);
+				kio::clock::timeout(TIMEOUT, serving)
+					.await
+					.unwrap_or_else(|_| panic!("{version}: the abandoned resume stayed alive"))
+					.unwrap();
+			}
+
+			let mut updates = Vec::new();
+			while let Ok(Ok(id)) = kio::clock::timeout(TIMEOUT, video.reader.varint()).await {
+				let body: ietf::Body = video.reader.decode().await.unwrap();
+				assert_eq!(id, ietf::SubscribeUpdate::ID, "{version}");
+				updates.push(body.message::<ietf::SubscribeUpdate>(version).unwrap().forward);
+			}
+			assert_eq!(updates, [Some(true), Some(false)], "{version}");
+		}
+	}
+
 	/// A paused PUBLISH of `name` in `namespace`, aliased by its request ID.
 	fn offered<'a>(namespace: &'a str, name: &'a str, request_id: u64) -> ietf::Publish<'a> {
 		ietf::Publish {
+			authorization_token: None,
 			request_id: RequestId(request_id),
 			track_namespace: Path::new(namespace).unwrap(),
 			track_name: name.into(),
@@ -1453,6 +1579,35 @@ mod tests {
 		}
 	}
 
+	/// One SUBSCRIBE_TRACKS covers each nesting chain, since the peer refuses an overlapping
+	/// prefix: a nested listing reuses the broader request, and a broader one cancels the
+	/// nested requests and goes out only once they have left the wire.
+	#[test]
+	fn overlapping_listings_share_one_request() {
+		let broadcasts: Vec<_> = (0..5).map(|_| crate::broadcast::Info::default().produce()).collect();
+		let lister = |i: usize| Arc::new(broadcasts[i].requests().lister().unwrap());
+		let live = |listings: &Listings| listings.requests.values().filter(|r| r.live.is_some()).count();
+
+		let mut listings = Listings::default();
+		let (_, _, outer) = listings.listen(Path::from_static("a"), lister(0));
+		assert!(
+			outer.is_some_and(|outer| outer.blockers.is_empty()),
+			"the first listing waits"
+		);
+		let (_, _, nested) = listings.listen(Path::from_static("a/b"), lister(1));
+		assert!(nested.is_none(), "a nested listing asked again");
+		assert_eq!(live(&listings), 1);
+
+		let mut listings = Listings::default();
+		for (i, path) in ["a/b", "a/c"].into_iter().enumerate() {
+			let (_, _, nested) = listings.listen(Path::new(path).unwrap(), lister(2 + i));
+			assert!(nested.is_some_and(|nested| nested.blockers.is_empty()), "{path}");
+		}
+		let (_, _, outer) = listings.listen(Path::from_static("a"), lister(4));
+		assert_eq!(outer.expect("the broader listing asks").blockers.len(), 2);
+		assert_eq!(live(&listings), 1, "the nested requests stand beside it");
+	}
+
 	/// The error code a refused PUBLISH answered with.
 	fn refusal(id: u64, body: &ietf::Body, version: Version) -> u64 {
 		assert_eq!(id, ietf::RequestError::ID, "accepted");
@@ -1462,7 +1617,7 @@ mod tests {
 	/// A PUBLISH no listing asked for stays refused, and one for a track already held is
 	/// redundant: DUPLICATE_SUBSCRIPTION on draft-18, which allows one subscription per
 	/// track, and UNINTERESTED after.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unasked_or_redundant_publish_is_refused() {
 		for (version, duplicate) in [(Version::Draft18, 0x19), (Version::Draft22, 0x20)] {
 			let mut h = harness(version);
@@ -1476,7 +1631,7 @@ mod tests {
 	}
 
 	/// A PUBLISH_DONE with TRACK_ENDED unlists the track as finished, and the listing stands.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_track_ended_publish_finishes_the_track() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
@@ -1496,7 +1651,7 @@ mod tests {
 
 	/// Any other PUBLISH_DONE, INTERNAL_ERROR included, fails the listing rather than hide a
 	/// track that may be live.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn another_publish_done_fails_the_listing() {
 		let version = Version::Draft22;
 		for (status, expected) in [
@@ -1523,7 +1678,7 @@ mod tests {
 
 	/// A resumed listed track ending any way but TRACK_ENDED fails the listing, even a
 	/// clean SUBSCRIPTION_ENDED (draft 18), which says nothing of the track itself.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_resumed_track_ending_otherwise_fails_the_listing() {
 		let version = Version::Draft18;
 		let mut h = harness(version);
@@ -1542,14 +1697,14 @@ mod tests {
 		};
 		write(&mut video, ietf::PublishDone::ID, &done).await;
 		// The subscription waits out its data streams before it ends.
-		moq_clock::sleep(Duration::from_secs(5)).await;
+		kio::clock::sleep(Duration::from_secs(5)).await;
 		assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_ready());
 	}
 
 	/// A skipped track is listed through a paused SUBSCRIBE of ours, once it answers.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_skipped_track_lists_once_its_paused_subscribe_answers() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let mut listing = h.establish().await;
 			let skipped = ietf::PublishSkipped {
@@ -1559,7 +1714,7 @@ mod tests {
 			write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
 			assert_eq!(event(&mut h.tracks), None, "{version}: listed before it answered");
 
-			let mut stream = moq_clock::timeout(
+			let mut stream = kio::clock::timeout(
 				TIMEOUT,
 				Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
 			)
@@ -1591,7 +1746,7 @@ mod tests {
 	}
 
 	/// A refused paused SUBSCRIBE fails the listing.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_refused_paused_subscribe_fails_the_listing() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
@@ -1601,7 +1756,7 @@ mod tests {
 			track_name: "audio".into(),
 		};
 		write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
-		let mut stream = moq_clock::timeout(
+		let mut stream = kio::clock::timeout(
 			TIMEOUT,
 			Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
 		)
@@ -1623,7 +1778,7 @@ mod tests {
 
 	/// A listed PUBLISH whose properties we cannot take fails the listing: the peer sends
 	/// nothing else for that track, so a listing left standing would silently miss it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unsupported_publish_fails_the_listing() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
@@ -1646,9 +1801,9 @@ mod tests {
 	/// On draft-22 a PUBLISH that forwards contradicts the paused listing it answers, and
 	/// nothing we send can pause it: it is refused and the listing fails, rather than have its
 	/// objects refused unseen. On draft-18 our PUBLISH_OK pauses it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_forwarding_publish_fails_the_listing_on_draft_22() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;
 			let forwarding = ietf::Publish {
@@ -1673,10 +1828,116 @@ mod tests {
 		}
 	}
 
+	/// A copy that learned DYNAMIC_GROUPS keeps it through a draft-22 resume that opts out of
+	/// the properties, so once that subscription pauses as the listing's entry, the
+	/// REQUEST_UPDATE resuming it still carries the group a join asked for.
+	#[kio::test]
+	async fn a_paused_resume_that_opted_out_keeps_dynamic_groups() {
+		let version = Version::Draft22;
+		let mut h = harness(version);
+		let mut listing = h.establish().await;
+		let accept = |peer: memory::Session| async move {
+			let mut stream = kio::clock::timeout(TIMEOUT, Stream::accept(&mut Transport::new(peer), version))
+				.await
+				.expect("no SUBSCRIBE")
+				.unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::Subscribe::ID);
+			let msg: ietf::Subscribe = body.message(version).unwrap();
+			(stream, msg.properties_wanted, msg.new_group)
+		};
+		let subscribe_ok = |dynamic_groups| ietf::SubscribeOk {
+			track_alias: 3,
+			largest: Some(ietf::Location { group: 5, object: 0 }),
+			properties: ietf::Properties {
+				dynamic_groups,
+				..Default::default()
+			},
+		};
+		let answer = ietf::RequestOk {
+			active: None,
+			largest: None,
+		};
+
+		// The first answer declares DYNAMIC_GROUPS, and group 5 lands with a delta.
+		let (track, first, _serving) = h.read_track("video").await;
+		let (mut stream, wanted, _) = accept(h.peer.clone()).await;
+		assert!(wanted);
+		write(&mut stream, ietf::SubscribeOk::ID, &subscribe_ok(true)).await;
+		let first = kio::clock::timeout(TIMEOUT, first)
+			.await
+			.expect("never accepted")
+			.unwrap();
+		let copy = h
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.producer
+			.clone()
+			.unwrap();
+		let mut group = copy.create_group(crate::model::group::Info { sequence: 5 }).unwrap();
+		group.write_frame(None, b"key".as_slice()).unwrap();
+		group.write_frame(None, b"delta".as_slice()).unwrap();
+
+		// A join past the ratio asks for group 6, which stays outstanding.
+		let join = track.subscribe(None).await.unwrap();
+		settle().await;
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		assert_eq!(
+			body.message::<ietf::SubscribeUpdate>(version).unwrap().new_group,
+			Some(6)
+		);
+		write(&mut stream, ietf::RequestOk::ID, &answer).await;
+
+		// Everyone leaves, and the copy lingers.
+		drop((first, join));
+		settle().await;
+
+		// A returning reader resumes it, opting out of the properties: the answer has none.
+		let reader = track.subscribe(None);
+		let (mut stream, wanted, new_group) = accept(h.peer.clone()).await;
+		assert!(!wanted, "the resume opts out");
+		assert_eq!(new_group, Some(6));
+		write(&mut stream, ietf::SubscribeOk::ID, &subscribe_ok(false)).await;
+		let reader = kio::clock::timeout(TIMEOUT, reader)
+			.await
+			.expect("never accepted")
+			.unwrap();
+
+		// Skipped in the listing, so this subscription becomes the entry and pauses.
+		let skipped = ietf::PublishSkipped {
+			suffix: Path::from_static(""),
+			track_name: "video".into(),
+		};
+		write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
+		assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
+		drop(reader);
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID, "not paused");
+		assert_eq!(
+			body.message::<ietf::SubscribeUpdate>(version).unwrap().forward,
+			Some(false)
+		);
+		write(&mut stream, ietf::RequestOk::ID, &answer).await;
+
+		// The resume still asks for group 6, since the track declared DYNAMIC_GROUPS.
+		let _reader = track.subscribe(None);
+		let (id, body) = read(&mut stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID, "not resumed");
+		let resume: ietf::SubscribeUpdate = body.message(version).unwrap();
+		assert_eq!(resume.forward, Some(true));
+		assert_eq!(resume.new_group, Some(6), "the pause forgot DYNAMIC_GROUPS");
+	}
+
 	/// A listed track that finishes before its resume is answered goes back to lingering, and
 	/// its waiting reader SUBSCRIBEs: the idle copy cannot place the end, which the SUBSCRIBE
 	/// learns, rather than abort a clean finish.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_track_ending_before_its_resume_resubscribes() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
@@ -1702,7 +1963,7 @@ mod tests {
 			"TRACK_ENDED failed the listing"
 		);
 
-		let mut stream = moq_clock::timeout(
+		let mut stream = kio::clock::timeout(
 			TIMEOUT,
 			Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
 		)
@@ -1715,7 +1976,7 @@ mod tests {
 
 	/// A paused track's upstream failing aborts the copy a reader left lingering, rather
 	/// than leave it open with nothing upstream.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_paused_track_failing_aborts_its_lingering_copy() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
@@ -1736,7 +1997,7 @@ mod tests {
 
 	/// The answer a pause owes is decoded like any other, so a malformed one closes the
 	/// session rather than count as an answer.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_malformed_pause_answer_closes_the_session() {
 		let version = Version::Draft22;
 		let mut h = harness(version);
@@ -1751,22 +2012,21 @@ mod tests {
 			.write_all(&mut &[0x00, 0x02, 0x00, 0xff][..])
 			.await
 			.unwrap();
-		let mut peer = h.peer.clone();
-		let closed =
-			kio::wait(move |waiter| crate::transport::poll::Session::poll_closed(&mut peer, &mut waiter.context()));
-		moq_clock::timeout(TIMEOUT, closed)
+		let peer = h.peer.clone();
+		let closed = kio::wait(move |waiter| crate::transport::poll::Session::poll_closed(&peer, waiter));
+		kio::clock::timeout(TIMEOUT, closed)
 			.await
 			.expect("the session stayed up");
 	}
 
 	/// A peer that refuses SUBSCRIBE_TRACKS, resets it, or never answers it fails at most
 	/// that listing: a plain SUBSCRIBE still goes out and is accepted on the session.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_peer_not_answering_the_listing_still_serves_subscribe() {
 		let version = Version::Draft22;
 		for case in ["refused", "reset", "silent"] {
 			let mut h = harness(version);
-			let mut listing = moq_clock::timeout(
+			let mut listing = kio::clock::timeout(
 				TIMEOUT,
 				Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
 			)
@@ -1804,7 +2064,7 @@ mod tests {
 			}
 
 			let (_track, reader, _serving) = h.read_track("video").await;
-			let mut stream = moq_clock::timeout(
+			let mut stream = kio::clock::timeout(
 				TIMEOUT,
 				Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
 			)
@@ -1821,7 +2081,7 @@ mod tests {
 				properties: ietf::Properties::default(),
 			};
 			write(&mut stream, ietf::SubscribeOk::ID, &ok).await;
-			moq_clock::timeout(TIMEOUT, reader)
+			kio::clock::timeout(TIMEOUT, reader)
 				.await
 				.expect("never accepted")
 				.unwrap_or_else(|err| panic!("{case}: {err}"));
@@ -1830,7 +2090,7 @@ mod tests {
 
 	/// Dropping the listing cancels its SUBSCRIBE_TRACKS: FIN on draft-18, RESET_STREAM on
 	/// draft-22, where a FIN is no cancel. The held PUBLISHes are let go with it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn dropping_the_listing_cancels_it() {
 		let version = Version::Draft18;
 		let mut h = harness(version);
@@ -1838,14 +2098,14 @@ mod tests {
 		let mut video = h.publish("video", 1).await;
 		drop(h.listening);
 		settle().await;
-		let ended = moq_clock::timeout(TIMEOUT, listing.reader.varint_maybe())
+		let ended = kio::clock::timeout(TIMEOUT, listing.reader.varint_maybe())
 			.await
 			.expect("the listing stayed open");
 		match version {
 			Version::Draft18 => assert!(matches!(ended, Ok(None)), "{version}: {ended:?}"),
 			_ => assert!(ended.is_err(), "{version}: {ended:?}"),
 		}
-		let ended = moq_clock::timeout(TIMEOUT, video.reader.varint_maybe())
+		let ended = kio::clock::timeout(TIMEOUT, video.reader.varint_maybe())
 			.await
 			.expect("the PUBLISH stayed held");
 		assert!(!matches!(ended, Ok(Some(_))), "{version}: {ended:?}");

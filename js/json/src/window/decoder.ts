@@ -1,5 +1,3 @@
-import { Decoder as Flate } from "@moq/flate";
-
 import { parse } from "../parse.ts";
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -14,12 +12,6 @@ function index(value: unknown, label: string): number {
 		throw new Error(`${label} must be a nonnegative safe integer`);
 	}
 	return value;
-}
-
-/** Options for a {@link Decoder}. */
-export interface DecoderConfig {
-	/** Read frames written with `Config.compression` on. Defaults to `false`. */
-	compression?: boolean;
 }
 
 /**
@@ -56,12 +48,11 @@ export interface Group {
  *
  * Group rolls are invisible here on purpose. A header restates the window, and this decoder emits
  * only what is new, so a reader sees one continuous stream of edits no matter how often the
- * publisher rolled for compression's sake.
+ * publisher rolled.
  *
  * @public
  */
 export class Decoder<T> {
-	#compress: boolean;
 	#generation = 0;
 
 	// Absolute index of the window's front, once a group header has positioned us.
@@ -73,22 +64,15 @@ export class Decoder<T> {
 	#events: Queued<T>[] = [];
 	#nextEvent = 0;
 
-	constructor(config: DecoderConfig = {}) {
-		this.#compress = config.compression ?? false;
-	}
-
 	/** Create the decoder for one MoQ group. */
 	group(): Group {
 		const generation = ++this.#generation;
-		let flate: Flate | undefined;
 		let positioned = false;
 
 		return {
 			decode: (payload) => {
 				if (generation !== this.#generation) throw new Error("stale window group");
-				if (this.#compress) flate ??= new Flate();
-				const bytes = flate ? flate.frame(payload) : payload;
-				const frame = object(parse(bytes), "window frame");
+				const frame = object(parse(payload), "window frame");
 
 				if (!positioned) {
 					if (!Array.isArray(frame.records)) throw new Error("window header records must be an array");

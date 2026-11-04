@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Instant, Milli, Nano, now, yieldNow } from "@moq/clock";
 import {
 	openWebSocketStream,
 	type WebSocketConstructor,
@@ -61,7 +62,7 @@ const ctor = FakeWebSocket as unknown as WebSocketConstructor;
 /** Yield to the event loop `n` times to let queued work run. */
 async function tick(n = 1): Promise<void> {
 	for (let i = 0; i < n; i++) {
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 	}
 }
 
@@ -136,7 +137,7 @@ describe("WebSocketStream ponyfill", () => {
 		await tick(5);
 		expect(settled).toBe(false); // backpressured at 100
 
-		// Raise the mark above the buffered amount — the in-progress drain resolves
+		// Raise the mark above the buffered amount - the in-progress drain resolves
 		// without bufferedAmount having to change.
 		wss.setHighWaterMark(1000);
 		expect(wss.highWaterMark).toBe(1000);
@@ -275,8 +276,8 @@ describe("WebSocketStream.adopt", () => {
 		// The ponyfill re-checks `bufferedAmount` on a timer, so poll rather than
 		// assume how many turns the drain takes.
 		ws.bufferedAmount = 0;
-		const deadline = Date.now() + 1000;
-		while (!written && Date.now() < deadline) await tick();
+		const deadline = Instant.add(now(), Nano.fromMilli(Milli(1000)));
+		while (!written && now() < deadline) await tick();
 		expect(written).toBe(true);
 	});
 });

@@ -16,15 +16,29 @@ function sessionFailure(err: unknown): boolean {
 	return source === "session" || name === "InvalidStateError";
 }
 
+/** What a deadline failure resets: a stream, or whatever owns one. @internal */
+export interface Abortable {
+	abort(err: Error): void;
+}
+
 /** One fatal deadline for a request, including every stream its setup creates. @internal */
 export class Deadline {
-	#opening = false;
-	#streams: Stream[] = [];
+	/** Creates still waiting on credit: a fetch opens its TRACK stream alongside. */
+	#opening = 0;
+	#owners: Abortable[] = [];
 	#failure?: Error;
 
-	/** Record a create so deadline failures reset its stream even if it opens late. */
-	async open(opening: Stream | Promise<Stream>): Promise<Stream> {
-		this.#opening = true;
+	/**
+	 * Record a create so deadline failures reset its stream even if it opens late. `own` wraps
+	 * the opened stream in its owner, which the failure then resets instead.
+	 */
+	open(opening: Stream | Promise<Stream>): Promise<Stream>;
+	open<T extends Abortable>(opening: Stream | Promise<Stream>, own: (stream: Stream) => T): Promise<T>;
+	async open(
+		opening: Stream | Promise<Stream>,
+		own: (stream: Stream) => Abortable = (stream) => stream,
+	): Promise<Abortable> {
+		this.#opening++;
 		let stream: Stream;
 		try {
 			stream = await opening;
@@ -32,20 +46,21 @@ export class Deadline {
 			if (sessionFailure(cause)) throw cause;
 			throw new NoStreamCredit({ cause });
 		} finally {
-			this.#opening = false;
+			this.#opening--;
 		}
+		const owner = own(stream);
 		if (this.#failure) {
-			stream.abort(this.#failure);
+			owner.abort(this.#failure);
 			throw this.#failure;
 		}
-		this.#streams.push(stream);
-		return stream;
+		this.#owners.push(owner);
+		return owner;
 	}
 
 	/** Write the request on an opened stream, which a deadline failure after resets. */
-	async send(stream: Stream, write: () => Promise<void>): Promise<void> {
+	async send(stream: Abortable, write: () => Promise<void>): Promise<void> {
 		if (this.#failure) throw this.#failure;
-		if (!this.#streams.includes(stream)) throw new Error("request sent on a stream the deadline did not open");
+		if (!this.#owners.includes(stream)) throw new Error("request sent on a stream the deadline did not open");
 		await write();
 	}
 
@@ -60,14 +75,14 @@ export class Deadline {
 		} catch (cause) {
 			const failure =
 				cause instanceof TimeoutError
-					? this.#opening
+					? this.#opening > 0
 						? new NoStreamCredit({ cause })
 						: controlTimeout(cause)
 					: error(cause);
 			this.#failure = failure;
 			// Other failures keep the caller's cancellation ordering.
 			if (cause instanceof TimeoutError || cause instanceof NoStreamCredit) {
-				for (const stream of this.#streams) stream.abort(failure);
+				for (const owner of this.#owners) owner.abort(failure);
 			}
 			throw failure;
 		}

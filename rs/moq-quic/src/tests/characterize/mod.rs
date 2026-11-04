@@ -17,28 +17,29 @@ mod reset;
 mod schedule;
 
 /// The transport every characterization pair runs: Cubic with deterministic packet numbers
-fn transport() -> TransportConfig {
-	let mut transport = TransportConfig::default();
-	transport.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
-	transport.deterministic_packet_numbers(true);
-	transport
+fn transport() -> transport::Config {
+	transport::Config {
+		congestion: Arc::new(congestion::cubic::Config::default()),
+		deterministic_packet_numbers: true,
+		..transport::Config::default()
+	}
 }
 
 /// A pair whose server runs [`transport`] with `configure` applied
-fn pair_with(configure: impl FnOnce(&mut TransportConfig)) -> Pair {
+fn pair_with(configure: impl FnOnce(&mut transport::Config)) -> Pair {
 	let mut config = server_config();
 	let mut transport = transport();
 	configure(&mut transport);
-	config.transport = Arc::new(transport);
+	config.transport = transport;
 	Pair::new(Default::default(), config)
 }
 
 /// A client config running [`transport`] with `configure` applied
-fn client_with(configure: impl FnOnce(&mut TransportConfig)) -> ClientConfig {
+fn client_with(configure: impl FnOnce(&mut transport::Config)) -> client::Config {
 	let mut config = client_config();
 	let mut transport = transport();
 	configure(&mut transport);
-	config.transport = Arc::new(transport);
+	config.transport = transport;
 	config
 }
 
@@ -49,8 +50,8 @@ fn connected() -> (Pair, ConnectionHandle, ConnectionHandle) {
 
 /// A connected pair whose server and client transports are configured separately
 fn connected_with(
-	server: impl FnOnce(&mut TransportConfig),
-	client: impl FnOnce(&mut TransportConfig),
+	server: impl FnOnce(&mut transport::Config),
+	client: impl FnOnce(&mut transport::Config),
 ) -> (Pair, ConnectionHandle, ConnectionHandle) {
 	let mut pair = pair_with(server);
 	let (client_ch, server_ch) = pair.connect_with(client_with(client));
@@ -106,29 +107,17 @@ fn server_sends(pair: &mut Pair, ch: ConnectionHandle, space: SpaceId, frames: F
 		.push_back((pair.time, None, packet.as_slice().into()));
 }
 
-/// Drains `conn`'s events, returning the error it was lost with, if any
+/// The error `conn` was lost with, if any
 fn lost(conn: &mut Connection) -> Option<ConnectionError> {
-	let mut lost = None;
-	while let Some(event) = conn.poll() {
-		if let Event::ConnectionLost { reason } = event {
-			assert!(lost.is_none(), "lost twice: {lost:?}, then {reason:?}");
-			lost = Some(reason);
-		}
-	}
-	lost
+	conn.error().cloned()
 }
 
-/// Drains `conn`'s events, panicking unless it connected and was never lost
+/// Panics unless `conn` connected and was never lost
 fn assert_connected(conn: &mut Connection) {
-	let mut connected = false;
-	while let Some(event) = conn.poll() {
-		match event {
-			Event::Connected => connected = true,
-			Event::ConnectionLost { reason } => panic!("lost: {reason:?}"),
-			_ => {}
-		}
+	if let Some(reason) = conn.error() {
+		panic!("lost: {reason:?}");
 	}
-	assert!(connected, "never connected");
+	assert!(is_connected(conn), "never connected");
 }
 
 /// The transport error code `conn` was lost with, panicking if it is still up or lost otherwise

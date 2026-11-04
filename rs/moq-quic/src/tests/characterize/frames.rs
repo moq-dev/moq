@@ -35,11 +35,12 @@ fn client_answer(frames: Frames) -> Option<TransportErrorCode> {
 	}
 }
 
-/// Early data is discarded without decryption, without losing a coalesced
-/// Initial or a later 1-RTT stream on the same connection.
+/// A 0-RTT packet is dropped before decryption, alone or coalesced, so an ACK inside it for a
+/// packet the server never sent is not processed, and a coalesced Initial or 1-RTT packet is
+/// still read.
 #[test]
-fn early_packets_leave_handshake_and_application_data_usable() {
-	use crate::packet::{FixedLengthConnectionIdParser, Header, LongType, PacketNumber, PartialDecode};
+fn zero_rtt_packets_are_dropped() {
+	use crate::packet::{FixedLengthConnectionIdParser, Header, LongHeaderType, LongType, PacketNumber, PartialDecode};
 	for leading in [true, false] {
 		let _guard = subscribe();
 		let mut pair = pair_with(|_| {});
@@ -50,37 +51,42 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 		let (decoded, _) = PartialDecode::new(
 			initial.clone(),
 			&FixedLengthConnectionIdParser::new(RandomConnectionIdGenerator::default().cid_len()),
-			&[1],
 			true,
 		)
 		.unwrap();
 		let initial_header = decoded.initial_header().unwrap();
-		let mut early = Vec::new();
+		let mut zero_rtt = Vec::new();
+		// No header encodes as 0-RTT, so encode a Handshake one and retype it below.
 		let encoded = Header::Long {
-			ty: LongType::ZeroRtt,
+			ty: LongType::Handshake,
 			src_cid: initial_header.src_cid,
 			dst_cid: initial_header.dst_cid,
 			number: PacketNumber::U8(0),
 			version: 1,
 		}
-		.encode(&mut early);
+		.encode(&mut zero_rtt);
+		// Processing this ACK would be a PROTOCOL_VIOLATION: the server never sent packet 1000.
+		let ack = Frames::default().var(FrameType::ACK, &[1000, 0, 0, 0]);
+		zero_rtt.extend_from_slice(&ack.0);
 		let keys = config
 			.crypto
 			.clone()
-			.start_session(1, "localhost", &TransportParameters::default())
+			.start_session(Version::V1, "localhost", &TransportParameters::default())
 			.unwrap()
 			.initial_keys(initial_header.dst_cid, Side::Client);
-		// The ciphertext is deliberately opaque: early-data rejection precedes decryption,
-		// regardless of which ticket or keys the sender used.
-		early.resize(early.len() + 32 + keys.packet.local.tag_len(), 0xff);
-		encoded.finish(&mut early, &*keys.header.local, Some((0, &*keys.packet.local)));
+		// The keys don't matter: the drop precedes decryption.
+		zero_rtt.resize(zero_rtt.len() + 32 + keys.packet.local.tag_len(), 0);
+		encoded.finish(&mut zero_rtt, &*keys.header.local, Some((0, &*keys.packet.local)));
+		// The type bits are outside header protection.
+		const TYPE_BITS: u8 = 0x30;
+		zero_rtt[0] = zero_rtt[0] & !TYPE_BITS | u8::from(LongHeaderType::ZeroRtt) & TYPE_BITS;
 		let mut datagram = Vec::new();
 		if leading {
-			datagram.extend_from_slice(&early);
+			datagram.extend_from_slice(&zero_rtt);
 		}
 		datagram.extend_from_slice(&initial);
 		if !leading {
-			datagram.extend_from_slice(&early);
+			datagram.extend_from_slice(&zero_rtt);
 		}
 		pair.server.inbound.push_front((now, ecn, datagram.as_slice().into()));
 		pair.drive();
@@ -89,11 +95,18 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 		assert_connected(pair.server_conn_mut(server_ch));
 		assert!(pair.server_streams(server_ch).accept(Dir::Uni).is_none());
 
+		// Alone, the 0-RTT packet changes nothing.
+		let before = pair.server_conn_mut(server_ch).stats().frame_rx;
+		pair.server.inbound.push_back((now, ecn, zero_rtt.as_slice().into()));
+		pair.drive_server();
+		assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.acks, before.acks);
+		assert!(lost(pair.server_conn_mut(server_ch)).is_none());
+
 		let stream = pair
 			.client_streams(client_ch)
 			.open(Dir::Uni, Default::default())
 			.unwrap();
-		const DATA: &[u8] = b"after early data";
+		const DATA: &[u8] = b"after 0-RTT";
 		client_sends(
 			&mut pair,
 			client_ch,
@@ -101,8 +114,13 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 			Frames::default().stream(stream.into(), 0, DATA, true),
 		);
 		let (now, ecn, application) = pair.server.inbound.pop_back().unwrap();
-		early.extend_from_slice(&application);
-		pair.server.inbound.push_back((now, ecn, early.as_slice().into()));
+		zero_rtt.extend_from_slice(&application);
+		pair.server.inbound.push_back((now, ecn, zero_rtt.as_slice().into()));
+		let before = pair.server_conn_mut(server_ch).stats().frame_rx;
+		pair.drive_server();
+		let after = pair.server_conn_mut(server_ch).stats().frame_rx;
+		assert_eq!(after.acks, before.acks);
+		assert_eq!(after.stream, before.stream + 1);
 		pair.drive();
 		assert!(lost(pair.client_conn_mut(client_ch)).is_none());
 		assert!(lost(pair.server_conn_mut(server_ch)).is_none());
@@ -111,7 +129,7 @@ fn early_packets_leave_handshake_and_application_data_usable() {
 		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, DATA);
 		assert!(chunks.next(usize::MAX).unwrap().is_none());
-		let _ = chunks.finalize();
+		chunks.finalize();
 	}
 }
 
@@ -281,14 +299,17 @@ fn retire_connection_id_in_use() {
 }
 
 /// A connection closed by its own transport error sends CONNECTION_CLOSE to a CID the server
-/// retired, and the server answers with a stateless reset, which must neither replace the unread
-/// close reason with `Reset` nor, once the reason was read, report a second `ConnectionLost`.
+/// retired, and the server answers with a stateless reset, which must neither replace the close
+/// reason with `Reset`, whether or not it was read first, nor wake the closed wait again.
 fn stateless_reset_after_local_close(poll_early: bool) {
 	let _guard = subscribe();
 	let (mut pair, client_ch, server_ch) = connected();
 	retire_in_use(&mut pair, client_ch, server_ch);
+	let closed = Counter::new();
+	assert!(pair.client_conn_mut(client_ch).poll_closed(&closed).is_pending());
 	pair.drive_client();
 	if poll_early {
+		assert_eq!(closed.wakes(), 1);
 		assert_eq!(
 			lost_code(pair.client_conn_mut(client_ch)),
 			TransportErrorCode::CONNECTION_ID_LIMIT_ERROR
@@ -296,18 +317,14 @@ fn stateless_reset_after_local_close(poll_early: bool) {
 	}
 
 	pair.drive();
-	let lost = lost(pair.client_conn_mut(client_ch));
-	if poll_early {
-		assert_eq!(lost, None);
-	} else {
-		assert_matches!(
-			lost,
-			Some(ConnectionError::TransportError(TransportError {
-				code: TransportErrorCode::CONNECTION_ID_LIMIT_ERROR,
-				..
-			}))
-		);
-	}
+	assert_eq!(closed.wakes(), 1);
+	assert_matches!(
+		lost(pair.client_conn_mut(client_ch)),
+		Some(ConnectionError::TransportError(TransportError {
+			code: TransportErrorCode::CONNECTION_ID_LIMIT_ERROR,
+			..
+		}))
+	);
 }
 
 #[test]
@@ -433,4 +450,37 @@ fn ack_frequency_max_ack_delay_upper_bound() {
 	assert_eq!(server_answer(frames), None);
 	let frames = Frames::default().var(FrameType::ACK_FREQUENCY, &[0, 1, LIMIT_US, 1]);
 	assert_eq!(server_answer(frames), Some(TransportErrorCode::PROTOCOL_VIOLATION));
+}
+
+/// An ACK_RECEIVE_TIMESTAMPS frame acknowledging packets 0 and 1 with `timestamps` of them
+fn ack_receive_timestamps(timestamps: u64) -> Frames {
+	// Largest Acknowledged, ACK Delay, ACK Range Count, First ACK Range
+	let mut fields = vec![1, 0, 0, 1];
+	// Timestamp Range Count, Delta Largest Acknowledged, Timestamp Delta Count, then the deltas
+	fields.extend([1, 0, timestamps]);
+	fields.extend((0..timestamps).map(|i| 10 - i));
+	Frames::default().var(FrameType::ACK_RECEIVE_TIMESTAMPS, &fields)
+}
+
+/// Receive timestamps are refused from a peer that was never asked for them, and past the
+/// number asked for
+#[test]
+fn receive_timestamps_beyond_request() {
+	assert_eq!(
+		server_answer(ack_receive_timestamps(1)),
+		Some(TransportErrorCode::PROTOCOL_VIOLATION)
+	);
+
+	for (timestamps, answer) in [(1, None), (2, Some(TransportErrorCode::PROTOCOL_VIOLATION))] {
+		let _guard = subscribe();
+		let (mut pair, client_ch, server_ch) =
+			connected_with(|server| server.receive_timestamps = NonZeroU32::new(1), |_| {});
+		client_sends(&mut pair, client_ch, SpaceId::Data, ack_receive_timestamps(timestamps));
+		pair.drive();
+		let lost = lost(pair.server_conn_mut(server_ch)).map(|error| match error {
+			ConnectionError::TransportError(error) => error.code,
+			other => panic!("server lost with {other:?}"),
+		});
+		assert_eq!(lost, answer, "{timestamps} timestamps");
+	}
 }
