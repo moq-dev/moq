@@ -25,8 +25,12 @@ async fn serve() -> Server {
 	use std::io::Write;
 
 	let dir = tempfile::tempdir().expect("tempdir");
-	let key = rcgen::KeyPair::generate().expect("key");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
 	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
 		.expect("params")
 		.self_signed(&key)
 		.expect("cert");
@@ -41,7 +45,10 @@ async fn serve() -> Server {
 	let mut config = moq_tokio::server::Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![write("server.pem", cert.pem())];
-	config.listen.tls.key = vec![write("server.key", key.serialize_pem())];
+	config.listen.tls.key = vec![write(
+		"server.key",
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)];
 	let mut listener = config
 		.init()
 		.expect("failed to init server")
@@ -69,7 +76,7 @@ async fn serve() -> Server {
 /// Dial the server over raw QUIC with `alpn`, send an empty SETUP and a GROUP for an
 /// unknown subscription, and return the code the server stopped the GROUP with.
 async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let mut roots = rustls::RootCertStore::empty();
 	roots.add(server.cert.clone()).expect("root");

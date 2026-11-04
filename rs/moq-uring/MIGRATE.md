@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Transport cryptography uses rind
+
+TLS configuration uses `rind-rustls`, and QUIC reset and token keys use rind through moq-quic.
+Unsupported CPU features fail configuration with the missing feature in the error.
+Caller-supplied rustls configurations should use `rind_rustls::default_provider()?`.
+No wire format changes.
+
 ### Native WebTransport implements moq-net's poll traits ([#7771](https://github.com/moq-dev/moq/pull/7771))
 
 `quic::web` is supported as a WebTransport library without running MoQ.

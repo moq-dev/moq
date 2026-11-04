@@ -1204,7 +1204,14 @@ mod tests {
 	#[cfg(all(feature = "websocket", any(unix, windows)))]
 	fn acceptor_state() -> Arc<WebState> {
 		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
-		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+		let cert = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(cert.cert.pem().as_bytes()).unwrap();
 		Web::new(
 			crate::auth::Auth::refuse("test"),
@@ -1214,7 +1221,8 @@ mod tests {
 		)
 		.state
 	}
-	use rcgen::{CertificateParams, KeyPair};
+	use rcgen::CertificateParams;
+	use rind_rcgen::KeyPair;
 	use std::io::Write;
 	use tempfile::TempDir;
 	use tokio::io::{AsyncRead, AsyncWrite};
@@ -1671,15 +1679,25 @@ mod tests {
 	fn make_named_certs(dir: &TempDir, name: &str, hostname: &str) -> (PathBuf, PathBuf, PathBuf) {
 		let _ = moq_tokio::crypto::install_default();
 
-		let ca_kp = KeyPair::generate().unwrap();
-		let mut ca_params = CertificateParams::new(vec![]).unwrap();
+		let ca_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut ca_params = CertificateParams::new(vec![])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
 		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
 		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
-		let server_kp = KeyPair::generate().unwrap();
-		let mut server_params = CertificateParams::new(vec![hostname.to_string()]).unwrap();
+		let server_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut server_params = CertificateParams::new(vec![hostname.to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		server_params
 			.distinguished_name
 			.push(rcgen::DnType::CommonName, format!("test-{name}"));
@@ -1690,7 +1708,11 @@ mod tests {
 		let key_path = dir.path().join(format!("{name}.key.pem"));
 		std::fs::write(&ca_path, ca_cert.pem()).unwrap();
 		std::fs::write(&cert_path, server_cert.pem()).unwrap();
-		std::fs::write(&key_path, server_kp.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", server_kp.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 
 		(ca_path, cert_path, key_path)
 	}

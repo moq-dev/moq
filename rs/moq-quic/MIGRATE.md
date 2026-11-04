@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Transport cryptography uses rind
+
+Remove the `ring`, `aws-lc-rs`, and `rustls-aws-lc-rs` Cargo features. rind is always enabled.
+Build caller-supplied rustls configurations with `rind_rustls::default_provider()?`.
+Endpoint initialization reports unsupported CPU features through `ConfigError::Crypto`.
+The convenience certificate builders remain infallible with respect to CPU support and panic naming the missing feature; check `rind::cpu::check()` before using them directly.
+QUIC packet protection, Retry integrity, reset tokens, and address-validation tokens keep their wire formats and derivation labels.
+
 ### Receive operations wake transmission themselves ([#7707](https://github.com/moq-dev/moq/pull/7707))
 
 `ShouldTransmit` is removed. `recv::Stream::lease` returns `Result<Lease, Error>` and
@@ -48,7 +56,7 @@ Replace `crypto_session().peer_identity()` and its downcast with `conn.peer_iden
 `Connection::export_keying_material` and `transport_parameters` are no longer public.
 A rustls config without TLS 1.3 or the AES-128-GCM-SHA256 suite now fails each connection: the client's connect returns `ConnectError::Tls`, and the server closes the connection or drops its Initial.
 `ConnectError` no longer implements `Eq`.
-rustls is a required dependency; the `ring` and `aws-lc-rs` features pick only the provider.
+rustls is a required dependency; rind supplies transport cryptography.
 
 ### An evicted stream fails `received_reset` ([#7624](https://github.com/moq-dev/moq/pull/7624))
 

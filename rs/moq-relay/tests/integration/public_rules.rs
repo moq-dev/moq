@@ -34,7 +34,7 @@ fn client() -> moq_tokio::Client {
 
 /// The relay's web stack with WebSocket and the HTTP routes, admitting through `auth`.
 async fn spawn_relay(auth: auth::Config) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let auth = auth
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");

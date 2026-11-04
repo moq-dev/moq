@@ -299,7 +299,36 @@ impl Client {
 		// `true` disables Nagle: records are already batched, see `Server::accept`.
 		#[cfg(feature = "wss")]
 		let (ws_stream, response) = {
-			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, self.connector.clone())
+			let connector = match (
+				&self.connector,
+				request
+					.uri()
+					.scheme_str()
+					.is_some_and(|scheme| scheme.eq_ignore_ascii_case("wss")),
+			) {
+				(Some(connector), _) => Some(connector.clone()),
+				(None, true) => {
+					let provider = rind_rustls::default_provider().map_err(std::io::Error::other)?;
+					let native = rustls_native_certs::load_native_certs();
+					if native.certs.is_empty() {
+						return Err(std::io::Error::new(
+							std::io::ErrorKind::NotFound,
+							format!("no native root CA certificates found: {:?}", native.errors),
+						)
+						.into());
+					}
+					let mut roots = rustls::RootCertStore::empty();
+					roots.add_parsable_certificates(native.certs);
+					let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+						.with_safe_default_protocol_versions()
+						.map_err(std::io::Error::other)?
+						.with_root_certificates(roots)
+						.with_no_client_auth();
+					Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+				}
+				(None, false) => None,
+			};
+			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, connector)
 				.await
 				.map_err(Error::from)?
 		};

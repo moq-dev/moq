@@ -18,10 +18,8 @@ use std::{
 	task::{Context, Poll, ready},
 };
 
-use hmac::{KeyInit, Mac};
 use moq_sock::udp::EcnCodepoint;
-
-type Hmac = hmac::Hmac<sha2::Sha256>;
+use rind::hmac;
 
 /// Where a QUIC-LB connection ID carries its server ID: after the byte encoding its length.
 pub(crate) const ID_OFFSET: usize = 1;
@@ -132,7 +130,6 @@ pub(crate) struct Unwrapped<'a> {
 }
 
 /// One server's forwarding: its server ID, its peers, and the socket forwards travel on.
-#[derive(Debug)]
 pub(crate) struct Forward {
 	socket: tokio::net::UdpSocket,
 	/// The same socket, sending without waiting on the reactor to report it writable, which a
@@ -140,9 +137,19 @@ pub(crate) struct Forward {
 	send: std::net::UdpSocket,
 	id: Box<[u8]>,
 	peers: Peers,
-	key: Hmac,
+	key: hmac::Key,
 	/// Scratch for one forward, sent or received.
 	buf: Box<[u8]>,
+}
+
+impl std::fmt::Debug for Forward {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Forward")
+			.field("socket", &self.socket)
+			.field("id", &self.id)
+			.field("peers", &self.peers)
+			.finish_non_exhaustive()
+	}
 }
 
 impl Forward {
@@ -158,6 +165,7 @@ impl Forward {
 		key: &[u8; 32],
 		max_udp_payload_size: u16,
 	) -> io::Result<Self> {
+		rind::cpu::check().map_err(io::Error::other)?;
 		socket.set_nonblocking(true)?;
 		let send = socket.try_clone()?;
 		let socket = {
@@ -169,7 +177,7 @@ impl Forward {
 			send,
 			id: id.into(),
 			peers,
-			key: Hmac::new_from_slice(key).expect("HMAC accepts any key length"),
+			key: hmac::Key::new(&hmac::HMAC_SHA256, key),
 			buf: vec![0; usize::from(max_udp_payload_size) + OVERHEAD].into(),
 		})
 	}
@@ -226,8 +234,8 @@ impl Forward {
 		buf[4..20].copy_from_slice(&ipv6(remote.ip()).octets());
 		buf[20..36].copy_from_slice(&local_ip.map_or(Ipv6Addr::UNSPECIFIED, ipv6).octets());
 		buf[OVERHEAD..].copy_from_slice(packet);
-		let tag = tag(&self.key, buf).finalize().into_bytes();
-		buf[OVERHEAD - TAG_LEN..OVERHEAD].copy_from_slice(&tag[..TAG_LEN]);
+		let tag = tag(&self.key, buf);
+		buf[OVERHEAD - TAG_LEN..OVERHEAD].copy_from_slice(&tag.as_ref()[..TAG_LEN]);
 		Some(buf.len())
 	}
 
@@ -249,9 +257,8 @@ impl Forward {
 		if len < OVERHEAD || buf[0] != VERSION {
 			return None;
 		}
-		tag(&self.key, buf)
-			.verify_truncated_left(&buf[OVERHEAD - TAG_LEN..OVERHEAD])
-			.ok()?;
+		let expected = tag(&self.key, buf);
+		rind::constant_time::verify(&expected.as_ref()[..TAG_LEN], &buf[OVERHEAD - TAG_LEN..OVERHEAD]).ok()?;
 
 		let packet = &buf[OVERHEAD..];
 		// Never forward again, and never answer for a connection another server owns: a peer
@@ -283,11 +290,11 @@ impl Forward {
 }
 
 /// The MAC over `forward`'s header, short of the tag itself, and its packet.
-fn tag(key: &Hmac, forward: &[u8]) -> Hmac {
-	let mut mac = key.clone();
+fn tag(key: &hmac::Key, forward: &[u8]) -> hmac::Tag {
+	let mut mac = hmac::Context::with_key(key);
 	mac.update(&forward[..OVERHEAD - TAG_LEN]);
 	mac.update(&forward[OVERHEAD..]);
-	mac
+	mac.sign()
 }
 
 fn ipv6(ip: IpAddr) -> Ipv6Addr {

@@ -1,10 +1,7 @@
 use std::{io, str, sync::Arc};
 
-#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-use aws_lc_rs::aead;
 use bytes::BytesMut;
-#[cfg(feature = "ring")]
-use ring::aead;
+use rind::aead;
 use rustls::{
 	self,
 	client::danger::ServerCertVerifier,
@@ -160,10 +157,10 @@ impl crypto::Session for TlsSession {
 		};
 
 		let nonce = aead::Nonce::assume_unique_for_key(nonce);
-		let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &key).unwrap());
+		let key = aead::Key::new(&aead::AES_128_GCM, &key).unwrap();
 
 		let (aad, tag) = pseudo_packet.split_at_mut(tag_start);
-		key.open_in_place(nonce, aead::Aad::from(aad), tag).is_ok()
+		key.open_in_place(nonce, aad, tag).is_ok()
 	}
 
 	fn export_keying_material(
@@ -344,11 +341,9 @@ impl crypto::ServerConfig for QuicServerConfig {
 		pseudo_packet.extend_from_slice(packet);
 
 		let nonce = aead::Nonce::assume_unique_for_key(nonce);
-		let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &key).unwrap());
+		let key = aead::Key::new(&aead::AES_128_GCM, &key).unwrap();
 
-		let tag = key
-			.seal_in_place_separate_tag(nonce, aead::Aad::from(pseudo_packet), &mut [])
-			.unwrap();
+		let tag = key.seal_in_place_separate_tag(nonce, &pseudo_packet, &mut []).unwrap();
 		let mut result = [0; 16];
 		result.copy_from_slice(tag.as_ref());
 		result
@@ -374,11 +369,7 @@ fn no_initial_suite() -> rustls::Error {
 }
 
 pub(crate) fn configured_provider() -> Arc<rustls::crypto::CryptoProvider> {
-	#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-	let provider = rustls::crypto::aws_lc_rs::default_provider();
-	#[cfg(feature = "ring")]
-	let provider = rustls::crypto::ring::default_provider();
-	Arc::new(provider)
+	Arc::new(rind_rustls::default_provider().unwrap_or_else(|err| panic!("{err}")))
 }
 
 fn to_vec(params: &TransportParameters) -> Vec<u8> {
@@ -482,7 +473,14 @@ mod tests {
 	/// caller's shared configs retain their original policy.
 	#[test]
 	fn supplied_configs_reject_early_data_and_keep_resumption() {
-		let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+		let identity = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 		let cert = identity.cert.der().clone();
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(cert.clone()).unwrap();
@@ -494,7 +492,7 @@ mod tests {
 		client.enable_early_data = true;
 		let mut server = QuicServerConfig::inner(
 			vec![cert],
-			PrivateKeyDer::Pkcs8(identity.signing_key.serialize_der().into()),
+			PrivateKeyDer::Pkcs8(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 		)
 		.unwrap();
 		server.max_early_data_size = u32::MAX;
@@ -528,7 +526,14 @@ mod tests {
 			.cipher_suites
 			.retain(|suite| suite.suite() != rustls::CipherSuite::TLS13_AES_128_GCM_SHA256);
 		let provider = Arc::new(provider);
-		let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+		let identity = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 
 		let client = rustls::ClientConfig::builder_with_provider(provider.clone())
 			.with_protocol_versions(&[&rustls::version::TLS13])
@@ -546,7 +551,7 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![identity.cert.der().clone()],
-				PrivateKeyDer::Pkcs8(identity.signing_key.serialize_der().into()),
+				PrivateKeyDer::Pkcs8(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 			)
 			.unwrap();
 		let server = QuicServerConfig::new(Arc::new(server));

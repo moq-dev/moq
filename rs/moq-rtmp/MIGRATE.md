@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Handshake cryptography uses rind
+
+RTMP handshake HMAC-SHA256 uses rind. `Server::bind` checks CPU support before binding.
+The `tls` feature no longer selects rustls' aws-lc provider; build the supplied TLS configuration with `rind_rustls::default_provider()?` or `moq_tokio::tls::Listen::server_config`.
+RTMP and RTMPS wire formats are unchanged.
+
 ### `with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 The ingest builders' `with_max_age` still default to `hang::container::MAX_AGE` (30 s), but `None` now sets no publisher limit instead of keeping that default.

@@ -14,7 +14,7 @@ fn relay_default() -> String {
 
 /// A relay on a loopback TCP listener, configured by `set`, whose admissions the test decides.
 async fn spawn_relay(set: impl FnOnce(&mut Config)) -> (u16, moq_relay::auth::Admissions, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut config = Config::default();
 	config.listen.version = vec!["moq-lite-07-wip".parse().expect("lite-07")];
 	config.connect.version = config.listen.version.clone();

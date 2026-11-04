@@ -3945,8 +3945,12 @@ mod tests {
 		idle: std::time::Duration,
 	) -> moq_tokio::quic::driver::endpoint::Endpoint {
 		use moq_tokio::quic::driver;
-		let key = rcgen::KeyPair::generate().expect("keypair");
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.expect("cert params")
 			.self_signed(&key)
 			.expect("self-signed cert");
@@ -3954,7 +3958,7 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![cert.der().clone()],
-				rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+				rustls::pki_types::PrivateKeyDer::Pkcs8(key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 			)
 			.expect("server tls");
 		tls.alpn_protocols = connect

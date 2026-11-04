@@ -266,6 +266,7 @@ pub struct Server {
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
+		rind::cpu::check().map_err(std::io::Error::other)?;
 		let listener = TcpListener::bind(addr).await?;
 
 		Ok(Self {
@@ -3030,7 +3031,7 @@ mod tests {
 			}
 		}
 
-		let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+		let provider = Arc::new(rind_rustls::default_provider().unwrap());
 
 		let mut tls = moq_tokio::tls::Listen::default();
 		tls.generate = vec!["localhost".to_string()];

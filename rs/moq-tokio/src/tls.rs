@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::{fs, io};
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(feature = "_certs")]
 use rustls::pki_types::PrivatePkcs8KeyDer;
 
 /// Errors loading or generating TLS certificates and keys.
@@ -164,9 +164,9 @@ pub enum Error {
 	#[error("failed to generate a self-signed certificate: {0}")]
 	Rcgen(String),
 
-	/// The crate was built without a crypto provider, so no TLS is possible.
-	#[error("no crypto provider available; enable aws-lc-rs or ring feature")]
-	NoCryptoProvider,
+	/// The CPU cannot run transport cryptography.
+	#[error("{0}")]
+	Crypto(String),
 
 	/// The section was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
@@ -285,14 +285,14 @@ impl fmt::Debug for Certified {
 /// Set it on [`Listen::identity`] to serve it and [`Connect::identity`] to
 /// present it. Generated in memory and never written to disk, so it lasts as
 /// long as the process and a restart is a new principal.
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(feature = "_certs")]
 #[derive(Clone)]
 pub struct Identity {
 	key: Arc<Certified>,
 	fingerprint: String,
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(feature = "_certs")]
 impl Identity {
 	/// Generate a fresh identity, valid for `hostnames`.
 	///
@@ -301,9 +301,10 @@ impl Identity {
 	/// placeholder name is enough there.
 	pub fn generate(hostnames: impl IntoIterator<Item = impl Into<String>>) -> Result<Self> {
 		let hostnames: Vec<String> = hostnames.into_iter().map(Into::into).collect();
+		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
 		let provider = crypto::provider();
 		let key = Arc::new(generate(&provider, &hostnames)?);
-		let fingerprint = hex::encode(crypto::sha256(&provider, key.leaf().as_ref()));
+		let fingerprint = hex::encode(crypto::sha256(key.leaf().as_ref()));
 		Ok(Self { key, fingerprint })
 	}
 
@@ -322,7 +323,7 @@ impl Identity {
 	}
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(feature = "_certs")]
 impl fmt::Debug for Identity {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		formatter
@@ -333,11 +334,11 @@ impl fmt::Debug for Identity {
 }
 
 /// Presents one fixed [`Identity`] whenever a server asks for a client certificate.
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(feature = "_certs")]
 #[derive(Debug)]
 struct IdentityResolver(Arc<rustls::sign::CertifiedKey>);
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(feature = "_certs")]
 impl rustls::client::ResolvesClientCert for IdentityResolver {
 	fn resolve(
 		&self,
@@ -492,7 +493,7 @@ pub struct Connect {
 	/// generates its identity at startup rather than loading one from disk.
 	/// Setting both is an error. Not settable from the CLI or a config file,
 	/// since it never exists on disk.
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	#[cfg(feature = "_certs")]
 	#[usage(skip)]
 	#[serde(skip)]
 	pub identity: Option<Identity>,
@@ -990,6 +991,7 @@ impl Connect {
 	/// released `--tls-*` / `--client-tls-*` spellings rather than building one that
 	/// silently ignored them.
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
+		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
 		let provider = crypto::provider();
 		let verification = self.verification()?;
 		if let Some(name) = &self.host_name {
@@ -1114,7 +1116,7 @@ impl Connect {
 		&self,
 		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>,
 	) -> Result<rustls::ClientConfig> {
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		#[cfg(feature = "_certs")]
 		if let Some(identity) = &self.identity {
 			if self.cert.is_some() || self.key.is_some() {
 				return Err(Error::ConflictingClientAuth);
@@ -1147,26 +1149,23 @@ impl Connect {
 /// Valid for two weeks starting yesterday: WebTransport refuses anything longer,
 /// and the backdating absorbs clock drift between two hosts that have never
 /// agreed on a time source.
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[cfg(feature = "_certs")]
 fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<Certified> {
-	let key_pair = rcgen::KeyPair::generate()?;
+	let key_pair = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
 
 	let mut params = rcgen::CertificateParams::new(hostnames)?;
+	let mut serial = [0; 16];
+	rind::rand::fill(&mut serial).map_err(|err| Error::Crypto(err.to_string()))?;
+	params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial));
 	params.not_before = ::time::OffsetDateTime::now_utc() - ::time::Duration::days(1);
 	params.not_after = params.not_before + ::time::Duration::days(14);
 
 	let cert = params.self_signed(&key_pair)?;
 
 	// Convert the rcgen types to the rustls ones.
-	let key = PrivatePkcs8KeyDer::from(key_pair.serialized_der().to_vec());
+	let key = PrivatePkcs8KeyDer::from(key_pair.to_pkcs8().secret_pkcs8_der().to_vec());
 
 	Certified::new(provider, vec![cert.into()], key.into())
-}
-
-/// Refuse at runtime when no crypto provider can sign a fresh certificate.
-#[cfg(all(feature = "_certs", not(any(feature = "aws-lc-rs", feature = "ring"))))]
-fn generate(_provider: &crypto::Provider, _hostnames: &[String]) -> Result<Certified> {
-	Err(Error::NoCryptoProvider)
 }
 
 /// Build a [`rustls::RootCertStore`] from a list of custom PEM roots.
@@ -1256,7 +1255,7 @@ pub struct Listen {
 	/// The programmatic alternative to `generate`, for a peer that hands the same
 	/// identity to [`Connect::identity`] so both roles share one fingerprint. Not
 	/// settable from the CLI or a config file, since it never exists on disk.
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	#[cfg(feature = "_certs")]
 	#[usage(skip)]
 	#[serde(skip)]
 	pub identity: Option<Identity>,
@@ -1359,6 +1358,7 @@ impl Listen {
 	#[cfg(feature = "_certs")]
 	pub fn load(&self) -> Result<Serve> {
 		self.refuse_deprecated()?;
+		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
 		let provider = crypto::provider();
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
 		certs.load_certs(self)?;
@@ -1382,11 +1382,11 @@ impl Listen {
 			|| !self.root.is_empty()
 			|| self.peers.is_some()
 			|| {
-				#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+				#[cfg(feature = "_certs")]
 				{
 					self.identity.is_some()
 				}
-				#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+				#[cfg(not(feature = "_certs"))]
 				{
 					false
 				}
@@ -1540,6 +1540,7 @@ impl Listen {
 	#[cfg(feature = "_certs")]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 		self.refuse_deprecated()?;
+		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
 		let provider = crypto::provider();
 
 		let certs = ServeCerts::new(provider.clone());
@@ -1599,13 +1600,14 @@ impl Serve {
 	/// usual verification and reload behavior. External certificates have no reported fingerprints.
 	pub fn resolver(resolver: Arc<dyn rustls::server::ResolvesServerCert>, policy: &Listen) -> Result<Self> {
 		policy.refuse_deprecated()?;
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		#[cfg(feature = "_certs")]
 		let in_memory = policy.identity.is_some();
-		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+		#[cfg(not(feature = "_certs"))]
 		let in_memory = false;
 		if !policy.cert.is_empty() || !policy.key.is_empty() || !policy.generate.is_empty() || in_memory {
 			return Err(Error::ConflictingResolver);
 		}
+		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
 		let provider = crypto::provider();
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
 		let verifier = policy.client_auth(provider)?;
@@ -1690,7 +1692,7 @@ impl PeerIdentity {
 	/// caller matches it against whatever it discovered them by.
 	pub fn fingerprint(&self) -> Option<String> {
 		let leaf = self.chain.first()?;
-		Some(hex::encode(crypto::sha256(&crypto::provider(), leaf.as_ref())))
+		Some(hex::encode(crypto::sha256(leaf.as_ref())))
 	}
 
 	/// The peer's name: the leaf's first SAN DNS name, else its CN, else its
@@ -1775,6 +1777,7 @@ impl Certificates {
 	/// such a listener fixes its TLS material when it is built, so the
 	/// fingerprints are computed once and never change.
 	pub fn from_pem(chain: &[u8]) -> Result<Self> {
+		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
 		use rustls::pki_types::pem::PemObject;
 
 		let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(chain)
@@ -1783,10 +1786,9 @@ impl Certificates {
 		if certs.is_empty() {
 			return Err(Error::Empty);
 		}
-		let provider = crypto::provider();
 		let fingerprints = certs
 			.iter()
-			.map(|cert| hex::encode(crypto::sha256(&provider, cert.as_ref())))
+			.map(|cert| hex::encode(crypto::sha256(cert.as_ref())))
 			.collect();
 		Ok(Self::new(Arc::new(RwLock::new(Info {
 			#[cfg(feature = "_certs")]
@@ -2027,7 +2029,7 @@ impl rustls::server::danger::ClientCertVerifier for PeerVerifier {
 		_intermediates: &[CertificateDer<'_>],
 		_now: UnixTime,
 	) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
-		let fingerprint = crypto::sha256(&self.provider, end_entity);
+		let fingerprint = crypto::sha256(end_entity);
 		match self.peers.contains_raw(fingerprint.as_ref()) {
 			true => Ok(rustls::server::danger::ClientCertVerified::assertion()),
 			false => Err(rustls::Error::General("unknown peer fingerprint".into())),
@@ -2080,7 +2082,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 		_ocsp: &[u8],
 		_now: UnixTime,
 	) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-		let fingerprint = crypto::sha256(&self.provider, end_entity);
+		let fingerprint = crypto::sha256(end_entity);
 		if self.fingerprints.iter().any(|fp| fingerprint.as_ref() == fp.as_slice()) {
 			Ok(rustls::client::danger::ServerCertVerified::assertion())
 		} else {
@@ -2112,7 +2114,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "quic", feature = "aws-lc-rs"))]
+#[cfg(feature = "quic")]
 mod tests {
 	#[tokio::test]
 	async fn resolved_config_keeps_reload_owner_alive() {
@@ -2135,13 +2137,21 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let cert_path = dir.path().join("cert.pem");
 		let key_path = dir.path().join("key.pem");
-		let key = rcgen::KeyPair::generate().unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.unwrap()
 			.self_signed(&key)
 			.unwrap();
 		std::fs::write(&cert_path, cert.pem()).unwrap();
-		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 		let config = Listen {
 			cert: vec![cert_path.clone()],
 			key: vec![key_path.clone()],
@@ -2155,8 +2165,12 @@ mod tests {
 		let first = serving.config(Vec::new()).unwrap();
 		let second = sibling.config(Vec::new()).unwrap();
 		assert!(Arc::ptr_eq(&first.cert_resolver, &second.cert_resolver));
-		let next_key = rcgen::KeyPair::generate().unwrap();
+		let next_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let next_cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.unwrap()
 			.self_signed(&next_key)
 			.unwrap();
@@ -2166,7 +2180,11 @@ mod tests {
 			"a half-written pair must not replace the snapshot"
 		);
 		assert_eq!(certificates.fingerprints(), previous);
-		std::fs::write(&key_path, next_key.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", next_key.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 		serving.0.certs.load_certs(&config).unwrap();
 		assert_ne!(certificates.fingerprints(), previous);
 		assert_eq!(certificates.fingerprints(), serving.certificates().fingerprints());
@@ -2184,13 +2202,21 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let cert_path = dir.path().join("cert.pem");
 		let key_path = dir.path().join("key.pem");
-		let key = rcgen::KeyPair::generate().unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
 			.unwrap()
 			.self_signed(&key)
 			.unwrap();
 		std::fs::write(&cert_path, cert.pem()).unwrap();
-		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 		Listen {
 			cert: vec![cert_path],
 			key: vec![key_path],
@@ -2273,8 +2299,13 @@ mod tests {
 	use rustls::server::danger::ClientCertVerifier;
 
 	fn self_signed() -> CertificateDer<'static> {
-		let key = rcgen::KeyPair::generate().unwrap();
-		let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		params.self_signed(&key).unwrap().into()
 	}
 
@@ -2283,8 +2314,13 @@ mod tests {
 		// notAfter at a whole second so the round-trip is exact.
 		let not_after = ::time::OffsetDateTime::from_unix_timestamp(2_000_000_000).unwrap();
 
-		let key = rcgen::KeyPair::generate().unwrap();
-		let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		params.not_after = not_after;
 		let cert: CertificateDer<'static> = params.self_signed(&key).unwrap().into();
 
@@ -2305,8 +2341,13 @@ mod tests {
 			(18_446_744_074, last),
 			(67_090_118_400, last),
 		] {
-			let key = rcgen::KeyPair::generate().unwrap();
-			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+			let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+				.map(|mut params| {
+					params.serial_number = Some(1u64.into());
+					params
+				})
+				.unwrap();
 			params.not_after = ::time::OffsetDateTime::from_unix_timestamp(seconds).unwrap();
 			let cert = params.self_signed(&key).unwrap().into();
 			let peer = PeerIdentity { chain: vec![cert] };
@@ -2318,7 +2359,7 @@ mod tests {
 	fn fingerprint_verifier_matches_and_rejects() {
 		let provider = crypto::provider();
 		let cert = self_signed();
-		let fingerprint = crypto::sha256(&provider, cert.as_ref()).as_ref().to_vec();
+		let fingerprint = crypto::sha256(cert.as_ref()).as_ref().to_vec();
 
 		let name = ServerName::try_from("localhost").unwrap();
 		let now = UnixTime::now();
@@ -2334,7 +2375,7 @@ mod tests {
 	#[test]
 	fn build_installs_fingerprint_verifier() {
 		let cert = self_signed();
-		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
+		let fingerprint = hex::encode(crypto::sha256(cert.as_ref()));
 
 		// A bogus hash still builds; verification happens at handshake time.
 		let config = Connect {
@@ -2376,14 +2417,21 @@ mod tests {
 	fn generated_certificate_survives_a_reload() {
 		use std::io::Write;
 
-		let key = rcgen::KeyPair::generate().unwrap();
-		let params = rcgen::CertificateParams::new(vec!["file.invalid".to_string()]).unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let params = rcgen::CertificateParams::new(vec!["file.invalid".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		let cert = params.self_signed(&key).unwrap();
 
 		let mut cert_file = tempfile::NamedTempFile::new().unwrap();
 		cert_file.write_all(cert.pem().as_bytes()).unwrap();
 		let mut key_file = tempfile::NamedTempFile::new().unwrap();
-		key_file.write_all(key.serialize_pem().as_bytes()).unwrap();
+		key_file
+			.write_all(pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())).as_bytes())
+			.unwrap();
 
 		let config = Listen {
 			cert: vec![cert_file.path().to_path_buf()],
@@ -2411,8 +2459,13 @@ mod tests {
 	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[tokio::test]
 	async fn dropping_the_reload_guard_stops_the_watcher() {
-		let key = rcgen::KeyPair::generate().unwrap();
-		let params = rcgen::CertificateParams::new(vec!["file.invalid".to_string()]).unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let params = rcgen::CertificateParams::new(vec!["file.invalid".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		let cert = params.self_signed(&key).unwrap();
 
 		// A dedicated directory, not `/tmp`: the watcher registers the parent, and
@@ -2422,7 +2475,11 @@ mod tests {
 		let cert_path = dir.path().join("cert.pem");
 		let key_path = dir.path().join("key.pem");
 		std::fs::write(&cert_path, cert.pem()).unwrap();
-		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+		std::fs::write(
+			&key_path,
+			pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+		)
+		.unwrap();
 
 		// File-backed, so the watcher actually parks rather than returning early.
 		let config = Listen {
@@ -2794,7 +2851,7 @@ mod tests {
 
 		// Same for fingerprint pinning.
 		let cert = self_signed();
-		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
+		let fingerprint = hex::encode(crypto::sha256(cert.as_ref()));
 		let config = Connect {
 			system_roots: Some(false),
 			fingerprint: vec![fingerprint],
@@ -2806,7 +2863,7 @@ mod tests {
 	#[test]
 	fn build_rejects_fingerprint_with_roots() {
 		let cert = self_signed();
-		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
+		let fingerprint = hex::encode(crypto::sha256(cert.as_ref()));
 
 		// Fingerprint pinning bypasses the CA chain, so combining it with roots
 		// is rejected rather than silently ignoring one of them.
@@ -2831,8 +2888,13 @@ mod tests {
 	/// handle alongside its path.
 	fn self_signed_root() -> (tempfile::NamedTempFile, PathBuf) {
 		use std::io::Write;
-		let key = rcgen::KeyPair::generate().unwrap();
-		let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		let cert = params.self_signed(&key).unwrap();
 		let mut file = tempfile::NamedTempFile::new().unwrap();
 		file.write_all(cert.pem().as_bytes()).unwrap();
@@ -2850,21 +2912,36 @@ mod tests {
 	) {
 		use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, Issuer};
 
-		let ca_key = rcgen::KeyPair::generate().unwrap();
-		let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		let ca_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new())
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 		let ca = ca_params.self_signed(&ca_key).unwrap();
 		let issuer = Issuer::from_params(&ca_params, &ca_key);
 
-		let server_key = rcgen::KeyPair::generate().unwrap();
-		let server_key_der = PrivatePkcs8KeyDer::from(server_key.serialize_der());
-		let mut server_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		let server_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let server_key_der = PrivatePkcs8KeyDer::from(server_key.to_pkcs8().secret_pkcs8_der().to_vec());
+		let mut server_params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 		let server = server_params.signed_by(&server_key, &issuer).unwrap();
 
-		let client_key = rcgen::KeyPair::generate().unwrap();
-		let client_key_der = PrivatePkcs8KeyDer::from(client_key.serialize_der());
-		let mut client_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		let client_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let client_key_der = PrivatePkcs8KeyDer::from(client_key.to_pkcs8().secret_pkcs8_der().to_vec());
+		let mut client_params = rcgen::CertificateParams::new(Vec::<String>::new())
+			.map(|mut params| {
+				params.serial_number = Some(1u64.into());
+				params
+			})
+			.unwrap();
 		client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 		let client = client_params.signed_by(&client_key, &issuer).unwrap();
 
@@ -3169,9 +3246,9 @@ impl ServeCerts {
 		}
 		// An in-memory identity is a certificate source like the other two, so a
 		// listener configured with only that one still has something to serve.
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		#[cfg(feature = "_certs")]
 		let in_memory = config.identity.is_some();
-		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+		#[cfg(not(feature = "_certs"))]
 		let in_memory = false;
 		if config.cert.is_empty() && config.generate.is_empty() && !in_memory {
 			return Err(Error::NoCertSource);
@@ -3189,7 +3266,7 @@ impl ServeCerts {
 			certs.push(self.generated(&config.generate)?);
 		}
 
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		#[cfg(feature = "_certs")]
 		if let Some(identity) = &config.identity {
 			certs.push(identity.certified());
 		}
@@ -3239,7 +3316,7 @@ impl ServeCerts {
 		let fingerprints = certs
 			.iter()
 			.map(|ck| {
-				let fingerprint = crate::crypto::sha256(&self.provider, ck.leaf().as_ref());
+				let fingerprint = crate::crypto::sha256(ck.leaf().as_ref());
 				hex::encode(fingerprint)
 			})
 			.collect();

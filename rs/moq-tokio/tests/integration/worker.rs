@@ -74,13 +74,22 @@ fn open_sockets() -> std::collections::HashSet<u64> {
 
 /// A self-signed certificate on disk.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.join("cert.pem");
 	let key_path = dir.join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 	(cert_path, key_path)
 }
 
@@ -115,7 +124,7 @@ fn config(count: u16) -> worker::Config {
 /// has to actually release the port.
 #[tokio::test]
 async fn dropping_the_workers_releases_the_port() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -144,7 +153,7 @@ async fn dropping_the_workers_releases_the_port() {
 /// leaves, and the peer only notices at its idle timeout.
 #[tokio::test]
 async fn stopping_the_group_closes_its_sessions() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().unwrap();
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).unwrap();
@@ -189,7 +198,7 @@ async fn stopping_the_group_closes_its_sessions() {
 /// onto the same task set.
 #[tokio::test]
 async fn spawner_runs_a_send_less_future() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -222,7 +231,7 @@ async fn spawner_runs_a_send_less_future() {
 /// worker thread: the group keeps running and the next future still starts.
 #[tokio::test]
 async fn spawner_contains_a_factory_panic() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -246,7 +255,7 @@ async fn spawner_contains_a_factory_panic() {
 /// detaching it to run unreachable until the group stops.
 #[tokio::test]
 async fn spawner_abort_reaches_the_worker() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -280,7 +289,7 @@ async fn spawner_abort_reaches_the_worker() {
 /// it: a caller that aborts while the handle is still in flight cancels it.
 #[tokio::test]
 async fn spawner_abort_races_the_handoff() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -313,7 +322,7 @@ async fn spawner_abort_races_the_handoff() {
 /// alternative to, so both are covered.
 #[tokio::test]
 async fn dropping_unserved_workers_releases_the_port() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -331,7 +340,7 @@ async fn dropping_unserved_workers_releases_the_port() {
 /// unreachable behind an address that reads as bound.
 #[tokio::test]
 async fn an_ephemeral_port_is_shared_by_the_group() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -359,7 +368,7 @@ async fn an_ephemeral_port_is_shared_by_the_group() {
 /// startup failure it is without workers.
 #[tokio::test]
 async fn an_occupied_port_is_refused() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -388,7 +397,7 @@ async fn an_occupied_port_is_refused() {
 /// lock has to catch this, not the probe, so the error is asserted exactly.
 #[tokio::test]
 async fn the_other_wildcard_spelling_is_refused() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -417,7 +426,7 @@ async fn the_other_wildcard_spelling_is_refused() {
 /// (the probe would let two specific addresses coexist).
 #[tokio::test]
 async fn a_shared_port_is_refused_across_addresses() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -445,7 +454,7 @@ async fn a_shared_port_is_refused_across_addresses() {
 /// a plain bind refuses a port any socket holds, reuseport or not.
 #[tokio::test]
 async fn a_foreign_reuseport_group_is_refused() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -465,7 +474,7 @@ async fn a_foreign_reuseport_group_is_refused() {
 /// left to spend.
 #[tokio::test]
 async fn an_unaddressable_group_is_refused() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -481,7 +490,7 @@ async fn an_unaddressable_group_is_refused() {
 /// Generated certificates are minted once and shared by the whole worker group.
 #[tokio::test]
 async fn generated_certificates_are_shared() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut listen = moq_tokio::listen::Config::default();
 	listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	listen.tls.generate = vec!["localhost".to_string()];
@@ -514,7 +523,7 @@ async fn generated_certificates_are_shared() {
 /// worker that never failed.
 #[tokio::test]
 async fn dropping_a_server_keeps_its_socket() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -562,7 +571,7 @@ async fn dropping_a_server_keeps_its_socket() {
 /// and the threads join, rather than leaving a resized reuseport group behind.
 #[tokio::test]
 async fn completing_a_member_stops_its_siblings() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -612,7 +621,7 @@ async fn completing_a_member_stops_its_siblings() {
 /// Cancelling one serving member ends serving for the whole group.
 #[tokio::test]
 async fn cancelling_a_member_stops_its_siblings() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -657,7 +666,7 @@ async fn cancelling_a_member_stops_its_siblings() {
 /// still reaches its own handle.
 #[tokio::test]
 async fn a_panicking_member_stops_its_siblings() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -701,7 +710,7 @@ async fn a_panicking_member_stops_its_siblings() {
 /// Explicit shutdown with work in flight stops every worker and joins.
 #[tokio::test]
 async fn shutdown_with_work_in_flight_joins() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -731,7 +740,7 @@ async fn shutdown_with_work_in_flight_joins() {
 /// the calling thread.
 #[tokio::test]
 async fn dropping_the_group_with_work_in_flight_stops() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -767,7 +776,7 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 #[cfg(feature = "watch")]
 #[tokio::test]
 async fn rotated_identity_reaches_every_worker() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().unwrap();
 	let (cert, key) = certificate(dir.path());
 	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).unwrap();
@@ -843,7 +852,7 @@ async fn rotated_identity_reaches_every_worker() {
 /// reaches through moq-tokio's fallback.
 #[test]
 fn shutting_down_outside_a_runtime_joins_the_workers() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());

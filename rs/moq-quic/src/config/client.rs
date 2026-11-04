@@ -2,10 +2,8 @@
 
 use std::{fmt, sync::Arc};
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use rustls::client::WebPkiServerVerifier;
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use crate::crypto::rustls::{QuicClientConfig, configured_provider};
 use crate::{
 	MAX_CID_SIZE, RandomConnectionIdGenerator, TokenMemoryCache, TokenStore, Version,
@@ -47,7 +45,6 @@ impl Config {
 	}
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl Config {
 	/// Run the handshake with `tls` and the default settings
 	///

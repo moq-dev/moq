@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Transport cryptography uses rind
+
+Remove the `aws-lc-rs` and `ring` Cargo features. rind is always enabled.
+`crypto::provider()` always returns rind, independently of rustls' process default;
+`crypto::install_default()` installs rind for consumers such as reqwest.
+TLS setup returns `tls::Error::Crypto` naming any unsupported CPU feature before generating keys or opening connections.
+Direct calls to the infallible crypto helpers panic with that feature; call `rind::cpu::check()` first when using them outside TLS setup.
+`tls::Error::NoCryptoProvider` is removed. The `net` and `driver` features include certificate support, so an RTMPS-only embedder can use `net` without selecting a provider.
+Self-signed certificates and mDNS/QUIC-LB authentication use rind. Wire formats are unchanged.
+
 ### Native WebTransport implements moq-net's poll traits ([#7771](https://github.com/moq-dev/moq/pull/7771))
 
 `quic::web` is supported as a WebTransport library without running MoQ.

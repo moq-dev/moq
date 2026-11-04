@@ -4526,10 +4526,16 @@ mod tests {
 		endpoint::{self, Dial, Endpoint},
 	};
 
-	#[cfg(feature = "ring")]
 	#[test]
 	fn large_initial_token_leaves_room_for_close() {
-		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+		let cert = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(cert.cert.der().clone()).unwrap();
 		let config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();

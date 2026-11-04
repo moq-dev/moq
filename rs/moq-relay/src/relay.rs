@@ -136,6 +136,7 @@ impl Relay {
 	/// the cache governor and stats publisher, is only stored, and no session is admitted until
 	/// [`Self::run`] drives both.
 	pub async fn load(config: Config) -> anyhow::Result<Self> {
+		rind::cpu::check()?;
 		// Keep the large debug state machine off the embedder's main-thread stack.
 		Box::pin(Self::load_inner(config)).await
 	}

@@ -130,11 +130,19 @@ struct Tls {
 
 impl Tls {
 	fn new() -> anyhow::Result<Self> {
-		let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+		let identity = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()?;
 		let cert = CertificateDer::from(identity.cert.der().to_vec());
-		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()));
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+			identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec(),
+		));
 		// The relay's provider, so the TLS share matches what it pays.
-		let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+		let provider = Arc::new(rind_rustls::default_provider().unwrap());
 
 		let mut server = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()?

@@ -965,7 +965,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 	#[test]
 	fn header_encoding() {
 		use crate::Side;

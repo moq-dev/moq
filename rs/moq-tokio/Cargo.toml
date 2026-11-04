@@ -13,21 +13,21 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
+default = ["net", "quic", "websocket", "tcp", "uds"]
 # MoQ sessions over moq-net: `Client`, `Server`, `origin`, and the `connect`, `listen`,
 # and `transport` modules. Every transport feature turns it on, since none works without it.
-net = ["dep:moq-net"]
+net = ["dep:moq-net", "_certs"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
-# the MoQ backend. Needs a crypto-provider feature.
-driver = ["dep:hmac", "dep:moq-congestion", "dep:moq-quic", "dep:rustc-hash", "dep:sha2"]
+# the MoQ backend. Includes rind cryptography.
+driver = ["_certs", "dep:moq-congestion", "dep:moq-quic", "dep:rustc-hash"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
-quic = ["_transport", "_certs", "driver", "dep:http", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
+quic = ["_transport", "driver", "dep:http", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
 # in-memory identities, and per-SNI selection. Not one to enable on its own, since
 # nothing turns it into a listener: every QUIC backend needs it for its own TLS, and
 # so does the plain-TLS `tls::Listen::server_config` an RTMPS or HTTPS listener builds,
-# which is why the crypto-provider features below turn it on too.
-_certs = ["dep:rcgen", "dep:rustls-webpki"]
+# enabled by every transport and the session API.
+_certs = ["dep:rcgen", "dep:rind-rcgen", "dep:rustls-webpki"]
 # Private "any transport is compiled" marker. Not one to enable on its own: every
 # backend that can move bytes turns it on, and `uds` reaches it through `tcp`.
 _transport = ["net", "dep:moq-quic"]
@@ -36,23 +36,17 @@ watch = ["dep:notify"]
 # Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default so production
 # builds do not pull in the qlog crate and its serde_json encoder.
 qlog = ["moq-quic?/qlog"]
-# The QUIC backend pulls in its crypto provider from these features (default-features
-# are off on the dependency), so a backend without aws-lc-rs/ring has no initial cipher.
-# A provider is also all it takes to sign and serve certificates, so each turns on
-# `_certs` even where there is no QUIC backend to serve them for.
-aws-lc-rs = ["_certs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "moq-quic?/rustls-aws-lc-rs"]
 # LAN peer discovery over mDNS (the `mdns` module).
-mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
+mdns = ["dep:mdns-sd"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["_transport", "dep:qmux", "watch", "dep:dns-lookup"]
-# Qmux over TCP: plaintext `tcp://`, and `tls://` once a crypto provider is on. Server-side and client-side.
+# Qmux over TCP: plaintext `tcp://`, and `tls://`. Server-side and client-side.
 tcp = ["_transport", "dep:qmux", "dep:dns-lookup", "dep:tokio-rustls"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
 # Native WebRTC data channels over str0m, with a full ICE agent (the `webrtc` module).
 webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", "dep:mdns-sd"]
-ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/ring"]
 # Inside `kio::clock::sim::run`, detached tasks spawn on kio's deterministic simulator,
 # and with `driver`, `quic::driver::sim` carries datagrams over seeded, impaired
 # `moq_quic::sim::Link`s with no sockets. Turns on no transport of its own. Hidden from the
@@ -60,15 +54,16 @@ ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/ring"]
 sim = ["kio/sim", "moq-quic?/sim"]
 
 [dependencies]
+rind = { workspace = true }
+rind-rcgen = { workspace = true, optional = true }
 bytes = "1"
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.
 dns-lookup = { version = "4", optional = true }
 futures = "0.3"
 hex = { workspace = true }
-hmac = { workspace = true, optional = true }
 http = { version = "1", optional = true }
-humantime = "2.3"
+humantime = { workspace = true }
 humantime-serde = { workspace = true }
 if-addrs = { workspace = true, optional = true }
 kio = { workspace = true, features = ["runtime"] }
@@ -77,7 +72,7 @@ moq-congestion = { workspace = true, optional = true }
 # The ICE agent behind the `webrtc` module. Private, like str0m: neither appears in this crate's API.
 moq-ice = { workspace = true, optional = true }
 moq-net = { workspace = true, optional = true }
-# The QUIC state machine `quic::driver` drives; the crypto-provider features pick its provider.
+# The QUIC state machine `quic::driver` drives; rind supplies its cryptography.
 moq-quic = { workspace = true, optional = true }
 moq-sock = { workspace = true }
 notify = { version = "8", optional = true }
@@ -85,16 +80,15 @@ qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 rand = "0.10.1"
 rcgen = { workspace = true, optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
+rind-rustls = { workspace = true }
 rustc-hash = { workspace = true, optional = true }
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 # OS-native server-cert verifier for the rustls backend.
 rustls-platform-verifier = "0.7"
-rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
+rustls-webpki = { version = "0.103", default-features = false, features = ["std"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
-sha2 = { workspace = true, optional = true }
 str0m = { workspace = true, optional = true }
-subtle = { workspace = true, optional = true }
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.7", optional = true }
 tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
@@ -139,10 +133,12 @@ moq-shaper = { path = "../moq-shaper" }
 # The tests run QUIC sessions on the simulator. Only `sim`, so a test build keeps the
 # features it was asked for.
 moq-tokio = { path = ".", default-features = false, features = ["sim"] }
-rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+pem = { workspace = true }
+rcgen = { workspace = true, features = ["pem"] }
 # rustls without a provider, as another crate in the graph may build it, so the default test build covers an
 # `http://` dial's certificate fetch with no process default installed.
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
+rind-rcgen = { workspace = true }
 # Sockets a test holds or inspects: which ones the process still holds, so the
 # worker tests can prove a stopped group closed its own, and port reservations
 # that never listen, so a test needn't release a port another test could take.
@@ -175,7 +171,7 @@ required-features = ["net"]
 [[bench]]
 name = "fanout"
 harness = false
-required-features = ["driver", "aws-lc-rs"]
+required-features = ["driver"]
 
 [lints]
 workspace = true

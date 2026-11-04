@@ -18,9 +18,11 @@ tcp = ["tokio/net"]
 tls = ["tcp", "dep:tokio-rustls", "dep:rustls"]
 uds = ["tokio/net"]
 ws = ["dep:tokio-tungstenite", "dep:futures"]
-wss = ["ws", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
+wss = ["ws", "dep:rind-rustls", "dep:rustls-native-certs", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
 
 [dependencies]
+rind = { workspace = true }
+rind-rustls = { workspace = true, optional = true }
 bytes = { workspace = true }
 futures = { workspace = true, optional = true }
 kio = { workspace = true, features = ["runtime"] }
@@ -28,6 +30,7 @@ moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
 moq-quic = { workspace = true, features = ["mux"] }
 rustls = { version = "0.23", default-features = false, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true, optional = true }
@@ -44,8 +47,9 @@ anyhow = { workspace = true }
 # The last release before this crate moved here, for wire interop tests only.
 qmux06 = { package = "qmux", version = "0.6.3", default-features = false, features = ["tcp", "ws"] }
 # A self-signed identity and the relay's crypto provider, for the bench example's TLS transports.
-rcgen = { workspace = true, features = ["aws_lc_rs"] }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+rcgen = { workspace = true, features = ["pem"] }
+rind-rcgen = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 # The 0.6 release's stream API, for driving it in the interop tests.
 web-transport-trait = { workspace = true }

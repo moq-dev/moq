@@ -6,10 +6,8 @@ use std::{
 	sync::Arc,
 };
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use crate::crypto::rustls::QuicServerConfig;
 use crate::{
 	Duration,
@@ -90,7 +88,6 @@ pub struct Config {
 	pub(crate) token_key: Arc<dyn HandshakeTokenKey>,
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl Config {
 	/// Run the handshake with `tls`, with the default settings and a random handshake token key
 	///
@@ -102,16 +99,13 @@ impl Config {
 
 	/// Serve any crypto, such as the fuzz target's plaintext
 	pub(crate) fn from_crypto(crypto: Arc<dyn crypto::ServerConfig>) -> Self {
-		#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-		use aws_lc_rs::hkdf;
 		use rand::Rng;
-		#[cfg(feature = "ring")]
-		use ring::hkdf;
+		use rind::hkdf;
 
 		let rng = &mut crate::entropy::rng();
 		let mut master_key = [0u8; 64];
 		rng.fill_bytes(&mut master_key);
-		let token_key = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(&master_key);
+		let token_key = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(&master_key);
 
 		Self {
 			transport: transport::Config::default(),

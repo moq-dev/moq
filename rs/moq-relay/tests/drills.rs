@@ -222,7 +222,7 @@ impl RelayHost {
 	/// Bind a relay running `config` and wait for it to be ready to accept.
 	async fn start(config: Config) -> Self {
 		// Process-global; every drill in this binary races to be first.
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(2)

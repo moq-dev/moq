@@ -6,6 +6,7 @@ static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jema
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+	rind::cpu::check()?;
 	moq_tokio::crypto::install_default().expect("failed to install default crypto provider");
 
 	// The whole startup sequence lives in `Relay::load` rather than here, so an

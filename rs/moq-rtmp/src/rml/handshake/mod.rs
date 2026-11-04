@@ -28,9 +28,8 @@ mod errors;
 
 pub use self::errors::HandshakeError;
 
-use hmac::{Hmac, KeyInit, Mac};
 use rand::RngExt;
-use sha2::Sha256;
+use rind::hmac;
 
 const RTMP_PACKET_SIZE: usize = 1536;
 const SHA256_DIGEST_LENGTH: usize = 32;
@@ -465,38 +464,16 @@ fn get_message_parts(handshake: &[u8; RTMP_PACKET_SIZE], digest_offset: u32) -> 
 }
 
 fn calc_hmac_from_parts(part1: &[u8], part2: &[u8], key: &[u8]) -> [u8; SHA256_DIGEST_LENGTH] {
-	let mut inputs = Vec::with_capacity(part1.len() + part2.len());
-	for index in 0..part1.len() {
-		inputs.push(part1[index]);
-	}
-
-	for index in 0..part2.len() {
-		inputs.push(part2[index]);
-	}
-
-	calc_hmac(&inputs, &key)
+	let key = hmac::Key::new(&hmac::HMAC_SHA256, key);
+	let mut mac = hmac::Context::with_key(&key);
+	mac.update(part1);
+	mac.update(part2);
+	mac.sign().as_ref().try_into().unwrap()
 }
 
 fn calc_hmac(input: &[u8], key: &[u8]) -> [u8; SHA256_DIGEST_LENGTH] {
-	let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
-	mac.update(input);
-
-	let result = mac.finalize();
-	let array = result.into_bytes();
-
-	if array.len() != 32 {
-		panic!(
-			"Expected hmac signature to be 32 byte array, instead it was a {} byte array",
-			array.len()
-		);
-	}
-
-	let mut output = [0_u8; 32];
-	for index in 0..32 {
-		output[index] = array[index];
-	}
-
-	output
+	let key = hmac::Key::new(&hmac::HMAC_SHA256, key);
+	hmac::sign(&key, input).as_ref().try_into().unwrap()
 }
 
 fn fill_with_random_data(buffer: &mut [u8]) {

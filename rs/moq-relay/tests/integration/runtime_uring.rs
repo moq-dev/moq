@@ -38,8 +38,13 @@ pub(crate) fn supported() -> bool {
 /// A CA on disk plus a certificate it signed, for the mTLS test. Returns the
 /// root, the client's certificate, and its key.
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-	let ca_key = rcgen::KeyPair::generate().expect("ca keypair");
-	let mut ca_params = rcgen::CertificateParams::new(Vec::new()).expect("ca params");
+	let ca_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("ca keypair");
+	let mut ca_params = rcgen::CertificateParams::new(Vec::new())
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("ca params");
 	ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 	ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
 	ca_params
@@ -47,8 +52,13 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 		.push(rcgen::DnType::CommonName, "moq test ca");
 	let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-signed ca");
 
-	let key = rcgen::KeyPair::generate().expect("client keypair");
-	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()]).expect("client params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("client keypair");
+	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("client params");
 	params.use_authority_key_identifier_extension = true;
 	params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
 	let cert = params.signed_by(&key, &ca).expect("signed client cert");
@@ -58,19 +68,32 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 	let key_path = dir.join("client.key.pem");
 	std::fs::write(&root_path, ca.pem()).expect("write ca");
 	std::fs::write(&cert_path, cert.pem()).expect("write client cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write client key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write client key");
 	(root_path, cert_path, key_path)
 }
 
 /// A self-signed certificate on disk.
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-	let key = rcgen::KeyPair::generate().expect("keypair");
-	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+		.map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})
+		.expect("cert params");
 	let cert = params.self_signed(&key).expect("self-signed cert");
 	let cert_path = dir.join("cert.pem");
 	let key_path = dir.join("key.pem");
 	std::fs::write(&cert_path, cert.pem()).expect("write cert");
-	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)
+	.expect("write key");
 	(cert_path, key_path)
 }
 
@@ -117,7 +140,7 @@ async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connect
 /// shared origin.
 #[tokio::test]
 async fn uring_workers_serve_webtransport_and_raw_quic() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -212,7 +235,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 /// each of which must negotiate exactly the version it was pinned to.
 #[tokio::test]
 async fn uring_workers_serve_every_configured_version() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -303,7 +326,7 @@ async fn uring_workers_serve_every_configured_version() {
 /// sends no SNI, rather than the WebTransport CONNECT host.
 #[tokio::test]
 async fn uring_workers_report_link_facts() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -365,7 +388,7 @@ async fn uring_workers_report_link_facts() {
 /// the whole window, and the arrival only what is left of it.
 #[tokio::test]
 async fn uring_workers_drain_on_the_trigger() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -510,7 +533,7 @@ async fn http_get(addr: SocketAddr, path: &str) -> String {
 /// The advertised fingerprint pins fresh handshakes before and after rotation.
 #[tokio::test]
 async fn workers_publish_their_rotated_certificate_fingerprint() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	for io_uring in [false, true] {
 		if io_uring && !supported() {
 			continue;
@@ -576,7 +599,7 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 /// A generated worker identity is advertised once and accepted by pinned clients.
 #[tokio::test]
 async fn workers_share_a_generated_identity() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	for io_uring in [false, true] {
 		if io_uring && !supported() {
 			continue;
@@ -627,7 +650,7 @@ async fn workers_share_a_generated_identity() {
 /// nothing else, so only the mTLS path can carry the round trip through.
 #[tokio::test]
 async fn an_mtls_client_authenticates_without_a_token() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -723,7 +746,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 #[cfg(feature = "qlog")]
 #[tokio::test]
 async fn uring_workers_write_qlog_traces() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -811,7 +834,7 @@ async fn uring_workers_write_qlog_traces() {
 /// refuses, over WebTransport and raw QUIC alike.
 #[tokio::test]
 async fn uring_refusals_reach_metrics() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -903,7 +926,7 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 async fn uring_forwards_the_setup_token() {
 	use moq_tokio::quic::{driver, web};
 
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -995,7 +1018,7 @@ async fn uring_forwards_the_setup_token() {
 /// The embedded auth decider receives the same transport facts as the Tokio path.
 #[tokio::test]
 async fn uring_auth_reports_distinct_quic_and_webtransport() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -1047,7 +1070,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 /// request would carry it.
 #[tokio::test]
 async fn uring_workers_offer_the_configured_extensions() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -1123,7 +1146,7 @@ fn uring_workers_bound_stalled_handshakes() {
 
 	const LISTEN: Duration = Duration::from_millis(200);
 
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -1251,7 +1274,7 @@ async fn stall_after_hello(server: SocketAddr) -> (SocketAddr, tokio::sync::ones
 /// The harness keeps only the connection target, including its span on worker and shared tasks.
 #[tokio::test]
 async fn uring_sessions_log_their_close_under_a_connection_span() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
@@ -1319,7 +1342,7 @@ async fn uring_startup_reports_the_memlock_limit() {
 	if !test_env::Env::default().set("MOQ_TEST_MEMLOCK", "0").isolate() {
 		return;
 	}
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	if !supported() {
 		return;
 	}
