@@ -18,6 +18,9 @@ consumers start live, have only a priority (`setPriority`), and have no range, o
 compression, FETCH, or cache API. `finish()` drains existing readers; `abort(error)`
 fails them immediately. Close consumers when done.
 
+A datagram consumer binds to the broadcast's serving source when opened. It keeps no
+stream resume state and does not move to a replacement route.
+
 Lite-07-wip uses DATAGRAMS on stream type 0x9 and carries no Inflated Size. Lite-05/06
 keep their wire format and carry both kinds of a name on one SUBSCRIBE, without deduplication.
 Create a datagram track before or with its same-name stream track on those versions.
