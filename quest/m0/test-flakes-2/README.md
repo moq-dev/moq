@@ -94,7 +94,6 @@ Public API: none. Wire: none.
 - [moq-relay's embedded io_uring stop test survives load](/quest/m0/test-flakes-2/relay-embed-stop.md) - `uring_custom_route_and_quic` stops seeing HTTP accepted after its owner stopped
 - [The JS worklet library-build test survives load](/quest/m0/test-flakes-2/js-worklet-build.md) - the lazy-blob worklet build test stops timing out at bun's 5 seconds
 - [moq-archive's cross-backend recording test survives load](/quest/m0/test-flakes-2/archive-backends-identical.md) - `recordings_are_byte_identical_on_every_backend` stops splitting S3's video objects differently
-- [moq-ffi's panicked-origin supervision test survives load](/quest/m0/test-flakes-2/ffi-origin-panic.md) - a read the origin driver's panic ends always reports `MoqError::Task`
 - [The scheduled macOS WebSocket version test completes reliably](/quest/m0/test-flakes-2/macos-websocket.md) - fix the scheduled timeout while preserving newest-version negotiation assertions
 - [@moq/net's lite subscribe tests wait for the whole request](/quest/m0/test-flakes-2/js-subscribe-fixture.md) - the three lite subscribe-with-track cases pass under forced yields
 - [Concurrent PulseAudio harness runs don't share a D-Bus name](/quest/m0/test-flakes-2/pulse-dbus.md) - parallel media runs no longer collide on `org.PulseAudio1`
