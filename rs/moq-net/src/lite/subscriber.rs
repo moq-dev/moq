@@ -3673,6 +3673,16 @@ mod tests {
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 		assert_eq!(sub.fill_range(1), Some(4..8));
 		assert_eq!(sub.fill_range(3), None, "the demand's new range is no fill");
+
+		// Before SUBSCRIBE_START, a fill an update retires keeps its Range ID, since the start
+		// still names it, and it must not count as the demand's.
+		sub.started = false;
+		sub.edit(&[moved, demand], 1).unwrap();
+		assert_eq!(sub.fill_range(2), None, "retired");
+		assert!(sub.fill_ids.contains(&2), "still a fill's");
+		sub.started = true;
+		sub.edit(&[moved, demand], 1).unwrap();
+		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
 
 	/// A lite-07 range an update adds owes nothing known until SUBSCRIBE_STARTED says where it
@@ -8084,7 +8094,9 @@ struct SubStream {
 	/// The demand the ranges ask for, `None` when they ask only for fills.
 	demand: Option<Subscription>,
 	/// The Range IDs of the fills' ranges; the rest are the demand's, which alone set where
-	/// the live feed is. Held by ID, since a fill may ask for exactly what a demand range does.
+	/// the live feed is. Held by ID, since a fill may ask for exactly what a demand range does,
+	/// and until SUBSCRIBE_START even once retired, since it answers every range the
+	/// SUBSCRIBE carried.
 	fill_ids: std::collections::BTreeSet<u64>,
 	/// The groups the ranges ask for fills.
 	fill_groups: rangemap::RangeSet<u64>,
@@ -8236,7 +8248,9 @@ impl SubStream {
 		let changed = !self.live.iter().map(|(id, _)| id).eq(before);
 		let live = &self.live;
 		self.starts.retain(|id, _| live.get(*id).is_some());
-		self.fill_ids.retain(|id| live.get(*id).is_some());
+		if self.started {
+			self.fill_ids.retain(|id| live.get(*id).is_some());
+		}
 		self.fill_ids
 			.extend(added.into_iter().filter(|(_, fill)| *fill).map(|(id, _)| id));
 		Ok((edit, changed))
@@ -10230,6 +10244,8 @@ impl ServeLoop {
 							}
 							self.range_fills.skip(groups, skipped);
 						}
+						// A fill an update retired since says nothing of the live feed either.
+						None if active.fill_ids.contains(&id) => {}
 						// Only the demand's ranges say where the live feed is served from. No range
 						// starting anywhere leaves nothing owed.
 						None => {
@@ -10241,6 +10257,9 @@ impl ServeLoop {
 					}
 				}
 				active.served = served;
+				// Only a live fill's Range ID matters from here.
+				let live = &active.live;
+				active.fill_ids.retain(|id| live.get(*id).is_some());
 				// One asking only for fills feeds nothing live.
 				if active.demand.is_none() {
 					active.started = true;
