@@ -1984,6 +1984,40 @@ fn hides(heads: &[Path], prefix: &Path) -> bool {
 		.any(|head| prefix.strip_prefix(head).is_some_and(|below| below.is_hidden()))
 }
 
+/// How many sessions withhold an origin's hidden routes from their peer, such as a
+/// moq-lite client before 07, whose peer can't ask for them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HiddenWithheld(kio::Shared<usize>);
+
+impl HiddenWithheld {
+	/// Count a session that withholds them, until the returned guard drops.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn hold(&self) -> HiddenWithholding {
+		*self.0.lock() += 1;
+		HiddenWithholding(self.clone())
+	}
+
+	/// Ready while a session withholds them.
+	pub fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0
+			.poll(waiter, |count| match **count {
+				0 => Poll::Pending,
+				_ => Poll::Ready(()),
+			})
+			.map(drop)
+	}
+}
+
+/// A session counted by [`HiddenWithheld::hold`], until dropped.
+#[derive(Debug)]
+pub(crate) struct HiddenWithholding(HiddenWithheld);
+
+impl Drop for HiddenWithholding {
+	fn drop(&mut self) {
+		*self.0.0.lock() -= 1;
+	}
+}
+
 /// What an [`AnnounceConsumer`] yields.
 #[derive(Clone, Debug)]
 pub enum AnnounceEvent {
@@ -5163,6 +5197,9 @@ struct OriginState {
 	// discovered; see [`Interests`].
 	listeners: Vec<Listener>,
 	next_listener: u64,
+
+	// The sessions withholding this origin's hidden routes from their peer.
+	hidden_withheld: HiddenWithheld,
 }
 
 impl OriginState {
@@ -5179,6 +5216,7 @@ impl OriginState {
 			closed: false,
 			listeners: Vec::new(),
 			next_listener: 0,
+			hidden_withheld: HiddenWithheld::default(),
 		}
 	}
 
@@ -6588,6 +6626,11 @@ impl Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn includes_hidden(&self) -> bool {
 		self.hidden.include
+	}
+
+	/// The sessions withholding this origin's hidden routes from their peer.
+	pub(crate) fn hidden_withheld(&self) -> HiddenWithheld {
+		self.shared.read().hidden_withheld.clone()
 	}
 
 	/// The egress stats context this handle was tagged with.
