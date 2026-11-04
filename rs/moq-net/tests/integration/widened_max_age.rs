@@ -41,6 +41,11 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
+/// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
+fn timed() -> Info {
+	Info::default().with_timescale(Timescale::MILLI).with_max_age(None)
+}
+
 /// A publisher holding every group, a relay, and a viewer behind it.
 struct Chain {
 	source: track::Producer,
@@ -74,9 +79,7 @@ impl Chain {
 			links.push(peer(version, relay, &viewer).await);
 		}
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let source = broadcast
-			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
-			.unwrap();
+		let source = broadcast.create_track("video", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		Self {
 			source,
@@ -300,9 +303,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.session(moq_net::Path::from_static(""));
 	let _upstream = connect_mock(options).await;
 	let broadcast = publisher.create_broadcast("live").unwrap();
-	let source = broadcast
-		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
-		.unwrap();
+	let source = broadcast.create_track("video", timed()).unwrap();
 	for sequence in 0..GROUPS {
 		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 		group

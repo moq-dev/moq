@@ -122,9 +122,9 @@ pub struct Config {
 	/// one policy.
 	pub pool: cache::Pool,
 
-	/// Ceiling on each track's media-timestamp retention window under this origin.
-	/// This caps the local retention and delivery budget without changing the
-	/// publisher's [`max_age`](track::Info::max_age) metadata. Wall-clock
+	/// Local ceiling on each track's max age under this origin.
+	/// This caps how long a superseded group stays fresh here, and the delivery budget,
+	/// without changing the publisher's [`max_age`](track::Info::max_age) metadata. Wall-clock
 	/// reclamation of idle content is separate: [`Self::pool`]'s
 	/// [`expiry`](cache::Pool::expiry) window. [`Duration::MAX`] (the default)
 	/// imposes no ceiling, leaving each track's own window in force.
@@ -2057,7 +2057,7 @@ pub struct Producer {
 	// mint their remote broadcasts with it). Unbounded by default.
 	pool: cache::Pool,
 
-	// Retention ceiling inherited by broadcasts created under this origin (see
+	// Max age ceiling inherited by broadcasts created under this origin (see
 	// [`Config::cache_duration`]). `Duration::MAX` (no ceiling) by default.
 	cache_duration: Duration,
 
@@ -2087,6 +2087,12 @@ pub struct Producer {
 }
 
 impl Producer {
+	/// A handle that queues work on this origin's [`Driver`] without keeping the origin
+	/// alive: work queued once the driver is gone is dropped.
+	pub(super) fn tasks(&self) -> crate::util::TasksWeak {
+		self.tasks.downgrade()
+	}
+
 	/// Build a producer from a [`Config`] (identity + cache pool) with no scoped
 	/// prefix and no pre-existing broadcasts, paired with the [`Driver`] that runs
 	/// the origin's lifecycle work.
@@ -14517,8 +14523,8 @@ mod tests {
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
 		// A successor, so the stalled group is not the protected live edge. Its
-		// timestamp is inside the retention budget, so subscription expiry keeps the
-		// stalled group: only reclamation can bound it.
+		// timestamp is inside the max age, so the stalled group stays fresh and
+		// subscription expiry never skips it: only reclamation can bound it.
 		let _successor = track.append_group().unwrap();
 
 		let mut reading = stalled.consume();

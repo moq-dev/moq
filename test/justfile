@@ -253,7 +253,7 @@ video:
     # A desktop display makes software Vulkan request unsupported window surfaces.
     cd video && bash ../../sh/local.sh env -u DISPLAY -u WAYLAND_DISPLAY bun test ./renderer.browser.ts
 
-# Optional publisher retention across Rust/JS sessions through a Rust relay.
+# Optional publisher max age across Rust/JS sessions through a Rust relay.
 max-age:
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 

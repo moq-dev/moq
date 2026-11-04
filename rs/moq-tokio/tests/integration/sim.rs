@@ -144,7 +144,12 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 	let viewer = origin_producer(2);
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let source = broadcast
-		.create_track("video", track::Info::default().with_timescale(Timescale::MILLI))
+		.create_track(
+			"video",
+			track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 

@@ -1301,7 +1301,8 @@ export class Subscriber {
 		if (!hasTrackStream(this.version)) {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
 			const framing = { compress: false, timescale: 0, scale: undefined };
-			const entry = this.#register(id, msg, ranges, request.accept(), framing, state);
+			// Nor a max age: no publisher limit, not the authored default.
+			const entry = this.#register(id, msg, ranges, request.accept({ maxAge: null }), framing, state);
 			const stream = await this.#sendSubscribe(state, msg, deadline);
 			// The first response MUST be a SUBSCRIBE_OK (older drafts only).
 			const resp = await decodeSubscribeResponse(stream.reader, this.version);
@@ -1345,7 +1346,8 @@ export class Subscriber {
 			// accept it again.
 			state.cancel.signal.throwIfAborted();
 			const model = this.#toModelInfo(answered.info);
-			const producer = request.accept(model);
+			// A TRACK_INFO without a max age sets no publisher limit, not the authored default.
+			const producer = request.accept({ ...model, maxAge: model.maxAge ?? null });
 			const framing = {
 				compress: answered.info.compress,
 				timescale: answered.info.timescale ?? 0,
@@ -1399,7 +1401,7 @@ export class Subscriber {
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
-			// for a late group anyway, and no longer than the publisher keeps one.
+			// for a late group anyway, and no longer than the publisher keeps one fresh.
 			tail: new Tail({
 				grace: () => hooks.tailGrace(producer),
 			}),

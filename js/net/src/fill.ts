@@ -518,7 +518,7 @@ export class Fill {
 	/**
 	 * Insert group `sequence` into the track's cache, handing it to the readers waiting on it,
 	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
-	 * if it has none yet. Throws a `RangeError` outside the fill, and an error if the group was
+	 * if it has none yet, as received metadata: an absent `maxAge` sets no publisher limit. Throws a `RangeError` outside the fill, and an error if the group was
 	 * already answered or cached, or the track is closed.
 	 */
 	accept(sequence: bigint, info?: Partial<Info>): GroupProducer {

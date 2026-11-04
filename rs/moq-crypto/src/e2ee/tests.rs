@@ -346,10 +346,11 @@ fn subscribe_all() -> moq_net::track::Subscription {
 		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)))
 }
 
+/// A track whose superseded groups stay fresh, so [`subscribe_all`] reads every group.
 fn net_track(name: &Name) -> moq_net::track::Producer {
 	moq_net::broadcast::Info::new()
 		.produce()
-		.create_track(name.as_str(), timed())
+		.create_track(name.as_str(), timed().with_max_age(None))
 		.unwrap()
 }
 
