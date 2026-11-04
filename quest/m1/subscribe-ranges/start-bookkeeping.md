@@ -30,10 +30,10 @@ generations of "start".
   DROP, since
   [Datagram tracks](/quest/m1/datagram-tracks/README.md) takes datagrams out
   of stream tracks (maintainer, 2026-11-01). The subscriber's end is "owed
-  range covered and no stream active", with no datagram grace;
-  `a_lost_datagram_delays_the_end` becomes a lite-05/06 case. Keep
-  `Settle`'s full grace for lite-05/06 and moq-transport behind one version
-  predicate.
+  range covered and no stream active", with no datagram grace. A stream
+  track's lite-05/06 subscription drops group datagrams, so a group an old
+  publisher sent only as one is a hole there. Keep `Settle`'s full grace for
+  lite-05/06 and moq-transport behind one version predicate.
 - Lite-07 is unpublished, so sending a fresh START per update can remove the
   `requested == start` gate (`lite/subscriber.rs`, about line 4898).
 

@@ -260,7 +260,7 @@ pub struct MoqMediaFrame {
 /// takes a [`MoqFrame`] and assigns the sequence number for you.
 #[derive(uniffi::Record)]
 pub struct MoqDatagram {
-	/// Per-track sequence number, shared with groups.
+	/// The datagram's sequence number, counted apart from the track's groups.
 	#[uniffi(default = 0)]
 	pub sequence: u64,
 	/// Presentation timestamp, or null on an untimed track, on both publish and receive.

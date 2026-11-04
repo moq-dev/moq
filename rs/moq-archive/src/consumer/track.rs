@@ -49,66 +49,56 @@ impl Live {
 	pub fn push(&mut self, objects: &[Arc<Object>], from: u64) -> Result<()> {
 		for object in objects {
 			for (index, entry) in object.entries.iter().enumerate() {
-				if entry.sequence() < from {
+				if entry.sequence < from {
 					continue;
 				}
 				if self.next.is_none() {
 					// Readers ask fills for everything older.
-					self.producer.start_at(entry.sequence())?;
+					self.producer.start_at(entry.sequence)?;
 				}
 				let first = match index {
 					0 => object.frame_start,
 					_ => 0,
 				};
 				self.entry(entry, first)?;
-				self.next = Some(entry.sequence() + 1);
+				self.next = Some(entry.sequence + 1);
 			}
 		}
 		Ok(())
 	}
 
 	fn entry(&mut self, entry: &Entry, first: u64) -> Result<()> {
-		match entry {
-			Entry::Datagram { sequence, frame } => {
-				// A later sequence completes the open group.
-				self.close()?;
-				let timestamp = timestamp(frame.timestamp, self.timescale)?;
-				self.producer
-					.insert_datagram(*sequence, timestamp, frame.payload.clone())?;
-			}
-			Entry::Group { sequence, frames } => {
-				if self.open.as_ref().is_some_and(|open| open.sequence != *sequence) {
-					self.close()?;
+		let sequence = entry.sequence;
+		if self.open.as_ref().is_some_and(|open| open.sequence != sequence) {
+			self.close()?;
+		}
+		// The group stays in `open` while it is written, so a failure aborts it with the track
+		// rather than dropping it.
+		let open = match &mut self.open {
+			Some(open) => {
+				if open.next != first {
+					return Err(Error::Sequence);
 				}
-				// The group stays in `open` while it is written, so a failure aborts it with
-				// the track rather than dropping it.
-				let open = match &mut self.open {
-					Some(open) => {
-						if open.next != first {
-							return Err(Error::Sequence);
-						}
-						open
-					}
-					None => {
-						let group = self.producer.create_group(group::Info { sequence: *sequence })?;
-						let open = self.open.insert(Open {
-							group,
-							sequence: *sequence,
-							next: first,
-						});
-						if first > 0 {
-							// Its head was pruned.
-							open.group.start_at(first)?;
-						}
-						open
-					}
-				};
-				for frame in frames {
-					let timestamp = timestamp(frame.timestamp, self.timescale)?;
-					open.group.write_frame(timestamp, frame.payload.clone())?;
-					open.next += 1;
-				}
+				open
 			}
+			None => {
+				let group = self.producer.create_group(group::Info { sequence })?;
+				let open = self.open.insert(Open {
+					group,
+					sequence,
+					next: first,
+				});
+				if first > 0 {
+					// Its head was pruned.
+					open.group.start_at(first)?;
+				}
+				open
+			}
+		};
+		for frame in &entry.frames {
+			let timestamp = timestamp(frame.timestamp, self.timescale)?;
+			open.group.write_frame(timestamp, frame.payload.clone())?;
+			open.next += 1;
 		}
 		Ok(())
 	}
@@ -197,17 +187,15 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 			.entries
 			.iter()
 			.enumerate()
-			.filter_map(|(position, entry)| match entry {
-				Entry::Group { sequence, frames } if position > 0 || object.frame_start == 0 => {
-					let first = frames.first()?;
-					first
-						.timestamp
-						.is_some_and(|at| u128::from(at) <= limit)
-						.then_some(*sequence)
-				}
-				_ => None,
-			})
-			.last();
+			.rev()
+			.filter(|(position, _)| *position > 0 || object.frame_start == 0)
+			.find_map(|(_, entry)| {
+				let first = entry.frames.first()?;
+				first
+					.timestamp
+					.is_some_and(|at| u128::from(at) <= limit)
+					.then_some(entry.sequence)
+			});
 		if let Some(sequence) = found {
 			return serve_group(shared, index, fill, sequence).await;
 		}
@@ -224,14 +212,8 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 			.entries
 			.iter()
 			.enumerate()
-			.find_map(|(position, entry)| match entry {
-				Entry::Group { sequence, frames }
-					if !frames.is_empty() && (position > 0 || object.frame_start == 0) =>
-				{
-					Some(*sequence)
-				}
-				_ => None,
-			});
+			.find(|(position, entry)| !entry.frames.is_empty() && (*position > 0 || object.frame_start == 0))
+			.map(|(_, entry)| entry.sequence);
 		if let Some(sequence) = found {
 			return serve_group(shared, index, fill, sequence).await;
 		}
@@ -313,32 +295,22 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		fill.drop_groups(0..next);
 		return;
 	};
-	let Some(position) = first.entries.iter().position(|entry| entry.sequence() >= sequence) else {
+	let Some(position) = first.entries.iter().position(|entry| entry.sequence >= sequence) else {
 		// A gap after the object's last entry.
-		let last = first.entries.last().map_or(0, |entry| entry.sequence() + 1);
+		let last = first.entries.last().map_or(0, |entry| entry.sequence + 1);
 		fill.drop_groups(last..next);
 		return;
 	};
-	let frames = match &first.entries[position] {
-		Entry::Group {
-			sequence: found,
-			frames,
-		} if *found == sequence => frames,
-		// A datagram stays lossy and uncached, never a fetched group.
-		Entry::Datagram { sequence: found, .. } if *found == sequence => {
-			fill.drop_groups(sequence..sequence + 1);
-			return;
-		}
+	let found = &first.entries[position];
+	if found.sequence != sequence {
 		// A gap between two entries.
-		other => {
-			let gap = match position {
-				0 => sequence,
-				_ => first.entries[position - 1].sequence() + 1,
-			};
-			fill.drop_groups(gap..other.sequence());
-			return;
-		}
-	};
+		let gap = match position {
+			0 => sequence,
+			_ => first.entries[position - 1].sequence + 1,
+		};
+		fill.drop_groups(gap..found.sequence);
+		return;
+	}
 	let start = match position {
 		0 => first.frame_start,
 		_ => 0,
@@ -350,15 +322,12 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 	}
 
 	// The group's frames, with their indices, across every object holding it.
-	let mut stored: Vec<(u64, &Frame)> = (start..).zip(frames).collect();
+	let mut stored: Vec<(u64, &Frame)> = (start..).zip(&found.frames).collect();
 	for object in &objects[1..] {
 		let next = start + stored.len() as u64;
 		match object.entries.first() {
-			Some(Entry::Group {
-				sequence: found,
-				frames,
-			}) if *found == sequence && object.frame_start == next => {
-				stored.extend((next..).zip(frames));
+			Some(entry) if entry.sequence == sequence && object.frame_start == next => {
+				stored.extend((next..).zip(&entry.frames));
 			}
 			_ => {
 				// A continuation went missing, so the group can't be served whole.
