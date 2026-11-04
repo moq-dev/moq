@@ -27,12 +27,24 @@ delay and publisher retention, refresh 1, and publisher priority 1.
 Additional local variants also passed: first answer at group 1, groups buffered
 before serving, an absolute group-1 subscription floor, and a fresh route
 instance between answers. The control codecs have not been changed, because
-none of these cases reproduces the reported invalid encoding.
+none of these cases reproduces the reported invalid encoding by itself.
+
+The replacement investigation in
+[moq-dev/moq#7851](https://github.com/moq-dev/moq/pull/7851) subsequently traced a
+matching publisher-session failure to a missing-group FETCH, rather than group
+sequence encoding. An unlimited reader causes Rust to send a FETCH Max Delay
+of `Number.MAX_SAFE_INTEGER`, encoded with its optional-field offset as
+9007199254740992. JS reads that encoded value with `r.u53()` before subtracting
+the offset, and refuses it. That PR owns the FETCH boundary fix and its
+replacement reproducer; this quest must not duplicate that implementation.
+The candidate here does not trigger the missing-group FETCH.
 
 ## Waiting
 
-- Maintainer: provide the failing sequence or paired JS/relay revisions so the
-  control-encoding failure can be reproduced (recommended), or accept the
-  regression test as evidence that this quest can be retired. The original
-  report does not give a minimal failing sequence, and the candidate passes
-  unchanged on current `main`.
+- moq-dev/moq: finish the FETCH budget-boundary fix and its regression coverage
+  in [moq-dev/moq#7851](https://github.com/moq-dev/moq/pull/7851), then check whether
+  it covers the original fresh-broadcast re-serve failure too.
+- Maintainer: after that check, retire this quest through the shared fix if it
+  explains the original failure (recommended), or retain it for a distinct
+  reproducer. The passing candidate in this draft is not evidence that the
+  original bug has been fixed and should not be landed as such.
