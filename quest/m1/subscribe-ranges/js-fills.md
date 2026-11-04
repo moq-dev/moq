@@ -25,6 +25,11 @@ subscriber session its received copy's `Requests` handler, over lite FETCH a
 group at a time, with the below-start rule below. It tested JS to JS and
 through a JS relay between Rust peers (`just test relay-fill`).
 
+- Scope, decided 2026-11-04 (maintainer, on #7845):
+  - ✅ Land #7845 as is; the head fill and `Fill.time` stay here.
+  - Port both in #7845.
+  - Drop both for JS.
+
 - Below-start rule, landed in #7845 (maintainer, 2026-11-04, replacing the
   2026-11-03 instruction to port
   [moq-dev/moq#7168](https://github.com/moq-dev/moq/pull/7168)'s budget
