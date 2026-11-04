@@ -2,9 +2,9 @@
 
 ## Goal
 
-`moq publish` can keep a broadcast's catalog open and publish later catalog
+`moq import` can keep a broadcast's catalog open and publish later catalog
 updates, such as adding or removing a track mid-stream, without restarting
-the broadcast or its epoch. An operator can then replay catalog recovery
+the broadcast or minting a new instance. An operator can then replay catalog recovery
 cases (a relay restart while a catalog group is open, a reader joining or
 resuming mid-update) with stock tools instead of hand-built clients.
 

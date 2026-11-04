@@ -20,8 +20,9 @@ before moq-ice sees it.
 - Classify it once at the str0m boundary in moq-ice, the only place that sees
   str0m's error. Until the [vendored stack](/quest/m2/webrtc/vendor.md) lands,
   that is a text match there, pinned by a test against the crate's real
-  message; once vendored, carry dimpl's variant through typed. Whichever of
-  this and the vendoring lands second removes the text match.
+  message. If the vendoring lands first, carry dimpl's variant through the
+  vendored `dtls.rs` typed instead, and add no text match. Otherwise the
+  vendoring quest replaces the match; its plan says so.
 - Add the variant to `moq_ice::Error` and `moq_rtc::Error`, named by role (for
   example `DtlsTimeout`), and map it in `moq-rtc`'s session loop and moq-tokio's
   `webrtc` transport, which also matches `moq_ice::Error`.
@@ -34,4 +35,5 @@ Public API: additive variants on non-exhaustive error enums. Wire: none.
 
 ## Related
 
+- [Vendor and trim the WebRTC stack](/quest/m2/webrtc/vendor.md) - replaces this quest's text match with dimpl's typed timeout
 - [DTLS waits for ICE](/quest/m2/webrtc/dtls-after-ice.md) - after it, every DTLS handshake timeout comes after nomination, which is the case this types

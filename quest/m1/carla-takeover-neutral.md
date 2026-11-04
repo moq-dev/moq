@@ -33,4 +33,4 @@ jump and the claim lands in the right gear. Pedals start released.
 ## Related
 
 - [CARLA on sockets](/quest/m1/socket/carla.md) - moves the control track; the handoff behaves the same after the move
-- [A stuck CARLA truck respawns after a handback](/quest/m1/carla-stuck-handback.md) - the other half of a bad takeover: getting the truck back
+- [A wedged CARLA truck nobody drives respawns after the stuck timeout](/quest/m1/carla-stuck-handback.md) - the other half of a bad takeover: getting the truck back
