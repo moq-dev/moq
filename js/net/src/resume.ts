@@ -281,7 +281,7 @@ interface Copy {
 	since?: Instant;
 	/** Groups still read that came from this copy, which keep a replaced copy subscribed. */
 	lease: number;
-	/** It handed out a group, so a failure is its route failing mid-serve rather than refusing. */
+	/** It handed out a group or datagram, so a failure is its route failing mid-serve rather than refusing. */
 	delivered?: boolean;
 }
 
@@ -843,6 +843,7 @@ class Reader implements ResumeSource {
 					}
 					this.#datagram = sequence;
 					this.#newestDatagram = max(this.#newestDatagram ?? 0n, sequence);
+					copy.delivered = true;
 					return recv;
 				}
 				if (recv.kind === "done") copy.datagramsDone = copy.sub.closed.peek() ?? null;

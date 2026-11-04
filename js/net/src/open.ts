@@ -17,6 +17,8 @@ import { race } from "@moq/signals";
  * keeps the send order it was created at.
  */
 
+const live = Symbol("live");
+
 /** A send order, or a way to read it while it can still move. */
 export type Rank = number | (() => number);
 
@@ -40,6 +42,8 @@ class Line<T> {
 	#waiting: Waiting<T>[] = [];
 	/** Streams admitted after the open that created them gave up. */
 	#spare: Admitted<T>[] = [];
+	/** Creates still waiting on the transport, never more than the opens waiting. */
+	#creating = 0;
 
 	constructor(create: (sendOrder: number) => Promise<T>, rank: (stream: T, sendOrder: number) => void) {
 		this.#create = create;
@@ -54,6 +58,9 @@ class Line<T> {
 	open(rank: Rank, cancel: Promise<unknown>): Promise<T | undefined>;
 	async open(rank: Rank, cancel?: Promise<unknown>): Promise<T | undefined> {
 		const current = typeof rank === "number" ? () => rank : rank;
+		// A caller already cancelled takes nothing, not even a stream that is free now. A fresh
+		// settled promise, observed after `cancel`, loses only to a cancel already settled.
+		if (cancel && (await race([cancel, Promise.resolve(live)])) !== live) return undefined;
 		if (this.#waiting.length === 0) {
 			const spare = this.#spare.pop();
 			if (spare) return this.#handed(spare, current());
@@ -65,11 +72,22 @@ class Line<T> {
 		});
 		this.#waiting.push(waiting);
 
-		const order = current();
-		this.#create(order).then(
-			(stream) => this.#admit({ stream, order }),
-			(err: unknown) => this.#refuse(err),
-		);
+		// An open that gave up leaves its create running for the next one, so cancellation
+		// churn never queues more creates than opens wait.
+		if (this.#creating < this.#waiting.length) {
+			const order = current();
+			this.#creating++;
+			this.#create(order).then(
+				(stream) => {
+					this.#creating--;
+					this.#admit({ stream, order });
+				},
+				(err: unknown) => {
+					this.#creating--;
+					this.#refuse(err);
+				},
+			);
+		}
 
 		if (!cancel) return ticket;
 		// `race`, so a cancel shared across many opens gains no reaction per open.

@@ -1016,6 +1016,27 @@ test("a copy that fails mid-serve on a route still serving is subscribed afresh"
 	close();
 });
 
+test("a datagram reader whose copy fails mid-serve on a route still serving is subscribed afresh", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe();
+	ta.producer.appendDatagram(undefined, enc.encode("a0"));
+	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("a0");
+
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	const again = copy(a);
+	// Datagrams are not replayed, so send them once the fresh copy is subscribed.
+	const next = sub.recvDatagram();
+	await settle();
+	await settle();
+	again.producer.appendDatagram(undefined, enc.encode("a0"));
+	again.producer.appendDatagram(undefined, enc.encode("a1"));
+	expect(dec.decode((await next)?.payload)).toBe("a1");
+
+	sub.close();
+	close();
+});
+
 test("between routes a reader keeps reading the copy it has", async () => {
 	const { origin, a, b, active, request, disposeA, close } = await setup();
 	const ta = copy(a);

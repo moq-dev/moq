@@ -715,10 +715,33 @@ test("open waits for a bidi slot rather than failing on a busy session", async (
 test("tryOpen gives up on a cancel that settled before the open", async () => {
 	const { quic, grant, created } = creditTransport();
 	expect(await Writer.tryOpen(quic, { cancel: Promise.resolve(), version: QUIC })).toBeUndefined();
+	expect(created).toHaveLength(0);
 
-	// The stream its create admits goes to the next open instead of a second create.
+	// Nor does it take a stream kept for the next open.
+	const cancelled = Promise.withResolvers<void>();
+	const gaveUp = Writer.tryOpen(quic, { cancel: cancelled.promise, version: QUIC });
+	cancelled.resolve();
+	expect(await gaveUp).toBeUndefined();
 	await grant();
+	expect(await Writer.tryOpen(quic, { cancel: Promise.resolve(), version: QUIC })).toBeUndefined();
 	expect(await Writer.open(quic, { version: QUIC })).toBeInstanceOf(Writer);
+	expect(created).toHaveLength(1);
+});
+
+// Groups that expire while the peer withholds credit leave their creates to the next open,
+// so churn never queues more creates than opens wait.
+test("cancelled opens never queue more creates than opens wait", async () => {
+	const { quic, grant, created } = creditTransport();
+	for (let i = 0; i < 100; i++) {
+		const cancelled = Promise.withResolvers<void>();
+		const opening = Writer.tryOpen(quic, { cancel: cancelled.promise, version: QUIC });
+		cancelled.resolve();
+		expect(await opening).toBeUndefined();
+	}
+	expect(created).toHaveLength(1);
+	const open = Writer.open(quic, { version: QUIC });
+	await grant();
+	expect(await open).toBeInstanceOf(Writer);
 	expect(created).toHaveLength(1);
 });
 
