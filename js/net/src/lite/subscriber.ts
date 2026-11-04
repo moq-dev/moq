@@ -925,6 +925,8 @@ export class Subscriber {
 				if (next !== undefined && next !== priority) {
 					await untilAborted(new DatagramsUpdate(next).encode(opened.writer, this.version), signal);
 					priority = next;
+					// The priority may have changed again during the write, before the wait below.
+					continue;
 				}
 				await untilAborted(race([ended, Signal.race(producer.priority, producer.closed)]), signal);
 			}

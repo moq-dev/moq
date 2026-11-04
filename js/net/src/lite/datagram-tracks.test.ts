@@ -197,3 +197,34 @@ for (const alpn of [ALPN_05, ALPN_06])
 			}
 		});
 	}
+
+test("lite-07 forwards a priority change made while the previous DATAGRAMS_UPDATE writes", async () => {
+	const source = new Origin();
+	const publication = source.createBroadcast(path);
+	const datagrams = publication.broadcast.createDatagrams("audio");
+	publication.announce();
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ url, transport: pair.server, publish: source.consume() }),
+	]);
+	const remote = wireOf(client).consume(path);
+	const reader = remote.datagrams("audio");
+	try {
+		await reader.info();
+		// Land the second change at each point of the first update's write.
+		for (let yields = 0; yields < 40; yields++) {
+			reader.setPriority(yields + 1);
+			for (let i = 0; i < yields; i++) await Promise.resolve();
+			reader.setPriority(-(yields + 1));
+			// Without a recheck after the write, the publisher stays at the first value and this hangs.
+			while (datagrams.priority.peek() !== -(yields + 1)) await datagrams.priority.changed();
+		}
+	} finally {
+		reader.close();
+		remote.close();
+		client.abort();
+		server.abort();
+		source.close();
+	}
+});

@@ -2621,7 +2621,9 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 
 test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// No max age: at the default zero, the live group would make group 9 stale and reset its
+	// stream if that stream were still serving, which depends on scheduling.
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	for (const sequence of [0n, 3n, 9n]) {
 		const group = track.createGroup(sequence);
 		for (let i = 0; i < 2; i++)
