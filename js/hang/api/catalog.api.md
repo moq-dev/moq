@@ -350,7 +350,7 @@ export const RootSchema: ZodMiniObject<{
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
 	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
-	media: ZodMiniOptional<ZodMiniObject<{
+	media: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
 		clock: ZodMiniOptional<ZodMiniObject<{
 			timescale: ZodMiniDefault<ZodMiniNumber<number>>;
 			wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
@@ -358,7 +358,7 @@ export const RootSchema: ZodMiniObject<{
 		join: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
 			interval: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 		}, $strip>>>;
-	}, $strip>>;
+	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
 	stats: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
 		track: ZodMiniString<string>;
 	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
