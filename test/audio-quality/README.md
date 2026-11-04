@@ -84,8 +84,9 @@ buffer it plays into 128-frame quanta at the device rate and classifies each by 
 supplied (`moq_audio::playback::Observer`). The meanings are the browser's, with three differences
 in what the native player does:
 
-- Its ring never stalls to refill. A dry ring underruns until the player pads it back to the target
-  with silence, which `silence` counts, so native `stalled` is only a sink with nothing written yet.
+- Its ring stretches received PCM toward the target. A ring that still runs dry
+  emits emergency silence while received PCM refills it; `silence` counts that padding.
+  Native `stalled` is only a sink with nothing written yet.
 - The playhead is projected from the player's last write at the wall rate and held at its end.
 - `device` is the host's reported output latency, with no `baseLatency`, and `render_load` is
   unmeasured.

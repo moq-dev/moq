@@ -3,8 +3,9 @@
 //! The writer resamples to the reader's rate on the way in, so the queue holds
 //! reader-rate frames and both its size and what it admits are counted in them.
 //! It opens primed with silence to its latency, can pad back up to it when the
-//! writer falls behind, and can trim back down to it when the writer runs ahead,
-//! so jitter and clock drift cost a short glitch rather than a growing delay.
+//! writer falls behind, and can trim back down to it when the writer runs ahead.
+//! Native playback instead enables received-audio stretch; only an actual
+//! underrun refills with emergency silence, which never enters the pitch search.
 //! Neither end allocates, locks, or blocks after construction, so either may
 //! run on an audio callback.
 
@@ -16,7 +17,7 @@
 )]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ringbuf::traits::{Consumer as _, Observer as _, Producer as _, Split as _};
@@ -73,6 +74,13 @@ pub(crate) enum Read {
 struct Shared {
 	pushed: AtomicBool,
 	read: AtomicBool,
+	/// Effective input frames played or discarded, including stretch's length
+	/// correction. One publication avoids sampling the ring and staging buffer
+	/// on opposite sides of a window transfer.
+	consumed: AtomicUsize,
+	target: AtomicUsize,
+	finished: AtomicBool,
+	stretch: AtomicBool,
 }
 
 /// A queue resampling `input_rate` to `output_rate`, interleaved at `channels`.
@@ -103,23 +111,28 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 	let (mut prod, cons) = HeapRb::<f32>::new(capacity * channels).split();
 	prod.push_iter(std::iter::repeat_n(0.0, latency * channels));
 
-	let shared = Arc::new(Shared::default());
+	let shared = Arc::new(Shared {
+		target: AtomicUsize::new(latency),
+		..Default::default()
+	});
 	let producer = Producer {
 		ring: prod,
 		channels,
 		rate: output_rate,
 		convert,
-		latency: latency * channels,
+		latency: config.latency,
+		written: latency,
 		pad: config.pad.then(|| latency * channels / 4),
 		shared: shared.clone(),
 	};
 	let consumer = Consumer {
 		ring: cons,
 		channels,
-		latency: latency * channels,
-		trim: config
-			.trim
-			.then(|| latency * channels + (capacity - latency) * channels * 3 / 4),
+		stretch: None,
+		refill: false,
+		prime: latency,
+		consumed: 0,
+		trim: config.trim,
 		shared,
 	};
 	(producer, consumer)
@@ -134,8 +147,11 @@ pub(crate) struct Producer {
 	/// Boxed, since the resampler state dwarfs the rest and a producer moves
 	/// through the mixer's command channel by value.
 	convert: Option<Box<Convert>>,
-	/// Samples the queue is primed and padded to.
-	latency: usize,
+	/// The requested duration, preserved across device rate changes.
+	latency: Duration,
+	/// Output-rate frames admitted, including the initial cushion. Together
+	/// with consumed this is a wrapping position, not a pair of queue snapshots.
+	written: usize,
 	/// Pad back up to the latency at or below this many samples.
 	pad: Option<usize>,
 	shared: Arc<Shared>,
@@ -155,10 +171,16 @@ impl Producer {
 		let frames = input.len() / self.channels;
 		let input = &input[..frames * self.channels];
 		let accepted = match &mut self.convert {
-			Some(convert) => convert.push(&mut self.ring, input),
+			Some(convert) => {
+				let before = convert.emitted;
+				let accepted = convert.push(&mut self.ring, input);
+				self.written = self.written.wrapping_add((convert.emitted - before) as usize);
+				accepted
+			}
 			None => {
 				let accepted = frames.min(self.ring.vacant_len() / self.channels);
 				self.ring.push_slice(&input[..accepted * self.channels]);
+				self.written = self.written.wrapping_add(accepted);
 				accepted
 			}
 		};
@@ -166,10 +188,12 @@ impl Producer {
 			return Push::Overflow { accepted };
 		}
 
-		if let Some(pad) = self.pad {
+		if let Some(pad) = self.pad.filter(|_| !self.shared.stretch.load(Ordering::Relaxed)) {
 			let queued = self.ring.occupied_len();
-			if queued <= pad && queued < self.latency {
-				let samples = self.ring.push_iter(std::iter::repeat_n(0.0, self.latency - queued));
+			let target = self.shared.target.load(Ordering::Relaxed) * self.channels;
+			if queued <= pad && queued < target {
+				let samples = self.ring.push_iter(std::iter::repeat_n(0.0, target - queued));
+				self.written = self.written.wrapping_add(samples / self.channels);
 				return Push::Padded {
 					frames: samples / self.channels,
 				};
@@ -185,15 +209,49 @@ impl Producer {
 	/// The resampler only converts whole chunks and its filter lags its input,
 	/// so the end of a stream otherwise sits inside it until more input arrives.
 	pub(crate) fn flush(&mut self) -> bool {
-		match &mut self.convert {
-			Some(convert) if self.shared.read.load(Ordering::Relaxed) => convert.flush(&mut self.ring),
+		let flushed = match &mut self.convert {
+			Some(convert) if self.shared.read.load(Ordering::Relaxed) => {
+				let before = convert.emitted;
+				let flushed = convert.flush(&mut self.ring);
+				self.written = self.written.wrapping_add((convert.emitted - before) as usize);
+				flushed
+			}
 			_ => true,
+		};
+		self.shared.finished.store(true, Ordering::Relaxed);
+		flushed
+	}
+
+	/// Change the target without reallocating the queue. Leave one stretch window
+	/// of headroom so the callback can still receive new PCM at the target.
+	pub(crate) fn set_latency(&mut self, latency: Duration) -> bool {
+		let frames = (latency.as_secs_f64() * self.rate as f64).round() as usize;
+		if frames == 0 {
+			return false;
 		}
+		let delay = self
+			.convert
+			.as_ref()
+			.map_or(0, |convert| convert.resampler.output_delay());
+		let frames = frames.saturating_sub(delay).max(1);
+		let window = self.rate as usize * 30 / 1000;
+		if frames == 0 || frames + window >= self.ring.capacity().get() / self.channels {
+			return false;
+		}
+		self.shared.target.store(frames, Ordering::Relaxed);
+		self.latency = latency;
+		true
+	}
+
+	pub(crate) fn latency(&self) -> Duration {
+		self.latency
 	}
 
 	/// How much audio is queued ahead of the reader.
 	pub(crate) fn buffered(&self) -> Duration {
-		Duration::from_secs_f64((self.ring.occupied_len() / self.channels) as f64 / self.rate as f64)
+		Duration::from_secs_f64(
+			self.written.wrapping_sub(self.shared.consumed.load(Ordering::Relaxed)) as f64 / self.rate as f64,
+		)
 	}
 }
 
@@ -319,14 +377,25 @@ impl Convert {
 pub(crate) struct Consumer {
 	ring: HeapCons<f32>,
 	channels: usize,
-	/// Samples the queue is trimmed back to.
-	latency: usize,
-	/// Trim back down to the latency at or above this many samples.
-	trim: Option<usize>,
+	stretch: Option<Box<crate::stretch::Stretch>>,
+	/// An actual underrun waits for received PCM, emitting emergency silence
+	/// directly rather than putting padding through the pitch search.
+	refill: bool,
+	/// The startup cushion is silence, not received audio to stretch.
+	prime: usize,
+	consumed: usize,
+	/// Trim only after filling three quarters of the current target's headroom.
+	trim: bool,
 	shared: Arc<Shared>,
 }
 
 impl Consumer {
+	/// Allocate the native playout stretcher before handing this ring to a device.
+	pub(crate) fn stretch(&mut self, rate: u32) {
+		self.stretch = Some(Box::new(crate::stretch::Stretch::new(rate, self.channels)));
+		self.shared.stretch.store(true, Ordering::Relaxed);
+	}
+
 	/// Fill `output` with queued interleaved frames, and silence past them.
 	pub(crate) fn read(&mut self, output: &mut [f32]) -> Read {
 		self.start();
@@ -336,24 +405,73 @@ impl Consumer {
 		}
 
 		let whole = output.len() - output.len() % self.channels;
-		let read = self.ring.pop_slice(&mut output[..whole]);
+		let read = if self.stretch.is_some() {
+			self.read_stretched(&mut output[..whole])
+		} else {
+			let samples = self.ring.pop_slice(&mut output[..whole]);
+			self.consumed = self.consumed.wrapping_add(samples / self.channels);
+			self.shared.consumed.store(self.consumed, Ordering::Relaxed);
+			samples
+		};
 		output[read..].fill(0.0);
 		if read < whole {
+			self.refill = self.stretch.is_some();
 			return Read::Underflow {
 				frames: read / self.channels,
 			};
 		}
 
-		if let Some(trim) = self.trim {
-			let queued = self.ring.occupied_len();
-			if queued >= trim && queued > self.latency {
-				let frames = (queued - self.latency) / self.channels;
+		if self.trim {
+			let queued = self.available();
+			let latency = self.shared.target.load(Ordering::Relaxed);
+			let capacity = self.ring.capacity().get() / self.channels;
+			let trim = latency + (capacity - latency) * 3 / 4;
+			if queued >= trim && queued > latency {
+				let frames = queued - latency;
 				self.discard(frames);
 				return Read::Trimmed { frames };
 			}
 		}
 
 		Read::Ok
+	}
+
+	fn read_stretched(&mut self, output: &mut [f32]) -> usize {
+		if self.refill && !self.shared.finished.load(Ordering::Relaxed) {
+			if self.available() < self.shared.target.load(Ordering::Relaxed) {
+				return 0;
+			}
+			self.refill = false;
+		}
+		let channels = self.channels;
+		let stretch = self.stretch.as_mut().unwrap();
+		let mut done = 0;
+		while done < output.len() {
+			if stretch.available() == 0 {
+				let buffered = self.ring.occupied_len() / channels;
+				let frames = buffered.min(stretch.window);
+				if frames == 0 {
+					break;
+				}
+				// Never transform startup padding or a finite stream's tail.
+				let enabled = self.prime == 0 && !self.shared.finished.load(Ordering::Relaxed);
+				let frames = if self.prime > 0 { frames.min(self.prime) } else { frames };
+				self.prime = self.prime.saturating_sub(frames);
+				let read = self.ring.pop_slice(&mut stretch.input[..frames * channels]);
+				debug_assert_eq!(read, frames * channels);
+				stretch.process(frames, buffered, self.shared.target.load(Ordering::Relaxed), enabled);
+				// The writer still counts the input while it is being analysed.
+				// Publish only the resulting duration change, then the rendered
+				// frames. Moving PCM into staging never makes it disappear.
+				self.consumed = self.consumed.wrapping_add(frames).wrapping_sub(stretch.available());
+				self.shared.consumed.store(self.consumed, Ordering::Relaxed);
+			}
+			let frames = stretch.read(&mut output[done..]);
+			done += frames * channels;
+			self.consumed = self.consumed.wrapping_add(frames);
+			self.shared.consumed.store(self.consumed, Ordering::Relaxed);
+		}
+		done
 	}
 
 	/// Accept pushes without reading first, as a read would.
@@ -364,7 +482,7 @@ impl Consumer {
 	/// Frames ready to read, or zero before the writer's first push.
 	pub(crate) fn available(&self) -> usize {
 		if self.shared.pushed.load(Ordering::Relaxed) {
-			self.ring.occupied_len() / self.channels
+			self.ring.occupied_len() / self.channels + self.stretch.as_ref().map_or(0, |stretch| stretch.available())
 		} else {
 			0
 		}
@@ -372,7 +490,11 @@ impl Consumer {
 
 	/// Drop up to `frames` queued frames unread.
 	pub(crate) fn discard(&mut self, frames: usize) {
-		self.ring.skip(frames * self.channels);
+		let staged = self.stretch.as_mut().map_or(0, |stretch| stretch.discard(frames));
+		let skipped = self.ring.skip((frames - staged) * self.channels) / self.channels;
+		self.prime = self.prime.saturating_sub(skipped);
+		self.consumed = self.consumed.wrapping_add(staged + skipped);
+		self.shared.consumed.store(self.consumed, Ordering::Relaxed);
 	}
 }
 
@@ -560,5 +682,180 @@ mod tests {
 				stats.bytes
 			);
 		}
+	}
+
+	/// Clock-controlled packet/device drift, without padding to hide a dropout.
+	#[test]
+	fn stretch_tracks_both_clock_directions_and_target_changes() {
+		for rate in [8_000, 44_100, 48_000, 96_000] {
+			for interval in [19_960u64, 20_040] {
+				let (mut prod, mut cons) = channel(
+					2,
+					rate,
+					rate,
+					Config {
+						latency: Duration::from_millis(80),
+						capacity: Duration::from_secs(3),
+						pad: false,
+						trim: false,
+					},
+				);
+				cons.stretch(rate);
+				cons.start();
+				let mut pcm = vec![0.0; rate as usize / 50 * 2];
+				for (i, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+					frame.fill((i as f32 * std::f32::consts::TAU * 200.0 / rate as f32).sin() * 0.25);
+				}
+				let mut out = vec![0.0; rate as usize / 100 * 2];
+				let mut arrival = 0;
+				for tick in 0..9000u64 {
+					if tick == 3000 {
+						assert!(prod.set_latency(Duration::from_millis(120)));
+					}
+					if tick == 6000 {
+						assert!(prod.set_latency(Duration::from_millis(60)));
+					}
+					while arrival <= tick * 10_000 {
+						assert_eq!(prod.push(&pcm), Push::Ok);
+						arrival += interval;
+					}
+					let (status, allocations) = crate::allocation::measure(|| cons.read(&mut out));
+					assert_eq!(allocations.operations, 0, "callback allocated");
+					assert_eq!(status, Read::Ok, "{rate} Hz, {interval} us, tick {tick}");
+					if tick % 3000 > 500 {
+						let target = if tick < 3000 {
+							80.0
+						} else if tick < 6000 {
+							120.0
+						} else {
+							60.0
+						};
+						let buffered = prod.buffered().as_secs_f64() * 1000.0;
+						assert!(
+							(target - 40.0..=target + 40.0).contains(&buffered),
+							"{rate} Hz tick {tick}: {buffered} ms, target {target}"
+						);
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn staged_audio_is_buffered_and_finish_drains_it() {
+		let (mut prod, mut cons) = channel(
+			2,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_secs(1),
+				pad: false,
+				trim: false,
+			},
+		);
+		cons.stretch(48_000);
+		cons.start();
+		assert_eq!(prod.push(&vec![0.25; 4800 * 2]), Push::Ok);
+		let mut out = [0.0; 128 * 2];
+		assert_eq!(cons.read(&mut out), Read::Ok);
+		assert_eq!(
+			prod.buffered(),
+			Duration::from_secs_f64(cons.available() as f64 / 48_000.0)
+		);
+		assert!(prod.flush());
+		let mut frames = 0;
+		while cons.available() > 0 {
+			let before = cons.available();
+			cons.read(&mut out);
+			frames += before - cons.available();
+		}
+		assert_eq!(frames, 7200 - 128, "finish never extends the tail");
+		assert_eq!(cons.read(&mut out), Read::Underflow { frames: 0 });
+	}
+
+	#[test]
+	fn recovery_waits_for_received_pcm_without_stretching_padding() {
+		let (mut prod, mut cons) = channel(
+			2,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_secs(1),
+				pad: true,
+				trim: false,
+			},
+		);
+		cons.stretch(48_000);
+		cons.start();
+		assert_eq!(prod.push(&[]), Push::Ok);
+		let mut out = vec![1.0; 4800 * 2];
+		assert_eq!(cons.read(&mut out), Read::Underflow { frames: 2400 });
+		for _ in 0..2 {
+			assert_eq!(prod.push(&[0.25; 960 * 2]), Push::Ok, "no padding inserted in the ring");
+			assert_eq!(cons.read(&mut out[..128 * 2]), Read::Underflow { frames: 0 });
+			assert!(out[..128 * 2].iter().all(|&sample| sample == 0.0));
+		}
+		assert_eq!(prod.push(&[0.25; 960 * 2]), Push::Ok);
+		assert_eq!(cons.read(&mut out[..128 * 2]), Read::Ok);
+		assert!(out[..128 * 2].iter().all(|&sample| sample == 0.25));
+		// A final short input must not wait forever to reach the refill target.
+		assert!(prod.flush());
+		while cons.available() > 0 {
+			cons.read(&mut out);
+		}
+		assert_eq!(cons.read(&mut out), Read::Underflow { frames: 0 });
+	}
+
+	#[test]
+	fn a_target_near_capacity_still_has_emergency_headroom() {
+		let (mut prod, mut cons) = channel(
+			2,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_millis(3050),
+				pad: false,
+				trim: true,
+			},
+		);
+		cons.stretch(48_000);
+		cons.start();
+		assert!(prod.set_latency(Duration::from_secs(3)));
+		// A 200 Hz tone, so the seam has a pitch period to remove.
+		let mut pcm = vec![0.0; 146_600 * 2];
+		for (i, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+			frame.fill((i as f32 * std::f32::consts::TAU * 200.0 / 48_000.0).sin() * 0.25);
+		}
+		let (first, second) = pcm.split_at(143_000 * 2);
+		// Play out the 50 ms prime and the 60 ms startup cooldown below the
+		// trim watermark, ending on a window boundary.
+		assert_eq!(prod.push(first), Push::Ok);
+		let mut out = [0.0; 480 * 2];
+		for _ in 0..8 {
+			assert_eq!(cons.read(&mut out), Read::Ok);
+		}
+		// Above NetEq's high limit (target + 20 ms) but under the trim
+		// watermark (three quarters of the 50 ms headroom).
+		assert_eq!(prod.push(second), Push::Ok);
+		let target = 144_000;
+		let queued = cons.available();
+		assert!((target + 960..target + 1800).contains(&queued), "{queued}");
+		assert_eq!(
+			cons.read(&mut out),
+			Read::Ok,
+			"ordinary target overshoot must stretch, not trim"
+		);
+		let removed = queued - cons.available() - 480;
+		assert!(
+			(120..=720).contains(&removed),
+			"accelerate removes one pitch period, removed {removed}"
+		);
+		assert_eq!(
+			prod.buffered(),
+			Duration::from_secs_f64(cons.available() as f64 / 48_000.0)
+		);
 	}
 }
