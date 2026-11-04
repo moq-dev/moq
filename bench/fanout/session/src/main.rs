@@ -5,12 +5,6 @@
 //! Usage: `fanout-session VIEWERS CYCLES [VERSION]`. Every session runs on this thread's
 //! runtime and the memory transport has no sockets or clock waits, so the retired
 //! instructions, less a run of zero cycles, are the per-group cost whatever the host does.
-//! The `counts` feature instead reports Consumer size and total allocation requests;
-//! subtract zero cycles from a full run and divide by viewer-group deliveries.
-
-#[cfg(feature = "counts")]
-mod counts;
-
 use std::hint::black_box;
 
 use bytes::Bytes;
@@ -97,7 +91,5 @@ fn main() {
 		// run would not subtract.
 		std::mem::forget((ingest, audience, broadcast, relay, publisher));
 	});
-	#[cfg(feature = "counts")]
-	counts::report();
 	std::process::exit(0);
 }

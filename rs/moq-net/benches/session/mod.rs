@@ -1492,6 +1492,8 @@ fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 fn allocations<B: Backend>() {
 	const ROUNDS: usize = 256;
 
+	println!("group::Consumer: {} bytes", size_of::<moq_net::group::Consumer>());
+
 	let rt = runtime();
 	let fanout = Shape {
 		publishers: 1,

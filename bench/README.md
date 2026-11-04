@@ -64,8 +64,8 @@ nix develop --command env SESSION_ALLOCS=1 cargo bench --locked -p moq-net --fea
 
 Throughput counts delivered datagrams. Every one must arrive with its sequence
 and payload; the memory transport loses none at these cadences, so a drop fails
-instead of looking cheaper. `SESSION_ALLOCS=1` prints allocations, allocated
-bytes and, where Linux perf counters are readable, user instructions per
+instead of looking cheaper. `SESSION_ALLOCS=1` prints the group consumer size,
+allocations, allocated bytes and, where Linux perf counters are readable, user instructions per
 delivered datagram or viewer-group. All three exclude the cache tick. Bytes sum
 requested allocation and reallocation sizes, including growth in place; they
 measure neither live memory nor bytes copied. A multiplexed instruction counter
@@ -394,20 +394,6 @@ callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
 instructions per group, and `python3 bench/fanout.py compare BASE CURRENT
 SUBSCRIBERS` ranks what moved between two revisions' `callgrind/` directories. `BENCH_FANOUT_VERSION` picks the session's protocol
 version (default `moq-lite-06`).
-
-To check that a layout change does not add allocations, build the session
-harness with `--features counts`. It prints `consumer_bytes`, total allocation
-requests (including reallocations), and requested bytes. Run the same viewer
-count with zero and many cycles, subtract the totals, and divide by viewers
-times cycles. For example:
-
-```bash
-cargo run --release --features counts --manifest-path bench/fanout/session/Cargo.toml -- 64 0
-cargo run --release --features counts --manifest-path bench/fanout/session/Cargo.toml -- 64 1563
-```
-
-Use the same harness and cycle counts against each revision. The feature is off
-for instruction counts.
 
 ### Heap
 

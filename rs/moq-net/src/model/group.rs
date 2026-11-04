@@ -3050,7 +3050,7 @@ impl Demand {
 /// pays nothing. Inline storage would triple the size of every [`Consumer`], which
 /// moves by value through each layer that hands out a group.
 ///
-/// The frame buffer's allocation also holds its cursor and optional metadata tables,
+/// The frame buffer's allocation also holds its cursor and optional metadata pointers,
 /// keeping an empty prefetch to one pointer without another allocation on the first fill.
 /// Slots hold the public [`frame::Frame`], with a segmented payload set aside in `chains`,
 /// so a whole read of a small frame moves it out of its slot as it did before segments.
@@ -3362,7 +3362,7 @@ pub struct Consumer {
 	parked: bool,
 }
 
-/// Metadata shared by parallel readers of one handed-out group, including its frames.
+/// Per-delivery state shared by a consumer's clones and its frame readers.
 /// Kept across replacement copies, so provenance and arrival remain the original's.
 pub(super) struct Delivery {
 	timescale: Option<Timescale>,
