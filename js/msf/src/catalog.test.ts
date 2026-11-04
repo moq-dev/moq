@@ -322,3 +322,34 @@ test("refuses malformed Unicode in catalogs", () => {
 	const prefix = new TextEncoder().encode('{"version":1,"extension":"');
 	expect(() => decode(new Uint8Array([...prefix, 0xff, 0x22, 0x7d]))).toThrow();
 });
+
+// Mirrors moq-msf: CMSF content protection round-trips, and a dangling refID is refused.
+test("content protection round-trips and a dangling refID is refused", () => {
+	const contentProtections = [
+		{
+			refID: "1",
+			defaultKID: ["a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"],
+			scheme: "cbcs",
+			drmSystem: {
+				systemID: "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+				laURL: { url: "https://license.example.com/", type: "EME-1.0" },
+				pssh: "AAAA",
+			},
+		},
+	];
+	const track = { name: "video", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.64001f" };
+	const catalog = decode(
+		encodeJson({
+			version: "draft-01",
+			contentProtections,
+			tracks: [{ ...track, contentProtectionRefIDs: ["1"] }],
+		}),
+	);
+	expect(catalog.contentProtections).toEqual(contentProtections);
+	expect(catalog.tracks[0].contentProtectionRefIDs).toEqual(["1"]);
+	expect(catalog.ext).toBeUndefined();
+	expect(decode(encode(catalog))).toEqual(catalog);
+
+	const dangling = encodeJson({ version: "draft-01", tracks: [{ ...track, contentProtectionRefIDs: ["2"] }] });
+	expect(() => decode(dangling)).toThrow("missing content protection");
+});

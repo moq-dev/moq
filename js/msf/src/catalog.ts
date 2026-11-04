@@ -48,6 +48,8 @@ const trackShape = {
 	altGroup: z.optional(z.number()),
 	maxGrpSapStartingType: z.optional(z.number()),
 	maxObjSapStartingType: z.optional(z.number()),
+	/** The `refID`s of the root `contentProtections` entries protecting this track (CMSF 4.1.2). */
+	contentProtectionRefIDs: z.optional(z.array(z.string())),
 
 	// Non-standard: maximum delay (ms) between consecutive frames on this track.
 	// The player's buffer must be at least this large to avoid underruns.
@@ -59,6 +61,40 @@ const trackShape = {
 	delay: z.optional(z.number()),
 };
 
+/** A service URL in a {@link DrmSystem}, with an optional protocol or MIME type. */
+export const ProtectionUrlSchema = z.object({
+	url: z.string(),
+	type: z.optional(z.string()),
+});
+
+/**
+ * A DRM system description (CMSF 4.1.1.4). draft-ietf-moq-cmsf-01 names no member for its
+ * authorization URL or robustness, so neither is carried.
+ */
+export const DrmSystemSchema = z.object({
+	systemID: z.string(),
+	laURL: z.optional(ProtectionUrlSchema),
+	certURL: z.optional(ProtectionUrlSchema),
+	/** A base64 `pssh` box with the system's initialization data. */
+	pssh: z.optional(z.string()),
+});
+
+/** A DRM system description within a {@link ContentProtection}. */
+export type DrmSystem = z.infer<typeof DrmSystemSchema>;
+
+/** One DRM system configuration protecting tracks of the broadcast (CMSF 4.1.1). */
+export const ContentProtectionSchema = z.object({
+	refID: z.string(),
+	/** The default key IDs (`default_KID`) as UUID strings. */
+	defaultKID: z.array(z.string()),
+	/** The Common Encryption scheme, `cenc` or `cbcs`. */
+	scheme: z.string(),
+	drmSystem: DrmSystemSchema,
+});
+
+/** One DRM system configuration protecting tracks of the broadcast. */
+export type ContentProtection = z.infer<typeof ContentProtectionSchema>;
+
 /** Zod schema describing a single track entry in an MSF catalog. */
 export const TrackSchema = z.object(trackShape);
 
@@ -68,6 +104,8 @@ export type Track = z.infer<typeof TrackSchema>;
 /** Zod schema for the top-level MSF catalog: a version-agnostic snapshot of tracks. */
 export const CatalogSchema = z.object({
 	tracks: z.array(TrackSchema),
+	/** The DRM systems protecting the tracks, which reference them by `refID` (CMSF 4.1.1). */
+	contentProtections: z.optional(z.array(ContentProtectionSchema)),
 	// The application extension: root members beyond the ones MSF defines, kept
 	// verbatim. An extension adds a section here, e.g. the `mpegts` section of
 	// draft-lcurley-moq-mpegts. Mirrors `Catalog::ext` in `moq-msf`, which is typed;
@@ -80,7 +118,7 @@ export const CatalogSchema = z.object({
 export type Catalog = z.infer<typeof CatalogSchema>;
 
 /** Root member names MSF itself defines, which an extension section must not reuse. */
-const RESERVED_ROOT = ["version", "generatedAt", "isComplete", "tracks", "initDataList"];
+const RESERVED_ROOT = ["version", "generatedAt", "isComplete", "tracks", "initDataList", "contentProtections"];
 
 /** The newest MSF draft version string this package emits on the wire. */
 export const VERSION = "draft-01";
@@ -107,6 +145,7 @@ const WireCatalogSchema = z.object({
 	version: z.union([z.literal(1), z.string()]),
 	tracks: z.optional(z.array(WireTrackSchema)),
 	initDataList: z.optional(z.array(InitDataSchema)),
+	contentProtections: z.optional(z.array(ContentProtectionSchema)),
 });
 
 /** Serialize a catalog to its JSON wire representation (draft-01). */
@@ -135,6 +174,7 @@ export function encode(catalog: Catalog): Uint8Array {
 	// the member from the encoded catalog.
 	const wire: Record<string, unknown> = Object.assign(Object.create(null), { version: VERSION, tracks });
 	if (initDataList.length > 0) wire.initDataList = initDataList;
+	if (catalog.contentProtections?.length) wire.contentProtections = catalog.contentProtections;
 
 	// Extension members are written flat, so one named after a field MSF defines would
 	// emit a duplicate key and lose one of the two on re-parse. Refuse instead. The Rust
@@ -171,8 +211,16 @@ export function decode(raw: Uint8Array): Catalog {
 		byId.set(entry.id, entry);
 	}
 
+	// A track's protection refers to a root entry by refID; one that names none would claim
+	// encryption the catalog cannot describe, so it is refused like a missing initRef.
+	const refIDs = new Set((wire.contentProtections ?? []).map((cp) => cp.refID));
+
 	const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
 		track.isLive ??= false;
+		const missing = track.contentProtectionRefIDs?.find((id) => !refIDs.has(id));
+		if (missing !== undefined) {
+			throw new Error(`MSF track "${track.name}" references missing content protection "${missing}"`);
+		}
 
 		// Resolve draft-01 initRef into inline initData so callers never see the
 		// indirection. Inline initData (draft-00) is kept as-is, but a catalog that
@@ -196,7 +244,10 @@ export function decode(raw: Uint8Array): Catalog {
 		return track;
 	});
 
-	return Object.keys(ext).length > 0 ? { tracks, ext } : { tracks };
+	const catalog: Catalog = { tracks };
+	if (wire.contentProtections?.length) catalog.contentProtections = wire.contentProtections;
+	if (Object.keys(ext).length > 0) catalog.ext = ext;
+	return catalog;
 }
 
 /** Read and decode the next catalog frame from a track, or undefined if the track ended. */
