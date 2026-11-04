@@ -94,11 +94,13 @@ def main():
                                 env=env,
                                 stdout=log,
                                 stderr=log,
-                                # quest gate closes the lock's descriptor, so workers can't hold
-                                # it: they stop with this process, even when it is killed outright,
-                                # rather than measure after the lock is gone. macOS has no
-                                # parent-death signal, so a SIGKILL there leaves them running:
-                                # an accepted gap, documented in bench/README.md.
+                                # Workers never get the lock's descriptor: close_fds drops it here, and
+                                # quest gate and Bun would drop it anyway. Instead they stop with this
+                                # process, even when it is killed outright, rather than measure after
+                                # the lock is gone. A SIGKILL still leaves them running on macOS, which
+                                # has no parent-death signal, and inside a Quest scope, whose gate
+                                # holds back the SIGTERM: an accepted gap, see bench/README.md.
+                                close_fds=True,
                                 preexec_fn=(lambda: die_with(coordinator)) if sys.platform == "linux" else None,
                             )
                             processes.append((process, began, stamp))

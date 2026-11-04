@@ -933,9 +933,12 @@ the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 Admission remains outside the suite's timeout clocks. Use separate checkouts to
 avoid measuring Cargo's artifact lock instead of competing work.
 
-Its workers run through `quest gate`, which closes the benchmark lock's
-descriptor, so only `local.py` itself holds the lock. Every exit of `local.py`
-stops its workers first, and on Linux a SIGKILL or OOM kill does too, through
-`PR_SET_PDEATHSIG`. On macOS it does not: killing `local.py` with SIGKILL frees
-the lock while its workers keep measuring until their own gates exit. Stop it
-with Ctrl-C or SIGTERM instead.
+`local.py` starts its workers without the benchmark lock's descriptor, which
+`quest gate` and Bun would close anyway, so only `local.py` itself holds the
+lock. Every exit of `local.py` stops its workers first, and on Linux a SIGKILL
+or OOM kill does too: `PR_SET_PDEATHSIG` sends each worker's `quest gate` a
+SIGTERM. It does not where that SIGTERM never reaches the work: on macOS, which
+has no parent-death signal, and inside a Quest scope or Quest's process group,
+whose gate leaves signals to the enclosing owner. There, killing `local.py`
+with SIGKILL frees the lock while its workers keep measuring until their own
+gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.
