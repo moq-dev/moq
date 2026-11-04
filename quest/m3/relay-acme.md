@@ -18,11 +18,13 @@ so moq-relay moves to instant-acme 0.9, which takes its crypto through its own
 - the TLS-ALPN-01 challenge resolver in its rustls config,
 - key and CSR generation through `rind-rcgen`.
 
-The cache's file naming (SHA-256 today) moves to rind and stays compatible, so
-an upgraded relay reuses its cached account and certificate. Test against a
-local ACME server such as Pebble.
+Its cache's file naming moves to rind. m1 removed the feature, its config, and
+its cache because nobody used ACME yet (maintainer, 2026-11-03), so the cache
+needs no compatibility with the rustls-acme layout. Test against a local ACME
+server such as Pebble.
 
-Public API: none; config unchanged. Wire: none.
+Public API: moq-relay regains the `acme` feature and an ACME config section.
+Wire: none.
 
 ## Required
 
