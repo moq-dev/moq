@@ -141,11 +141,12 @@ impl Live {
 					},
 					None,
 				)?;
-				// An empty group stores no object, so what the archive holds nothing for up to the
-				// end is not found here, and the end settles over it.
+				// An empty group stores no object, so the replay never produces what the archive
+				// holds nothing for up to the end, as it skips the gaps between stored groups, and
+				// the end settles over it.
 				let fin = at.group + u64::from(at.frame != 0);
 				let from = self.next.unwrap_or(0);
-				self.producer.drop_groups(from..fin, moq_net::StreamError::NotFound);
+				self.producer.skip_groups(from..fin);
 			}
 			End::Error(code) => {
 				// After the newest stored sequence, keeping the history an abort would refuse.

@@ -298,9 +298,9 @@ impl Version {
 	}
 
 	/// Whether holes split into SUBSCRIBE_SKIP, for sequences never produced, and
-	/// SUBSCRIBE_DROP, for groups that existed, whose drop names the `Max Age` and range
-	/// `Terms` a stale verdict was judged under; SUBSCRIBE and SUBSCRIBE_UPDATE carry those
-	/// `Terms`. Added in lite-07; earlier versions name every hole in SUBSCRIBE_DROP.
+	/// SUBSCRIBE_DROP, for groups that existed, which names the `Update` in effect when it was
+	/// given up; SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07;
+	/// earlier versions name every hole in SUBSCRIBE_DROP.
 	pub(crate) fn has_skip(self) -> bool {
 		!matches!(
 			self,

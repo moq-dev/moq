@@ -456,6 +456,8 @@ impl Model {
 		let requests = self.origin.requests_route(PATH, route, None).unwrap();
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
+		// The route's live feed, received from its publisher: its groups land in any order.
+		track.received();
 		let upstream = broadcast.consume();
 		let serving = kio::clock::sim::spawn(async move {
 			while let Ok(request) = kio::wait(|waiter| requests.poll_requested_broadcast(waiter)).await {

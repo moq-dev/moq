@@ -162,3 +162,53 @@ test("a widening keeps a bounded lite-07 subscription open for the stale groups 
 	client.abort();
 	server.abort();
 });
+
+// Every lite-07 update reopens the stale drops, widening or not: the publisher drops again, under
+// the new update's number, what is still stale, so the subscriber settles at once rather than
+// waiting out its grace for a re-offer that never comes.
+test("an update keeping the budget drops the stale groups again on lite-07", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publication = origin.createBroadcast(Path.from("room"));
+	publication.announce();
+	const broadcast = publication.broadcast;
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const write = (sequence: number, millis: number) => {
+		const group = producer.createGroup(BigInt(sequence));
+		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+		group.finish();
+	};
+	write(0, 0);
+
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ transport: pair.server, url, version: Version.DRAFT_07, publish: origin.consume() }),
+	]);
+	const remote = wireOf(client).consume(Path.from("room"));
+	const reader = remote.track("video").subscribe({ delay: { max: Milli(1500) } });
+	expect(await received(reader, 1)).toEqual([0n]);
+	for (const [sequence, millis] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 3000],
+		[4, 6000],
+	]) {
+		write(sequence, millis);
+	}
+	expect(await received(reader, 2)).toEqual([3n, 4n]);
+
+	// Only the priority changes: groups 1 and 2 are still stale, so they are dropped again.
+	reader.update({ priority: 5 });
+	const before = performance.now();
+	producer.finish();
+	producer.close();
+	expect(await reader.recvGroup()).toBeUndefined();
+	expect(performance.now() - before).toBeLessThan(500);
+
+	reader.close();
+	remote.close();
+	broadcast.close();
+	origin.close();
+	client.abort();
+	server.abort();
+});

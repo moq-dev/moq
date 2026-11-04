@@ -4352,6 +4352,8 @@ test("replay and backlogs deliver sparse out-of-order arrivals ascending without
 // pending, so lower groups may still arrive behind a higher one.
 function pendingTail(end: bigint, maxDelay = Milli(60_000)) {
 	const producer = new TrackProducer("test");
+	// A received copy, whose groups arrive in any order.
+	hooks.receiveTrack(producer);
 	const reader = producer.subscribe({ delay: { max: maxDelay } });
 	hooks.startTrack(producer, { start: 0n });
 	hooks.endTrack(producer, { group: end, frame: 0 });
@@ -4849,4 +4851,65 @@ test("an errored end keeps its history", async () => {
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(0n);
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(1n);
 	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
+});
+
+// A local publisher creates its groups in order, so the gap a created group leaves is skipped at
+// once rather than waited for or judged stale; a reason already given keeps it. A received copy's
+// groups arrive in any order, so its gap is not skipped. Mirrors Rust.
+test("a local producer skips the gap a created group leaves at once", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({});
+	const reader = producer.subscribe({ delay: { max: null } });
+	producer.createGroup(0n).finish();
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group", group: { sequence: 0n } });
+	hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED });
+	producer.createGroup(4n).finish();
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "drop", start: 1n, end: 2n, skip: true });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2n, end: 3n, error: DROPPED });
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "drop", start: 3n, end: 4n, skip: true });
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group", group: { sequence: 4n } });
+	// A group appended next leaves no gap.
+	producer.appendGroup().finish();
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group", group: { sequence: 5n } });
+
+	const copy = new TrackProducer("test");
+	hooks.receiveTrack(copy);
+	copy.accept({});
+	const late = copy.subscribe({ delay: { max: null } });
+	copy.createGroup(0n).finish();
+	copy.createGroup(2n).finish();
+	expect(hooks.tryRecvGroup(late, true)).toMatchObject({ kind: "group" });
+	expect(hooks.tryRecvGroup(late, true)).toMatchObject({ kind: "group" });
+	expect(hooks.tryRecvGroup(late, true)).toEqual({ kind: "idle" });
+});
+
+// A late group the local publisher still creates in a skipped gap reaches a reader that has not
+// moved past it, as a group stream wins over a drop.
+test("a late local group wins over its skip for a reader that has not reported it", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({});
+	producer.createGroup(0n).finish();
+	producer.createGroup(2n).finish();
+	const reader = producer.subscribe({ delay: { max: null }, order: "ascending" });
+	producer.createGroup(1n).finish();
+	const got: bigint[] = [];
+	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) got.push(group.sequence);
+	expect(got).toEqual([0n, 1n, 2n]);
+});
+
+// A received stale run is judged from where it meets the reader's span, as Rust clips it: a reader
+// asking only its suffix, up to where the upstream's range ended, is settled by that suffix.
+test("a received stale run settles the suffix a narrower range asks for", () => {
+	const producer = new TrackProducer("video").accept({});
+	hooks.receiveTrack(producer);
+	hooks.supersedeStale(producer, 10n);
+	const reader = producer.subscribe({
+		delay: { max: Milli(500) },
+		ranges: [{ start: { absolute: 5n }, end: { absolute: 10n } }],
+	});
+	hooks.dropTrackGroups(producer, 0n, 10n, staleHole(500));
+	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 5n, end: 10n, stale: 500 });
+	expect(hooks.tryDrop(reader)).toBeUndefined();
+	reader.close();
+	producer.close();
 });

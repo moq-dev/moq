@@ -1137,9 +1137,13 @@ impl Misses {
 		}
 	}
 
-	/// Judge `groups` again: a widening reversed the stale verdict they were given up with.
+	/// Judge `groups` again: an update reopened the stale verdict they were given up with.
+	/// They are no longer judged, and the next probe judges its whole span afresh, so it
+	/// asks a fill for them or gives them up again.
 	pub(super) fn retry(&mut self, groups: ops::Range<u64>) {
-		self.given_up.remove(groups);
+		self.given_up.remove(groups.clone());
+		self.judged.remove(groups);
+		self.at = None;
 	}
 
 	pub(super) fn give_up(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
@@ -1444,7 +1448,9 @@ mod tests {
 			.unwrap();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
-		for sequence in [0, 4] {
+		// Newest first, so the publisher skips nothing below it: group 2 is a live gap a fill
+		// may answer.
+		for sequence in [4, 0] {
 			track
 				.create_group(crate::group::Info { sequence })
 				.unwrap()
@@ -1587,7 +1593,9 @@ mod tests {
 			.unwrap();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
-		for sequence in [0, 4] {
+		// Newest first, so the publisher skips nothing below it: group 2 is a live gap a fill
+		// may answer.
+		for sequence in [4, 0] {
 			track
 				.create_group(crate::group::Info { sequence })
 				.unwrap()
@@ -1660,6 +1668,8 @@ mod tests {
 	async fn unchanged_probes_and_late_arrivals_keep_other_gap_deadlines() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("sparse", crate::track::Info::default()).unwrap();
+		// A received copy, whose live gaps are filled or waited for, not skipped.
+		track.received();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in [0, 2, 4] {
@@ -1760,6 +1770,31 @@ mod tests {
 			"judged stale under the reader's budget"
 		);
 		assert!(misses.deferred.runs.is_empty());
+
+		// An update reopens the verdict: retried, the gap is judged afresh, and a wider budget
+		// asks a fill for it.
+		misses.retry(3..4);
+		let wider = Drift {
+			budget: Duration::from_secs(3600),
+			bounded: false,
+			edge: state.drift_edge(&Servable::ALL),
+			coverage: None,
+		};
+		given_up.clear();
+		let asks = misses.judge(
+			&state,
+			(0, 0, None),
+			None,
+			None,
+			None,
+			|span| [span].into_iter().collect(),
+			&Delivered::default(),
+			&wider,
+			&mut given_up,
+			&waiter,
+		);
+		assert!(asks.contains(&3), "a retried gap is asked again");
+		assert!(given_up.is_empty());
 	}
 
 	/// A grace change with nothing deferred has no deadline to move, so an unchanged probe
@@ -1768,6 +1803,8 @@ mod tests {
 	async fn a_grace_change_with_nothing_deferred_times_the_next_gap() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
+		// A received copy, whose live gaps are filled or waited for, not skipped.
+		track.received();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in 0..3 {
@@ -2031,15 +2068,15 @@ mod tests {
 			let mut track = broadcast.create_track("moved", crate::track::Info::default()).unwrap();
 			let budget = Duration::from_secs(5);
 			let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
-			// A feed with holes, some of them under where it starts.
-			for sequence in 0..SEQUENCES {
-				if next(3) > 0 {
-					track
-						.create_group(crate::group::Info { sequence })
-						.unwrap()
-						.finish()
-						.unwrap();
-				}
+			// A feed with holes, some of them under where it starts, created newest first so the
+			// publisher skips none of them.
+			let sequences: Vec<_> = (0..SEQUENCES).filter(|_| next(3) > 0).collect();
+			for &sequence in sequences.iter().rev() {
+				track
+					.create_group(crate::group::Info { sequence })
+					.unwrap()
+					.finish()
+					.unwrap();
 			}
 			if next(2) == 0 {
 				track.start_at(next(SEQUENCES / 2)).unwrap();

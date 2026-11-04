@@ -19,7 +19,7 @@ use super::Version;
 use crate::tail::{self, Reading, Settle, Tail};
 
 use kio::Lock;
-use rangemap::RangeMap;
+use rangemap::RangeSet;
 
 pub(super) struct SubscriberConfig {
 	pub runtime: crate::time::Deadlines,
@@ -2436,6 +2436,8 @@ mod tests {
 	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, track::Fill) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
+		// The relay's copy of the upstream feed, whose groups may land out of order.
+		track.received();
 		let dynamic = track.requests();
 		let fetching = track.consume().fetch_group(sequence, None);
 		let req = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
@@ -2466,8 +2468,8 @@ mod tests {
 			unanswered: None,
 			updated: false,
 			_working: crate::session::Work::default().start(),
-			terms: 0,
-			stale: RangeMap::new(),
+			update: 0,
+			stale: RangeSet::new(),
 		})
 	}
 
@@ -2617,8 +2619,8 @@ mod tests {
 				unanswered: None,
 				updated: false,
 				_working: crate::session::Work::default().start(),
-				terms: 0,
-				stale: RangeMap::new(),
+				update: 0,
+				stale: RangeSet::new(),
 			});
 			if update {
 				h.serve
@@ -2659,6 +2661,8 @@ mod tests {
 	) -> (track::Producer, Vec<kio::Pending<track::Fetching>>, Vec<track::Fill>) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		// The relay's copy of the upstream feed, whose groups may land out of order.
+		track.received();
 		let dynamic = track.requests();
 		let mut callers = Vec::new();
 		let mut requests = Vec::new();
@@ -3080,8 +3084,8 @@ mod tests {
 			unanswered: None,
 			updated: false,
 			_working: crate::session::Work::default().start(),
-			terms: 0,
-			stale: RangeMap::new(),
+			update: 0,
+			stale: RangeSet::new(),
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -4140,6 +4144,130 @@ mod tests {
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
 	}
 
+	/// On lite-07 an OLD drop is a stale verdict judged under the budget this subscriber sent
+	/// with the update it names. Any SUBSCRIBE_UPDATE reopens every stale run in the tail,
+	/// whether or not it widens the budget, and an OLD drop naming a superseded update is no
+	/// verdict: still owed, and given up on no reader. Any other drop is final, whatever update
+	/// it names.
+	#[kio::test]
+	async fn an_update_reopens_every_stale_drop_and_supersedes_the_rest() {
+		let version = Version::Lite07;
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
+		let budget = Duration::from_millis(500);
+		let tail = kio::Producer::new(Tail::default());
+		serving.sub = Sub::Active(SubStream {
+			order: crate::track::Order::Descending,
+			stream: Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap(),
+			id: 0,
+			max_delay: budget,
+			min_delay: None,
+			start: None,
+			priority: 0,
+			requested: None,
+			ranges: vec![lite::Range::OLDEST],
+			tail: tail.clone(),
+			served: None,
+			started: false,
+			starts: Vec::new(),
+			end: None,
+			wanted: None,
+			unanswered: None,
+			updated: false,
+			_working: crate::session::Work::default().start(),
+			update: 0,
+			stale: RangeSet::new(),
+		});
+		let mut reader = serving.serving.subscribe(
+			crate::track::Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(budget))
+				.with_ranges([crate::track::Range::groups(0..)]),
+		);
+		let waiter = kio::Waiter::noop();
+		let code = |err: &crate::StreamError| u64::from(crate::coding::StreamCodes::encode_stream_code(&version, err));
+		let drop = |start, end, err: &crate::StreamError, update| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start,
+				end,
+				error: code(err),
+				update,
+			})
+		};
+		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
+
+		serving
+			.apply_response(&serve, drop(1, 2, &crate::StreamError::Old, 0))
+			.unwrap();
+		assert!(covers(1..3));
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((1..3, track::Hole::stale(budget))),
+			"judged under the budget sent with update 0"
+		);
+
+		// An update that keeps the budget and the ranges still reopens the stale run.
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			buffer_update(active, &serving.serving, serve.subscriber.runtime.now()).unwrap();
+			assert_eq!(active.update, 1);
+			assert!(active.stale.is_empty());
+		}
+		assert!(!covers(1..3), "the publisher re-offers or drops it again");
+
+		// Still in flight from before the update: no verdict.
+		serving
+			.apply_response(&serve, drop(4, 4, &crate::StreamError::Old, 0))
+			.unwrap();
+		assert!(!covers(4..5), "still owed");
+		assert!(reader.poll_drop(&waiter).is_pending(), "no reader settles on it");
+
+		// Any other drop is final, whatever update it names.
+		serving
+			.apply_response(&serve, drop(5, 5, &crate::StreamError::App(5), 0))
+			.unwrap();
+		assert!(covers(5..6));
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((5..6, track::Hole::drop(crate::StreamError::App(5))))
+		);
+
+		// Under the current update, a stale drop is a verdict again.
+		serving
+			.apply_response(&serve, drop(6, 6, &crate::StreamError::Old, 1))
+			.unwrap();
+		assert!(covers(6..7));
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((6..7, track::Hole::stale(budget)))
+		);
+	}
+
 	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code on lite-07.
 	/// Earlier versions carry an application code there, so the same bytes read as
 	/// OLD.
@@ -4157,8 +4285,7 @@ mod tests {
 					start: 2,
 					end: 2,
 					error: code.into(),
-					max_age: None,
-					terms: 0,
+					update: 0,
 				}),
 			] {
 				resp.encode(
@@ -7538,12 +7665,12 @@ struct SubStream {
 	/// Whether an update changed the ranges since the SUBSCRIBE, which the publisher may
 	/// have read before its SUBSCRIBE_START, so the starts need not match the SUBSCRIBE.
 	updated: bool,
-	/// The range terms id of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop
-	/// judged under an earlier one is no verdict on the current terms.
-	terms: u64,
-	/// The runs `tail` accounts for by a stale drop, with the max age each was judged under:
-	/// a widening past it reverses the verdict, so they are owed again.
-	stale: RangeMap<u64, Duration>,
+	/// The number of the latest SUBSCRIBE (0) or SUBSCRIBE_UPDATE sent: a stale drop given
+	/// up under an earlier one is no verdict on the current terms.
+	update: u64,
+	/// The runs `tail` accounts for by a stale drop under `update`: the next update reopens
+	/// them, since the publisher re-offers or drops them again under it.
+	stale: RangeSet<u64>,
 	/// Holds the session busy for as long as the subscription is open.
 	_working: crate::session::Working,
 }
@@ -8350,30 +8477,23 @@ fn judged_end(ranges: &[lite::Range]) -> Option<u64> {
 		.max()
 }
 
-/// Buffer the current SUBSCRIBE parameters under new range terms. The caller flushes.
+/// Buffer the current SUBSCRIBE parameters as the next update. The caller flushes.
 ///
-/// A stale drop judged under earlier terms may still be in flight, and the update may have
-/// moved the range it was judged against, so the runs `serving` holds as stale become
-/// unknown again: a reader fills them by range rather than trust an old verdict.
+/// A stale drop given up under an earlier update may still be in flight, and this one may
+/// move the range or budget it was judged against, so the runs `serving` holds as stale
+/// become unknown again: a reader fills them by range rather than trust an old verdict.
 ///
-/// A lite-07 publisher re-offers or drops again what a widening reverses, so the tail owes
-/// the stale runs judged under a narrower max age than this update's again, from `now`.
+/// A lite-07 publisher re-offers every group it reported stale on any update, and drops
+/// again under the new number what is still stale, so the tail owes every stale run again,
+/// from `now`.
 fn buffer_update(active: &mut SubStream, serving: &track::Producer, now: crate::time::Instant) -> Result<(), Error> {
-	active.terms += 1;
+	active.update += 1;
 	serving.supersede_stale(judged_end(&active.ranges));
-	let reversed: Vec<_> = active
-		.stale
-		.iter()
-		.filter(|(_, judged)| **judged < active.max_delay)
-		.map(|(run, _)| run.clone())
-		.collect();
+	let reopened = std::mem::take(&mut active.stale);
 	if let Ok(mut tail) = active.tail.write() {
-		for run in &reversed {
+		for run in reopened.iter() {
 			tail.unaccount(run.clone(), now);
 		}
-	}
-	for run in reversed {
-		active.stale.remove(run);
 	}
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
@@ -8382,7 +8502,7 @@ fn buffer_update(active: &mut SubStream, serving: &track::Producer, now: crate::
 		min_delay: active.min_delay,
 		ranges: active.ranges.clone(),
 		order: active.order,
-		terms: active.terms,
+		update: active.update,
 	})
 }
 
@@ -8426,7 +8546,7 @@ impl Establish {
 			min_delay: self.subscription.delay.min,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
-			terms: 0,
+			update: 0,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -8481,8 +8601,8 @@ impl Establish {
 			end: None,
 			wanted: None,
 			updated: false,
-			terms: 0,
-			stale: RangeMap::new(),
+			update: 0,
+			stale: RangeSet::new(),
 			_working: self.session.work().start(),
 		}
 	}
@@ -9489,26 +9609,26 @@ impl ServeLoop {
 			// one still arriving ends with the drop's error now.
 			lite::SubscribeResponse::Drop(dropped) => {
 				let groups = dropped.start..dropped.end.saturating_add(1);
-				// A stale verdict under terms an update has since replaced says nothing of the
-				// current ones: the groups are unknown, and a reader that wants one fills it by range.
-				let superseded = dropped.terms < active.terms;
-				// One the update widened past is served or dropped again, so it is still owed.
-				let reversed = superseded && dropped.max_age.is_some_and(|judged| judged < active.max_delay);
-				if !reversed && let Ok(mut tail) = active.tail.write() {
-					tail.account(groups.clone(), serve.subscriber.runtime.now());
-				}
-				if let Some(judged) = dropped.max_age.filter(|_| !reversed) {
-					active.stale.insert(groups.clone(), judged);
-				}
-				match dropped.max_age {
-					Some(_) if superseded => {}
-					stale => self.serving.give_up(
-						groups,
-						track::Hole::Drop {
-							error: dropped.error(serve.subscriber.version),
-							stale,
-						},
-					),
+				let error = dropped.error(serve.subscriber.version);
+				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every
+				// other drop is final, whatever update it names.
+				let stale = serve.subscriber.version.has_skip() && error == crate::StreamError::Old;
+				// One given up under an update since replaced says nothing of the current terms:
+				// the publisher re-offers it or drops it again under the new number, so it is
+				// still owed, and a reader that wants it fills it by range meanwhile.
+				if !(stale && dropped.update < active.update) {
+					if let Ok(mut tail) = active.tail.write() {
+						tail.account(groups.clone(), serve.subscriber.runtime.now());
+					}
+					let hole = match stale {
+						// Judged under the budget this subscriber sent with that update.
+						true => {
+							active.stale.insert(groups.clone());
+							track::Hole::stale(active.max_delay)
+						}
+						false => track::Hole::drop(error),
+					};
+					self.serving.give_up(groups, hole);
 				}
 			}
 			// Never produced, so nothing is waited for and no reader ends.

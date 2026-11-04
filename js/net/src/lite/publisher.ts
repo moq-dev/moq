@@ -955,8 +955,6 @@ export class Publisher {
 		}
 		// Parked past a bounded window's end: the peer reads this stream's end as the track's.
 		const track = hooks.parked(consumer.subscribe(subscription(ranges)));
-		// A lite-07 widening re-offers what was reported stale; earlier versions' drops are final.
-		if (hasSkip(this.version)) hooks.reoffersReported(track);
 		serving(track);
 		if (timed) {
 			try {
@@ -1084,7 +1082,7 @@ export class Publisher {
 				served,
 				floor,
 				bounds,
-				terms: msg.terms,
+				update: msg.update,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1250,12 +1248,12 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: bigint;
 			bounds: FrameBounds;
-			/** The SUBSCRIBE's range terms id, which a stale drop echoes until an update replaces it. */
-			terms: bigint;
+			/** The SUBSCRIBE's update number (0), which a drop echoes until an update replaces it. */
+			update: bigint;
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
-		let terms = serving.terms;
+		let updateNumber = serving.update;
 		// The read cursor's floor; the subscription's ranges cap it.
 		let floor = serving.floor;
 		const moveCursor = () => track.withRange({ start: { included: floor } });
@@ -1283,7 +1281,7 @@ export class Publisher {
 		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse =>
 			hole.skip && hasSkip(this.version)
 				? { skip: new SubscribeSkip({ start, end }) }
-				: { drop: SubscribeDrop.given(start, end, hole.error, this.version, { maxAge: hole.stale, terms }) };
+				: { drop: SubscribeDrop.given(start, end, hole.error, this.version, updateNumber) };
 
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
@@ -1344,7 +1342,11 @@ export class Publisher {
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
 		const drops = new Signal(0);
-		const pendingDrops: SubscribeDrop[] = [];
+		// Groups whose stream failed, with why, for the control stream to name.
+		const pendingDrops: { sequence: bigint; error: Error }[] = [];
+		// Lite-07 groups whose stream expired as stale, which every update drops again under its
+		// number: the subscriber reopens each stale drop then, and the stream already reset.
+		const expired: Run[] = [];
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1366,7 +1368,11 @@ export class Publisher {
 					skipped.length = 0;
 				}
 				if (pendingDrops.length > 0) {
-					for (const dropped of pendingDrops.splice(0)) {
+					for (const { sequence, error } of pendingDrops.splice(0)) {
+						// A stream expired under this subscription's budget is a stale verdict.
+						if (hasSkip(this.version) && toStreamCode(error) === StreamCode.Old)
+							insertRun(expired, sequence, sequence + 1n);
+						const dropped = SubscribeDrop.given(sequence, sequence, error, this.version, updateNumber);
 						if (
 							!(await controls.response(encodeSubscribeResponse(stream, { drop: dropped }, this.version)))
 						)
@@ -1392,7 +1398,22 @@ export class Publisher {
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
-							terms = update.terms;
+							updateNumber = update.update;
+							// Lite-07 reopens every stale drop on any update: what was reported stale is
+							// offered again, and dropped again under this update's number if still stale.
+							if (hasSkip(this.version)) {
+								const reopened = hooks.reofferStale(track);
+								if (served) {
+									for (const run of reopened)
+										served.splice(0, served.length, ...removeRun(served, run.start, run.end));
+								}
+								// A stream already reset as stale is not served again: dropped again.
+								for (const run of expired) {
+									for (let sequence = run.start; sequence < run.end; sequence++)
+										pendingDrops.push({ sequence, error: new StreamError(StreamCode.Old) });
+								}
+								expired.length = 0;
+							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
 							// group, so an update that drops a named floor re-pins there too. On
@@ -1446,12 +1467,6 @@ export class Publisher {
 					? ({ kind: "group", group: first.group } as const)
 					: hooks.tryRecvGroup(track, emitRange);
 				first = undefined;
-				// A stale drop a lite-07 widening reversed is owed again: re-offered if still held,
-				// and dropped again under the new terms otherwise.
-				if (served) {
-					for (const run of hooks.takeUnreported(track))
-						served.splice(0, served.length, ...removeRun(served, run.start, run.end));
-				}
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
@@ -1604,7 +1619,7 @@ export class Publisher {
 				const group = recv.group;
 				// Never a second stream for a sequence this subscription already accounted for
 				// (served, sent as a datagram, or dropped): before lite-07 a subscriber settles a
-				// drop for good. A stale drop a lite-07 widening reversed is owed again above.
+				// drop for good. A stale drop a lite-07 update reopened is owed again (see the update above).
 				if (served && runGaps(served, group.sequence, group.sequence + 1n).length === 0) {
 					group.close();
 					continue;
@@ -1665,14 +1680,7 @@ export class Publisher {
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					if (emitRange && failed instanceof Error) {
-						// A stream expired under this subscription's budget is a stale verdict.
-						const maxAge = toStreamCode(failed) === StreamCode.Old ? hooks.budget(track) : undefined;
-						pendingDrops.push(
-							SubscribeDrop.given(group.sequence, group.sequence, failed, this.version, {
-								maxAge,
-								terms,
-							}),
-						);
+						pendingDrops.push({ sequence: group.sequence, error: failed });
 						drops.update((revision) => revision + 1);
 					}
 				});

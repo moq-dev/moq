@@ -642,18 +642,12 @@ export const hooks: {
 	 */
 	unreport: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/**
-	 * The budget in milliseconds a subscriber judges staleness under: its max delay, clamped to the
-	 * track's max age. Mirrors the Rust crate-private `track::Subscriber::budget`.
+	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
+	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
+	 * taken back, which are owed again. Mirrors the Rust crate-private
+	 * `track::Subscriber::reoffer_stale`.
 	 */
-	budget: (subscriber: Subscriber) => number;
-	/**
-	 * Have a widening re-offer what a subscriber reported stale through dispositions, as a wire
-	 * whose drops a widening reverses does. Returns the subscriber. Mirrors the Rust
-	 * crate-private `track::Subscriber::reoffers_reported`.
-	 */
-	reoffersReported: (subscriber: Subscriber) => Subscriber;
-	/** The runs a subscriber reported stale that a widening took back since the last call. */
-	takeUnreported: (subscriber: Subscriber) => Run[];
+	reofferStale: (subscriber: Subscriber) => Run[];
 	/**
 	 * Whether a subscriber reads a copy received from a remote publisher, which cannot tell a group
 	 * its source never produced from one it never received. A resumed reader always does.
@@ -667,6 +661,11 @@ export const hooks: {
 	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown> };
+	/**
+	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
+	 * new terms superseded is gone. Mirrors the Rust crate-private `track::Subscriber::stale_held`.
+	 */
+	staleHeld: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
 	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
@@ -872,13 +871,7 @@ export const hooks: {
 	supersedeStale: () => {
 		throw new Error("track.ts not loaded");
 	},
-	budget: () => {
-		throw new Error("track.ts not loaded");
-	},
-	reoffersReported: () => {
-		throw new Error("track.ts not loaded");
-	},
-	takeUnreported: () => {
+	reofferStale: () => {
 		throw new Error("track.ts not loaded");
 	},
 	isReceived: () => {
@@ -915,6 +908,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	holdsGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	staleHeld: () => {
 		throw new Error("track.ts not loaded");
 	},
 	givenUp: () => {

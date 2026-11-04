@@ -8,7 +8,7 @@ import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
-import { hooks, MAX_DATAGRAMS } from "./internal.ts";
+import { hooks, MAX_DATAGRAMS, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -49,6 +49,8 @@ function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 /** A copy of the logical track: every route's copy holds the same groups under the same sequences. */
 function copy(source: BroadcastProducer) {
 	const producer = source.createTrack("seq");
+	// A route's copy is received, so its groups arrive in any order.
+	hooks.receiveTrack(producer);
 	return {
 		producer,
 		write(sequence: bigint, frames = 1, close = true) {
@@ -1361,6 +1363,42 @@ test("a drop waits while a copy the serving one replaced may still deliver it", 
 		await clock.advance(Nano(1_000_000_000));
 		expect(recvDisposition(sub)).toEqual([2n, 3n, 70]);
 		ta.write(2n);
+		expect(recvDisposition(sub)).toBe("idle");
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	} finally {
+		installed.close();
+	}
+});
+
+// A received stale run the reader held back is unknown again once new terms supersede it on the
+// serving copy: its upstream re-offers or drops it again, so it is not reported meanwhile.
+test("a held-back stale run new terms supersede is not reported", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(1_000) } });
+		ta.write(0n);
+		expect(recvDisposition(sub)).toBe(0n);
+		front.serve(b.consume());
+		await settle();
+		// The new route's upstream judged groups 1 and 2 stale; the old route may still deliver them.
+		hooks.dropTrackGroups(tb.producer, 1n, 3n, staleHole(1_000));
+		expect(recvDisposition(sub)).toBe("idle");
+		tb.write(3n);
+		expect(recvDisposition(sub)).toBe(3n);
+		// The route's subscription updates before the old copy is past the budget.
+		hooks.supersedeStale(tb.producer, undefined);
+		await clock.advance(Nano(1_000_000_000));
 		expect(recvDisposition(sub)).toBe("idle");
 
 		sub.close();

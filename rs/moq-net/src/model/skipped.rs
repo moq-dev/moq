@@ -67,6 +67,19 @@ impl Skipped {
 		widened
 	}
 
+	/// The skipped runs within `groups`, clipped to them, lowest first; each stays until its
+	/// group is handed out or skipped again.
+	pub fn within(&self, groups: RangeInclusive<u64>) -> Vec<RangeInclusive<u64>> {
+		let Some(skipped) = &self.0 else {
+			return Vec::new();
+		};
+		skipped
+			.runs
+			.overlapping(&groups)
+			.map(|(run, _)| *run.start().max(groups.start())..=*run.end().min(groups.end()))
+			.collect()
+	}
+
 	/// Whether no run is recorded.
 	pub fn is_empty(&self) -> bool {
 		self.0.as_ref().is_none_or(|skipped| skipped.runs.is_empty())

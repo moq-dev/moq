@@ -40,6 +40,7 @@ import {
 	removeRun,
 	runGaps,
 	type StagedTrack,
+	skipHole,
 	staleHole,
 	type TrackRequestOptions,
 } from "./internal.ts";
@@ -1633,6 +1634,10 @@ export class Producer {
 	/**
 	 * Create a new group with the given sequence number.
 	 *
+	 * A gap it leaves above the last group is skipped at once: readers move past it without
+	 * waiting, and no reader ends. A group created in that gap later still reaches readers that
+	 * have not moved past it.
+	 *
 	 * Throws on a sequence that is still cached: a live duplicate would fan out to every
 	 * subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
 	 * sequence again. Best effort (mirrors Rust): nothing remembers a sequence whose cache
@@ -1645,6 +1650,14 @@ export class Producer {
 
 	#createGroup(sequence: bigint, start: number): GroupProducer {
 		this.#writable(sequence);
+		// What this track's own publisher passes over when it creates a group is skipped at once,
+		// never judged stale; a received copy's groups arrive in any order. A late group it still
+		// creates below wins over its skip, as a group stream wins over a drop. Mirrors Rust.
+		// A run already given up keeps its reason.
+		if (!this.#subscribed && this.#received > 0n) {
+			for (const gap of runGaps(this.#state.drops.peek(), this.#received, sequence))
+				this.#drop(gap.start, gap.end, skipHole());
+		}
 		const existing = this.#cached.get(sequence);
 		if (existing) {
 			if (!(existing.group.closed.peek() instanceof Error)) {
@@ -2065,15 +2078,9 @@ export class Subscriber {
 		judgedEnd?: bigint;
 	};
 	#reported: Run[] = [];
-	// The reported runs judged stale, with the budget each was judged under, for a wire whose
-	// widening re-offers them; see `hooks.reoffersReported`.
-	#reportedStale: DropRun[] = [];
-	// Whether a widening re-offers what this cursor reported stale, and the runs it took back
-	// since the owner last drained them.
-	#reoffersReported = false;
-	#unreported: Run[] = [];
-	// The budget the reported stale runs were last checked against: only a change can reverse one.
-	#reofferedAt?: number;
+	// The reported runs judged stale, for a wire whose update re-offers them; see
+	// `hooks.reofferStale`.
+	#reportedStale: Run[] = [];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -2352,19 +2359,6 @@ export class Subscriber {
 	// skipped again, so a newer one handed out first never folds it into #delivered. Costs the
 	// skipped groups, never the cache.
 	#reoffer(budget: number): void {
-		// A reported stale run reversed is judged again, and owed again by the wire.
-		const changed = this.#reofferedAt !== budget;
-		this.#reofferedAt = budget;
-		if (this.#reoffersReported && changed && this.#reportedStale.some((run) => (run.stale ?? budget) < budget)) {
-			for (const run of this.#reportedStale) {
-				if ((run.stale ?? budget) >= budget) continue;
-				this.#reported = removeRun(this.#reported, run.start, run.end);
-				insertRun(this.#unreported, run.start, run.end);
-			}
-			this.#reportedStale = this.#reportedStale.filter((run) => (run.stale ?? budget) >= budget);
-			this.#pending = this.#pending.filter((run) => (run.stale ?? budget) >= budget);
-			this.#dropsSeen = undefined;
-		}
 		if (this.#skipped.size === 0 || budget <= this.#narrowest) return;
 		const sequences: bigint[] = [];
 		let narrowest = Number.POSITIVE_INFINITY;
@@ -2388,6 +2382,30 @@ export class Subscriber {
 		this.#narrowest = narrowest;
 		const producer = this.#state.producer;
 		if (producer && !this.#closed) reofferSequences(producer, this.#state, sequences);
+	}
+
+	// Owe again every run this cursor gave up as stale, reported or not: an update reopens the
+	// verdict. A group still cached is offered again as a widened skip is, and whatever is still
+	// stale under the new terms is given up and reported again. Returns the runs taken back. A
+	// resumed reader reports only what its routes' copies give up, so it keeps its reports.
+	#reofferStale(): Run[] {
+		if (this.#resume) return [];
+		const taken: Run[] = [];
+		for (const run of this.#reportedStale) {
+			this.#reported = removeRun(this.#reported, run.start, run.end);
+			insertRun(taken, run.start, run.end);
+		}
+		this.#reportedStale = [];
+		for (const run of this.#pending) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
+		this.#pending = this.#pending.filter((run) => run.stale === undefined);
+		// A received stale run is folded in again by the next scan, if the track still holds it.
+		this.#dropsSeen = undefined;
+		const sequences = [...this.#skipped.keys()].filter((sequence) =>
+			taken.some((run) => run.start <= sequence && sequence < run.end),
+		);
+		const producer = this.#state.producer;
+		if (sequences.length > 0 && producer && !this.#closed) reofferSequences(producer, this.#state, sequences);
+		return taken;
 	}
 
 	private constructor(name: string, state: TrackState) {
@@ -2531,13 +2549,17 @@ export class Subscriber {
 		const budget = this.#drift().budget;
 		const coverage = this.#coverage();
 		const all = this.#state.drops.peek();
-		const drops = all.filter((run) => settles(run, budget, coverage, this.#state.judgedEnd));
-		const unknown = all.filter((run) => !settles(run, budget, coverage, this.#state.judgedEnd));
 		const producer = this.#state.producer;
 		for (const run of this.#window.runs(this.#window.floor() ?? 0n, end)) {
 			let gaps = [run];
 			for (const delivered of taken) gaps = gaps.flatMap((gap) => delivered.gaps(gap.start, gap.end));
 			for (const gap of gaps) {
+				// Each run judged from where it meets the gap, as the reader would read it.
+				const overlapping = all
+					.filter((run) => run.start < gap.end && gap.start < run.end)
+					.map((run) => ({ ...run, start: max(run.start, gap.start), end: min(run.end, gap.end) }));
+				const drops = overlapping.filter((run) => settles(run, budget, coverage, this.#state.judgedEnd));
+				const unknown = overlapping.filter((run) => !settles(run, budget, coverage, this.#state.judgedEnd));
 				for (const open of runGaps(drops, gap.start, gap.end)) {
 					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
 					// Not received yet, so it may still arrive.
@@ -2617,16 +2639,7 @@ export class Subscriber {
 		hooks.unreport = (subscriber, start, end) => {
 			subscriber.#reported = removeRun(subscriber.#reported, start, end);
 		};
-		hooks.budget = (subscriber) => subscriber.#drift().budget;
-		hooks.reoffersReported = (subscriber) => {
-			subscriber.#reoffersReported = true;
-			return subscriber;
-		};
-		hooks.takeUnreported = (subscriber) => {
-			const unreported = subscriber.#unreported;
-			subscriber.#unreported = [];
-			return unreported;
-		};
+		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
 		hooks.isReceived = (subscriber) => {
 			if (subscriber.#resume) return true;
 			const producer = subscriber.#state.producer;
@@ -2692,6 +2705,14 @@ export class Subscriber {
 		hooks.holdsGroup = (subscriber, sequence) => {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && cachedHolds(producer, sequence);
+		};
+		hooks.staleHeld = (subscriber, start, end) => {
+			const held: Run[] = [];
+			for (const run of subscriber.#state.drops.peek()) {
+				if (run.stale === undefined || run.end <= start || run.start >= end) continue;
+				insertRun(held, max(run.start, start), min(run.end, end));
+			}
+			return held;
 		};
 		hooks.givenUp = (subscriber, sequence) => {
 			const drops = subscriber.#state.drops;
@@ -3111,8 +3132,7 @@ export class Subscriber {
 			const [gap] = runGaps(this.#reported, run.start, run.end);
 			if (!gap) continue;
 			insertRun(this.#reported, gap.start, gap.end);
-			if (hole.stale !== undefined)
-				this.#reportedStale = insertDrop(this.#reportedStale, gap.start, gap.end, hole);
+			if (hole.stale !== undefined) insertRun(this.#reportedStale, gap.start, gap.end);
 			return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 		}
 		return undefined;
@@ -3150,7 +3170,10 @@ export class Subscriber {
 			// The track's runs are folded in afresh, so one it forgot, such as a stale run new terms
 			// superseded, or one that stopped settling this reader, leaves nothing behind.
 			this.#pending = this.#pending.filter((run) => !run.received);
-			for (const run of drops) {
+			for (const dropped of drops) {
+				// Judged from where it meets this cursor's span, as Rust clips it.
+				const run = { ...dropped, start: max(dropped.start, start), end: min(dropped.end, end ?? dropped.end) };
+				if (run.start >= run.end) continue;
 				// A received stale run that does not settle this reader is unknown to it.
 				if (!settles(run, budget, coverage, judgedEnd)) continue;
 				this.#pending = insertDrop(this.#pending, run.start, run.end, { ...run, received: true });

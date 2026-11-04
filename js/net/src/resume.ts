@@ -730,11 +730,22 @@ class Reader implements ResumeSource {
 		if (this.#closed) return undefined;
 		const serving = this.#serving();
 		if (serving) {
+			// A received stale run queued here that new terms superseded since is unknown again: the
+			// copy no longer holds it, and its upstream re-offers or drops it again.
+			for (const run of this.#drops) {
+				if (!run.received) continue;
+				const held = hooks.staleHeld(serving.sub, run.start, run.end);
+				for (const gap of runGaps(held, run.start, run.end))
+					this.#drops = removeRun(this.#drops, gap.start, gap.end);
+			}
 			for (let dropped = hooks.tryDrop(serving.sub); dropped; dropped = hooks.tryDrop(serving.sub)) {
 				// A route failing is no verdict: another route may still deliver the group, and
 				// one it failed while buffered is handed out to continue through its recovery.
 				if (routeFailed(dropped.error)) continue;
-				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, dropped);
+				// A stale run the copy holds came from its upstream, which new terms may supersede.
+				const received =
+					dropped.stale !== undefined && hooks.staleHeld(serving.sub, dropped.start, dropped.end).length > 0;
+				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, { ...dropped, received });
 			}
 		}
 		this.#drops = this.#drops.filter((run) => !delivered.covers(run.start, run.end));

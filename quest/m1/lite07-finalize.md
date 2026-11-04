@@ -63,8 +63,8 @@ The cut:
   names that rejection, not only the cap.
 
 Decided 2026-10-20 (maintainer): the drop set joined Required, because it
-adds `Max Age` to lite-07's SUBSCRIBE_DROP. That wire work, with
-SUBSCRIBE_SKIP and range `Terms`, landed in
+changes lite-07's SUBSCRIBE_DROP. That wire work, SUBSCRIBE_SKIP and the
+`Update` number on SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP, landed in
 [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670); what remains of
 the drop set is memory accounting with no wire change, so it no longer gates
 the cut. Nothing

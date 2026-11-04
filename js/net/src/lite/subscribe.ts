@@ -28,14 +28,14 @@ import {
 	Version,
 } from "./version.ts";
 
-/** Decode the range `Terms` after the ranges. A wire without the field decodes as 0. */
-async function decodeTerms(r: Reader, version: Version): Promise<bigint> {
+/** Decode the `Update` number after the ranges. A wire without the field decodes as 0. */
+async function decodeUpdate(r: Reader, version: Version): Promise<bigint> {
 	return hasSkip(version) ? await r.u62() : 0n;
 }
 
-/** Encode the range `Terms`, dropping it on a wire without the field. */
-async function encodeTerms(w: Writer, version: Version, terms: bigint) {
-	if (hasSkip(version)) await w.u62(terms);
+/** Encode the `Update` number, dropping it on a wire without the field. */
+async function encodeUpdate(w: Writer, version: Version, update: bigint) {
+	if (hasSkip(version)) await w.u62(update);
 }
 
 /**
@@ -441,8 +441,8 @@ export class SubscribeUpdate {
 	endFrame?: number;
 	/** See {@link Subscribe.ranges}. */
 	ranges?: WireRange[];
-	/** See {@link Subscribe.terms}: larger than the subscription's previous terms. */
-	terms: bigint;
+	/** See {@link Subscribe.update}: larger than the subscription's previous one. */
+	update: bigint;
 
 	constructor(props: {
 		priority: number;
@@ -455,7 +455,7 @@ export class SubscribeUpdate {
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
-		terms?: bigint;
+		update?: bigint;
 	}) {
 		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
 			throw new RangeError("wanted group must be non-negative");
@@ -469,7 +469,7 @@ export class SubscribeUpdate {
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
-		this.terms = props.terms ?? 0n;
+		this.update = props.update ?? 0n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -484,7 +484,7 @@ export class SubscribeUpdate {
 				await w.u53(this.maxDelay);
 				await encodeMinDelay(w, version, this.minDelay);
 				await encodeSpan(w, version, this, this.ranges);
-				await encodeTerms(w, version, this.terms);
+				await encodeUpdate(w, version, this.update);
 				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
 				break;
 		}
@@ -501,7 +501,7 @@ export class SubscribeUpdate {
 				const maxDelay = await r.u53();
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
-				const terms = await decodeTerms(r, version);
+				const update = await decodeUpdate(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
 				return new SubscribeUpdate({
 					wantedGroup: wanted === 0n ? undefined : wanted - 1n,
@@ -510,7 +510,7 @@ export class SubscribeUpdate {
 					maxDelay,
 					minDelay,
 					...span,
-					terms,
+					update,
 				});
 			}
 		}
@@ -574,11 +574,11 @@ export class Subscribe {
 	ranges?: WireRange[];
 
 	/**
-	 * The range terms id: every SUBSCRIBE_UPDATE carries a larger one, and a stale
-	 * {@link SubscribeDrop} echoes the one it was judged under. Lite-07+; earlier wires decode
-	 * as 0 and drop it on encode.
+	 * The number of the terms in effect: the SUBSCRIBE is 0 and every SUBSCRIBE_UPDATE carries a
+	 * larger one, which a {@link SubscribeDrop} echoes. Lite-07+; earlier wires decode as 0 and
+	 * drop it on encode.
 	 */
-	terms: bigint;
+	update: bigint;
 
 	constructor(props: {
 		id: bigint;
@@ -594,7 +594,7 @@ export class Subscribe {
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
-		terms?: bigint;
+		update?: bigint;
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -609,7 +609,7 @@ export class Subscribe {
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
-		this.terms = props.terms ?? 0n;
+		this.update = props.update ?? 0n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -630,7 +630,7 @@ export class Subscribe {
 				await encodeSpan(w, version, this, this.ranges);
 				break;
 		}
-		await encodeTerms(w, version, this.terms);
+		await encodeUpdate(w, version, this.update);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
@@ -649,7 +649,7 @@ export class Subscribe {
 				const maxDelay = await r.u53();
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
-				const terms = await decodeTerms(r, version);
+				const update = await decodeUpdate(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
@@ -660,7 +660,7 @@ export class Subscribe {
 					maxDelay,
 					minDelay,
 					...span,
-					terms,
+					update,
 				});
 			}
 		}
@@ -881,40 +881,27 @@ export class SubscribeDrop {
 	end: bigint;
 	error: number;
 	/**
-	 * The budget in milliseconds a stale verdict was judged under, undefined for a drop that does
-	 * not depend on it. Lite-07+, encoded as the value plus one; earlier wires decode as undefined.
+	 * The number of the SUBSCRIBE or SUBSCRIBE_UPDATE in effect when the groups were given up
+	 * ({@link Subscribe.update}): a stale (OLD) drop under a superseded one is no verdict.
+	 * Lite-07+; earlier wires decode as 0.
 	 */
-	maxAge?: number;
-	/** The range terms id ({@link Subscribe.terms}) a stale verdict was judged under. Lite-07+. */
-	terms: bigint;
+	update: bigint;
 
-	constructor(props: { start: bigint; end: bigint; error: number; maxAge?: number; terms?: bigint }) {
+	constructor(props: { start: bigint; end: bigint; error: number; update?: bigint }) {
 		this.start = props.start;
 		this.end = props.end;
 		this.error = props.error;
-		this.maxAge = props.maxAge;
-		this.terms = props.terms ?? 0n;
+		this.update = props.update ?? 0n;
 	}
 
-	/**
-	 * Name `[start, end]` given up with `err`, as `version` carries it, judged under `maxAge` and
-	 * `terms` when the verdict depends on the budget.
-	 */
-	static given(
-		start: bigint,
-		end: bigint,
-		err: unknown,
-		version: Version,
-		judged?: { maxAge?: number; terms: bigint },
-	): SubscribeDrop {
-		const skip = hasSkip(version);
+	/** Name `[start, end]` given up with `err` under the terms numbered `update`, as `version` carries it. */
+	static given(start: bigint, end: bigint, err: unknown, version: Version, update = 0n): SubscribeDrop {
 		return new SubscribeDrop({
 			start,
 			end,
 			// Before lite-07 the code is the application's, so it says nothing of why.
 			error: hasDropCode(version) ? toStreamCode(err) : 0,
-			maxAge: skip ? judged?.maxAge : undefined,
-			terms: skip ? (judged?.terms ?? 0n) : 0n,
+			update: hasSkip(version) ? update : 0n,
 		});
 	}
 
@@ -936,10 +923,7 @@ export class SubscribeDrop {
 		await w.u62(this.start);
 		await w.u62(this.end);
 		await w.u53(this.error);
-		if (hasSkip(version)) {
-			await w.u62(this.maxAge === undefined ? 0n : BigInt(this.maxAge) + 1n);
-			await w.u62(this.terms);
-		}
+		await encodeUpdate(w, version, this.update);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<SubscribeDrop> {
@@ -947,15 +931,8 @@ export class SubscribeDrop {
 		const end = await r.u62();
 		if (start - end > 1n) throw new ProtocolViolation("invalid dropped range");
 		const error = await r.u53();
-		let maxAge: number | undefined;
-		let terms = 0n;
-		if (hasSkip(version)) {
-			const age = await r.u62();
-			if (age > BigInt(Number.MAX_SAFE_INTEGER) + 1n) throw new RangeError("max age exceeds safe integer");
-			maxAge = age === 0n ? undefined : Number(age - 1n);
-			terms = await r.u62();
-		}
-		return new SubscribeDrop({ start, end, error, maxAge, terms });
+		const update = await decodeUpdate(r, version);
+		return new SubscribeDrop({ start, end, error, update });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

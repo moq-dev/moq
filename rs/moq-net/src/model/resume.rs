@@ -1101,7 +1101,9 @@ struct Reader {
 	out: Vec<(u64, Weak<()>)>,
 	/// Runs the serving copy gave up that the reader has yet to report; see
 	/// [`Reader::poll_drop`].
-	drops: RangeMap<u64, track::Hole>,
+	/// Each with whether it is a received stale run the serving copy held, which new terms
+	/// can supersede.
+	drops: RangeMap<u64, (track::Hole, bool)>,
 }
 
 impl Reader {
@@ -1856,15 +1858,32 @@ impl Reader {
 	/// so a run there waits until that copy no longer feeds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_drop(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Poll<(std::ops::Range<u64>, track::Hole)> {
+		let queued: Vec<_> = self
+			.drops
+			.iter()
+			.filter(|(_, (_, received))| *received)
+			.map(|(run, _)| run.clone())
+			.collect();
 		let mut given_up = Vec::new();
+		let mut superseded = Vec::new();
 		if let Poll::Ready(Some(sub)) = self.poll_serving(waiter) {
-			while let Poll::Ready(run) = sub.poll_drop(waiter) {
-				given_up.push(run);
+			// A received stale run queued here that new terms superseded since is unknown again:
+			// the copy no longer holds it, and its upstream re-offers or drops it again.
+			for run in queued {
+				superseded.extend(sub.stale_held(run.clone()).gaps(&run));
+			}
+			while let Poll::Ready((run, hole)) = sub.poll_drop(waiter) {
+				// A stale run the copy holds came from its upstream, which new terms may supersede.
+				let received = hole.stale_budget().is_some() && !sub.stale_held(run.clone()).is_empty();
+				given_up.push((run, hole, received));
 			}
 		}
-		for (run, hole) in given_up {
+		for run in superseded {
+			self.drops.remove(run);
+		}
+		for (run, hole, received) in given_up {
 			if !route_failed(&Error::Stream(hole.error())) {
-				self.drops.insert(run, hole);
+				self.drops.insert(run, (hole, received));
 			}
 		}
 		let covered: Vec<_> = self
@@ -1892,7 +1911,7 @@ impl Reader {
 				feeding.insert(from..until);
 			}
 		}
-		let next = self.drops.iter().find_map(|(run, err)| {
+		let next = self.drops.iter().find_map(|(run, (err, _))| {
 			let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
 			let open = delivered
 				.gaps(run)
@@ -2595,6 +2614,13 @@ mod test {
 			"video",
 			crate::track::Info::timed(),
 		)
+	}
+
+	/// A route's copy received from a remote publisher, whose groups may land out of order.
+	fn received_copy() -> track::Producer {
+		let copy = copy();
+		copy.received();
+		copy
 	}
 
 	/// The logical track `routes` serves.
@@ -3698,6 +3724,34 @@ mod test {
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 	}
 
+	/// A received stale run the reader held back is unknown again once new terms supersede it
+	/// on the serving copy: its upstream re-offers or drops it again, so it is not reported
+	/// meanwhile.
+	#[kio::test]
+	async fn a_held_back_stale_run_new_terms_supersede_is_not_reported() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let budget = Duration::from_secs(1);
+		let mut sub = subscribe(&logical, budget);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		// The new route's upstream judged groups 1 and 2 stale; the old route may still deliver them.
+		b.give_up(1..3, track::Hole::stale(budget));
+		assert_eq!(dropped(&mut sub), []);
+		write(&b, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
+
+		// The route's subscription updates before the old copy is past the budget.
+		b.supersede_stale(None);
+		kio::clock::sleep(budget).await;
+		assert_eq!(dropped(&mut sub), [], "no verdict under the new terms");
+	}
+
 	/// A run a replaced route held back is dropped with that route: the route serving next
 	/// may still deliver it.
 	#[test]
@@ -4632,7 +4686,7 @@ mod test {
 	fn a_clean_end_waits_for_a_group_the_replaced_copy_still_carries() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
-		let a = copy();
+		let a = received_copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(1));
 		write(&a, 0);
@@ -4660,7 +4714,7 @@ mod test {
 			for ordered in [false, true] {
 				let routes = Producer::new();
 				let logical = logical(&routes);
-				let a = copy();
+				let a = received_copy();
 				let pool = a.broadcast().pool.clone();
 				let opened = a.consume().now();
 				let noop = kio::Waiter::noop();
@@ -4714,7 +4768,7 @@ mod test {
 	fn a_read_waiting_past_a_drained_copy_wakes_when_the_route_changes() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
-		let a = copy();
+		let a = received_copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(1));
 		write(&a, 0);

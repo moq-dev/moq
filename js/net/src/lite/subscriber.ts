@@ -17,6 +17,7 @@ import {
 	StreamCode,
 	StreamError,
 	sessionCause,
+	toStreamCode,
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
@@ -89,6 +90,7 @@ import {
 	hasRanges,
 	hasRefresh,
 	hasSetupStream,
+	hasSkip,
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
@@ -160,13 +162,14 @@ interface SubscribeEntry {
 	starts?: (bigint | undefined)[];
 	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
 	updated?: boolean;
-	// The range terms id of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop judged
-	// under an earlier one is no verdict on the current terms. Undefined is the SUBSCRIBE's 0.
-	terms?: bigint;
-	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds.
+	// The number of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop given up under an
+	// earlier one is no verdict on the current terms. Undefined is the SUBSCRIBE's 0.
+	update?: bigint;
+	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds: the budget
+	// a stale drop under it was judged by.
 	maxDelay?: number;
-	// The runs `tail` accounts for by a stale drop, with the max age each was judged under: a
-	// widening past it reverses the verdict, so they are owed again.
+	// The runs `tail` accounts for by a stale drop under `update`: the next update reopens them,
+	// since the publisher re-offers or drops them again under it.
 	// Coalesced, so a peer repeating a drop holds one run, not one per message.
 	stale?: DropRun[];
 	// Whether SUBSCRIBE_START arrived, which `start` alone cannot say when no range starts.
@@ -1867,20 +1870,20 @@ export class Subscriber {
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups, so they are accounted for without a
 				// stream, and a reader of one still arriving ends with the drop's error now.
-				const { start, end, maxAge, terms } = resp.drop;
-				// A stale verdict under terms an update has since replaced says nothing of the
-				// current ones: the groups are unknown, and a reader that wants one fills it.
-				const superseded = maxAge !== undefined && terms < (entry.terms ?? 0n);
-				// One the update widened past is served or dropped again, so it is still owed.
-				const reversed = superseded && maxAge < (entry.maxDelay ?? 0);
-				if (!reversed) entry.tail.account(start, end + 1n);
-				if (maxAge !== undefined && !reversed)
-					entry.stale = insertDrop(entry.stale ?? [], start, end + 1n, staleHole(maxAge));
-				if (superseded) continue;
-				hooks.dropTrackGroups(entry.track, start, end + 1n, {
-					error: resp.drop.cause(this.version),
-					stale: maxAge,
-				});
+				const { start, end, update } = resp.drop;
+				const error = resp.drop.cause(this.version);
+				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every other
+				// drop is final, whatever update it names.
+				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
+				// One given up under an update since replaced says nothing of the current terms: the
+				// publisher re-offers it or drops it again under the new number, so it is still owed,
+				// and a reader that wants it fills it meanwhile.
+				if (stale && update < (entry.update ?? 0n)) continue;
+				entry.tail.account(start, end + 1n);
+				// Judged under the budget this subscriber sent with that update.
+				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
+				if (stale) entry.stale = insertDrop(entry.stale ?? [], start, end + 1n, hole);
+				hooks.dropTrackGroups(entry.track, start, end + 1n, hole);
 			} else if ("skip" in resp) {
 				// Never produced, so nothing is waited for and no reader ends.
 				entry.tail.account(resp.skip.start, resp.skip.end + 1n);
@@ -2059,20 +2062,18 @@ export class Subscriber {
 				startGroup: span.start,
 				endGroup: inclusiveGroupEnd(span.end),
 				ranges: hasRanges(this.version) ? toWireRanges(ranges, entry.scale) : undefined,
-				terms: (entry.terms ?? 0n) + 1n,
+				update: (entry.update ?? 0n) + 1n,
 			});
-			// A stale drop judged under the previous terms may still be in flight, and this update
-			// may move the range it was judged against, so the runs held as stale become unknown
-			// again: a reader fills them rather than trust an old verdict.
-			entry.terms = update.terms;
+			// A stale drop given up under the previous update may still be in flight, and this one
+			// may move the range or budget it was judged against, so the runs held as stale become
+			// unknown again: a reader fills them rather than trust an old verdict.
+			entry.update = update.update;
 			entry.maxDelay = update.maxDelay;
 			hooks.supersedeStale(entry.track, judgedEnd(ranges));
-			// A lite-07 publisher re-offers or drops again what a widening reverses, so the tail owes
-			// the stale runs judged under a narrower max age again.
-			for (const run of entry.stale ?? []) {
-				if ((run.stale ?? 0) < update.maxDelay) entry.tail.unaccount(run.start, run.end);
-			}
-			entry.stale = entry.stale?.filter((run) => (run.stale ?? 0) >= update.maxDelay);
+			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
+			// again under the new number what is still stale, so the tail owes every stale run again.
+			for (const run of entry.stale ?? []) entry.tail.unaccount(run.start, run.end);
+			entry.stale = undefined;
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the

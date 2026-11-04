@@ -3425,6 +3425,10 @@ impl Producer {
 
 	/// Create a new group with the given sequence number.
 	///
+	/// A gap it leaves above the last group is skipped at once: readers move past it without
+	/// waiting, and no reader ends. A group created in that gap later still reaches readers
+	/// that have not moved past it.
+	///
 	/// Readers and group demand reach it at once, but the track counts it as content (its
 	/// live edge, or the successor that ages the group before it) only once its first frame
 	/// opens or it finishes.
@@ -3442,6 +3446,17 @@ impl Producer {
 		let mut state = self.modify()?;
 		if state.sealed || state.final_sequence().is_some_and(|fin| info.sequence >= fin) {
 			return Err(Error::Closed);
+		}
+		// What this track's own publisher passes over when it creates a group is skipped at
+		// once, never judged stale; a received copy's groups arrive in any order. A late group
+		// it still creates below wins over its skip, as a group stream wins over a drop.
+		// A run already given up keeps its reason.
+		if !state.received && received.is_none() && state.max_sequence.is_some() {
+			let next = state.next_sequence()?;
+			let gaps: Vec<_> = state.drops.gaps(&(next..info.sequence)).collect();
+			for gap in gaps {
+				state.drop_groups(gap, Hole::Skip);
+			}
 		}
 		let start = received.unwrap_or(0);
 		let content = if received.is_some() {
@@ -3793,14 +3808,17 @@ impl Producer {
 	/// Record that the publisher gave up `groups` with `err`: none will arrive, so a reader
 	/// waiting on one moves past it, a group still arriving in them ends with `err`, the
 	/// declared end does not wait for them, and a relay serving this track forwards the drop.
-	pub fn drop_groups(&self, groups: ops::Range<u64>, err: StreamError) {
+	pub(crate) fn drop_groups(&self, groups: ops::Range<u64>, err: StreamError) {
 		self.give_up(groups, Hole::drop(err));
 	}
 
-	/// Record that the publisher never produced `groups`, such as skipped sequence numbers:
-	/// none will arrive, so a reader waiting on one moves past it, the declared end does not
-	/// wait for them, and a relay serving this track forwards the skip. Unlike
-	/// [`Self::drop_groups`], it ends no reader.
+	/// Record that the publisher never produced `groups`: none will arrive, so a reader
+	/// waiting on one moves past it, the declared end does not wait for them, and a relay
+	/// serving this track forwards the skip. Unlike a drop, it ends no reader.
+	///
+	/// A gap below a created group is skipped already, since a publisher creates its groups
+	/// in order. This names the rest, such as sequences between the last group and an end
+	/// declared ahead of it that will never be produced.
 	pub fn skip_groups(&self, groups: ops::Range<u64>) {
 		self.give_up(groups, Hole::Skip);
 	}
@@ -6809,14 +6827,6 @@ struct Cursor {
 	skipped: Skipped,
 	/// The drops a wire publisher forwards, once it first polls for one.
 	drops: Option<Box<DropCursor>>,
-	/// Whether a widening re-offers what this cursor reported stale: a wire whose drops a
-	/// widening reverses, unlike one whose drops are final.
-	reoffers_reported: bool,
-	/// The reported stale runs a widening took back since the owner last drained them.
-	unreported: Vec<ops::Range<u64>>,
-	/// The budget the reported stale runs were last checked against: only a change can
-	/// reverse one, so an unchanged budget costs nothing per poll.
-	reoffered_at: Option<Duration>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
 	/// The heads a bounded window asked for, once it first finds a group missing one.
@@ -6911,10 +6921,10 @@ struct DropCursor {
 	/// Every sequence this cursor already reported.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	reported: RangeSet<u64>,
-	/// The reported runs judged stale, with the budget each was judged under, for a wire
-	/// whose widening re-offers them; see [`Cursor::reoffers_reported`].
+	/// The reported runs judged stale, for a wire whose update re-offers them; see
+	/// [`Subscriber::reoffer_stale`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	reported_stale: RangeMap<u64, Duration>,
+	reported_stale: RangeSet<u64>,
 }
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -6926,36 +6936,29 @@ impl DropCursor {
 			pending: RangeMap::new(),
 			scanned: None,
 			reported: RangeSet::new(),
-			reported_stale: RangeMap::new(),
+			reported_stale: RangeSet::new(),
 		}
 	}
 
-	/// Take back the reported stale runs judged under a budget narrower than `budget`, and
-	/// withdraw those not reported yet: a widening reverses their verdict, so they are
-	/// judged again, and reported again if still given up.
-	fn widened(&mut self, budget: Duration) -> Vec<ops::Range<u64>> {
-		let pending: Vec<_> = self
+	/// Take back every stale run, reported or not: an update reopens their verdict, so they
+	/// are judged again, and reported again under the new update if still stale.
+	fn take_stale(&mut self) -> Vec<ops::Range<u64>> {
+		let mut stale: RangeSet<u64> = self
 			.pending
 			.iter()
-			.filter(|(_, pending)| pending.hole.stale_budget().is_some_and(|judged| judged < budget))
+			.filter(|(_, pending)| pending.hole.stale_budget().is_some())
 			.map(|(run, _)| run.clone())
 			.collect();
-		for run in pending {
-			self.pending.remove(run);
+		for run in stale.iter() {
+			self.pending.remove(run.clone());
 		}
-		let widened: Vec<_> = self
-			.reported_stale
-			.iter()
-			.filter(|(_, judged)| **judged < budget)
-			.map(|(run, _)| run.clone())
-			.collect();
-		// A wider budget changes the scan's key, so a received stale run it no longer settles is
-		// left out of the next scan.
-		for run in &widened {
-			self.reported_stale.remove(run.clone());
+		for run in std::mem::take(&mut self.reported_stale).iter() {
 			self.reported.remove(run.clone());
+			stale.insert(run.clone());
 		}
-		widened
+		// A received stale run is folded in again by the next scan, if the track still holds it.
+		self.scanned = None;
+		stale.into_iter().collect()
 	}
 
 	/// Record a run this cursor's fills gave up on as a miss, as `hole` says; a reason
@@ -7048,8 +7051,8 @@ impl DropCursor {
 				}
 				let hole = pending.hole;
 				self.reported.insert(gap.clone());
-				if let Some(budget) = hole.stale_budget() {
-					self.reported_stale.insert(gap.clone(), budget);
+				if hole.stale_budget().is_some() {
+					self.reported_stale.insert(gap.clone());
 				}
 				return Some((gap, hole));
 			}
@@ -7148,9 +7151,6 @@ impl Cursor {
 			seek_pending: BTreeMap::new(),
 			skipped: Skipped::default(),
 			drops: None,
-			reoffers_reported: false,
-			unreported: Vec::new(),
-			reoffered_at: None,
 			misses: None,
 			heads: None,
 			idle: None,
@@ -7537,42 +7537,54 @@ impl Cursor {
 	}
 
 	/// Owe again the groups this cursor skipped as stale under a budget narrower than
-	/// `budget`: only a widening reverses a stale verdict. Costs the skipped runs, never
-	/// the cache, and nothing when the budget did not widen.
+	/// `budget`: only a widening reverses a stale verdict it has not reported. Costs the
+	/// skipped runs, never the cache, and nothing when the budget did not widen.
 	fn reoffer(&mut self, budget: Duration) {
-		// A reported stale run reversed is judged again: a group still cached is owed below
-		// as a skipped one is, and a missing one is missed again.
-		if self.reoffers_reported
-			&& self.reoffered_at.replace(budget) != Some(budget)
-			&& let Some(drops) = &mut self.drops
-		{
-			for run in drops.widened(budget) {
-				if let Some(misses) = &mut self.misses {
-					misses.retry(run.clone());
+		for run in self.skipped.widened(budget) {
+			self.reowe(run);
+		}
+	}
+
+	/// Owe again every run this cursor gave up as stale, reported or not: an update reopens
+	/// the verdict. A group still cached is owed as a widened skip is, a missing one is
+	/// missed again. Returns the runs taken back; whatever is still stale under the new
+	/// terms is given up and reported again.
+	fn reoffer_stale(&mut self) -> Vec<ops::Range<u64>> {
+		let Some(drops) = &mut self.drops else {
+			return Vec::new();
+		};
+		let runs = drops.take_stale();
+		for run in &runs {
+			if let Some(misses) = &mut self.misses {
+				misses.retry(run.clone());
+			}
+			if let Some(last) = run.end.checked_sub(1) {
+				for skipped in self.skipped.within(run.start..=last) {
+					self.reowe(skipped);
 				}
-				self.unreported.push(run);
 			}
 		}
-		for run in self.skipped.widened(budget) {
-			self.filter
-				.written_off
-				.remove(*run.start()..run.end().saturating_add(1));
-			// Judged again, so a drop not reported yet is withdrawn; a reported one stands.
-			if let Some(drops) = &mut self.drops {
-				let span = *run.start()..run.end().saturating_add(1);
-				let old: Vec<_> = drops
-					.pending
-					.overlapping(span.clone())
-					.filter(|(_, pending)| pending.hole.stale_budget().is_some())
-					.map(|(range, _)| range.start.max(span.start)..range.end.min(span.end))
-					.collect();
-				for range in old {
-					drops.pending.remove(range);
-				}
+		runs
+	}
+
+	/// Owe `run` of skipped groups again, judged anew, withdrawing a stale drop of it not
+	/// reported yet; a reported one stands.
+	fn reowe(&mut self, run: ops::RangeInclusive<u64>) {
+		let span = *run.start()..run.end().saturating_add(1);
+		self.filter.written_off.remove(span.clone());
+		if let Some(drops) = &mut self.drops {
+			let old: Vec<_> = drops
+				.pending
+				.overlapping(span.clone())
+				.filter(|(_, pending)| pending.hole.stale_budget().is_some())
+				.map(|(range, _)| range.start.max(span.start)..range.end.min(span.end))
+				.collect();
+			for range in old {
+				drops.pending.remove(range);
 			}
-			for owed in self.filter.admitted.overlapping(run.clone()) {
-				self.filter.owed.insert(owed);
-			}
+		}
+		for owed in self.filter.admitted.overlapping(run) {
+			self.filter.owed.insert(owed);
 		}
 	}
 
@@ -9272,24 +9284,14 @@ impl Subscriber {
 		self
 	}
 
-	/// Have a widening re-offer what this reader reported stale through
-	/// [`Self::poll_drop`], as a wire whose drops a widening reverses does: each run it
-	/// takes back is judged again, and [`Self::take_unreported`] hands it to the owner. A
-	/// front's reader reports only what its copies give up, so it keeps its reports.
+	/// Re-offer what this reader gave up as stale through [`Self::poll_drop`], as a wire
+	/// whose every update reopens its stale drops does: each run is judged again under the
+	/// new terms. Returns the runs taken back, which are owed again. A front's reader
+	/// reports only what its copies give up, so it keeps its reports.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn reoffers_reported(mut self) -> Self {
-		if let Inner::Plain(cursor) = &mut self.inner {
-			cursor.reoffers_reported = true;
-		}
-		self
-	}
-
-	/// The runs this reader reported stale that a widening took back since the last call,
-	/// which are owed again; see [`Self::reoffers_reported`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn take_unreported(&mut self) -> Vec<ops::Range<u64>> {
+	pub(crate) fn reoffer_stale(&mut self) -> Vec<ops::Range<u64>> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => std::mem::take(&mut cursor.unreported),
+			Inner::Plain(cursor) => cursor.reoffer_stale(),
 			Inner::Resume(..) => Vec::new(),
 		}
 	}
@@ -9416,6 +9418,24 @@ impl Subscriber {
 				Poll::Ready(largest) => largest,
 				Poll::Pending => None,
 			},
+		}
+	}
+
+	/// The parts of `run` this subscriber's track still holds as a received stale run: one
+	/// new terms superseded is gone (see [`Producer::supersede_stale`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn stale_held(&self, run: ops::Range<u64>) -> RangeSet<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor
+				.state
+				.read()
+				.drops
+				.overlapping(&run)
+				.filter(|(_, hole)| hole.stale_budget().is_some())
+				.map(|(held, _)| held.start.max(run.start)..held.end.min(run.end))
+				.collect(),
+			// A front's reader checks its own routes' copies.
+			Inner::Resume(..) => RangeSet::new(),
 		}
 	}
 
@@ -22032,6 +22052,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_reader_forgets_misses_behind_its_window() {
 		let mut producer = track_producer("test", Info::timed());
+		// A received copy, whose missing groups may still arrive.
+		producer.received();
 		let _dynamic = producer.requests();
 		let ascending = |groups| Subscription::default().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
@@ -22132,6 +22154,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_end_ahead_of_the_edge_keeps_a_late_group() {
 		let mut producer = track_producer("test", Info::timed());
+		// A received copy, whose missing groups may still arrive.
+		producer.received();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		for sequence in [0, 1, 2, 4, 5] {
 			write_group(&producer, sequence);
@@ -23350,6 +23374,61 @@ mod test {
 		);
 	}
 
+	/// A local publisher creating a group past the next sequence skips the gap at once: a
+	/// reader is told without waiting for any budget or grace, and no reader ends. A late
+	/// group the publisher still creates in the gap wins over the skip, as a group stream wins
+	/// over a drop, so a reader takes it once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_local_gap_is_skipped_once_a_group_above_it_is_created() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		let waiter = kio::Waiter::noop();
+		write_group(&producer, 2);
+		write_group(&producer, 5);
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((3..5, Hole::Skip)));
+		assert_eq!(drain_groups(&mut subscriber), [2, 5]);
+
+		write_group(&producer, 4);
+		assert!(
+			!producer.state.read().drops.contains_key(&4),
+			"the group wins over its skip"
+		);
+		assert_eq!(drain_groups(&mut subscriber), [4]);
+		let mut late = producer.subscribe(replay().with_range(0..));
+		assert_eq!(drained_drops(&mut late), [(3, 4)]);
+		let mut read = drain_groups(&mut late);
+		read.sort();
+		assert_eq!(read, [2, 4, 5]);
+	}
+
+	/// Appending leaves no gap, and nothing below a track's first group is skipped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn appending_and_a_first_group_skip_nothing() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		write_group(&producer, 3);
+		producer.append_group().unwrap().finish().unwrap();
+		assert!(producer.state.read().drops.is_empty());
+		assert!(drained_drops(&mut subscriber).is_empty());
+	}
+
+	/// A received copy's groups land in any order, so a gap above its newest is still owed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_gap_is_not_skipped() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		write_group(&producer, 2);
+		write_group(&producer, 5);
+		assert!(producer.state.read().drops.is_empty());
+		assert!(drained_drops(&mut subscriber).is_empty());
+		write_group(&producer, 3);
+		assert_eq!(drain_groups(&mut subscriber), [2, 5, 3]);
+	}
+
 	/// A received stale run superseded by new range terms is unknown again, and a group a
 	/// widening re-offers wins over its drop.
 	#[test]
@@ -23794,6 +23873,9 @@ mod test {
 		}];
 		for dropped in [false, true] {
 			let producer = track_producer("test", Info::timed());
+			// A received copy whose wire carries media time, so group 1 may still arrive.
+			producer.received();
+			producer.anchored();
 			let mut zero = producer.create_group(group::Info { sequence: 0 }).unwrap();
 			zero.write_frame(at(0), bytes::Bytes::from_static(b"x")).unwrap();
 			let mut two = producer.create_group(group::Info { sequence: 2 }).unwrap();
@@ -24974,6 +25056,8 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_bounded_read_ends_after_its_fill() {
 		let (producer, _pool) = pooled_producer(1 << 40);
+		// A received copy, whose missing groups may still arrive.
+		producer.received();
 		let dynamic = producer.requests();
 		producer.create_group(0u64.into()).unwrap().finish().unwrap();
 		producer.create_group(2u64.into()).unwrap().finish().unwrap();

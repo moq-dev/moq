@@ -30,10 +30,10 @@ pub struct Subscribe<'a> {
 	/// Which pending group to send first. Lite07+ only; earlier wires decode as
 	/// [`Order::Descending`] and cannot ask for anything else.
 	pub order: Order,
-	/// The range terms id: every SUBSCRIBE_UPDATE carries a larger one, and a stale
-	/// [`SubscribeDrop`] echoes the one it was judged under. Lite07+ only; earlier wires
+	/// The number of the terms in effect: the SUBSCRIBE is 0 and every SUBSCRIBE_UPDATE
+	/// carries a larger one, which a [`SubscribeDrop`] echoes. Lite07+ only; earlier wires
 	/// decode as 0 and drop it on encode.
-	pub terms: u64,
+	pub update: u64,
 }
 
 impl Subscribe<'_> {
@@ -49,7 +49,7 @@ impl Subscribe<'_> {
 			min_delay: self.min_delay,
 			ranges: self.ranges,
 			order: self.order,
-			terms: self.terms,
+			update: self.update,
 		}
 	}
 }
@@ -147,7 +147,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 				(order, max_delay, min_delay, decode_ranges(r, version)?)
 			}
 		};
-		let terms = decode_terms(r, version)?;
+		let update = decode_update(r, version)?;
 
 		Ok(Self {
 			id,
@@ -159,7 +159,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			min_delay,
 			ranges,
 			order,
-			terms,
+			update,
 		})
 	}
 
@@ -180,24 +180,24 @@ impl<'a> Message<'a> for Subscribe<'a> {
 				encode_ranges(w, version, &self.ranges)?;
 			}
 		}
-		encode_terms(w, version, self.terms)?;
+		encode_update(w, version, self.update)?;
 
 		Ok(())
 	}
 }
 
-/// Decode the range `Terms` after the ranges. A wire without the field decodes as 0.
-fn decode_terms(r: &mut Decoder<'_>, version: Version) -> Result<u64, DecodeError> {
+/// Decode the `Update` number after the ranges. A wire without the field decodes as 0.
+fn decode_update(r: &mut Decoder<'_>, version: Version) -> Result<u64, DecodeError> {
 	match version.has_skip() {
 		true => r.varint(),
 		false => Ok(0),
 	}
 }
 
-/// Encode the range `Terms`, dropping it on a wire without the field.
-fn encode_terms(w: &mut Encoder<'_>, version: Version, terms: u64) -> Result<(), EncodeError> {
+/// Encode the `Update` number, dropping it on a wire without the field.
+fn encode_update(w: &mut Encoder<'_>, version: Version, update: u64) -> Result<(), EncodeError> {
 	match version.has_skip() {
-		true => w.varint(terms),
+		true => w.varint(update),
 		false => Ok(()),
 	}
 }
@@ -676,8 +676,8 @@ pub struct SubscribeUpdate {
 	pub ranges: Vec<Range>,
 	/// See [`Subscribe::order`].
 	pub order: Order,
-	/// See [`Subscribe::terms`]: larger than the subscription's previous terms.
-	pub terms: u64,
+	/// See [`Subscribe::update`]: larger than the subscription's previous one.
+	pub update: u64,
 }
 
 impl<'a> Message<'a> for SubscribeUpdate {
@@ -695,7 +695,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		let max_delay = std::time::Duration::from_millis(r.varint()?);
 		let min_delay = decode_min_delay(r, version)?;
 		let ranges = decode_ranges(r, version)?;
-		let terms = decode_terms(r, version)?;
+		let update = decode_update(r, version)?;
 
 		let wanted_group = match version.has_refresh() {
 			true => r.varint()?.checked_sub(1),
@@ -709,7 +709,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			min_delay,
 			ranges,
 			order,
-			terms,
+			update,
 		})
 	}
 
@@ -726,7 +726,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 		encode_min_delay(w, version, self.min_delay)?;
 		encode_ranges(w, version, &self.ranges)?;
-		encode_terms(w, version, self.terms)?;
+		encode_update(w, version, self.update)?;
 
 		if version.has_refresh() {
 			w.varint_opt(self.wanted_group)?;
@@ -755,26 +755,17 @@ pub struct SubscribeDrop {
 	/// application-specific code before, where 0 means simply unavailable.
 	pub error: u64,
 
-	/// The budget a stale verdict was judged under, `None` for a drop that does not depend
-	/// on it. Lite07+ only, encoded as milliseconds plus one; earlier wires decode as `None`.
-	pub max_age: Option<std::time::Duration>,
-
-	/// The range terms id ([`Subscribe::terms`]) a stale verdict was judged under. Lite07+
-	/// only; earlier wires decode as 0.
-	pub terms: u64,
+	/// The number of the SUBSCRIBE or SUBSCRIBE_UPDATE in effect when the groups were
+	/// given up ([`Subscribe::update`]): a stale (OLD) drop under a superseded one is no
+	/// verdict. Lite07+ only; earlier wires decode as 0.
+	pub update: u64,
 }
 
 #[cfg(feature = "async")]
 impl SubscribeDrop {
-	/// Name `groups` given up with `err`, as `version` carries it, judged under `max_age`
-	/// and `terms` when the verdict depends on the budget.
-	pub fn new(
-		groups: std::ops::RangeInclusive<u64>,
-		err: &StreamError,
-		max_age: Option<std::time::Duration>,
-		terms: u64,
-		version: Version,
-	) -> Self {
+	/// Name `groups` given up with `err` under the terms numbered `update`, as `version`
+	/// carries it.
+	pub fn new(groups: std::ops::RangeInclusive<u64>, err: &StreamError, update: u64, version: Version) -> Self {
 		Self {
 			start: *groups.start(),
 			end: *groups.end(),
@@ -783,8 +774,7 @@ impl SubscribeDrop {
 				true => version.encode_stream_code(err).into(),
 				false => 0,
 			},
-			max_age: max_age.filter(|_| version.has_skip()),
-			terms: if version.has_skip() { terms } else { 0 },
+			update: if version.has_skip() { update } else { 0 },
 		}
 	}
 
@@ -816,16 +806,12 @@ impl<'a> Message<'a> for SubscribeDrop {
 			return Err(DecodeError::InvalidValue);
 		}
 		let error = r.varint()?;
-		let (max_age, terms) = match version.has_skip() {
-			true => (r.varint_opt()?.map(std::time::Duration::from_millis), r.varint()?),
-			false => (None, 0),
-		};
+		let update = decode_update(r, version)?;
 		Ok(Self {
 			start,
 			end,
 			error,
-			max_age,
-			terms,
+			update,
 		})
 	}
 
@@ -844,14 +830,7 @@ impl<'a> Message<'a> for SubscribeDrop {
 		w.varint(self.start)?;
 		w.varint(self.end)?;
 		w.varint(self.error)?;
-		if version.has_skip() {
-			let max_age = self
-				.max_age
-				.map(|age| u64::try_from(age.as_millis()).map_err(|_| EncodeError::BoundsExceeded))
-				.transpose()?;
-			w.varint_opt(max_age)?;
-			w.varint(self.terms)?;
-		}
+		encode_update(w, version, self.update)?;
 
 		Ok(())
 	}
@@ -997,8 +976,7 @@ mod test {
 					start: 3,
 					end: 1,
 					error: 0,
-					max_age: None,
-					terms: 0,
+					update: 0,
 				}
 				.encode_bytes(version)
 				.is_err()
@@ -1013,8 +991,7 @@ mod test {
 					start,
 					end,
 					error: 0,
-					max_age: None,
-					terms: 0,
+					update: 0,
 				};
 				let data = msg.encode_bytes(version).unwrap();
 				let (decoded, _) = SubscribeDrop::decode_slice(&data, version).unwrap();
@@ -1135,14 +1112,13 @@ mod test {
 			start: 1,
 			end: 3,
 			error: 7,
-			max_age: None,
-			terms: 0,
+			update: 0,
 		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
-		// A drop no budget reverses has a Max Age of 0.
-		assert_eq!(buf, [2, 5, 1, 3, 7, 0, 0]);
+		// The drop names the SUBSCRIBE's update, 0.
+		assert_eq!(buf, [2, 4, 1, 3, 7, 0]);
 		match crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, |r, v| {
 			SubscribeResponse::decode(r, v)
 		})
@@ -1153,33 +1129,24 @@ mod test {
 		}
 	}
 
-	/// A stale drop names the budget, as milliseconds plus one so a zero budget is 1, and the
-	/// terms it was judged under; earlier versions carry neither.
+	/// A drop names the update it was given up under on lite-07; earlier versions carry none.
 	#[test]
-	fn a_stale_drop_names_its_max_age_and_terms_on_lite07() {
-		for max_age in [std::time::Duration::ZERO, std::time::Duration::from_millis(300)] {
-			let msg = SubscribeDrop {
-				start: 4,
-				end: 4,
-				error: 0x34,
-				max_age: Some(max_age),
-				terms: 2,
-			};
-			let buf = msg.encode_bytes(Version::Lite07).unwrap();
-			let (decoded, _) = SubscribeDrop::decode_slice(&buf, Version::Lite07).unwrap();
-			assert_eq!(decoded, msg);
-		}
+	fn a_drop_names_its_update_on_lite07() {
 		let msg = SubscribeDrop {
 			start: 4,
 			end: 4,
-			error: 0,
-			max_age: Some(std::time::Duration::from_millis(300)),
-			terms: 2,
+			error: 0x34,
+			update: 2,
 		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(buf.as_ref(), [4, 4, 4, 0x34, 2]);
+		let (decoded, _) = SubscribeDrop::decode_slice(&buf, Version::Lite07).unwrap();
+		assert_eq!(decoded, msg);
+		let msg = SubscribeDrop { error: 0, ..msg };
 		let buf = msg.encode_bytes(Version::Lite06).unwrap();
 		assert_eq!(buf.as_ref(), [3, 4, 4, 0]);
 		let (decoded, _) = SubscribeDrop::decode_slice(&buf, Version::Lite06).unwrap();
-		assert_eq!((decoded.max_age, decoded.terms), (None, 0));
+		assert_eq!(decoded.update, 0);
 	}
 
 	/// SUBSCRIBE_SKIP is type 3 on lite-07 and unknown before it.
@@ -1203,15 +1170,15 @@ mod test {
 		));
 	}
 
-	/// SUBSCRIBE and SUBSCRIBE_UPDATE carry their range terms on lite-07 alone.
+	/// SUBSCRIBE and SUBSCRIBE_UPDATE carry their update number on lite-07 alone.
 	#[test]
-	fn range_terms_roundtrip_only_on_lite07() {
+	fn update_number_roundtrips_only_on_lite07() {
 		for version in [Version::Lite06, Version::Lite07] {
 			let mut msg = subscribe_sample();
-			msg.terms = 5;
+			msg.update = 5;
 			let buf = encode(&msg, version).unwrap();
 			let decoded = crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg).unwrap();
-			assert_eq!(decoded.terms, if version.has_skip() { 5 } else { 0 });
+			assert_eq!(decoded.update, if version.has_skip() { 5 } else { 0 });
 		}
 	}
 
@@ -1221,8 +1188,7 @@ mod test {
 			start: 1,
 			end: 3,
 			error: 0,
-			max_age: None,
-			terms: 0,
+			update: 0,
 		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
@@ -1243,8 +1209,7 @@ mod test {
 			start: 1,
 			end: 3,
 			error: 0,
-			max_age: None,
-			terms: 0,
+			update: 0,
 		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
@@ -1273,7 +1238,7 @@ mod test {
 				start: absolute(7, 4),
 				end: absolute(9, 3),
 			}],
-			terms: 0,
+			update: 0,
 		}
 	}
 
@@ -1452,7 +1417,7 @@ mod test {
 			min_delay: None,
 			ranges: msg.ranges.clone(),
 			order: crate::track::Order::Ascending,
-			terms: 0,
+			update: 0,
 		};
 		let buf = update.encode_bytes(Version::Lite07).unwrap();
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
@@ -1471,7 +1436,7 @@ mod test {
 
 		msg.ranges = vec![Range::OLDEST];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last but for the terms: a count of one, then two anchors of type 0.
+		// The list is last but for the update number: a count of one, then two anchors of type 0.
 		let at = buf.len() - 4;
 		assert_eq!(&buf[at..], [1, 0, 0, 0]);
 		buf[at] = 0;
@@ -1548,7 +1513,7 @@ mod test {
 					min_delay: None,
 					ranges: vec![Range::OLDEST],
 					order: crate::track::Order::Descending,
-					terms: 0,
+					update: 0,
 				};
 				let buf = update.encode_bytes(version).unwrap();
 				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
@@ -1582,7 +1547,7 @@ mod test {
 					min_delay,
 					ranges: vec![Range::OLDEST],
 					order: crate::track::Order::Descending,
-					terms: 0,
+					update: 0,
 				};
 				let buf = update.encode_bytes(version).unwrap();
 				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
@@ -1611,7 +1576,7 @@ mod test {
 				min_delay: None,
 				ranges: vec![Range::OLDEST],
 				order,
-				terms: 0,
+				update: 0,
 			};
 			let mut buf = Vec::new();
 			update

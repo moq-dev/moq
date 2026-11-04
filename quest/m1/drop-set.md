@@ -13,13 +13,13 @@ subscription with `TooFarBehind`.
 ## Plan
 
 [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670) landed the
-behavior: lite-07 SUBSCRIBE_SKIP and SUBSCRIBE_DROP with `Max Age` and
-`Terms`, a per-run reason (`Hole` in `rs/moq-net/src/model/track/hole.rs`,
+behavior: lite-07 SUBSCRIBE_SKIP and SUBSCRIBE_DROP with `Update`, a per-run
+reason (`Hole` in `rs/moq-net/src/model/track/hole.rs`,
 `Hole` in `js/net/src/internal.ts`), relays settling a received stale drop
 only for readers it covers (`Drift::settles`, `settles` in
 `js/net/src/track.ts`) and forgetting stale runs when they send new terms
-(`supersede_stale`), and lite-07 widenings re-offering what was reported
-stale (`reoffers_reported`). It kept today's storage: `TrackState::drops`,
+(`supersede_stale`), and every lite-07 update re-offering what was reported
+stale (`reoffer_stale`). It kept today's storage: `TrackState::drops`,
 `DropCursor` with its `reported` and `reported_stale` sets, `Skipped`,
 `Delivered`, `TrackRun::served`, and the JS `drops` signal, `#pending`,
 `#reported`, and `#reportedStale`, none billed to anything. This quest is
@@ -38,7 +38,8 @@ chosen: a per-track run cap; upstream backpressure. The pool port itself is
 [JS cache pool](/quest/m1/js-cache-pool.md), split out on 2026-11-03 since it
 lands on its own; this quest bills the runs to it.
 
-Decided 2026-11-03 (maintainer, /quest-unblock): range terms carry an
+Decided 2026-11-03 (maintainer, /quest-unblock), renamed and narrowed by the
+`/quest-complete` decisions below: range terms carry an
 explicit update id. Each lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE carries an
 increasing range-terms id, and a stale drop echoes the id it was judged
 under. A relay treats a drop whose id has been superseded as unknown and
@@ -50,8 +51,9 @@ group 2 under the open range and group 0 under a range capped before group
 conservative refill with bounded remembered ranges; treating every range
 update as invalidating in-flight drops.
 
-Decided 2026-11-03 (maintainer, /quest-unblock): lite-07 splits its hole
-message by whether the group ever existed. `SUBSCRIBE_SKIP {Group Start,
+Decided 2026-11-03 (maintainer, /quest-unblock), with `Max Age` dropped and
+`Terms` renamed `Update` by the `/quest-complete` decisions below: lite-07
+splits its hole message by whether the group ever existed. `SUBSCRIBE_SKIP {Group Start,
 Group End}` names sequences the publisher never produced, such as skipped
 sequence numbers or ones past a cut: it has no error code, ends no reader,
 and is final. `SUBSCRIBE_DROP {Group Start, Group End, Error Code, Max Age,
@@ -65,6 +67,33 @@ through the draft. Reason: a hole that never existed has no reader to end
 and no budget to qualify, so one message conflated a final, code-free
 verdict with a reversible, reader-ending one. Not chosen: stale in SKIP; a
 single message with a reason enum; renaming only.
+
+Decided 2026-11-03 (maintainer, /quest-complete), changing the design
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670) first shipped:
+
+- **`Terms` is renamed `Update`** on lite-07 SUBSCRIBE, SUBSCRIBE_UPDATE and
+  SUBSCRIBE_DROP: the number of the SUBSCRIBE or SUBSCRIBE_UPDATE in effect,
+  in the Rust and JS code too.
+- **SUBSCRIBE_DROP drops `Max Age`:** it is {Group Start, Group End, Error
+  Code, Update}. The budget a stale (OLD) drop was judged under comes from
+  the subscriber's own record of what it sent with that Update, and a drop
+  whose Update is superseded is no verdict. Any SUBSCRIBE_UPDATE reopens every
+  outstanding OLD drop in the subscriber's tail accounting; the publisher
+  re-offers what the new terms cover and drops again, under the new Update,
+  what is still stale. This replaces reopening only when the max delay widens
+  past the drop's. A non-OLD drop is final, whatever its Update.
+- **SKIP comes from the publisher's own group creation, eagerly:** when a
+  local (non-received) track producer creates a group above the next
+  sequence, the gap is recorded as `Hole::Skip` at once, not judged stale
+  until the track ends, and `append_group` never leaves a gap. A later
+  `create_group` below the high-water mark still works and wins over the skip,
+  as a Group Stream wins over a drop: in-tree callers re-create aborted
+  sequences (`claim_sequence`) and deliver late lower groups, and 85 moq-net
+  tests rely on it, so refusing it was not chosen.
+- **`track::Producer::drop_groups` is crate-private.** `skip_groups` stays
+  public for moq-archive, whose replay names the sequences it holds nothing
+  for up to a recorded end above its last group; a SKIP, matching the gaps
+  between stored groups that eager skipping already names.
 
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),
@@ -134,13 +163,14 @@ Still to cover, beyond the memory work:
 Tests, on mock time through a relay, in Rust and mirrored in `js/net`:
 
 - After a widening from B1 to B2 for a group the upstream no longer holds, an
-  in-flight drop tagged B1 settles only the B1 reader, and the re-drop tagged
-  B2 settles the B2 reader, over the wire.
+  in-flight drop under the B1 update settles no reader once the B2 update is
+  sent, and the re-drop under the B2 update settles the B2 reader, over the
+  wire.
 - A group a relay evicted while the upstream still holds it is never reported
   dropped: a new, a widened, and an owed reader each fill it by range.
 - Rust and `js/net` encode and decode an origin's eviction and retention
-  expiry drop with `Max Age` 0 across languages; a relay forwards them
-  unchanged, and a widening re-offers neither.
+  expiry drop (EVICTED, not OLD) across languages; a relay forwards them
+  unchanged, and no update re-offers either.
 - Through a lite-06 hop, a reported group stays dropped for every reader,
   with no session error; a shrink sends no drops.
 - Under pool pressure, delivered runs and budget-independent drops fold into

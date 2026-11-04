@@ -580,7 +580,7 @@ async fn a_completed_archive_ends_as_recorded() {
 	);
 	assert_eq!(fetch(&broadcast, "errored", 0).await.unwrap(), expected(true, 0, 0..1));
 
-	// The sequences the archive holds nothing for are dropped, and the end settles over them.
+	// The sequences the archive holds nothing for are skipped, and the end settles over them.
 	let mut reader = subscribe(&broadcast, "tail").await;
 	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..1)));
 	assert!(next(&mut reader).await.is_none());

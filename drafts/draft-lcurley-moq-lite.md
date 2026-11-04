@@ -335,9 +335,9 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x32  | GROUP_TOO_LARGE | The group grew past the publisher's cache budget and was aborted. |
 | ------- | ------------- | ----------- |
-|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A sequence that never held a group is named by SUBSCRIBE_SKIP instead. |
+|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A sequence its publisher never produced is named by SUBSCRIBE_SKIP instead; a relay that cannot tell whether its source produced one names it with NOT_FOUND. |
 | ------- | ------------- | ----------- |
-|  0x34  | OLD | The group was superseded by a newer group and dropped. In SUBSCRIBE_DROP with a `Max Age`, a widening past that budget re-offers it. |
+|  0x34  | OLD | The group was superseded by a newer group and dropped. In SUBSCRIBE_DROP, the next SUBSCRIBE_UPDATE reopens it: the publisher re-offers the group or drops it again. |
 | ------- | ------------- | ----------- |
 |  0x35  | EVICTED | The group was dropped under memory pressure. Unlike OLD it was still current, so it can be re-fetched. |
 | ------- | ------------- | ----------- |
@@ -1251,7 +1251,7 @@ SUBSCRIBE Message {
   Subscriber Min Age (i)
   Range Count (i)
   Range (..) ...
-  Terms (i)
+  Update (i)
 }
 
 Range {
@@ -1315,9 +1315,9 @@ Which fields follow, and what the Anchor names:
 Any other value is a PROTOCOL_VIOLATION.
 The publisher resolves a Relative or Time Anchor against the Track as it holds it.
 
-**Terms**:
-An identifier for the subscription's terms: its Ranges and `Subscriber Max Age`.
-Each SUBSCRIBE_UPDATE carries a larger value than the one before it, and a stale [SUBSCRIBE_DROP](#subscribe-drop) echoes the value it was judged under, so the subscriber can tell a verdict on its current terms from one an update has since replaced.
+**Update**:
+The number of the subscription's terms this message sets: 0 on SUBSCRIBE, and on each SUBSCRIBE_UPDATE a larger value than the one before it.
+A [SUBSCRIBE_DROP](#subscribe-drop) echoes the number in effect when its groups were given up, so the subscriber can tell a stale verdict on its current terms from one an update has since replaced.
 
 A `Start` is a floor, not a request; `Subscriber Max Age` is the only thing that asks for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
@@ -1335,7 +1335,9 @@ A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
 Its Ranges replace the previous ones, growing or shrinking the subscription.
 Lowering a `Start` covers the groups below the old one that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
-Growing the subscription asks for what it newly covers: the publisher MUST serve the newly covered Groups it holds and never delivered on this subscription, including Groups it named in a stale SUBSCRIBE_DROP that the new terms no longer convict, and MUST name again, under the new `Terms`, those it cannot serve.
+Growing the subscription asks for what it newly covers: the publisher MUST serve the newly covered Groups it holds and never delivered on this subscription.
+Every SUBSCRIBE_UPDATE, whatever it changes, reopens every stale (OLD) SUBSCRIBE_DROP sent before it: the publisher MUST serve again the Groups it named in one that it still holds and the new terms cover, and MUST name again, in a SUBSCRIBE_DROP carrying the new `Update`, those still stale.
+A SUBSCRIBE_DROP with any other Error Code is final, and no update reopens it.
 A SUBSCRIBE_UPDATE never resets the subscription, since a reset would race Group Streams already in flight, and shrinking it sends no SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 
 ~~~
@@ -1347,13 +1349,13 @@ SUBSCRIBE_UPDATE Message {
   Subscriber Min Age (i)
   Range Count (i)
   Range (..) ...
-  Terms (i)
+  Update (i)
   Wanted Group (i)
 }
 ~~~
 
 See [SUBSCRIBE](#subscribe) for information about each field.
-A `Terms` no larger than the previous one only confuses the subscriber's own accounting of stale drops; the publisher echoes the latest value it read.
+An `Update` no larger than the previous one only confuses the subscriber's own accounting of stale drops; the publisher echoes the latest value it read.
 Moving a `Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; it only bounds what the publisher sends from here on.
 
 
@@ -1568,6 +1570,7 @@ The publisher SHOULD send SUBSCRIBE_FINISH as soon as the exclusive final group 
 
 A publisher names groups that existed but that it will not deliver with SUBSCRIBE_DROP on the Subscribe Stream: an aborted or reset group, one evicted or expired with no copy left to serve it, or one past the subscriber's budget (OLD).
 Sequences the publisher never produced are named by [SUBSCRIBE_SKIP](#subscribe-skip) instead.
+A relay cannot tell a sequence its source never produced from one it never received, so it names a sequence it never got in SUBSCRIBE_DROP with NOT_FOUND.
 
 ~~~
 SUBSCRIBE_DROP Message {
@@ -1576,27 +1579,27 @@ SUBSCRIBE_DROP Message {
   Group Start (i)
   Group End (i)
   Error Code (i)
-  Max Age (i)
-  Terms (i)
+  Update (i)
 }
 ~~~
 
 **Group Start** and **Group End** are the inclusive range of group sequences the publisher gave up.
 `Group Start = Group End + 1` is an empty range; a larger Group Start is a PROTOCOL_VIOLATION.
 
-**Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example OLD for one past the subscriber's budget, or EVICTED for one the publisher no longer holds.
+**Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example OLD for one past the subscriber's budget, EVICTED for one the publisher no longer holds, or NOT_FOUND for one a relay never received.
 A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
 
-**Max Age**:
-The `Subscriber Max Age` a staleness verdict was judged under, in milliseconds plus one, so a verdict on a budget of zero is 1.
-0 means the drop does not depend on the subscriber's budget, such as an aborted group or one evicted or expired with no copy left, and no SUBSCRIBE_UPDATE reverses it.
+**Update**:
+The [SUBSCRIBE](#subscribe) or [SUBSCRIBE_UPDATE](#subscribe-update) `Update` in effect when the publisher gave the groups up.
 
-**Terms**:
-The [SUBSCRIBE](#subscribe) `Terms` in effect when the publisher judged the drop.
-A stale drop holds only under those terms: a subscriber treats one whose `Terms` an update has since replaced as no verdict, since the update may have moved the Range the verdict was judged against, and a relay asks for such a group again rather than drop it for its own readers.
-A relay that received a stale drop settles with it only a reader whose own budget is no wider than its `Max Age` and whose Ranges cover the relay's own, which the verdict was judged against.
+A drop whose Error Code is OLD is a stale verdict, which holds only under the update it names.
+The subscriber judges it against the `Subscriber Max Age` it sent with that update, from its own record: the drop does not carry the budget.
+A stale drop whose `Update` a later update has replaced is no verdict, since the update may have moved the Range or budget it was judged against: the subscriber still owes those groups, and a relay asks for such a group again rather than drop it for its own readers.
+The next SUBSCRIBE_UPDATE reopens every stale drop the subscriber accounted for, which it owes again until the publisher serves the group or drops it again under the new `Update`, as described in [SUBSCRIBE_UPDATE](#subscribe-update).
+A relay that received a stale drop settles with it only a reader whose own budget is no wider than the one the relay sent with that update and whose Ranges cover the relay's own, which the verdict was judged against.
 
-A SUBSCRIBE_UPDATE that widens the terms re-offers the stale drops they no longer convict, as described in [SUBSCRIBE_UPDATE](#subscribe-update).
+A drop with any other Error Code is final, whatever its `Update`.
+
 A Group Stream for a sequence the subscriber already saw dropped, as after such a re-offer, wins over the drop: the subscriber delivers it.
 
 For every sequence in the subscription's range, the publisher MUST send a Group Stream, send a datagram, or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
@@ -1605,7 +1608,7 @@ A reliably delivered reset retaining the Group Stream header accounts for that g
 The publisher SHOULD name a sequence as soon as it gives it up, without waiting for SUBSCRIBE_FINISH.
 A datagram counts as sent even if it is lost; a subscriber SHOULD bound its wait for unaccounted sequences, for example by Subscriber Max Age.
 
-Before moq-lite-07, SUBSCRIBE_DROP carries neither `Max Age` nor `Terms`, its Error Code is application-specific, and it also names the sequences moq-lite-07 names in SUBSCRIBE_SKIP; every such drop is final.
+Before moq-lite-07, SUBSCRIBE_DROP carries no `Update`, its Error Code is application-specific, and it also names the sequences moq-lite-07 names in SUBSCRIBE_SKIP; every such drop is final.
 
 ## SUBSCRIBE_SKIP {#subscribe-skip}
 
@@ -1625,7 +1628,8 @@ SUBSCRIBE_SKIP Message {
 
 A skip is final: no Group will ever exist at those sequences, whatever the terms.
 It carries no error and ends no reader, since there is nothing to read; a subscriber stops waiting for those sequences.
-A relay forwards it unchanged.
+A publisher SHOULD name a gap it leaves in its own sequence numbers as soon as it creates the Group above it, rather than judge the gap stale later.
+A relay forwards it unchanged; a relay that cannot tell whether its source produced a sequence uses SUBSCRIBE_DROP instead (see [SUBSCRIBE_DROP](#subscribe-drop)).
 
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
@@ -1952,7 +1956,7 @@ The `Message Length` describes the payload size on the wire.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
 - Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it.
 - Added SUBSCRIBE_SKIP (type 0x3) for sequences the publisher never produced, which ends no reader and is final. SUBSCRIBE_DROP now names only groups that existed.
-- Added `Max Age` and `Terms` to SUBSCRIBE_DROP, and `Terms` to SUBSCRIBE and SUBSCRIBE_UPDATE: a stale drop names the budget and the terms it was judged under, holds only under them, and a widening re-offers it. A Group Stream wins over its earlier drop.
+- Added `Update` to SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP: the number of the terms in effect. A stale (OLD) drop holds only under the update it names, judged against the budget the subscriber sent with it; every later SUBSCRIBE_UPDATE reopens it, and the publisher re-offers the group or drops it again under the new `Update`. Any other drop is final. A Group Stream wins over its earlier drop.
 - SUBSCRIBE_FINISH declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.
 - A publisher that withheld SUBSCRIBE_OK sends it, then the drops it withheld, once no group can resolve the start: every Group of a bounded subscription was given up, or the Track finished.

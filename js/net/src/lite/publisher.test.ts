@@ -935,6 +935,8 @@ test("lite-07 serves a time range from the on-demand track its lookup resolved",
 // deliver it; a sequence cursor would skip it permanently.
 test("lite draft-05: a late-arriving older group is still served", async () => {
 	const sub = await servedSubscription({ startGroup: 1n });
+	// A received copy: a local publisher's gap is skipped at once, so its late group is not.
+	hooks.receiveTrack(sub.track);
 	try {
 		// Serve one at a time so arrival order at the publisher is the order given.
 		sub.serve(1n);
