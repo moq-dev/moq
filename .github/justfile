@@ -27,7 +27,7 @@ check:
     actionlint
     zizmor --offline --quiet .github
     sh/gh/alert.sh check-coverage
-    bun test sh/gh/alert.test.ts
+    bun test ./sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts
     python3 sh/gh/test-inventory.py
     python3 bench/relay.test.py
@@ -52,14 +52,15 @@ test:
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
     python3 sh/gh/test-inventory.test.py
-    bun test sh/gh/setup.test.ts
+    bun test ./sh/gh/setup.test.ts
     bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/gh/ffi.test.py
-    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts sh/gh/publish.test.ts
+    bun test ./sh/gh/ffi.test.ts ./sh/gh/cpp.test.ts ./sh/gh/publish.test.ts
     python3 sh/rs/package-rename.test.py
     python3 sh/dart/build.test.py
+    python3 sh/kt/gradle.test.py
     python3 sh/rs/select.test.py
     python3 sh/rs/config.test.py
     python3 sh/js/workspace.test.py

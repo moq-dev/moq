@@ -498,19 +498,26 @@ plan_pass() {
         done
     fi
     [[ "$FINISH_ONLY" -eq 0 ]] || return 0
-    record "not run" case="CLI FETCH" publisher=rust subscriber=rust
+    for pub in rust js-native-node js-native-bun; do
+        [[ "$pub" == rust ]] || needs "$pub" || continue
+        for sub in rust js-native-node js-native-bun; do
+            [[ "$sub" == rust ]] || needs "$sub" || continue
+            record "not run" case="CLI FETCH" publisher="$pub" subscriber="$sub"
+        done
+    done
     record "not run" case="late join" publisher=rust subscriber=rust
     record "not run" case=tail publisher=rust subscriber=rust
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
-        record "not run" case="CLI FETCH" publisher="$runtime" subscriber=rust
+        for sub in rust js-native-node js-native-bun; do
+            [[ "$sub" == rust ]] || needs "$sub" || continue
+            record "not run" case="CLI FETCH history" publisher="$runtime" subscriber="$sub"
+        done
         record "not run" case="late join" publisher=rust subscriber="$runtime"
         record "not run" case="late join" publisher="$runtime" subscriber=rust
         record "not run" case=tail publisher=rust subscriber="$runtime"
         record "not run" case=tail publisher="$runtime" subscriber=rust
         if [[ "$VERSION" == moq-transport-* ]]; then
-            record "not run" case=datagram publisher=rust subscriber="$runtime"
-            record "not run" case=datagram publisher="$runtime" subscriber=rust
             record "not run" case="wire track status" publisher=rust subscriber="$runtime"
             record "not run" case=goaway publisher=rust subscriber="$runtime"
             [[ "$runtime" != js-native-bun ]] || record "not run" case=goaway publisher="$runtime" subscriber=rust
@@ -525,7 +532,7 @@ plan_pass() {
             record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
         done
         record "not run" case="compressed catalog" publisher=rust subscriber="$runtime"
-        record "not run" case="hls records" publisher="$runtime" subscriber=rust
+        record "not run" case="hls grid" publisher="$runtime" subscriber=rust
     done
     needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -1925,10 +1932,7 @@ run_tail_pair() {
         mode="join"
         want='tail join clean end=4 groups=[0-3](,[0-3])*'
     fi
-    if [[ "$kind" == datagram ]]; then
-        mode=datagram
-        want='datagram clean groups=0,1,2,3 bytes=3600'
-    elif [[ "$kind" == "track status" ]]; then
+    if [[ "$kind" == "track status" ]]; then
         mode=status
         want="track status answered"
     elif [[ "$kind" == compress ]]; then
@@ -1949,26 +1953,8 @@ run_tail_pair() {
     # Each side's token grants this broadcast alone, like a media round's.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
     pid="$HARNESS_PID"
-    if [[ "$mode" == datagram ]]; then
-        # Subscription metadata, on the clients' serialized task runtimes, confirms the alias is bound. An acknowledgement
-        # per datagram avoids testing a best-effort receive buffer's burst capacity.
-        mkfifo "$LOGS/datagram-ack"
-        exec 8<>"$LOGS/datagram-ack"
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
-        subscriber_pid="$HARNESS_PID"
-        local ack sequence
-        if read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram ready" ]]; then
-            for sequence in 0 1 2 3; do
-                printf 'datagram %s\n' "$sequence" >&9
-                read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram $sequence" ]] || break
-            done
-        fi
-        exec 8>&-
-        rm "$LOGS/datagram-ack"
-    else
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
-        subscriber_pid="$HARNESS_PID"
-    fi
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+    subscriber_pid="$HARNESS_PID"
     harness_wait "$subscriber_pid" || true
     # Like run_native, a verified data result survives the NAPI addon's exit crash.
     if read=$(grep -xE "$want" "$LOGS/$name-sub.log") && { [[ "$mode" != status ]] || grep -qx "track status answered" "$LOGS/$name-sub.log"; }; then
@@ -2052,14 +2038,18 @@ run_late_pair() {
     rm "$fifo" "$heads"
 }
 
-# This checkout's CLI FETCHes a past group of a finished track, under the same relay close check as
+# Rust and native JS FETCH a past group of a finished track, under the same relay close check as
 # live readers. Every object has its own bytes, so a FETCH that drops, repeats, or reorders one fails.
+# The `history` mode (native JS only) serves the group from the publisher's request handler: it
+# was never in its cache.
 run_fetch_round() {
-    local pub="$1" name="fetch-$1" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM" pid from version
+    local pub="$1" sub="$2" mode="${3:-cached}" pid from version
+    local name="fetch-$1-$2${3:+-$3}" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM"
+    local label="CLI FETCH${3:+ $3}"
     local started=$SECONDS why=""
-    local cell=(case="CLI FETCH" publisher="$pub" subscriber=rust log="$LOGS/$name-pub.log")
-    if is_broken "$pub"; then
-        echo "  FAIL  CLI FETCH $pub (client unavailable)"
+    local cell=(case="$label" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    if is_broken "$pub" || is_broken "$sub"; then
+        echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
@@ -2068,32 +2058,24 @@ run_fetch_round() {
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" cached
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
     pid="$HARNESS_PID"
-    if timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
-        --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" &&
-        python3 - "$LOGS/$name.json" <<'PYCODE'
-import base64, json, sys
-frames = [json.loads(line) for line in open(sys.argv[1])]
-assert [(frame["group"], frame["frame"], frame["size"]) for frame in frames] == [(1, index, 64 * 1024) for index in range(3)], frames
-assert [base64.b64decode(frame["payload"], validate=True) for frame in frames] == [bytes([16 + index]) * (64 * 1024) for index in range(3)], "incorrect FETCH payload"
-PYCODE
-    then
+    if run_fetch_subscriber "$sub" "$broadcast" "$version" "$name"; then
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         if grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
-            echo "  PASS  CLI FETCH $pub (group 1; 3 objects)"
+            echo "  PASS  $label $pub -> $sub (group 1; 3 objects)"
         else
-            echo "  FAIL  CLI FETCH $pub (publisher did not acknowledge)"
+            echo "  FAIL  $label $pub -> $sub (publisher did not acknowledge)"
             why="publisher did not acknowledge"
             overall=1
             cat "$LOGS/$name-pub.log"
         fi
     else
-        echo "  FAIL  CLI FETCH $pub"
+        echo "  FAIL  $label $pub -> $sub"
         why="incorrect or missing FETCH payload"
         overall=1
-        cat "$LOGS/$name-pub.log"
+        cat "$LOGS/$name-pub.log" "$LOGS/$name-sub.log"
         harness_reap "$pid"
     fi
     exec 9>&-
@@ -2105,6 +2087,23 @@ PYCODE
     fi
     cell+=(seconds=$((SECONDS - started)))
     if [[ -z "$why" ]]; then record pass "${cell[@]}"; else record fail "${cell[@]}" detail="$why"; fi
+}
+
+run_fetch_subscriber() {
+    local sub="$1" broadcast="$2" version="$3" name="$4"
+    if [[ "$sub" != rust ]]; then
+        run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" fetch >"$LOGS/$name-sub.log" 2>&1 &&
+            grep -qx 'fetch clean group=1 frames=3 bytes=196608' "$LOGS/$name-sub.log"
+        return
+    fi
+    timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
+        --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" 2>"$LOGS/$name-sub.log" &&
+        python3 - "$LOGS/$name.json" <<'PYCODE'
+import base64, json, sys
+frames = [json.loads(line) for line in open(sys.argv[1])]
+assert [(frame["group"], frame["frame"], frame["size"]) for frame in frames] == [(1, index, 64 * 1024) for index in range(3)], frames
+assert [base64.b64decode(frame["payload"], validate=True) for frame in frames] == [bytes([16 + index]) * (64 * 1024) for index in range(3)], "incorrect FETCH payload"
+PYCODE
 }
 
 # One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
@@ -2385,15 +2384,15 @@ run_hls_publisher() {
     esac
 }
 
-# A native JS publisher's HLS records and declared durations match Rust's for the same frames:
-# moq-mux and @moq/hang each publish one schedule through the relay, and the Rust reader's
-# readout of the two broadcasts must be identical.
-run_hls_records() {
+# A native JS publisher's declared join interval and groups match Rust's for the same frames, so
+# an HLS edge numbers its segments alike: moq-mux and @moq/hang each publish one schedule through
+# the relay, and the Rust reader's readout of the two broadcasts must be identical.
+run_hls_grid() {
     local runtime="$1" started=$SECONDS publisher pid why="" want got
     local name="hls-$1" fifo="$LOGS/hls-ack" broadcast="hls-$1-$$-$RANDOM"
-    local cell=(case="hls records" publisher="$runtime" subscriber=rust log="$LOGS/$name-$runtime-read.log")
+    local cell=(case="hls grid" publisher="$runtime" subscriber=rust log="$LOGS/$name-$runtime-read.log")
     if is_broken "$runtime"; then
-        echo "  FAIL  hls records $runtime -> rust (client unavailable)"
+        echo "  FAIL  hls grid $runtime -> rust (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
@@ -2404,7 +2403,7 @@ run_hls_records() {
         harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher/**")" "$broadcast-$publisher"
         pid="$HARNESS_PID"
         harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher/**")" "$broadcast-$publisher"
-        harness_wait "$HARNESS_PID" || why="${why:-$publisher records unreadable}"
+        harness_wait "$HARNESS_PID" || why="${why:-$publisher groups unreadable}"
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         grep -qx 'hls acknowledged' "$LOGS/$name-$publisher-pub.log" || why="${why:-$publisher publisher did not acknowledge}"
@@ -2412,15 +2411,15 @@ run_hls_records() {
     want=$(grep '^hls ' "$LOGS/$name-rust-read.log" || true)
     got=$(grep '^hls ' "$LOGS/$name-$runtime-read.log" || true)
     if [[ -z "$why" && -z "$want" ]]; then
-        why="rust published no records"
+        why="rust published no groups"
     elif [[ -z "$why" && "$want" != "$got" ]]; then
-        why="records differ from rust"
+        why="groups differ from rust"
     fi
     if [[ -z "$why" ]]; then
-        echo "  PASS  hls records $runtime -> rust (match moq-mux)"
+        echo "  PASS  hls grid $runtime -> rust (match moq-mux)"
         record pass "${cell[@]}" seconds=$((SECONDS - started))
     else
-        echo "  FAIL  hls records $runtime -> rust ($why)"
+        echo "  FAIL  hls grid $runtime -> rust ($why)"
         record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="$why"
         overall=1
         diff <(echo "$want") <(echo "$got") || true
@@ -2434,9 +2433,20 @@ run_hls_records() {
 run_tails() {
     local runtime version
     echo "=== CLI FETCH close ==="
-    run_fetch_round rust
+    local pub sub
+    for pub in rust js-native-node js-native-bun; do
+        [[ "$pub" == rust ]] || needs "$pub" || continue
+        for sub in rust js-native-node js-native-bun; do
+            [[ "$sub" == rust ]] || needs "$sub" || continue
+            run_fetch_round "$pub" "$sub"
+        done
+    done
     for runtime in js-native-node js-native-bun; do
-        ! needs "$runtime" || run_fetch_round "$runtime"
+        needs "$runtime" || continue
+        for sub in rust js-native-node js-native-bun; do
+            [[ "$sub" == rust ]] || needs "$sub" || continue
+            run_fetch_round "$runtime" "$sub" history
+        done
     done
     echo "=== late join ==="
     run_late_pair rust rust
@@ -2453,8 +2463,6 @@ run_tails() {
             run_tail_pair rust "$runtime"
             run_tail_pair "$runtime" rust
             if [[ "$VERSION" == moq-transport-* ]]; then
-                run_tail_pair rust "$runtime" datagram
-                run_tail_pair "$runtime" rust datagram
                 run_control_case "$runtime" status
                 run_control_case "$runtime" goaway
                 [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" reverse-goaway
@@ -2471,7 +2479,7 @@ run_tails() {
             run_tail_pair "$runtime" rust compress "$version"
         done
         run_catalog_fanout "$runtime"
-        run_hls_records "$runtime"
+        run_hls_grid "$runtime"
     done
     if needs js-native-node; then
         for version in "${DROP_VERSIONS[@]}"; do

@@ -1,20 +1,16 @@
-//! Endpoint keys: a persistent Ed25519 secret key and the public key that names its endpoint.
+//! The Ed25519 public key that names an endpoint, and its z-base-32 text.
+//!
+//! This builds without the `sign` feature, so a crate that only names endpoints shares the one
+//! codec without `moq-net` or a crypto backend.
 
 use std::fmt;
-use std::io::{self, Write};
 use std::str::FromStr;
-use std::sync::Arc;
-
-use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
-use zeroize::Zeroizing;
-
-use crate::sign::scope::SIGNATURE_LEN;
 
 /// Ed25519 key length in bytes, for both the secret seed and the public key.
-const KEY_LEN: usize = 32;
+pub(crate) const KEY_LEN: usize = 32;
 
 /// z-base-32: most significant bit first, no padding, trailing bits must be zero.
-static ZBASE32: std::sync::LazyLock<data_encoding::Encoding> = std::sync::LazyLock::new(|| {
+pub(crate) static ZBASE32: std::sync::LazyLock<data_encoding::Encoding> = std::sync::LazyLock::new(|| {
 	let mut spec = data_encoding::Specification::new();
 	spec.symbols.push_str("ybndrfg8ejkmcpqxot1uwisza345h769");
 	spec.encoding().expect("a valid z-base-32 specification")
@@ -31,13 +27,20 @@ static ZBASE32: std::sync::LazyLock<data_encoding::Encoding> = std::sync::LazyLo
 pub struct PublicKey([u8; KEY_LEN]);
 
 impl PublicKey {
-	#[cfg(test)]
-	pub(crate) fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
+	/// The ID of the raw 32-byte Ed25519 public key.
+	pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
 		Self(bytes)
 	}
 
+	/// The raw 32-byte Ed25519 public key.
+	pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
+		&self.0
+	}
+
 	/// Whether `signature` is this key's Ed25519 signature over `message`.
-	pub(crate) fn verify(&self, message: &[u8], signature: &[u8; SIGNATURE_LEN]) -> bool {
+	#[cfg(feature = "sign")]
+	pub(crate) fn verify(&self, message: &[u8], signature: &[u8; crate::sign::scope::SIGNATURE_LEN]) -> bool {
+		use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
 		UnparsedPublicKey::new(&ED25519, &self.0)
 			.verify(message, signature)
 			.is_ok()
@@ -70,9 +73,24 @@ impl fmt::Debug for PublicKey {
 	}
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for PublicKey {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.collect_str(self)
+	}
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for PublicKey {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+		text.parse().map_err(serde::de::Error::custom)
+	}
+}
+
 /// Decode exactly 52 z-base-32 characters. The alphabet is lowercase-only and nonzero trailing
 /// bits are refused, so a key has one text form.
-fn decode(text: &str) -> Result<[u8; KEY_LEN], InvalidKey> {
+pub(crate) fn decode(text: &str) -> Result<[u8; KEY_LEN], InvalidKey> {
 	let mut out = [0u8; KEY_LEN];
 	match ZBASE32.decode_len(text.len()) {
 		Ok(KEY_LEN) => ZBASE32.decode_mut(text.as_bytes(), &mut out).map_err(|_| InvalidKey)?,
@@ -81,117 +99,51 @@ fn decode(text: &str) -> Result<[u8; KEY_LEN], InvalidKey> {
 	Ok(out)
 }
 
-struct Inner {
-	seed: Zeroizing<[u8; KEY_LEN]>,
-	pair: Ed25519KeyPair,
-	public: PublicKey,
-}
+#[cfg(test)]
+mod tests {
+	use serde_json::Value;
 
-/// An endpoint's Ed25519 secret key: cheap to clone, redacted from `Debug`.
-#[derive(Clone)]
-pub struct SecretKey(Arc<Inner>);
+	use super::PublicKey;
 
-impl SecretKey {
-	/// Generate a fresh key from the system's secure random source.
-	pub fn generate() -> Self {
-		let mut seed = Zeroizing::new([0u8; KEY_LEN]);
-		aws_lc_rs::rand::fill(seed.as_mut()).expect("system randomness");
-		Self::from_seed(seed)
+	fn vectors() -> Value {
+		serde_json::from_str(include_str!("../../../../drafts/moq-sign-00.json")).unwrap()
 	}
 
-	pub(crate) fn from_seed(seed: Zeroizing<[u8; KEY_LEN]>) -> Self {
-		let pair = Ed25519KeyPair::from_seed_unchecked(seed.as_ref()).expect("a 32-byte Ed25519 seed");
-		let public = PublicKey(
-			pair.public_key()
-				.as_ref()
-				.try_into()
-				.expect("a 32-byte Ed25519 public key"),
-		);
-		Self(Arc::new(Inner { seed, pair, public }))
-	}
-
-	/// The public key, which is this endpoint's ID.
-	pub fn public(&self) -> PublicKey {
-		self.0.public
-	}
-
-	/// Load the key stored at `path`, or generate one and store it there if the file is missing.
-	///
-	/// The file holds the seed as 52 z-base-32 characters and a newline, created with mode
-	/// `0600`. A key is never replaced implicitly: an existing file that does not parse, or that
-	/// other users can read, is an error rather than a reason to generate a new identity.
-	///
-	/// # Errors
-	///
-	/// [`io::ErrorKind::InvalidData`] for a malformed or exposed file, or the I/O error reading or
-	/// creating it.
-	pub fn load_or_generate(path: impl AsRef<std::path::Path>) -> io::Result<Self> {
-		let path = path.as_ref();
-		match Self::load(path) {
-			Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-			other => return other,
-		}
-
-		let key = Self::generate();
-		let mut options = std::fs::OpenOptions::new();
-		options.write(true).create_new(true);
-		#[cfg(unix)]
-		std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-		let mut file = match options.open(path) {
-			Ok(file) => file,
-			// Another process created it first; its key wins.
-			Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Self::load(path),
-			Err(err) => return Err(err),
-		};
-		// Sized up front, so appending the newline never leaves an unzeroized copy behind.
-		let mut text = Zeroizing::new(String::with_capacity(ZBASE32.encode_len(KEY_LEN) + 1));
-		ZBASE32.encode_append(key.0.seed.as_ref(), &mut text);
-		text.push('\n');
-		file.write_all(text.as_bytes())?;
-		file.sync_all()?;
-		Ok(key)
-	}
-
-	fn load(path: &std::path::Path) -> io::Result<Self> {
-		let file = std::fs::File::open(path)?;
-		#[cfg(unix)]
-		{
-			use std::os::unix::fs::PermissionsExt;
-			if file.metadata()?.permissions().mode() & 0o077 != 0 {
-				return Err(io::Error::new(
-					io::ErrorKind::InvalidData,
-					format!("key file {} is accessible by other users", path.display()),
-				));
+	#[test]
+	fn vector_keys() {
+		for row in vectors()["keys"].as_array().unwrap() {
+			let id = &row["id"];
+			let bytes = hex::decode(row["public"].as_str().unwrap()).unwrap();
+			let endpoint: PublicKey = row["endpoint"].as_str().unwrap().parse().unwrap();
+			assert_eq!(
+				endpoint,
+				PublicKey::from_bytes(bytes.clone().try_into().unwrap()),
+				"{id}"
+			);
+			assert_eq!(endpoint.as_bytes().as_slice(), bytes, "{id}");
+			assert_eq!(endpoint.to_string(), row["endpoint"].as_str().unwrap(), "{id}");
+			#[cfg(feature = "serde")]
+			{
+				assert_eq!(serde_json::to_value(endpoint).unwrap(), row["endpoint"], "{id}");
+				assert_eq!(
+					serde_json::from_value::<PublicKey>(row["endpoint"].clone()).unwrap(),
+					endpoint,
+					"{id}"
+				);
 			}
 		}
-		let mut text = Zeroizing::new(String::new());
-		io::Read::read_to_string(&mut &file, &mut text)?;
-		let encoded = text.strip_suffix('\n').unwrap_or(&text);
-		let seed = decode(encoded).map_err(|_| {
-			io::Error::new(
-				io::ErrorKind::InvalidData,
-				format!("key file {} is not 52 z-base-32 characters", path.display()),
-			)
-		})?;
-		Ok(Self::from_seed(Zeroizing::new(seed)))
 	}
 
-	/// Sign `message` with Ed25519.
-	pub(crate) fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN] {
-		self.0
-			.pair
-			.sign(message)
-			.as_ref()
-			.try_into()
-			.expect("a 64-byte Ed25519 signature")
-	}
-}
-
-impl fmt::Debug for SecretKey {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("SecretKey")
-			.field("public", &self.0.public)
-			.field("seed", &"<redacted>")
-			.finish()
+	#[test]
+	fn vector_invalid_ids() {
+		for row in vectors()["invalid_ids"].as_array().unwrap() {
+			let id = &row["id"];
+			assert!(row["text"].as_str().unwrap().parse::<PublicKey>().is_err(), "{id}");
+			#[cfg(feature = "serde")]
+			assert!(
+				serde_json::from_value::<PublicKey>(row["text"].clone()).is_err(),
+				"{id}"
+			);
+		}
 	}
 }

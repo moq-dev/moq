@@ -1,7 +1,8 @@
 import { expect, jest, onTestFinished, test } from "bun:test";
-import { Elapsed, Instant, Milli, Nano, now, timeout } from "@moq/clock";
+import { Elapsed, Instant, Manual, Milli, Nano, now, timeout } from "@moq/clock";
 import * as Connection from "../connection/index.ts";
 import { StreamCode } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -61,7 +62,10 @@ async function subscribed(version: IetfVersion = VERSION) {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
-	const consumer = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const consumer = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0 } }] });
 	onTestFinished(() => {
 		consumer.close();
 		session.close();
@@ -115,7 +119,7 @@ async function head(requestId: bigint, payloads: string[], group = GROUP, versio
 	const bytes = await Writer.collect(version, async (w) => {
 		await w.u62(requestId);
 		for (const [object, payload] of payloads.entries()) {
-			await new FetchFrame({ payload: text(payload) }).encode(
+			await new FetchFrame({ payload: text(payload), priority: 0 }).encode(
 				w,
 				{ group, object, first: object === 0 },
 				undefined,
@@ -394,7 +398,7 @@ async function deltaHead(requestId: bigint, payloads: string[], delta: number) {
 		await w.u62(requestId);
 		for (const [object, payload] of payloads.entries()) {
 			if (object === 0) {
-				await new FetchFrame({ payload: text(payload) }).encode(
+				await new FetchFrame({ payload: text(payload), priority: 0 }).encode(
 					w,
 					{ group: GROUP, object, first: true },
 					undefined,
@@ -455,13 +459,13 @@ test("a joining FETCH spanning another group drops the head", async () => {
 
 	const bytes = await Writer.collect(VERSION, async (w) => {
 		await w.u62(fetch.requestId);
-		await new FetchFrame({ payload: text("h0") }).encode(
+		await new FetchFrame({ payload: text("h0"), priority: 0 }).encode(
 			w,
 			{ group: GROUP, object: 0, first: true },
 			undefined,
 			VERSION,
 		);
-		await new FetchFrame({ payload: text("x0") }).encode(
+		await new FetchFrame({ payload: text("x0"), priority: 0 }).encode(
 			w,
 			{ group: GROUP + 1n, object: 0, first: false, previousGroup: GROUP },
 			undefined,
@@ -550,13 +554,13 @@ test("a clean end finishes a head nothing claimed", () => {
 
 test("fetch objects decode as FetchFrame wrote them", async () => {
 	const bytes = await Writer.collect(VERSION, async (w) => {
-		await new FetchFrame({ payload: text("a") }).encode(
+		await new FetchFrame({ payload: text("a"), priority: 0 }).encode(
 			w,
 			{ group: 5n, object: 0, first: true },
 			undefined,
 			VERSION,
 		);
-		await new FetchFrame({ payload: new Uint8Array() }).encode(
+		await new FetchFrame({ payload: new Uint8Array(), priority: 0 }).encode(
 			w,
 			{ group: 5n, object: 1, first: false },
 			undefined,
@@ -617,3 +621,37 @@ for (const version of VERSIONS) {
 		expect(sent.mock.calls).toHaveLength(version === VERSION ? 2 : 0);
 	});
 }
+
+// A completed join must not remain a gate on the group's later cache misses.
+test("an evicted joined group is fetched again as standalone history", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	onTestFinished(() => installed.close());
+	const { subscriber, consumer, fetching, fetch, client } = await join();
+	if (!fetch) throw new Error("no joining FETCH");
+	await accept(fetching);
+	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
+	await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
+	const first = await consumer.recvGroup();
+	expect(await frames(first)).toEqual(["h0", "h1", "t2"]);
+	first?.close();
+	await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["new"]));
+	// Twice the model's 30-second idle cache window, with deterministic time.
+	await clock.advance(Nano.fromMilli(Milli(60_000)));
+	expect(hooks.cachedGroup(consumer, GROUP)).toBeUndefined();
+	const broadcast = subscriber.consume(Path.from("room"));
+	onTestFinished(() => broadcast.close());
+	const pending = broadcast.track("video").fetchGroup(GROUP);
+	const stream = await nextStream(client);
+	if (!stream) throw new Error("no standalone FETCH");
+	expect(await stream.reader.u53()).toBe(Fetch.id);
+	const standalone = await Fetch.decode(stream.reader, VERSION);
+	expect(standalone.type.kind).toBe("standalone");
+	await stream.writer.u53(FetchOk.id);
+	await new FetchOk({ endOfTrack: false, endLocation: { group: GROUP, object: 3n } }).encode(stream.writer, VERSION);
+	await subscriber.handleFetch(await head(standalone.requestId, ["h0", "h1", "t2"]));
+	const group = await pending;
+	expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
+	group.close();
+	consumer.close();
+});

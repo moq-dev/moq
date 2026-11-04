@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::sign::error::{Error, Result};
-use crate::sign::key::{PublicKey, SecretKey};
+use crate::sign::{PublicKey, SecretKey};
 
 /// Length of the Ed25519 signature appended to every signed frame.
 pub(crate) const SIGNATURE_LEN: usize = 64;

@@ -31,7 +31,7 @@ pub(super) struct Subscriptions {
 	wanted: u64,
 	/// A join over the track's refresh ratio asked for a group past every sequence written,
 	/// and no such group has landed yet. Read against `next` rather than stored as a number,
-	/// so a datagram taking the next sequence can never leave the ask behind.
+	/// so a sequence written without answering it can never leave the ask behind.
 	refresh: bool,
 	/// One past the highest sequence written, which a pending refresh asks for.
 	next: u64,
@@ -119,8 +119,8 @@ impl Subscriptions {
 	}
 
 	/// Sequence `sequence` was written. One at or past the next free sequence moves it: a
-	/// group subscribers receive answers a pending refresh, and anything else, such as a
-	/// datagram, moves the sequence it asks for.
+	/// group subscribers receive answers a pending refresh, and anything else moves the
+	/// sequence it asks for.
 	pub(super) fn wrote(&mut self, sequence: u64, answers: bool) -> kio::WaiterList {
 		let next = self.next;
 		self.next = next.max(sequence.saturating_add(1));

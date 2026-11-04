@@ -150,8 +150,6 @@ export namespace Health {
 	export function viewer(sample: Health.Sample<Echo.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
 }
 
-export * as Hls from "@moq/hang/hls";
-
 export * as Net from "@moq/net";
 
 export namespace Report {

@@ -30,6 +30,9 @@ pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_seq: Option<Bytes>,
+	/// A sequence header only a [`dropped`](Self::dropped) keyframe carried, which the next
+	/// keyframe written takes if it carries none, so a subscriber can still decode it.
+	owed_seq: bool,
 }
 
 impl Import {
@@ -52,6 +55,7 @@ impl Import {
 			track,
 			catalog,
 			last_seq: None,
+			owed_seq: false,
 		};
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config)?;
@@ -232,24 +236,20 @@ impl Import {
 	/// Write split frames to the track, resolving the config from the first
 	/// keyframe's inline sequence header and refining the catalog jitter.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
-		for frame in frames {
-			if frame.keyframe {
-				let seq = find_sequence_header(&frame.payload);
-				// A new sequence header starts a coded sequence whose HDR metadata replaces the last
-				// one's. It goes first, so a keyframe that also configures publishes once.
-				// The first header after an av1C is the record's own sequence, which sync samples repeat.
-				let sequence = seq
-					.as_ref()
-					.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
-				self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
-				if let Some(seq) = seq {
-					self.configure_from_seq(&seq)?;
-				}
-			}
+		for mut frame in frames {
+			self.configure(&frame)?;
 
 			// A keyframe we couldn't configure (no sequence header) is undecodable.
 			if frame.keyframe && !self.catalog.configured() {
 				return Err(Error::MissingSequenceHeader.into());
+			}
+
+			if frame.keyframe
+				&& std::mem::take(&mut self.owed_seq)
+				&& let Some(seq) = &self.last_seq
+				&& find_sequence_header(&frame.payload).is_none()
+			{
+				frame.payload = with_sequence_header(&frame.payload, seq)?;
 			}
 
 			// A pre-keyframe delta has no group to anchor it: the producer returns
@@ -259,11 +259,57 @@ impl Import {
 		Ok(())
 	}
 
+	/// Account for a frame its caller drops rather than writes: a keyframe still configures the
+	/// rendition, and its sequence header goes out with the next keyframe written.
+	pub(crate) fn dropped(&mut self, frame: &Frame) -> Result<()> {
+		self.configure(frame)?;
+		if frame.keyframe && find_sequence_header(&frame.payload).is_some() {
+			self.owed_seq = true;
+		}
+		Ok(())
+	}
+
+	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
+	fn configure(&mut self, frame: &Frame) -> Result<()> {
+		if !frame.keyframe {
+			return Ok(());
+		}
+		let seq = find_sequence_header(&frame.payload);
+		// A new sequence header starts a coded sequence whose HDR metadata replaces the last
+		// one's. It goes first, so a keyframe that also configures publishes once.
+		// The first header after an av1C is the record's own sequence, which sync samples repeat.
+		let sequence = seq
+			.as_ref()
+			.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
+		self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
+		if let Some(seq) = seq {
+			self.configure_from_seq(&seq)?;
+		}
+		Ok(())
+	}
+
 	/// Publish split frames, resolving the config from the first keyframe's inline
 	/// sequence header and refining the catalog jitter.
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}
+}
+
+/// `payload` with the sequence header `seq` after its leading temporal delimiter, where a temporal
+/// unit carries it.
+fn with_sequence_header(payload: &Bytes, seq: &Bytes) -> Result<Bytes> {
+	let mut buf = payload.clone();
+	let first = ObuIterator::new(&mut buf).next().transpose()?;
+	let delimiter = first.filter(|obu| {
+		let mut reader = &obu[..];
+		ObuHeader::parse(&mut reader).is_ok_and(|header| header.obu_type == ObuType::TemporalDelimiter)
+	});
+	let at = delimiter.map_or(0, |obu| obu.len());
+	let mut out = bytes::BytesMut::with_capacity(payload.len() + seq.len());
+	out.extend_from_slice(&payload[..at]);
+	out.extend_from_slice(seq);
+	out.extend_from_slice(&payload[at..]);
+	Ok(out.freeze())
 }
 
 fn is_sequence_header(obu: &[u8]) -> bool {

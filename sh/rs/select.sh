@@ -50,8 +50,8 @@ select_packages() {
 
     local seeds benches edges selected
     # A crate's `benches/` builds only its own bench targets, which no other crate can
-    # depend on and the test build never compiles, so it selects that crate alone
-    # (for its lint) rather than every dependent's tests.
+    # depend on, so it selects that crate alone (for its lint) rather than every
+    # dependent's tests.
     benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
     # A target can also sit outside its crate, as moq-cli's interop examples
     # under test/interop/clients/rust/ do, so a change in the directory of a
@@ -161,6 +161,12 @@ case "$action" in
         # Nightly runs the Send-depth proof (`just rs send-depth`) on its
         # pinned toolchain.
         just rs "$action" "${flags[@]}"
+        # The test build enables device features, which can hide unused items
+        # in the default-feature test cfg. Keep this compile isolated from the
+        # selected dependents, whose features would unify capture back in.
+        if [[ "$action" == lint ]] && wants '(moq-video|moq-audio)'; then
+            just rs media-defaults
+        fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
         if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
@@ -176,6 +182,9 @@ case "$action" in
         # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
+        # Benches and examples join the build only to be linted; nextest's
+        # default filter leaves the benches unrun.
+        flags+=(--benches --examples)
         # CI keeps Cargo's per-crate build timings, which check.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
@@ -184,8 +193,11 @@ case "$action" in
         # features only add code, so every test still runs. Cargo rejects a
         # feature of a package outside the selection, hence the explicit picks.
         features=()
+        # The crates the build holds, for their targets' features below.
+        building=$names
         if wants '(moq-video|moq-audio)'; then
             [[ "$packages" == ALL ]] || flags+=(--package moq-video --package moq-audio)
+            building+=" moq-video moq-audio"
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
@@ -194,6 +206,26 @@ case "$action" in
         # The relay's io_uring listener, Linux-only. A moq-uring change selects
         # the relay too, as its dependent.
         if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
+        # Cargo skips a bench or example whose `required-features` are off without
+        # a word, and a bench-only change selects its crate alone, so no dependent
+        # turns them on. Turn on every one the built crates' targets name. All of
+        # them are additive and build wherever the gate runs; moq-uring's targets
+        # compile to nothing off Linux.
+        required=$(
+            set -e
+            cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$building" --arg all "$packages" '
+                ($names | split(" ") | map(select(. != ""))) as $want
+                | .packages[]
+                | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
+                | .name as $name
+                | .targets[]
+                | select(.kind // [] | any(. == "bench" or . == "example"))
+                | (.["required-features"] // [])[]
+                | "\($name)/\(.)"' | sort -u | tr '\n' ' '
+        )
+        for feature in $required; do
+            [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
+        done
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;

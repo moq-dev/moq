@@ -12,8 +12,8 @@ the overlay, goes through relays. Content is signed by default, and each node
 publishes a `.status` track describing its links.
 
 This repository ships the libraries. The mesh binary and its UI live outside
-it: [kixelated](https://github.com/kixelated) builds a `kixel` daemon on these
-libraries, and any other binary can do the same.
+it: Kixel builds a `kixel` daemon on these libraries, and any other binary
+can do the same.
 
 Non-goals: a mesh daemon or CLI here (`moq mesh` is not added to moq-cli),
 MagicDNS, agent protocols, a graph UI, internet P2P or NAT traversal in m2
@@ -96,6 +96,7 @@ the third, and survives a relay restart.
 - [Mesh relay node](/quest/m2/mesh/node.md) - a relay node enrolls into a mesh, dials its relays, and admits only enrolled LAN peers
 - [Address hints](/quest/m2/mesh/addr.md) - nodes publish their addresses on mesh tracks and dial each other directly where mDNS cannot find them
 - [Sparse overlay](/quest/m2/mesh/overlay.md) - each node keeps about log N deterministic direct links, forwards for the rest, and falls back to relays across a partition
+- [JS mesh enrollment client](/quest/m2/mesh/js-enroll.md) - `@moq/auth` enrolls and refreshes from JS like `moq_auth::mesh::Client`
 - [Status track](/quest/m2/mesh/status.md) - a signed `.status` track per node with its links and per-link RTTs
 - [Mesh library guide](/quest/m2/mesh/guide.md) - the doc.moq.dev page for the libraries, the contract, and porting from iroh
 

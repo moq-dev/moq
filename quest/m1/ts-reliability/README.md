@@ -93,16 +93,22 @@ measurement (decided 2026-10-28). Re-planned the same day: decode order covers M
 absorbs the release audit's export-reorder quest, and the shared parser lands
 before the open stream-routes and PAT drafts, which rebase onto it.
 
+Decided 2026-11-03 (maintainer, #7221): the TS export counts an unmarked step
+back as a restart only where a reorder bound proves the frame falls outside
+valid reordering: audio, which never reorders, and video that steps back past
+its catalog `reorder` depth, in both cases by more than the export's delay.
+Video that declares no `reorder` is left untouched: no detection, no rewrite,
+no error.
+
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
 
 ## Required
 
-- [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - the export re-acquires on a sub-group step back from any source instead of dropping its video
-- [Clock-table revisions land at their media position](/quest/m1/ts-reliability/tdt-placement.md) - two exports of one broadcast stay byte-identical across TDT/TOT revisions
 - [A skipped group flags the next PCR](/quest/m1/ts-reliability/skip-flag.md) - a within-instance skip reaches the wire as a flagged PCR discontinuity
 - [A republish announces as soon as its tracks are known](/quest/m1/ts-reliability/republish-announce.md) - a stitched export keeps the new instance's first group on a short-GOP feed
+- [A TS export never loses a queued clock revision](/quest/m1/ts-reliability/clock-revision-burst.md) - a burst of TDT/TOT revisions all reach their stamped slots, or the drop is shown to be the two-exporter fixture's
 
 ## Related
 

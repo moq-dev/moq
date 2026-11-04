@@ -1,4 +1,4 @@
-# [XS] Interop and Video pass on main
+# Interop and Video pass on main
 
 ## Goal
 
@@ -37,7 +37,7 @@ the fallback audio stall, which hit on
 [41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824); see
 [the IETF22 fallback quest](/quest/m0/test-flakes-2/ietf22-fallback.md).
 
-Every child has landed. Video passed its scheduled
+Video passed its scheduled
 [run 41497602703](https://github.com/moq-dev/moq/actions/runs/41497602703).
 Interop runs
 [41317901057](https://github.com/moq-dev/moq/actions/runs/41317901057),
@@ -65,3 +65,7 @@ The P2P data-channel test timed out once, in 41668668824, and passes
 locally; triage it if it recurs.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Confirm scheduled open-GOP recovery passes](/quest/m0/interop-green/open-gop-fixture.md) - a scheduled Interop run passes the open-GOP case with the typed fixture and direct effect/page error reporting

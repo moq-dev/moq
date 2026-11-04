@@ -32,8 +32,8 @@ harness_browser_tests := '''
 '''
 
 harness_compat_tests := '''
-    test/interop/compat/claims.test.ts
-    test/interop/compat/resolve.test.ts
+    ./test/interop/compat/claims.test.ts
+    ./test/interop/compat/resolve.test.ts
 '''
 
 # List the cross-language suites.
@@ -95,8 +95,9 @@ wire-compat *args:
     ./interop/compat.sh "$@"
 
 # Pinned Moxygen sections 1-7, subgroup zero, through one relay under the conformance profile.
-ietf-conformance:
-    ./ietf-conformance/run.sh
+[positional-arguments]
+ietf-conformance *args:
+    ./ietf-conformance/run.sh "$@"
 
 # Installs each client from its public registry, inside test/smoke's own Nix
 # shell rather than this repo's toolchain. The first argument picks a smoke
@@ -161,6 +162,10 @@ native-play:
 [positional-arguments]
 audio-quality *args:
     ./audio-quality/run.sh "$@"
+
+# Measure 22 push-to-talk presses at 300 ms on an ideal local path.
+push-to-talk:
+    ./audio-quality/ptt.sh
 
 # Records the arrival traces under audio-quality/traces/ that the replay rows grade: the
 # public relay's bbb.hang, a local relay's AAC tone, and a browser microphone through the
@@ -277,7 +282,7 @@ resume-model:
 qmux:
     cargo build --locked --quiet --manifest-path ../rs/qmux/Cargo.toml --example interop-server --example interop-client
     cd .. && bun install --frozen-lockfile
-    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test test/qmux/interop.test.ts
+    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test ./test/qmux/interop.test.ts
 
 # Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
 p2p:
