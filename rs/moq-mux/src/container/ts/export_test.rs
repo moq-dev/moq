@@ -8356,12 +8356,20 @@ fn assert_skip_discontinuity(frames: &[Frame], count: usize) {
 			break;
 		}
 	}
-	for packet in ts.as_chunks::<188>().0 {
+	let start = kio::clock::Instant::now();
+	for (count, packet) in ts.as_chunks::<188>().0.iter().enumerate() {
 		if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0 {
 			assert_ne!(packet[5] & 0x10, 0, "a skip flags only a PCR packet");
 		}
 		let continuation = continuity.packet(packet);
-		health.packet(packet, continuation, None);
+		health.packet(
+			packet,
+			continuation,
+			super::health::At {
+				count: count as u64 + 1,
+				arrival: start,
+			},
+		);
 	}
 	let mut stats = stats::Snapshot::default();
 	health.errors().report(&mut stats);
