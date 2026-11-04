@@ -179,7 +179,7 @@ let
       # Resolve the paths the way a consumer's pkg-config will, so a template
       # whose libdir or includedir misses what this prefix ships fails here.
       for check in libdir:libmoq.a includedir:moq.h; do
-        dir=$(PKG_CONFIG_PATH=$out/lib/pkgconfig pkg-config --variable="''${check%%:*}" moq-c)
+        dir=$(pkg-config --variable="''${check%%:*}" "$pc")
         if [ ! -f "$dir/''${check#*:}" ]; then
           echo "moq-c.pc ''${check%%:*} $dir has no ''${check#*:}" >&2
           exit 1

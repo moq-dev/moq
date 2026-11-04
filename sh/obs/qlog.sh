@@ -10,10 +10,10 @@ fi
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 moq_prefix=$("$here/moq.sh" qlog)
-export PKG_CONFIG_PATH="$moq_prefix/lib/pkgconfig"
+moq_pc="$moq_prefix/lib/pkgconfig/moq-cpp.pc"
 # Assigned first: set -e ignores a failing substitution inside a command's arguments.
-moq_sources=$(pkg-config --variable=sources moq-cpp)
-moq_flags=$(pkg-config --cflags --libs moq-cpp)
+moq_sources=$(pkg-config --variable=sources "$moq_pc")
+moq_flags=$(pkg-config --cflags --libs "$moq_pc")
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
