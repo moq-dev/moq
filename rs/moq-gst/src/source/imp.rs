@@ -1760,6 +1760,7 @@ impl Play {
 		let mut sent_segment = false;
 		// Each play starts a new stream on the pad, which opusdec decodes from a fresh state.
 		let mut clip = OpusClip::new(&shape.caps, shape.warmup);
+		let mut first = true;
 		loop {
 			tokio::select! {
 				// The follower stopped this reader (the instance changed, the rendition was
@@ -1773,7 +1774,16 @@ impl Play {
 				}
 				frame = track.read() => match frame {
 					Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
-					Ok(Some(moq_mux::container::Read::Frame { frame, .. })) => {
+					Ok(Some(moq_mux::container::Read::Frame { frame, group })) => {
+						// Nothing precedes group 0, and a group delivers from its frame 0 or not at
+						// all, so a play that reads it first decodes from the encoder's first packet,
+						// which has no history to warm up from.
+						if std::mem::take(&mut first)
+							&& group == 0
+							&& let Some(clip) = &mut clip
+						{
+							clip.track_start();
+						}
 						let mut buffer = match build_buffer(frame, kind) {
 							Ok(buffer) => buffer,
 							Err(err) => {
@@ -1945,7 +1955,7 @@ fn build_buffer(frame: moq_mux::container::Frame, kind: TrackKind) -> Result<gst
 /// After the pre-skip it clips the catalog `warmup` too, the media the decoder needs before its
 /// output is clean: every packet still reaches the decoder, but nothing decoded before the first
 /// frame plus the warmup plays, as `moq-audio` presents a join. The clipped packets keep their
-/// place on the shared timeline.
+/// place on the shared timeline. A play from the track's first packet clips the pre-skip alone.
 struct OpusClip {
 	/// The OpusHead's pre-skip, in 48 kHz samples.
 	total: u64,
@@ -1978,6 +1988,12 @@ impl OpusClip {
 			remaining: total,
 			warmup,
 		})
+	}
+
+	/// Decode from the track's first packet: the pre-skip is all the priming its encoder declared,
+	/// so no warmup is clipped.
+	fn track_start(&mut self) {
+		self.warmup = 0;
 	}
 
 	/// Clip this packet's share of the pre-skip and then of the warmup, and stamp it where its
@@ -2346,9 +2362,10 @@ mod tests {
 		}
 	}
 
-	/// The catalog warmup is clipped from the decoded output after the pre-skip, so the first
-	/// sample that plays is the first frame plus the warmup, while every packet still reaches the
-	/// decoder and keeps its place on the timeline.
+	/// After a join, the catalog warmup is clipped from the decoded output after the pre-skip, so
+	/// the first sample that plays is the first frame plus the warmup, while every packet still
+	/// reaches the decoder and keeps its place on the timeline. The track's first packet has no
+	/// warmup to clip.
 	#[test]
 	fn opus_warmup_is_clipped_after_the_pre_skip() {
 		gst::init().unwrap();
@@ -2364,10 +2381,12 @@ mod tests {
 		let headed = super::audio_caps(&config).unwrap();
 		assert!(super::OpusClip::new(&gst::Caps::new_empty_simple("video/x-h264"), warmup).is_none());
 
-		// 20 ms (960-sample) CELT packets: (clipped samples, pts in microseconds) for each.
-		for (caps, expected) in [
+		// 20 ms (960-sample) CELT packets: (clipped samples, pts in microseconds) for each, after a
+		// join, and from the track's first packet.
+		for (caps, track_start, expected) in [
 			(
 				&bare,
+				false,
 				&[
 					(960, 20_000),
 					(960, 40_000),
@@ -2379,6 +2398,7 @@ mod tests {
 			),
 			(
 				&headed,
+				false,
 				&[
 					(960, 13_500),
 					(960, 33_500),
@@ -2388,8 +2408,13 @@ mod tests {
 					(0, 93_500),
 				][..],
 			),
+			(&bare, true, &[(0, 0), (0, 20_000)][..]),
+			(&headed, true, &[(312, 0), (0, 13_500)][..]),
 		] {
 			let mut clip = super::OpusClip::new(caps, warmup).unwrap();
+			if track_start {
+				clip.track_start();
+			}
 			for (index, &(clipped, pts)) in expected.iter().enumerate() {
 				let mut buffer = gst::Buffer::from_slice([0xf8u8]);
 				let buffer = buffer.get_mut().unwrap();
@@ -2398,11 +2423,15 @@ mod tests {
 				let meta = buffer
 					.meta::<gst_audio::AudioClippingMeta>()
 					.map(|meta| meta.start().value() as u64);
-				assert_eq!(meta.unwrap_or(0), clipped, "packet {index} of {caps}");
+				assert_eq!(
+					meta.unwrap_or(0),
+					clipped,
+					"packet {index} of {caps}, start {track_start}"
+				);
 				assert_eq!(
 					buffer.pts(),
 					Some(gst::ClockTime::from_useconds(pts)),
-					"packet {index} of {caps}"
+					"packet {index} of {caps}, start {track_start}"
 				);
 			}
 		}
