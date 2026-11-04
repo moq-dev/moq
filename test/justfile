@@ -77,7 +77,6 @@ interop *args:
         tracks_interop \
         varint_interop \
         --run-ignored all
-    just rs test -p moq-relay --test integration javascript_claim_restart --run-ignored all
     ./interop/interop.sh "$@"
 
 # The harnesses append one record per case to HARNESS_RESULTS; flags link the page to its

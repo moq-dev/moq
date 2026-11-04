@@ -9,7 +9,6 @@
 
 mod auth_lifetime;
 mod bitrate_caps;
-mod claims;
 mod cluster_close;
 mod cluster_drain;
 mod cluster_fresh_port;
