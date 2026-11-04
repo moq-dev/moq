@@ -271,6 +271,8 @@ struct Pending {
 /// A frame waiting in the jitter buffer, with what it needs from the moment it was read.
 struct Queued {
 	frame: Frame,
+	/// Delivery skips before this frame, excluding declared timeline boundaries.
+	gap: u64,
 	/// When the frame decodes: its DTS, else its PTS.
 	decode: Timestamp,
 	/// Where the jitter buffer orders it ([`Track::release_key`]).
@@ -316,6 +318,8 @@ struct Track {
 	/// The marker, skip and cut counts of the sources the track read before this one, so the
 	/// counts keep rising across a resubscription.
 	base: (u64, u64, u64),
+	/// Delivery skips before the last frame muxed, so read-ahead cannot flag earlier output.
+	gap: u64,
 	finished: bool,
 	pid: u16,
 	/// The PMT lists it: from its first frame out until its last has gone and the catalog has
@@ -393,6 +397,7 @@ impl Track {
 			latest: kio::clock::Instant::ZERO,
 			restart: 0,
 			base: (0, 0, 0),
+			gap: 0,
 			finished: false,
 			pid: 0,
 			listed: false,
@@ -788,6 +793,7 @@ impl Track {
 		let Pending {
 			frame,
 			restart,
+			skip,
 			arrived,
 			read,
 			..
@@ -836,6 +842,7 @@ impl Track {
 			bytes: frame.payload.len() + self.key.name.len(),
 			item: Queued {
 				frame,
+				gap: skip.saturating_sub(restart),
 				decode,
 				key,
 				dts,
@@ -1172,6 +1179,8 @@ struct PesUnit {
 	pid: u16,
 	is_video: bool,
 	keyframe: bool,
+	/// Delivery loss precedes this frame, so its scheduled PCR flags the gap.
+	skipped: bool,
 	timestamp: Timestamp,
 	/// Authored decode timestamp for a reordered (B-frame) video frame, in continuous
 	/// (unwrapped) 90 kHz ticks (wrapped to the wire field in `write_pes`). `Some` only when
@@ -3348,13 +3357,17 @@ where
 	fn mux(&mut self, name: &str, queued: Queued) -> anyhow::Result<()> {
 		let Queued {
 			frame,
+			gap,
 			decode,
 			dts,
 			description,
 			pes,
 			..
 		} = queued;
-		let kind = &self.program.tracks.get(name).context("missing track")?.kind;
+		let track = self.program.tracks.get_mut(name).context("missing track")?;
+		let skipped = gap > track.gap;
+		track.gap = gap;
+		let kind = &track.kind;
 		let is_video = matches!(kind, Kind::Video(_));
 		// Refresh PSI at keyframes, MPEG-1/2 video's carried whole among them, or after the
 		// interval lapses, and lead with a revision.
@@ -3444,7 +3457,7 @@ where
 		// The tables lead the unit that carries this frame, behind whatever went before it.
 		if kind.placed() {
 			self.program.psi_due |= psi;
-			return self.place(name, &frame, out);
+			return self.place(name, &frame, out, skipped);
 		}
 		match es_payload {
 			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
@@ -3458,6 +3471,7 @@ where
 					pid,
 					is_video,
 					keyframe,
+					skipped,
 					timestamp: frame.timestamp,
 					dts,
 					stream_id: stream_id(&kind),
@@ -3472,7 +3486,7 @@ where
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		self.push_unit(name, pid, decode, out, keyframe, Vec::new())
+		self.push_unit(name, pid, decode, out, (keyframe, skipped), Vec::new())
 	}
 
 	/// Queue a whole PES or section unchanged on `name`'s PID behind `tables`, its
@@ -3483,7 +3497,7 @@ where
 	/// unit that begins in it, so each one after counts on from there and leaves at its own time.
 	/// The bytes ahead of the first end a frame an earlier PES began; they leave with it,
 	/// which only overstates what the buffer holds. A PES without a PTS holds nothing there.
-	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
+	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>, skipped: bool) -> anyhow::Result<()> {
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let pes = match track.kind {
 			Kind::PesPacket { stream_type } => Some(
@@ -3523,6 +3537,9 @@ where
 			self.program.schedule.set_buffer(pid, buffer);
 		}
 		self.lead_tables()?;
+		if skipped {
+			self.program.schedule.skip();
+		}
 		self.program.schedule.push_placed(
 			pid,
 			(place, decode.unwrap_or(place)),
@@ -3560,7 +3577,8 @@ where
 		let (size, fit) = track.fit(payload.len());
 		let place = place(unit.timestamp, samples, rate);
 		// A PTS is a whole 90 kHz tick, so the frames run on within one of where they end.
-		let joins = start.is_some()
+		let joins = !unit.skipped
+			&& start.is_some()
 			&& track.pack.as_ref().is_some_and(|pack| {
 				pack.start == start
 					&& pack.rate == rate
@@ -3607,7 +3625,7 @@ where
 		} = pack;
 		let mut out = Vec::new();
 		self.write_pes(&mut out, &unit, &payload)?;
-		self.push_unit(name, unit.pid, decode, out, unit.keyframe, frames)
+		self.push_unit(name, unit.pid, decode, out, (unit.keyframe, unit.skipped), frames)
 	}
 
 	/// Send on, in decode order, the packed frames of each track for which `done` holds, given
@@ -3639,7 +3657,7 @@ where
 		pid: u16,
 		decode: Timestamp,
 		out: Vec<u8>,
-		keyframe: bool,
+		(keyframe, skipped): (bool, bool),
 		frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
 		let mut tables = std::mem::take(&mut self.program.tables);
@@ -3669,6 +3687,9 @@ where
 		}
 		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
 		self.lead_tables()?;
+		if skipped {
+			self.program.schedule.skip();
+		}
 		self.program.schedule.push_frames(
 			pid,
 			super::schedule::Timing {
@@ -3803,7 +3824,7 @@ where
 			let mut payload = slot.layout(&clock, pmt_pid, &NULL_PACKET);
 			// The slot opens with its PCR, in the clock packet or the clock PID's packet that
 			// carries it, whose adaptation field flags the break.
-			let discontinuity = std::mem::take(&mut self.program.pcr_discontinuity);
+			let discontinuity = std::mem::take(&mut self.program.pcr_discontinuity) || slot.discontinuity;
 			if discontinuity {
 				payload[5] |= 0x80;
 			}

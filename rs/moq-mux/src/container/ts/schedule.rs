@@ -195,6 +195,8 @@ struct Unit {
 	/// Packets already laid out.
 	sent: usize,
 	keyframe: bool,
+	/// Delivery loss precedes this unit; the next PCR at its release flags it.
+	gap: bool,
 	/// It was pushed after its due slot went out, so it goes out as soon as it can.
 	late: bool,
 	/// The first byte's placement in nanoseconds and payload prefix (the section pointer field).
@@ -420,6 +422,8 @@ fn with_pcr(packets: &[u8], ticks: u64) -> Option<Vec<u8>> {
 /// One grid slot's worth of output.
 pub(super) struct Slot {
 	pub index: u128,
+	/// Delivery loss starts here, before any backfilled slots after a clock jump.
+	pub discontinuity: bool,
 	/// The PCR that opens the slot, in system clock ticks.
 	pub pcr: u64,
 	/// The media packets, in the order they were muxed.
@@ -620,6 +624,8 @@ pub(super) struct Schedule {
 	/// The unit held packets last went out in, by `seq`: what is muxed after them waits until it
 	/// has finished, as it rides a lane of its own.
 	deferred: Option<u64>,
+	/// A delivery skip precedes the next unit queued.
+	gap: bool,
 }
 
 impl Schedule {
@@ -646,6 +652,7 @@ impl Schedule {
 			clocked: 0,
 			unclocked: Vec::new(),
 			deferred: None,
+			gap: false,
 		}
 	}
 
@@ -823,6 +830,11 @@ impl Schedule {
 		self.push_frames(pid, timing, packets, keyframe, Vec::new())
 	}
 
+	/// Mark delivery loss before the next unit, leaving earlier queued media on its clock.
+	pub fn skip(&mut self) {
+		self.gap = true;
+	}
+
 	/// Queue an access unit on `pid` (whole TS packets, the tables muxed ahead of it first)
 	/// with its exact transport deadline and decoder removal time. A PES that packs several
 	/// frames lists each one's decode time and elementary bytes, in decode order, which leave
@@ -870,6 +882,12 @@ impl Schedule {
 		keyframe: bool,
 		mut frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
+		let gap = std::mem::take(&mut self.gap);
+		if gap {
+			// The resumed unit keeps its send-ahead, rather than taking the slot after the
+			// old unit as though they ran continuously across the missing interval.
+			self.last = None;
+		}
 		if let Some(tables) = self.lead.take() {
 			let pmt = self.pmt.context("program tables without a PMT PID")?;
 			let clock = self.psi.as_ref().context("program tables never set")?.clock;
@@ -943,6 +961,7 @@ impl Schedule {
 		self.horizon = self.horizon.max(Some(last.div_ceil(PCR_INTERVAL.as_nanos())));
 		let unit = self.enqueue(pid, timing, packets, None);
 		unit.keyframe = keyframe;
+		unit.gap = gap;
 		unit.place = place;
 		unit.frames = frames;
 		Ok(())
@@ -965,6 +984,7 @@ impl Schedule {
 			packets,
 			sent: 0,
 			keyframe: false,
+			gap: false,
 			late: self.next.is_some_and(|next| due < next),
 			place: None,
 			held: 0,
@@ -1038,6 +1058,7 @@ impl Schedule {
 		self.clocked = 0;
 		self.unclocked.clear();
 		self.deferred = None;
+		self.gap = false;
 	}
 
 	/// The first slot `unit` may go out in: [`ahead`] of its due slot, and never before the
@@ -1122,9 +1143,22 @@ impl Schedule {
 			self.deferred = Some(unit.seq);
 			self.last = last;
 		}
+		// A long outage jumps to the start of its backfill. Flag that first PCR, not a
+		// still-queued slot on the old clock, nor the media slot after the backfill.
+		let jumped = self.next.is_some_and(|next| index > next);
+		let through = if jumped { index + BACKFILL } else { index };
+		let mut discontinuity = false;
+		for i in 0..self.units.len() {
+			if self.units[i].gap && self.release(&self.units[i]) <= through {
+				self.units[i].gap = false;
+				discontinuity = true;
+			}
+		}
 		self.next = Some(index + 1);
 		if let Some(rate) = self.rate {
-			return self.padded(index, rate).map(Some);
+			let mut out = self.padded(index, rate)?;
+			out.discontinuity = discontinuity;
+			return Ok(Some(out));
 		}
 
 		let clock = self.clock;
@@ -1185,6 +1219,7 @@ impl Schedule {
 		self.units.retain(|unit| unit.remaining() > 0);
 		Ok(Some(Slot {
 			index,
+			discontinuity,
 			pcr: grid_pcr(index) as u64,
 			packets,
 			nulls: 0,
@@ -1209,6 +1244,7 @@ impl Schedule {
 		};
 		let mut out = Slot {
 			index,
+			discontinuity: false,
 			pcr: rate_pcr(index, rate) as u64,
 			packets: Vec::new(),
 			nulls: count - 1,
@@ -3208,6 +3244,7 @@ mod tests {
 		packets.extend(unit(131, 1));
 		let media = packets.len() / TsPacket::SIZE;
 		let slot = Slot {
+			discontinuity: false,
 			index: 0,
 			pcr: 0,
 			packets,
@@ -3249,6 +3286,7 @@ mod tests {
 		packets.extend(unit(1, 1));
 		packets.extend(unit(3, 4));
 		let slot = Slot {
+			discontinuity: false,
 			index: 0,
 			pcr: 0,
 			packets,
