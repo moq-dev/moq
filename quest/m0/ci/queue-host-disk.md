@@ -185,6 +185,43 @@ CI's resident use stays near its 380-476 GiB post-purge range. Its current
 head adds no such cleanup, and the 2026-10-31 purge was a one-off. Confirm
 the cleanup holds across the gate's run history.
 
+### Open: which side leaves the shared Nix daemon
+
+A read-only check on 2026-11-03 found the topology described above still in
+place: NixOS containers `moq-ci`, `moq-pro`, `quest-ci`, `rind-ci`, and
+`rust2-ci`, plus the `quest-land-*` watchers and check/fixer sockets. The
+root filesystem had 228 GiB free of 953 GiB. The host deploys from
+`ci/public-merge-queues-cutover`
+([kixelated/nixos#19](https://github.com/kixelated/nixos/pull/19)), which
+merges #16. Other sessions pushed both on 2026-11-03.
+
+The host runs a single `nix-daemon` (Nix 2.34.9). Agents, the runner
+containers, and the gate's check and fixer instances all use it. It runs in
+the `ci-builders` network namespace, with CI's egress policy and CPU and
+memory caps. Its `build-dir` is `/var/lib/ci-nix-builds`, which is in
+project 42000, and `kixelated` is one of its trusted users. Giving agents
+and CI separate writable stores (decision 2) therefore means running a
+second daemon. The Plan does not yet say which side moves to it:
+
+1. **CI moves to a new store (recommended).** A second daemon stays in the
+   `ci-builders` namespace and keeps CI's caps. Its store root is in project
+   42000, and it is mounted at `/nix/store` inside the runner containers and
+   the gate's instance roots. Each container's system closure is copied into
+   that store when the container starts. The host's `/nix`, its build
+   directory, and its daemon (which leaves the CI network namespace) move
+   into the agent project. Agent workflows and their cache stay unchanged.
+2. **Agents move to a new store.** A second daemon serves a store root inside
+   the agent project. Agent `nix develop` and `nix run` sessions run in a
+   mount namespace that puts that store at `/nix/store`. Unless the store is
+   layered over the host store with the experimental `local-overlay-store`,
+   that hides the host system's closure. CI stays unchanged, but every agent
+   session on the host changes.
+
+Decision 1 sends the host change to the existing owners' work, but other
+sessions hold #16 and #19. The change therefore goes in a new
+`kixelated/nixos` PR built on `ci/public-merge-queues-cutover`, which merges
+that branch as it moves.
+
 Decided 2026-11-01 (maintainer, /quest-complete iterations of
 [moq-dev/moq#7548](https://github.com/moq-dev/moq/pull/7548)):
 
