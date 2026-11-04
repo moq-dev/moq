@@ -54,10 +54,6 @@ again.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [HLS lists a broadcast's contributions without starting their media](/quest/m0/hls-contributions.md) - its PR, [moq-dev/moq#7836](https://github.com/moq-dev/moq/pull/7836), adds the refused follower this extends
-
 ## Related
 
 - [Listing and follow](/quest/m1/api-audit/route/events.md) - `follow` takes over instance changes from announce events
