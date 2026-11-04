@@ -513,7 +513,7 @@ impl Producer {
 	}
 
 	/// Whether unencoded history is still retained.
-	#[cfg(any(feature = "capture", test))]
+	#[cfg(feature = "capture")]
 	pub(crate) fn retains(&self) -> bool {
 		!self.backlog.is_empty()
 	}
@@ -611,7 +611,7 @@ impl Producer {
 
 	/// [`finish`](Self::finish) the track with `err`, for a source that failed: subscribers keep
 	/// every packet published, then get `err` instead of the end of stream.
-	#[cfg(any(feature = "capture", test))]
+	#[cfg(feature = "capture")]
 	pub(crate) fn fail(&mut self, err: moq_net::Error) -> Result<(), Error> {
 		self.end(Some(err))
 	}
