@@ -147,10 +147,10 @@ separated presses have an identifiable onset.
 
 `summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
 is still attributed to its utterance. The command checks pipeline completeness, not the epic's
-latency verdict. It refuses missing encoder inputs, missing heads, submitted frames that never
-encode or reach the container, reopened capture, a new encoder (a probe or a rebuilt codec) or
-subscription, and separated utterances with no audible output. It also fails on a broken driver or
-invalid capture.
+latency verdict. It refuses missing encoder inputs, a head that never reaches the listener or never
+decodes, submitted frames that never encode or reach the container, written frames that never reach
+the listener, reopened capture, a new encoder (a probe or a rebuilt codec) or subscription, and
+separated utterances with no audible output. It also fails on a broken driver or invalid capture.
 
 The latency goal is at most 300 ms of playout added on top of one-way delivery. For each separated
 press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
@@ -160,10 +160,10 @@ that onset. `path` follows the head frame from the press to projected output in 
 it: `capture` (worklet delivery and framing, after the media the frame still needed),
 `packetization` (that media, placed on the media clock by the newest chunk captured before the
 press), `encode` (codec and container write), `network` (write to arrival, through the relay),
-`decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the newest PCM decoded before
-the onset, which filled the playout delay), `render` (that PCM to the render onset: the worklet
-hand-off and the context's render callback), and `device`, as the stages below name them. `latency`
-and `path` give each one's min, median and max.
+`decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the first PCM that fills the
+playout delay), `render` (that PCM to the render onset: the worklet hand-off and the context's
+render callback), and `device`, as the stages below name them. `latency` and `path` give each one's
+min, median and max.
 
 The command prints `latency`, `path`, and the completeness counts, and keeps its run directory
 even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
