@@ -24,6 +24,8 @@ pub(super) fn body(kind: FourCC, data: &[u8]) -> Result<()> {
 #[derive(Clone, Copy)]
 enum Namespace {
 	Any,
+	/// The children of a visual sample entry, which may also hold spatial boxes.
+	Visual,
 	Udta,
 	Mebx,
 	Keys,
@@ -74,6 +76,12 @@ impl Scan {
 				Namespace::Udta if header.kind.as_ref() != b"meta" => {}
 				Namespace::Mebx if header.kind.as_ref() == b"keys" => self.boxes(body, Namespace::Keys)?,
 				Namespace::Keys => self.boxes(body, Namespace::Any)?,
+				// Not in Any: the entry keeps them in its boxed Spatial, or a repeat verbatim as an Any.
+				Namespace::Visual if matches!(header.kind.as_ref(), b"st3d" | b"sv3d" | b"vexu" | b"hfov") => {
+					let size = std::mem::size_of::<mp4_atom::Spatial>() + std::mem::size_of::<mp4_atom::Any>();
+					self.retain(header.kind, 1, size)?;
+					self.spatial(header.kind, body)?;
+				}
 				_ => self.body(header.kind, body)?,
 			}
 		}
@@ -121,7 +129,7 @@ impl Scan {
 			}
 			b"avc1" | b"avc3" | b"hvc1" | b"hev1" | b"vp08" | b"vp09" | b"av01" | b"jpeg" | b"uncv" => {
 				take(&mut data, 78)?; // VisualSampleEntry
-				Namespace::Any
+				Namespace::Visual
 			}
 			b"mp4a" | b".mp3" | b"Opus" | b"fLaC" | b"ac-3" | b"ec-3" | b"sowt" | b"twos" | b"lpcm" | b"ipcm"
 			| b"fpcm" | b"in24" | b"in32" | b"fl32" | b"fl64" | b"s16l" => {
@@ -169,6 +177,33 @@ impl Scan {
 		self.parents.push(kind);
 		self.boxes(data, namespace)?;
 		self.parents.pop();
+		Ok(())
+	}
+
+	/// Count the children of a spatial box, which mp4-atom frames by header instead of Any.
+	///
+	/// Each child fills a slot or is kept verbatim as an Any, so each is charged as one. A box whose
+	/// children do not frame is kept whole rather than refused, so the count stops there too.
+	fn spatial(&mut self, kind: FourCC, mut data: &[u8]) -> Result<()> {
+		if !matches!(
+			kind.as_ref(),
+			b"sv3d" | b"vexu" | b"proj" | b"eyes" | b"pack" | b"cams" | b"cmfy"
+		) {
+			return Ok(());
+		}
+		while data.len() >= 8 {
+			let Ok((header, body)) = next(&mut data) else {
+				break;
+			};
+			self.retain(header.kind, 1, std::mem::size_of::<mp4_atom::Any>())?;
+			// Only these children decode their own; the fixed nesting also bounds the recursion.
+			if matches!(
+				(kind.as_ref(), header.kind.as_ref()),
+				(b"sv3d", b"proj") | (b"vexu", b"eyes" | b"pack" | b"proj") | (b"eyes", b"cams" | b"cmfy")
+			) {
+				self.spatial(header.kind, body)?;
+			}
+		}
 		Ok(())
 	}
 }
@@ -403,6 +438,104 @@ pub(crate) mod tests {
 		assert!(check(&data).is_err());
 	}
 
+	#[test]
+	fn spatial_children_are_counted_where_the_dependency_keeps_them() {
+		let mut avc1 = Vec::new();
+		mp4_atom::Avc1 {
+			avcc: mp4_atom::Avcc {
+				configuration_version: 1,
+				avc_profile_indication: 66,
+				length_size: 4,
+				..Default::default()
+			},
+			..Default::default()
+		}
+		.encode(&mut avc1)
+		.unwrap();
+		let entry = |spatial: &[u8]| {
+			let mut body = avc1[8..].to_vec();
+			body.extend_from_slice(spatial);
+			let data = boxed(b"avc1", &body);
+			let decoded = mp4_atom::Any::decode(&mut data.as_slice()).is_ok();
+			(decoded, check(&data))
+		};
+		let children = |count: usize| (0..count).flat_map(|_| boxed(b"free", &[])).collect::<Vec<_>>();
+		let budget = MAX_METADATA_BYTES / std::mem::size_of::<mp4_atom::Any>();
+		// Every container in the fixed nesting keeps its unmodelled children, as do repeats.
+		for nested in [
+			boxed(b"sv3d", &boxed(b"proj", &children(budget))),
+			boxed(b"vexu", &boxed(b"pack", &children(budget))),
+			boxed(b"vexu", &boxed(b"eyes", &boxed(b"cams", &children(budget)))),
+			boxed(b"vexu", &boxed(b"eyes", &boxed(b"cmfy", &children(budget)))),
+			boxed(b"st3d", &[]).repeat(budget),
+		] {
+			let (decoded, checked) = entry(&nested);
+			assert!(decoded);
+			assert!(matches!(checked, Err(Error::Mp4(err)) if matches!(*err, mp4_atom::Error::TooLarge(_))));
+		}
+		// A few are accepted, as are children that do not frame: the dependency keeps those whole.
+		let mut truncated = 100u32.to_be_bytes().to_vec();
+		truncated.extend_from_slice(b"free");
+		for spatial in [
+			boxed(b"vexu", &boxed(b"eyes", &boxed(b"cams", &children(16)))),
+			boxed(b"vexu", &truncated),
+			boxed(b"sv3d", &boxed(b"proj", &truncated)),
+		] {
+			assert!(matches!(entry(&spatial), (true, Ok(()))));
+		}
+		// Kinds nested where the dependency does not decode them are kept whole, not descended into.
+		let deep = (0..4096).fold(Vec::new(), |inner, _| boxed(b"eyes", &inner));
+		assert!(matches!(entry(&boxed(b"vexu", &boxed(b"eyes", &deep))), (true, Ok(()))));
+	}
+
+	/// Typed lists the preflight leaves unbounded expand by about tenfold, within the held bound.
+	#[test]
+	fn accepted_lists_stay_within_the_held_bound() {
+		let fill = |prefix: Vec<u8>, entry: &[u8]| {
+			let mut data = prefix;
+			let count = (MAX_METADATA_BYTES - 256 - data.len()) / entry.len();
+			for _ in 0..count {
+				data.extend_from_slice(entry);
+			}
+			(data, count as u32)
+		};
+		// Minimal item entries in an iinf, each a 21-byte infe.
+		let (mut iinf, count) = fill(
+			vec![1, 0, 0, 0, 0, 0, 0, 0],
+			&boxed(b"infe", b"\x02\0\0\0\0\x01\0\0zzzz\0"),
+		);
+		iinf[4..8].copy_from_slice(&count.to_be_bytes());
+		let mut meta = vec![0; 4];
+		mp4_atom::Hdlr::default().encode(&mut meta).unwrap();
+		meta.extend(boxed(b"iinf", &iinf));
+		// Empty parameter sets in hvcC arrays, at most 65,535 to an array.
+		let mut hvcc = vec![1];
+		hvcc.extend_from_slice(&[0; 21]);
+		let arrays = (MAX_METADATA_BYTES - 256) / (3 + 2 * 65_535);
+		hvcc.push(arrays as u8);
+		for _ in 0..arrays {
+			hvcc.push(32);
+			hvcc.extend_from_slice(&65_535u16.to_be_bytes());
+			hvcc.resize(hvcc.len() + 2 * 65_535, 0);
+		}
+		let mut hvc1 = vec![0; 78];
+		hvc1.extend(boxed(b"hvcC", &hvcc));
+		// Empty FLAC Vorbis comments.
+		let (mut comments, count) = fill(vec![0; 8], &[0; 4]);
+		comments[4..8].copy_from_slice(&count.to_le_bytes());
+		let mut dfla = vec![0; 4];
+		dfla.extend_from_slice(&(0x8400_0000 | comments.len() as u32).to_be_bytes());
+		dfla.extend(comments);
+		let mut flac = vec![0; 28];
+		flac.extend(boxed(b"dfLa", &dfla));
+		for data in [boxed(b"meta", &meta), boxed(b"hvc1", &hvc1), boxed(b"fLaC", &flac)] {
+			let data = boxed(b"moov", &data);
+			check(&data).unwrap();
+			let (_, usage) = crate::allocation::measure(|| mp4_atom::Any::decode(&mut data.as_slice()));
+			assert!(usage.peak <= super::super::MAX_HELD_BYTES, "held {} bytes", usage.peak);
+		}
+	}
+
 	pub(crate) fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
 		let mut data = Vec::new();
 		mp4_atom::Header {
@@ -439,11 +572,20 @@ pub(crate) mod tests {
 			codecs.extend(boxed(b"free", &[]));
 		}
 		let codecs = boxed(b"stsd", &codecs);
+		// Spatial boxes keep each unmodelled child as an Any, outside Any's own dispatch.
+		let mut spatial = Vec::new();
+		for _ in 0..65_536 {
+			spatial.extend(boxed(b"free", &[]));
+		}
+		let mut entry = vec![0; 78];
+		entry.extend(boxed(b"vexu", &boxed(b"eyes", &spatial)));
+		let entry = boxed(b"avc1", &entry);
 		vec![
 			("large body", boxed(kind, &run).into()),
 			("small body, large count", boxed(kind, &group).into()),
 			("many tiny boxes", boxed(kind, &meta).into()),
 			("many tiny codec entries", boxed(kind, &codecs).into()),
+			("many tiny spatial children", boxed(kind, &entry).into()),
 		]
 	}
 
