@@ -923,7 +923,6 @@ the module lanes `just check` runs at once, sweep `--jobs 1 3` over
 Admission remains outside the suite's timeout clocks. Use separate checkouts to
 avoid measuring Cargo's artifact lock instead of competing work.
 
-
 ### Python socket sessions
 
 The Python binding runner also sweeps both TCP and track sockets over 1, 4,

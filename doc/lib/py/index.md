@@ -156,7 +156,6 @@ A catalog that needs a newer moq-hang draft than this build reads raises `Error.
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
 
-
 ## Socket sessions
 
 `moq.socket` connects endpoints through relays in either direction. Wire one
