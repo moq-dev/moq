@@ -16,9 +16,12 @@ use crate::{Error, Result, Timestamp};
 /// One range resolved to groups: from `start` up to the exclusive `end`, `None` while it
 /// stays open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::model) struct Resolved {
+pub(crate) struct Resolved {
 	pub start: u64,
 	pub end: Option<u64>,
+	/// Whether the start names a group, rather than reaching back to the oldest one (a
+	/// time start older than every group held, or the oldest start).
+	pub floored: bool,
 }
 
 /// The groups a publisher accounted for, which [`Window::covered_by`] checks against: a
@@ -863,9 +866,11 @@ impl Window {
 			.ranges
 			.iter()
 			.map(|range| match (range.start, range.end) {
-				(Anchor::Absolute(start), Some(Anchor::Absolute(end))) if range.is_empty() => {
-					Some(Resolved { start, end: Some(end) })
-				}
+				(Anchor::Absolute(start), Some(Anchor::Absolute(end))) if range.is_empty() => Some(Resolved {
+					start,
+					end: Some(end),
+					floored: true,
+				}),
 				_ => None,
 			})
 			.collect();
@@ -876,6 +881,7 @@ impl Window {
 					End::Before(end) => Some(end),
 					End::Open | End::Time(_) => None,
 				},
+				floored: span.floored,
 			});
 		}
 		resolved
@@ -1458,8 +1464,16 @@ mod tests {
 		assert_eq!(
 			window.resolved(),
 			vec![
-				Some(Resolved { start: 2, end: Some(4) }),
-				Some(Resolved { start: 7, end: None }),
+				Some(Resolved {
+					start: 2,
+					end: Some(4),
+					floored: true
+				}),
+				Some(Resolved {
+					start: 7,
+					end: None,
+					floored: true
+				}),
 			]
 		);
 		// Delivery starting inside a range raises its start; past its end leaves it none.
@@ -1518,13 +1532,27 @@ mod tests {
 		let window = Window::new(&[range(time(3500), time(4500))], Some(6), &groups).unwrap();
 		assert_eq!(covered(&window, 8), vec![3, 4]);
 		assert!(window.is_settled());
-		assert_eq!(window.resolved(), vec![Some(Resolved { start: 3, end: Some(5) })]);
+		assert_eq!(
+			window.resolved(),
+			vec![Some(Resolved {
+				start: 3,
+				end: Some(5),
+				floored: true
+			})]
+		);
 
 		// Group 6 may yet start at 5000 too: read on speculation, the end left open.
 		let window = Window::new(&[range(time(3500), time(5000))], Some(6), &groups).unwrap();
 		assert!(!window.is_settled());
 		assert_eq!(covered(&window, 9), vec![3, 4, 5, 6]);
-		assert_eq!(window.resolved(), vec![Some(Resolved { start: 3, end: None })]);
+		assert_eq!(
+			window.resolved(),
+			vec![Some(Resolved {
+				start: 3,
+				end: None,
+				floored: true
+			})]
+		);
 		assert_eq!(window.end(), None, "the cap is not the end");
 		assert_eq!(window.speculative().collect::<Vec<_>>(), vec![6]);
 
@@ -1665,13 +1693,15 @@ mod tests {
 		assert!(resolved[..split].iter().all(|r| *r
 			== Some(Resolved {
 				start: 0,
-				end: Some(count)
+				end: Some(count),
+				floored: true,
 			})));
-		assert!(
-			resolved[split..]
-				.iter()
-				.all(|r| *r == Some(Resolved { start: 0, end: None }))
-		);
+		assert!(resolved[split..].iter().all(|r| *r
+			== Some(Resolved {
+				start: 0,
+				end: None,
+				floored: true
+			})));
 
 		// Once a group starts past every end, they all settle.
 		groups.held.insert(count + 1, Held::Started(at(2_000_000)));
@@ -1855,7 +1885,14 @@ mod tests {
 			asked: Cell::new(false),
 		};
 		let window = Window::new(&[range(Anchor::Absolute(0), time(5000))], None, &racing).unwrap();
-		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(1) })]);
+		assert_eq!(
+			window.resolved(),
+			vec![Some(Resolved {
+				start: 0,
+				end: Some(1),
+				floored: true
+			})]
+		);
 	}
 
 	#[test]
@@ -1872,7 +1909,14 @@ mod tests {
 		assert_eq!(covered(&window, 5), vec![0, 1], "2 waits on 1 starting");
 		groups.held.insert(1, Held::Started(at(3600)));
 		window.settle(Some(3), &groups);
-		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(1) })]);
+		assert_eq!(
+			window.resolved(),
+			vec![Some(Resolved {
+				start: 0,
+				end: Some(1),
+				floored: true
+			})]
+		);
 	}
 
 	#[test]
@@ -1883,7 +1927,8 @@ mod tests {
 			window.resolved(),
 			vec![Some(Resolved {
 				start: u64::MAX,
-				end: None
+				end: None,
+				floored: true,
 			})]
 		);
 		assert!(window.contains(u64::MAX));
@@ -1911,7 +1956,8 @@ mod tests {
 				None,
 				Some(Resolved {
 					start: 20,
-					end: Some(21)
+					end: Some(21),
+					floored: true,
 				})
 			]
 		);
@@ -1922,12 +1968,23 @@ mod tests {
 		assert!(window.settle(Some(9), &groups));
 		assert_eq!(
 			window.resolved()[0],
-			Some(Resolved { start: 0, end: None }),
+			Some(Resolved {
+				start: 0,
+				end: None,
+				floored: false
+			}),
 			"3 starts past it"
 		);
 		groups.held.insert(2, Held::Started(at(2000)));
 		let window = Window::new(&ranges, Some(9), &groups).unwrap();
-		assert_eq!(window.resolved()[0], Some(Resolved { start: 2, end: None }));
+		assert_eq!(
+			window.resolved()[0],
+			Some(Resolved {
+				start: 2,
+				end: None,
+				floored: true
+			})
+		);
 		assert!(window.is_settled());
 
 		let groups = Groups {
@@ -1935,7 +1992,14 @@ mod tests {
 			..Groups::new(pending)
 		};
 		let window = Window::new(&ranges, Some(9), &groups).unwrap();
-		assert_eq!(window.resolved()[0], Some(Resolved { start: 0, end: None }));
+		assert_eq!(
+			window.resolved()[0],
+			Some(Resolved {
+				start: 0,
+				end: None,
+				floored: false
+			})
+		);
 	}
 
 	/// A relative end counts back from the latest group it was asked against, however many
@@ -1959,7 +2023,8 @@ mod tests {
 				window.resolved()[0],
 				Some(Resolved {
 					start: 2,
-					end: Some(10)
+					end: Some(10),
+					floored: true,
 				})
 			);
 		}
@@ -2040,7 +2105,14 @@ mod tests {
 		assert!(!window.is_settled() && !window.contains(9) && window.resolved() == [None]);
 		groups.held.insert(8, Held::Started(at(8000)));
 		assert!(window.found(at(8500), Some(8), &groups));
-		assert_eq!(window.resolved(), [Some(Resolved { start: 8, end: None })]);
+		assert_eq!(
+			window.resolved(),
+			[Some(Resolved {
+				start: 8,
+				end: None,
+				floored: true
+			})]
+		);
 		assert!(window.is_settled());
 
 		let window = Window::new(&[range(time(8500), None)], Some(9), &groups).unwrap();
@@ -2049,7 +2121,14 @@ mod tests {
 		let mut window = Window::new(&[range(time(500), None)], Some(9), &groups).unwrap();
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(at(500), 4)]);
 		assert!(window.found(at(500), None, &groups));
-		assert_eq!(window.resolved(), [Some(Resolved { start: 0, end: None })]);
+		assert_eq!(
+			window.resolved(),
+			[Some(Resolved {
+				start: 0,
+				end: None,
+				floored: false
+			})]
+		);
 		assert!(window.contains(4) && !window.missable(0).any(|run| *run.start() < 4));
 	}
 
@@ -2063,7 +2142,14 @@ mod tests {
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(at(500), 4)]);
 		assert!(window.found(at(500), None, &groups));
 		assert!(window.is_settled());
-		assert_eq!(window.resolved(), [Some(Resolved { start: 0, end: Some(4) })]);
+		assert_eq!(
+			window.resolved(),
+			[Some(Resolved {
+				start: 0,
+				end: Some(4),
+				floored: false
+			})]
+		);
 	}
 
 	/// Without a handler serving the history, the groups held decide alone.
@@ -2075,8 +2161,16 @@ mod tests {
 		assert_eq!(
 			window.resolved(),
 			[
-				Some(Resolved { start: 4, end: None }),
-				Some(Resolved { start: 0, end: None }),
+				Some(Resolved {
+					start: 4,
+					end: None,
+					floored: true
+				}),
+				Some(Resolved {
+					start: 0,
+					end: None,
+					floored: false
+				}),
 			]
 		);
 	}

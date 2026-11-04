@@ -16,8 +16,11 @@ import { max, min, saturatingSub, UNBOUNDED } from "./util/sequence.ts";
 /** A run of group sequences `[start, end)`; an open run ends at {@link UNBOUNDED}. */
 export type Run = { start: bigint; end: bigint };
 
-/** One range resolved to groups: from `start` up to the exclusive `end`, undefined while open. */
-export type Resolved = { start: bigint; end?: bigint };
+/**
+ * One range resolved to groups: from `start` up to the exclusive `end`, undefined while open.
+ * `floored` says whether the start names a group, rather than reaching back to the oldest one.
+ */
+export type Resolved = { start: bigint; end?: bigint; floored: boolean };
 
 /** Everything from the latest group onward. */
 export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0n }) });
@@ -685,12 +688,13 @@ export class Window {
 		const resolved: (Resolved | undefined)[] = this.ranges.map((range) => {
 			if (!isEmpty(range)) return undefined;
 			const end = absolute(range.end) ?? 0n;
-			return { start: (range.start && absolute(range.start)) ?? end, end };
+			return { start: (range.start && absolute(range.start)) ?? end, end, floored: true };
 		});
 		for (const span of this.#spans) {
 			resolved[span.index] = {
 				start: span.start,
 				end: span.end !== "open" && "before" in span.end ? span.end.before : undefined,
+				floored: span.floored,
 			};
 		}
 		return resolved;

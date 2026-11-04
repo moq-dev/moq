@@ -9,7 +9,8 @@ mod runs;
 mod window;
 pub(super) use runs::{Layered, Runs};
 pub(crate) use window::Accounted;
-pub(super) use window::{Containing, Held, Holdings, Resolved, Seen, Unheld, Window, later};
+pub(crate) use window::Resolved;
+pub(super) use window::{Containing, Held, Holdings, Seen, Unheld, Window, later};
 
 /// Subscriber-side preferences for receiving a track.
 ///

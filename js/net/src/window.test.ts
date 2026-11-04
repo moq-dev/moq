@@ -60,7 +60,11 @@ test("a window reads only its ranges, counting relative anchors back from the la
 		{ start: 1n, end: 4n },
 		{ start: 9n, end: 12n },
 	]);
-	expect(window.resolved()).toEqual([{ start: 2n, end: 4n }, { start: 9n }, { start: 0n, end: 3n }]);
+	expect(window.resolved()).toEqual([
+		{ start: 2n, end: 4n, floored: true },
+		{ start: 9n, floored: true },
+		{ start: 0n, end: 3n, floored: true },
+	]);
 });
 
 test("a relative anchor clamps to group 0 and waits for a first group", () => {
@@ -100,7 +104,7 @@ test("a wire without ranges carries one span covering them all", () => {
 
 test("clamping raises starts to the floor and caps ends without widening", () => {
 	const ranges: Range[] = [abs(1n, 9n), {}, { start: { relative: 2n }, end: { relative: 0n } }];
-	expect(clamped(ranges, 4n, 6n, [undefined, undefined, { start: 8n, end: 11n }])).toEqual([
+	expect(clamped(ranges, 4n, 6n, [undefined, undefined, { start: 8n, end: 11n, floored: true }])).toEqual([
 		abs(4n, 6n),
 		abs(4n, 6n),
 		abs(8n, 6n),
@@ -179,13 +183,13 @@ test("a time start is the group containing it, and an end stops past it once a l
 	let window = new Window([{ start: time(3500), end: time(4500) }], 6n, groups);
 	expect(covered(window, 8)).toEqual([3n, 4n]);
 	expect(window.settled).toBe(true);
-	expect(window.resolved()).toEqual([{ start: 3n, end: 5n }]);
+	expect(window.resolved()).toEqual([{ start: 3n, end: 5n, floored: true }]);
 
 	// Group 6 may yet start at 5000 too: read on speculation, the end left open.
 	window = new Window([{ start: time(3500), end: time(5000) }], 6n, groups);
 	expect(window.settled).toBe(false);
 	expect(covered(window, 9)).toEqual([3n, 4n, 5n, 6n]);
-	expect(window.resolved()).toEqual([{ start: 3n, end: undefined }]);
+	expect(window.resolved()).toEqual([{ start: 3n, end: undefined, floored: true }]);
 	expect(window.end()).toBeUndefined();
 
 	// Before every start held: reach back to the oldest.
@@ -219,7 +223,7 @@ test("a waiting time start keeps the relative end it was asked with", () => {
 
 		groups.held.set(2n, started(2000));
 		expect(window.settle(10n, groups)).toBe(true);
-		expect(window.resolved()).toEqual([{ start: 2n, end: 10n }]);
+		expect(window.resolved()).toEqual([{ start: 2n, end: 10n, floored: true }]);
 	}
 });
 
@@ -328,7 +332,7 @@ test("a datagram is judged by its own timestamp, one range at a time", () => {
 	]);
 	groups.gones.push({ start: 1n, end: 2n });
 	const settled = new Window([{ start: time(0), end: time(5000) }], undefined, groups);
-	expect(settled.resolved()).toEqual([{ start: 0n, end: 2n }]);
+	expect(settled.resolved()).toEqual([{ start: 0n, end: 2n, floored: true }]);
 	expect(settled.admitsDatagram(1n, Timestamp.fromMillis(4000))).toBe(true);
 	expect(settled.admitsDatagram(1n, Timestamp.fromMillis(7000))).toBe(false);
 
@@ -356,7 +360,7 @@ test("a time anchor needs moq-lite-07, is resolved by the copy, and clamps to it
 		{ start: time(5) },
 	]);
 	// Resolved anchors become their groups; an unresolved time end stays so the cap applies apart.
-	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [{ start: 3n, end: 7n }])).toEqual([
+	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [{ start: 3n, end: 7n, floored: true }])).toEqual([
 		{ start: { absolute: 3n }, end: { absolute: 7n } },
 	]);
 	expect(clamped([{ start: time(1), end: time(5) }], 2n, 9n, [])).toEqual([{ start: time(1), end: time(5) }]);

@@ -988,6 +988,43 @@ test("lite-07 keeps where an added time start resolved", async () => {
 	}
 });
 
+// Group 0 included: a time start that resolved to group 0 names it, so a newer group starting
+// before its time doesn't move it either.
+test("lite-07 keeps an added time start that resolved to group 0", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		prefill: [0n],
+		maxAge: Milli(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }],
+	});
+	const next = async () => {
+		for (;;) {
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if ("start" in resp || "started" in resp) return resp;
+		}
+	};
+	try {
+		if (!("start" in (await next()))) throw new Error("expected SUBSCRIBE_OK");
+
+		// 10 ms falls in group 0, the only group.
+		await replayUpdate({ priority: 0, ranges: [{ start: { time: 10 } }] }).encode(sub.client.writer, version);
+		const started = await next();
+		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
+		expect([started.started.id, started.started.start]).toEqual([1n, 0n]);
+
+		// Group 1 starts at 1 ms, before 10 ms; the range still starts at group 0.
+		sub.serve(1n);
+		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
+		if (!("started" in (await next()))) throw new Error("expected SUBSCRIBE_STARTED");
+		const ranges = sub.track.subscription.peek()?.ranges ?? [];
+		expect(ranges.some((range) => range.start?.time !== undefined)).toBe(false);
+		expect(ranges.some((range) => range.start?.absolute === 0n && range.end === undefined)).toBe(true);
+	} finally {
+		await sub.close();
+	}
+});
+
 // An edit naming a Range ID the subscription never assigned violates the protocol.
 test("lite-07 refuses an update retiring an unknown Range ID", async () => {
 	const version = Version.DRAFT_07;

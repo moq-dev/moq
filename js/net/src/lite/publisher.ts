@@ -397,14 +397,14 @@ class SubscriptionControls {
 
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
 // an update that leaves it live never counts its relative anchors back from a newer latest group,
-// nor looks a time start up again in newer holdings. A time start resolved at group 0 stays: it
-// either names group 0, below which nothing sits, or reaches back to the oldest group held,
-// which an absolute start would turn into a floor the subscriber never named.
+// nor looks a time start up again in newer holdings. A start reaching back to the oldest group
+// held stays as it was, since an absolute start would turn it into a floor the subscriber never
+// named.
 function pin(entry: RangeEntry, resolved: Resolved | undefined): RangeEntry {
 	if (!resolved) return entry;
 	const range = { ...entry.range };
 	let { from, to } = entry;
-	if (range.start?.relative !== undefined || (range.start?.time !== undefined && resolved.start > 0n)) {
+	if (resolved.floored && (range.start?.relative !== undefined || range.start?.time !== undefined)) {
 		range.start = { absolute: resolved.start };
 		from = [resolved.start, 0];
 	}

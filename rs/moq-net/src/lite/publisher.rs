@@ -4858,10 +4858,9 @@ impl TrackRun {
 	/// `ranges`, numbered by `ids`, with each range this subscription already held resolved
 	/// as it was: a range resolves once, so an update that leaves it live never counts its
 	/// relative anchors back from a newer latest group, nor looks a time start up again in
-	/// newer groups. A time start resolved at group 0 stays: it either names group 0, below
-	/// which nothing sits, or reaches back to the oldest group held, which an absolute start
-	/// would turn into a floor the subscriber never named. Lite-07 only: an older update
-	/// replaces every range.
+	/// newer groups. A start reaching back to the oldest group held stays as it was, since an
+	/// absolute start would turn it into a floor the subscriber never named. Lite-07 only: an
+	/// older update replaces every range.
 	fn pin(&mut self, ids: &[u64], mut ranges: Vec<lite::Range>) -> Vec<lite::Range> {
 		if !self.ctx.version.has_ranges() {
 			return ranges;
@@ -4869,22 +4868,17 @@ impl TrackRun {
 		let resolved = self.track.resolved();
 		let positions = self.positions();
 		for (id, range) in ids.iter().zip(&mut ranges) {
-			let Some((start, end)) = positions
+			let Some(resolved) = positions
 				.get(id)
 				.and_then(|index| resolved.get(*index).copied().flatten())
 			else {
 				continue;
 			};
-			let pinned = match range.start {
-				Some(lite::Anchor::Relative(_)) => true,
-				Some(lite::Anchor::Time(_)) => start > 0,
-				_ => false,
-			};
-			if pinned {
-				range.start = Some(lite::Anchor::Absolute(track::Position::group(start)));
+			if resolved.floored && matches!(range.start, Some(lite::Anchor::Relative(_) | lite::Anchor::Time(_))) {
+				range.start = Some(lite::Anchor::Absolute(track::Position::group(resolved.start)));
 			}
 			// An end resolves once it settles; until then it is reported open.
-			if let (Some(lite::Anchor::Relative(_) | lite::Anchor::Time(_)), Some(end)) = (range.end, end) {
+			if let (Some(lite::Anchor::Relative(_) | lite::Anchor::Time(_)), Some(end)) = (range.end, resolved.end) {
 				range.end = Some(lite::Anchor::Absolute(track::Position::group(end)));
 			}
 		}
@@ -4912,9 +4906,9 @@ impl TrackRun {
 		for id in std::mem::take(&mut self.unstarted) {
 			let index = *positions.get(&id).expect("unstarted ranges are live");
 			let start = match resolved.get(index).copied().flatten() {
-				Some((start, end)) => {
-					let start = start.max(from);
-					end.is_none_or(|end| end > start).then_some(start)
+				Some(resolved) => {
+					let start = resolved.start.max(from);
+					resolved.end.is_none_or(|end| end > start).then_some(start)
 				}
 				None if finished => None,
 				None => {
@@ -7173,50 +7167,73 @@ mod serve_group_test {
 		}
 		let live = [(0, first), (1, back)];
 		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
-		assert_eq!(run.track.resolved()[1], Some((2, None)), "the update resolved it again");
+		let resolved = run.track.resolved()[1].map(|r| (r.start, r.end));
+		assert_eq!(resolved, Some((2, None)), "the update kept where it started");
 	}
 
-	/// A time start resolves once too: a newer group starting before its time doesn't move it
-	/// once an update leaves the range live.
-	#[kio::test]
-	async fn lite07_an_added_time_start_keeps_its_start() {
+	/// Where an added time start `time` resolves among `groups` (sequence and start, in
+	/// milliseconds), before and after `newer` arrives and another update leaves it live, with
+	/// whether it names that group. The run serves group `first` first.
+	async fn time_start_across_an_update(
+		groups: &[(u64, u64)],
+		first: u64,
+		time: u64,
+		newer: (u64, u64),
+	) -> [(u64, bool); 2] {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
 			crate::track::Info::timed(),
 		);
-		for sequence in 0..5 {
-			write_group(&mut track, sequence, sequence * 1000);
+		for (sequence, millis) in groups {
+			write_group(&mut track, *sequence, *millis);
 		}
-		let first = lite::Range::span(Some(0), 0, Some(0), None);
+		let served = lite::Range::span(Some(first), 0, Some(first), None);
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
-				.with_range(0..1),
+				.with_range(first..first + 1),
 		);
 		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		while run.start.is_none() {
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 		}
-
-		// 4.5 s falls in group 4, the newest group starting at or before it.
 		let time = lite::Range {
-			start: Some(lite::Anchor::Time(4500)),
+			start: Some(lite::Anchor::Time(time)),
 			end: None,
 		};
-		run.update(lite07_add(&[(0, first)], 1, &[time]));
+		run.update(lite07_add(&[(0, served)], 1, &[time]));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(run.track.resolved()[1], Some((4, None)));
+		let before = run.track.resolved()[1].expect("resolved");
 
-		// Group 5 starts before 4.5 s, and another update leaves the range live: it still
-		// starts at 4.
-		write_group(&mut track, 5, 4200);
-		let live = [(0, first), (1, time)];
-		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
+		write_group(&mut track, newer.0, newer.1);
+		let live = [(0, served), (1, time)];
+		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(99), 0, None, None)]));
+		let after = run.track.resolved()[1].expect("resolved");
+		[(before.start, before.floored), (after.start, after.floored)]
+	}
+
+	/// A time start resolves once too: a newer group starting before its time doesn't move it
+	/// once an update leaves the range live, group 0 included. One older than every group held
+	/// still reaches back to the oldest, rather than becoming a floor at group 0.
+	#[kio::test]
+	async fn lite07_an_added_time_start_keeps_its_start() {
+		let five: Vec<_> = (0..5).map(|sequence| (sequence, sequence * 1000)).collect();
+		// 4.5 s falls in group 4, the newest starting at or before it, until group 5 starts at
+		// 4.2 s.
 		assert_eq!(
-			run.track.resolved()[1],
-			Some((4, None)),
-			"the update kept where it started"
+			time_start_across_an_update(&five, 0, 4500, (5, 4200)).await,
+			[(4, true), (4, true)]
+		);
+		// 1 s falls in group 0 until group 1 starts at 0.5 s.
+		assert_eq!(
+			time_start_across_an_update(&[(0, 0)], 0, 1000, (1, 500)).await,
+			[(0, true), (0, true)]
+		);
+		// 0.1 s is older than group 5, the oldest held.
+		assert_eq!(
+			time_start_across_an_update(&[(5, 5000)], 5, 100, (6, 6000)).await,
+			[(0, false), (0, false)]
 		);
 	}
 
