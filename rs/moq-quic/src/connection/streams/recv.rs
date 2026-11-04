@@ -412,11 +412,9 @@ impl Recv {
 /// Chunks returned from [`Stream::read()`].
 ///
 /// ### Note: Finalization Needed
-/// Bytes read from the stream are not released from the congestion window until
-/// either [`Self::finalize()`] is called, or this type is dropped.
-///
-/// It is recommended that you call [`Self::finalize()`] because it returns a flag
-/// telling you whether reading from the stream has resulted in the need to transmit a packet.
+/// Bytes read from the stream are not released from the receive window until
+/// either [`Self::finalize()`] is called, or this type is dropped. Returning credit wakes
+/// the connection's transmit waiter when the peer needs an update.
 ///
 /// If this type is leaked, the stream will remain blocked on the remote peer until
 /// another read from the stream is done.
@@ -531,7 +529,7 @@ impl<'a> Chunks<'a> {
 
 	/// Mark the read data as consumed from the stream.
 	///
-	/// The number of read bytes will be released from the congestion window,
+	/// The number of read bytes will be released from the receive window,
 	/// allowing the remote peer to send more data if it was previously blocked.
 	///
 	pub fn finalize(mut self) {

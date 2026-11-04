@@ -115,7 +115,7 @@ fn a_steered_group_serves_a_shared_port() {
 						.server(&[ALPN], quic::server::ClientAuth::None)
 						.expect("tls"),
 				);
-				let endpoint = quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server))
+				let endpoint = quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), socket)
 					.expect("endpoint");
 
 				handle.spawn(async move {
@@ -123,7 +123,7 @@ fn a_steered_group_serves_a_shared_port() {
 					// close is how the client learns this side accepted it.
 					while let Ok(conn) = endpoint.accept().await {
 						accepted[usize::from(shard.index())].fetch_add(1, Ordering::AcqRel);
-						conn.close(moq_uring::quic::VarInt::from_u32(0), b"done");
+						conn.close(moq_uring::quic::VarInt::from_u32(0), "done");
 					}
 				});
 				ready.send(()).expect("test alive");
