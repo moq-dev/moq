@@ -1781,36 +1781,9 @@ export class Subscriber {
 		void fill
 			.unwanted(sequence)
 			.then(() => cancel.abort(new StreamError(StreamCode.Cancel, { message: "cancel" })));
-		const signal = consumed.valid ? AbortSignal.any([consumed.valid, cancel.signal]) : cancel.signal;
-		let stream: Stream;
-		try {
-			if (this.#denied(broadcast)) throw unauthorized(broadcast);
-			const priority = fill.priority;
-			const maxDelay = fill.maxDelay ?? undefined;
-			const deadline = new Deadline();
-			stream = await deadline.wait(
-				this.#exchange(
-					{ sendOrder: sendOrder({ priority }), version: this.version },
-					async (stream) => {
-						await stream.writer.u53(StreamId.Fetch);
-						await new FetchMessage({
-							broadcast,
-							instance: consumed.instance,
-							track: name,
-							priority,
-							maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
-							group: sequence,
-						}).encode(stream.writer, this.version);
-						// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
-						await stream.reader.done();
-						return stream;
-					},
-					signal,
-					deadline,
-				),
-			);
-		} catch (err) {
-			if (!cancel.signal.aborted) fill.refuseGroups(sequence, sequence + 1n, error(err));
+		const stream = await this.#requestFill(broadcast, consumed, name, fill, sequence, cancel.signal);
+		if (!stream) {
+			cancel.abort();
 			return;
 		}
 		let group: netGroup.Producer;
@@ -1837,6 +1810,65 @@ export class Subscriber {
 			const e = error(err);
 			group.abort(e);
 			stream.abort(e);
+		}
+	}
+
+	// Open the FETCH for group `sequence` of `fill` once the session's grant admits it, and wait
+	// for the publisher's answer. A refusal answers the readers waiting now, unless the fill's
+	// budget widened since the FETCH carried it: a reader that joined meanwhile may reach what
+	// the narrower one could not, so it asks again. Undefined once refused, or once nobody waits.
+	async #requestFill(
+		broadcast: Path.Valid,
+		consumed: Consumed,
+		name: string,
+		fill: track.Fill,
+		sequence: bigint,
+		cancel: AbortSignal,
+	): Promise<Stream | undefined> {
+		const signal = consumed.valid ? AbortSignal.any([consumed.valid, cancel]) : cancel;
+		for (;;) {
+			const priority = fill.priority;
+			// Lite-07 FETCH carries the budget; older ones leave it to the publisher's max age.
+			const maxDelay = hasFetchMaxDelay(this.version) ? (fill.maxDelay ?? undefined) : undefined;
+			try {
+				// Wait for the grant as a subscribe or fetch does; nobody waiting ends the wait.
+				while (
+					(await this.#auth?.ready(broadcast, "subscribe", {
+						signal: consumed.valid,
+						until: () => fill.unwanted(sequence),
+					})) === false
+				) {
+					if (!fill.isWanted(sequence)) return undefined;
+				}
+				if (this.#denied(broadcast)) throw unauthorized(broadcast);
+				const deadline = new Deadline();
+				return await deadline.wait(
+					this.#exchange(
+						{ sendOrder: sendOrder({ priority }), version: this.version },
+						async (stream) => {
+							await stream.writer.u53(StreamId.Fetch);
+							await new FetchMessage({
+								broadcast,
+								instance: consumed.instance,
+								track: name,
+								priority,
+								maxDelay,
+								group: sequence,
+							}).encode(stream.writer, this.version);
+							// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+							await stream.reader.done();
+							return stream;
+						},
+						signal,
+						deadline,
+					),
+				);
+			} catch (err) {
+				if (cancel.aborted || !fill.isWanted(sequence)) return undefined;
+				if (maxDelay !== undefined && (fill.maxDelay ?? Number.POSITIVE_INFINITY) > maxDelay) continue;
+				fill.refuseGroups(sequence, sequence + 1n, error(err));
+				return undefined;
+			}
 		}
 	}
 

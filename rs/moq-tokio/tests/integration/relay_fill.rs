@@ -86,6 +86,17 @@ impl Relay {
 		Ok(count.parse()?)
 	}
 
+	/// FETCH group `sequence` from behind a downstream session of its own, returning its first
+	/// frame.
+	async fn fetch(&mut self, sequence: u64) -> anyhow::Result<String> {
+		self.command("dial", "dialed").await?;
+		let viewer = self.viewers.recv().await.context("no downstream session")?;
+		let remote = viewer.consume().follow("history", None)?.available().await?;
+		let mut group = remote.track("video")?.fetch_group(sequence, None).await?;
+		let frame = group.read_frame().await?.context("empty group")?;
+		Ok(String::from_utf8(frame.payload.to_vec())?)
+	}
+
 	/// A reader behind a downstream session of its own.
 	async fn subscribe(&mut self, subscription: Subscription) -> anyhow::Result<moq_net::track::Subscriber> {
 		self.command("dial", "dialed").await?;
@@ -95,10 +106,28 @@ impl Relay {
 	}
 }
 
-/// Every group `subscriber` hands out until it goes quiet, with its first frame.
-async fn received(subscriber: &mut moq_net::track::Subscriber) -> anyhow::Result<BTreeMap<u64, String>> {
+/// How long a reader must stay quiet once it has every group it wants, for a group past them
+/// to show up.
+const QUIET: Duration = Duration::from_millis(500);
+
+/// How long a reader waits for each group it still wants, inside the version's [`TIMEOUT`].
+const ARRIVAL: Duration = Duration::from_secs(10);
+
+/// The groups `subscriber` hands out, with their first frame: until it has every group in
+/// `want`, then until it goes quiet, so a group past them still shows.
+async fn received(
+	subscriber: &mut moq_net::track::Subscriber,
+	want: &BTreeMap<u64, String>,
+) -> anyhow::Result<BTreeMap<u64, String>> {
 	let mut got = BTreeMap::new();
-	while let Ok(group) = kio::clock::timeout(Duration::from_secs(1), subscriber.recv_group()).await {
+	loop {
+		let wait = match want.keys().all(|sequence| got.contains_key(sequence)) {
+			true => QUIET,
+			false => ARRIVAL,
+		};
+		let Ok(group) = kio::clock::timeout(wait, subscriber.recv_group()).await else {
+			return Ok(got);
+		};
 		let mut group = group?.ok_or_else(|| anyhow::anyhow!("the track ended"))?;
 		let frame = group
 			.read_frame()
@@ -111,7 +140,6 @@ async fn received(subscriber: &mut moq_net::track::Subscriber) -> anyhow::Result
 			group.sequence
 		);
 	}
-	Ok(got)
 }
 
 fn groups(range: std::ops::Range<u64>) -> BTreeMap<u64, String> {
@@ -164,7 +192,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	anyhow::ensure!(ready.as_deref() == Some("ready"), "the relay did not start: {ready:?}");
 
 	let expect = async |subscriber: &mut moq_net::track::Subscriber, want: BTreeMap<u64, String>, what: &str| {
-		let got = received(subscriber).await?;
+		let got = received(subscriber, &want).await?;
 		anyhow::ensure!(got == want, "{version} {what}: got {got:?}, wanted {want:?}");
 		anyhow::Ok(())
 	};
@@ -206,13 +234,24 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	// history arrives over the subscription, not through a FETCH the relay forwards past its
 	// copy. Before lite-06 the relay starts at the live edge, below which the reader's own copy
 	// FETCHes.
+	// From lite-06 none was forwarded. A FETCH of its own shows the count sees them at all.
+	let forwarded = relay.fetches().await?;
 	if version.alpn() != "moq-lite-05" {
-		let forwarded = relay.fetches().await?;
 		anyhow::ensure!(
 			forwarded == 0,
 			"{version}: the relay forwarded {forwarded} FETCHes past its copy"
 		);
 	}
+	anyhow::ensure!(
+		relay.fetch(2).await? == "group 2",
+		"{version}: the FETCH read the wrong group"
+	);
+	let counted = relay.fetches().await?;
+	anyhow::ensure!(
+		counted == forwarded + 1,
+		"{version}: the relay counted {counted} forwarded FETCHes, not {}",
+		forwarded + 1
+	);
 
 	drop((first, below, inside));
 	drop(relay);
