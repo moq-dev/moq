@@ -848,6 +848,10 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(Self::receive_window(self))
 	}
+	/// The connection's credit, which every WebTransport session on it shares.
+	fn stream_credit(&self, dir: moq_net::transport::Dir) -> Option<moq_net::transport::StreamCredit> {
+		Some(self.conn.stream_credit(dir))
+	}
 }
 
 /// Close the session: in web mode with a `CloseWebTransportSession` capsule

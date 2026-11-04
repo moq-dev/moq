@@ -1561,19 +1561,41 @@ fn streams_blocked() {
 	let mut pair = Pair::new(Default::default(), server);
 	let (client_ch, server_ch) = pair.connect();
 
-	// Use up the only stream slot, then try to open another
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 1);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
+
+	// Use up the only stream slot: out of credit, but not blocked until an open is refused
 	let s = pair
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.expect("first uni stream");
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 0);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
 	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
+	assert!(pair.client_streams(client_ch).blocked(Dir::Uni));
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Bi), "each direction blocks alone");
 
 	// Send data so the STREAMS_BLOCKED piggybacks on an outgoing packet
 	pair.client_send(client_ch, s).write(&mut &b"hi"[..]).unwrap();
+	pair.client_send(client_ch, s).finish().unwrap();
 	pair.drive();
 
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.streams_blocked_uni, 1);
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.streams_blocked_uni, 1);
+	// Still blocked once STREAMS_BLOCKED is sent: only the peer's MAX_STREAMS clears it
+	assert!(pair.client_streams(client_ch).blocked(Dir::Uni));
+
+	// The server reads the stream to its end, which frees the slot for a MAX_STREAMS
+	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
+	let mut recv = pair.server_recv(server_ch, s);
+	let mut chunks = recv.read().unwrap();
+	assert_matches!(chunks.next(usize::MAX), Ok(Some(_)));
+	assert_matches!(chunks.next(usize::MAX), Ok(None));
+	chunks.finalize();
+	pair.drive();
+
+	assert_eq!(pair.client_streams(client_ch).credit(Dir::Uni), 1);
+	assert!(!pair.client_streams(client_ch).blocked(Dir::Uni));
 }
 
 #[test]

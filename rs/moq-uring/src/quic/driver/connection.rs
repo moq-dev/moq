@@ -329,6 +329,17 @@ impl Connection {
 		let conn = self.shared.conn.borrow();
 		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
 	}
+
+	/// The peer's stream credit in `dir`, as this connection last heard it.
+	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
+		let dir = match dir {
+			moq_net::transport::Dir::Uni => Dir::Uni,
+			moq_net::transport::Dir::Bi => Dir::Bi,
+		};
+		let mut conn = self.shared.conn.borrow_mut();
+		let streams = conn.streams();
+		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
+	}
 }
 
 impl Clone for Connection {

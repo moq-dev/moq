@@ -164,6 +164,37 @@ impl ReceiveWindow {
 	}
 }
 
+/// Which streams a session opens: one-way, or both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+	/// Unidirectional streams.
+	Uni,
+	/// Bidirectional streams.
+	Bi,
+}
+
+/// The streams a peer still lets this side open in one direction, as the transport last heard.
+///
+/// A peer grants a bounded number of streams, and an open beyond them waits for it to grant
+/// more. A session reads this to tell an open waiting for that credit from one waiting on
+/// anything else. See [`poll::Session::stream_credit`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StreamCredit {
+	/// The streams this side may still open before the peer grants more.
+	pub available: u64,
+	/// Whether an open was refused for lack of credit since the peer last granted more, so
+	/// this side waits for the peer, as QUIC's STREAMS_BLOCKED says.
+	pub blocked: bool,
+}
+
+impl StreamCredit {
+	/// `available` streams left, `blocked` once an open was refused for lack of them.
+	pub fn new(available: u64, blocked: bool) -> Self {
+		Self { available, blocked }
+	}
+}
+
 /// The smallest connection receive window a transport that leases may offer: one 1 MiB
 /// storage segment.
 ///
@@ -363,6 +394,16 @@ pub mod poll {
 		/// stream holds, so it never pauses one: ingest reads every stream as it arrives and
 		/// sheds what its readers fall behind on.
 		fn receive_window(&self) -> Option<super::ReceiveWindow> {
+			None
+		}
+
+		/// Return the peer's stream credit in `dir`, or `None` when the transport cannot say,
+		/// as a browser's WebTransport cannot.
+		///
+		/// Read whenever an open waits, so the session knows whether the peer's credit is what
+		/// it waits for.
+		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+			let _ = dir;
 			None
 		}
 
@@ -569,6 +610,10 @@ pub mod poll {
 
 		fn receive_window(&self) -> Option<super::ReceiveWindow> {
 			(**self).receive_window()
+		}
+
+		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+			(**self).stream_credit(dir)
 		}
 	}
 

@@ -5,13 +5,19 @@
 //! grants to whichever waiting open polls first. Here the opens of one session queue instead,
 //! ranked exactly as the transport will send their streams, and only the first in line asks
 //! the transport for credit, so returning credit goes to the most important open.
+//!
+//! An open can also wait on something other than credit, such as a WebTransport stream's
+//! header, so the line asks the transport's [`StreamCredit`] whether the peer is what it waits
+//! for.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
+use super::boxed::{self, Transport};
 use super::poll::SendOptions;
+use super::{Dir, StreamCredit};
 
 /// Where an open ranks for credit: the order the transport will send its stream in.
 ///
@@ -56,10 +62,18 @@ impl Line {
 		self.waiting.keys().next().copied()
 	}
 
-	fn join(&mut self, rank: Rank) -> Key {
-		if self.waiting.is_empty() {
-			tracing::debug!("out of the peer's stream credit: opens wait in priority order");
+	/// Say why the line starts waiting: the peer's stream credit, unless the transport reports
+	/// otherwise.
+	fn start(credit: Option<StreamCredit>) {
+		match credit {
+			Some(credit) if !credit.blocked => {
+				tracing::debug!(available = credit.available, "opens wait in priority order for the transport")
+			}
+			_ => tracing::debug!("out of the peer's stream credit: opens wait in priority order"),
 		}
+	}
+
+	fn join(&mut self, rank: Rank) -> Key {
 		let key = Key {
 			rank: Reverse(rank),
 			arrival: self.arrivals,
@@ -77,7 +91,7 @@ impl Line {
 			self.wake_head();
 		}
 		if self.waiting.is_empty() {
-			tracing::debug!("no opens waiting for the peer's stream credit");
+			tracing::debug!("no opens waiting in line");
 		}
 	}
 
@@ -88,21 +102,23 @@ impl Line {
 	}
 }
 
-/// Which of a session's lines an open waits in.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Dir {
-	Uni,
-	Bi,
-}
-
 /// The lines of one session's opens, shared by every task opening on it.
-#[derive(Default)]
 pub(crate) struct Lines {
 	uni: Mutex<Line>,
 	bi: Mutex<Line>,
+	/// Whose stream credit the opens wait for.
+	pub(super) transport: Transport,
 }
 
 impl Lines {
+	pub(super) fn new(transport: Transport) -> Self {
+		Self {
+			uni: Default::default(),
+			bi: Default::default(),
+			transport,
+		}
+	}
+
 	fn line(&self, dir: Dir) -> std::sync::MutexGuard<'_, Line> {
 		let line = match dir {
 			Dir::Uni => &self.uni,
@@ -140,6 +156,7 @@ impl Open {
 				if let Poll::Ready(res) = open(waiter) {
 					return Poll::Ready(res);
 				}
+				Line::start(boxed::stream_credit(&lines.transport, dir));
 				let key = line.join(rank);
 				line.waiting.get_mut(&key).expect("just joined").register(waiter);
 				self.place = Some((lines.clone(), dir, key));
@@ -184,6 +201,14 @@ impl Drop for Open {
 		if let Some((lines, dir, key)) = self.place.take() {
 			lines.line(dir).leave(key);
 		}
+	}
+}
+
+#[cfg(test)]
+impl Default for Lines {
+	/// Lines without a transport, which therefore never says why they wait.
+	fn default() -> Self {
+		Self::new(std::sync::Weak::<boxed::Shared<super::memory::Session>>::new())
 	}
 }
 
@@ -335,6 +360,37 @@ mod tests {
 		credit.lock().unwrap().grant(1);
 		assert!(next.poll(&lines, &credit));
 		assert!(lines.line(Dir::Uni).waiting.is_empty());
+	}
+
+	/// A session reports the peer's stream credit through its line's transport, blocked once
+	/// an open in line was refused, and nothing once the transport is gone.
+	#[test]
+	fn the_line_reads_the_transports_credit() {
+		use super::super::{memory, poll::Session as _};
+
+		let (a, _b) = memory::pair(memory::Config {
+			max_concurrent_uni_streams: Some(1),
+			..Default::default()
+		});
+		let session = boxed::Session::new(a);
+		let waiter = kio::Waiter::noop();
+		let options = || SendOptions {
+			group: None,
+			priority: 0,
+		};
+		let mut first = Open::default();
+		let opened = session.poll_open_uni(&mut first, &waiter, options());
+		assert!(matches!(opened, Poll::Ready(Ok(_))));
+		assert_eq!(session.stream_credit(Dir::Uni), Some(StreamCredit::new(0, false)));
+
+		let mut second = Open::default();
+		assert!(session.poll_open_uni(&mut second, &waiter, options()).is_pending());
+		assert_eq!(session.stream_credit(Dir::Uni), Some(StreamCredit::new(0, true)));
+		let transport = session.opens.transport.clone();
+		assert_eq!(boxed::stream_credit(&transport, Dir::Uni), Some(StreamCredit::new(0, true)));
+
+		drop((second, session));
+		assert_eq!(boxed::stream_credit(&transport, Dir::Uni), None);
 	}
 
 	/// Ranked as the transport sends: outside every group before any group, then by priority.

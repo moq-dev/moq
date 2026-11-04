@@ -113,6 +113,10 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn receive_window(&self) -> Option<moq::ReceiveWindow> {
 		self.0.receive_window()
 	}
+
+	fn stream_credit(&self, dir: moq::Dir) -> Option<moq::StreamCredit> {
+		self.0.stream_credit(dir)
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {

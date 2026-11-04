@@ -1070,6 +1070,10 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(self.conn.receive_window())
 	}
+	/// The connection's credit, which every WebTransport session on it shares.
+	fn stream_credit(&self, dir: moq_net::transport::Dir) -> Option<moq_net::transport::StreamCredit> {
+		Some(self.conn.stream_credit(dir))
+	}
 }
 
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
@@ -1293,6 +1297,38 @@ mod tests {
 			async { crate::quic::web::Request::accept(server).await.unwrap().ok().await },
 		);
 		(client.unwrap(), server.unwrap())
+	}
+
+	/// Both session kinds report the connection's stream credit, blocked once an open waits for
+	/// the peer to grant more.
+	#[tokio::test]
+	async fn stream_credit_follows_the_connection() {
+		use moq_net::transport::{Dir, StreamCredit, poll::Session as _};
+
+		for framed in [false, true] {
+			let mut server_transport = crate::quic::driver::transport::Config::default();
+			server_transport.limits.max_streams = std::num::NonZeroU64::new(4);
+			let (client, server, _endpoints, _gate) =
+				gated_pair_with_transport(server_transport, Default::default()).await;
+			let (client, _server) = sessions(framed, client, server).await;
+
+			// HTTP/3 spends some of the credit on its own streams before the session starts.
+			let start = client.stream_credit(Dir::Bi).unwrap();
+			assert!(start.available > 0 && !start.blocked, "framed: {framed}");
+			let mut opened = Vec::new();
+			for left in (0..start.available).rev() {
+				opened.push(client.open_bi(send::Options::default()).await.unwrap());
+				assert_eq!(client.stream_credit(Dir::Bi), Some(StreamCredit::new(left, false)));
+			}
+			let pending = moq_net::transport::poll::Session::poll_open_bi(
+				&client,
+				&Waiter::noop(),
+				moq_net::transport::poll::SendOptions::default(),
+			);
+			assert!(pending.is_pending(), "framed: {framed}");
+			assert_eq!(client.stream_credit(Dir::Bi), Some(StreamCredit::new(0, true)));
+			assert!(!client.stream_credit(Dir::Uni).unwrap().blocked, "each direction blocks alone");
+		}
 	}
 
 	/// Once a read met the peer's reset, the close watch keeps reporting it rather than a clean end.

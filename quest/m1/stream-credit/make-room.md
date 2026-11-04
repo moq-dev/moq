@@ -21,9 +21,16 @@ Decided 2026-11-04 (maintainer):
 - **Cancel only as the fallback**, and the lowest-priority stream, not just
   idle ones. One reset in flight per waiting open, because credit returns
   only when the peer's MAX_STREAMS arrives, at least a round trip later.
-- **When.** Rust acts as soon as its QUIC stack reports it is blocked. JS
-  acts once an open has waited about one round trip, not a fixed time: a
-  fixed 100 ms is too long on a LAN and too short on mobile. The RTT comes
+- **When.** Rust acts as soon as the transport reports it is blocked:
+  `StreamCredit::blocked` from `poll::Session::stream_credit(dir)`, which
+  the open line in `rs/moq-net/src/transport/open.rs` already reads where it
+  starts waiting. moq-quic (raw QUIC and WebTransport), qmux and the memory
+  transport report it; a pending open alone does not say, since a
+  WebTransport open also waits on its stream header. JS over `@moq/qmux` acts
+  as soon as `Session.streamCredit(dir).blocked` says so. A browser's
+  WebTransport reports no credit, so there JS acts once an open has waited
+  about one round trip, not a fixed time: a fixed 100 ms is too long on a
+  LAN and too short on mobile. The RTT comes
   from WebTransport's `getStats()` when it reports one, else moq's own probe
   (`Probe.rtt`, as `js/net/src/connection/stats.ts` already falls back), and
   before any sample exists the maintainer's original 100 ms.

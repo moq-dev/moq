@@ -25,10 +25,13 @@ which JS cannot raise; Chrome stalled at 103, Firefox at 100):
 - ✅ Make room by taking over, else cancelling. Rejected: cancelling only
   (each reset frees credit only after the peer's MAX_STREAMS, a round trip
   later), and ordering waiting opens without making room.
-- Detecting the limit needs no library support: an open that is waiting is
-  the signal. Browsers keep `createUnidirectionalStream()` pending without
-  credit; moq-quic tracks its blocked state (it sends STREAMS_BLOCKED) and
-  `@moq/qmux` its `Credit`, and both expose it to the entry point.
+- ✅ Transports report the peer's stream credit and blocked state
+  (decided 2026-11-04, maintainer): moq-quic, Rust qmux and `@moq/qmux`
+  expose it, and the Rust entry point reads it through
+  `poll::Session::stream_credit`. Rejected: treating any waiting open as the
+  signal, since an open also waits on things other than credit. Browsers
+  report nothing and keep `createUnidirectionalStream()` pending without
+  credit, so there a waiting open stays the only signal.
 
 This epic owns the end-to-end test: a browser reader and a Rust relay over
 WebTransport, 300 live tracks of mixed priority, the highest-priority ones

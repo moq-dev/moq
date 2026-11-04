@@ -496,6 +496,18 @@ impl Connection {
 		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
 	}
 
+	/// The peer's stream credit in `dir`, as this connection last heard it.
+	#[cfg(feature = "net")]
+	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
+		let dir = match dir {
+			moq_net::transport::Dir::Uni => Dir::Uni,
+			moq_net::transport::Dir::Bi => Dir::Bi,
+		};
+		let mut state = self.0.state.lock();
+		let streams = state.inner.streams();
+		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
+	}
+
 	/// How many send streams the connection still holds state for
 	#[cfg(test)]
 	pub(crate) fn send_streams(&self) -> usize {

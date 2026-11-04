@@ -376,19 +376,25 @@ async fn the_peer_limits_concurrent_streams() {
 	let mut server = config(Version::QMux02);
 	server.limits.max_streams = std::num::NonZeroU64::new(1);
 	let (client, server) = pair(config(Version::QMux02), server).await;
+	let credit = |dir| client.stream_credit(dir).unwrap();
+	assert_eq!(credit(net::Dir::Uni), net::StreamCredit::new(1, false));
 
 	let mut first = client.open_uni(SendOptions::default()).await.unwrap();
+	assert_eq!(credit(net::Dir::Uni), net::StreamCredit::new(0, false));
 	let mut opening = std::pin::pin!(client.open_uni(SendOptions::default()));
 	assert!(
 		futures_poll_once(&mut opening).await.is_none(),
 		"no credit for a second stream"
 	);
+	assert_eq!(credit(net::Dir::Uni), net::StreamCredit::new(0, true));
+	assert_eq!(credit(net::Dir::Bi), net::StreamCredit::new(1, false), "per direction");
 
 	first.finish().unwrap();
 	let mut recv = server.accept_uni().await.unwrap();
 	read_all(&mut recv).await.unwrap();
 	drop(recv);
 	opening.await.expect("credit returned once the first stream is done");
+	assert!(!credit(net::Dir::Uni).blocked, "the peer's MAX_STREAMS unblocks");
 }
 
 /// Poll `future` once, after letting every other task run.

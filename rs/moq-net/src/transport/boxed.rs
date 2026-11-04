@@ -14,7 +14,7 @@ use bytes::{Buf, Bytes};
 
 use super::open::{self, Open};
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, Probe, ReceiveWindow, Wire};
+use super::{Address, CloseKind, Dir, Probe, ReceiveWindow, StreamCredit, Wire};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -25,19 +25,20 @@ pub(crate) struct Session {
 	/// Shared by every clone, so each task counts the subscriptions and fetches it carries.
 	work: crate::session::Work,
 	/// Shared by every clone, so every open waits for the peer's stream credit in one line.
-	opens: Arc<open::Lines>,
+	pub(super) opens: Arc<open::Lines>,
 }
 
 impl Session {
 	pub(crate) fn new<S: poll::Boxable>(session: S) -> Self {
+		let inner: Arc<Shared<dyn ErasedSession>> = Arc::new(Shared {
+			paused: AtomicU64::new(0),
+			session,
+		});
 		Self {
-			inner: Arc::new(Shared {
-				paused: AtomicU64::new(0),
-				session,
-			}),
+			opens: Arc::new(open::Lines::new(Arc::downgrade(&inner))),
+			inner,
 			closing: Default::default(),
 			work: Default::default(),
-			opens: Default::default(),
 		}
 	}
 
@@ -49,7 +50,7 @@ impl Session {
 		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<SendStream, Error>> {
-		open.poll(&self.opens, open::Dir::Uni, waiter, &options, |waiter| {
+		open.poll(&self.opens, Dir::Uni, waiter, &options, |waiter| {
 			self.inner.session.poll_open_uni(waiter, options)
 		})
 	}
@@ -62,7 +63,7 @@ impl Session {
 		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		open.poll(&self.opens, open::Dir::Bi, waiter, &options, |waiter| {
+		open.poll(&self.opens, Dir::Bi, waiter, &options, |waiter| {
 			self.inner.session.poll_open_bi(waiter, options, self.budget())
 		})
 	}
@@ -96,7 +97,7 @@ impl Session {
 }
 
 /// A boxed transport and the receive credit its paused streams hold.
-struct Shared<S: ?Sized> {
+pub(super) struct Shared<S: ?Sized> {
 	/// The stream credit reserved by streams this session stopped reading to pace a group's
 	/// writer, at most half the connection window; see [`ReceiveWindow`].
 	paused: AtomicU64,
@@ -122,6 +123,15 @@ impl Shared<dyn ErasedSession> {
 /// The session a stream reserves paused credit from, which a stream outliving it never keeps
 /// open: once it is gone, nothing is paused.
 type Budget = Weak<Shared<dyn ErasedSession>>;
+
+/// The transport a session's lines read the peer's stream credit from, which they never keep
+/// open.
+pub(super) type Transport = Weak<Shared<dyn ErasedSession>>;
+
+/// The peer's stream credit in `dir`, or `None` once the transport is gone or cannot say.
+pub(super) fn stream_credit(transport: &Transport, dir: Dir) -> Option<StreamCredit> {
+	transport.upgrade()?.session.stream_credit(dir)
+}
 
 /// A boxed transport error, keeping both code registries and the message.
 #[derive(Debug)]
@@ -310,7 +320,7 @@ impl super::Metrics for Metrics {
 	}
 }
 
-trait ErasedSession: Send + Sync {
+pub(super) trait ErasedSession: Send + Sync {
 	fn poll_accept_uni(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<RecvStream, Error>>;
 	fn poll_accept_bi(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<(SendStream, RecvStream), Error>>;
 	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>>;
@@ -332,6 +342,7 @@ trait ErasedSession: Send + Sync {
 	fn wire(&self) -> Option<Wire>;
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
+	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit>;
 }
 
 trait ErasedGroup: Send + Sync {
@@ -461,6 +472,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		poll::Session::receive_window(self)
+	}
+
+	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
+		poll::Session::stream_credit(self, dir)
 	}
 }
 
@@ -641,6 +656,10 @@ impl poll::Session for Session {
 
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		self.inner.session.receive_window()
+	}
+
+	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
+		self.inner.session.stream_credit(dir)
 	}
 }
 
