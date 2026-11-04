@@ -3746,7 +3746,7 @@ impl<E: CatalogExt> AacStream<E> {
 		let mut open = None;
 		let result = self.split(pending, batched, &mut open);
 		let closed = match (open, &mut self.import) {
-			(Some(end), Some(import)) => import.cut(end),
+			(Some(end), Some(import)) => import.cut(Some(end)),
 			_ => Ok(()),
 		};
 		let published = result?;
@@ -3754,9 +3754,10 @@ impl<E: CatalogExt> AacStream<E> {
 		Ok(published)
 	}
 
-	/// Publish the frames `pending` completes into one group, leaving `open` at `Some(end)` while it
-	/// is open, `end` being where its last frame stops.
-	fn split(&mut self, pending: Pending, batched: bool, open: &mut Option<Option<Timestamp>>) -> anyhow::Result<u64> {
+	/// Publish the frames `pending` completes into one group, leaving `open` at where its last frame
+	/// stops while it is open. A frame without a PTS is stamped by the producer, which checks only
+	/// where groups start, so it keeps a group of its own, as every frame once did.
+	fn split(&mut self, pending: Pending, batched: bool, open: &mut Option<Timestamp>) -> anyhow::Result<u64> {
 		let pes_base = on_clock(pending.pts, pending.offset)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -3894,7 +3895,7 @@ impl<E: CatalogExt> AacStream<E> {
 					"AAC format changed mid-stream, starting a new track"
 				);
 				if let Some(end) = open.take() {
-					import.cut(end)?;
+					import.cut(Some(end))?;
 				}
 				import.finish()?;
 				self.import = None;
@@ -3953,11 +3954,19 @@ impl<E: CatalogExt> AacStream<E> {
 			};
 
 			forward(&mut self.last, pts)?;
+			if pts.is_none()
+				&& let Some(end) = open.take()
+			{
+				import.cut(Some(end))?;
+			}
 			import.decode(block, pts)?;
 			// Count only completed frames; input gaps and unfinished tails are not a media burst.
 			burst += std::time::Duration::from_nanos((1024_u64 * 1_000_000_000).div_ceil(header.sample_rate as u64));
 			pts = advance_pts(pts, 1024, header.sample_rate)?;
-			*open = Some(pts);
+			match pts {
+				Some(end) => *open = Some(end),
+				None => import.cut(None)?,
+			}
 			self.resync.published(unvouched);
 			published += 1;
 			// Offsets behind the published frame are spent; carrying one would republish it.
@@ -4071,11 +4080,18 @@ impl OpusStream {
 			forward(&mut self.last, pts)?;
 			self.import.decode(packet, pts)?;
 			published += 1;
+			// The producer stamps a packet without a PTS and checks only where groups start, so it
+			// keeps a group of its own.
+			if pts.is_none() {
+				self.import.cut(None)?;
+			}
 		}
 		// One group per PES, at its known end: see `AacStream::write`. A failed decode ends the
 		// import, so there is no open group to close on that path.
-		if published > 0 {
-			self.import.cut(advance_pts(base, elapsed, 48_000)?)?;
+		if published > 0
+			&& let Some(end) = advance_pts(base, elapsed, 48_000)?
+		{
+			self.import.cut(Some(end))?;
 		}
 		Ok(published)
 	}
@@ -4351,7 +4367,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		let mut open = None;
 		let result = self.split(pending, &mut open);
 		let closed = match (open, &mut self.import) {
-			(Some(end), Some(import)) => import.cut(end),
+			(Some(end), Some(import)) => import.cut(Some(end)),
 			_ => Ok(()),
 		};
 		let published = result?;
@@ -4359,9 +4375,10 @@ impl<E: CatalogExt> LegacyStream<E> {
 		Ok(published)
 	}
 
-	/// Publish the frames `pending` completes into one group, leaving `open` at `Some(end)` while it
-	/// is open, `end` being where its last frame stops.
-	fn split(&mut self, pending: Pending, open: &mut Option<Option<Timestamp>>) -> anyhow::Result<u64> {
+	/// Publish the frames `pending` completes into one group, leaving `open` at where its last frame
+	/// stops while it is open. A frame without a PTS is stamped by the producer, which checks only
+	/// where groups start, so it keeps a group of its own, as every frame once did.
+	fn split(&mut self, pending: Pending, open: &mut Option<Timestamp>) -> anyhow::Result<u64> {
 		let mut published = 0;
 		let pes_base = on_clock(pending.pts, pending.offset)?;
 
@@ -4509,7 +4526,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					"audio format changed mid-stream, starting a new track"
 				);
 				if let Some(end) = open.take() {
-					import.cut(end)?;
+					import.cut(Some(end))?;
 				}
 				import.finish()?;
 				self.import = None;
@@ -4538,9 +4555,17 @@ impl<E: CatalogExt> LegacyStream<E> {
 			};
 
 			forward(&mut self.last, pts)?;
+			if pts.is_none()
+				&& let Some(end) = open.take()
+			{
+				import.cut(Some(end))?;
+			}
 			import.decode(&data[offset..end], pts)?;
 			pts = advance_pts(pts, header.samples, header.sample_rate)?;
-			*open = Some(pts);
+			match pts {
+				Some(end) => *open = Some(end),
+				None => import.cut(None)?,
+			}
 			self.resync.published(unvouched);
 			published += 1;
 			// Offsets behind the published frame are spent; carrying one would republish it.
@@ -4640,7 +4665,7 @@ fn skip_missing_keyframe(result: crate::Result<()>) -> anyhow::Result<bool> {
 
 /// Refuse an audio frame that starts below the last one its track published: a restart, which is
 /// a new broadcast. Audio never reorders, and the producer only checks where groups start, which
-/// is once a PES.
+/// is once a PES. A frame without a PTS is left to the producer, in a group of its own.
 fn forward(last: &mut Option<Timestamp>, pts: Option<Timestamp>) -> crate::Result<()> {
 	let Some(pts) = pts else {
 		return Ok(());
@@ -10036,6 +10061,50 @@ pub(super) mod test {
 			groups.push(fills);
 		}
 		assert_eq!(groups, [vec![0xA0, 0xA1, 0xA2], vec![0xB0, 0xB1, 0xB2]]);
+	}
+
+	/// A frame without a PTS is stamped by the producer, which checks only where groups start, so
+	/// each keeps a group of its own, unlike the PES that carries a PTS after them.
+	#[tokio::test(start_paused = true)]
+	async fn aac_untimed_frames_keep_a_group_each() {
+		const AAC_PID: u16 = 0x0060;
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
+			..Default::default()
+		};
+		let mut payload = Vec::new();
+		for i in 0..3 {
+			payload.extend_from_slice(&adts_frame(17, 0xA0 | i));
+		}
+		let cc = mux.cc(AAC_PID);
+		// The same PES with its PTS flag cleared: header length 0, five fewer bytes of PES.
+		let mut untimed = audio_pes_packet(AAC_PID, cc, 0, &payload);
+		let pes = untimed.iter().position(|&b| b == 0xc0).unwrap() - 3;
+		let len = u16::from_be_bytes([untimed[pes + 4], untimed[pes + 5]]) - 5;
+		untimed[pes + 4..pes + 6].copy_from_slice(&len.to_be_bytes());
+		untimed[pes + 7] = 0x00;
+		untimed[pes + 8] = 0x00;
+		untimed.drain(pes + 9..pes + 14);
+		// Refill the adaptation field so the packet stays 188 bytes.
+		untimed[4] += 5;
+		untimed.splice(6..6, std::iter::repeat_n(0xff, 5));
+		mux.out.extend_from_slice(&untimed);
+		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
+
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
+		let mut groups = Vec::new();
+		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
+			let mut fills = Vec::new();
+			while let Some(mut frame) = group.next_frame().await.unwrap() {
+				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
+				fills.extend(frame.payload.first().copied());
+			}
+			groups.push(fills);
+		}
+		assert_eq!(groups, [vec![0xA0], vec![0xA1], vec![0xA2]]);
 	}
 
 	/// PCR placement advances independently of the video's B-frame presentation reorder.

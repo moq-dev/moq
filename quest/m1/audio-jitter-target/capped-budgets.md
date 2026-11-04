@@ -2,12 +2,11 @@
 
 ## Goal
 
-Seven scheduled nightlies on `main`, all after the TS importer began publishing
-each PES as one group, show the AAC `bursty` browser rows discarding about as
-much audio a minute as the Opus `bursty` rows. `test/audio-quality/budgets.json`
-carries the six AAC browser rows' ceilings re-measured from them, by the rule in
-its note, and the note's sentence that the AAC rows predate the grouping is
-dropped.
+`test/audio-quality/budgets.json` carries the six AAC browser rows' ceilings
+re-measured, by the rule in its note, from seven scheduled nightlies on `main`
+that all ran after the TS importer began publishing each PES as one group, and
+the note's sentence that the AAC rows predate the grouping is dropped. Nearly
+every AAC frame on those nights arrives in order.
 
 ## Waiting
 
@@ -40,11 +39,14 @@ now one group, its frames in presentation order.
 On those nights, before the change, AAC `bursty` discarded up to 368.3 ms a
 minute against Opus `bursty`'s 117.4. Replaying their captures with each PES's
 arrival slots handed to its frames oldest first, as one group, halved the AAC
-`bursty` and `wide` discards (worst `bursty` night 362.7 to 190.1 ms a minute)
-and lowered both rows' target by 20 to 60 ms. That shallower target doubled AAC
+`bursty` and `wide` discards (`bursty` summed over the seven nights 1156 to 584
+ms a minute) and lowered both rows' target by 20 to 60 ms. That shallower target doubled AAC
 `wide`'s player re-stalls (mean 3.0 to 6.6 a minute), the 0.95 quantile's trade
 that [Watch](/quest/m1/audio-jitter-target/watch.md)'s time stretch absorbs.
 
-Grade the same `chromium-aac-*` rows. If AAC `bursty` still discards several
-times what Opus `bursty` does, compare the rows' `.arrivals.ndjson` captures:
-with one group per PES nearly every frame should arrive in order.
+AAC `bursty` still discards about three times what Opus `bursty` does (584
+against 174 summed), and parity is not expected: the harness keeps ffmpeg's
+default PES packing on purpose, so AAC frames reach the viewer a median 210 ms
+behind their media time on `bursty` against Opus's 41. Grade the same
+`chromium-aac-*` rows, and check the in-order claim with the share of each row's
+`.arrivals.ndjson` frames that arrive behind a newer one.
