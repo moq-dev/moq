@@ -51,8 +51,9 @@ group 2 under the open range and group 0 under a range capped before group
 conservative refill with bounded remembered ranges; treating every range
 update as invalidating in-flight drops.
 
-Decided 2026-11-03 (maintainer, /quest-unblock), with `Max Age` dropped and
-`Terms` renamed `Update` by the `/quest-complete` decisions below: lite-07
+Decided 2026-11-03 (maintainer, /quest-unblock), with `Max Age` dropped,
+`Terms` renamed `Update`, and SKIP narrowed to declared sequences by the
+`/quest-complete` decisions below: lite-07
 splits its hole message by whether the group ever existed. `SUBSCRIBE_SKIP {Group Start,
 Group End}` names sequences the publisher never produced, such as skipped
 sequence numbers or ones past a cut: it has no error code, ends no reader,
@@ -82,18 +83,50 @@ Decided 2026-11-03 (maintainer, /quest-complete), changing the design
   re-offers what the new terms cover and drops again, under the new Update,
   what is still stale. This replaces reopening only when the max delay widens
   past the drop's. A non-OLD drop is final, whatever its Update.
-- **SKIP comes from the publisher's own group creation, eagerly:** when a
-  local (non-received) track producer creates a group above the next
-  sequence, the gap is recorded as `Hole::Skip` at once, not judged stale
-  until the track ends, and `append_group` never leaves a gap. A later
-  `create_group` below the high-water mark still works and wins over the skip,
-  as a Group Stream wins over a drop: in-tree callers re-create aborted
-  sequences (`claim_sequence`) and deliver late lower groups, and 85 moq-net
-  tests rely on it, so refusing it was not chosen.
 - **`track::Producer::drop_groups` is crate-private.** `skip_groups` stays
-  public for moq-archive, whose replay names the sequences it holds nothing
-  for up to a recorded end above its last group; a SKIP, matching the gaps
-  between stored groups that eager skipping already names.
+  public (see the next decision).
+
+Decided 2026-11-03 (maintainer, /quest-complete), replacing the "eager SKIP"
+decision above and the PR's `## Waiting` item on out-of-order creation:
+
+- ✅ **SKIP comes only from an explicit, public `track::Producer::skip_groups`**,
+  and from `append_group` (below). Reason: producers legitimately create
+  groups out of order (`claim_sequence` re-creating an aborted sequence,
+  moq-mux and moq-c `seek`, `finish()`'s documented "older groups can still
+  arrive"), so a gap tells moq-net nothing; only the producer knows a
+  sequence will never exist. moq-archive's replay is the in-tree consumer of
+  `skip_groups`, for the sequences up to a recorded end it holds nothing
+  for; a producer that numbers sparsely would call it too. moq-mux's live
+  encoders use `append_group`. The relay forwards received SKIPs through the
+  crate-internal `give_up`.
+- ✅ **Both inferences are removed:** the eager skip of the gap in
+  `create_group`, and the automatic SKIP at finish for never-arrived
+  sequences below the final one (`TrackState::missed` and the publisher's
+  `drop_unserved`). An undeclared gap is judged stale against the reader's
+  budget, or named with DROP NOT_FOUND, as before this PR.
+- ✅ **SKIP is final:** creating a group (or appending a group or datagram)
+  at a skipped sequence is refused with `Error::Skipped` (JS `Skipped`).
+  Re-creating a dropped or aborted sequence still works.
+- ✅ **`append_group` is an implicit skip** (refinement, same session): it
+  means "the next group", so the producer declares it won't go back, and it
+  skips every sequence below it that never arrived and wasn't already given
+  up, as if `skip_groups` were called on them; those are then final. Today
+  `append_group` leaves no gap of its own, so this only fires on holes earlier
+  `create_group` calls left below the head; under time addressing it names
+  the span between consecutive starts. `create_group` stays non-committal,
+  so out-of-order creation (`claim_sequence` retries, `seek`) keeps working.
+  There is still no inference at finish.
+- ✅ **`skip_groups` stays public** and is documented as the explicit source
+  of SKIP; `drop_groups` stays crate-private. Rust and JS mirror each other
+  (`skipGroups`, `appendGroup`).
+- ✅ **Draft:** SKIP names only sequences the publisher declared it will never
+  produce, and it is final.
+- Not chosen: eager skip on `create_group` with a late group winning over
+  it (the shipped design, which inferred SKIP from a gap that out-of-order
+  creation makes meaningless); refusing every `create_group` below the last
+  group (broke `claim_sequence`, `seek` and 85 moq-net tests); keeping the
+  finish-time inference for a local producer (a gap at finish is no more a
+  declaration than one mid-stream).
 
 Decided 2026-10-27 (maintainer): this runs after the range count cost work,
 which finished in [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542),

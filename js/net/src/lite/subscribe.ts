@@ -874,7 +874,7 @@ export class SubscribeEnd {
  * no copy left, or stale.
  *
  * Draft-03+; publishers send it on Draft-05 and later. Before lite-07 it also names sequences
- * never produced, which lite-07 names in {@link SubscribeSkip}.
+ * declared skipped, which lite-07 names in {@link SubscribeSkip}.
  */
 export class SubscribeDrop {
 	start: bigint;
@@ -945,8 +945,8 @@ export class SubscribeDrop {
 }
 
 /**
- * Names sequences the publisher never produced, such as skipped sequence numbers or ones past a
- * cut: final, with no error, ending no reader. Lite-07+; earlier versions name them in a
+ * Names sequences the publisher declared it will never produce (see `Producer.skipGroups`):
+ * final, with no error, ending no reader. Lite-07+; earlier versions name them in a
  * {@link SubscribeDrop}.
  */
 export class SubscribeSkip {

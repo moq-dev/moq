@@ -742,7 +742,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 /// `start = 5, end = 7` means groups 5, 6, and 7 were dropped.
 ///
 /// Lite03+; publishers send it on Lite05 and later. Before lite-07 it also names sequences
-/// never produced, which lite-07 names in [`SubscribeSkip`].
+/// declared skipped, which lite-07 names in [`SubscribeSkip`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscribeDrop {
 	/// The first absolute group sequence in the dropped range.
@@ -836,8 +836,8 @@ impl<'a> Message<'a> for SubscribeDrop {
 	}
 }
 
-/// Names sequences the publisher never produced, such as skipped sequence numbers or ones
-/// past a cut: final, with no error, ending no reader.
+/// Names sequences the publisher declared it will never produce (see
+/// `track::Producer::skip_groups`): final, with no error, ending no reader.
 ///
 /// The range `[start, end]` is inclusive on both ends. Lite07+ only; earlier versions name
 /// them in a [`SubscribeDrop`].

@@ -63,13 +63,18 @@ a producer would need per-track memory of its last number.
   one FETCH per tick in the hole. Accepted: "This was a lingering problem.
   The entire point of (multiple) ranges is to avoid this issue."
 
-- **Eager skips** (decided 2026-11-03, maintainer, /quest-complete): a local
-  producer's `create_group` skips the gap it leaves above its last group at
-  once, and `append_group` never leaves one
-  ([moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)).
-  `append_group(timestamp)` follows the same rule: every start between the
-  previous group's and the new one is skipped when the group is created,
-  never judged stale later.
+- **Skips are declared, never inferred** (decided 2026-11-03, maintainer,
+  /quest-complete, replacing that day's "eager skips";
+  [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)). A gap tells
+  moq-net nothing, since groups may be created out of order. SKIP comes only
+  from the producer: an explicit `skip_groups`, or `append_group`, which
+  means "the next group" and so skips every key below it that never arrived
+  and was not given up, since the producer's last append. `create_group`
+  implies no skip. A skip is final: creating a group at a skipped key is
+  refused. Today `append_group` leaves no gap of its own, so its skip only
+  names holes earlier `create_group` calls left. `append_group(timestamp)`
+  keeps the rule, and there it names the span between consecutive starts:
+  every key between the previous group's start and the new one.
 
 Every current role of the sequence needs a replacement or a reason to drop
 it:

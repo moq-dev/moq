@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
 import { race } from "@moq/signals";
-import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Decoder } from "./flate/decoder.ts";
 import { Encoder } from "./flate/encoder.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -4853,24 +4853,37 @@ test("an errored end keeps its history", async () => {
 	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
 });
 
-// A local publisher creates its groups in order, so the gap a created group leaves is skipped at
-// once rather than waited for or judged stale; a reason already given keeps it. A received copy's
-// groups arrive in any order, so its gap is not skipped. Mirrors Rust.
-test("a local producer skips the gap a created group leaves at once", () => {
+// Creating a group says nothing about the gap it leaves: groups may be created out of order. An
+// append says the producer will not go back, so it skips every hole below it that was never
+// produced, keeping a reason already given. A received copy's groups arrive in any order, so its
+// gap is not skipped. Mirrors Rust.
+test("an append skips the holes created groups left below it", () => {
 	const producer = new TrackProducer("test");
 	producer.accept({});
 	const reader = producer.subscribe({ delay: { max: null } });
+	const drain = () => {
+		const got: unknown[] = [];
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
+			got.push(next.kind === "group" ? next.group.sequence : [next.start, next.end, next.skip === true]);
+		}
+		return got;
+	};
 	producer.createGroup(0n).finish();
-	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group", group: { sequence: 0n } });
 	hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED });
 	producer.createGroup(4n).finish();
-	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "drop", start: 1n, end: 2n, skip: true });
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2n, end: 3n, error: DROPPED });
-	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "drop", start: 3n, end: 4n, skip: true });
-	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group", group: { sequence: 4n } });
-	// A group appended next leaves no gap.
+	expect(drain()).toEqual([[2n, 3n, false], 0n, 4n]);
+
 	producer.appendGroup().finish();
-	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group", group: { sequence: 5n } });
+	expect(drain()).toEqual([[1n, 2n, true], [3n, 4n, true], 5n]);
+
+	// The next append only names what was left since this one.
+	producer.createGroup(7n).finish();
+	producer.appendGroup().finish();
+	expect(drain()).toEqual([[6n, 7n, true], 7n, 8n]);
 
 	const copy = new TrackProducer("test");
 	hooks.receiveTrack(copy);
@@ -4878,14 +4891,15 @@ test("a local producer skips the gap a created group leaves at once", () => {
 	const late = copy.subscribe({ delay: { max: null } });
 	copy.createGroup(0n).finish();
 	copy.createGroup(2n).finish();
+	copy.appendGroup().finish();
+	expect(hooks.tryRecvGroup(late, true)).toMatchObject({ kind: "group" });
 	expect(hooks.tryRecvGroup(late, true)).toMatchObject({ kind: "group" });
 	expect(hooks.tryRecvGroup(late, true)).toMatchObject({ kind: "group" });
 	expect(hooks.tryRecvGroup(late, true)).toEqual({ kind: "idle" });
 });
 
-// A late group the local publisher still creates in a skipped gap reaches a reader that has not
-// moved past it, as a group stream wins over a drop.
-test("a late local group wins over its skip for a reader that has not reported it", () => {
+// A late group created out of order reaches a reader, since creating a group skips nothing.
+test("a late local group reaches a reader, since creating out of order skips nothing", () => {
 	const producer = new TrackProducer("test");
 	producer.accept({});
 	producer.createGroup(0n).finish();
@@ -4895,6 +4909,42 @@ test("a late local group wins over its skip for a reader that has not reported i
 	const got: bigint[] = [];
 	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) got.push(group.sequence);
 	expect(got).toEqual([0n, 1n, 2n]);
+});
+
+// A skip is final: creating at a sequence an append or skipGroups skipped throws, while a dropped
+// sequence may be created again. skipGroups leaves cached and given-up sequences alone. Mirrors Rust.
+test("creating a skipped sequence throws Skipped", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({});
+	producer.createGroup(0n).finish();
+	producer.createGroup(3n).finish();
+	producer.appendGroup().finish();
+	expect(() => producer.createGroup(1n)).toThrow(Skipped);
+
+	producer.skipGroups(5n, 7n);
+	expect(() => producer.createGroup(6n)).toThrow(Skipped);
+	// The next sequence, 5, was skipped too.
+	expect(() => producer.appendGroup()).toThrow(Skipped);
+	// A dropped sequence may be created again.
+	hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED });
+	producer.createGroup(2n).finish();
+
+	const other = new TrackProducer("test");
+	other.accept({});
+	const reader = other.subscribe({ delay: { max: null } });
+	other.createGroup(1n).finish();
+	hooks.dropTrackGroups(other, 3n, 4n, { error: DROPPED });
+	other.skipGroups(0n, 5n);
+	const drops: unknown[] = [];
+	for (let next = hooks.tryRecvGroup(reader, true); next.kind !== "idle"; next = hooks.tryRecvGroup(reader, true)) {
+		if (next.kind === "drop") drops.push([next.start, next.end, next.skip === true]);
+	}
+	expect(drops).toEqual([
+		[0n, 1n, true],
+		[2n, 3n, true],
+		[3n, 4n, false],
+		[4n, 5n, true],
+	]);
 });
 
 // A received stale run is judged from where it meets the reader's span, as Rust clips it: a reader

@@ -335,7 +335,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x32  | GROUP_TOO_LARGE | The group grew past the publisher's cache budget and was aborted. |
 | ------- | ------------- | ----------- |
-|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A sequence its publisher never produced is named by SUBSCRIBE_SKIP instead; a relay that cannot tell whether its source produced one names it with NOT_FOUND. |
+|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A sequence its publisher declared it will never produce is named by SUBSCRIBE_SKIP instead; any other sequence a publisher never had, including a gap it never declared, is named with NOT_FOUND. |
 | ------- | ------------- | ----------- |
 |  0x34  | OLD | The group was superseded by a newer group and dropped. In SUBSCRIBE_DROP, the next SUBSCRIBE_UPDATE reopens it: the publisher re-offers the group or drops it again. |
 | ------- | ------------- | ----------- |
@@ -1569,8 +1569,8 @@ The publisher SHOULD send SUBSCRIBE_FINISH as soon as the exclusive final group 
 ## SUBSCRIBE_DROP {#subscribe-drop}
 
 A publisher names groups that existed but that it will not deliver with SUBSCRIBE_DROP on the Subscribe Stream: an aborted or reset group, one evicted or expired with no copy left to serve it, or one past the subscriber's budget (OLD).
-Sequences the publisher never produced are named by [SUBSCRIBE_SKIP](#subscribe-skip) instead.
-A relay cannot tell a sequence its source never produced from one it never received, so it names a sequence it never got in SUBSCRIBE_DROP with NOT_FOUND.
+Sequences the publisher declared it will never produce are named by [SUBSCRIBE_SKIP](#subscribe-skip) instead.
+A sequence the publisher never had but never declared skipped, such as a gap between the Groups it created or one a relay never received, might have existed, so it is named in SUBSCRIBE_DROP: with OLD when it is past the subscriber's budget, otherwise with NOT_FOUND.
 
 ~~~
 SUBSCRIBE_DROP Message {
@@ -1612,7 +1612,7 @@ Before moq-lite-07, SUBSCRIBE_DROP carries no `Update`, its Error Code is applic
 
 ## SUBSCRIBE_SKIP {#subscribe-skip}
 
-A publisher names sequences it never produced with SUBSCRIBE_SKIP on the Subscribe Stream: skipped sequence numbers, or ones past a cut.
+A publisher names sequences it declared it will never produce with SUBSCRIBE_SKIP on the Subscribe Stream.
 
 ~~~
 SUBSCRIBE_SKIP Message {
@@ -1623,13 +1623,17 @@ SUBSCRIBE_SKIP Message {
 }
 ~~~
 
-**Group Start** and **Group End** are the inclusive range of sequences that never held a group.
+**Group Start** and **Group End** are the inclusive range of sequences that will never hold a group.
 `Group Start = Group End + 1` is an empty range; a larger Group Start is a PROTOCOL_VIOLATION.
 
-A skip is final: no Group will ever exist at those sequences, whatever the terms.
+A skip names only sequences the original publisher declared it will never produce, and it is final: no Group will ever exist at those sequences, whatever the terms.
+A publisher MUST NOT later create a Group at a sequence it skipped, and a subscriber MUST NOT deliver a Group Stream for one.
 It carries no error and ends no reader, since there is nothing to read; a subscriber stops waiting for those sequences.
-A publisher SHOULD name a gap it leaves in its own sequence numbers as soon as it creates the Group above it, rather than judge the gap stale later.
-A relay forwards it unchanged; a relay that cannot tell whether its source produced a sequence uses SUBSCRIBE_DROP instead (see [SUBSCRIBE_DROP](#subscribe-drop)).
+
+A gap in the sequence numbers says nothing on its own: a publisher may create Groups out of order, or create again a sequence whose Group it aborted, so it never skips a sequence merely because a higher Group exists or the Track ended without it.
+Only the application producing the Track knows a sequence will never exist, for example when it numbers Groups sparsely, or when it moves on to the next Group and so declares that it will not go back to fill the sequences below.
+A publisher SHOULD send the skip as soon as it declares it.
+A relay forwards a skip it received unchanged, and never skips a sequence on its own: one it never received is named in SUBSCRIBE_DROP (see [SUBSCRIBE_DROP](#subscribe-drop)).
 
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
@@ -1955,7 +1959,7 @@ The `Message Length` describes the payload size on the wire.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_FINISH. Every sequence is accounted for by a Group Stream, a datagram, or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
 - Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it.
-- Added SUBSCRIBE_SKIP (type 0x3) for sequences the publisher never produced, which ends no reader and is final. SUBSCRIBE_DROP now names only groups that existed.
+- Added SUBSCRIBE_SKIP (type 0x3) for sequences the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped sequence. A gap in the sequence numbers is not a skip, since Groups may be created out of order; a sequence never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
 - Added `Update` to SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP: the number of the terms in effect. A stale (OLD) drop holds only under the update it names, judged against the budget the subscriber sent with it; every later SUBSCRIBE_UPDATE reopens it, and the publisher re-offers the group or drops it again under the new `Update`. Any other drop is final. A Group Stream wins over its earlier drop.
 - SUBSCRIBE_FINISH declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.

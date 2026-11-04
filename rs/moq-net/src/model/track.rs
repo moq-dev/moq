@@ -518,6 +518,14 @@ pub(crate) struct TrackState {
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
 	// one entry.
 	drops: RangeMap<u64, Hole>,
+	// What this track's own publisher produced since its last `append_group`, which skips
+	// every sequence below it that never arrived and was not given up: the producer moved on.
+	// Arrivals cannot say so, since a gap folds into them once nobody waits for it. Only
+	// sequences at or above `appended` are kept, so it holds the runs created since then.
+	produced: RangeSet<u64>,
+	// One past the last `append_group`: every sequence below it arrived, was given up, or
+	// was skipped.
+	appended: Option<u64>,
 	// Where the ranges a received copy's upstream judges stale runs against end: the
 	// exclusive end of its current terms, `None` past the live edge or unknown.
 	judged_end: Option<u64>,
@@ -1153,19 +1161,47 @@ impl TrackState {
 		self.change_drops(groups, Some(hole));
 	}
 
-	/// Why a run a reader's misses gave up will not come: never produced when this track's
-	/// own publisher ended without it ever arriving, whatever else judged it; otherwise stale
-	/// under `stale` when that is the verdict, or unknown, so simply not found.
-	fn missed(&self, run: &ops::Range<u64>, stale: Option<Duration>) -> Hole {
-		let never = !self.received
-			&& self.final_sequence().is_some_and(|fin| run.end <= fin)
-			&& self.arrivals.accounted(run.clone()).next().is_none()
-			&& self.lookup.range(run.clone()).next().is_none();
-		match (never, stale) {
-			(true, _) => Hole::Skip,
-			(false, Some(budget)) => Hole::stale(budget),
-			(false, None) => Hole::drop(StreamError::NotFound),
+	/// Whether the publisher declared `sequence` skipped: never produced, which is final.
+	fn skipped(&self, sequence: u64) -> bool {
+		self.drops.get(&sequence).is_some_and(|hole| *hole == Hole::Skip)
+	}
+
+	/// Skip what of `groups` is neither cached nor given up; see [`Producer::skip_groups`].
+	fn skip_groups(&mut self, groups: ops::Range<u64>) {
+		let mut left = RangeSet::new();
+		for gap in self.drops.gaps(&groups) {
+			left.insert(gap);
 		}
+		for (sequence, slot) in self.lookup.range(groups) {
+			if slot.visible
+				&& let Some(end) = sequence.checked_add(1)
+			{
+				left.remove(*sequence..end);
+			}
+		}
+		for run in left.iter().cloned().collect::<Vec<_>>() {
+			self.drop_groups(run, Hole::Skip);
+		}
+	}
+
+	/// Settle an append at `sequence`: skip every sequence below it that this track's own
+	/// publisher never produced and did not give up, from the lowest it produced since its
+	/// last append, since appending says it will not go back. A reason already given stands.
+	fn appended(&mut self, sequence: u64) {
+		if let Some(from) = self.appended.or(self.produced.iter().next().map(|run| run.start)) {
+			let mut left = RangeSet::new();
+			for gap in self.drops.gaps(&(from..sequence)) {
+				left.insert(gap);
+			}
+			for run in self.produced.iter() {
+				left.remove(run.clone());
+			}
+			for run in left.iter().cloned().collect::<Vec<_>>() {
+				self.drop_groups(run, Hole::Skip);
+			}
+		}
+		self.produced.clear();
+		self.appended = sequence.checked_add(1);
 	}
 
 	/// Forget every run held as stale; see [`Producer::supersede_stale`].
@@ -2192,6 +2228,12 @@ impl TrackState {
 	/// Record that the live feed delivered `sequence`, then fold the gaps that aged out.
 	fn record_arrival(&mut self, sequence: u64, now: crate::time::Instant) {
 		self.arrivals.arrive(sequence, now);
+		if !self.received
+			&& self.appended.is_none_or(|appended| sequence >= appended)
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			self.produced.insert(sequence..end);
+		}
 		// A feed still delivering keeps the gap above its last arrival open.
 		if self.tail.is_some() {
 			self.tail = Some(now);
@@ -3425,9 +3467,10 @@ impl Producer {
 
 	/// Create a new group with the given sequence number.
 	///
-	/// A gap it leaves above the last group is skipped at once: readers move past it without
-	/// waiting, and no reader ends. A group created in that gap later still reaches readers
-	/// that have not moved past it.
+	/// It says nothing about the sequences around it: groups may be created out of order, and
+	/// an aborted or evicted sequence created again. A gap it leaves is skipped only once the
+	/// producer says it will not fill it, with [`Self::skip_groups`] or [`Self::append_group`].
+	/// A sequence already skipped is refused with [`Error::Skipped`].
 	///
 	/// Readers and group demand reach it at once, but the track counts it as content (its
 	/// live edge, or the successor that ages the group before it) only once its first frame
@@ -3447,16 +3490,10 @@ impl Producer {
 		if state.sealed || state.final_sequence().is_some_and(|fin| info.sequence >= fin) {
 			return Err(Error::Closed);
 		}
-		// What this track's own publisher passes over when it creates a group is skipped at
-		// once, never judged stale; a received copy's groups arrive in any order. A late group
-		// it still creates below wins over its skip, as a group stream wins over a drop.
-		// A run already given up keeps its reason.
-		if !state.received && received.is_none() && state.max_sequence.is_some() {
-			let next = state.next_sequence()?;
-			let gaps: Vec<_> = state.drops.gaps(&(next..info.sequence)).collect();
-			for gap in gaps {
-				state.drop_groups(gap, Hole::Skip);
-			}
+		// A skip says the sequence will never be produced, so it is final. A drop is not: a
+		// publisher may re-create a group it cut or aborted.
+		if state.skipped(info.sequence) {
+			return Err(Error::Skipped);
 		}
 		let start = received.unwrap_or(0);
 		let content = if received.is_some() {
@@ -3486,6 +3523,12 @@ impl Producer {
 
 	/// Create a new group with the next sequence number: one past this producer's own writes.
 	///
+	/// Appending says the producer will not go back, so it skips every sequence below the new
+	/// group that it never produced and did not give up, from the lowest it produced since
+	/// its last append, as [`Self::skip_groups`] would. Those sequences are then final: creating
+	/// one is refused. Appending alone never leaves such a gap; one left by out-of-order
+	/// [`Self::create_group`] calls is what it names.
+	///
 	/// The broadcast remembers nothing of an earlier producer of the name, so a replacement
 	/// starts at 0. Since a name always means the same content, a replacement continues past
 	/// its predecessor's groups with [`Self::create_group`].
@@ -3497,6 +3540,9 @@ impl Producer {
 		{
 			return Err(Error::Closed);
 		}
+		if state.skipped(sequence) {
+			return Err(Error::Skipped);
+		}
 
 		let track = state.info.clone().unwrap();
 
@@ -3504,6 +3550,7 @@ impl Producer {
 			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
+		state.appended(sequence);
 		let deferred = state.deferred();
 		drop(state);
 		deferred.wake();
@@ -3544,6 +3591,9 @@ impl Producer {
 			&& sequence >= fin
 		{
 			return Err(Error::Closed);
+		}
+		if state.skipped(sequence) {
+			return Err(Error::Skipped);
 		}
 		state.advance(sequence, false);
 		state.cache.finish_largest(sequence);
@@ -3813,15 +3863,23 @@ impl Producer {
 		self.give_up(groups, Hole::drop(err));
 	}
 
-	/// Record that the publisher never produced `groups`: none will arrive, so a reader
+	/// Declare that this producer will never produce `groups`: none will arrive, so a reader
 	/// waiting on one moves past it, the declared end does not wait for them, and a relay
-	/// serving this track forwards the skip. Unlike a drop, it ends no reader.
+	/// serving this track forwards the skip (lite-07 SUBSCRIBE_SKIP). Unlike a drop, it ends
+	/// no reader.
 	///
-	/// A gap below a created group is skipped already, since a publisher creates its groups
-	/// in order. This names the rest, such as sequences between the last group and an end
-	/// declared ahead of it that will never be produced.
+	/// This and [`Self::append_group`] are the only sources of a skip: a gap between created
+	/// groups says nothing, since groups may be created out of order, so only the producer
+	/// knows a sequence will never exist. A skip is final: creating a group at a skipped
+	/// sequence is refused with [`Error::Skipped`]. A sequence already produced or given up
+	/// keeps what it is.
 	pub fn skip_groups(&self, groups: ops::Range<u64>) {
-		self.give_up(groups, Hole::Skip);
+		if let Ok(mut state) = self.modify() {
+			state.skip_groups(groups);
+			let deferred = state.deferred();
+			drop(state);
+			deferred.wake();
+		}
 	}
 
 	/// Forget every run held as stale: the terms a received copy's upstream judged them
@@ -7165,9 +7223,8 @@ impl Cursor {
 		if self.drops.is_none() {
 			let mut drops = Box::new(DropCursor::new(&self.state.read()));
 			if let Some(misses) = &self.misses {
-				let state = self.state.read();
 				for run in misses.given_up().iter() {
-					drops.give_up(run.clone(), state.missed(run, None));
+					drops.give_up(run.clone(), Hole::missed(None));
 				}
 			}
 			self.drops = Some(drops);
@@ -7907,9 +7964,8 @@ impl Cursor {
 			misses.expire(&self.state.read(), drift, &mut given_up, waiter);
 		}
 		if let Some(drops) = &mut self.drops {
-			let state = self.state.read();
 			for (run, stale) in given_up {
-				drops.give_up(run.clone(), state.missed(&run, stale));
+				drops.give_up(run.clone(), Hole::missed(stale));
 			}
 		}
 		// A refusal taken in may move a time end walking history past it, widening what
@@ -7927,9 +7983,8 @@ impl Cursor {
 		let mut given_up = Vec::new();
 		let group = misses.next_filled(&self.state.read(), order, &mut given_up);
 		if let Some(drops) = &mut self.drops {
-			let state = self.state.read();
 			for (run, stale) in given_up {
-				drops.give_up(run.clone(), state.missed(&run, stale));
+				drops.give_up(run.clone(), Hole::missed(stale));
 			}
 		}
 		group
@@ -9486,17 +9541,6 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => clamp_max_delay(budget, cursor.state.read().max_age_bound()),
 			Inner::Resume(..) => budget,
-		}
-	}
-
-	/// Whether this subscriber reads a copy received from a remote publisher, which cannot
-	/// tell a group its source never produced from one it never received. A front's reader
-	/// always reads its routes' copies.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn is_received(&self) -> bool {
-		match &self.inner {
-			Inner::Plain(cursor) => cursor.state.read().received,
-			Inner::Resume(..) => true,
 		}
 	}
 
@@ -23413,35 +23457,128 @@ mod test {
 		);
 	}
 
-	/// A local publisher creating a group past the next sequence skips the gap at once: a
-	/// reader is told without waiting for any budget or grace, and no reader ends. A late
-	/// group the publisher still creates in the gap wins over the skip, as a group stream wins
-	/// over a drop, so a reader takes it once.
+	/// Creating a group past the next sequence says nothing about the gap: groups may be
+	/// created out of order, so a late one in it still reaches readers, and nothing is skipped.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_local_gap_is_skipped_once_a_group_above_it_is_created() {
+	fn creating_a_group_past_a_gap_skips_nothing() {
 		let producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		let waiter = kio::Waiter::noop();
 		write_group(&producer, 2);
 		write_group(&producer, 5);
-		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((3..5, Hole::Skip)));
+		assert!(producer.state.read().drops.is_empty());
+		assert!(subscriber.poll_drop(&waiter).is_pending());
 		assert_eq!(drain_groups(&mut subscriber), [2, 5]);
 
 		write_group(&producer, 4);
-		assert!(
-			!producer.state.read().drops.contains_key(&4),
-			"the group wins over its skip"
-		);
 		assert_eq!(drain_groups(&mut subscriber), [4]);
-		let mut late = producer.subscribe(replay().with_range(0..));
-		assert_eq!(drained_drops(&mut late), [(3, 4)]);
-		let mut read = drain_groups(&mut late);
-		read.sort();
-		assert_eq!(read, [2, 4, 5]);
+		assert!(producer.state.read().drops.is_empty());
 	}
 
-	/// Appending leaves no gap, and nothing below a track's first group is skipped.
+	/// Appending says the producer will not go back: every sequence below the new group it
+	/// never produced since its first group is skipped, and readers are told at once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn appending_skips_the_holes_below_it() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		let waiter = kio::Waiter::noop();
+		write_group(&producer, 2);
+		write_group(&producer, 5);
+		write_group(&producer, 7);
+		producer.append_group().unwrap().finish().unwrap();
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((3..5, Hole::Skip)));
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((6..7, Hole::Skip)));
+		assert_eq!(drain_groups(&mut subscriber), [2, 5, 7, 8]);
+
+		// The next append only names what was left since this one.
+		write_group(&producer, 10);
+		producer.append_group().unwrap().finish().unwrap();
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((9..10, Hole::Skip)));
+		let skipped: Vec<_> = producer
+			.state
+			.read()
+			.drops
+			.iter()
+			.map(|(run, hole)| (run.clone(), hole.clone()))
+			.collect();
+		assert_eq!(skipped, [(3..5, Hole::Skip), (6..7, Hole::Skip), (9..10, Hole::Skip)]);
+	}
+
+	/// A sequence already given up keeps its reason when an append skips around it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn appending_keeps_a_reason_already_given() {
+		let producer = track_producer("test", Info::timed());
+		write_group(&producer, 0);
+		write_group(&producer, 4);
+		producer.give_up(1..2, Hole::drop(StreamError::Cancel));
+		producer.append_group().unwrap().finish().unwrap();
+		let drops: Vec<_> = producer
+			.state
+			.read()
+			.drops
+			.iter()
+			.map(|(run, hole)| (run.clone(), hole.clone()))
+			.collect();
+		assert_eq!(drops, [(1..2, Hole::drop(StreamError::Cancel)), (2..4, Hole::Skip)]);
+	}
+
+	/// A skip is final: creating a group at a sequence an append or `skip_groups` skipped is
+	/// refused, while a dropped one may be created again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn creating_a_skipped_sequence_is_refused() {
+		let producer = track_producer("test", Info::timed());
+		write_group(&producer, 0);
+		write_group(&producer, 3);
+		producer.append_group().unwrap().finish().unwrap();
+		assert!(matches!(
+			producer.create_group(group::Info { sequence: 1 }),
+			Err(Error::Skipped)
+		));
+
+		producer.skip_groups(5..7);
+		assert!(matches!(
+			producer.create_group(group::Info { sequence: 6 }),
+			Err(Error::Skipped)
+		));
+		// The next sequence, 5, was skipped too.
+		assert!(matches!(producer.append_group(), Err(Error::Skipped)));
+		// A dropped sequence may be created again.
+		producer.give_up(2..3, Hole::drop(StreamError::Cancel));
+		write_group(&producer, 2);
+	}
+
+	/// `skip_groups` leaves a cached group and a reason already given alone.
+	#[test]
+	#[cfg(feature = "async")]
+	fn skipping_leaves_produced_and_given_up_sequences() {
+		let producer = track_producer("test", Info::timed());
+		write_group(&producer, 1);
+		producer.give_up(3..4, Hole::drop(StreamError::Cancel));
+		producer.skip_groups(0..5);
+		let drops: Vec<_> = producer
+			.state
+			.read()
+			.drops
+			.iter()
+			.map(|(run, hole)| (run.clone(), hole.clone()))
+			.collect();
+		assert_eq!(
+			drops,
+			[
+				(0..1, Hole::Skip),
+				(2..3, Hole::Skip),
+				(3..4, Hole::drop(StreamError::Cancel)),
+				(4..5, Hole::Skip)
+			]
+		);
+	}
+
+	/// Appending and a first group leave no gap, so they skip nothing; nor is anything below
+	/// a track's first group skipped.
 	#[test]
 	#[cfg(feature = "async")]
 	fn appending_and_a_first_group_skip_nothing() {

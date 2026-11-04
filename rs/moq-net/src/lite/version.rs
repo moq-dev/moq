@@ -297,7 +297,7 @@ impl Version {
 		)
 	}
 
-	/// Whether holes split into SUBSCRIBE_SKIP, for sequences never produced, and
+	/// Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
 	/// SUBSCRIBE_DROP, for groups that existed, which names the `Update` in effect when it was
 	/// given up; SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07;
 	/// earlier versions name every hole in SUBSCRIBE_DROP.

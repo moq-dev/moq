@@ -406,6 +406,25 @@ function localStreamCode(err: unknown): StreamCode {
 }
 
 /**
+ * A group was created at a sequence its track declared skipped.
+ *
+ * A skip says the sequence will never be produced, so it is final. See
+ * {@link TrackProducer.skipGroups}. Mirrors the Rust `Error::Skipped`.
+ *
+ * @public
+ */
+export class Skipped extends Error {
+	/** The sequence that was refused. */
+	readonly sequence: bigint;
+
+	constructor(sequence: bigint) {
+		super(`sequence ${sequence} was skipped`);
+		this.name = "Skipped";
+		this.sequence = sequence;
+	}
+}
+
+/**
  * The transport refused a request stream or failed to grant stream credit before its deadline.
  *
  * This local failure is terminal and has no wire code. The request is not retried.

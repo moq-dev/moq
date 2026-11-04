@@ -4747,8 +4747,8 @@ impl TrackRun {
 	}
 
 	/// Name every sequence from the start to the end that this subscription never got. The
-	/// track has ended, so none of them will be served now: groups it never produced (a
-	/// skipped sequence), and groups the cursor passed over (stale, or missing their head).
+	/// track has ended, so none of them will be served now: groups the cursor passed over
+	/// (stale, or missing their head), and gaps the publisher never declared skipped.
 	///
 	/// Returns whether any drop was buffered.
 	fn drop_unserved(
@@ -4770,12 +4770,9 @@ impl TrackRun {
 		// Only the groups the ranges name: one between disjoint ranges is not owed, and
 		// naming it would keep a later update widening over it from delivering it.
 		let end = self.track.subscription().end().map_or(fin, |end| end.min(fin));
-		// The track's own publisher knows a group it never reported is one it never produced;
-		// a relay cannot tell what its source held.
-		let hole = match self.track.is_received() {
-			false => Hole::Skip,
-			true => Hole::drop(StreamError::NotFound),
-		};
+		// A sequence the publisher declared skipped went out as a skip already; one it never
+		// declared might have existed, so it is not found.
+		let hole = Hole::drop(StreamError::NotFound);
 		let mut dropped = false;
 		for run in self.track.runs_in_range(start, end) {
 			dropped |= self.drop_range(run, &hole, writer)?;
@@ -6822,10 +6819,10 @@ mod serve_group_test {
 		}
 	}
 
-	/// A sequence the publisher never produced is accounted for by SKIP rather than a stream
-	/// count.
+	/// A gap the publisher never declared might have existed, so the end names it with a
+	/// DROP rather than a SKIP: here the reader passed it, so it is stale.
 	#[kio::test]
-	async fn lite07_end_skips_sequences_never_produced() {
+	async fn lite07_end_drops_an_undeclared_gap() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -6841,8 +6838,36 @@ mod serve_group_test {
 		track.finish().unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 
-		// SUBSCRIBE_START with the range starting at 0, a SKIP for group 1, which the end
-		// gives up on at once, and SUBSCRIBE_FINISH at 3.
+		// SUBSCRIBE_START with the range starting at 0, a DROP for group 1 with OLD (0x34)
+		// under update 0, which the end gives up on at once, and SUBSCRIBE_FINISH at 3.
+		assert_eq!(
+			*log.writes.lock().unwrap(),
+			[0, 4, 1, 0, 1, 1, 2, 4, 1, 1, 0x34, 0, 1, 2, 3, 0]
+		);
+	}
+
+	/// A sequence the publisher declared it will never produce is accounted for by SKIP
+	/// rather than a stream count.
+	#[kio::test]
+	async fn lite07_skips_a_declared_skip() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut writer, waiter)));
+
+		write_group(&mut track, 0, 0);
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		write_group(&mut track, 2, 2);
+		track.skip_groups(1..2);
+		track.finish().unwrap();
+		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
+
+		// SUBSCRIBE_START with the range starting at 0, a SKIP for group 1, and
+		// SUBSCRIBE_FINISH at 3.
 		assert_eq!(*log.writes.lock().unwrap(), [0, 4, 1, 0, 1, 1, 3, 2, 1, 1, 1, 2, 3, 0]);
 	}
 
@@ -7628,10 +7653,8 @@ mod serve_group_test {
 			run.await.unwrap();
 		}
 		// Group 2 arrived before the subscription, but it is cached, so the lowered start
-		// serves it and the drops name only what is missing around it. The publisher skipped
-		// 3 and 4 when it created group 5, so they go out once the lowered start reaches them,
-		// before the end names the rest.
-		assert_eq!(drops(&mut writer, &log, version).await, [(3, 4), (0, 1), (6, 6)]);
+		// serves it and the drops name only what is missing around it.
+		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 4), (6, 6)]);
 	}
 
 	/// A lowered start restarts the age of the gaps it newly asks for, as the subscriber does,

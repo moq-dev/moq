@@ -31,7 +31,6 @@ import {
 	type Run,
 	removeRun,
 	runGaps,
-	skipHole,
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -1589,11 +1588,11 @@ export class Publisher {
 						// Name every sequence from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startSequence !== undefined) {
-							// The track's own publisher knows a group it never reported is one it never
-							// produced; a relay cannot tell what its source held.
-							const unserved: Hole = hooks.isReceived(track)
-								? { error: new StreamError(StreamCode.NotFound, { message: "group not served" }) }
-								: skipHole();
+							// A sequence the publisher declared skipped went out as a skip already; one
+							// it never declared might have existed, so it is not found.
+							const unserved: Hole = {
+								error: new StreamError(StreamCode.NotFound, { message: "group not served" }),
+							};
 							// Only the groups inside the ranges are owed.
 							for (const run of hooks.servingRuns(track, startSequence, boundary())) {
 								if (!(await drop(run.start, run.end, unserved))) return false;

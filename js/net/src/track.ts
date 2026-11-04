@@ -11,6 +11,7 @@ import { Delivered } from "./delivered.ts";
 import {
 	GroupTooLarge,
 	ProtocolViolation,
+	Skipped,
 	StreamCode,
 	StreamError,
 	TimestampMismatch,
@@ -766,8 +767,6 @@ let startsOf: (producer: Producer) => readonly Start[];
 // The exclusive end of the run of sequences from `sequence` the producer's feed can no longer
 // deliver, undefined while it may; assigned in its static block.
 let goneAt: (producer: Producer, sequence: bigint) => bigint | undefined;
-// Whether the producer is fed by a wire subscription; assigned in its static block.
-let received: (producer: Producer) => boolean;
 
 /** A reader's last contiguous run of groups: its start, and its exclusive end unless it reads past the live edge. */
 type Coverage = { start: bigint; end?: bigint } | undefined;
@@ -941,6 +940,13 @@ export class Producer {
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
 	// worth waiting for.
 	#arrivals = new Ledger();
+	// What this track's own publisher produced since its last append, which skips every
+	// sequence below it that never arrived and was not given up: the producer moved on. The
+	// arrivals cannot say so, since a gap folds into them once nobody waits for it. Only
+	// sequences at or above `#appended` are kept. Mirrors the Rust `produced`.
+	#produced: Run[] = [];
+	// One past the last append: every sequence below it arrived, was given up, or was skipped.
+	#appended?: bigint;
 
 	constructor(name: string) {
 		this.name = name;
@@ -978,7 +984,6 @@ export class Producer {
 					state.drops.set(drops.filter((run) => run.stale === undefined));
 			}
 		};
-		received = (producer) => producer.#subscribed;
 		hooks.dropAnchors = (producer) => {
 			for (const state of [producer.#state, ...producer.#sinks]) state.dropsAnchors.set(true);
 		};
@@ -1549,6 +1554,7 @@ export class Producer {
 		this.#cached.set(group.sequence, entry);
 		this.#advance(group.sequence, true);
 		this.#arrive(group.sequence);
+		this.#produce(group.sequence);
 		this.#state.latest = max(this.#state.latest ?? 0n, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Follow the group's frames as they land, past the head `#advance` already named.
@@ -1626,6 +1632,12 @@ export class Producer {
 	/**
 	 * Append a new group with the next sequence number: one past this producer's own writes.
 	 *
+	 * Appending says the producer will not go back, so it skips every sequence below the new
+	 * group that it never produced and did not give up, from the lowest it produced since its
+	 * last append, as {@link skipGroups} would. Those sequences are then final: creating one
+	 * throws {@link Skipped}. Appending alone never leaves such a gap; one left by out-of-order
+	 * {@link createGroup} calls is what it names.
+	 *
 	 * The broadcast remembers nothing of an earlier producer of the name, so a replacement
 	 * starts at 0. Since a name always means the same content, a replacement continues past
 	 * its predecessor's groups with {@link createGroup}.
@@ -1635,20 +1647,75 @@ export class Producer {
 	 * So does a first frame that starts before the group below it or after the one above it.
 	 */
 	appendGroup(): GroupProducer {
-		const group = new GroupProducer(this.#nextSequence());
+		const sequence = this.#nextSequence();
+		this.#refuseSkipped(sequence);
+		const group = new GroupProducer(sequence);
 		this.#bind(group);
 		this.#cap(group);
 		this.#publish(group);
+		this.#settleAppend(sequence);
 
 		return group;
 	}
 
 	/**
+	 * Declare that this producer will never produce `[start, end)`: none will arrive, so a reader
+	 * waiting on one moves past it, the declared end does not wait for them, and a relay serving
+	 * this track forwards the skip (lite-07 SUBSCRIBE_SKIP). Unlike a drop, it ends no reader.
+	 *
+	 * This and {@link appendGroup} are the only sources of a skip: a gap between created groups
+	 * says nothing, since groups may be created out of order, so only the producer knows a
+	 * sequence will never exist. A skip is final: creating a group at a skipped sequence throws
+	 * {@link Skipped}. A sequence already produced or given up keeps what it is.
+	 * Mirrors the Rust `skip_groups`.
+	 */
+	skipGroups(start: bigint, end: bigint): void {
+		if (this.#state.closed.peek() !== undefined) return;
+		const cached: Run[] = [];
+		for (const sequence of this.#cached.keys()) {
+			if (sequence >= start && sequence < end) insertRun(cached, sequence, sequence + 1n);
+		}
+		this.#skipGaps(cached, start, end);
+	}
+
+	// Skip what of `[start, end)` neither `kept` nor a drop already names.
+	#skipGaps(kept: readonly Run[], start: bigint, end: bigint): void {
+		for (const gap of runGaps(kept, start, end)) {
+			for (const open of runGaps(this.#state.drops.peek(), gap.start, gap.end)) {
+				this.#drop(open.start, open.end, skipHole());
+			}
+		}
+	}
+
+	// Record a sequence this track's own publisher produced, for the next append to skip around.
+	#produce(sequence: bigint): void {
+		if (this.#subscribed || (this.#appended !== undefined && sequence < this.#appended)) return;
+		insertRun(this.#produced, sequence, sequence + 1n);
+	}
+
+	// Settle an append at `sequence`: skip every sequence below it this track's own publisher
+	// never produced and did not give up, from the lowest it produced since its last append,
+	// since appending says it will not go back. A reason already given stands.
+	#settleAppend(sequence: bigint): void {
+		const from = this.#appended ?? this.#produced[0]?.start;
+		if (from !== undefined) this.#skipGaps(this.#produced, from, sequence);
+		this.#produced = [];
+		this.#appended = sequence + 1n;
+	}
+
+	// Refuse a sequence the publisher declared skipped: a skip is final.
+	#refuseSkipped(sequence: bigint): void {
+		const run = this.#state.drops.peek().find((run) => run.start <= sequence && sequence < run.end);
+		if (run?.skip) throw new Skipped(sequence);
+	}
+
+	/**
 	 * Create a new group with the given sequence number.
 	 *
-	 * A gap it leaves above the last group is skipped at once: readers move past it without
-	 * waiting, and no reader ends. A group created in that gap later still reaches readers that
-	 * have not moved past it.
+	 * It says nothing about the sequences around it: groups may be created out of order, and an
+	 * aborted or evicted sequence created again. A gap it leaves is skipped only once the
+	 * producer says it will not fill it, with {@link skipGroups} or {@link appendGroup}. A
+	 * sequence already skipped throws {@link Skipped}.
 	 *
 	 * Throws on a sequence that is still cached: a live duplicate would fan out to every
 	 * subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
@@ -1662,14 +1729,9 @@ export class Producer {
 
 	#createGroup(sequence: bigint, start: number): GroupProducer {
 		this.#writable(sequence);
-		// What this track's own publisher passes over when it creates a group is skipped at once,
-		// never judged stale; a received copy's groups arrive in any order. A late group it still
-		// creates below wins over its skip, as a group stream wins over a drop. Mirrors Rust.
-		// A run already given up keeps its reason.
-		if (!this.#subscribed && this.#received > 0n) {
-			for (const gap of runGaps(this.#state.drops.peek(), this.#received, sequence))
-				this.#drop(gap.start, gap.end, skipHole());
-		}
+		// A skip says the sequence will never be produced, so it is final. A drop is not: a
+		// publisher may re-create a group it cut or aborted.
+		this.#refuseSkipped(sequence);
 		const existing = this.#cached.get(sequence);
 		if (existing) {
 			if (!(existing.group.closed.peek() instanceof Error)) {
@@ -1704,6 +1766,7 @@ export class Producer {
 		this.#advanceObject({ group: sequence, frame: 0 });
 		this.#advance(sequence, false);
 		this.#arrive(sequence);
+		this.#produce(sequence);
 		this.#finishLargest(sequence);
 		for (const sink of this.#sinks) {
 			sink.received.set(this.#received);
@@ -1732,6 +1795,7 @@ export class Producer {
 	 */
 	appendDatagram(timestamp: Timestamp | undefined, payload: Uint8Array): bigint {
 		const sequence = this.#nextSequence();
+		this.#refuseSkipped(sequence);
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 		this.#checkDatagram(timestamp);
 
@@ -2677,11 +2741,6 @@ export class Subscriber {
 		};
 		hooks.reofferStale = (subscriber) => subscriber.#reofferStale();
 		hooks.reofferGroups = (subscriber, start, end) => subscriber.#reofferGroups(start, end);
-		hooks.isReceived = (subscriber) => {
-			if (subscriber.#resume) return true;
-			const producer = subscriber.#state.producer;
-			return producer !== undefined && received(producer);
-		};
 		hooks.tryRecvDatagram = (subscriber) => subscriber.#tryDatagram();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);

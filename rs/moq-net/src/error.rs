@@ -391,6 +391,11 @@ pub enum Error {
 	#[error("duplicate")]
 	Duplicate,
 
+	/// A group was created at a sequence its track declared skipped: a skip says the
+	/// sequence will never be produced, so it is final. See `track::Producer::skip_groups`.
+	#[error("sequence was skipped")]
+	Skipped,
+
 	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
 	/// by either side, as `Session::closed` reports it. Not a failure.
 	#[error("cancelled")]
@@ -657,6 +662,7 @@ impl From<&Error> for SessionError {
 			| Error::UnexpectedMessage
 			| Error::UnexpectedStream
 			| Error::Duplicate
+			| Error::Skipped
 			| Error::Decode(_)
 			| Error::Encode(_)
 			| Error::WrongSize
@@ -744,6 +750,7 @@ impl From<&Error> for StreamError {
 			| Error::UnknownAlpn(_)
 			| Error::TooManyRequests
 			| Error::Duplicate
+			| Error::Skipped
 			| Error::GoawayTimeout
 			| Error::ProtocolViolation
 			| Error::UnexpectedMessage => Self::Session(SessionError::from(err)),

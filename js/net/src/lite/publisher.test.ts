@@ -1031,36 +1031,42 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 
-	test(`lite ${version}: the end sweep names a group never produced ${version === Version.DRAFT_07 ? "in SUBSCRIBE_SKIP" : "in SUBSCRIBE_DROP"}`, async () => {
-		const sub = await servedSubscription({ version, startGroup: 5n });
-		try {
-			sub.serve(5n);
-			expect(await sub.servedSequence()).toBe(5n);
-			await replayUpdate({ priority: 0, startGroup: 2n }).encode(sub.client.writer, version);
-			await flush();
-			sub.track.finish();
-			sub.track.close();
-			const codes: number[] = [];
-			const skips: bigint[][] = [];
-			for (;;) {
-				const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
-				if (!resp) break;
-				if ("drop" in resp) codes.push(resp.drop.error);
-				if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
-				// Lite-07 keeps the stream open past SUBSCRIBE_END, after the sweep's drops.
-				if ("end" in resp && keepsSubscribeOpen(version)) break;
+	for (const declared of [false, true]) {
+		const named = declared && version === Version.DRAFT_07 ? "in SUBSCRIBE_SKIP" : "in SUBSCRIBE_DROP";
+		test(`lite ${version}: the end sweep names a ${declared ? "declared skip" : "gap never declared"} ${named}`, async () => {
+			const sub = await servedSubscription({ version, startGroup: 5n });
+			try {
+				sub.serve(5n);
+				expect(await sub.servedSequence()).toBe(5n);
+				await replayUpdate({ priority: 0, startGroup: 2n }).encode(sub.client.writer, version);
+				await flush();
+				// Only a declared skip says groups 2 through 4 were never produced; a gap alone
+				// might have held them, so it is not found.
+				if (declared) sub.track.skipGroups(2n, 6n);
+				sub.track.finish();
+				sub.track.close();
+				const codes: number[] = [];
+				const skips: bigint[][] = [];
+				for (;;) {
+					const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
+					if (!resp) break;
+					if ("drop" in resp) codes.push(resp.drop.error);
+					if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
+					// Lite-07 keeps the stream open past SUBSCRIBE_END, after the sweep's drops.
+					if ("end" in resp && keepsSubscribeOpen(version)) break;
+				}
+				if (version !== Version.DRAFT_07) {
+					expect([codes, skips]).toEqual([[0], []]);
+				} else if (declared) {
+					expect([codes, skips]).toEqual([[], [[2n, 4n]]]);
+				} else {
+					expect([codes, skips]).toEqual([[StreamCode.NotFound], []]);
+				}
+			} finally {
+				await sub.close();
 			}
-			// The track's own publisher never produced groups 2 through 4.
-			if (version === Version.DRAFT_07) {
-				expect(codes).toEqual([]);
-				expect(skips).toEqual([[2n, 4n]]);
-			} else {
-				expect(codes).toEqual([0]);
-			}
-		} finally {
-			await sub.close();
-		}
-	});
+		});
+	}
 }
 
 for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
