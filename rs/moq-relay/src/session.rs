@@ -9,7 +9,7 @@ use kio::clock::Wall;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -27,6 +27,7 @@ pub struct Registry {
 struct Entry {
 	request: Request,
 	started: Wall,
+	closed: Arc<OnceLock<Wall>>,
 	handle: Handle,
 }
 
@@ -63,9 +64,14 @@ pub struct Registration {
 	id: String,
 	handle: Handle,
 	seen: AtomicU64,
+	closed: Arc<OnceLock<Wall>>,
 }
 
 impl Registration {
+	pub(crate) fn closed(&self) {
+		self.closed.get_or_init(kio::clock::wall);
+	}
+
 	/// Wait until a push has asked this session to re-check since the last observation.
 	pub async fn nudged(&self) {
 		let seen = self.seen.load(Ordering::Relaxed);
@@ -94,11 +100,13 @@ impl Registry {
 	pub fn register(&self, request: Request) -> Registration {
 		let handle = Handle::default();
 		let id = request.id.clone();
+		let closed = Arc::new(OnceLock::new());
 		self.inner.lock().unwrap_or_else(PoisonError::into_inner).insert(
 			id.clone(),
 			Entry {
 				request,
 				started: kio::clock::wall(),
+				closed: closed.clone(),
 				handle: handle.clone(),
 			},
 		);
@@ -107,6 +115,7 @@ impl Registry {
 			id,
 			handle,
 			seen: AtomicU64::new(0),
+			closed,
 		}
 	}
 
@@ -117,7 +126,7 @@ impl Registry {
 			.unwrap_or_else(PoisonError::into_inner)
 			.values()
 			.filter(|entry| filter.matches(&entry.request))
-			.map(|entry| View::from_session(&entry.request, entry.started))
+			.map(|entry| View::from_session(&entry.request, entry.started, entry.closed.get().copied()))
 			.collect()
 	}
 
@@ -413,7 +422,7 @@ impl IntoResponse for Error {
 }
 
 /// One live session as the list route returns it: the request the server saw,
-/// minus its credentials (`query` and `token`), plus when it was admitted.
+/// minus its credentials (`query` and `token`), plus its admission and close times.
 #[serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -441,10 +450,13 @@ pub struct View {
 	/// When the session was admitted, as unix seconds.
 	#[serde_as(as = "kio::clock::serde::UnixSeconds")]
 	pub started: Wall,
+	/// When supervision observed the session closed, as unix seconds, absent while open.
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	pub closed: Option<Wall>,
 }
 
 impl View {
-	fn from_session(request: &Request, started: Wall) -> Self {
+	fn from_session(request: &Request, started: Wall, closed: Option<Wall>) -> Self {
 		Self {
 			id: request.id.clone(),
 			node: request.node.clone(),
@@ -457,6 +469,7 @@ impl View {
 			role: request.role,
 			tls: request.tls.clone(),
 			started,
+			closed,
 		}
 	}
 }

@@ -378,13 +378,12 @@ impl Lifecycle {
 pub async fn supervise(
 	session: moq_net::Session,
 	lease: auth::Lease,
-	serving: crate::shutdown::Serving,
+	mut serving: crate::shutdown::Serving,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
 	let mut lease = lease.authorizing(&session);
 	let mut shutdown = serving.shutdown.clone();
 	// Held until the `end` is reported, so a drain past its deadline still waits for it.
-	let _serving = serving;
 	let reported = lease.reported();
 	let result = loop {
 		let nudged = async {
@@ -412,13 +411,17 @@ pub async fn supervise(
 				// Empty URI: "reconnect to me" (the relay is restarting). The session's
 				// machine runs on its own, so the GOAWAY still reaches the wire while
 				// we wait here, and the drain deadline closes it if the peer stays.
-				shutdown.drain_session(&session).await;
+				serving.drain(&session).await;
 				lease.close(moq_auth::lease::Reason::Shutdown, session_bytes(&session));
 				break Ok(());
 			}
 			() = nudged => lease.revalidate(),
 		}
 	};
+	serving.closed();
+	if let Some(registration) = &registration {
+		registration.closed();
+	}
 	reported.await;
 	result
 }

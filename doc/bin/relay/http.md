@@ -114,7 +114,9 @@ Live sessions on this node. Query parameters filter on the fields the auth
 server already saw (`id`, `path` as a pattern, `remote` as an IP or CIDR,
 `transport`, `tls.name`, ...); every given field must match, and an empty
 filter is everyone. Each entry is the auth request plus start time, without
-`query` or `token`.
+`query` or `token`. A session stays listed until its end report finishes;
+`closed`, when present, is the Unix seconds timestamp of its observed closure,
+so tooling can separate open sessions from those finishing their report.
 
 ```bash
 curl 'http://127.0.0.1:9101/sessions?path=demo/**'

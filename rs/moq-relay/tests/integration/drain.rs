@@ -89,7 +89,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 }
 
 /// Start the drain and return its end, which [`shutdown::Observer::drained`] reports.
-fn drain(trigger: &shutdown::Trigger, observer: &shutdown::Observer) -> kio::clock::sim::JoinHandle<()> {
+fn drain(trigger: &shutdown::Trigger, observer: &shutdown::Observer) -> kio::clock::sim::JoinHandle<shutdown::Drained> {
 	trigger.start();
 	let observer = observer.clone();
 	kio::clock::sim::spawn(async move { observer.drained().await })

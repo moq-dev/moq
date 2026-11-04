@@ -1142,67 +1142,118 @@ async fn the_end_carries_duration_and_bytes() {
 	relay.abort();
 }
 
-/// A session the drain deadline force-closes reports its `end` to the auth server,
-/// and the drain waits for that report rather than exiting under it.
+/// The drain distinguishes a deadline cut from a peer already closed and only
+/// reporting its end, and holds both registrations until those reports finish.
 #[tokio::test]
 async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	let clock = manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let gate = script.hold_ends();
 	let auth = build_auth(script.spawn().await);
-	let drain_timeout = Duration::from_millis(100);
-	let (trigger, observer) = moq_relay::shutdown::Observer::new(drain_timeout);
+	let drain_timeout = Duration::from_secs(4);
+	let (trigger, mut observer) = moq_relay::shutdown::Observer::new(drain_timeout);
+	let registry = moq_relay::session::Registry::new();
+	let mut clients = Vec::new();
+	let mut supervised = Vec::new();
+	for _ in 0..2 {
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let lease = auth.admit(request.clone()).await.expect("admitted before draining");
+		let registration = registry.register(request);
+		let (client, server) = memory_sessions().await;
+		clients.push(client);
+		supervised.push(tokio::spawn(moq_relay::supervise(
+			server,
+			lease,
+			observer.serve(),
+			Some(registration),
+		)));
+	}
+	assert_eq!(
+		observer.changed().await,
+		moq_relay::shutdown::Tally { open: 2, ending: 0 }
+	);
+	for view in registry.list(&Default::default()) {
+		assert_eq!(view.closed, None);
+		assert!(serde_json::to_value(view).unwrap().get("closed").is_none());
+	}
 
-	let lease = auth
-		.admit(auth.request(moq_auth::Transport::Quic, "/room"))
-		.await
-		.expect("admitted before draining");
-	let (client, server) = memory_sessions().await;
-	let supervised = tokio::spawn(moq_relay::supervise(server, lease, observer.serve(), None));
-
-	// Keep the deadline from racing the client receiving GOAWAY under load.
-	tokio::time::pause();
 	trigger.start();
-	kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
+	let started = kio::clock::now();
+	for client in &clients {
+		kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| client.draining().poll(waiter)))
+			.await
+			.expect("GOAWAY timeout")
+			.expect("a GOAWAY");
+	}
+	clock.advance(Duration::from_secs(1));
+	let closed = kio::clock::wall();
+	clients[0].abort(moq_net::Error::Cancel);
+	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
 		.await
-		.expect("GOAWAY timeout")
-		.expect("a GOAWAY");
+		.expect("first end");
+	assert_eq!(
+		observer.changed().await,
+		moq_relay::shutdown::Tally { open: 1, ending: 1 }
+	);
+	let views = registry.list(&Default::default());
+	assert_eq!(views.iter().filter(|view| view.closed == Some(closed)).count(), 1);
+	let view = views.iter().find(|view| view.closed.is_some()).unwrap();
+	let json = serde_json::to_value(view).unwrap();
+	assert!(json["closed"].is_number(), "{json}");
+	assert_eq!(serde_json::from_value::<moq_relay::session::View>(json).unwrap(), *view);
+
 	let drained = tokio::spawn({
 		let observer = observer.clone();
 		async move { observer.drained().await }
 	});
-	clock.advance(drain_timeout);
-	tokio::time::advance(drain_timeout).await;
-	// The end report crosses HTTP, so resume real time after forcing the close.
-	tokio::time::resume();
+	clock.advance(drain_timeout - Duration::from_secs(1));
 	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
 		.await
-		.expect("the end never reached the server");
-	tokio::task::yield_now().await;
+		.expect("deadline end");
+	assert_eq!(
+		observer.changed().await,
+		moq_relay::shutdown::Tally { open: 0, ending: 2 }
+	);
 	assert!(
 		!drained.is_finished(),
-		"the drain ended before the server answered the end"
+		"drain ended before the server answered the ends"
 	);
+	let views = registry.list(&Default::default());
+	assert_eq!(views.iter().filter(|view| view.closed.is_some()).count(), 2);
 
-	gate.add_permits(1);
-	kio::clock::timeout(TIMEOUT, drained)
+	clock.advance(Duration::from_secs(2));
+	gate.add_permits(2);
+	let summary = kio::clock::timeout(TIMEOUT, drained)
 		.await
-		.expect("the drain outlived the end")
+		.expect("drain outlived the ends")
 		.unwrap();
-	supervised.await.expect("supervisor task").expect("drained session");
+	for supervised in supervised {
+		supervised.await.expect("supervisor task").expect("drained session");
+	}
+	assert_eq!(
+		summary,
+		moq_relay::shutdown::Drained {
+			forced: 1,
+			ending: 1,
+			elapsed: Duration::from_secs(6),
+		}
+	);
+	assert_eq!(observer.tally(), Default::default());
+	assert!(registry.list(&Default::default()).is_empty());
+	clock.advance(Duration::from_secs(100));
+	assert!(started.elapsed() > summary.elapsed);
+	assert_eq!(observer.drained().await, summary, "a late observer changed the outcome");
 	let ends = script.ends();
-	let [end] = ends.as_slice() else {
-		panic!("one end per session: {ends:?}")
-	};
+	assert_eq!(ends.len(), 2);
 	assert!(
-		matches!(
-			&end.event,
+		ends.iter().all(|end| matches!(
+			end.event,
 			Event::End {
 				reason: moq_auth::lease::Reason::Shutdown,
 				..
 			}
-		),
-		"{end:?}"
+		)),
+		"{ends:?}"
 	);
 }
 

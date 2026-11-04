@@ -849,9 +849,10 @@ async fn drain(
 
 	tokio::select! {
 		() = signal() => {
-			tracing::warn!(open = shutdown.tally().live, "second shutdown signal; exiting immediately");
+			let tally = shutdown.tally();
+			tracing::warn!(open = tally.open, ending = tally.ending, "second shutdown signal; exiting immediately");
 		}
-		() = shutdown.drained() => {}
+		_ = shutdown.drained() => {}
 	}
 }
 
@@ -1022,7 +1023,7 @@ mod tests {
 
 		// Arrives just after the count reaches zero: refused at accept.
 		drop(arrival);
-		assert!(draining.as_mut().now_or_never().is_some());
+		draining.await;
 		assert!(
 			activity.enter().is_none(),
 			"admitted a connection after the drain committed to exit"
