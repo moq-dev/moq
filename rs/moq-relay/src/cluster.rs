@@ -1258,13 +1258,15 @@ pub struct Cluster {
 	peer_quic: crate::limits::Quic,
 	config: Config,
 	/// Dial template every peer dial is built from; see [`Self::peer_client`].
-	connect: Option<moq_tokio::connect::Config>,
-	quic: Option<moq_tokio::quic::Config>,
+	/// The dial state sits behind `Arc`s because it is several KiB inline, and every
+	/// clone and every future holding one would copy it, on the stack in debug builds.
+	connect: Option<Arc<moq_tokio::connect::Config>>,
+	quic: Option<Arc<moq_tokio::quic::Config>>,
 	/// The client static and API peers share when the template binds a fixed
 	/// `[connect]` port, so that port stays the cluster's egress port. Otherwise
 	/// `None`, and every session builds its own client on an ephemeral port. Built
 	/// by [`Self::start`] and joins [`Self::dialers`] once [`Started::run`] begins.
-	dial: Option<moq_tokio::Client>,
+	dial: Option<Arc<moq_tokio::Client>>,
 	/// Every dial client, shared by all clones, for [`Self::close`].
 	dialers: Dialers,
 	/// Bound listen port and optional generated-certificate fingerprint.
@@ -1549,8 +1551,8 @@ impl Cluster {
 	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
-		self.connect = Some(connect);
-		self.quic = Some(quic);
+		self.connect = Some(Arc::new(connect));
+		self.quic = Some(Arc::new(quic));
 		self
 	}
 
@@ -1815,7 +1817,7 @@ impl Cluster {
 		let client = self
 			.peer_client(!shared, None)
 			.context("cluster peers configured but the dial template is unusable")?;
-		self.dial = shared.then_some(client);
+		self.dial = shared.then(|| Arc::new(client));
 
 		// After everything fallible, so a failed start leaves no credential behind.
 		#[cfg(feature = "cluster-lan")]
@@ -2138,7 +2140,7 @@ impl Cluster {
 		// leaves from a fresh port. A fixed `[connect]` bind port names a single
 		// source port, so static and API peers share the client bound to it instead.
 		let (client, _held) = match (&self.dial, target.lan) {
-			(Some(shared), false) => (shared.clone(), None),
+			(Some(shared), false) => (moq_tokio::Client::clone(shared), None),
 			_ => {
 				let client = self.peer_client(true, Some(target))?;
 				let held = self.dialers.hold(&client)?;
@@ -2210,7 +2212,8 @@ impl Cluster {
 	fn peer_client(&self, ephemeral: bool, target: Option<&DialTarget>) -> anyhow::Result<moq_tokio::Client> {
 		let mut connect = self
 			.connect
-			.clone()
+			.as_deref()
+			.cloned()
 			.context("cluster dial without a dial template (call Cluster::with_connect)")?;
 		if ephemeral {
 			let mut bind = connect.resolve().bind;
@@ -2232,7 +2235,7 @@ impl Cluster {
 			connect.tls = moq_tokio::tls::Connect::default();
 			connect.tls.fingerprint = vec![fingerprint.to_string()];
 		}
-		let mut quic = self.quic.clone().unwrap_or_default();
+		let mut quic = self.quic.as_deref().cloned().unwrap_or_default();
 		self.peer_quic.dial(&mut quic);
 		Ok(connect.init(quic)?)
 	}

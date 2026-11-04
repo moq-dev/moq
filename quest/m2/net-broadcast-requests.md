@@ -11,8 +11,7 @@ front from one broadcast, on demand, the way Rust does.
 
 Split 2026-11-03 (maintainer) from
 [JS undeclared track names](/quest/m2/e2ee/js-undeclared-names.md), which
-keeps the `@moq/crypto` half and now requires this. Kixel's T3 host
-([kixelated/t3code#1](https://github.com/kixelated/t3code/pull/1)) needs
+keeps the `@moq/crypto` half and now requires this. Kixel's T3 host needs
 only the plaintext half: without it, one environment broadcast would need a
 track per thread created up front, so T3 claims a broadcast per entity
 instead and can collapse to one once this lands. Today the request pull
