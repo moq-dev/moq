@@ -1,7 +1,8 @@
-name: Dependabot
+name: Dependency updates
 
-# Requests landing for Dependabot updates through the same pinned-head gate
-# as other PRs. dependabot.yml holds new versions for seven days.
+# Requests landing for Dependabot and our Renovate App through the same
+# pinned-head gate as other PRs. Their updater configurations hold ordinary
+# releases for seven days.
 #
 # `pull_request_target` rather than `pull_request`: Dependabot runs with a
 # read-only token and no access to secrets, so a `pull_request` run could
@@ -23,11 +24,12 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # head.repo guards the `pull_request_target` trigger: Dependabot pushes its
-    # branches to this repository, so a pull request from a fork claiming to be
-    # Dependabot is not one.
+    # Both updaters push here. A matching bot login on a fork is not trusted.
+    # The Renovate login is set once the maintainer creates its dedicated App.
     if: >-
-      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      (github.event.pull_request.user.login == 'dependabot[bot]' ||
+      (vars.RENOVATE_BOT_LOGIN != '' &&
+      github.event.pull_request.user.login == vars.RENOVATE_BOT_LOGIN)) &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     # The moq-bot key lives in the `bot` Environment, which only protected

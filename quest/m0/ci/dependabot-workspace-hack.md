@@ -94,6 +94,45 @@ Renovate runs self-hosted:
 
 Public API: none. Wire: none.
 
+Implementation prepared in [moq-dev/moq#7877](https://github.com/moq-dev/moq/pull/7877).
+Local tests run the pinned Renovate 44.213.0 Cargo artifact updater and
+post-upgrade executor against a disposable workspace. A grouped indexmap
+1-to-2 update regenerates the hack without compiling fixture build scripts.
+The manifest-only filter loses hakari's refreshed lockfile: the returned
+`Cargo.lock` differs from the one on disk. Including exactly the root lockfile
+fixes that, and both hakari's diff and locked Cargo metadata pass. The fixture
+runs nightly without credentials; fast workflow-boundary tests run in CI.
+
+Two changes to the settled Plan are proposed, not yet approved: collect
+`Cargo.lock` alongside the generated manifest, and retain a Cargo-only
+Dependabot suppression entry. GitHub documents that `ignore` applies to
+security updates too; removing the Cargo entry alone leaves automatic security
+updates enabled. Renovate reads Cargo alerts with the App's additional
+Dependabot-alerts read permission. Other Dependabot ecosystems are unchanged.
+
+## Waiting
+
+- Maintainer: create/install the dedicated Renovate App and the `renovate`
+  Environment admitting only branch `main`, supply its App secrets there, and
+  set `RENOVATE_BOT_LOGIN`. The setup and exact permissions are in
+  [the infrastructure guide](/infra/README.md#bootstrapping-cargo-dependency-updates).
+  App creation, permissions and secret handling were reserved for the maintainer;
+  no credentialed job has been dispatched by the implementation agent.
+- Maintainer: approve collecting exactly `Cargo.lock` in addition to the hack
+  manifest (recommended), or retain the original filter and wait for upstream
+  support to refresh an existing lockfile artifact after the hook. The real
+  executor test proves the original filter publishes stale lockfile contents.
+- Maintainer: approve the Cargo-only ignore-all suppression entry (recommended),
+  or keep the original removal and accept competing Dependabot security PRs
+  that can hand-edit the hack. Other ecosystems keep Dependabot in either case;
+  the suppression is needed for a complete Cargo security-update handoff.
+- GitHub Actions: after the reviewed workflow is installed on `main` and setup
+  is complete, an approved Renovate run must publish a Cargo group PR passing
+  hakari generation and locked metadata without a manual commit. Verify its
+  App identity, the same-repository pinned-head landing request, and that branch
+  or tag dispatches cannot enter the credentialed job. Local tests do not prove
+  this production acceptance condition.
+
 ## Related
 
 - [Unify dependency features with cargo-hakari](/quest/m0/ci/hakari.md) - the workspace-hack this keeps generated

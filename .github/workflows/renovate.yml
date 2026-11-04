@@ -1,0 +1,48 @@
+name: Renovate
+
+on:
+  schedule:
+    - cron: "0 10 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  cargo:
+    if: github.repository == 'moq-dev/moq' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # This separate Environment admits only main, including for manual dispatch.
+    environment: renovate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/just
+      # The pinned dev shell supplies Cargo and cargo-hakari. Install Renovate
+      # before minting the token; no upgraded repository code is compiled.
+      - name: Install Renovate
+        run: nix develop --command just gh renovate-install
+      - name: Generate Renovate token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq
+          permission-contents: write
+          permission-pull-requests: write
+          permission-vulnerability-alerts: read
+      - name: Update Cargo and regenerate the workspace-hack
+        env:
+          RENOVATE_TOKEN: ${{ steps.token.outputs.token }}
+          RENOVATE_USERNAME: ${{ steps.token.outputs.app-slug }}[bot]
+          EXPECTED_RENOVATE_LOGIN: ${{ vars.RENOVATE_BOT_LOGIN }}
+        run: nix develop --command just gh renovate

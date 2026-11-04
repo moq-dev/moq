@@ -53,6 +53,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  renovate:
+    name: Renovate updater tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/just
+      # This job has no App token or Environment. It exercises the real updater
+      # against a local fixture, including build scripts that refuse compilation.
+      - name: Install Renovate
+        run: nix develop --command just gh renovate-install
+      - name: Check Renovate and the hakari hook
+        run: nix develop --command just gh renovate-check
+
   features:
     uses: ./.github/workflows/features.yml
     secrets: inherit
