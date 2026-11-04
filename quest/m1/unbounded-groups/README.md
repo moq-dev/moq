@@ -160,4 +160,3 @@ covered only at the model layer (maintainer, 2026-10-30).
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
 - [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way
 - [Compressed frames have no size cap and inflate as a bounded stream](/quest/m1/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one
-- [FETCH egress and ingest stream large frames without buffering](/quest/m1/unbounded-groups/fetch-stream.md) - `@moq/net` serves a moq-transport FETCH object by object as it reads them, never collecting a requested group slice whole, so a FETCH of a group with large frames holds no more than the group tail
