@@ -28,7 +28,3 @@ explanation of nightly incremental rebuilds costing near-full builds, before
 running the queue experiment.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - the structural baseline, replacing concurrent queue entries
