@@ -185,6 +185,24 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_finished_parent_catalog_keeps_its_contributions() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let child = Instance::random();
+	let mut parent = publish(&origin, "room/live", &root, &parent_catalog());
+	frames(&parent.video, 0);
+	frames(&parent.audio, 0);
+	let _contribution = publish(&origin, "room/ladder", &child, &catalog());
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	let listed = format!("contribution/rung%2Fa/video/same/@{child}");
+	master(&server, &listed, true).await;
+	// A clean end freezes the final catalog, entries included.
+	parent.catalog.finish().unwrap();
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	master(&server, &listed, true).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_failed_parent_catalog_stops_its_contributions() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();

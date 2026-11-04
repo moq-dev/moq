@@ -586,10 +586,12 @@ async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer
 			latest = Some(catalog);
 		}
 	};
+	let failed = result.is_err();
 	renditions.finish(result);
-	// The root catalog lists the contributions: once it ends or fails, stop following and
-	// advertising them too.
-	if let Role::Root(Some(contributions)) = &role {
+	// The root catalog lists the contributions: once it fails, stop following and advertising
+	// them too. A clean end freezes the final catalog, which keeps its entries, as the own
+	// renditions keep their final set.
+	if failed && let Role::Root(Some(contributions)) = &role {
 		contributions.clear();
 	}
 }

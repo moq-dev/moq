@@ -254,7 +254,7 @@ async fn follow_instances(mut instances: follow::Instances, current: kio::Produc
 					.to_string();
 				let source = moq_mux::Source::new(context.origin.clone(), broadcast);
 				let renditions = renditions::Producer::lazy(context.window, context.spawner.clone());
-				let owner = context.spawner.spawn(super::watch_catalog(
+				let owner = context.spawner.lead(super::watch_catalog(
 					source,
 					renditions.clone(),
 					super::Role::Contribution(context.root.consume()),

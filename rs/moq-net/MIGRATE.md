@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Following` waits out a refusal ([#7836](https://github.com/moq-dev/moq/pull/7836))
+
+After `Following::available` returns a handler's refusal, the next call no longer asks the refusing route again at once.
+It waits for the serving route to change: another instance, the path going and coming back, or the same instance over another route.
+A caller that retried in a loop now waits instead of spinning; one that gave up on the first error is unaffected.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.
