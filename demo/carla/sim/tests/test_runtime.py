@@ -8,6 +8,7 @@ from moq_carla_sim import runtime
 from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry
 from moq_carla_sim.publish import Pose
 from moq_carla_sim.runtime import MAX_STAGE_MS, StuckDetector, latency_breakdown
+from moq_carla_sim.world import Truck
 
 
 class FakeClock:
@@ -320,6 +321,103 @@ def test_autonomous_truck_wedged_for_the_timeout_is_respawned(monkeypatch: pytes
         assert runtime.STUCK_TIMEOUT <= respawns[0] < runtime.STUCK_TIMEOUT + 1.0
         # Status keeps flowing through the whole wait, and after the respawn.
         assert len(published) > respawns[0] / runtime.TELEMETRY_INTERVAL
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("reset_before_handback", [False, True], ids=["latched", "reset"])
+@pytest.mark.parametrize("handback", ["driver_left", "watchdog_expired"])
+def test_stuck_watchdog_after_manual_estop_and_handback(
+    monkeypatch: pytest.MonkeyPatch, reset_before_handback: bool, handback: str
+) -> None:
+    async def scenario() -> None:
+        clock = 0.0
+        respawns: list[float] = []
+        controls: list[SimpleNamespace] = []
+        wedged = Pose(x=5.0, y=5.0, yaw=90.0, speed=0.0)
+        vehicle = SimpleNamespace(
+            get_transform=lambda: SimpleNamespace(),
+            get_control=lambda: controls[-1],
+            get_velocity=lambda: SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            set_autopilot=lambda *_args: None,
+            apply_control=controls.append,
+        )
+        truck = Truck(
+            "truck1", vehicle, [], SimpleNamespace(listen=lambda _callback: None), 8000, road_map=SimpleNamespace()
+        )
+        truck.telemetry = lambda: SimpleNamespace(pose=wedged, measured=DriveState(gear=Gear.FORWARD))
+        truck.respawn = lambda: respawns.append(clock)
+        session = telemetry_session(pose=lambda: wedged)
+        session._truck = truck
+        session._deadline = None
+        session._media_pipeline = {}
+        session._publish = lambda _telemetry=None: None
+
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "time", lambda: clock)
+
+        async def command(command: Command) -> None:
+            commands = iter([command])
+
+            async def next_command() -> Command:
+                next_ = next(commands, None)
+                if next_ is None:
+                    raise asyncio.CancelledError
+                return next_
+
+            with monkeypatch.context() as patch:
+                patch.setattr(session, "_next_command", next_command)
+                with pytest.raises(asyncio.CancelledError):
+                    await session._loop()
+
+        # Claim with the brake applied, then supply a pedal input. This also
+        # exercises a genuine manual takeover with the takeover pedal hold.
+        await command(Command(kind="drive", driver_id="holder", sequence=1, state=DriveState(gear=Gear.FORWARD)))
+        await command(
+            Command(
+                kind="drive",
+                driver_id="holder",
+                sequence=2,
+                state=DriveState(throttle=0.5, brake=0.0, gear=Gear.FORWARD),
+            )
+        )
+        assert not truck.autonomous
+        assert controls[-1].throttle == 0.5
+        await command(Command(kind="estop", driver_id="holder", sequence=3))
+        assert controls[-1].brake == 1.0 and controls[-1].hand_brake
+        if reset_before_handback:
+            await command(Command(kind="reset_estop", driver_id="holder", sequence=4))
+        if handback == "watchdog_expired":
+            assert session._deadline is not None
+            clock = session._deadline
+            expired = await session._next_command()
+            assert expired.kind == "watchdog_expired"
+            await command(expired)
+        else:
+            await command(Command(kind="driver_left", driver_id="holder"))
+        assert session._drive.driver is None
+        assert session._drive.estopped is not reset_before_handback
+        assert truck.autonomous is reset_before_handback
+        assert session._clock.running
+        handed_back = clock
+
+        async def sleep(delay: float) -> None:
+            nonlocal clock
+            clock += delay
+            if clock - handed_back > 480.0:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(runtime.asyncio, "sleep", sleep)
+        with pytest.raises(asyncio.CancelledError):
+            await session._publish_telemetry()
+
+        if reset_before_handback:
+            assert len(respawns) == 1
+            assert runtime.STUCK_TIMEOUT <= respawns[0] - handed_back < runtime.STUCK_TIMEOUT + 1.0
+        else:
+            assert respawns == []
+            assert session._stuck._anchor is None
+            assert session._drive.estopped and not truck.autonomous
 
     asyncio.run(scenario())
 
