@@ -19,9 +19,8 @@ for (const groups of [2, 128]) {
 	for (const subscribers of [1, 8]) {
 		for (const size of [16, 1000, SEGMENT_BYTES * 2]) {
 			const origin = new Producer();
-			const publication = origin.createBroadcast(Path.from("fetch"));
-			publication.announce();
-			const track = publication.broadcast.createTrack("video", { maxAge: Milli(60_000) });
+			const route = origin.route(Path.from("fetch"));
+			const track = route.broadcast.createTrack("video", { maxAge: Milli(60_000) });
 			for (let sequence = 0; sequence < groups; sequence++) {
 				const group = track.appendGroup();
 				// Only the selected group needs payloads; the rest expose cache-table scans.

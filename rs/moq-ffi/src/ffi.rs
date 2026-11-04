@@ -730,11 +730,6 @@ impl<T> Polled<T> {
 		self.state.lock().as_mut().map(f)
 	}
 
-	/// Whether [Self::cancel] or [Self::take] has run.
-	pub fn is_cancelled(&self) -> bool {
-		self.state.lock().is_none()
-	}
-
 	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
 	///
 	/// `check` sees the state first, and an error there leaves this handle untouched.
