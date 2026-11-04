@@ -56,6 +56,12 @@ pub struct Catalog<E: CatalogExt = ()> {
 	/// The tracks in this catalog snapshot.
 	pub tracks: Vec<Track>,
 
+	/// The DRM systems protecting this broadcast's tracks (CMSF 4.1.1).
+	///
+	/// Tracks point at these entries by [`ContentProtection::ref_id`] through
+	/// [`Track::content_protection_ref_ids`]; an entry is never repeated on a track.
+	pub content_protections: Vec<ContentProtection>,
+
 	/// The application extension: root members beyond the ones MSF defines.
 	pub ext: E,
 }
@@ -89,7 +95,8 @@ pub struct Catalog<E: CatalogExt = ()> {
 /// `serde_json::Map<String, serde_json::Value>`, which keeps them verbatim.
 ///
 /// An extension MUST NOT name a member after one MSF defines (`version`, `generatedAt`,
-/// `isComplete`, `tracks`, `initDataList`); the wire JSON would carry a duplicate key.
+/// `isComplete`, `tracks`, `initDataList`, `contentProtections`); the wire JSON would carry a
+/// duplicate key.
 pub trait CatalogExt: Serialize + serde::de::DeserializeOwned + Default + Clone + Send + Unpin + 'static {}
 
 // Blanket, so a caller writes no impl: naming the trait is only about readable bounds.
@@ -185,6 +192,11 @@ pub struct Track {
 	#[serde(rename = "maxObjSapStartingType")]
 	pub max_obj_sap_starting_type: Option<u8>,
 
+	/// The [`ContentProtection::ref_id`]s of the catalog's entries that protect this track
+	/// (CMSF 4.1.2). Empty means the track is not encrypted with Common Encryption.
+	#[serde(default, rename = "contentProtectionRefIDs", skip_serializing_if = "Vec::is_empty")]
+	pub content_protection_ref_ids: Vec<String>,
+
 	/// Jitter (non-standard extension; not in the MSF/CMSF drafts).
 	///
 	/// Serialized as a JSON number of milliseconds, matching the hang catalog.
@@ -217,6 +229,7 @@ impl<E: CatalogExt> Catalog<E> {
 			generated_at: None,
 			is_complete: false,
 			tracks,
+			content_protections: Vec::new(),
 			ext,
 		}
 	}
@@ -261,7 +274,7 @@ fn colliding_member<E: CatalogExt>(ext: &E) -> Option<String> {
 pub fn reserved_root(name: &str) -> bool {
 	matches!(
 		name,
-		"version" | "generatedAt" | "isComplete" | "tracks" | "initDataList"
+		"version" | "generatedAt" | "isComplete" | "tracks" | "initDataList" | "contentProtections"
 	)
 }
 
@@ -312,6 +325,7 @@ impl<E: CatalogExt> Serialize for Catalog<E> {
 			is_complete: self.is_complete,
 			tracks,
 			init_data_list: (!init_data_list.is_empty()).then_some(init_data_list),
+			content_protections: self.content_protections.clone(),
 			ext: self.ext.clone(),
 		}
 		.serialize(serializer)
@@ -334,6 +348,21 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 				return Err(serde::de::Error::custom(format!(
 					"MSF catalog has duplicate initData id {:?}",
 					entry.id
+				)));
+			}
+		}
+
+		// A track's protection refers to a root entry by refID; one that names none would claim
+		// encryption the catalog cannot describe, so it is refused like a missing initRef.
+		for track in &wire.tracks {
+			if let Some(missing) = track
+				.content_protection_ref_ids
+				.iter()
+				.find(|id| !wire.content_protections.iter().any(|cp| &cp.ref_id == *id))
+			{
+				return Err(serde::de::Error::custom(format!(
+					"MSF track {:?} references missing content protection {:?}",
+					track.name, missing
 				)));
 			}
 		}
@@ -380,6 +409,7 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 			generated_at: wire.generated_at,
 			is_complete: wire.is_complete,
 			tracks,
+			content_protections: wire.content_protections,
 			ext: wire.ext,
 		})
 	}
@@ -402,6 +432,8 @@ struct Wire<E> {
 	#[serde(default)]
 	tracks: Vec<Track>,
 	init_data_list: Option<Vec<InitData>>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	content_protections: Vec<ContentProtection>,
 
 	/// The extension's own root members, written flat alongside the ones above.
 	#[serde(flatten)]
@@ -508,8 +540,107 @@ impl Track {
 			alt_group: None,
 			max_grp_sap_starting_type: None,
 			max_obj_sap_starting_type: None,
+			content_protection_ref_ids: Vec::new(),
 			jitter: None,
 			delay: None,
+		}
+	}
+}
+
+/// One DRM system configuration protecting tracks of the broadcast (CMSF 4.1.1).
+///
+/// The samples are encrypted with ISO Common Encryption; the track's initialization data
+/// carries the matching `sinf`/`tenc` (CMSF 4.2). draft-ietf-moq-cmsf-01 names no member for
+/// its authorization URL (4.1.1.4.4) or robustness (4.1.1.4.6), so neither is carried.
+#[serde_with::skip_serializing_none]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ContentProtection {
+	/// The identifier tracks use to reference this entry.
+	#[serde(rename = "refID")]
+	pub ref_id: String,
+
+	/// The default key IDs (`default_KID`) as UUID strings.
+	#[serde(rename = "defaultKID")]
+	pub default_kid: Vec<String>,
+
+	/// The Common Encryption scheme, `cenc` or `cbcs`.
+	pub scheme: String,
+
+	/// The DRM system and where to obtain its license.
+	#[serde(rename = "drmSystem")]
+	pub drm_system: DrmSystem,
+}
+
+impl ContentProtection {
+	/// An entry with the required fields; the DRM system's optional fields start empty.
+	pub fn new(
+		ref_id: impl Into<String>,
+		default_kid: Vec<String>,
+		scheme: impl Into<String>,
+		system_id: impl Into<String>,
+	) -> Self {
+		Self {
+			ref_id: ref_id.into(),
+			default_kid,
+			scheme: scheme.into(),
+			drm_system: DrmSystem::new(system_id),
+		}
+	}
+}
+
+/// A DRM system description within a [`ContentProtection`] (CMSF 4.1.1.4).
+#[serde_with::skip_serializing_none]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DrmSystem {
+	/// The DRM system ID as a UUID string, e.g. Widevine's `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`.
+	#[serde(rename = "systemID")]
+	pub system_id: String,
+
+	/// The license acquisition service.
+	#[serde(rename = "laURL")]
+	pub la_url: Option<ProtectionUrl>,
+
+	/// The certificate service, required by systems such as FairPlay Streaming.
+	#[serde(rename = "certURL")]
+	pub cert_url: Option<ProtectionUrl>,
+
+	/// A base64 `pssh` box with the system's initialization data.
+	pub pssh: Option<String>,
+}
+
+impl DrmSystem {
+	/// A DRM system with only its ID set.
+	pub fn new(system_id: impl Into<String>) -> Self {
+		Self {
+			system_id: system_id.into(),
+			la_url: None,
+			cert_url: None,
+			pssh: None,
+		}
+	}
+}
+
+/// A service URL in a [`DrmSystem`], with an optional protocol or MIME type.
+#[serde_with::skip_serializing_none]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProtectionUrl {
+	/// The service URL.
+	pub url: String,
+
+	/// The protocol or MIME type, e.g. `EME-1.0`.
+	#[serde(rename = "type")]
+	pub kind: Option<String>,
+}
+
+impl ProtectionUrl {
+	/// A URL without a type.
+	pub fn new(url: impl Into<String>) -> Self {
+		Self {
+			url: url.into(),
+			kind: None,
 		}
 	}
 }
@@ -638,6 +769,81 @@ impl<'de> Deserialize<'de> for Role {
 
 #[cfg(test)]
 mod test {
+	/// The protected-video example of draft-ietf-moq-cmsf-01 section 5.2, trimmed to two DRM
+	/// systems, survives a parse and a serialize unchanged.
+	#[test]
+	fn content_protection_round_trips() {
+		let json = r#"{
+			"version": "draft-01",
+			"contentProtections": [
+				{
+					"refID": "1",
+					"defaultKID": ["01234567-89ab-cdef-0123-456789abcdef"],
+					"scheme": "cbcs",
+					"drmSystem": {
+						"systemID": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",
+						"laURL": { "url": "https://widevine-license.example.com/proxy" },
+						"pssh": "AAAAP3Bzc2gAAAAA7e+LqXnWSs6jy"
+					}
+				},
+				{
+					"refID": "3",
+					"defaultKID": ["01234567-89ab-cdef-0123-456789abcdef"],
+					"scheme": "cbcs",
+					"drmSystem": {
+						"systemID": "94ce86fb-07ff-4f43-adb8-93d2fa968ca2",
+						"laURL": { "url": "https://fps-license.example.com/api/licenses" },
+						"certURL": { "url": "https://fps-license.example.com/cert", "type": "application/pkcs7-mime" }
+					}
+				}
+			],
+			"tracks": [
+				{ "name": "video_protected", "packaging": "cmaf", "isLive": true, "codec": "avc3.4D401F", "contentProtectionRefIDs": ["1", "3"] },
+				{ "name": "audio", "packaging": "cmaf", "isLive": true, "codec": "mp4a.40.2" }
+			]
+		}"#;
+		let catalog: super::Catalog = json.parse().unwrap();
+		assert_eq!(catalog.content_protections.len(), 2);
+		let fairplay = &catalog.content_protections[1].drm_system;
+		assert_eq!(
+			fairplay.cert_url.as_ref().unwrap().kind.as_deref(),
+			Some("application/pkcs7-mime")
+		);
+		assert_eq!(catalog.tracks[0].content_protection_ref_ids, ["1", "3"]);
+		assert!(catalog.tracks[1].content_protection_ref_ids.is_empty());
+
+		let again: super::Catalog = catalog.to_json().unwrap().parse().unwrap();
+		assert_eq!(again, catalog);
+		let wire: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert!(
+			wire["tracks"][1].get("contentProtectionRefIDs").is_none(),
+			"an unprotected track carries no refs"
+		);
+		assert_eq!(
+			wire["contentProtections"][0]["drmSystem"]["systemID"],
+			"edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
+		);
+	}
+
+	/// A catalog without protection writes no `contentProtections` member at all.
+	#[test]
+	fn no_protection_writes_nothing() {
+		let catalog = super::Catalog::new(vec![super::Track::new("video", super::Packaging::Cmaf)]);
+		let wire: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert!(wire.get("contentProtections").is_none());
+		assert!(wire["tracks"][0].get("contentProtectionRefIDs").is_none());
+	}
+
+	/// A track that references an entry the root lacks is refused, like a missing initRef.
+	#[test]
+	fn a_dangling_protection_ref_is_refused() {
+		let json = r#"{ "version": "draft-01", "tracks": [
+			{ "name": "video", "packaging": "cmaf", "isLive": true, "contentProtectionRefIDs": ["9"] }
+		] }"#;
+		let err = json.parse::<super::Catalog>().unwrap_err().to_string();
+		assert!(err.contains("missing content protection"), "{err}");
+	}
+
 	#[test]
 	fn track_namespace_round_trips() {
 		for version in ["1", "\"draft-01\""] {
@@ -674,6 +880,7 @@ mod test {
 			alt_group: None,
 			max_grp_sap_starting_type: None,
 			max_obj_sap_starting_type: None,
+			content_protection_ref_ids: Vec::new(),
 			jitter: None,
 			delay: None,
 		}
@@ -701,6 +908,7 @@ mod test {
 			alt_group: None,
 			max_grp_sap_starting_type: None,
 			max_obj_sap_starting_type: None,
+			content_protection_ref_ids: Vec::new(),
 			jitter: None,
 			delay: None,
 		}
@@ -728,6 +936,7 @@ mod test {
 			alt_group: None,
 			max_grp_sap_starting_type: Some(1),
 			max_obj_sap_starting_type: Some(2),
+			content_protection_ref_ids: Vec::new(),
 			jitter: Some(Duration::from_millis(15)),
 			delay: None,
 		}
