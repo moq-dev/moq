@@ -457,8 +457,8 @@ test("a FETCH preserves relayed metadata and cached groups without upstream FETC
 			publication.announce();
 			const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			writeGroup(track, 3n, ["3-0", "3-1"]);
-			// An IETF source cannot fetch standalone yet; lite-05 can, but refuses empty ranges.
-			const pair = createMockTransportPair(warm ? ALPN.DRAFT_20 : Lite.ALPN_05);
+			// lite-04 has no FETCH; lite-05 can fetch, but refuses empty subscription ranges.
+			const pair = createMockTransportPair(warm ? Lite.ALPN_04 : Lite.ALPN_05);
 			const url = new URL("https://localhost:4443/test");
 			const [client, server] = await Promise.all([
 				connectSession({ url, transport: pair.client }),
