@@ -469,14 +469,9 @@ impl Client {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
 			let quic_addr = addr.clone();
-			let address = match quic_transport(&url) {
-				crate::Transport::Quic => moq_net::transport::Address::Setup,
-				_ => moq_net::transport::Address::Uri,
-			};
 			let quic_handle = async {
 				quic.connect(&self.tls, quic_addr, &self.versions)
 					.await
-					.map(|session| crate::transport::Session::new(session, address))
 					.map_err(Error::from)
 			};
 
@@ -1070,10 +1065,7 @@ mod tests {
 		// Hold QUIC until the fallback has been refused, so the 403 is always exercised.
 		let quic = Box::pin(async move {
 			forbid.await.unwrap().expect("fallback listener failed");
-			quic.connect(&tls, quic_addr, &versions)
-				.await
-				.map(|session| crate::transport::Session::new(session, moq_net::transport::Address::Uri))
-				.map_err(Error::from)
+			quic.connect(&tls, quic_addr, &versions).await.map_err(Error::from)
 		});
 
 		let dialed = kio::clock::timeout(
@@ -1165,10 +1157,7 @@ mod tests {
 			let quic = dialer.quic.as_ref().expect("QUIC backend");
 			let session = quic.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
 			connected.send(()).expect("fallback listener alive");
-			Ok::<_, crate::Error>(crate::transport::Session::new(
-				session,
-				moq_net::transport::Address::Uri,
-			))
+			Ok::<_, crate::Error>(session)
 		});
 		let cc = client
 			.race_moq_connect(&client.moq, ws_addr, quic)

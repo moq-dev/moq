@@ -147,10 +147,7 @@ mod linux {
 					.with_publisher(&pub_origin)
 					.accept(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Address::Setup,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("accept");
@@ -168,10 +165,7 @@ mod linux {
 						.with_subscriber(sub_origin.clone())
 						.connect(
 							moq_net::time::Instant::now(),
-							moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-								quic::web::Session::raw(conn),
-								moq_net::transport::Address::Setup,
-							)),
+							moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 						)
 						.await
 						.expect("connect");
