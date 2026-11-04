@@ -782,11 +782,15 @@ struct ReloadState<T: ?Sized + Send + Sync + 'static> {
 	build: Box<dyn Fn() -> Result<Arc<T>> + Send + Sync>,
 	/// What the files hold, for the reload logs.
 	material: &'static str,
+	/// Held across each read and install, so a slower read of older files never
+	/// replaces a newer one.
+	serial: std::sync::Mutex<()>,
 }
 
 #[cfg(feature = "watch")]
 impl<T: ?Sized + Send + Sync + 'static> ReloadState<T> {
 	fn reload(&self) {
+		let _serial = self.serial.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		match (self.build)() {
 			Ok(next) => {
 				*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
@@ -795,6 +799,16 @@ impl<T: ?Sized + Send + Sync + 'static> ReloadState<T> {
 			Err(err) => {
 				tracing::warn!(%err, material = self.material, "failed to reload TLS files; retaining the previous ones");
 			}
+		}
+	}
+
+	/// Reread the files once the watch is registered, catching a rotation that
+	/// landed between the caller's first load and the watch, which no event reports.
+	/// Quiet, since it almost always rereads what was just loaded.
+	fn resync(&self) {
+		let _serial = self.serial.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		if let Ok(next) = (self.build)() {
+			*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
 		}
 	}
 
@@ -826,11 +840,13 @@ impl<T: ?Sized + Send + Sync + 'static> Reloading<T> {
 			current: RwLock::new(initial),
 			build: Box::new(build),
 			material,
+			serial: std::sync::Mutex::new(()),
 		});
 
 		let reload = state.clone();
 		let watcher =
 			crate::watch::callback(paths, move || reload.reload()).map_err(|err| Error::Watch(err.to_string()))?;
+		state.resync();
 
 		Ok(Self {
 			state,
