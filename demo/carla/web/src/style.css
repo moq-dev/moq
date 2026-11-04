@@ -4,21 +4,25 @@
 	margin: 0;
 	padding: 0;
 }
-/* The same palette as the MoQ Boy demo. */
+/*
+ * The same palette as the MoQ Boy demo. A host page themes the player by setting
+ * these on `moq-carla`, since outer rules beat `:host`. The element paints no
+ * background of its own, so it sits on whatever page embeds it.
+ */
 :host {
 	color-scheme: dark;
-	--bg: #0a0a0a;
 	--panel: #141414;
 	--line: #333;
 	--text: #e0e0e0;
 	--muted: #888;
-	--dim: #555;
 	--accent: #8bac0f;
 	--accent-hover: #b4d63a;
 	--danger: #ed7169;
 	--ok: #8bac0f;
+	--on-accent: #0a0a0a;
+	--map-bg: #202020;
+	--scrim: #0a0a0acc;
 	font-family: system-ui, sans-serif;
-	background: var(--bg);
 	color: var(--text);
 	min-width: 320px;
 	display: flex;
@@ -48,21 +52,19 @@ button:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
 }
-header {
-	padding: 0.75rem 1.5rem;
+.map-status {
+	position: absolute;
+	top: 12px;
+	left: 12px;
+	z-index: 3;
 	display: flex;
 	align-items: center;
-	gap: 1rem;
-	border-bottom: 1px solid var(--line);
+	gap: 8px;
 }
-header h1 {
-	font-size: 1.1rem;
-	font-weight: 600;
-	color: var(--accent);
-}
-
 .status {
-	margin-left: auto;
+	padding: 4px 8px;
+	border-radius: 4px;
+	background: var(--scrim);
 	font:
 		12px ui-monospace,
 		monospace;
@@ -88,24 +90,16 @@ header h1 {
 }
 .wheel {
 	border: 1px solid var(--line);
-	background: transparent;
+	background: var(--scrim);
 	color: var(--text);
-	padding: 8px 12px;
-	border-radius: 5px;
+	padding: 4px 8px;
+	border-radius: 4px;
 	font-size: 12px;
 }
 .wheel[data-driving="true"] {
 	border-color: var(--accent);
 	color: var(--accent);
 }
-main {
-	width: 100%;
-	max-width: 1760px;
-	padding: 1rem 1.5rem;
-	margin: 0 auto;
-	flex: 1;
-}
-
 .map-panel {
 	border: 1px solid var(--line);
 	border-radius: 8px;
@@ -113,15 +107,15 @@ main {
 }
 #map {
 	position: relative;
-	height: max(420px, calc(100dvh - 180px));
-	background-color: #202020;
+	/* The aerial's aspect ratio, so the image fills the map with no bare bands. */
+	aspect-ratio: 16 / 9;
+	width: 100%;
+	min-height: 320px;
+	max-height: calc(100dvh - 8rem);
+	background-color: var(--map-bg);
 	background-image:
-		linear-gradient(#ffffff04 1px, transparent 1px), linear-gradient(90deg, #ffffff04 1px, transparent 1px),
-		radial-gradient(ellipse at 40% 60%, #292929, #191919);
-	background-size:
-		40px 40px,
-		40px 40px,
-		auto;
+		linear-gradient(#ffffff04 1px, transparent 1px), linear-gradient(90deg, #ffffff04 1px, transparent 1px);
+	background-size: 40px 40px;
 }
 #roads,
 #markers {
@@ -161,6 +155,7 @@ main {
 		monospace;
 	color: #dddddd;
 	text-align: center;
+	filter: drop-shadow(0 1px 2px #000);
 }
 .compass span {
 	display: block;
@@ -174,6 +169,7 @@ main {
 	font:
 		10px ui-monospace,
 		monospace;
+	filter: drop-shadow(0 1px 2px #000);
 }
 .bar {
 	border: 1px solid currentColor;
@@ -206,11 +202,11 @@ main {
 	width: 28px;
 	height: 28px;
 	background: var(--accent);
-	color: #0a0a0a;
+	color: var(--on-accent);
 	border: 2px solid #222222;
 	border-radius: 7px;
 	box-shadow:
-		0 0 0 3px #8bac0f30,
+		0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent),
 		0 3px 12px #0008;
 	z-index: 1;
 }
@@ -233,7 +229,7 @@ main {
 	left: 50%;
 	transform: translateX(-50%);
 	color: var(--text);
-	background: #151515ed;
+	background: var(--panel);
 	padding: 5px 7px;
 	border: 1px solid var(--line);
 	border-radius: 3px;
@@ -300,7 +296,7 @@ main {
 .estop-btn[data-reset="true"] {
 	color: var(--ok);
 	border-color: var(--ok);
-	background: #1c2408;
+	background: color-mix(in srgb, var(--ok) 15%, transparent);
 }
 .truck:not([data-focused="true"]) .video-wrap > .estop-btn {
 	position: absolute;
@@ -317,9 +313,10 @@ main {
 #backdrop {
 	position: fixed;
 	inset: 0;
-	background: #0a0a0ac9;
+	background: var(--scrim);
 	backdrop-filter: blur(5px);
-	z-index: 5;
+	/* The element makes no stacking context, so this competes with a host page's sticky chrome. */
+	z-index: 1000;
 }
 .truck[data-focused="true"] .card {
 	position: fixed;
@@ -329,7 +326,7 @@ main {
 	width: min(1100px, 94vw, max(560px, calc((94dvh - 140px) * 16 / 9)));
 	max-height: 94dvh;
 	overflow-y: auto;
-	z-index: 6;
+	z-index: 1001;
 	box-shadow: 0 28px 100px #0008;
 }
 .truck[data-active="true"] .card {
@@ -425,7 +422,7 @@ main {
 	min-height: 36px;
 }
 .control-btn {
-	color: #0a0a0a;
+	color: var(--on-accent);
 	background: var(--accent);
 	border: 1px solid var(--accent);
 }
@@ -546,30 +543,10 @@ summary {
 	border-color: var(--danger);
 }
 footer {
-	padding: 0.75rem 1.5rem;
-	border-top: 1px solid var(--line);
-	display: flex;
-	justify-content: space-between;
-	align-items: start;
-	color: var(--dim);
-	font-size: 0.75rem;
-	line-height: 1.7;
-	gap: 24px;
-}
-footer a {
-	color: var(--accent);
-	text-decoration: none;
-}
-footer a:hover {
-	text-decoration: underline;
-}
-footer details {
-	max-width: 600px;
-	flex: 1;
+	padding-top: 0.75rem;
 	color: var(--muted);
-}
-footer p {
-	margin-top: 10px;
+	font-size: 0.8rem;
+	line-height: 1.9;
 }
 #offline {
 	position: absolute;
@@ -580,7 +557,7 @@ footer p {
 	gap: 0.75rem;
 	padding: 1.5rem;
 	text-align: center;
-	background: #0a0a0acc;
+	background: var(--scrim);
 	/* Announcements land a moment after the session connects; fading in late keeps a
 	   simulator that is online from flashing the offline message. */
 	animation: reveal 0.3s ease 1s both;
@@ -630,19 +607,6 @@ kbd {
 	}
 }
 @media (max-width: 700px) {
-	header {
-		flex-wrap: wrap;
-		gap: 12px;
-		padding-inline: 1rem;
-	}
-	main {
-		padding: 1rem;
-	}
-
-	#map {
-		height: 380px;
-	}
-
 	.body {
 		padding: 16px;
 	}
@@ -663,15 +627,6 @@ kbd {
 	.guide-key {
 		flex-wrap: wrap;
 		gap: 10px;
-	}
-	footer {
-		flex-wrap: wrap;
-		gap: 14px;
-		padding-inline: 1rem;
-	}
-	footer details {
-		order: 3;
-		flex-basis: 100%;
 	}
 }
 

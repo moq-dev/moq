@@ -297,7 +297,7 @@ fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
 								let mut stream = conn.recv_stream(id);
 								let mut chunks = stream.read().unwrap();
 								assert!(matches!(chunks.next(usize::MAX), Err(recv::Error::Reset(_))));
-								let _ = chunks.finalize();
+								chunks.finalize();
 							}
 							let mut limits = moq_quic::Limits::default();
 							limits.receive_window = std::num::NonZeroU64::new(window as u64);
