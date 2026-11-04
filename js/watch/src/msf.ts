@@ -1,5 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
-import { u53 } from "@moq/hang/catalog";
+import { DrmSchema, u53 } from "@moq/hang/catalog";
 import * as Util from "@moq/hang/util";
 import type * as Msf from "@moq/msf";
 import { Path } from "@moq/net";
@@ -119,35 +119,86 @@ function namesCatalog(namespace: Path.Valid, base: Path.Valid): boolean {
 	return endsWith(a, b) || endsWith(b, a);
 }
 
+const HYPHENATED = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SIMPLE = /^[0-9a-f]{32}$/i;
+
 /**
- * The hang `drm` entries an MSF catalog's `contentProtections` describe, and each `refID`'s entry IDs.
+ * A UUID in lowercase hyphenated form, from any form moq-mux's `uuid` parse accepts: simple,
+ * hyphenated, braced, or URN. `undefined` for anything else.
+ */
+function normalizeUuid(text: string): string | undefined {
+	let hyphenated: string;
+	if (text.length === 32) {
+		if (!SIMPLE.test(text)) return undefined;
+		const at = [0, 8, 12, 16, 20, 32];
+		hyphenated = at
+			.slice(1)
+			.map((end, i) => text.slice(at[i], end))
+			.join("-");
+	} else if (text.length === 36) {
+		hyphenated = text;
+	} else if (text.length === 38 && text.startsWith("{") && text.endsWith("}")) {
+		hyphenated = text.slice(1, -1);
+	} else if (text.length === 45 && text.slice(0, 9).toLowerCase() === "urn:uuid:") {
+		hyphenated = text.slice(9);
+	} else {
+		return undefined;
+	}
+	return HYPHENATED.test(hyphenated) ? hyphenated.toLowerCase() : undefined;
+}
+
+/**
+ * The hang `drm` entries one MSF content protection describes, by ID, or `undefined` when the hang
+ * catalog cannot carry it.
  *
  * Mirrors moq-mux: an entry naming several default keys becomes one hang entry per key,
- * `{refID}:{kid}`. A track referencing it lists all of them here, which is enough to know it is
+ * `{refID}:{kid}` with the key in lowercase hyphenated form, and a split ID that is another
+ * entry's refID drops the entry rather than overwriting the other.
+ */
+function splitEntry(cp: Msf.ContentProtection, refIDs: Set<string>): [string, Catalog.Drm][] | undefined {
+	if (cp.defaultKID.length === 0) return undefined;
+	const system = normalizeUuid(cp.drmSystem.systemID);
+	if (system === undefined) return undefined;
+	const entries: [string, Catalog.Drm][] = [];
+	for (const raw of cp.defaultKID) {
+		const kid = normalizeUuid(raw);
+		if (kid === undefined) return undefined;
+		const id = cp.defaultKID.length === 1 ? cp.refID : `${cp.refID}:${kid}`;
+		if (entries.some(([other]) => other === id)) return undefined;
+		if (cp.defaultKID.length > 1 && refIDs.has(id)) return undefined;
+		// The scheme, the servers' URLs, and the pssh are checked the way the hang catalog reads them.
+		const entry = DrmSchema.safeParse({
+			system,
+			scheme: cp.scheme,
+			kid,
+			pssh: cp.drmSystem.pssh,
+			license: cp.drmSystem.laURL,
+			certificate: cp.drmSystem.certURL,
+		});
+		if (!entry.success) return undefined;
+		entries.push([id, entry.data]);
+	}
+	return entries;
+}
+
+/**
+ * The hang `drm` entries an MSF catalog's `contentProtections` describe, and each `refID`'s entry
+ * IDs, `undefined` for an entry the hang catalog cannot carry.
+ *
+ * A track referencing it lists all of a split entry's IDs here, which is enough to know it is
  * protected; moq-mux picks the one its init's `tenc` names.
  */
-function toDrm(msf: Msf.Catalog): { drm: Record<string, Catalog.Drm>; byRef: Map<string, string[]> } {
+function toDrm(msf: Msf.Catalog): { drm: Record<string, Catalog.Drm>; byRef: Map<string, string[] | undefined> } {
 	const drm: Record<string, Catalog.Drm> = Object.create(null);
-	const byRef = new Map<string, string[]>();
+	const byRef = new Map<string, string[] | undefined>();
+	const refIDs = new Set((msf.contentProtections ?? []).map((cp) => cp.refID));
 	for (const cp of msf.contentProtections ?? []) {
-		if (cp.scheme !== "cenc" && cp.scheme !== "cbcs") {
-			throw new Error(`MSF content protection ${cp.refID} has unsupported scheme ${cp.scheme}`);
-		}
-		if (cp.defaultKID.length === 0) throw new Error(`MSF content protection ${cp.refID} has no defaultKID`);
-		const ids: string[] = [];
-		for (const kid of cp.defaultKID) {
-			const id = cp.defaultKID.length === 1 ? cp.refID : `${cp.refID}:${kid.toLowerCase()}`;
-			drm[id] = {
-				system: cp.drmSystem.systemID,
-				scheme: cp.scheme,
-				kid,
-				pssh: cp.drmSystem.pssh,
-				license: cp.drmSystem.laURL,
-				certificate: cp.drmSystem.certURL,
-			};
-			ids.push(id);
-		}
-		byRef.set(cp.refID, ids);
+		const entries = splitEntry(cp, refIDs);
+		byRef.set(
+			cp.refID,
+			entries?.map(([id]) => id),
+		);
+		for (const [id, entry] of entries ?? []) drm[id] = entry;
 	}
 	return { drm, byRef };
 }
@@ -155,9 +206,17 @@ function toDrm(msf: Msf.Catalog): { drm: Record<string, Catalog.Drm>; byRef: Map
 /** Convert an MSF catalog to a hang catalog Root. */
 export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 	const { drm, byRef } = toDrm(msf);
-	// The hang entry IDs a track's refIDs name; @moq/msf refuses a refID the root lacks.
-	const protection = (track: Msf.Track) => {
-		const ids = (track.contentProtectionRefIDs ?? []).flatMap((id) => byRef.get(id) ?? []);
+	// The hang entry IDs a track's refIDs name; @moq/msf refuses a refID the root lacks. A track
+	// protected by an entry that was dropped is encrypted in a way the catalog cannot describe, so
+	// it is dropped too (`undefined`) rather than signalled as clear; the other tracks remain.
+	const protection = (track: Msf.Track): { drm?: string[] } | undefined => {
+		const ids: string[] = [];
+		for (const ref of track.contentProtectionRefIDs ?? []) {
+			if (!byRef.has(ref)) continue;
+			const split = byRef.get(ref);
+			if (split === undefined) return undefined;
+			ids.push(...split);
+		}
 		return ids.length > 0 ? { drm: ids } : {};
 	};
 
@@ -191,10 +250,12 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 		}
 		if (track.role === "video") {
 			const config = toVideoConfig(track);
-			if (config) videoRenditions[track.name] = { ...config, broadcast, ...protection(track) };
+			const drm = protection(track);
+			if (config && drm) videoRenditions[track.name] = { ...config, broadcast, ...drm };
 		} else if (track.role === "audio") {
 			const config = toAudioConfig(track);
-			if (config) audioRenditions[track.name] = { ...config, broadcast, ...protection(track) };
+			const drm = protection(track);
+			if (config && drm) audioRenditions[track.name] = { ...config, broadcast, ...drm };
 		} else if (
 			track.role === "caption" ||
 			track.role === "subtitle" ||

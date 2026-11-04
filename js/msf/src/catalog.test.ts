@@ -352,4 +352,11 @@ test("content protection round-trips and a dangling refID is refused", () => {
 
 	const dangling = encodeJson({ version: "draft-01", tracks: [{ ...track, contentProtectionRefIDs: ["2"] }] });
 	expect(() => decode(dangling)).toThrow("missing content protection");
+
+	const repeated = encodeJson({
+		version: "draft-01",
+		contentProtections: [...contentProtections, ...contentProtections],
+		tracks: [],
+	});
+	expect(() => decode(repeated)).toThrow("is repeated");
 });

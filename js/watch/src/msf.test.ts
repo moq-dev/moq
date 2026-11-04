@@ -353,7 +353,55 @@ test("maps CMSF content protection onto hang drm entries", () => {
 	expect(Catalog.isProtected(root.video?.renditions.video ?? { drm: [] })).toBe(true);
 	expect(root.audio?.renditions.audio?.drm).toBeUndefined();
 
+	// An entry the hang catalog cannot carry is dropped, and with it the tracks it protects; the
+	// clear audio stays.
 	const cens = structuredClone(catalog);
 	if (cens.contentProtections?.[0]) cens.contentProtections[0].scheme = "cens";
-	expect(() => toHang(cens)).toThrow("unsupported scheme");
+	const noKid = structuredClone(catalog);
+	if (noKid.contentProtections?.[0]) noKid.contentProtections[0].defaultKID = [];
+	for (const malformed of [cens, noKid]) {
+		const root = Catalog.checkRenditions(toHang(malformed));
+		expect(Object.keys(root.drm ?? {}).sort()).toEqual([
+			"wv:01234567-89ab-cdef-0123-456789abcdef",
+			"wv:a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90",
+		]);
+		expect(root.video).toBeUndefined();
+		expect(root.audio?.renditions.audio).toBeDefined();
+	}
+});
+
+// Mirrors moq-mux: a split entry's ID and key are lowercase hyphenated whatever form MSF used, and
+// one that would take another entry's refID drops that entry rather than overwriting the other.
+test("split CMSF entry IDs are normalised and never collide", () => {
+	const split: Msf.ContentProtection = {
+		refID: "ck",
+		defaultKID: ["0123456789ABCDEF0123456789ABCDEF", "{A1B2C3D4-E5F6-0718-293A-4B5C6D7E8F90}"],
+		scheme: "cenc",
+		drmSystem: { systemID: "1077EFEC-C0B2-4D02-ACE3-3C1E52E2FB4B" },
+	};
+	const track: Msf.Track = {
+		name: "video",
+		packaging: "loc",
+		role: "video",
+		codec: "vp8",
+		contentProtectionRefIDs: ["ck"],
+	};
+	const root = Catalog.checkRenditions(toHang({ contentProtections: [split], tracks: [track] }));
+	expect(Object.keys(root.drm ?? {}).sort()).toEqual([
+		"ck:01234567-89ab-cdef-0123-456789abcdef",
+		"ck:a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90",
+	]);
+	expect(root.drm?.["ck:01234567-89ab-cdef-0123-456789abcdef"]?.kid).toBe("01234567-89ab-cdef-0123-456789abcdef");
+	expect(root.drm?.["ck:01234567-89ab-cdef-0123-456789abcdef"]?.system).toBe(Catalog.SYSTEM.clearkey);
+
+	const colliding: Msf.ContentProtection = {
+		refID: "ck:01234567-89ab-cdef-0123-456789abcdef",
+		defaultKID: ["01234567-89ab-cdef-0123-456789abcdef"],
+		scheme: "cbcs",
+		drmSystem: { systemID: Catalog.SYSTEM.widevine },
+	};
+	const collided = Catalog.checkRenditions(toHang({ contentProtections: [split, colliding], tracks: [track] }));
+	expect(Object.keys(collided.drm ?? {})).toEqual(["ck:01234567-89ab-cdef-0123-456789abcdef"]);
+	expect(collided.drm?.["ck:01234567-89ab-cdef-0123-456789abcdef"]?.scheme).toBe("cbcs");
+	expect(collided.video).toBeUndefined();
 });

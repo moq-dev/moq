@@ -352,6 +352,15 @@ impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 			}
 		}
 
+		// A refID names one entry, so a repeated one leaves its tracks' protection ambiguous.
+		let mut ref_ids = std::collections::HashSet::new();
+		if let Some(repeated) = (wire.content_protections.iter()).find(|cp| !ref_ids.insert(cp.ref_id.as_str())) {
+			return Err(serde::de::Error::custom(format!(
+				"MSF content protection refID {:?} is repeated",
+				repeated.ref_id
+			)));
+		}
+
 		// A track's protection refers to a root entry by refID; one that names none would claim
 		// encryption the catalog cannot describe, so it is refused like a missing initRef.
 		for track in &wire.tracks {
@@ -842,6 +851,16 @@ mod test {
 		] }"#;
 		let err = json.parse::<super::Catalog>().unwrap_err().to_string();
 		assert!(err.contains("missing content protection"), "{err}");
+	}
+
+	/// A refID names one entry, so a catalog repeating one is refused.
+	#[test]
+	fn a_repeated_protection_ref_id_is_refused() {
+		let entry = r#"{ "refID": "1", "defaultKID": ["01234567-89ab-cdef-0123-456789abcdef"], "scheme": "cbcs",
+			"drmSystem": { "systemID": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" } }"#;
+		let json = format!(r#"{{ "version": "draft-01", "contentProtections": [{entry}, {entry}], "tracks": [] }}"#);
+		let err = json.parse::<super::Catalog>().unwrap_err().to_string();
+		assert!(err.contains("is repeated"), "{err}");
 	}
 
 	#[test]

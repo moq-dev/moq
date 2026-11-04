@@ -114,12 +114,15 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 ///
 /// `contentProtections` become the `drm` section, each `refID` an entry ID, and a track's
 /// `contentProtectionRefIDs` its rendition's `drm`. An entry naming several default keys becomes
-/// one hang entry per key, `{refID}:{kid}`, and a track lists the one its init's `tenc` uses (all
-/// of them when the init names none).
+/// one hang entry per key, `{refID}:{kid}` with the key in lowercase hyphenated form, and a track
+/// lists the one its init's `tenc` uses (all of them when the init names none). An entry the hang
+/// catalog cannot carry (a malformed ID, URL, or `pssh`, a scheme other than `cenc` and `cbcs`, no
+/// default key, or a split ID that is another entry's `refID`) is dropped with a warning, and so is
+/// every video and audio track it protects; the other tracks remain.
 pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net::Path) -> Result<Catalog<E>> {
 	let mut catalog = Catalog::default();
 	catalog.ext = msf.ext.clone();
-	let protections = Protections::from_msf(msf)?;
+	let protections = Protections::from_msf(msf);
 	catalog.drm = protections.entries.clone();
 
 	for track in &msf.tracks {
@@ -152,8 +155,12 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 		match role {
 			moq_msf::Role::Video => match video_config_from_msf(track)? {
 				Some(mut config) => {
+					let Some(drm) = protections.track(track, &config.container) else {
+						tracing::warn!(track = %track.name, "skipping MSF video track protected by an ignored content protection");
+						continue;
+					};
 					config.broadcast = broadcast;
-					config.drm = protections.track(track, &config.container);
+					config.drm = drm;
 					catalog.video.renditions.insert(track.name.clone(), config);
 				}
 				None => {
@@ -166,8 +173,12 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			},
 			moq_msf::Role::Audio => match audio_config_from_msf(track)? {
 				Some(mut config) => {
+					let Some(drm) = protections.track(track, &config.container) else {
+						tracing::warn!(track = %track.name, "skipping MSF audio track protected by an ignored content protection");
+						continue;
+					};
 					config.broadcast = broadcast;
-					config.drm = protections.track(track, &config.container);
+					config.drm = drm;
 					catalog.audio.renditions.insert(track.name.clone(), config);
 				}
 				None => {
@@ -201,58 +212,90 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 struct Protections {
 	/// The hang entries, by ID.
 	entries: std::collections::BTreeMap<String, hang::catalog::drm::Entry>,
-	/// Each `refID`'s hang entries, with the default key each one is for.
-	by_ref: std::collections::HashMap<String, Vec<(String, hang::catalog::drm::Uuid)>>,
+	/// Each usable `refID`'s hang entries, with the default key each one is for, or `None` for one
+	/// the hang catalog cannot carry.
+	by_ref: std::collections::HashMap<String, Option<Vec<(String, hang::catalog::drm::Uuid)>>>,
 }
 
 impl Protections {
-	fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Self> {
-		use hang::catalog::drm;
-
-		let mut entries = std::collections::BTreeMap::new();
-		let mut by_ref = std::collections::HashMap::<String, Vec<_>>::new();
+	/// Map each entry, dropping with a warning one the hang catalog cannot carry, so a bad entry
+	/// costs only the renditions it protects (see [`track`](Self::track)), not the whole catalog.
+	fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Self {
+		// moq-msf refuses a repeated refID. A split entry's `{refID}:{kid}` must not take another
+		// entry's refID, whichever comes first.
+		let ref_ids: std::collections::HashSet<&str> =
+			msf.content_protections.iter().map(|cp| cp.ref_id.as_str()).collect();
+		let mut protections = Self {
+			entries: Default::default(),
+			by_ref: Default::default(),
+		};
 		for cp in &msf.content_protections {
-			let invalid = |reason| Error::InvalidContentProtection {
-				ref_id: cp.ref_id.clone(),
-				reason,
+			let split = match protections.split(cp, &ref_ids) {
+				Ok(split) => Some(split),
+				Err(reason) => {
+					tracing::warn!(ref_id = %cp.ref_id, reason, "ignoring MSF content protection the hang catalog cannot carry");
+					None
+				}
 			};
-			let system = drm::Uuid::try_parse(&cp.drm_system.system_id).map_err(|_| invalid("malformed systemID"))?;
-			let scheme: drm::Scheme = cp.scheme.parse().map_err(|_| invalid("unsupported scheme"))?;
-			let server = |url: &moq_msf::ProtectionUrl| -> Result<drm::Server> {
-				let mut server = drm::Server::new(url.url.parse().map_err(|_| invalid("malformed URL"))?);
-				server.kind = url.kind.clone();
-				Ok(server)
-			};
-			let license = cp.drm_system.la_url.as_ref().map(server).transpose()?;
-			let certificate = cp.drm_system.cert_url.as_ref().map(server).transpose()?;
-			let pssh = (cp.drm_system.pssh.as_ref())
-				.map(|pssh| base64::engine::general_purpose::STANDARD.decode(pssh))
-				.transpose()
-				.map_err(|_| invalid("malformed pssh"))?;
-			if cp.default_kid.is_empty() {
-				return Err(invalid("no defaultKID").into());
-			}
-
-			let split = by_ref.entry(cp.ref_id.clone()).or_default();
-			for kid in &cp.default_kid {
-				let kid = drm::Uuid::try_parse(kid).map_err(|_| invalid("malformed defaultKID"))?;
-				let id = match cp.default_kid.len() {
-					1 => cp.ref_id.clone(),
-					_ => format!("{}:{}", cp.ref_id, kid.hyphenated()),
-				};
-				let mut entry = drm::Entry::new(system, scheme, kid);
-				entry.license = license.clone();
-				entry.certificate = certificate.clone();
-				entry.pssh = pssh.clone().map(Into::into);
-				entries.insert(id.clone(), entry);
-				split.push((id, kid));
-			}
+			protections.by_ref.insert(cp.ref_id.clone(), split);
 		}
-		Ok(Self { entries, by_ref })
+		protections
 	}
 
-	/// The hang entry IDs protecting `track`, whose CMAF init is in `container`.
-	fn track(&self, track: &moq_msf::Track, container: &Container) -> Vec<String> {
+	/// Add `cp`'s hang entries, one per default key, returning their IDs.
+	fn split(
+		&mut self,
+		cp: &moq_msf::ContentProtection,
+		ref_ids: &std::collections::HashSet<&str>,
+	) -> std::result::Result<Vec<(String, hang::catalog::drm::Uuid)>, &'static str> {
+		use hang::catalog::drm;
+
+		let system = drm::Uuid::try_parse(&cp.drm_system.system_id).map_err(|_| "malformed systemID")?;
+		let scheme: drm::Scheme = cp.scheme.parse().map_err(|_| "unsupported scheme")?;
+		let server = |url: &moq_msf::ProtectionUrl| -> std::result::Result<drm::Server, &'static str> {
+			let mut server = drm::Server::new(url.url.parse().map_err(|_| "malformed URL")?);
+			server.kind = url.kind.clone();
+			Ok(server)
+		};
+		let license = cp.drm_system.la_url.as_ref().map(server).transpose()?;
+		let certificate = cp.drm_system.cert_url.as_ref().map(server).transpose()?;
+		let pssh = (cp.drm_system.pssh.as_ref())
+			.map(|pssh| base64::engine::general_purpose::STANDARD.decode(pssh))
+			.transpose()
+			.map_err(|_| "malformed pssh")?;
+		if cp.default_kid.is_empty() {
+			return Err("no defaultKID");
+		}
+
+		let mut split = Vec::with_capacity(cp.default_kid.len());
+		for kid in &cp.default_kid {
+			let kid = drm::Uuid::try_parse(kid).map_err(|_| "malformed defaultKID")?;
+			let id = match cp.default_kid.len() {
+				1 => cp.ref_id.clone(),
+				_ => format!("{}:{}", cp.ref_id, kid.hyphenated()),
+			};
+			if split.iter().any(|(other, _)| *other == id) {
+				return Err("repeated defaultKID");
+			}
+			if cp.default_kid.len() > 1 && ref_ids.contains(id.as_str()) {
+				return Err("a split entry ID is another entry's refID");
+			}
+			split.push((id, kid));
+		}
+		for (id, kid) in &split {
+			let mut entry = drm::Entry::new(system, scheme, *kid);
+			entry.license = license.clone();
+			entry.certificate = certificate.clone();
+			entry.pssh = pssh.clone().map(Into::into);
+			self.entries.insert(id.clone(), entry);
+		}
+		Ok(split)
+	}
+
+	/// The hang entry IDs protecting `track`, whose CMAF init is in `container`, or `None` when it
+	/// references an entry that was dropped: its samples are encrypted in a way the catalog cannot
+	/// describe, so the rendition is left out rather than signalled as clear.
+	fn track(&self, track: &moq_msf::Track, container: &Container) -> Option<Vec<String>> {
 		let kid = match container {
 			Container::Cmaf { init } => init_kid(init),
 			_ => None,
@@ -264,6 +307,7 @@ impl Protections {
 			.iter()
 			.filter_map(|id| self.by_ref.get(id))
 		{
+			let split = split.as_ref()?;
 			let matching: Vec<_> = split.iter().filter(|(_, other)| Some(*other) == kid).collect();
 			let chosen = match (split.len(), matching.is_empty()) {
 				(1, _) | (_, true) => split.iter().collect(),
@@ -271,7 +315,7 @@ impl Protections {
 			};
 			ids.extend(chosen.into_iter().map(|(id, _)| id.clone()));
 		}
-		ids
+		Some(ids)
 	}
 }
 
@@ -593,7 +637,7 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 mod test {
 	/// CMSF content protection maps onto the hang `drm` section. An entry naming two default
 	/// keys becomes one hang entry per key; a track whose init names neither lists both, and a
-	/// malformed entry refuses the catalog.
+	/// malformed entry is dropped with the tracks it protects.
 	#[test]
 	fn content_protections_become_drm_entries() {
 		use hang::catalog::drm;
@@ -634,9 +678,74 @@ mod test {
 		);
 		assert!(catalog.audio.renditions["audio"].drm.is_empty());
 
-		let malformed = json.replace("\"cenc\"", "\"cens\"");
-		let msf: moq_msf::Catalog = malformed.parse().unwrap();
-		assert!(from_msf(&msf, &moq_net::Path::empty()).is_err());
+		// An entry the hang catalog cannot carry is dropped, and with it the tracks it protects;
+		// the clear audio stays.
+		for (from, to) in [
+			("\"cenc\"", "\"cens\""),
+			(
+				"[\"01234567-89ab-cdef-0123-456789abcdef\", \"a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90\"]",
+				"[]",
+			),
+		] {
+			let malformed = json.replace(from, to);
+			assert_ne!(malformed, json);
+			let msf: moq_msf::Catalog = malformed.parse().unwrap();
+			let catalog = from_msf(&msf, &moq_net::Path::empty()).unwrap();
+			catalog.check_renditions().unwrap();
+			assert_eq!(catalog.drm.keys().collect::<Vec<_>>(), ["wv"]);
+			assert!(catalog.video.renditions.is_empty());
+			assert!(catalog.audio.renditions.contains_key("audio"));
+		}
+	}
+
+	/// A split entry's ID writes its key in lowercase hyphenated form, whatever form the MSF
+	/// catalog used, as `@moq/watch` does; one that would take another entry's `refID` drops that
+	/// entry rather than overwriting the other.
+	#[test]
+	fn split_entry_ids_are_normalised_and_never_collide() {
+		let json = r#"{
+			"version": "draft-01",
+			"contentProtections": [
+				{ "refID": "ck", "defaultKID": ["0123456789ABCDEF0123456789ABCDEF", "{A1B2C3D4-E5F6-0718-293A-4B5C6D7E8F90}"],
+				  "scheme": "cenc", "drmSystem": { "systemID": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b" } }
+			],
+			"tracks": [
+				{ "name": "video", "packaging": "legacy", "isLive": true, "role": "video", "codec": "vp8",
+				  "contentProtectionRefIDs": ["ck"] }
+			]
+		}"#;
+		let msf: moq_msf::Catalog = json.parse().unwrap();
+		let catalog = from_msf(&msf, &moq_net::Path::empty()).unwrap();
+		assert_eq!(
+			catalog.drm.keys().collect::<Vec<_>>(),
+			[
+				"ck:01234567-89ab-cdef-0123-456789abcdef",
+				"ck:a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"
+			]
+		);
+		assert_eq!(
+			catalog.drm["ck:01234567-89ab-cdef-0123-456789abcdef"].kid,
+			hang::catalog::drm::Uuid::from_u128(0x01234567_89ab_cdef_0123_456789abcdef)
+		);
+
+		// Another entry whose refID is one of the split IDs keeps it; the split entry is dropped.
+		let colliding = json.replace(
+			"\"contentProtections\": [",
+			r#""contentProtections": [
+				{ "refID": "ck:01234567-89ab-cdef-0123-456789abcdef", "defaultKID": ["01234567-89ab-cdef-0123-456789abcdef"],
+				  "scheme": "cbcs", "drmSystem": { "systemID": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" } },"#,
+		);
+		let msf: moq_msf::Catalog = colliding.parse().unwrap();
+		let catalog = from_msf(&msf, &moq_net::Path::empty()).unwrap();
+		assert_eq!(
+			catalog.drm.keys().collect::<Vec<_>>(),
+			["ck:01234567-89ab-cdef-0123-456789abcdef"]
+		);
+		assert_eq!(
+			catalog.drm["ck:01234567-89ab-cdef-0123-456789abcdef"].scheme,
+			hang::catalog::drm::Scheme::Cbcs
+		);
+		assert!(catalog.video.renditions.is_empty());
 	}
 
 	/// A later track with a name replaces the earlier one, even under another role, so the

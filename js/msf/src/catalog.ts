@@ -211,9 +211,15 @@ export function decode(raw: Uint8Array): Catalog {
 		byId.set(entry.id, entry);
 	}
 
+	// A refID names one entry, so a repeated one leaves its tracks' protection ambiguous.
+	const refIDs = new Set<string>();
+	for (const cp of wire.contentProtections ?? []) {
+		if (refIDs.has(cp.refID)) throw new Error(`MSF content protection refID "${cp.refID}" is repeated`);
+		refIDs.add(cp.refID);
+	}
+
 	// A track's protection refers to a root entry by refID; one that names none would claim
 	// encryption the catalog cannot describe, so it is refused like a missing initRef.
-	const refIDs = new Set((wire.contentProtections ?? []).map((cp) => cp.refID));
 
 	const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
 		track.isLive ??= false;
