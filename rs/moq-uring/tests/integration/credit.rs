@@ -10,7 +10,7 @@
 use crate::support;
 
 use std::net::UdpSocket;
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
