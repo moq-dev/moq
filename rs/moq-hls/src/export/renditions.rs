@@ -285,6 +285,19 @@ impl Producer {
 		self.state.read().renditions.is_empty()
 	}
 
+	/// Whether any rendition could still be listed: enabled and not failed on its own.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub fn listable(&self) -> bool {
+		self.state
+			.read()
+			.renditions
+			.values()
+			.any(|rendition| rendition.is_enabled() && !rendition.failed_alone())
+	}
+
 	/// Release every rendition the map is holding.
 	///
 	/// The map lives in shared state, so a surviving [`Consumer`] would otherwise keep every

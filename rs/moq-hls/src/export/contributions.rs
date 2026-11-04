@@ -142,7 +142,7 @@ impl Producer {
 							}
 							let listable = instance.renditions.snapshot().iter().any(|rendition| {
 								rendition.is_enabled()
-									&& rendition.poll_resolved(waiter).is_ready()
+									&& rendition.poll_resolved(waiter) == Poll::Ready(true)
 									&& rendition.poll_refused(waiter).is_pending()
 							});
 							if listable {
@@ -172,10 +172,11 @@ impl Producer {
 			let current = entry.current.read();
 			let Current::Online(instance) = &*current else { continue };
 			for rendition in instance.renditions.snapshot() {
-				// A rendition whose binding is still resolving may yet be denied, so it waits.
+				// A rendition whose binding is still resolving may yet be denied, so it waits; one
+				// whose binding failed has no media to serve.
 				let noop = kio::Waiter::noop();
 				if !rendition.is_enabled()
-					|| rendition.poll_resolved(&noop).is_pending()
+					|| rendition.poll_resolved(&noop) != Poll::Ready(true)
 					|| rendition.poll_refused(&noop).is_ready()
 				{
 					continue;

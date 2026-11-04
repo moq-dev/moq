@@ -1146,14 +1146,17 @@ impl Rendition {
 		self.media.handle.lock().expect("media lock poisoned").track.is_some()
 	}
 
-	/// Poll until the broadcast serving this rendition's media resolves or is refused, so a
-	/// listing never advertises a rendition whose authorization is still pending.
+	/// Poll until the broadcast serving this rendition's media settles: `true` once it resolved,
+	/// `false` if it failed, however. A listing advertises only a resolved rendition, so never
+	/// one whose authorization is pending or whose media can't be read.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) fn poll_resolved(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.poll_media(waiter).poll_broadcast(waiter).map(|_| ())
+	pub(crate) fn poll_resolved(&self, waiter: &kio::Waiter) -> Poll<bool> {
+		self.poll_media(waiter)
+			.poll_broadcast(waiter)
+			.map(|result| result.is_ok())
 	}
 
 	/// Poll until listings of this rendition refuse (see [`check`](Self::check)), waking when its

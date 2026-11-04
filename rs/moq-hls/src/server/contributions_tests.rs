@@ -344,6 +344,66 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_contribution_rendition_whose_broadcast_failed_is_not_listed() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
+	frames(&parent.video, 0);
+	frames(&parent.audio, 0);
+	let other = origin.requests("room/other").unwrap();
+	let child = Instance::random();
+	let mut value = catalog();
+	value.audio.renditions.clear();
+	value.video.renditions.get_mut("same").unwrap().broadcast = Some(moq_net::path::Relative::new("./other").unwrap());
+	let _contribution = publish(&origin, "room/ladder", &child, &value);
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	master(&server, &format!("@{root}/video/same"), true).await;
+	// Not a denial, but its media still can't be read.
+	kio::clock::timeout(Duration::from_secs(5), other.requested_broadcast())
+		.await
+		.expect("the binding never asked")
+		.unwrap()
+		.reject(moq_net::Error::Unroutable);
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let listed = master(&server, &format!("@{root}/video/same"), true).await;
+	assert!(!listed.contains("contribution/"), "{listed}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_contribution_answers_the_master_when_no_own_rendition_is_listable() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let child = Instance::random();
+	let mut value = parent_catalog();
+	value.video.renditions.get_mut("same").unwrap().enabled = false;
+	value.audio.renditions.get_mut("sound").unwrap().enabled = false;
+	let _parent = publish(&origin, "room/live", &root, &value);
+	let _contribution = publish(&origin, "room/ladder", &child, &catalog());
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	let broadcaster = server.broadcaster("room/live").await.unwrap();
+	let at = crate::export::Contribution {
+		id: "rung/a".into(),
+		instance: child.to_string(),
+	};
+	assert!(
+		broadcaster
+			.contribution(&at, crate::export::Kind::Video, "same")
+			.await
+			.unwrap()
+			.is_some()
+	);
+	// Disabled own renditions can't be listed, so the master needn't wait out its timeout.
+	let start = kio::clock::now();
+	let (status, body) = request(&server, "/room/live/master.m3u8").await;
+	assert_eq!(status, StatusCode::OK, "{body}");
+	assert!(
+		body.contains(&format!("contribution/rung%2Fa/video/same/@{child}")),
+		"{body}"
+	);
+	assert!(kio::clock::now() - start < Duration::from_secs(1));
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_contribution_rendition_is_listed_once_its_broadcast_resolves() {
 	let origin = moq_tokio::origin::spawn();
 	let root = Instance::random();

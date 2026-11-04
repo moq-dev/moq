@@ -273,7 +273,8 @@ impl Broadcaster {
 				.contributions
 				.as_ref()
 				.is_some_and(|contributions| contributions.poll_advertised(waiter).is_ready());
-			if own.is_ready() || (self.renditions.is_empty() && contribution) {
+			// Contributions alone answer only while no own rendition could still be listed.
+			if own.is_ready() || (!self.renditions.listable() && contribution) {
 				std::task::Poll::Ready(())
 			} else {
 				std::task::Poll::Pending
