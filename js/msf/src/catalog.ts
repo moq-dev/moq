@@ -73,7 +73,15 @@ export const CatalogSchema = z.object({
 	// draft-lcurley-moq-mpegts. Mirrors `Catalog::ext` in `moq-msf`, which is typed;
 	// here it stays an untyped map, so members this build has never seen survive a
 	// decode/encode round trip unchanged.
-	ext: z.optional(z.record(z.string(), z.unknown())),
+	ext: z.optional(
+		z.pipe(
+			// A record parser drops `__proto__`; every own extension member is application data.
+			z.custom<Record<string, unknown>>(
+				(value) => typeof value === "object" && value !== null && !Array.isArray(value),
+			),
+			z.transform((value) => Object.assign(Object.create(null), value) as Record<string, unknown>),
+		),
+	),
 });
 
 /** The MSF catalog: a snapshot of the available tracks. */

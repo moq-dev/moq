@@ -33,6 +33,92 @@ const audioConfig: Catalog.AudioConfig = {
 	container: { kind: "legacy" },
 };
 
+const parity = (await Bun.file(new URL("../../../rs/hang/fixtures/catalog-parity.json", import.meta.url)).json()) as {
+	catalog: unknown;
+	refused?: boolean;
+}[];
+
+for (const kind of ["video", "audio", "text"] as const) {
+	const fixture = parity.find((c) => {
+		if (c.refused) return false;
+		const entries = Catalog.RootSchema.parse(c.catalog)[kind]?.renditions;
+		return entries && ["__proto__", "constructor", "toString"].every((name) => Object.hasOwn(entries, name));
+	});
+	if (!fixture) throw new Error(`missing shared ${kind} name fixture`);
+	const configs = Catalog.RootSchema.parse(fixture.catalog)[kind]?.renditions ?? {};
+
+	test(`shared Rust ${kind} names survive registration and the published catalog`, async () => {
+		const origin = new Origin.Producer();
+		const broadcast = new Broadcast({ origin, name: Path.from("names.hang") });
+		try {
+			const register = () =>
+				Object.entries(configs).map(([name, config]) => {
+					const rendition = broadcast[kind](name);
+					rendition.config.set(config);
+					expect(() => broadcast[kind](name)).toThrow();
+					return rendition;
+				});
+			const registered = register();
+			await settle();
+			const entries = (await readCatalog(broadcast))?.[kind]?.renditions ?? {};
+			expect(Object.keys(entries).sort()).toEqual(Object.keys(configs).sort());
+			expect(entries).toEqual(configs);
+			for (const rendition of registered) {
+				expect(rendition.track.peek()?.name).toBe(rendition.name);
+				rendition.close();
+			}
+			await settle();
+			expect((await readCatalog(broadcast))?.[kind]).toBeUndefined();
+			register();
+			await settle();
+			const restored = (await readCatalog(broadcast))?.[kind]?.renditions ?? {};
+			expect(Object.keys(restored).sort()).toEqual(Object.keys(configs).sort());
+			expect(restored).toEqual(configs);
+		} finally {
+			broadcast.close();
+			origin.close();
+		}
+	});
+}
+
+test("shared Rust stats names survive the publisher's report builder", async () => {
+	const fixture = Stats.SnapshotSchema.parse(
+		await Bun.file(new URL("../../../rs/hang/fixtures/stats-snapshot.json", import.meta.url)).json(),
+	);
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Origin.Producer();
+	const broadcast = new Broadcast({ origin, name: Path.from("stats-names.hang"), stats: true });
+	try {
+		for (const [name, stats] of Object.entries(fixture.renditions ?? {})) {
+			const rendition = broadcast.video(name);
+			rendition.config.set(videoConfig);
+			rendition.stats.set(stats);
+		}
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected a network producer");
+		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		try {
+			const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
+				track: subscriber,
+				schema: Stats.SnapshotSchema,
+			});
+			await settle();
+			await clock.advance(Nano.fromMilli(Milli(1000)));
+			const reported = (await consumer.latest())?.value.renditions ?? {};
+			expect(Object.keys(reported).sort()).toEqual(Object.keys(fixture.renditions ?? {}).sort());
+			expect(reported).toEqual(fixture.renditions ?? {});
+		} finally {
+			subscriber.close();
+		}
+	} finally {
+		broadcast.close();
+		origin.close();
+		installed.close();
+	}
+});
+
 test("sibling broadcasts on one page advertise the same capture clock", async () => {
 	const origin = new Origin.Producer();
 	const camera = new Broadcast({ enabled: true, origin, name: Path.from("participant/camera.hang") });
