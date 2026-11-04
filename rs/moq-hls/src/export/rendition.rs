@@ -319,9 +319,28 @@ struct Claim {
 	pending: bool,
 	/// The newest group this instance read from its track.
 	seen: Option<u64>,
-	/// Set by [`Rendition::retire`] to [`seen`](Self::seen): the groups this instance still lists
-	/// are those up to it, and a replacement on the same track lists only groups past it.
+	/// Set by [`Rendition::retire`] to [`seen`](Self::seen), or to the group before a
+	/// [`handover`](Rendition::handover): the groups this instance still lists are those up to it,
+	/// and a replacement on the same track lists only groups past it.
 	boundary: Option<u64>,
+	/// Retired, where the replacement's media starts: the first group past the boundary.
+	theirs_at: Option<moq_net::Timestamp>,
+	/// The oldest group no completed segment holds, and the open segment if one is: what a retire
+	/// can still hand over.
+	unplaced: Option<(u64, Option<u64>)>,
+	/// The picture size the newest group declared in band.
+	size: Option<(u32, u32)>,
+	/// The newest group declaring a picture size other than the one before it: every later group
+	/// read shares its size.
+	resized: Option<Resize>,
+}
+
+/// A group whose keyframe changed the picture size in band.
+#[derive(Clone, Copy)]
+struct Resize {
+	group: u64,
+	pts: moq_net::Timestamp,
+	size: (u32, u32),
 }
 
 /// A single HLS rendition: master-playlist metadata, its window over its media track's groups
@@ -616,16 +635,30 @@ impl Rendition {
 	}
 
 	/// End the window once its open segment is listed, because the catalog dropped or replaced the
-	/// rendition. Returns where a replacement takes over.
+	/// rendition with `successor`'s config. Returns where a replacement takes over.
 	///
 	/// Its track may go on (a replacement may read it too), so its end can't end the window.
 	/// Ending it at once would lose the last segment of every recording, since it is listed only
 	/// once a later one starts or the track ends.
-	pub(crate) fn retire(self: &Arc<Self>) -> Handoff {
+	///
+	/// It keeps the groups it read before the catalog update, except a [`handover`](Self::handover):
+	/// the media and the catalog are separate tracks, so the successor's first group can arrive first.
+	pub(crate) fn retire(self: &Arc<Self>, successor: Option<&VideoConfig>) -> Handoff {
 		let (next, pending) = {
 			let mut claim = self.claim.lock().expect("claim lock poisoned");
 			claim.retired = true;
 			claim.boundary = claim.seen;
+			if let Some(resized) = self.handover(&claim, successor) {
+				claim.boundary = resized.group.checked_sub(1);
+				claim.theirs_at = Some(resized.pts);
+				// No group of the open segment is this instance's, so it lists nothing more.
+				if let Some((first, open)) = claim.unplaced
+					&& first == resized.group
+				{
+					claim.next = open.unwrap_or(claim.next);
+					claim.pending = false;
+				}
+			}
 			(claim.next, claim.pending)
 		};
 		self.retiring.send_replace(true);
@@ -640,6 +673,25 @@ impl Rendition {
 				false => self.previous(),
 			},
 		}
+	}
+
+	/// The group `successor`'s first on this track, when this instance read it but has not listed it:
+	/// the newest in-band resize, to the picture size `successor` declares in place of this config's.
+	///
+	/// A track keeps its decoder identity, so the picture size is the only decoder change it carries,
+	/// and only its keyframes say where that change starts (see the hang draft's Track Identity).
+	fn handover(&self, claim: &Claim, successor: Option<&VideoConfig>) -> Option<Resize> {
+		let (Config::Video(current), Some(successor)) = (&self.config, successor) else {
+			return None;
+		};
+		let size = |config: &VideoConfig| config.coded_width.zip(config.coded_height);
+		let same_track = successor.track(&self.name) == self.track()
+			&& successor.broadcast() == current.broadcast()
+			&& successor.instance() == current.instance();
+		let resized = claim.resized?;
+		let (unplaced, _) = claim.unplaced?;
+		let resizes = size(successor).is_some_and(|size| size == resized.size) && size(successor) != size(current);
+		(same_track && resizes && resized.group >= unplaced).then_some(resized)
 	}
 
 	fn previous(&self) -> Option<Arc<Rendition>> {
@@ -1507,6 +1559,20 @@ fn broken(segments: &[u64], inherited: usize) -> usize {
 		.unwrap_or(0)
 }
 
+/// Resolve once `rendition` is retired with no segment left waiting to list, or is gone.
+///
+/// The claim is read on every change, so a retire that leaves nothing pending wakes it.
+async fn retired(retiring: &mut tokio::sync::watch::Receiver<bool>, rendition: &Weak<Rendition>) {
+	let done = |retiring: &bool| {
+		*retiring
+			&& rendition
+				.upgrade()
+				.is_none_or(|rendition| !rendition.claim.lock().expect("claim lock poisoned").pending)
+	};
+	// A dropped sender means the rendition is gone, which ends the watch all the same.
+	let _ = retiring.wait_for(done).await;
+}
+
 /// Follow a rendition's media track into its window, numbering its groups on the grid, until the
 /// track ends or fails.
 ///
@@ -1515,9 +1581,9 @@ fn broken(segments: &[u64], inherited: usize) -> usize {
 /// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
 /// lists that segment whole, and the same URL must name the same bytes everywhere.
 async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watch::Receiver<bool>) {
-	let Some((track, interval, segment, container)) = rendition
+	let Some((track, interval, segment, container, mut probe)) = rendition
 		.upgrade()
-		.map(|r| (r.track().to_string(), r.interval, r.segment, r.container.clone()))
+		.map(|r| (r.track().to_string(), r.interval, r.segment, r.container.clone(), r.muxer().ok()))
 	else {
 		return;
 	};
@@ -1532,7 +1598,7 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 		if let Some(previous) = previous {
 			tokio::select! {
 				_ = previous.live.closed() => {}
-				_ = retiring.wait_for(|retiring| *retiring) => return Ok(()),
+				_ = retired(&mut retiring, &rendition) => return Ok(()),
 			}
 			let (next, boundary) = {
 				let claim = previous.claim.lock().expect("claim lock poisoned");
@@ -1567,7 +1633,7 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 				// The bound broadcast never serves the track: nothing to list.
 				None => return Ok(()),
 			},
-			_ = retiring.wait_for(|retiring| *retiring) => return Ok(()),
+			_ = retired(&mut retiring, &rendition) => return Ok(()),
 		};
 
 		let mut grid = grid::Grid::new(segment, segments::MAX_SEGMENTS);
@@ -1577,29 +1643,25 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 		let mut spacing: Option<std::time::Duration> = None;
 		// Nothing is listed before the first segment this watcher saw start.
 		let mut whole = false;
-		// Retired, where the first group past the last it had read starts: the replacement's media.
-		let mut theirs_at: Option<moq_net::Timestamp> = None;
 		loop {
-			let pending = rendition
-				.upgrade()
-				.is_some_and(|rendition| rendition.claim.lock().expect("claim lock poisoned").pending);
 			let next = tokio::select! {
 				next = groups.next_group() => next?,
-				// Nothing waits on a later segment, so a retiring rendition has listed all it will.
-				_ = retiring.wait_for(|retiring| *retiring), if !pending => return Ok(()),
+				_ = retired(&mut retiring, &rendition) => return Ok(()),
 			};
 			let ended = next.is_none();
 			// The group read and, unless it is a marker, its first pts.
 			let mut read: Option<(u64, Option<moq_net::Timestamp>)> = None;
+			// The picture size the group's keyframe declares.
+			let mut size = None;
 			let slots = match next {
 				Some(mut group) => {
 					// A group's place is its first frame's pts: the transport's stamp, or the
 					// container's own where the session carries none.
 					let first = tokio::select! {
 						first = group.read_frame() => first?,
-						_ = retiring.wait_for(|retiring| *retiring), if !pending => return Ok(()),
+						_ = retired(&mut retiring, &rendition) => return Ok(()),
 					};
-					let Some(first) = first.and_then(|frame| first_frame(&container, frame)) else {
+					let Some(first) = first.and_then(|frame| first_frame(&container, frame, probe.as_mut())) else {
 						tracing::warn!(%track, group = group.sequence, "skipping a group without a timed first frame");
 						continue;
 					};
@@ -1611,8 +1673,9 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 							latest = None;
 							grid.stop(at)
 						}
-						First::Media(pts, reach) => {
+						First::Media(pts, reach, declared) => {
 							read = Some((group.sequence, Some(pts)));
+							size = declared;
 							if let Some((_, previous, _)) = &latest {
 								spacing = pts.checked_sub(*previous).ok().map(Duration::from).or(spacing);
 							}
@@ -1643,8 +1706,9 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 				&& let Some((sequence, Some(pts))) = read
 				&& theirs(&(sequence..sequence + 1))
 			{
-				theirs_at = theirs_at.or(Some(pts));
+				claim.theirs_at = claim.theirs_at.or(Some(pts));
 			}
+			let theirs_at = claim.theirs_at;
 			for slot in slots {
 				let Some(segment) = slot.segment() else {
 					tracing::warn!(%track, "media timestamps went back; resetting the playlist window");
@@ -1712,6 +1776,13 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 			if let Some((sequence, _)) = read {
 				claim.seen = Some(sequence);
 			}
+			if let (Some((group, Some(pts))), Some(size)) = (read, size)
+				&& claim.size != Some(size)
+			{
+				claim.size = Some(size);
+				claim.resized = Some(Resize { group, pts, size });
+			}
+			claim.unplaced = grid.unplaced().map(|first| (first, grid.open()));
 			if !claim.retired
 				&& let Some(open) = grid.open()
 			{
@@ -1808,14 +1879,20 @@ impl Reach {
 
 /// What a group's first frame holds.
 enum First {
-	/// Media: its pts, the transport's stamp or else its first sample's, with what its samples reach.
-	Media(moq_net::Timestamp, Reach),
+	/// Media: its pts, the transport's stamp or else its first sample's, with what its samples reach
+	/// and the picture size its keyframe declares.
+	Media(moq_net::Timestamp, Reach, Option<(u32, u32)>),
 	/// A discontinuity marker, a frame with no payload: the content stops at its timestamp.
 	Marker(moq_net::Timestamp),
 }
 
-/// The first frame of a group, or `None` when it can't be read.
-fn first_frame(container: &moq_mux::catalog::hang::Container, frame: moq_net::frame::Frame) -> Option<First> {
+/// The first frame of a group, or `None` when it can't be read. `probe` reads its picture size; one
+/// it can't parse declares none, leaving the hand-over to arrival order.
+fn first_frame(
+	container: &moq_mux::catalog::hang::Container,
+	frame: moq_net::frame::Frame,
+	probe: Option<&mut Muxer>,
+) -> Option<First> {
 	use moq_mux::container::Container as _;
 	let stamp = frame.timestamp;
 	let decoded = container.decode(frame).ok()?;
@@ -1824,9 +1901,10 @@ fn first_frame(container: &moq_mux::catalog::hang::Container, frame: moq_net::fr
 	if first.payload.is_empty() {
 		return Some(First::Marker(pts));
 	}
+	let size = probe.and_then(|probe| probe.picture_size(first).ok().flatten());
 	let mut reach = Reach::default();
 	reach.add(decoded);
-	Some(First::Media(pts, reach))
+	Some(First::Media(pts, reach, size))
 }
 
 /// What a group's content reaches, read once the track has ended so every frame is in, starting

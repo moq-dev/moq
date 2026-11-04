@@ -214,6 +214,26 @@ impl Muxer {
 		Ok(out)
 	}
 
+	/// The picture size `keyframe` decodes to: from its in-band parameter sets or frame header,
+	/// else the catalog `description`, or `None` for audio or a codec that declares neither.
+	///
+	/// Pass a group's first frame: the picture size of a track may change at any keyframe, which
+	/// only the media says, so reading this per group tells which config muxes it. It leaves the
+	/// [`init`](Self::init) untouched.
+	pub fn picture_size(&mut self, keyframe: &Frame) -> crate::Result<Option<(u32, u32)>> {
+		let Kind::Video(config) = &self.kind else {
+			return Ok(None);
+		};
+		let description = match self.transform.as_mut() {
+			Some(transform) => {
+				transform.transform(keyframe.payload.clone(), true)?;
+				transform.codec_private().cloned()
+			}
+			None => self.description.clone(),
+		};
+		codec_dimensions(&config.codec, description.as_deref(), &keyframe.payload)
+	}
+
 	fn resolve_video_dimensions(&mut self, payload: &[u8]) -> crate::Result<()> {
 		let Kind::Video(config) = &mut self.kind else {
 			return Ok(());
@@ -501,6 +521,46 @@ mod tests {
 		config.coded_height = Some(240);
 		config.framerate = Some(30.0);
 		Muxer::video(&config).unwrap()
+	}
+
+	// Each keyframe reports the size its own parameter sets or frame header declare, so a track
+	// that resizes in band is read group by group; one carrying none keeps the active set's.
+	#[test]
+	fn a_keyframe_reports_its_in_band_picture_size() {
+		use crate::codec::h264::fixtures::{PPS, SPS_ANAMORPHIC, SPS_EXTENDED_SAR};
+		let annexb = |nals: &[&[u8]]| {
+			let payload: Vec<u8> = nals.iter().flat_map(|nal| [&[0, 0, 0, 1][..], nal].concat()).collect();
+			Frame {
+				payload: payload.into(),
+				..frame(0, true)
+			}
+		};
+		let idr = &[0x65, 0x88, 0x84, 0x21][..];
+		let mut config = VideoConfig::new(VideoCodec::H264(hang::catalog::H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x28,
+			inline: true,
+		}));
+		config.framerate = Some(25.0);
+		let mut muxer = Muxer::video(&config).unwrap();
+		let sizes = [
+			annexb(&[SPS_ANAMORPHIC, PPS, idr]),
+			annexb(&[SPS_EXTENDED_SAR, PPS, idr]),
+			annexb(&[idr]),
+		]
+		.map(|keyframe| muxer.picture_size(&keyframe).unwrap());
+		assert_eq!(sizes, [Some((1440, 1080)), Some((64, 48)), Some((64, 48))]);
+		assert!(muxer.init().unwrap().is_none(), "probing builds no init");
+
+		// VP8 declares its size in every keyframe header, whatever the catalog says.
+		let keyframe = Frame {
+			payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01]),
+			..frame(0, true)
+		};
+		assert_eq!(video_muxer().picture_size(&keyframe).unwrap(), Some((640, 480)));
+		let audio = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		assert_eq!(Muxer::audio(&audio).unwrap().picture_size(&keyframe).unwrap(), None);
 	}
 
 	#[test]
