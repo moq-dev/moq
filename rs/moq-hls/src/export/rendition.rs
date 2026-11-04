@@ -263,17 +263,19 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 	config
 }
 
-/// `EXT-X-TARGETDURATION` for a grid of `interval`: twice it, in whole seconds rounded up, and at
-/// least one (maintainer, 2026-11-03).
+/// `EXT-X-TARGETDURATION` for segments `length` long on a join interval of `interval`: their sum,
+/// in whole seconds rounded up, and at least one. That is twice the interval when a segment is one
+/// interval (maintainer, 2026-11-03), and 2 s for 1 s segments of 20 ms audio groups.
 ///
 /// A segment starts at the group containing its line, which can start up to one interval before
-/// it, so a segment of groups within the interval stays under twice it, whatever shifts the GOP
-/// phase: a join, a cut, a resize, or a live interval change. Only an overrun, a group longer
-/// than the interval, can exceed it; one whose rounded `EXTINF` does is listed anyway (see
+/// it, and ends where the next segment starts, at or before the next line, so a segment of groups
+/// within the interval stays under its length plus one interval, whatever shifts the GOP phase: a
+/// join, a cut, a resize, or a live interval change. Only an overrun, a group longer than the
+/// interval, can exceed it; one whose rounded `EXTINF` does is listed anyway (see
 /// [`Rendition::overrun`]).
-fn target_duration(interval: Duration) -> u64 {
-	let twice = interval.saturating_mul(2);
-	(twice.as_secs() + u64::from(twice.subsec_nanos() > 0)).max(1)
+fn target_duration(length: Duration, interval: Duration) -> u64 {
+	let bound = length.saturating_add(interval);
+	(bound.as_secs() + u64::from(bound.subsec_nanos() > 0)).max(1)
 }
 
 /// The segment [tag](segments::tag) of `track` numbered on a grid of `interval` and muxed under
@@ -345,8 +347,11 @@ pub struct Rendition {
 	config: Config,
 	/// The container its media track carries, to decode a group's first frame.
 	container: Arc<moq_mux::catalog::hang::Container>,
-	/// The catalog's `media.join.interval`: the grid this rendition numbers its segments on.
+	/// The catalog's `media.join.interval`, which fixes [`segment`](Self::segment).
 	interval: Duration,
+	/// The segment length the grid numbers this rendition's segments on (see
+	/// [`grid::segment_length`]).
+	segment: Duration,
 	/// The [tag](segments::tag) of the media track numbered on [`interval`](Self::interval)'s
 	/// grid and muxed under this config, in every segment URL.
 	tag: Arc<str>,
@@ -426,17 +431,23 @@ impl Rendition {
 		&self.media.track
 	}
 
-	/// The catalog's `media.join.interval`, the grid this rendition numbers its segments on.
+	/// The catalog's `media.join.interval`, which fixes the [segment length](Self::segment_length).
 	pub fn interval(&self) -> Duration {
 		self.interval
 	}
 
-	/// The most groups one segment request fetches: one per millisecond of the interval, and at
-	/// least [`MAX_SEGMENT_GROUPS`]. A segment spans about an interval, so this bounds a request's
-	/// work by the media it serves, while a publisher grouping far finer than its interval can't
-	/// turn one request into an endless fetch loop.
+	/// How long a segment is: the smallest whole multiple of the interval that is at least a
+	/// second, the grid every rendition numbers its segments on.
+	pub fn segment_length(&self) -> Duration {
+		self.segment
+	}
+
+	/// The most groups one segment request fetches: one per millisecond of the segment length, and
+	/// at least [`MAX_SEGMENT_GROUPS`]. This bounds a request's work by the media it serves, while
+	/// a publisher grouping far finer than its interval can't turn one request into an endless
+	/// fetch loop.
 	pub(crate) fn max_groups(&self) -> u64 {
-		u64::try_from(self.interval.as_millis())
+		u64::try_from(self.segment.as_millis())
 			.unwrap_or(u64::MAX)
 			.max(MAX_SEGMENT_GROUPS)
 	}
@@ -504,9 +515,10 @@ impl Rendition {
 			height: config.coded_height,
 			codec: config.codec.to_string(),
 			config: Config::Video(config.clone()),
-			target_duration: target_duration(interval),
+			target_duration: target_duration(grid::segment_length(interval), interval),
 			overruns: AtomicU64::new(0),
 			interval,
+			segment: grid::segment_length(interval),
 			clock,
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
@@ -546,9 +558,10 @@ impl Rendition {
 			height: None,
 			codec: config.codec.to_string(),
 			config: Config::Audio(config.clone()),
-			target_duration: target_duration(interval),
+			target_duration: target_duration(grid::segment_length(interval), interval),
 			overruns: AtomicU64::new(0),
 			interval,
+			segment: grid::segment_length(interval),
 			clock,
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
@@ -727,7 +740,7 @@ impl Rendition {
 				?duration,
 				target_duration = self.target_duration,
 				overruns,
-				"segment overruns the declared join interval; listing it past EXT-X-TARGETDURATION"
+				"a group overruns the declared join interval; listing its segment past EXT-X-TARGETDURATION"
 			);
 		}
 	}
@@ -1497,9 +1510,9 @@ fn broken(segments: &[u64], inherited: usize) -> usize {
 /// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
 /// lists that segment whole, and the same URL must name the same bytes everywhere.
 async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watch::Receiver<bool>) {
-	let Some((track, interval, container)) = rendition
+	let Some((track, interval, segment, container)) = rendition
 		.upgrade()
-		.map(|r| (r.track().to_string(), r.interval, r.container.clone()))
+		.map(|r| (r.track().to_string(), r.interval, r.segment, r.container.clone()))
 	else {
 		return;
 	};
@@ -1552,7 +1565,7 @@ async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watc
 			_ = retiring.wait_for(|retiring| *retiring) => return Ok(()),
 		};
 
-		let mut grid = grid::Grid::new(interval, segments::MAX_SEGMENTS);
+		let mut grid = grid::Grid::new(segment, segments::MAX_SEGMENTS);
 		// The newest group, its first pts, and what its first frame reached, read again for its
 		// content's end if the track ends after it, and the gap from the group before it.
 		let mut latest: Option<(moq_net::group::Consumer, moq_net::Timestamp, Reach)> = None;

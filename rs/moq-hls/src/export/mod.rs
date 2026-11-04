@@ -3365,7 +3365,13 @@ mod tests {
 
 		/// `video` and `audio` renditions, each with its own media track.
 		fn with(video: &[&str], audio: &[&str]) -> Self {
+			Self::joined(video, audio, INTERVAL)
+		}
+
+		/// [`with`](Self::with), on a join interval of `interval`.
+		fn joined(video: &[&str], audio: &[&str], interval: Duration) -> Self {
 			let mut catalog = joined();
+			catalog.media.join = hang::catalog::Join::new(interval);
 			for name in video {
 				let config = video_config();
 				catalog.video.renditions.insert(name.to_string(), config);
@@ -4176,6 +4182,48 @@ mod tests {
 		.await
 		.expect("the rendition fails");
 		assert!(matches!(failed, crate::Error::MediaFailed { .. }), "{failed:?}");
+	}
+
+	// A segment is the smallest whole multiple of the interval at least a second long
+	// (maintainer, 2026-11-03), so an audio-only broadcast's 20 ms groups pack into 1 s segments and
+	// an odd 300 ms interval gives 1.2 s ones. The target duration covers a segment plus the one
+	// interval its first group can start before its line.
+	#[tokio::test(start_paused = true)]
+	async fn short_intervals_pack_into_whole_second_segments() {
+		for (interval, groups, length, target) in [(20, 160, 1_000, 2), (300, 10, 1_200, 2)] {
+			let test = Groups::joined(&[], &["audio0"], Duration::from_millis(interval));
+			let rendition = test.rendition("audio0");
+			assert_eq!(rendition.segment_length(), Duration::from_millis(length));
+			assert_eq!(rendition.target_duration(), target);
+
+			let mut media = test.publish("audio0");
+			for sequence in 0..groups {
+				media.at(sequence, sequence * interval);
+			}
+			let snapshot = test.listed("audio0", 1).await;
+			assert!(gaps(&snapshot).is_empty(), "{interval} ms");
+			let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
+			assert!(
+				durations.len() >= 2 && durations.iter().all(|d| *d == u128::from(length)),
+				"{interval} ms: {durations:?}"
+			);
+		}
+	}
+
+	// A join interval of a second or more is the segment length itself, as for a 2 s GOP.
+	#[tokio::test(start_paused = true)]
+	async fn a_two_second_gop_is_one_segment() {
+		let test = Groups::with(&["video0"], &[]);
+		let rendition = test.rendition("video0");
+		assert_eq!(rendition.segment_length(), INTERVAL);
+		assert_eq!(rendition.target_duration(), 4);
+		let mut media = test.publish("video0");
+		for sequence in 0..4 {
+			media.gop(sequence);
+		}
+		let snapshot = test.listed("video0", 2).await;
+		assert_eq!(numbers(&snapshot), [0, 1, 2]);
+		assert!(snapshot.segments.iter().all(|s| s.duration == INTERVAL));
 	}
 
 	// EXT-X-TARGETDURATION is twice the interval, rounded up, however long the segments in the

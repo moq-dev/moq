@@ -993,20 +993,23 @@ A track's name says nothing about its compression.
 
 # HLS and DASH {#hls}
 An edge serves a broadcast as HLS or DASH from its media tracks.
-HLS numbers segments by position, so every edge and every reload has to derive the same consecutive numbers from timestamps alone: they come from the grid the join interval ({{media-join}}) draws, a line at every multiple of the interval in presentation time.
+HLS numbers segments by position, so every edge and every reload has to derive the same consecutive numbers from timestamps alone: they come from a grid the join interval ({{media-join}}) fixes.
+A segment is the smallest whole multiple of the interval that is at least one second long, so an audio-only broadcast's short groups pack into one-second segments, and an interval of a second or more is the segment itself.
+The grid draws a line at every multiple of that segment length in presentation time.
+An edge derives the length from the interval alone, so every edge agrees.
 A broadcast without `media.join` is not served as HLS or DASH.
 
 A group spans from its first frame's timestamp to the next group's.
-It belongs to one segment: the first line it contains, so segment N starts at the group containing N times the interval, or, when it contains none, the line it starts after.
+It belongs to one segment: the first line it contains, so segment N starts at the group containing N times the segment length, or, when it contains none, the line it starts after.
 A segment holds whole groups, since one starting mid-group is not independent.
 Every rendition numbers its segments on the one grid, so they share segment numbers while each cuts its boundaries at its own groups.
 
-A line no group starts a segment at, because a group longer than the interval or a pause skipped it, is a gap: the edge lists it as HLS `EXT-X-GAP`, omits it from the DASH SegmentTimeline, and never serves media for it, so the numbering never skips.
+A line no group starts a segment at, because a group longer than the segment or a pause skipped it, is a gap: the edge lists it as HLS `EXT-X-GAP`, omits it from the DASH SegmentTimeline, and never serves media for it, so the numbering never skips.
 On a 2 second grid, a group spanning 0 to 7 seconds is segment 0, segments 1 and 2 are gaps, and the group after it, starting at 7 seconds, starts segment 3; an edge that joins at that group numbers it alike without the one before.
 
 A segment starts at its first group's timestamp, or a gap at its line, and lasts until the next segment starts.
-A group longer than the interval is listed at its first line, so its duration understates its media, and the gaps after it overstate theirs.
-`EXT-X-TARGETDURATION` is twice the interval, rounded up to whole seconds: the group containing a line starts at most one interval before it, so only a group longer than the interval can exceed it.
+A group longer than the segment is listed at its first line, so its duration understates its media, and the gaps after it overstate theirs.
+`EXT-X-TARGETDURATION` is the segment length plus one interval, rounded up to whole seconds, which is twice the interval when the segment is one interval: the group containing a line starts at most one interval before it, so only a group longer than the interval can exceed it.
 The HLS media sequence and the segment URL derive from the segment number, and DASH addresses the same segments by `$Time$`.
 
 An edge lists a segment once a later one starts or the track ends.
@@ -1112,7 +1115,7 @@ This document has no IANA actions.
 - Defined AAC payloads without a `description` as ADTS, and payloads with an AudioSpecificConfig as raw AAC.
 - A `broadcast` reference and an echo `path` are spelled like a path: one with an empty segment or a lone `\` refuses the catalog instead of collapsing.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, and JSON data tracks SHOULD be compressed.
-- Replaced the root `archive` section and its per-track timelines with the root `media` section ({{media}}). Its `join.interval` is the longest group of any audio or video track, fixed for the broadcast, and the grid an edge numbers HLS and DASH segments on from each group's first timestamp ({{hls}}); the root `clock` moved to `media.clock`. Segment indexes, frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone.
+- Replaced the root `archive` section and its per-track timelines with the root `media` section ({{media}}). Its `join.interval` is the longest group of any audio or video track, fixed for the broadcast, and the grid an edge numbers HLS and DASH segments on, each segment the smallest whole multiple of it at least a second long, from each group's first timestamp ({{hls}}); the root `clock` moved to `media.clock`. Segment indexes, frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A malformed audio or video rendition ({{malformed}}) refuses the catalog: a known codec string without valid parameters, a zero or out-of-range dimension, sample rate, or channel count, a bitrate or duration above 2^53 - 1, or a container without a string `kind`.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.

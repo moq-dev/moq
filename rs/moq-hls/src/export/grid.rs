@@ -1,13 +1,15 @@
 //! Numbering a rendition's groups into HLS segments on the broadcast's join-interval grid.
 //!
 //! HLS numbers segments by position, so every edge and every reload has to derive the same
-//! consecutive numbers from timestamps alone. The catalog's `media.join.interval` draws a grid
-//! line at every multiple of the interval in pts, and every rendition numbers its segments on it,
-//! so they share segment numbers while each cuts its boundaries at its own groups.
+//! consecutive numbers from timestamps alone. The catalog's `media.join.interval` fixes the
+//! segment length, the smallest whole multiple of the interval that is at least [`MIN_SEGMENT`]
+//! (see [`segment_length`]), which draws a grid line at every multiple of that length in pts.
+//! Every rendition numbers its segments on it, so they share segment numbers while each cuts its
+//! boundaries at its own groups.
 //!
 //! A group spans from its first frame's pts to the next group's. It belongs to one segment: the
-//! first line it contains, so segment N starts at the group containing pts N × interval; or, if it
-//! contains none, the line it starts after, `floor(pts / interval)`. Groups are never split, since a
+//! first line it contains, so segment N starts at the group containing pts N × length; or, if it
+//! contains none, the line it starts after, `floor(pts / length)`. Groups are never split, since a
 //! segment starting mid-GOP is not independent. A grid slot no group starts a segment in, because
 //! an overrun or a pause skipped it, is listed as a gap, so the numbering never skips: on a 2s grid,
 //! a group A = [0s, 7s) is segment 0, slots 1 and 2 are gaps, and a contiguous B = [7s, 7.2s)
@@ -15,13 +17,27 @@
 //! without A.
 //!
 //! A segment starts at its first group's pts, or a gap at its line, and its `EXTINF` runs to the
-//! next segment's start. A group overrunning the interval is listed at its first line, so its
+//! next segment's start. A group overrunning the segment length is listed at its first line, so its
 //! `EXTINF` understates its media, and the gaps after it overstate theirs; the playlist timeline
 //! still meets the media again at the next segment.
 
 use std::time::Duration;
 
 use moq_net::Timestamp;
+
+/// The shortest segment an export cuts (maintainer, 2026-11-03): a join interval shorter than this,
+/// as an audio-only broadcast's group spacing is, packs whole intervals into each segment rather
+/// than listing a segment per group.
+pub(crate) const MIN_SEGMENT: Duration = Duration::from_secs(1);
+
+/// The segment length on a join interval of `interval`: the smallest whole multiple of it that is
+/// at least [`MIN_SEGMENT`]. It derives from the interval alone, so every edge agrees, and a line
+/// every segment starts at is also a line of the interval's own grid.
+pub(crate) fn segment_length(interval: Duration) -> Duration {
+	let interval = interval.as_nanos().max(1);
+	let length = MIN_SEGMENT.as_nanos().div_ceil(interval).max(1) * interval;
+	Duration::from_nanos(u64::try_from(length).unwrap_or(u64::MAX))
+}
 
 /// One segment the grid completed, oldest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,10 +98,10 @@ impl Open {
 	}
 }
 
-/// Places one rendition's groups, fed in sequence order, into segments on a grid of `interval`.
+/// Places one rendition's groups, fed in sequence order, into segments on a grid of one length.
 pub(crate) struct Grid {
-	/// The grid's spacing in nanoseconds, at least one.
-	interval: u128,
+	/// The segment length in nanoseconds, at least one.
+	length: u128,
 	/// The newest group, until the next one bounds it.
 	pending: Option<Group>,
 	open: Option<Open>,
@@ -106,10 +122,10 @@ impl Slot {
 }
 
 impl Grid {
-	/// A grid of `interval`, listing at most `max_gaps` gaps for one skip.
-	pub fn new(interval: Duration, max_gaps: usize) -> Self {
+	/// A grid of segments `length` long, listing at most `max_gaps` gaps for one skip.
+	pub fn new(length: Duration, max_gaps: usize) -> Self {
 		Self {
-			interval: interval.as_nanos().max(1),
+			length: length.as_nanos().max(1),
 			pending: None,
 			open: None,
 			last: None,
@@ -121,11 +137,11 @@ impl Grid {
 	/// needs an `end` it doesn't have.
 	pub fn segment(&self, pts: Timestamp, end: Option<Timestamp>) -> Option<u64> {
 		let pts = pts.as_nanos();
-		let slot = pts / self.interval;
-		if pts.is_multiple_of(self.interval) {
+		let slot = pts / self.length;
+		if pts.is_multiple_of(self.length) {
 			return Some(slot as u64);
 		}
-		let line = (slot + 1) * self.interval;
+		let line = (slot + 1) * self.length;
 		let end = end?.as_nanos();
 		Some(if end > line { slot + 1 } else { slot } as u64)
 	}
@@ -135,7 +151,7 @@ impl Grid {
 	/// group starts after its line may follow earlier groups of the same segment.
 	pub fn starts(&self, slot: &Slot) -> bool {
 		match slot {
-			Slot::Media { segment, pts, .. } => (*segment as u128).saturating_mul(self.interval) >= pts.as_nanos(),
+			Slot::Media { segment, pts, .. } => (*segment as u128).saturating_mul(self.length) >= pts.as_nanos(),
 			Slot::Gap { .. } => true,
 			Slot::Reset => false,
 		}
@@ -158,7 +174,7 @@ impl Grid {
 
 	/// The pts of line `segment`.
 	fn line(&self, segment: u64) -> Timestamp {
-		let nanos = (segment as u128).saturating_mul(self.interval);
+		let nanos = (segment as u128).saturating_mul(self.length);
 		Timestamp::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)).unwrap_or(Timestamp::ZERO)
 	}
 
@@ -299,8 +315,8 @@ mod test {
 	}
 
 	/// Feed groups starting at `starts` ms, numbered from zero, then end the track at `end` ms.
-	fn run(interval_ms: u64, starts: &[u64], end: u64) -> Vec<Listed> {
-		let mut grid = Grid::new(Duration::from_millis(interval_ms), 256);
+	fn run(length_ms: u64, starts: &[u64], end: u64) -> Vec<Listed> {
+		let mut grid = Grid::new(Duration::from_millis(length_ms), 256);
 		let mut slots = Vec::new();
 		for (sequence, start) in starts.iter().enumerate() {
 			slots.extend(grid.group(sequence as u64, ms(*start)));
@@ -309,7 +325,7 @@ mod test {
 		listed(slots)
 	}
 
-	/// Each case: interval, group starts, content end, and the segments listed.
+	/// Each case: segment length, group starts, content end, and the segments listed.
 	#[test]
 	fn segmentation() {
 		#[allow(clippy::type_complexity, reason = "a table of plain tuples reads best inline")]
@@ -405,6 +421,31 @@ mod test {
 		for (name, interval, starts, end, expected) in cases {
 			assert_eq!(run(*interval, starts, *end), *expected, "{name}");
 		}
+	}
+
+	/// Segments are whole intervals at least a second long: 20 ms audio groups pack into 1 s
+	/// segments, an odd 300 ms interval into 1.2 s ones, and a 2 s GOP stays 2 s.
+	#[test]
+	fn segments_are_whole_intervals_of_at_least_a_second() {
+		for (interval, length) in [
+			(20, 1000),
+			(300, 1200),
+			(999, 1998),
+			(1000, 1000),
+			(2000, 2000),
+			(2500, 2500),
+		] {
+			assert_eq!(
+				segment_length(Duration::from_millis(interval)),
+				Duration::from_millis(length),
+				"{interval} ms"
+			);
+		}
+		assert_eq!(
+			segment_length(Duration::from_nanos(333_333_333)),
+			Duration::from_nanos(999_999_999 + 333_333_333)
+		);
+		assert_eq!(segment_length(Duration::ZERO), MIN_SEGMENT);
 	}
 
 	/// The maintainer's 2026-11-03 rule: an edge joining at B numbers it 3, as one that saw A does.
