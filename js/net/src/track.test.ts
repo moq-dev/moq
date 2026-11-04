@@ -766,7 +766,12 @@ test("a pinned max delay survives every later update and reaches the aggregate",
 	// Either handle restoring the budget keeps the pin and applies the rest.
 	track.update({ priority: 5, delay: { max: null } });
 	ordered.update({ priority: 6, delay: { max: Milli(250) } });
-	const expected = { priority: 6, delay: { min: Milli(0), max: Milli(0) }, order: "descending", ranges: [{}] };
+	const expected: Subscription = {
+		priority: 6,
+		delay: { min: Milli(0), max: Milli(0) },
+		order: "descending",
+		ranges: [{}],
+	};
 	expect(track.subscription.peek()).toEqual(expected);
 	await Promise.resolve();
 	expect(producer.subscription.peek()).toEqual(expected);
