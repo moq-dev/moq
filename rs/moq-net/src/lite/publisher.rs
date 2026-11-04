@@ -5161,7 +5161,9 @@ impl CoverageBench {
 		let version = Version::Lite07;
 		let (local, peer) = crate::transport::memory::pair(Default::default());
 		let session = Transport::new(local);
-		let Poll::Ready(Ok(stream)) = session.poll_open_uni(&kio::Waiter::noop(), SendOptions::default()) else {
+		let Poll::Ready(Ok(stream)) =
+			session.poll_open_uni(&mut Default::default(), &kio::Waiter::noop(), SendOptions::default())
+		else {
 			panic!("a memory stream opens at once");
 		};
 		let group = |group| Some(lite::Anchor::Absolute(track::Position::group(group)));
@@ -5253,6 +5255,8 @@ fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Er
 struct GroupServe {
 	ctx: GroupContext,
 	rank: Rank,
+	/// Its place in line for the peer's stream credit while it waits to open.
+	open: crate::transport::open::Open,
 	group: group::Consumer,
 	sequence: u64,
 	frame_start: u64,
@@ -5313,6 +5317,7 @@ impl GroupServe {
 		Self {
 			ctx,
 			rank,
+			open: Default::default(),
 			group,
 			sequence,
 			frame_start,
@@ -5358,7 +5363,7 @@ impl GroupServe {
 				priority: handle.send_order().into(),
 			},
 		};
-		let stream = match ready!(session.poll_open_uni(waiter, options)) {
+		let stream = match ready!(session.poll_open_uni(&mut self.open, waiter, options)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.settle_open(false);

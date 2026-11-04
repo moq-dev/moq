@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Request opens are ordinary bidirectional opens ([#7894](https://github.com/moq-dev/moq/pull/7894))
+
+`quic::web::Session::poll_open_request` is removed. Call `poll_open_bi`, which waits for the peer's stream credit.
+
 ### QUIC method names and polls match the transport layer
 
 On `quic::driver::connection::Connection` and `quic::web::Session`, rename `read_datagram()` to `recv_datagram()`.

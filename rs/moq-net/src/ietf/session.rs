@@ -371,8 +371,8 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 			let sub_ns_run = run_namespaces(subscriber.clone(), discovery, {
 				let session = session.clone();
 				move || {
-					let mut session = session.clone();
-					async move { Stream::open_request(&mut session, version).await }
+					let session = session.clone();
+					async move { Stream::open(&session, version).await }
 				}
 			});
 			let mut sub_ns_run = std::pin::pin!(err_only(sub_ns_run));
@@ -1403,14 +1403,12 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn announce_interest_without_credit_keeps_the_session_alive() {
-		use std::sync::atomic::Ordering;
+	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Draft18] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let interest = origin.consume().announced();
-			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
-			let log = session.log.clone();
-			let session = crate::driver::Transport::new(session);
+			let scripted = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+			let log = scripted.log.clone();
+			let session = crate::driver::Transport::new(scripted.clone());
 			let (driver, _goaway, _) = start(Config {
 				runtime: crate::time::sim(),
 				stats: Default::default(),
@@ -1439,23 +1437,21 @@ mod tests {
 			.unwrap();
 			let mut driver = std::pin::pin!(driver);
 			assert!(futures::poll!(driver.as_mut()).is_pending(), "{version}");
-			assert_eq!(
-				log.request_attempts.load(Ordering::Relaxed),
-				1,
-				"{version}: interest was attempted"
-			);
 			kio::clock::sleep(std::time::Duration::from_secs(20)).await;
 			assert!(
 				futures::poll!(driver.as_mut()).is_pending(),
-				"{version}: local refusal ended the session"
+				"{version}: waiting for credit ended the session"
 			);
-			assert_eq!(
-				log.request_attempts.load(Ordering::Relaxed),
-				1,
-				"{version}: interest was not retried"
-			);
+			let opened = log.bi_opens();
 			assert!(log.closes().is_empty());
-			assert!(interest.is_synced(), "a refused interest releases its snapshot");
+
+			scripted.grant_credit();
+			for i in 0..5 {
+				let _ = futures::poll!(driver.as_mut());
+				eprintln!("DEBUG poll {i}: opens {} (before {opened})", log.bi_opens());
+				kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+			}
+			assert!(log.bi_opens() > opened, "{version}: interest opens once credit returns");
 		}
 	}
 

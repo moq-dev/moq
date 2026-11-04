@@ -66,6 +66,22 @@ interface Start {
 	object: number;
 }
 
+// A stream ranked by its start: an open one, or a place held for one still waiting to open.
+type Ranked = Pick<Writer, "setPriority"> | Place;
+
+/**
+ * A group stream's place while it waits for stream credit: it ranks the subscription's other
+ * streams as an open one would, so a newer group overtakes an older one still waiting.
+ *
+ * @internal
+ */
+export interface Place {
+	/** The send order the stream would open at now. */
+	rank(): number;
+	/** Give the place up, once the stream opened or will not. */
+	release(): void;
+}
+
 /**
  * Ranks one subscription's group streams against each other, and re-ranks them whenever the
  * set changes or the subscription is updated.
@@ -83,7 +99,7 @@ interface Start {
 export class Priority {
 	#track: track.Subscriber;
 	#publisher: number;
-	#streams = new Map<Writer, Start>();
+	#streams = new Map<Ranked, Start>();
 	#dispose: Dispose;
 	#closed = false;
 
@@ -107,6 +123,17 @@ export class Priority {
 		});
 	}
 
+	/** Hold a place for a stream starting at this group and object while it waits to open. */
+	reserve(sequence: bigint, object: number): Place {
+		const place: Place = {
+			rank: () => this.rank(sequence, object),
+			release: () => this.remove(place),
+		};
+		this.#streams.set(place, { sequence, object });
+		this.#rerank();
+		return place;
+	}
+
 	/** Rank a stream by its first object now and after ranking changes, until {@link remove}. */
 	add(stream: Writer, sequence: bigint, object: number) {
 		this.#streams.set(stream, { sequence, object });
@@ -117,7 +144,7 @@ export class Priority {
 	}
 
 	/** Stop ranking a finished group's stream, promoting whatever was queued behind it. */
-	remove(stream: Writer) {
+	remove(stream: Ranked) {
 		if (!this.#streams.delete(stream)) return;
 
 		if (this.#closed && this.#streams.size === 0) {
@@ -160,7 +187,7 @@ export class Priority {
 		for (let i = 0; i < queue.length; i++) {
 			const [stream, start] = queue[i];
 			if (i > 0 && compareStarts(queue[i - 1][1], start, order) !== 0) position = i;
-			stream.setPriority(sendOrder({ priority, publisher: this.#publisher, position }));
+			if ("setPriority" in stream) stream.setPriority(sendOrder({ priority, publisher: this.#publisher, position }));
 		}
 	}
 }

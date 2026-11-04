@@ -4048,26 +4048,23 @@ impl Publisher {
 		self.origin.stats()
 	}
 
-	/// Open a stream for one advertisement, or `None` if the peer has no stream credit for
-	/// it or did not take its header in time.
+	/// Open a stream for one advertisement, or `None` if it did not get the peer's stream
+	/// credit and take its header in time.
 	///
 	/// The announce loop is single-threaded over origin updates, so an open that parks
 	/// forever parks everything, including the unannounces that release the streams the
-	/// peer is waiting on us to retire. Failing instead keeps the loop moving.
+	/// peer is waiting on us to retire. Giving up instead keeps the loop moving.
 	///
-	/// Unlike a request, an advertisement refused for credit comes back on the retry timer:
-	/// it is our own state the peer should hold, and credit returning raises no signal the
-	/// loop could wait on.
+	/// An advertisement that gave up comes back on the retry timer: it is our own state the
+	/// peer should hold, and credit returning raises no signal the loop could wait on.
 	async fn open_request(&self) -> Result<Option<Stream<Transport, Version>>, Error> {
-		let mut session = self.session.clone();
-		let mut open = std::pin::pin!(Stream::open_request(&mut session, self.version));
+		let mut open = std::pin::pin!(Stream::open(&self.session, self.version));
 		let mut timeout = crate::time::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(open.as_mut()) {
 				return Poll::Ready(match res {
 					Ok(stream) => Ok(Some(stream.with_stats(self.origin.stats()))),
-					Err(Error::NoStreamCredit) => Ok(None),
 					Err(err) => Err(err),
 				});
 			}
@@ -5416,6 +5413,7 @@ impl FetchPayloadWrite {
 /// ranked as the group it ends.
 struct EndOfTrack {
 	end: track::Position,
+	open: crate::transport::open::Open,
 	state: EndOfTrackState,
 }
 
@@ -5424,6 +5422,7 @@ impl EndOfTrack {
 	fn new(end: track::Position) -> Self {
 		Self {
 			end,
+			open: Default::default(),
 			state: EndOfTrackState::Start,
 		}
 	}
@@ -5434,7 +5433,7 @@ impl EndOfTrack {
 			object: self.end.frame,
 		});
 		let stream =
-			wait!(Open => serve.session.poll_open_uni(waiter, rank.options())).map_err(Error::from_transport)?;
+			wait!(Open => serve.session.poll_open_uni(&mut self.open, waiter, rank.options())).map_err(Error::from_transport)?;
 		serve.opened.fetch_add(1, Ordering::Relaxed);
 		let stream = Ranked::new(stream, Some(rank)).lapsing(&serve.ranking.lapse);
 		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
@@ -5576,6 +5575,8 @@ struct GroupServe {
 	opened: Arc<AtomicU64>,
 	msg: ietf::GroupHeader,
 	rank: Rank<GroupOf<Transport>>,
+	/// Its place in line for the peer's stream credit while it waits to open.
+	open: crate::transport::open::Open,
 	group: group::Consumer,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -5665,6 +5666,7 @@ impl GroupServe {
 			opened: Default::default(),
 			msg,
 			rank,
+			open: Default::default(),
 			group,
 			timescale,
 			version,
@@ -5745,7 +5747,7 @@ impl GroupServe {
 		}
 		// The current rank, so a move while parked applies to the stream as it opens.
 		let _ = self.rank.poll_moved(waiter);
-		let stream = match ready!(self.session.poll_open_uni(waiter, self.rank.options())) {
+		let stream = match ready!(self.session.poll_open_uni(&mut self.open, waiter, self.rank.options())) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;
@@ -17849,12 +17851,11 @@ mod tests {
 		}
 	}
 
-	/// Credit returning raises no signal of its own, so only the retry timer brings back an
-	/// advertisement refused for credit; without it the namespace stays undiscoverable for
-	/// the life of the session. The refusal itself must not spend a request ID.
+	/// An advertisement waiting for credit spends no request ID and comes back once credit
+	/// returns, whether it was still waiting or had given up for the retry timer; without
+	/// that the namespace stays undiscoverable for the life of the session.
 	#[kio::test]
 	async fn an_advertisement_without_credit_is_retried_and_spends_no_id() {
-		use std::sync::atomic::Ordering;
 		for version in [Version::Draft18] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
@@ -17874,8 +17875,7 @@ mod tests {
 			);
 			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			assert_eq!(log.request_attempts.load(Ordering::Relaxed), 1, "{version}");
-			assert_eq!(log.bi_opens(), 0, "{version}: refused without opening a stream");
+			assert_eq!(log.bi_opens(), 0, "{version}: waits without opening a stream");
 
 			// Credit returns. Nothing else changes: no publish, no unannounce, no route move.
 			session.grant_credit();

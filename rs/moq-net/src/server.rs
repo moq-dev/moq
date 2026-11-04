@@ -1002,16 +1002,6 @@ mod tests {
 			std::task::Poll::Pending
 		}
 
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: crate::transport::poll::SendOptions<
-				'_,
-				<Self::SendStream as crate::transport::poll::SendStream>::Group,
-			>,
-		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
-			self.poll_open_bi(waiter, options).map_ok(Some)
-		}
 		fn poll_open_uni(
 			&self,
 			_waiter: &kio::Waiter,

@@ -1041,10 +1041,6 @@ impl SubscriberDriver {
 			let mut failed = None;
 			let _ = self.announces.poll_each(waiter, |machine, res| match res {
 				Ok(()) => ended.push(machine.prefix),
-				Err(Error::NoStreamCredit) => {
-					tracing::warn!(prefix = %machine.prefix, "announce interest refused without stream credit");
-					ended.push(machine.prefix);
-				}
 				Err(err) => {
 					failed.get_or_insert(err);
 				}
@@ -1874,6 +1870,8 @@ impl RecvBandwidth {
 /// One PROBE stream: send the type, then feed the peer's estimates into the
 /// bandwidth producer until it FINs, sending each new target along the way.
 struct ProbeStream {
+	/// Its place in line for the peer's stream credit while its stream opens.
+	open: crate::transport::open::Open,
 	subscriber: Subscriber,
 	session: Transport,
 	state: ProbeState,
@@ -1885,6 +1883,7 @@ struct ProbeStream {
 impl ProbeStream {
 	fn new(subscriber: &Subscriber) -> Self {
 		Self {
+			open: Default::default(),
 			subscriber: subscriber.clone(),
 			session: subscriber.session.clone(),
 			state: ProbeState::Start,
@@ -1900,7 +1899,7 @@ impl ProbeStream {
 			if self.subscriber.going_away.is_set() {
 				return Poll::Ready(Ok(()));
 			}
-			Stream::poll_open(&self.session, self.subscriber.version, waiter)
+			Stream::poll_open(&self.session, &mut self.open, self.subscriber.version, waiter)
 		})?
 		.with_stats(self.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Probe)?;
@@ -1940,6 +1939,8 @@ impl ProbeStream {
 /// feeds every received announce into the origin. Only its *error* ends the
 /// session; a publisher FIN is a clean end for the prefix alone.
 struct AnnouncePrefix {
+	/// Its place in line for the peer's stream credit while its stream opens.
+	open: crate::transport::open::Open,
 	subscriber: Subscriber,
 	prefix: Path,
 	state: PrefixState,
@@ -1983,6 +1984,7 @@ impl AnnouncePrefix {
 	/// origin never reads as synced before the request even goes out.
 	fn new(subscriber: Subscriber, prefix: Path, snapshot: crate::model::Snapshot) -> Self {
 		Self {
+			open: Default::default(),
 			subscriber,
 			prefix,
 			state: PrefixState::Start,
@@ -1999,8 +2001,9 @@ impl AnnouncePrefix {
 
 	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Opening the control stream (after the GOAWAY gate).
-		let mut stream: Stream<Transport, Version> = wait!(Open => Stream::poll_open_request(
+		let mut stream: Stream<Transport, Version> = wait!(Open => Stream::poll_open(
 			&self.subscriber.session,
+			&mut self.open,
 			self.subscriber.version,
 			waiter
 		))?
@@ -2203,6 +2206,8 @@ struct SourceServe {
 
 /// Forwards the peer's TRACKS listing of a source into the source's lister.
 struct TracksRecv {
+	/// Its place in line for the peer's stream credit while its stream opens.
+	open: crate::transport::open::Open,
 	session: Transport,
 	stream: Option<Stream<Transport, Version>>,
 	/// What the peer lists, each holding an `announces` slot: discovery state the peer
@@ -2260,7 +2265,7 @@ impl TracksRecv {
 		let stream = match &mut self.stream {
 			Some(stream) => stream,
 			None => {
-				let mut stream = ready!(Stream::poll_open_request(&self.session, version, waiter))?;
+				let mut stream = ready!(Stream::poll_open(&self.session, &mut self.open, version, waiter))?;
 				stream = stream.with_stats(source.subscriber.origin.stats());
 				stream.writer.buffer(&lite::ControlType::Tracks)?;
 				stream.writer.buffer(&lite::Tracks {
@@ -2357,6 +2362,7 @@ impl SourceServe {
 						continue;
 					}
 					listing = Some(TracksRecv {
+						open: Default::default(),
 						session: self.subscriber.session.clone(),
 						stream: None,
 						listed: HashMap::new(),
@@ -2488,6 +2494,8 @@ impl kio::Task for SourceServe {
 /// sharing its one upstream subscription with any stream reader, and takes the datagrams it
 /// carries. Older versions carry no datagrams.
 struct DatagramServe {
+	/// Its place in line for the peer's stream credit while its stream opens.
+	open: crate::transport::open::Open,
 	subscriber: Subscriber,
 	path: Path,
 	instance: Option<crate::Instance>,
@@ -2554,6 +2562,7 @@ impl DatagramServe {
 	) -> Self {
 		let id = subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 		Self {
+			open: Default::default(),
 			gate: crate::auth::Gate::new(subscriber.auth.clone(), path.clone(), crate::auth::Direction::Subscribe),
 			_working: subscriber.session.work().start(),
 			closed: subscriber.session.clone(),
@@ -2635,7 +2644,7 @@ impl DatagramServe {
 						self.state = DatagramState::Subscribe { request, subscribing };
 						continue;
 					}
-					let mut stream = ready!(Stream::poll_open_request(&self.subscriber.session, version, waiter))?
+					let mut stream = ready!(Stream::poll_open(&self.subscriber.session, &mut self.open, version, waiter))?
 						.with_stats(self.subscriber.origin.stats());
 					let DatagramState::Open { request } = std::mem::replace(&mut self.state, DatagramState::Done)
 					else {
@@ -5092,16 +5101,14 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn announce_interest_without_credit_keeps_the_session_alive() {
-		use std::sync::atomic::Ordering;
+	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Lite04, Version::Lite07] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let interest = origin.consume().announced();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
 			let log = session.log.clone();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
-				session: crate::driver::Transport::new(session),
+				session: crate::driver::Transport::new(session.clone()),
 				origin,
 				recv_bandwidth: None,
 				version,
@@ -5113,16 +5120,14 @@ mod tests {
 			});
 			let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false);
 			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
-			assert_eq!(log.request_attempts.load(Ordering::Relaxed), 1, "{version}");
 			kio::clock::sleep(std::time::Duration::from_secs(20)).await;
 			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
-			assert_eq!(
-				log.request_attempts.load(Ordering::Relaxed),
-				1,
-				"{version}: interest was not retried"
-			);
-			assert!(log.closes().is_empty());
-			assert!(interest.is_synced(), "a refused interest releases its snapshot");
+			assert_eq!(log.bi_opens(), 0, "{version}: interest waits without a stream");
+			assert!(log.closes().is_empty(), "{version}: waiting keeps the session");
+
+			session.grant_credit();
+			let _ = driver.poll(&kio::Waiter::noop());
+			assert_eq!(log.bi_opens(), 1, "{version}: interest opens once credit returns");
 		}
 	}
 
@@ -8676,6 +8681,7 @@ impl TrackServe {
 
 		let session = self.subscriber.session.clone();
 		Establish {
+			open: Default::default(),
 			validity: self.validity.start(),
 			serve: self.clone(),
 			_working: session.work().start(),
@@ -8783,6 +8789,8 @@ fn buffer_update(active: &mut SubStream) -> Result<(), Error> {
 /// lite-05) wait for the SUBSCRIBE_OK. Resolves with the live [`SubStream`];
 /// the caller deregisters the id on failure.
 struct Establish {
+	/// Its place in line for the peer's stream credit while its stream opens.
+	open: crate::transport::open::Open,
 	validity: crate::model::broadcast::RequestValidity,
 	serve: TrackServe,
 	session: Transport,
@@ -8804,8 +8812,9 @@ impl Establish {
 		#[every_poll]
 		self.validity.check(waiter)?;
 
-		let mut stream: Stream<Transport, Version> = wait!(Open => Stream::poll_open_request(
+		let mut stream: Stream<Transport, Version> = wait!(Open => Stream::poll_open(
 			&self.session,
+			&mut self.open,
 			self.serve.subscriber.version,
 			waiter
 		))?;
@@ -9384,6 +9393,8 @@ impl Drop for TrackServeRun {
 /// model's [`track::Info`], handing back the stream to hold. Lite05+ only. Bails if the
 /// session dies meanwhile.
 struct TrackInfoFetch {
+	/// Its place in line for the peer's stream credit while its stream opens.
+	open: crate::transport::open::Open,
 	validity: crate::model::broadcast::RequestValidity,
 	session: Transport,
 	// A dedicated close-watch handle for the read.
@@ -9396,6 +9407,7 @@ impl TrackInfoFetch {
 	fn new(serve: &TrackServe) -> Self {
 		let session = serve.subscriber.session.clone();
 		Self {
+			open: Default::default(),
 			validity: serve.validity.start(),
 			closed: session.clone(),
 			session,
@@ -9422,7 +9434,7 @@ impl TrackInfoFetch {
 		}
 
 		let mut stream: Stream<Transport, Version> =
-			wait!(Open => Stream::poll_open_request(&self.session, serve.subscriber.version, waiter))?
+			wait!(Open => Stream::poll_open(&self.session, &mut self.open, serve.subscriber.version, waiter))?
 				.with_stats(serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Track)?;
 		stream.writer.buffer(&lite::Track {
@@ -10392,6 +10404,8 @@ impl kio::Task for FillServeRun {
 /// info comes from its TRACK_INFO, which the response waits for unread if it
 /// is still in flight, and the group sequence is implicit from the request.
 struct FetchServeRun {
+	/// Its place in line for the peer's stream credit while its stream opens.
+	open: crate::transport::open::Open,
 	validity: crate::model::broadcast::RequestValidity,
 	gate: crate::auth::Gate,
 	serve: TrackServe,
@@ -10446,6 +10460,7 @@ impl FetchServeRun {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
 		Self {
+			open: Default::default(),
 			validity: serve.validity.start(),
 			gate: serve.gate(),
 			serve,
@@ -10544,7 +10559,7 @@ impl kio::Task for FetchServeRun {
 					// The fill already has readers holding its demand. Backpressure keeps their
 					// owned request alive; abandoning it above releases this wait too.
 					let mut stream =
-						match ready!(Stream::poll_open(&self.session, self.serve.subscriber.version, waiter)) {
+						match ready!(Stream::poll_open(&self.session, &mut self.open, self.serve.subscriber.version, waiter)) {
 							Ok(stream) => stream,
 							Err(err) => {
 								tracing::warn!(track = %self.serve.name, %err, "fetch stream open failed");

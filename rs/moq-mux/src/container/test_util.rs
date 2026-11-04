@@ -504,16 +504,6 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.poll_open_bi(waiter, options)
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: moq_net::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.inner.poll_open_request(waiter, options)
-	}
 
 	fn send_group(&self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {
 		self.inner.send_group(priority)

@@ -33,7 +33,7 @@ import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
-import { Deadline, requestOptions } from "../util/deadline.ts";
+import { Deadline } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min } from "../util/sequence.ts";
@@ -1182,7 +1182,7 @@ export class Subscriber {
 			active.throwIfAborted();
 			if (id === undefined) throw await this.#closedSession();
 			this.#ranges.set(id, accepted.promise);
-			stream = new RequestStream(await this.#session.openBi(requestOptions), this.#session, this.#quic);
+			stream = new RequestStream(await this.#session.openBi(), this.#session, this.#quic);
 			if (active.aborted) {
 				stream.abort(active.reason);
 				active.throwIfAborted();
@@ -1452,7 +1452,7 @@ export class Subscriber {
 			subscription.fetchIds.push(fetchId);
 
 			request = new RequestStream(
-				await untilAborted(Promise.resolve(this.#session.openBi(requestOptions)), signal),
+				await untilAborted(Promise.resolve(this.#session.openBi()), signal),
 				this.#session,
 				this.#quic,
 			);

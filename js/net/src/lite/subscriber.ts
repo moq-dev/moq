@@ -32,7 +32,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
-import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min, UNBOUNDED } from "../util/sequence.ts";
@@ -367,7 +367,7 @@ export class Subscriber {
 		try {
 			const deadline = new Deadline();
 			stream = await deadline.wait(
-				deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions })),
+				deadline.open(Stream.open(this.#quic, { version: this.version })),
 			);
 		} catch (err: unknown) {
 			announced.close(error(err));
@@ -884,7 +884,7 @@ export class Subscriber {
 		});
 		let stream: Stream | undefined;
 		try {
-			const opening = Stream.open(this.#quic, { version: this.version, ...requestOptions });
+			const opening = Stream.open(this.#quic, { version: this.version });
 			const cut = valid ? AbortSignal.any([stop, valid]) : stop;
 			void opening.then(
 				(late) => {
@@ -1416,7 +1416,7 @@ export class Subscriber {
 
 	// Open the subscribe stream and write the SUBSCRIBE on it.
 	async #sendSubscribe(state: SubscribeSetup, msg: Subscribe, deadline: Deadline): Promise<Stream> {
-		const stream = await deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions }));
+		const stream = await deadline.open(Stream.open(this.#quic, { version: this.version }));
 		state.stream = stream;
 		// The deadline passed while the open waited: the late-setup handler resets the stream, so
 		// don't send a SUBSCRIBE on it first.
@@ -1459,7 +1459,7 @@ export class Subscriber {
 	): Promise<T> {
 		const closed = signal ? AbortSignal.any([this.#closed.signal, signal]) : this.#closed.signal;
 		closed.throwIfAborted();
-		const opening = deadline.open(Stream.open(this.#quic, { ...options, ...requestOptions }));
+		const opening = deadline.open(Stream.open(this.#quic, { ...options }));
 		let stream: Stream;
 		try {
 			stream = await untilAborted(opening, closed);

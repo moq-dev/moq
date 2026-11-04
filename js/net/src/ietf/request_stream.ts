@@ -1,7 +1,7 @@
 import { error, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { Reader, type Stream, type Writer } from "../stream.ts";
-import { type Deadline, requestOptions } from "../util/deadline.ts";
+import type { Deadline } from "../util/deadline.ts";
 import { type RequestCondition, type RequestKind, toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
@@ -184,7 +184,7 @@ export class RequestStream {
 	 * {@link abort} like any other end, so the request ends once whatever ends it.
 	 */
 	static open(session: Session, deadline: Deadline, quic?: WebTransport): Promise<RequestStream> {
-		return deadline.open(session.openBi(requestOptions), (stream) => new RequestStream(stream, session, quic));
+		return deadline.open(session.openBi(), (stream) => new RequestStream(stream, session, quic));
 	}
 
 	/**

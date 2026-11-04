@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Request opens are ordinary bidirectional opens ([#7894](https://github.com/moq-dev/moq/pull/7894))
+
+`quic::web::Session::poll_open_request` is removed. Call `poll_open_bi`, which waits for the peer's stream credit.
+
 ### QUIC method names and signatures match the core and Tokio driver
 
 Construct an endpoint with `quic::Endpoint::new(config, socket)` instead of `new(socket, config)`.

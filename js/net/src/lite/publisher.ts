@@ -1918,15 +1918,12 @@ export class Publisher {
 	async #openGroup(options: RunGroup): Promise<Writer | Error> {
 		const { group, givenUp, priority, unsubscribed, start } = options;
 		try {
-			// The transport drains streams by send order, so this is what makes a high-priority
-			// track (and a newer group within it) win the link when there isn't room for both.
-			//
-			// One stream per group is faster than a peer at its limit can retire them, so this
-			// is the one path that doesn't wait for a slot: the transport would serve the opens
-			// in the order we asked, which is oldest-first, exactly backwards for live media.
-			// Failing here drops the group and lets the next one compete for the next slot.
-			// Watch the group while the transport parks the open, and release that watch
-			// once the open settles. tryOpen owns resetting a slot that arrives too late.
+			// The transport drains streams by send order, and opens wait for stream credit in
+			// it, so this is what makes a high-priority track (and a newer group within it) win
+			// the link and the peer's credit when there isn't room for both. The place ranks the
+			// open against the subscription's other groups while it waits.
+			// Watch the group while the open waits, and release that watch once it settles.
+			const place = priority.reserve(group.sequence, start);
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
 			const abandoned = givenUp
@@ -1938,15 +1935,15 @@ export class Publisher {
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
 					version: this.version,
-					sendOrder: priority.rank(group.sequence, start),
+					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned]),
-					waitUntilAvailable: false,
 				});
 			} finally {
 				opened.resolve();
+				place.release();
 			}
 			if (!stream) {
-				const failed = failure ?? new Error("no stream slot");
+				const failed = failure ?? new Error("unsubscribed while waiting for a stream");
 				hooks.releaseGroupReader(group, failed);
 				return failed;
 			}

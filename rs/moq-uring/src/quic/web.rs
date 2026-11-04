@@ -534,7 +534,6 @@ struct Opening {
 	park: kio::Park,
 	uni: Option<(SendStream, Bytes)>,
 	bi: Option<(SendStream, RecvStream, Bytes)>,
-	request: Option<(SendStream, RecvStream, Bytes)>,
 }
 
 impl Session {
@@ -642,58 +641,31 @@ impl Session {
 		waiter: &kio::Waiter,
 		options: driver_send::Options<'_>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.poll_open_pair(waiter, options, false)
-			.map_ok(|pair| pair.expect("ordinary opens wait for credit"))
-	}
-
-	/// Open a request without waiting for stream credit; pending only while writing its header.
-	pub fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: driver_send::Options<'_>,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		self.poll_open_pair(waiter, options, true)
-	}
-
-	fn poll_open_pair(
-		&self,
-		waiter: &kio::Waiter,
-		options: driver_send::Options<'_>,
-		request: bool,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
 		self.opening.poll(waiter, |opening, cx| {
-			let slot = if request { &mut opening.request } else { &mut opening.bi };
-			if slot.is_none() {
-				let (mut send, recv) = if request {
-					let Some(pair) = self.conn.open_request().map_err(|e| self.map_err(e))? else {
-						return Poll::Ready(Ok(None));
-					};
-					pair
-				} else {
-					ready!(self.conn.poll_open_bi(
-						opening.park.hold(cx),
-						driver_send::Options {
-							group: None,
-							priority: i64::MAX
-						}
-					))
-					.map_err(|e| self.map_err(e))?
-				};
+			if opening.bi.is_none() {
+				let (mut send, recv) = ready!(self.conn.poll_open_bi(
+					opening.park.hold(cx),
+					driver_send::Options {
+						group: None,
+						priority: i64::MAX
+					}
+				))
+				.map_err(|e| self.map_err(e))?;
 				send.set_priority(i64::MAX);
 				let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
-				*slot = Some((
+				opening.bi = Some((
 					SendStream::new(send, &self.handles, None),
 					RecvStream::new(recv, &self.handles),
 					header,
 				));
 			}
-			let (send, _, header) = slot.as_mut().unwrap();
+			let (send, _, header) = opening.bi.as_mut().unwrap();
 			let result = ready!(send.poll_header(opening.park.hold(cx), header)).map_err(Error::from);
-			let (mut send, recv, _) = slot.take().unwrap();
+			let (mut send, recv, _) = opening.bi.take().unwrap();
 			result?;
 			send.set_priority(options.priority);
 			send.set_group(options.group);
-			Poll::Ready(Ok(Some((send, recv))))
+			Poll::Ready(Ok((send, recv)))
 		})
 	}
 
@@ -817,20 +789,6 @@ impl moq_net::transport::poll::Session for Session {
 		options: moq_net::transport::poll::SendOptions<'_, driver_send::Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		Self::poll_open_bi(
-			self,
-			waiter,
-			driver_send::Options {
-				group: options.group,
-				priority: options.priority,
-			},
-		)
-	}
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: moq_net::transport::poll::SendOptions<'_, driver_send::Group>,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		Self::poll_open_request(
 			self,
 			waiter,
 			driver_send::Options {

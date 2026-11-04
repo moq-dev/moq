@@ -357,13 +357,6 @@ impl poll::Session for Session {
 		Poll::Ready(opened.map(|()| (send, recv)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: poll::SendOptions<'_, poll::Ungrouped>,
-	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
 
 	fn send_group(&self, _: i64) -> Option<poll::Ungrouped> {
 		None

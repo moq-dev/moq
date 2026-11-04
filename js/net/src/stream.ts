@@ -1,11 +1,9 @@
-import { Milli, Nano } from "@moq/clock";
-import { race } from "@moq/signals";
 import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
+import { lines, type Rank } from "./open.ts";
 import { decodeError } from "./util/decode_error.ts";
-import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import { POW32, toBigInt, toNumber, U64 } from "./util/u64.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
 import {
@@ -51,41 +49,6 @@ function stopReason(reason: unknown, stream: StreamVersion): unknown {
 
 const MAX_U31 = 2 ** 31 - 1;
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
-
-/**
- * Options handed to the transport for one outgoing stream.
- *
- * `waitUntilAvailable` waits for the peer's concurrent stream limit to free a slot instead
- * of rejecting the create, which is what we want for the streams a session
- * opens occasionally. `@types/web` doesn't declare it yet, hence the intersection.
- */
-function sendOptions(options?: OpenOptions): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
-	return { sendOrder: options?.sendOrder, waitUntilAvailable: options?.waitUntilAvailable ?? true };
-}
-
-// How long any open may wait for the peer to free a stream slot. Every open needs this,
-// whether or not it asked to wait: an implementation may park an over-limit open rather
-// than rejecting it, and a peer can advertise a stream limit of zero and never raise it.
-const OPEN_TIMEOUT_MS = 10_000;
-
-/**
- * Bound an open that would otherwise park until the peer grants stream credit, restoring
- * the pre-waitUntilAvailable failure after a grace period. A stream arriving after the
- * deadline is discarded, since nobody is waiting for it any more.
- */
-async function openWithin<T>(opening: Promise<T>, timeout: number | null, discard: (stream: T) => void): Promise<T> {
-	if (timeout === null) return opening;
-	try {
-		return await withTimeout(
-			opening,
-			Nano.fromMilli(Milli(timeout)),
-			`stream open timed out after ${timeout}ms waiting for a slot`,
-		);
-	} catch (err: unknown) {
-		opening.then(discard).catch(() => void 0);
-		throw err;
-	}
-}
 
 /**
  * The version a stream's bytes follow: a moq-transport draft or a moq-lite draft. Required on
@@ -171,31 +134,21 @@ export interface OpenOptions {
 	version: StreamVersion;
 
 	/**
-	 * The transport send order, where HIGHER values are transmitted first.
-	 * Left to the transport's default when unset.
+	 * The transport send order, where HIGHER values are transmitted first: also where the open
+	 * waits for the peer's stream credit, ahead of every lower one. Defaults to 0, the
+	 * transport's default.
 	 */
 	sendOrder?: number;
-
-	/**
-	 * Reject if the peer hasn't freed a stream slot within this many milliseconds. Defaults
-	 * to 10s. Set null only when the caller owns the create deadline.
-	 */
-	timeout?: number | null;
-
-	/**
-	 * Ask the transport to wait for a stream slot rather than failing when the peer's
-	 * concurrent stream limit is exhausted. Defaults to true.
-	 *
-	 * Set it false on a path that opens streams faster than the peer can retire them. The
-	 * transport queues the opens it can't satisfy and serves them in order, with no way to
-	 * cancel one, so waiting there spends returning credit on whatever was requested first
-	 * rather than on what matters now.
-	 */
-	waitUntilAvailable?: boolean;
 }
 
 /** Options for {@link Writer.tryOpen}. */
-export interface TryOpenOptions extends OpenOptions {
+export interface TryOpenOptions extends Omit<OpenOptions, "sendOrder"> {
+	/**
+	 * The send order, as {@link OpenOptions.sendOrder}, or a function read again whenever the
+	 * line hands out a stream, for a rank that moves while the open waits.
+	 */
+	sendOrder?: Rank;
+
 	/** Give up once this resolves. */
 	cancel: Promise<void>;
 }
@@ -250,16 +203,10 @@ export class Stream {
 	 * @param options - The version its varints encode with, and the send order ranking it
 	 *   against the session's other streams
 	 */
+	/** Open a stream, waiting its turn for the peer's stream credit. */
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Stream> {
-		const { readable, writable } = await openWithin(
-			quic.createBidirectionalStream(sendOptions(options)),
-			options.timeout === undefined ? OPEN_TIMEOUT_MS : options.timeout,
-			(stream) => {
-				void stream.writable.abort().catch(() => void 0);
-				void stream.readable.cancel().catch(() => void 0);
-			},
-		);
-		return new Stream({ readable, writable, version: options.version });
+		const opened = await lines(quic).bi.open(options.sendOrder ?? 0);
+		return new Stream({ readable: opened.readable, writable: opened.writable, version: options.version });
 	}
 
 	close() {
@@ -862,49 +809,20 @@ export class Writer {
 	 * @param options - The version its varints encode with, and the send order ranking it
 	 *   against the session's other streams
 	 */
+	/** Open a send-only stream, waiting its turn for the peer's stream credit. */
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Writer> {
-		const writable = await openWithin(
-			quic.createUnidirectionalStream(sendOptions(options)) as Promise<WritableStream<Uint8Array>>,
-			options.timeout === undefined ? OPEN_TIMEOUT_MS : options.timeout,
-			(stream) => void stream.abort().catch(() => void 0),
-		);
-
+		const writable = await lines(quic).uni.open(options.sendOrder ?? 0);
 		return new Writer(writable, options.version);
 	}
 
 	/**
-	 * Like {@link Writer.open}, but gives up when `cancel` settles or `timeout` elapses,
-	 * returning undefined so the caller can drop whatever it meant to send. A stream that
-	 * opens after that is reset rather than leaked. A real transport failure still throws.
-	 *
-	 * Worth using even with `waitUntilAvailable: false`, since an implementation may park
-	 * an over-limit open instead of rejecting it.
+	 * Like {@link Writer.open}, but leaves the line once `cancel` settles, returning undefined
+	 * so the caller can drop whatever it meant to send. The stream its create admits later goes
+	 * to the next open in line. A transport failure, or a rejected `cancel`, still throws.
 	 */
 	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
-		// Raced ahead of the open, so an already-cancelled caller wins even against a slot
-		// that is free right now. `race` rather than `Promise.race`: the caller shares one
-		// `cancel` across every group of a subscription, which must not gain a reaction per call.
-		const open = Writer.open(quic, options);
-
-		// Resets a stream that opens after we gave up; a no-op if the open itself failed.
-		const abandon = () => {
-			const abandoned = new Error("abandoned waiting for a stream slot");
-			open.then((w) => w.reset(abandoned)).catch(() => void 0);
-		};
-
-		try {
-			const stream = await race([options.cancel, open]);
-			if (stream) return stream;
-		} catch (err: unknown) {
-			// open already discarded the late stream on its way out.
-			if (err instanceof TimeoutError) return undefined;
-			// A rejected `cancel` still leaves the open pending.
-			abandon();
-			throw err;
-		}
-
-		abandon();
-		return undefined;
+		const writable = await lines(quic).uni.open(options.sendOrder ?? 0, options.cancel);
+		return writable && new Writer(writable, options.version);
 	}
 }
 

@@ -36,12 +36,16 @@ function expected(order: Order, count: number): number[] {
 
 // The positions in `sendStreams.uni` of each transport's fetch streams.
 const fetchStreams = new WeakMap<MockTransport, Set<number>>();
+// The leading bytes each of a transport's uni streams wrote, by position in `sendStreams.uni`.
+const headers = new WeakMap<MockTransport, Map<number, number[]>>();
 
 // Note which uni streams open with a fetch header. A draft-18 subscriber that joins after
 // Largest fetches the group's head on one, ranked with that group, beside its group streams.
 function noteFetchStreams(transport: MockTransport): void {
 	const fetches = new Set<number>();
 	fetchStreams.set(transport, fetches);
+	const written = new Map<number, number[]>();
+	headers.set(transport, written);
 	const create = transport.createUnidirectionalStream.bind(transport);
 	transport.createUnidirectionalStream = async (options) => {
 		const stream = await create(options);
@@ -55,6 +59,8 @@ function noteFetchStreams(transport: MockTransport): void {
 			writer.write = (chunk) => {
 				if (first && chunk?.[0] === FetchHeader.type) fetches.add(index);
 				first = false;
+				const bytes = written.get(index) ?? [];
+				if (chunk && bytes.length < 8) written.set(index, [...bytes, ...chunk].slice(0, 8));
 				return write(chunk);
 			};
 			return writer;
@@ -65,6 +71,21 @@ function noteFetchStreams(transport: MockTransport): void {
 
 // The send orders of a transport's group streams. Protocol streams, such as the setup stream,
 // open without one, and fetch streams are left out.
+// The send orders of a moq-lite transport's group streams by group sequence: the opens of a
+// backlog wait together, so which stream carries which group is the line's choice. A lite
+// group stream starts with its type, the header's size, the subscription, then the sequence,
+// each a single byte at these values.
+function liteSendOrders(transport: MockTransport): number[] {
+	const written = headers.get(transport);
+	return transport.sendStreams.uni
+		.flatMap((stream, index) => {
+			const sequence = written?.get(index)?.[3];
+			return stream.sendOrder === undefined || sequence === undefined ? [] : [[sequence, stream.sendOrder]];
+		})
+		.sort(([a], [b]) => a - b)
+		.map(([, order]) => order);
+}
+
 function sendOrders(transport: MockTransport): number[] {
 	const fetches = fetchStreams.get(transport);
 	return transport.sendStreams.uni.flatMap((stream, index) =>
@@ -112,9 +133,8 @@ async function session(protocol: string, origin: OriginProducer): Promise<Sessio
 	return { client, server, transport: pair.server };
 }
 
-// A backlog already cached when the subscription arrives. The publisher's own reader hands a
-// buffered backlog out lowest first, so stream `i` carries group `i`. With `update`, the
-// subscriber switches to that order once every group is in flight.
+// A backlog already cached when the subscription arrives, its send orders listed by group.
+// With `update`, the subscriber switches to that order once every group is in flight.
 async function backlog(protocol: string, order: Order, update?: Order) {
 	const origin = new OriginProducer();
 	const { client, server, transport } = await session(protocol, origin);
@@ -138,7 +158,7 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 		await aggregate(video, (upstream) => upstream === update);
 	}
 
-	const result = { upstream: video.subscription.peek()?.order, orders: sendOrders(transport) };
+	const result = { upstream: video.subscription.peek()?.order, orders: liteSendOrders(transport) };
 
 	for (const group of groups) group.finish();
 	subscriber.close();

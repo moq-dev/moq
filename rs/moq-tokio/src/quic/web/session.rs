@@ -292,57 +292,30 @@ impl Session {
 		waiter: &Waiter,
 		options: send::Options<'_>,
 	) -> Poll<Result<(SendStream, RecvStream), SessionError>> {
-		self.poll_open_pair(waiter, options, false)
-			.map_ok(|pair| pair.expect("ordinary opens wait for credit"))
-	}
-
-	/// Open a request without waiting for stream credit; pending only while writing its header.
-	pub fn poll_open_request(
-		&self,
-		waiter: &Waiter,
-		options: send::Options<'_>,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, SessionError>> {
-		self.poll_open_pair(waiter, options, true)
-	}
-
-	fn poll_open_pair(
-		&self,
-		waiter: &Waiter,
-		options: send::Options<'_>,
-		request: bool,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, SessionError>> {
 		self.opening.poll(waiter, |opening, cx| {
-			let slot = if request { &mut opening.request } else { &mut opening.bi };
-			if slot.is_none() {
-				let (mut send, recv) = if request {
-					let Some(pair) = self.conn.open_request().map_err(|e| self.map_error(e))? else {
-						return Poll::Ready(Ok(None));
-					};
-					pair
-				} else {
-					std::task::ready!(self.conn.poll_open_bi(
-						opening.park.hold(cx),
-						send::Options {
-							group: None,
-							priority: i64::MAX
-						}
-					))
-					.map_err(|e| self.map_error(e))?
-				};
+			if opening.bi.is_none() {
+				let (mut send, recv) = std::task::ready!(self.conn.poll_open_bi(
+					opening.park.hold(cx),
+					send::Options {
+						group: None,
+						priority: i64::MAX
+					}
+				))
+				.map_err(|e| self.map_error(e))?;
 				send.set_priority(i64::MAX);
-				*slot = Some((send, recv, self.header_bi.clone()));
+				opening.bi = Some((send, recv, self.header_bi.clone()));
 			}
-			let (send, _, header) = slot.as_mut().unwrap();
+			let (send, _, header) = opening.bi.as_mut().unwrap();
 			let result = std::task::ready!(poll_header(send, opening.park.hold(cx), header));
-			let (mut send, recv, _) = slot.take().unwrap();
+			let (mut send, recv, _) = opening.bi.take().unwrap();
 			result.map_err(|e| self.map_error(e))?;
 			send.set_priority(options.priority);
 			send.set_group(options.group);
 			let header = self.session_id.map(|_| send.offset());
-			Poll::Ready(Ok(Some((
+			Poll::Ready(Ok((
 				SendStream::new(send, self.close.clone(), header),
 				RecvStream::new(recv, self.close.clone()),
-			))))
+			)))
 		})
 	}
 
@@ -626,7 +599,6 @@ struct Opening {
 	park: kio::Park,
 	uni: Option<(send::Stream, Bytes)>,
 	bi: Option<(send::Stream, crate::quic::driver::recv::Stream, Bytes)>,
-	request: Option<(send::Stream, crate::quic::driver::recv::Stream, Bytes)>,
 }
 
 fn poll_header(send: &mut send::Stream, waiter: &Waiter, header: &mut Bytes) -> Poll<Result<(), SessionError>> {
@@ -1047,20 +1019,6 @@ impl moq_net::transport::poll::Session for Session {
 			},
 		)
 	}
-	fn poll_open_request(
-		&self,
-		waiter: &Waiter,
-		options: moq_net::transport::poll::SendOptions<'_, send::Group>,
-	) -> Poll<Result<Option<(SendStream, RecvStream)>, SessionError>> {
-		Self::poll_open_request(
-			self,
-			waiter,
-			send::Options {
-				group: options.group,
-				priority: options.priority,
-			},
-		)
-	}
 	fn send_group(&self, priority: i64) -> Option<send::Group> {
 		Some(Self::send_group(self, priority))
 	}
@@ -1436,55 +1394,6 @@ mod tests {
 		assert_eq!(bi.read_to_end(2).await.unwrap(), b"bi");
 		assert!(server.accept_uni().await.is_err());
 		assert!(server.accept_bi().await.is_err());
-	}
-
-	#[tokio::test]
-	async fn request_credit_refusal_does_not_leave_an_open() {
-		let mut transport = crate::quic::driver::transport::Config::default();
-		transport.limits.max_streams = std::num::NonZeroU64::new(1);
-		let (client, server, _endpoints, _) = gated_pair_with_transport(transport, Default::default()).await;
-		let client = Session::raw(client);
-		let server = Session::raw(server);
-		let waiter = &moq_net::kio::Waiter::noop();
-		let Poll::Ready(Ok(Some((send, mut recv)))) = client.poll_open_request(waiter, Default::default()) else {
-			panic!("initial request has credit");
-		};
-		for _ in 0..2 {
-			assert!(matches!(
-				client.poll_open_request(waiter, Default::default()),
-				Poll::Ready(Ok(None))
-			));
-		}
-		let send = send.finish();
-		let (peer_send, mut peer_recv) = server.accept_bi().await.unwrap();
-		let peer_send = peer_send.finish();
-		assert!(peer_recv.read_chunk(1).await.unwrap().is_none());
-		assert!(recv.read_chunk(1).await.unwrap().is_none());
-		drop((send, recv, peer_send, peer_recv));
-		let _fresh = client.open_bi(Default::default()).await.unwrap();
-		assert!(matches!(
-			client.poll_open_request(waiter, Default::default()),
-			Poll::Ready(Ok(None))
-		));
-	}
-
-	#[tokio::test]
-	async fn request_header_send_pressure_keeps_its_admitted_stream() {
-		let mut server_transport = crate::quic::driver::transport::Config::default();
-		server_transport.limits.max_streams = std::num::NonZeroU64::new(1);
-		let mut client_transport = crate::quic::driver::transport::Config::default();
-		// One byte, so the two-byte header cannot fully enter the send window.
-		client_transport.limits.send_window = std::num::NonZeroU64::new(1);
-		let (client, _server, _endpoints, _) = gated_pair_with_transport(server_transport, client_transport).await;
-		let mut web = Session::raw(client.clone());
-		web.header_bi = Bytes::from_static(&[0x41, 0]);
-		let session = web;
-		let waiter = &moq_net::kio::Waiter::noop();
-		// The only stream credit is consumed, but the header cannot fully enter the send window.
-		assert!(session.poll_open_request(waiter, Default::default()).is_pending());
-		assert!(client.open_request().unwrap().is_none());
-		// Polling the admitted request never rechecks credit or starts another open.
-		assert!(session.poll_open_request(waiter, Default::default()).is_pending());
 	}
 
 	/// A queued capsule must survive a stalled socket beyond the teardown grace.

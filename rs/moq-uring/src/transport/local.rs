@@ -62,15 +62,6 @@ impl<S: poll::Session> poll::Session for Local<S> {
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
-	) -> Poll<Result<Option<poll::BiStreams<Self>>, Self::Error>> {
-		self.0
-			.poll_open_request(waiter, unwrap(options))
-			.map_ok(|streams| streams.map(|(send, recv)| (Local::new(send), Local::new(recv))))
-	}
 
 	fn send_group(&self, priority: i64) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
 		self.0.send_group(priority).map(Local::new)

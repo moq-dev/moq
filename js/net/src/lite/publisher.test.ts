@@ -1164,8 +1164,9 @@ test("lite draft-06: a reported cut still allows a late group", async () => {
 
 		sub.serve(1n);
 		sub.serve(2n);
-		expect(await sub.servedSequence()).toBe(1n);
-		expect(await sub.servedSequence()).toBe(2n);
+		// Opened together, so the newer group may take the first stream.
+		const served = [await sub.servedSequence(), await sub.servedSequence()];
+		expect(served.sort()).toEqual([1n, 2n]);
 		sub.track.finish();
 		sub.track.close();
 		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
@@ -1530,8 +1531,9 @@ test("lite draft-06: a widening update lowers the serving floor", async () => {
 
 		sub.serve(5n);
 		sub.serve(6n);
-		expect(await sub.servedSequence()).toBe(5n);
-		expect(await sub.servedSequence()).toBe(6n);
+		// Opened together, so the newer group may take the first stream.
+		const served = [await sub.servedSequence(), await sub.servedSequence()];
+		expect(served.sort()).toEqual([5n, 6n]);
 	} finally {
 		await sub.close();
 	}
@@ -2399,13 +2401,12 @@ async function saturatedGroup() {
 	};
 }
 
-// Group streams are the one path that must not queue behind the peer's stream limit: the
-// transport serves queued opens oldest-first, which is backwards for live media, and an
-// open already handed to it can't be taken back.
-test("lite draft-05: group streams do not ask the transport to wait for a slot", async () => {
+// Group streams wait for the peer's stream limit like any open: the line, not the transport,
+// decides which waiting open a returning slot goes to.
+test("lite draft-05: group streams wait for a slot", async () => {
 	const { requested, freeSlot, close } = await saturatedGroup();
 
-	expect(requested).toEqual([{ sendOrder: expect.any(Number), waitUntilAvailable: false }]);
+	expect(requested).toEqual([{ sendOrder: expect.any(Number), waitUntilAvailable: true }]);
 
 	freeSlot();
 	close();
@@ -2490,8 +2491,10 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 	// the subscription rather than racing it against the slot below.
 	while (track.subscription.peek() !== undefined) await track.subscription.changed();
 
+	// The slot is kept for the next open, never used to send the dropped group.
 	freeSlot();
-	expect(await outcome).toBe("reset");
+	const idle = sleep(Nano.fromMilli(Milli(20))).then(() => "pending" as const);
+	expect(await Promise.race([outcome, idle])).toBe("pending");
 
 	close();
 });
@@ -2640,17 +2643,12 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 	const opened = new Promise<void>((resolve) => {
 		open = resolve;
 	});
-	let reset!: (reason: unknown) => void;
-	const streamReset = new Promise<unknown>((resolve) => {
-		reset = resolve;
-	});
 	let writes = 0;
 	const stale = new WritableStream<Uint8Array>({
 		write() {
 			writes++;
 			throw new Error("write into an abandoned stream");
 		},
-		abort: (reason) => reset(reason),
 	});
 	spyOn(pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => {
 		requested();
@@ -2683,9 +2681,9 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		write(2n, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
-		expect(writes).toBe(0);
+		// The slot goes to the next open rather than carrying the stale group.
 		await flush();
+		expect(writes).toBe(0);
 		expect(unhandled).toEqual([]);
 	} finally {
 		process.off("unhandledRejection", onUnhandled);

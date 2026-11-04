@@ -3116,12 +3116,13 @@ impl Subscriber {
 			}
 			None => {
 				let opening = self.session.clone();
+				let mut open = crate::transport::open::Open::default();
 				let stream = match kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 					validity.check(waiter)?;
-					Stream::poll_open_request(&opening, self.version, waiter)
+					Stream::poll_open(&opening, &mut open, self.version, waiter)
 				})
 				.await
 				{
@@ -4268,12 +4269,13 @@ impl Subscriber {
 				// No ID is spent while opening a stream, so dropping a blocked open
 				// cannot leave a gap in the peer's sequential request IDs.
 				let opening = this.session.clone();
+				let mut open = crate::transport::open::Open::default();
 				let mut stream = kio::wait(|waiter| {
 					validity.check(waiter)?;
 					if let Poll::Ready(err) = track.poll_aborted(waiter) {
 						return Poll::Ready(Err(err));
 					}
-					Stream::poll_open(&opening, this.version, waiter)
+					Stream::poll_open(&opening, &mut open, this.version, waiter)
 				})
 				.await?;
 				stream = stream.with_stats(this.origin.stats());
@@ -4477,12 +4479,13 @@ impl Subscriber {
 		let dynamic = request.requests();
 		let validity = self.validity.start();
 		let opening = self.session.clone();
+		let mut open = crate::transport::open::Open::default();
 		let mut stream = match kio::wait(|waiter| {
 			if gate.poll_denied(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
 			validity.check(waiter)?;
-			Stream::poll_open_request(&opening, self.version, waiter)
+			Stream::poll_open(&opening, &mut open, self.version, waiter)
 		})
 		.await
 		{
@@ -5577,6 +5580,7 @@ impl Subscriber {
 		// The fill is already owned by waiting readers; credit backpressures it until
 		// their demand leaves instead of refusing accepted work.
 		let opening = self.session.clone();
+		let mut open = crate::transport::open::Open::default();
 		let mut stream = match kio::wait(|waiter| {
 			validity.check(waiter)?;
 			if let Poll::Ready(err) = fill.poll_aborted(waiter) {
@@ -5589,7 +5593,7 @@ impl Subscriber {
 			if let Poll::Ready(Err(err)) = timescale.poll(waiter) {
 				return Poll::Ready(Err(err));
 			}
-			Stream::poll_open(&opening, self.version, waiter)
+			Stream::poll_open(&opening, &mut open, self.version, waiter)
 		})
 		.await
 		{

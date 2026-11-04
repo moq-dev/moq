@@ -10,7 +10,6 @@ import * as DatagramStream from "../datagram_stream.ts";
 import {
 	controlTimeout,
 	error,
-	NoStreamCredit,
 	NotFound,
 	ProtocolViolation,
 	reason,
@@ -1112,12 +1111,10 @@ export class Publisher {
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const givenUp = new GivenUp(group);
 		try {
-			// One stream per group is faster than a peer at its limit can retire them, so this
-			// is the one path that doesn't wait for a slot: the transport would serve the opens
-			// in the order we asked, not the subscription's order. Failing here drops the group
-			// and lets the next one compete for the next slot.
-			// Watch the group while the transport parks the open, and release that watch
-			// once the open settles. tryOpen owns resetting a slot that arrives too late.
+			// Opens wait for stream credit in send order, and the place ranks this one against
+			// the subscription's other groups while it waits.
+			// Watch the group while the open waits, and release that watch once it settles.
+			const place = ranking.reserve(group.sequence, slice.skip);
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
 			const abandoned = givenUp
@@ -1129,15 +1126,15 @@ export class Publisher {
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
 					version: this.#session.version,
-					sendOrder: ranking.rank(group.sequence, slice.skip),
+					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned, excluded.promise]),
-					waitUntilAvailable: false,
 				});
 			} finally {
 				opened.resolve();
+				place.release();
 			}
 			if (!stream) {
-				hooks.releaseGroupReader(group, failure ?? new Error("no stream slot"));
+				hooks.releaseGroupReader(group, failure ?? new Error("unsubscribed while waiting for a stream"));
 				return;
 			}
 			streams.opened += 1;
@@ -1954,9 +1951,7 @@ export class Publisher {
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
-			return e instanceof NoStreamCredit || (e instanceof StreamError && e.code === StreamCode.ControlTimeout)
-				? "never"
-				: "dropped";
+			return e instanceof StreamError && e.code === StreamCode.ControlTimeout ? "never" : "dropped";
 		}
 	}
 

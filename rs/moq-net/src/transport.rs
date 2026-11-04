@@ -12,6 +12,8 @@ use std::time::Duration;
 #[cfg(feature = "async")]
 pub(crate) mod boxed;
 pub mod memory;
+#[cfg(feature = "async")]
+pub(crate) mod open;
 
 /// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -276,18 +278,6 @@ pub mod poll {
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
-		/// Open a request stream without waiting for stream credit.
-		///
-		/// `None` refuses the request before opening a stream. `Pending` means the stream
-		/// already has credit but its transport header is waiting for send capacity.
-		/// Native QUIC and qmux implement this admission check; browser-backed sessions
-		/// retain their browser's behavior.
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
-		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>>;
-
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
 		///
@@ -527,14 +517,6 @@ pub mod poll {
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>> {
 			(**self).poll_open_bi(waiter, options)
-		}
-
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
-		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>> {
-			(**self).poll_open_request(waiter, options)
 		}
 
 		fn send_group(&self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group> {

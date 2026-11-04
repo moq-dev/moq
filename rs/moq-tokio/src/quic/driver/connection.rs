@@ -307,23 +307,6 @@ impl Connection {
 		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 
-	/// Open a request stream using only the credit already granted by the peer.
-	#[cfg(feature = "net")]
-	pub(crate) fn open_request(&self) -> Result<Option<(send::Stream, recv::Stream)>, Error> {
-		let mut state = self.0.state.lock();
-		if let Some(err) = state.error() {
-			return Err(err);
-		}
-		let Some(id) = state.inner.streams().open(Dir::Bi, Default::default()) else {
-			return Ok(None);
-		};
-		drop(state);
-		Ok(Some((
-			send::Stream::new(self.0.clone(), id),
-			recv::Stream::new(self.0.clone(), id),
-		)))
-	}
-
 	/// Accept the next incoming uni-directional stream
 	///
 	/// # Cancel safety

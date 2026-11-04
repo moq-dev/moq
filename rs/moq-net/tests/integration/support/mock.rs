@@ -569,16 +569,6 @@ impl poll::Session for MockSession {
 		Poll::Ready(Ok((send, self.recv(recv, back))))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: moq_net::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.poll_open_bi(waiter, options).map_ok(Some)
-	}
 
 	fn poll_open_uni(
 		&self,
