@@ -70,17 +70,12 @@ Implementation evidence, 2026-11-04:
   Its container warmup must remain zero if it adopts the shared setup;
   subtracting the catalog warmup would change that lane's skip behavior.
 
-## Waiting
+Decided 2026-11-04 (maintainer, on [moq-dev/moq#7864](https://github.com/moq-dev/moq/pull/7864)):
+how catalog warmup reaches the raw FFI consumer.
 
-- Maintainer: choose how catalog warmup reaches the raw FFI consumer before
-  implementation resumes. Option 1 (recommended): add optional `warmup`
-  duration fields, defaulting to absent, to `MoqAudio` and `MoqVideo`, carry
-  them through catalog conversions and every language wrapper, and document
-  the public record change while keeping the subscribe method unchanged.
-  This mirrors the existing audio `jitter` field and makes standalone
-  rendition subscriptions work. Option 2: keep the records unchanged and
-  resolve warmup from the broadcast catalog inside the raw subscriber;
-  this adds a catalog lookup/subscription and needs a policy for standalone
-  caller-supplied renditions and missing catalogs. The AFK brief requires a
-  maintainer decision on new public API/scope choices, so an agent cannot
-  select between these designs. A recorded choice clears this wait.
+- ✅ Add public optional `warmup` fields to `MoqAudio` and `MoqVideo`, so
+  `convert_catalog` keeps a rendition's warmup and
+  `MoqMediaTrackConsumer::subscribe` receives it with the rendition.
+- Not chosen: resolve warmup from the broadcast catalog inside the raw
+  subscriber, which needs a policy for standalone renditions and missing
+  catalogs.
