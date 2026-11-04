@@ -165,4 +165,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
 - [Local test runs honor NEXTEST_NO_FAIL_FAST](/quest/m0/ci/no-fail-fast.md) - `just check` and `sh/rs/nextest.sh` pass `--no-fail-fast` through, so one host failure doesn't hide the rest
 - [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
-- [Dependabot leaves the workspace-hack to hakari](/quest/m0/ci/dependabot-workspace-hack.md) - cargo group PRs stop hand-editing `rs/workspace-hack/Cargo.toml`
+- [Renovate keeps the workspace-hack generated](/quest/m0/ci/dependabot-workspace-hack.md) - a protected scheduled Renovate runs `cargo hakari generate` in cargo update PRs, replacing Dependabot's cargo updates
