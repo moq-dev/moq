@@ -196,35 +196,72 @@ test("delay parses beside jitter and zero is absent", () => {
 	expect(parsed.text?.renditions.captions?.delay).toBe(u53(120));
 });
 
-test("clock round-trips at the root", () => {
-	const parsed = RootSchema.parse({
-		clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
-	});
-	expect(parsed.clock).toMatchObject({ wall: 1_751_846_400_000_000, timescale: 1_000_000 });
+test("media round-trips at the root", () => {
+	const media = { clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 }, join: { interval: 2000 } };
+	const parsed = RootSchema.parse({ media });
+	expect(parsed.media?.clock).toMatchObject(media.clock);
+	expect(Number(parsed.media?.join?.interval)).toBe(2000);
+	expect(JSON.parse(JSON.stringify(encode(parsed)))).toEqual({ media });
 });
 
-test("clock stays off the wire when absent", () => {
-	expect(JSON.stringify(RootSchema.parse({}))).not.toContain('"clock"');
+test("media stays off the wire when it holds nothing", () => {
+	expect(JSON.stringify(RootSchema.parse({}))).not.toContain('"media"');
+	expect(encode(RootSchema.parse({ media: {} }))).toEqual({});
+	// A join without a clock still holds something.
+	expect(encode(RootSchema.parse({ media: { join: { interval: 1000 } } })).media?.join?.interval).toBe(u53(1000));
 });
 
-test("a rendition's hls field round-trips", () => {
-	const hls = { track: "video.hls", duration: 2000 };
-	const parsed = RootSchema.parse({
-		video: { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" }, hls } } },
-	});
-	if (!parsed.video) throw new Error("missing video section");
-	expect(parsed.video.renditions.video?.hls).toEqual({ track: hls.track, duration: u53(hls.duration) });
-	expect(JSON.stringify(parsed)).toContain('"hls":{"track":"video.hls","duration":2000}');
-});
-
-test("a malformed hls field leaves the rendition playable", () => {
-	const config = { codec: "avc1.64001f", container: { kind: "legacy" } };
-	for (const hls of [{ track: "video.hls" }, { duration: 2000 }, { track: 42, duration: 2000 }, "video.hls", null]) {
-		const parsed = RootSchema.parse({ video: { renditions: { video: { ...config, hls } } } });
-		if (!parsed.video) throw new Error("missing video section");
-		expect(parsed.video.renditions.video?.hls).toBeUndefined();
-		expect(parsed.video.renditions.video?.codec).toBe(config.codec);
+test("a malformed clock fails the catalog", () => {
+	for (const clock of [{ wall: -1 }, { wall: 0, timescale: 0 }, "now", null]) {
+		expect(RootSchema.safeParse({ media: { clock } }).success).toBe(false);
 	}
+	expect(RootSchema.safeParse({ media: "clock" }).success).toBe(false);
+});
+
+test("a malformed join leaves the media playable", () => {
+	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+	const clock = { wall: 1000, timescale: 1_000_000 };
+	for (const join of [
+		{},
+		{ interval: 0 },
+		{ interval: 1.5 },
+		{ interval: -2000 },
+		{ interval: "2000" },
+		2000,
+		null,
+	]) {
+		const parsed = RootSchema.parse({ video, media: { clock, join } });
+		expect(parsed.media?.join).toBeUndefined();
+		expect(parsed.media?.clock).toMatchObject(clock);
+		expect(parsed.video?.renditions.video?.codec).toBe("avc1.64001f");
+	}
+});
+
+// The root `clock` moved to `media.clock` and the per-rendition `hls` field is gone: a catalog from
+// an older publisher still parses, with its media intact and both left unread.
+test("an old root clock and rendition hls are ignored", () => {
+	const config = { codec: "avc1.64001f", container: { kind: "legacy" } };
+	const parsed = RootSchema.parse({
+		video: { renditions: { video: { ...config, hls: { track: "video.hls", duration: 2000 } } } },
+		audio: {
+			renditions: {
+				audio: {
+					codec: "opus",
+					container: { kind: "legacy" },
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					hls: { track: "audio.hls", duration: 2000 },
+				},
+			},
+		},
+		clock: { wall: 1000, timescale: 1_000_000 },
+	});
+	expect(parsed.media).toBeUndefined();
+	expect(parsed.video?.renditions.video).toEqual(
+		RootSchema.parse({ video: { renditions: { video: config } } }).video?.renditions.video,
+	);
+	expect(parsed.video?.renditions.video).not.toHaveProperty("hls");
+	expect(parsed.audio?.renditions.audio).not.toHaveProperty("hls");
 });
 
 // The root `archive` section is gone: a catalog from an older publisher still parses, with its

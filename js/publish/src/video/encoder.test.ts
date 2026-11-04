@@ -4,11 +4,11 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
-import { Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { Estimator, Order } from "../order";
 import { Slot } from "../publication";
-import { Encoder } from "./encoder";
+import { type Config, Encoder } from "./encoder";
 
 // How long a fake hardware probe takes on the installed clock.
 const PROBE = Nano.fromMilli(Milli(5));
@@ -128,8 +128,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -173,8 +172,7 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: live,
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -231,8 +229,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -300,6 +297,18 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 	}
 });
 
+// The broadcast's current catalog, read through a fresh subscriber, which the producer seeds.
+async function readCatalog(broadcast: Broadcast): Promise<Catalog.Root | undefined> {
+	const track = new Moq.Track.Producer("catalog.json");
+	const effect = new Effect();
+	broadcast.catalog.serve(track, effect);
+	try {
+		return (await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).latest())?.value;
+	} finally {
+		effect.close();
+	}
+}
+
 // Step through 40 back-to-back probes, which outlasts any chain of re-probes a test triggers.
 async function settle(): Promise<void> {
 	for (let i = 0; i < 40; i++) await clock.advance(PROBE);
@@ -320,8 +329,7 @@ test("every published config fits a probe for its own codec", async () => {
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -676,8 +684,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -847,8 +854,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1058,8 +1064,7 @@ async function recordKeyframes(
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1217,20 +1222,21 @@ test.each([false, true])(
 	},
 );
 
-// An HLS export subscribes only to the records the catalog advertises, so an on-demand rendition has
-// to advertise them before anything is encoded, even with every frame a keyframe.
-test("an on-demand all-keyframe rendition advertises its records, whose subscriber starts it", async () => {
+// An HLS export cuts segments on the catalog's join interval and reads the media directly, so an
+// on-demand rendition declares its keyframe interval before anything is encoded and publishes no records.
+test("an on-demand rendition declares its keyframe interval, and a media subscriber starts it", async () => {
 	using recording = await installRecording();
 	const broadcast = new Broadcast({
 		origin: new Moq.Origin.Producer(),
-		name: Moq.Path.from("keyframes.hang"),
+		name: Moq.Path.from("join.hang"),
 		onDemand: true,
 	});
+	const config = new Signal<Config | undefined>({ keyframeInterval: Milli(3000) });
 	const encoder = new Encoder("video", {
 		enabled: true,
 		broadcast,
 		capture: recording.capture as never,
-		config: { keyframeInterval: Milli(0) },
+		config,
 	});
 	const subscribers: Moq.Track.Subscriber[] = [];
 	try {
@@ -1241,17 +1247,34 @@ test("an on-demand all-keyframe rendition advertises its records, whose subscrib
 
 		const catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		subscribers.push(catalogSubscriber);
-		const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber }).latest();
-		expect(catalog?.value.video?.renditions.video?.hls).toEqual({
-			track: "video.hls",
-			duration: Catalog.u53(4000),
-		});
+		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
+		const first = (await catalog.latest())?.value;
+		expect(first?.media?.join).toEqual({ interval: Catalog.u53(3000) });
+		expect(first?.video?.renditions.video).not.toHaveProperty("hls");
 
-		subscribers.push(net.track("video.hls").subscribe());
+		subscribers.push(net.track("video").subscribe());
 		await settle();
 		expect(encoder.out.active.peek()).toBe(true);
+
+		// A later keyframe interval leaves the declared grid alone for this broadcast.
+		config.set({ keyframeInterval: Milli(5000) });
+		await settle();
+		expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(3000));
 	} finally {
 		for (const subscriber of subscribers) subscriber.close();
+		encoder.close();
+		broadcast.close();
+	}
+});
+
+test("the default keyframe interval is the declared join interval", async () => {
+	using recording = await installRecording();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("default.hang") });
+	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never });
+	try {
+		await settle();
+		expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
+	} finally {
 		encoder.close();
 		broadcast.close();
 	}
@@ -1521,8 +1544,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1597,8 +1619,7 @@ test("the catalog bitrate and frame rate only rise", async () => {
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		hls: () => undefined,
-		hlsHint: new Signal(undefined),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1660,8 +1681,7 @@ test("each slot keeps its own ceiling and maxima", async () => {
 			stats: new Signal(undefined),
 			track: new Signal<Moq.Track.Producer | undefined>(undefined),
 			slot,
-			hls: () => undefined,
-			hlsHint: new Signal(undefined),
+			joinInterval: new Signal(undefined),
 			close: () => {},
 		});
 		return { video: rendition, order: new Order() };

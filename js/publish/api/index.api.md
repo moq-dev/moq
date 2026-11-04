@@ -137,7 +137,6 @@ export type BroadcastInput = {
 	echo: Signals.Getter<Net.Path.Relative | undefined>;
 	enabled: Signals.Getter<boolean>;
 	flip: Signals.Getter<boolean>;
-	hls: Signals.Getter<boolean>;
 	maxAge: Signals.Getter<Clock.Milli | undefined>;
 	name: Signals.Getter<Net.Path.Valid>;
 	onDemand: Signals.Getter<boolean | undefined>;
@@ -219,8 +218,7 @@ export namespace Preview {
 export class Rendition<Config> {
 	close(): void;
 	readonly config: Signals.Signal<Config | undefined>;
-	hls(track: Net.Track.Producer): Hang.Hls.Recorder | undefined;
-	readonly hlsHint: Signals.Signal<Clock.Micro | undefined>;
+	readonly joinInterval: Signals.Signal<Clock.Milli | undefined>;
 	readonly kind: Kind;
 	readonly name: string;
 	readonly stats: Signals.Signal<RenditionStats | undefined>;
