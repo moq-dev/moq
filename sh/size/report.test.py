@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -79,6 +83,51 @@ class Trends(unittest.TestCase):
     def test_validates_first_report_date(self):
         with self.assertRaises(ValueError):
             report.compare(row("invalid"), [])
+
+    def test_refuses_invalid_revision_metadata(self):
+        for revision in [None, 123, "main", "a" * 39, "a" * 40 + ")"]:
+            current = row("2026-10-10") | {"revision": revision}
+            with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, "commit SHA"):
+                report.compare(current, [])
+
+    def test_failed_growth_advances_daily_history_but_keeps_monthly_anchor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "previous.json"
+            history.write_text(json.dumps([row("2026-09-10"), row("2026-10-09")]))
+
+            def run(current):
+                (root / "sizes.json").write_text(json.dumps(current))
+                result = subprocess.run(
+                    [sys.executable, str(Path(report.__file__)), str(root), "--history", str(history)],
+                    capture_output=True,
+                    text=True,
+                )
+                retained = json.loads((root / "history.json").read_text())
+                history.write_text(json.dumps(retained))
+                return result, retained
+
+            previous = row("2026-10-10", 106) | {"revision": "a" * 40}
+            failed, retained = run(previous)
+            self.assertEqual(failed.returncode, 1, failed.stderr)
+            self.assertEqual(retained[-1], previous)
+
+            # A stable next report compares against the failed point, not the last success.
+            current = row("2026-10-11", 106) | {"revision": "b" * 40}
+            passed, _ = run(current)
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertIn(report.source(current), passed.stdout)
+
+            # The thirty-day guard still catches drift despite the advanced daily baseline.
+            monthly, _ = run(row("2026-10-12", 111))
+            self.assertEqual(monthly.returncode, 1, monthly.stderr)
+            self.assertIn("30 days: 2026-09-10", monthly.stdout)
+            self.assertNotIn("(previous:", monthly.stdout)
+
+    def test_failure_names_the_measured_baseline_revision(self):
+        baseline = row("2026-10-09") | {"revision": "a" * 40}
+        failures = report.compare(row("2026-10-10", 106), [baseline])
+        self.assertIn(report.source(baseline), failures[0])
 
 
 unittest.main()
