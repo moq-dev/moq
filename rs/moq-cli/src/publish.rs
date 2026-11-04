@@ -2414,25 +2414,45 @@ pub(crate) mod tests {
 			output[follower.export().discontinuity() as usize].extend_from_slice(&frame.payload);
 		}
 		assert_eq!(follower.export().discontinuity(), 1, "one program switch");
-		let video_pts = |bytes: &[u8]| {
+		let pictures = |bytes: &[u8]| {
 			let mut reader = PesPacketReader::new(TsPacketReader::new(std::io::Cursor::new(bytes)));
-			let mut pts = Vec::new();
+			let mut pictures = Vec::new();
 			while let Some(pes) = reader.read_pes_packet().unwrap() {
-				if pes.header.stream_id.is_video() {
-					pts.push(pes.header.pts.unwrap().as_u64());
+				if !pes.header.stream_id.is_video() {
+					continue;
 				}
+				let mut payload = BytesMut::from(pes.data.as_slice());
+				let mut nals = moq_mux::codec::annexb::NalIterator::new(&mut payload);
+				let mut slices = Vec::new();
+				for nal in nals.by_ref() {
+					let nal = nal.unwrap();
+					if matches!(nal[0] & 31, 1..=5) {
+						slices.push(nal);
+					}
+				}
+				if let Some(nal) = nals.flush().unwrap()
+					&& matches!(nal[0] & 31, 1..=5)
+				{
+					slices.push(nal);
+				}
+				pictures.push((pes.header.pts.unwrap().as_u64(), slices));
 			}
-			pts
+			pictures
 		};
-		let source = video_pts(CLIP);
+		let source = pictures(CLIP);
+		let replacement = pictures(&output[1]);
 		assert_eq!(
-			video_pts(&output[1]).first(),
-			source.first(),
-			"the replacement's first GOP goes out"
+			replacement.first().map(|picture| &picture.1),
+			source.first().map(|picture| &picture.1),
+			"the replacement's first coded picture goes out"
 		);
+		// Compare picture bytes: Hang normalizes PTS to microseconds, which can lose a 90 kHz tick.
 		assert_eq!(
-			video_pts(&output[0]).iter().max(),
-			source.iter().max(),
+			pictures(&output[0])
+				.iter()
+				.max_by_key(|picture| picture.0)
+				.map(|picture| &picture.1),
+			source.iter().max_by_key(|picture| picture.0).map(|picture| &picture.1),
 			"the old program drains through the cut"
 		);
 	}
