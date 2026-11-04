@@ -531,6 +531,10 @@ impl Shared {
 				return;
 			}
 			state.offline();
+			// Including when the task was aborted mid-handover: nothing enforces the
+			// predecessor's deadline anymore, so a parked clone would hold its transport open.
+			// A graceful close took its own clone before aborting.
+			state.predecessor = None;
 			state.ended = true;
 			state.failure = None;
 			state.error = err;
