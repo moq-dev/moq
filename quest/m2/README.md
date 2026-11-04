@@ -14,17 +14,24 @@ m1, and defer new capabilities without changing their intended outcome.
 Dependencies on m1 remain explicit. An implementation that discovers a new
 necessary API break brings that decision to the maintainer before proceeding.
 
-The first follow-through is [release execution](/quest/m2/release/README.md).
+Decided 2026-11-03 (maintainer, Kixel's quest audit): [byte streams](/quest/m2/stream/README.md)
+and the [mesh libraries](/quest/m2/mesh/README.md) rank first in m2, ahead
+of [release execution](/quest/m2/release/README.md). Kixel's daemon builds on
+them from `main` through a git submodule, so it needs them merged, not
+released. They stay out of m1 so the cut does not wait on them; each starts
+as soon as its m1 prerequisites (sockets, fastest-reader pacing, outbound
+federation) land.
+
 Rate-grant work targets the next unpublished lite version after finalized
 lite-07; bitrate enforcement is not part of this release.
 
 ## Required
 
+- [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
+- [Mesh libraries](/quest/m2/mesh/README.md) - an `Endpoint` reaches any enrolled node by endpoint ID over relays or a sparse direct overlay, with address hints and a `.status` track; the mesh binary and UI live in Kixel
 - [Announce credit](/quest/m2/announce-credit.md) - a subscriber bounds an Announce Stream's routes with credit at the wire, so a path flood never closes a session
 - [JS announced coalescing](/quest/m2/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m2/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
-- [Mesh libraries](/quest/m2/mesh/README.md) - an `Endpoint` reaches any enrolled node by endpoint ID over relays or a sparse direct overlay, with address hints and a `.status` track; the mesh binary and UI live in Kixel
-- [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [One policy for oversized container metadata](/quest/m2/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
 - [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the cmsg walks in moq-sock and moq-uring have invariant fuzz targets, and the unsafe peer input reaches runs under Miri
@@ -163,6 +170,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Per-app audio on macOS](/quest/m2/capture-app-audio-macos.md) - one application's audio through ScreenCaptureKit
 - [cpal loads libasound at runtime](/quest/m2/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
 - [Audio capture without ALSA link](/quest/m2/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound, and capture becomes a default feature
+- [The moq CLI can publish a changing catalog](/quest/m2/cli-catalog-updates.md) - catalog updates mid-stream, so recovery replays need no hand-built clients
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
@@ -210,6 +218,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [No MOQ_* knobs outside the binaries](/quest/m2/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
+- [moq-hls exposes each rendition's bound source](/quest/m2/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
 - [The memory bench finishes at 1 MiB frames](/quest/m2/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
