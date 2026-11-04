@@ -56,7 +56,9 @@ use moq_net::{Timestamp, broadcast, frame, group, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// A small, fixed payload shared across every frame. Cloning a `Bytes` is a
@@ -641,7 +643,9 @@ fn contended(
 	readers: usize,
 ) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
+	let track = broadcast
+		.create_track("bench", track::Info::default().with_max_age(None))
+		.unwrap();
 	let mut group = track.append_group().unwrap();
 	// The group readers move to once theirs ends.
 	let next = Arc::new(Mutex::new(group.consume()));
@@ -750,7 +754,9 @@ fn bench_streaming(c: &mut Criterion) {
 /// One [`bench_streaming`] case.
 fn streaming(b: &mut criterion::Bencher, chunk: &Bytes, arrivals: usize, threads: usize, readers: usize) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
+	let track = broadcast
+		.create_track("bench", track::Info::default().with_max_age(None))
+		.unwrap();
 	let info = frame::Info {
 		size: (arrivals * chunk.len()) as u64,
 		timestamp: None,
