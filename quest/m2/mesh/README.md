@@ -96,6 +96,7 @@ the third, and survives a relay restart.
 - [Mesh relay node](/quest/m2/mesh/node.md) - a relay node enrolls into a mesh, dials its relays, and admits only enrolled LAN peers
 - [Address hints](/quest/m2/mesh/addr.md) - nodes publish their addresses on mesh tracks and dial each other directly where mDNS cannot find them
 - [Sparse overlay](/quest/m2/mesh/overlay.md) - each node keeps about log N deterministic direct links, forwards for the rest, and falls back to relays across a partition
+- [JS mesh enrollment client](/quest/m2/mesh/js-enroll.md) - `@moq/auth` enrolls and refreshes from JS like `moq_auth::mesh::Client`
 - [Status track](/quest/m2/mesh/status.md) - a signed `.status` track per node with its links and per-link RTTs
 - [Mesh library guide](/quest/m2/mesh/guide.md) - the doc.moq.dev page for the libraries, the contract, and porting from iroh
 

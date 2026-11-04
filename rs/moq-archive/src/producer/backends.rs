@@ -141,15 +141,10 @@ fn decode(objects: &BTreeMap<String, Bytes>, key: &str, timed: bool) -> Vec<(u64
 	object
 		.entries
 		.iter()
-		.map(|entry| match entry {
-			crate::layout::Entry::Group { sequence, frames } => (
-				*sequence,
-				frames
-					.iter()
-					.map(|frame| String::from_utf8(frame.payload.to_vec()).unwrap())
-					.collect(),
-			),
-			crate::layout::Entry::Datagram { .. } => panic!("no datagrams were sent"),
+		.map(|entry| {
+			let frames = entry.frames.iter();
+			let frames = frames.map(|frame| String::from_utf8(frame.payload.to_vec()).unwrap());
+			(entry.sequence, frames.collect())
 		})
 		.collect()
 }

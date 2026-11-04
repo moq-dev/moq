@@ -21,11 +21,16 @@ use crate::e2ee::limits::{
 };
 use crate::e2ee::name::{Name, pad};
 use crate::e2ee::protect::{nonce, protect};
-use crate::e2ee::{group, track};
+use crate::e2ee::{datagram, group, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
+/// A millisecond datagram track.
+fn timed_datagrams() -> moq_net::datagram::Info {
+	moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// Raw lengths of the derived AES-128-GCM and HMAC-SHA-256 keys, which the vectors pin.
@@ -372,6 +377,42 @@ fn pair(semantic: &str) -> Pair {
 	}
 }
 
+struct DatagramPair {
+	semantic: String,
+	generation: Consumer,
+	net: moq_net::datagram::Producer,
+	producer: datagram::Producer,
+	consumer: datagram::Consumer,
+}
+
+fn datagram_pair(semantic: &str) -> DatagramPair {
+	let generation = test_generation();
+	let net = timed_datagrams().produce(generation.name(semantic).unwrap().as_str());
+	let producer = generation.produce_datagrams(net.clone(), semantic).unwrap();
+	let consuming = consume(&generation);
+	let consumer = consuming.consume_datagrams(net.consume(), semantic).unwrap();
+	DatagramPair {
+		semantic: semantic.to_string(),
+		generation: consuming,
+		net,
+		producer,
+		consumer,
+	}
+}
+
+impl DatagramPair {
+	/// Send `payload` raw, the way a relay could.
+	fn inject(&mut self, sequence: u64, timestamp: moq_net::Timestamp, payload: impl Into<Bytes>) {
+		self.net
+			.insert(moq_net::Datagram {
+				sequence,
+				timestamp: Some(timestamp),
+				payload: payload.into(),
+			})
+			.unwrap();
+	}
+}
+
 fn ms(value: u64) -> moq_net::Timestamp {
 	moq_net::Timestamp::from_millis(value).unwrap()
 }
@@ -390,8 +431,8 @@ fn read_frame(consumer: &mut group::Consumer) -> group::Frame {
 	}
 }
 
-fn recv_datagram(consumer: &mut track::Consumer) -> Event {
-	match consumer.poll_recv_datagram(&kio::Waiter::noop()) {
+fn recv_datagram(consumer: &mut datagram::Consumer) -> Event {
+	match consumer.poll_recv(&kio::Waiter::noop()) {
 		Poll::Ready(Ok(Some(event))) => event,
 		other => panic!("expected datagram event, got {other:?}"),
 	}
@@ -431,9 +472,9 @@ fn grouped_roundtrip() {
 
 #[test]
 fn datagram_roundtrip() {
-	let mut pair = pair("audio");
-	assert_eq!(pair.producer.append_datagram(ms(5), b"opus").unwrap(), 0);
-	assert_eq!(pair.producer.datagram_invocations(), 1);
+	let mut pair = datagram_pair("audio");
+	assert_eq!(pair.producer.append(ms(5), b"opus").unwrap(), 0);
+	assert_eq!(pair.producer.invocations(), 1);
 	match recv_datagram(&mut pair.consumer) {
 		Event::Datagram(d) => {
 			assert_eq!(d.sequence, 0);
@@ -449,25 +490,17 @@ fn sequences_allocate_monotonically() {
 	let mut pair = pair("video");
 	assert_eq!(pair.producer.append_group().unwrap().sequence(), 0);
 	assert_eq!(pair.producer.create_group(5).unwrap().sequence(), 5);
-	assert_eq!(pair.producer.append_datagram(ms(1), b"x").unwrap(), 6);
-	assert_eq!(pair.producer.append_group().unwrap().sequence(), 7);
-	assert_eq!(
-		pair.producer.create_group(7).map(|_| ()).unwrap_err().to_string(),
-		"reuse"
-	);
-	assert_eq!(
-		pair.producer.create_group(3).map(|_| ()).unwrap_err().to_string(),
-		"reuse"
-	);
-	assert_eq!(
-		pair.producer.insert_datagram(6, ms(1), b"x").unwrap_err().to_string(),
-		"reuse"
-	);
-	assert_eq!(
-		pair.producer.datagram_invocations(),
-		1,
-		"reuse is refused before encryption"
-	);
+	assert_eq!(pair.producer.append_group().unwrap().sequence(), 6);
+	for sequence in [6, 3] {
+		assert_eq!(
+			pair.producer
+				.create_group(sequence)
+				.map(|_| ())
+				.unwrap_err()
+				.to_string(),
+			"reuse"
+		);
+	}
 	assert_eq!(
 		pair.producer
 			.create_group(MAX_U53 + 1)
@@ -479,29 +512,107 @@ fn sequences_allocate_monotonically() {
 }
 
 #[test]
-fn oversize_datagram_keeps_the_sequence() {
-	let mut pair = pair("audio");
-	let big = vec![0u8; MAX_DATAGRAM_PLAINTEXT + 1];
+fn datagram_sequences_allocate_monotonically() {
+	let mut pair = datagram_pair("audio");
+	assert_eq!(pair.producer.append(ms(1), b"x").unwrap(), 0);
+	pair.producer.insert(5, ms(1), b"x").unwrap();
+	assert_eq!(pair.producer.append(ms(1), b"x").unwrap(), 6);
+	for sequence in [6, 3] {
+		assert_eq!(
+			pair.producer.insert(sequence, ms(1), b"x").unwrap_err().to_string(),
+			"reuse"
+		);
+	}
 	assert_eq!(
-		pair.producer.append_datagram(ms(1), &big).unwrap_err().to_string(),
-		"oversize"
+		pair.producer.insert(MAX_U53 + 1, ms(1), b"x").unwrap_err().to_string(),
+		"identity"
 	);
-	assert_eq!(pair.producer.datagram_invocations(), 0);
+	assert_eq!(pair.producer.invocations(), 3, "refused before encryption");
+}
+
+#[test]
+fn oversize_datagram_keeps_the_sequence() {
+	let mut pair = datagram_pair("audio");
+	let big = vec![0u8; MAX_DATAGRAM_PLAINTEXT + 1];
+	assert_eq!(pair.producer.append(ms(1), &big).unwrap_err().to_string(), "oversize");
+	assert_eq!(pair.producer.invocations(), 0);
 	let max = vec![0u8; MAX_DATAGRAM_PLAINTEXT];
-	assert_eq!(pair.producer.append_datagram(ms(1), &max).unwrap(), 0);
+	assert_eq!(pair.producer.append(ms(1), &max).unwrap(), 0);
 }
 
 #[test]
 fn refused_datagram_timestamp_keeps_the_sequence() {
-	let mut pair = pair("audio");
+	let mut pair = datagram_pair("audio");
 	// (2^61-1) seconds overflows conversion to the milli-scale track.
 	let huge = moq_net::Timestamp::from_secs((1 << 61) - 1).unwrap();
 	for timestamp in [None, Some(huge)] {
-		let err = pair.producer.append_datagram(timestamp, b"x").unwrap_err();
+		let err = pair.producer.append(timestamp, b"x").unwrap_err();
 		assert!(matches!(err, Error::Net(moq_net::Error::TimestampMismatch)), "{err:?}");
 	}
-	assert_eq!(pair.producer.datagram_invocations(), 0);
-	assert_eq!(pair.producer.append_datagram(ms(1), b"x").unwrap(), 0);
+	assert_eq!(pair.producer.invocations(), 0);
+	assert_eq!(pair.producer.append(ms(1), b"x").unwrap(), 0);
+}
+
+#[test]
+fn one_name_keys_its_stream_and_datagram_tracks_apart() {
+	let generation = test_generation();
+	let name = generation.name("audio").unwrap();
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let net = broadcast.create_track(name.as_str(), timed()).unwrap();
+	let net_datagrams = broadcast.create_datagrams(name.as_str(), timed_datagrams()).unwrap();
+	let mut track = generation.produce(net.clone(), "audio").unwrap();
+	let mut datagrams = generation.produce_datagrams(net_datagrams.clone(), "audio").unwrap();
+	assert_eq!(track.name(), datagrams.name());
+
+	let consuming = consume(&generation);
+	let mut track_reader = consuming.consume(net.subscribe(subscribe_all()), "audio").unwrap();
+	let mut datagram_reader = consuming.consume_datagrams(net_datagrams.consume(), "audio").unwrap();
+
+	// The same plaintext at the same identity in each kind: group 0 frame 0, and datagram 0.
+	let mut group = track.append_group().unwrap();
+	group.write_frame(ms(1), b"same").unwrap();
+	group.finish().unwrap();
+	assert_eq!(datagrams.append(ms(1), b"same").unwrap(), 0);
+	assert_eq!(read_frame(&mut recv_group(&mut track_reader)).plaintext, &b"same"[..]);
+	match recv_datagram(&mut datagram_reader) {
+		Event::Datagram(d) => {
+			assert_eq!(d.sequence, 0);
+			assert_eq!(&d.plaintext[..], b"same");
+		}
+		other => panic!("{other:?}"),
+	}
+
+	// Only the domain separates the two keys, and neither ciphertext opens as the other.
+	let frame = consuming
+		.key("audio", Domain::Group)
+		.unwrap()
+		.protect(0, 0, b"same", MAX_GROUPED_PAYLOAD)
+		.unwrap();
+	let sealed = datagram_ciphertext(&consuming, "audio", 0, b"same");
+	assert_ne!(frame, sealed);
+
+	let forged = net_track(&name);
+	let mut reader = consuming.consume(forged.subscribe(subscribe_all()), "audio").unwrap();
+	let mut group = forged.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	group.write_frame(ms(1), sealed).unwrap();
+	group.finish().unwrap();
+	assert_eq!(
+		recv_group(&mut reader)
+			.poll_read_frame(&kio::Waiter::noop())
+			.map(|r| r.unwrap_err().to_string()),
+		Poll::Ready("authentication".to_string())
+	);
+
+	let mut forged = timed_datagrams().produce(name.as_str());
+	let mut reader = consuming.consume_datagrams(forged.consume(), "audio").unwrap();
+	forged
+		.insert(moq_net::Datagram {
+			sequence: 0,
+			timestamp: Some(ms(1)),
+			payload: frame,
+		})
+		.unwrap();
+	assert_eq!(recv_datagram(&mut reader), Event::Authentication { sequence: 0 });
 }
 
 #[test]
@@ -512,26 +623,34 @@ fn reproduced_track_resumes_above_its_marks() {
 	let mut producer = generation.produce(net.clone(), "video").unwrap();
 	assert_eq!(producer.name(), name.as_str());
 	producer.create_group(4).unwrap();
-	assert_eq!(producer.append_datagram(ms(1), b"x").unwrap(), 5);
 	drop(producer);
 
 	// A clone of the generation reopening the name, on any output, resumes above its marks.
 	let mut again = generation.clone().produce(net_track(&name), "video").unwrap();
-	for sequence in [0, 5] {
+	for sequence in [0, 4] {
 		assert_eq!(
 			again.create_group(sequence).map(|_| ()).unwrap_err().to_string(),
 			"reuse"
 		);
-		assert_eq!(
-			again.insert_datagram(sequence, ms(1), b"x").unwrap_err().to_string(),
-			"reuse"
-		);
 	}
-	assert_eq!(again.append_group().unwrap().sequence(), 6);
+	assert_eq!(again.append_group().unwrap().sequence(), 5);
 	// Two live producers of the name share one sequence namespace.
 	let mut other = generation.produce(net_track(&name), "video").unwrap();
-	assert_eq!(other.append_datagram(ms(1), b"x").unwrap(), 7);
-	assert_eq!(again.append_group().unwrap().sequence(), 8);
+	assert_eq!(other.append_group().unwrap().sequence(), 6);
+	assert_eq!(again.append_group().unwrap().sequence(), 7);
+
+	// A datagram track of the name has sequences of its own, and resumes above them too.
+	let datagrams = || {
+		generation
+			.produce_datagrams(timed_datagrams().produce(name.as_str()), "video")
+			.unwrap()
+	};
+	let mut first = datagrams();
+	assert_eq!(first.append(ms(1), b"x").unwrap(), 0);
+	drop(first);
+	let mut second = datagrams();
+	assert_eq!(second.insert(0, ms(1), b"x").unwrap_err().to_string(), "reuse");
+	assert_eq!(second.append(ms(1), b"x").unwrap(), 1);
 
 	// A new epoch is a new publisher instance.
 	let fresh = generation.credential().produce();
@@ -543,7 +662,7 @@ fn reproduced_track_resumes_above_its_marks() {
 	consume(&generation)
 		.consume(net.subscribe(subscribe_all()), "video")
 		.unwrap();
-	assert_eq!(generation.claims(), 1);
+	assert_eq!(generation.claims(), 2);
 }
 
 #[test]
@@ -626,11 +745,9 @@ fn reserved_track_serves_on_demand() {
 
 	let mut audio = request.accept(timed());
 	let mut reader = resolve(&subscribing).unwrap();
-	audio.append_datagram(ms(1), b"opus").unwrap();
-	match recv_datagram(&mut reader) {
-		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"opus"),
-		other => panic!("{other:?}"),
-	}
+	let mut group = audio.append_group().unwrap();
+	group.write_frame(ms(1), b"opus").unwrap();
+	assert_eq!(read_frame(&mut recv_group(&mut reader)).plaintext, &b"opus"[..]);
 }
 
 #[test]
@@ -640,15 +757,19 @@ fn broadcast_claims_span_outputs() {
 	let mut video = first.create_track("video", timed()).unwrap();
 	video.create_group(2).unwrap();
 	let mut audio = first.reserve_track("audio").unwrap().accept(timed());
-	audio.append_datagram(ms(1), b"opus").unwrap();
+	audio.append_group().unwrap();
+	let mut voice = first.create_datagrams("voice", timed_datagrams()).unwrap();
+	voice.append(ms(1), b"opus").unwrap();
 
-	// A clone of the generation on another output resumes either name above its marks.
+	// A clone of the generation on another output resumes each name above its marks.
 	let second = crate::e2ee::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation);
 	let mut video = second.create_track("video", timed()).unwrap();
 	assert_eq!(video.append_group().unwrap().sequence(), 3);
 	let request = second.reserve_track("audio").unwrap();
 	assert_eq!(request.name(), "audio");
-	assert_eq!(request.accept(timed()).append_datagram(ms(1), b"opus").unwrap(), 1);
+	assert_eq!(request.accept(timed()).append_group().unwrap().sequence(), 1);
+	let mut voice = second.create_datagrams("voice", timed_datagrams()).unwrap();
+	assert_eq!(voice.append(ms(1), b"opus").unwrap(), 1);
 }
 
 #[test]
@@ -809,6 +930,42 @@ fn requests_serve_a_dropped_name_above_its_marks() {
 }
 
 #[test]
+fn datagram_requests_serve_issued_names() {
+	let protected = protected();
+	// Without a handler, a datagram track nobody created is missing.
+	assert!(matches!(
+		protected.consumer.datagrams("presence"),
+		Err(Error::Net(moq_net::Error::NotFound))
+	));
+	let requests = protected.producer.requests();
+	let mut datagrams = requests.datagrams();
+	let waiter = kio::Waiter::noop();
+	let generation = protected.producer.generation();
+
+	// A name the generation did not issue is answered as missing without reaching the handler.
+	let mut forged = protected.raw.datagrams("presence").unwrap();
+	assert!(datagrams.poll_requested(&waiter).is_pending());
+	assert!(matches!(
+		forged.poll_recv(&waiter),
+		Poll::Ready(Err(moq_net::Error::NotFound))
+	));
+
+	let mut reader = protected.consumer.datagrams("presence").unwrap();
+	let Poll::Ready(Ok(request)) = datagrams.poll_requested(&waiter) else {
+		panic!("expected a request");
+	};
+	assert_eq!(request.name(), "presence");
+	assert_eq!(generation.claims(), 0);
+	let mut presence = request.accept(timed_datagrams());
+	assert_eq!(generation.claims(), 1);
+	assert_eq!(presence.append(ms(1), b"here").unwrap(), 0);
+	match recv_datagram(&mut reader) {
+		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"here"),
+		other => panic!("{other:?}"),
+	}
+}
+
+#[test]
 fn lister_lists_physical_names() {
 	let protected = protected();
 	let requests = protected.producer.requests();
@@ -961,12 +1118,6 @@ fn grouped_authentication_ends_track() {
 			.map(|r| r.unwrap_err().to_string()),
 		Poll::Ready("authentication".to_string())
 	);
-	assert_eq!(
-		pair.consumer
-			.poll_recv_datagram(&waiter)
-			.map(|r| r.unwrap_err().to_string()),
-		Poll::Ready("authentication".to_string())
-	);
 }
 
 /// Wakes when a parked read is notified. One flag per parked task, so a sibling
@@ -1032,8 +1183,8 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	let mut forged = recv_group(&mut pair.consumer);
 	assert!(bad_demand.wanted());
 
-	// Sibling frame, next group, and datagram reads are already parked. Nothing
-	// further is published.
+	// Sibling frame and next group reads are already parked. Nothing further is
+	// published.
 	let mut frame = Parked::new();
 	assert!(matches!(
 		frame.poll(|waiter| good.poll_read_frame(waiter)),
@@ -1042,10 +1193,6 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	let mut track = Parked::new();
 	assert!(matches!(
 		track.poll(|waiter| pair.consumer.poll_recv_group(waiter)),
-		Poll::Pending
-	));
-	assert!(matches!(
-		track.poll(|waiter| pair.consumer.poll_recv_datagram(waiter)),
 		Poll::Pending
 	));
 
@@ -1057,7 +1204,7 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	);
 
 	assert!(frame.woken(), "parked frame read was not woken");
-	assert!(track.woken(), "parked group and datagram reads were not woken");
+	assert!(track.woken(), "parked group read was not woken");
 	assert!(!bad_demand.wanted(), "failed group demand stayed live");
 	assert!(!pair.net.is_closed(), "publisher must stay open");
 
@@ -1079,12 +1226,6 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	assert_eq!(
 		track
 			.poll(|waiter| pair.consumer.poll_recv_group(waiter))
-			.map(|r| r.unwrap_err().to_string()),
-		Poll::Ready("authentication".to_string())
-	);
-	assert_eq!(
-		track
-			.poll(|waiter| pair.consumer.poll_recv_datagram(waiter))
 			.map(|r| r.unwrap_err().to_string()),
 		Poll::Ready("authentication".to_string())
 	);
@@ -1116,50 +1257,14 @@ fn a_held_group_keeps_demand_after_the_track_drops() {
 }
 
 #[test]
-fn bad_datagram_stays_an_event_and_keeps_demand() {
-	let mut pair = pair("audio");
-	let demand = pair.net.demand();
-	let mut open = pair.producer.append_group().unwrap();
-	open.write_frame(ms(1), b"ok").unwrap();
-
-	let semantic = pair.semantic.as_str();
-	let mut forged = datagram_ciphertext(&pair.generation, semantic, 0, b"nope").to_vec();
-	forged[0] ^= 1;
-	pair.net.insert_datagram(0, ms(2), forged).unwrap();
-
-	let mut good = recv_group(&mut pair.consumer);
-	assert_eq!(read_frame(&mut good).plaintext, &b"ok"[..]);
-	let mut frame = Parked::new();
-	assert!(matches!(
-		frame.poll(|waiter| good.poll_read_frame(waiter)),
-		Poll::Pending
-	));
-
-	assert_eq!(recv_datagram(&mut pair.consumer), Event::Authentication { sequence: 0 });
-	assert!(!frame.woken(), "a bad datagram must not wake grouped reads");
-	assert!(matches!(
-		frame.poll(|waiter| good.poll_read_frame(waiter)),
-		Poll::Pending
-	));
-	assert!(demand.wanted().is_some());
-
-	pair.producer.insert_datagram(1, ms(3), b"next").unwrap();
-	match recv_datagram(&mut pair.consumer) {
-		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"next"),
-		other => panic!("{other:?}"),
-	}
-	assert!(demand.wanted().is_some());
-}
-
-#[test]
 fn bad_datagram_is_event() {
-	let mut pair = pair("audio");
-	let semantic = pair.semantic.as_str();
-	pair.producer.append_datagram(ms(1), b"one").unwrap();
-	let mut forged = datagram_ciphertext(&pair.generation, semantic, 1, b"two").to_vec();
+	let mut pair = datagram_pair("audio");
+	let semantic = pair.semantic.clone();
+	pair.producer.append(ms(1), b"one").unwrap();
+	let mut forged = datagram_ciphertext(&pair.generation, &semantic, 1, b"two").to_vec();
 	forged[0] ^= 1;
-	pair.net.insert_datagram(1, ms(2), forged).unwrap();
-	pair.producer.insert_datagram(2, ms(3), b"three").unwrap();
+	pair.inject(1, ms(2), forged);
+	pair.producer.insert(2, ms(3), b"three").unwrap();
 
 	assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
 	assert_eq!(recv_datagram(&mut pair.consumer), Event::Authentication { sequence: 1 });
@@ -1171,16 +1276,14 @@ fn bad_datagram_is_event() {
 
 #[test]
 fn unsealable_datagram_is_dropped_with_its_code() {
-	let mut pair = pair("audio");
-	let semantic = pair.semantic.as_str();
-	let sealed = datagram_ciphertext(&pair.generation, semantic, 0, b"x");
-	pair.net
-		.insert_datagram(1, ms(1), vec![0u8; MAX_DATAGRAM_PAYLOAD + 1])
-		.unwrap();
-	pair.net.insert_datagram(2, ms(2), sealed.slice(..3)).unwrap();
-	pair.net.insert_datagram(MAX_U53 + 1, ms(3), sealed.clone()).unwrap();
-	pair.net.insert_datagram(MAX_U53 + 2, ms(3), sealed.slice(..3)).unwrap();
-	pair.producer.insert_datagram(MAX_U53, ms(4), b"last").unwrap();
+	let mut pair = datagram_pair("audio");
+	let semantic = pair.semantic.clone();
+	let sealed = datagram_ciphertext(&pair.generation, &semantic, 0, b"x");
+	pair.inject(1, ms(1), vec![0u8; MAX_DATAGRAM_PAYLOAD + 1]);
+	pair.inject(2, ms(2), sealed.slice(..3));
+	pair.inject(MAX_U53 + 1, ms(3), sealed.clone());
+	pair.inject(MAX_U53 + 2, ms(3), sealed.slice(..3));
+	pair.producer.insert(MAX_U53, ms(4), b"last").unwrap();
 
 	assert_eq!(recv_datagram(&mut pair.consumer), Event::Oversize { sequence: 1 });
 	assert_eq!(recv_datagram(&mut pair.consumer), Event::Oversize { sequence: 2 });
@@ -1201,35 +1304,32 @@ fn unsealable_datagram_is_dropped_with_its_code() {
 
 #[test]
 fn resubscribing_shares_a_keys_budget() {
-	let mut pair = pair("audio");
+	let mut pair = datagram_pair("audio");
 	let semantic = pair.semantic.as_str();
-	pair.producer.append_datagram(ms(1), b"one").unwrap();
+	pair.producer.append(ms(1), b"one").unwrap();
 	assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
 	drop(pair.consumer);
-	let keys = pair.generation.keys(semantic).unwrap();
-	assert_eq!(keys.datagram.lock().unwrap().invocations(), 1);
-	keys.datagram.lock().unwrap().set_usage(MAX_INVOCATIONS, 0);
+	let claim = pair.generation.keys(semantic, Domain::Datagram).unwrap();
+	assert_eq!(claim.key.lock().unwrap().invocations(), 1);
+	claim.key.lock().unwrap().set_usage(MAX_INVOCATIONS, 0);
 
-	let mut again = pair
-		.generation
-		.consume(pair.net.subscribe(subscribe_all()), semantic)
-		.unwrap();
-	pair.producer.append_datagram(ms(2), b"two").unwrap();
+	let mut again = pair.generation.consume_datagrams(pair.net.consume(), semantic).unwrap();
+	pair.producer.append(ms(2), b"two").unwrap();
 	assert!(matches!(
-		again.poll_recv_datagram(&kio::Waiter::noop()),
+		again.poll_recv(&kio::Waiter::noop()),
 		Poll::Ready(Err(Error::Exhausted))
 	));
 }
 
 #[test]
 fn forged_datagram_does_not_burn_identity() {
-	let mut pair = pair("audio");
-	let semantic = pair.semantic.as_str();
-	pair.producer.append_datagram(ms(1), b"one").unwrap();
-	let mut forged = datagram_ciphertext(&pair.generation, semantic, 1, b"two").to_vec();
+	let mut pair = datagram_pair("audio");
+	let semantic = pair.semantic.clone();
+	pair.producer.append(ms(1), b"one").unwrap();
+	let mut forged = datagram_ciphertext(&pair.generation, &semantic, 1, b"two").to_vec();
 	forged[0] ^= 1;
-	pair.net.insert_datagram(1, ms(2), forged).unwrap();
-	pair.producer.insert_datagram(1, ms(2), b"two").unwrap();
+	pair.inject(1, ms(2), forged);
+	pair.producer.insert(1, ms(2), b"two").unwrap();
 
 	assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
 	assert_eq!(recv_datagram(&mut pair.consumer), Event::Authentication { sequence: 1 });
@@ -1244,26 +1344,21 @@ fn forged_datagram_does_not_burn_identity() {
 
 #[test]
 fn duplicate_datagram_is_bounded() {
-	let mut pair = pair("audio");
-	let semantic = pair.semantic.as_str();
-	let replay = datagram_ciphertext(&pair.generation, semantic, 0, b"once");
-	pair.net.insert_datagram(0, ms(1), replay.clone()).unwrap();
-	pair.net.insert_datagram(0, ms(1), replay.clone()).unwrap();
+	let mut pair = datagram_pair("audio");
+	let semantic = pair.semantic.clone();
+	let replay = datagram_ciphertext(&pair.generation, &semantic, 0, b"once");
+	pair.inject(0, ms(1), replay.clone());
+	pair.inject(0, ms(1), replay.clone());
 	assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
 	assert_eq!(recv_datagram(&mut pair.consumer), Event::Duplicate { sequence: 0 });
 
 	// Once the window slides past it, the same ciphertext opens again.
 	for sequence in 1..=DATAGRAM_WINDOW {
-		pair.net
-			.insert_datagram(
-				sequence,
-				ms(sequence),
-				datagram_ciphertext(&pair.generation, semantic, sequence, b"x"),
-			)
-			.unwrap();
+		let sealed = datagram_ciphertext(&pair.generation, &semantic, sequence, b"x");
+		pair.inject(sequence, ms(sequence), sealed);
 		assert!(matches!(recv_datagram(&mut pair.consumer), Event::Datagram(_)));
 	}
-	pair.net.insert_datagram(0, ms(1), replay).unwrap();
+	pair.inject(0, ms(1), replay);
 	match recv_datagram(&mut pair.consumer) {
 		Event::Datagram(d) => assert_eq!(d.sequence, 0),
 		other => panic!("{other:?}"),

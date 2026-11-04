@@ -249,14 +249,11 @@ mod tests {
 		}
 	}
 
-	/// A catalog config recording two-second HLS segments, so its renditions are listed.
+	/// A catalog config declaring a two-second join interval up front, so its renditions are listed.
 	fn hls_config() -> moq_mux::catalog::Config {
-		let duration = Duration::from_secs(2);
-		moq_mux::catalog::Config::default().with_hls(
-			moq_mux::hls::Config::default()
-				.with_duration(duration)
-				.with_duration_hint(duration),
-		)
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+		moq_mux::catalog::Config::default().with_catalog(catalog)
 	}
 
 	fn video_config() -> hang::catalog::VideoConfig {
@@ -447,9 +444,9 @@ mod tests {
 			.unwrap()
 			.router();
 		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
-		let old_segment = format!("/live/@{RUN}/video/video0/seg/53e0aafd.0.m4s");
+		let old_segment = format!("/live/@{RUN}/video/video0/seg/8343e7cd.0.m4s");
 		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
-		wait_listed(&app, &old_playlist, "seg/53e0aafd.0.m4s").await;
+		wait_listed(&app, &old_playlist, "seg/8343e7cd.0.m4s").await;
 
 		let next = moq_net::Instance::random();
 		let new = origin.create_broadcast("live").expect("publish");
@@ -465,7 +462,7 @@ mod tests {
 			&format!("@{}/video/video0/media.m3u8", next.as_str()),
 		)
 		.await;
-		wait_listed(&app, &new_playlist, "seg/53e0aafd.0.m4s").await;
+		wait_listed(&app, &new_playlist, "seg/8343e7cd.0.m4s").await;
 		assert_eq!(status(&app, &old_playlist).await, StatusCode::OK);
 		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
 
@@ -495,7 +492,7 @@ mod tests {
 		let server = Server::new(origin.consume(), crate::export::Config::default()).unwrap();
 		let app = server.router();
 		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
-		wait_listed(&app, &old_playlist, "seg/53e0aafd.1.m4s").await;
+		wait_listed(&app, &old_playlist, "seg/8343e7cd.1.m4s").await;
 		let replaced = server.broadcaster("live").await.expect("announced");
 		let mut old_renditions = replaced.renditions();
 		let old_rendition = replaced.rendition(Kind::Video, "video0").expect("listed");
@@ -553,7 +550,7 @@ mod tests {
 		assert_eq!(recorded, [0, 1], "exactly what was listed before the takeover");
 		let playlist = old_rendition.media_playlist(None).unwrap().expect("listed");
 		assert!(playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
-		assert!(!playlist.contains("seg/53e0aafd.2.m4s"), "{playlist}");
+		assert!(!playlist.contains("seg/8343e7cd.2.m4s"), "{playlist}");
 
 		let mut added = 0;
 		while let Some(event) = kio::clock::timeout(TIMEOUT, old_renditions.next())
@@ -567,29 +564,17 @@ mod tests {
 		assert!(!replaced.is_closed(), "its publisher is still sending");
 	}
 
-	/// Failed records answer every listing with an uncacheable error rather than ending it as a
-	/// complete recording.
+	/// A failed media track answers every listing with an uncacheable error rather than ending it
+	/// as a complete recording.
 	#[tokio::test(start_paused = true)]
-	async fn failed_records_answer_an_uncacheable_error() {
+	async fn a_failed_media_track_answers_an_uncacheable_error() {
 		let origin = moq_tokio::origin::spawn();
 		let broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(run()).expect("announce");
-		let mut catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
-		let name = hang::hls::default_name("video0");
-		catalog
-			.mutate(|catalog| {
-				let mut config = video_config();
-				config.hls = Some(hang::catalog::Hls::new(name.clone(), Duration::from_secs(2)));
-				catalog.video.renditions.insert("video0".into(), config);
-			})
-			.unwrap();
-		let track = broadcast.create_track(name, moq_mux::hls::Producer::info()).unwrap();
-		let mut records = moq_mux::hls::Producer::new(track.clone(), moq_mux::Clock::new());
-		for sequence in 0..4 {
-			let record = hang::hls::Record::new(sequence, sequence, sequence * 2_000);
-			records.push(&record).unwrap();
-		}
+		let (_catalog, _registration, track, mut media) =
+			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
+		write_three_gops(&mut media);
+		media.write(vp8_frame(6_000_000, true)).unwrap();
 
 		let app = Server::new(origin.consume(), crate::export::Config::default())
 			.unwrap()
@@ -597,7 +582,7 @@ mod tests {
 		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), ".2.m4s").await;
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
-		drop(records);
+		// The track fails while its rendition stays in the catalog.
 		track
 			.abort(moq_net::Error::Transport("connection lost".into()))
 			.unwrap();
@@ -614,6 +599,7 @@ mod tests {
 			assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{uri}");
 			assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store", "{uri}");
 		}
+		drop(media);
 	}
 
 	/// Only the URLs the renderers emit are served: the init under its hash, segments under the
@@ -632,7 +618,7 @@ mod tests {
 		wait_listed(
 			&app,
 			&format!("/live/@{RUN}/video/video0/media.m3u8"),
-			"seg/53e0aafd.0.m4s",
+			"seg/8343e7cd.0.m4s",
 		)
 		.await;
 		let broadcaster = server.broadcaster("live").await.expect("broadcaster");
@@ -641,7 +627,7 @@ mod tests {
 		let response = oneshot(app.clone(), &format!("/live/@{RUN}/video/video0/media.m3u8")).await;
 		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
 		let playlist = String::from_utf8(body.to_vec()).unwrap();
-		assert!(playlist.contains("\nseg/run-1.53e0aafd.0.m4s\n"), "{playlist}");
+		assert!(playlist.contains("\nseg/run-1.8343e7cd.0.m4s\n"), "{playlist}");
 		let map = playlist.lines().find(|line| line.starts_with("#EXT-X-MAP:")).unwrap();
 		let init = map
 			.strip_prefix("#EXT-X-MAP:URI=\"")
@@ -663,26 +649,26 @@ mod tests {
 		);
 
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.53e0aafd.0.m4s")).await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.53e0aafd.t0.m4s")).await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.t0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/53e0aafd.0.m4s")).await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/8343e7cd.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-0.53e0aafd.0.m4s")).await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-0.8343e7cd.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		// A new run: the previous generation's URLs are refused even for numbers it reuses.
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.53e0aafd.0.m4s")).await,
+			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 	}

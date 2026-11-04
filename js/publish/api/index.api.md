@@ -123,6 +123,7 @@ export class Broadcast {
 	readonly catalog: CatalogProducer;
 	close(): void;
 	readonly in: Signals.Readonlys<BroadcastInput>;
+	readonly join: Signals.Signal<Clock.Milli | undefined>;
 	readonly net: Signals.Getter<Net.Broadcast.Producer | undefined>;
 	text(name: string): Rendition<Hang.Catalog.TextConfig>;
 	video(name: string): Rendition<Hang.Catalog.Video.VideoConfig>;
@@ -137,7 +138,6 @@ export type BroadcastInput = {
 	echo: Signals.Getter<Net.Path.Relative | undefined>;
 	enabled: Signals.Getter<boolean>;
 	flip: Signals.Getter<boolean>;
-	hls: Signals.Getter<boolean>;
 	maxAge: Signals.Getter<Clock.Milli | null | undefined>;
 	name: Signals.Getter<Net.Path.Valid>;
 	onDemand: Signals.Getter<boolean | undefined>;
@@ -219,8 +219,7 @@ export namespace Preview {
 export class Rendition<Config> {
 	close(): void;
 	readonly config: Signals.Signal<Config | undefined>;
-	hls(track: Net.Track.Producer): Hang.Hls.Recorder | undefined;
-	readonly hlsHint: Signals.Signal<Clock.Micro | undefined>;
+	readonly joinInterval: Signals.Signal<Clock.Milli | undefined>;
 	readonly kind: Kind;
 	readonly name: string;
 	readonly stats: Signals.Signal<RenditionStats | undefined>;

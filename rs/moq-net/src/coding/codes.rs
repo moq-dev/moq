@@ -51,17 +51,11 @@ impl StreamCodes for lite::Version {
 	}
 
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
-		match err {
-			StreamError::NotFetchable if !self.has_not_fetchable() => StreamError::NotFound.to_code(),
-			err => err.to_code(),
-		}
+		err.to_code()
 	}
 
 	fn decode_stream_code(&self, code: u32) -> StreamError {
-		match StreamError::from_code(code) {
-			StreamError::NotFetchable if !self.has_not_fetchable() => StreamError::Unknown(code),
-			err => err,
-		}
+		StreamError::from_code(code)
 	}
 }
 
@@ -122,32 +116,6 @@ mod tests {
 
 		assert_eq!(lite.decode_stream_code(0x4), StreamError::GoingAway);
 		assert_eq!(ietf.decode_stream_code(0x4), StreamError::GoingAway);
-	}
-
-	/// NOT_FETCHABLE is lite-07's: an earlier peer is told NOT_FOUND, the miss it would
-	/// have been told before, and is not credited with a code its version never assigned.
-	#[test]
-	fn not_fetchable_is_lite_07s() {
-		for version in [lite::Version::Lite05, lite::Version::Lite06] {
-			assert_eq!(
-				version.encode_stream_code(&StreamError::NotFetchable),
-				StreamError::NotFound.to_code(),
-				"{version}"
-			);
-			assert_eq!(
-				version.decode_stream_code(0x3a),
-				StreamError::Unknown(0x3a),
-				"{version}"
-			);
-		}
-
-		let version = lite::Version::Lite07;
-		assert_eq!(version.encode_stream_code(&StreamError::NotFetchable), 0x3a);
-		assert_eq!(version.decode_stream_code(0x3a), StreamError::NotFetchable);
-		assert_eq!(
-			version.decode_stream_code(StreamError::NotFound.to_code()),
-			StreamError::NotFound
-		);
 	}
 
 	/// A dropped [`Writer`](super::Writer) resets with a cancellation, and `Drop` cannot

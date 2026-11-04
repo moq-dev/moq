@@ -1020,7 +1020,6 @@ impl GroupState {
 			bytes: self.cache + self.unwritten(),
 			frames: self.next_index.saturating_sub(self.held()) as u64,
 			groups: 1,
-			datagrams: 0,
 		}
 	}
 
@@ -1048,7 +1047,6 @@ impl GroupState {
 			bytes,
 			frames: (end - start) as u64,
 			groups: 0,
-			datagrams: 0,
 		}
 	}
 
@@ -2582,14 +2580,12 @@ impl Handle {
 			&& !matches!(
 				err,
 				Error::Cancel
-					| Error::Lagged | Error::NotFetchable
-					| Error::Stream(
-						StreamError::Cancel
-							| StreamError::Old | StreamError::Evicted
-							| StreamError::DeliveryTimeout
-							| StreamError::TooFarBehind
-							| StreamError::NotFetchable
-					)
+					| Error::Lagged | Error::Stream(
+					StreamError::Cancel
+						| StreamError::Old | StreamError::Evicted
+						| StreamError::DeliveryTimeout
+						| StreamError::TooFarBehind
+				)
 			);
 		if cut {
 			let _ = self.alive.cut.set(err.clone());

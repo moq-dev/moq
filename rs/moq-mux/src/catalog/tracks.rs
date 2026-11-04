@@ -432,7 +432,7 @@ fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name:
 /// timestamps by. Clones share that timebase.
 pub struct Reserved<E: CatalogExt = ()> {
 	timebase: super::Timebase<E>,
-	hls_hint: Option<std::time::Duration>,
+	interval: Option<std::time::Duration>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
@@ -440,14 +440,15 @@ impl<E: CatalogExt> Reserved<E> {
 		timebase.catalog.add_reserver();
 		Self {
 			timebase,
-			hls_hint: None,
+			interval: None,
 		}
 	}
 
-	/// Declare the track's regular group duration, which fixes its HLS segment duration up front
-	/// unless [`Config::with_hls`](super::Config::with_hls) disabled HLS records.
-	pub fn with_hls_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
-		self.hls_hint = duration.into();
+	/// Declare the track's longest group (its GOP), which the catalog's `media.join.interval`
+	/// promises. Without one, a video or audio track measures it over its first second or group,
+	/// whichever is longer, before the interval is declared.
+	pub fn with_interval(mut self, interval: impl Into<Option<std::time::Duration>>) -> Self {
+		self.interval = interval.into();
 		self
 	}
 
@@ -524,7 +525,7 @@ impl<E: CatalogExt> Reserved<E> {
 		let rendition = self.init(track.name())?;
 		self.timebase
 			.catalog
-			.media(track, container, rendition, config.into(), self.hls_hint)
+			.media(track, container, rendition, config.into(), self.interval)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -551,7 +552,7 @@ impl<E: CatalogExt> Reserved<E> {
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone()).with_hls_hint(self.hls_hint)
+		Self::new(self.timebase.clone()).with_interval(self.interval)
 	}
 }
 
@@ -602,21 +603,16 @@ pub(crate) type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 /// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// The successor of this rendition's track, under a newly minted name, for a decoder identity
-	/// change. `hls_hint` carries the segment duration the old track declared.
+	/// change. `interval` carries the longest group the old track declared or measured.
 	pub(crate) fn fresh(
 		&self,
 		container: super::hang::Container,
 		info: moq_net::track::Info,
-		hls_hint: Option<std::time::Duration>,
+		interval: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
 		let track = self.catalog.fresh_track(&self.name, info)?;
 		let rendition = self.catalog.rendition(track.name())?;
-		self.catalog.media(track, container, rendition, None, hls_hint)
-	}
-
-	/// Finish and forget the HLS records of `track`, a predecessor this rendition replaced.
-	pub(crate) fn retire(&self, track: &str) -> crate::Result<()> {
-		self.catalog.retire(track)
+		self.catalog.media(track, container, rendition, None, interval)
 	}
 
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
@@ -733,7 +729,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
 	pub(crate) fn estimate(&mut self, reading: impl Into<super::Reading>) -> crate::Result<()> {
-		let super::Reading { estimate, period } = reading.into();
+		let super::Reading { estimate, period, .. } = reading.into();
 		if !C::detects() {
 			return Ok(());
 		}
@@ -1442,41 +1438,6 @@ mod tests {
 			catalog.reserve().init::<hang::catalog::VideoConfig>("v").is_err(),
 			"the catalog already carries it"
 		);
-	}
-
-	/// Each rendition gets its own HLS records, advertised in its own entry, and only when enabled.
-	#[test]
-	fn renditions_get_their_own_hls_records() {
-		for enabled in [false, true] {
-			let mut broadcast = moq_net::broadcast::Info::new().produce();
-			let catalog_config = super::super::Config::default().with_hls(enabled.then(crate::hls::Config::default));
-			let mut catalog = super::super::Producer::new(&mut broadcast, catalog_config).unwrap();
-
-			let hint = Some(std::time::Duration::from_secs(4));
-			let video0 = catalog.enroll("video0", hint).unwrap();
-			let video1 = catalog.enroll("video1", hint).unwrap();
-			assert_eq!(video0.is_some(), enabled);
-			assert_eq!(video1.is_some(), enabled);
-			{
-				let mut guard = catalog.modify().unwrap();
-				guard.video.insert("video0", config(None, None)).unwrap();
-				guard.video.insert("video1", config(None, None)).unwrap();
-			}
-
-			let snapshot = catalog.snapshot();
-			let hls = |name: &str| snapshot.video.renditions[name].hls.clone();
-			match enabled {
-				true => {
-					let four = std::time::Duration::from_secs(4);
-					assert_eq!(hls("video0"), Some(hang::catalog::Hls::new("video0.hls", four)));
-					assert_eq!(hls("video1"), Some(hang::catalog::Hls::new("video1.hls", four)));
-				}
-				false => {
-					assert_eq!(hls("video0"), None);
-					assert_eq!(hls("video1"), None);
-				}
-			}
-		}
 	}
 
 	mod custom {

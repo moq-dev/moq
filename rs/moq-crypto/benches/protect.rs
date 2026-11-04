@@ -20,14 +20,8 @@ fn credential() -> Credential {
 }
 
 /// Each producer is its own publisher instance, so it gets its own epoch.
-fn produce(credential: &Credential, semantic: &str) -> moq_crypto::e2ee::track::Producer {
-	// Advancing timestamps plus a zero max age leave only the newest group fresh.
-	let info = moq_net::track::Info::default()
-		.with_timescale(moq_net::Timescale::MILLI)
-		.with_max_age(Duration::ZERO);
+fn broadcast(credential: &Credential) -> moq_crypto::e2ee::broadcast::Producer {
 	moq_crypto::e2ee::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), credential.produce())
-		.create_track(semantic, info)
-		.unwrap()
 }
 
 fn bench_protect(c: &mut Criterion) {
@@ -38,7 +32,11 @@ fn bench_protect(c: &mut Criterion) {
 	let mut group = c.benchmark_group("protect");
 	group.throughput(Throughput::Bytes(grouped.len() as u64));
 	group.bench_function("grouped_1k", |b| {
-		let mut producer = produce(&credential, "video");
+		// Advancing timestamps plus a zero max age leave only the newest group fresh.
+		let info = moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(Duration::ZERO);
+		let mut producer = broadcast(&credential).create_track("video", info).unwrap();
 		let mut ms = 0u64;
 		b.iter(|| {
 			ms += 1;
@@ -51,12 +49,13 @@ fn bench_protect(c: &mut Criterion) {
 	});
 	group.throughput(Throughput::Bytes(opus.len() as u64));
 	group.bench_function("datagram_opus160", |b| {
-		let mut producer = produce(&credential, "audio");
+		let info = moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let mut producer = broadcast(&credential).create_datagrams("audio", info).unwrap();
 		let mut ms = 0u64;
 		b.iter(|| {
 			ms += 1;
 			producer
-				.append_datagram(Timestamp::from_millis(ms).unwrap(), black_box(&opus))
+				.append(Timestamp::from_millis(ms).unwrap(), black_box(&opus))
 				.unwrap()
 		});
 	});

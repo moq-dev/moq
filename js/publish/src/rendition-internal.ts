@@ -1,5 +1,4 @@
-import type { Micro } from "@moq/clock";
-import type * as Hls from "@moq/hang/hls";
+import type { Milli } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
 import type { Slot } from "./publication";
@@ -30,7 +29,6 @@ export let makeRendition: <Config>(
 	kind: Kind,
 	track: Getter<Moq.Track.Producer | undefined>,
 	slot: Getter<Slot<Config> | undefined>,
-	hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined,
 	close: () => void,
 ) => Rendition<Config>;
 
@@ -58,12 +56,16 @@ export class Rendition<Config> {
 	readonly config = new Signal<Config | undefined>(undefined);
 
 	/**
-	 * The rendition's longest group duration, when known (a video encoder's keyframe interval). Read
-	 * when each of its tracks is created, it fixes that track's HLS segment duration up front, so the
-	 * catalog advertises the records before any media is encoded, as an on-demand broadcast needs.
-	 * Without one, the first segment declares the duration.
+	 * The longest a video or audio rendition's tracks run between group starts outside a pause, when
+	 * known: a video encoder's keyframe interval, or an audio encoder's group duration. Undefined, or
+	 * not a positive duration, contributes nothing.
+	 *
+	 * When the broadcast first lists a video or audio rendition in a network broadcast, it declares
+	 * the longest of these as the catalog's `media.join.interval`, rounded up to whole milliseconds,
+	 * so an HLS or DASH export can cut its segments before any media is encoded. That declaration
+	 * is fixed for the network broadcast, so a later change here does not move it.
 	 */
-	readonly hlsHint = new Signal<Micro | undefined>(undefined);
+	readonly joinInterval = new Signal<Milli | undefined>(undefined);
 
 	/**
 	 * What the producer has sent under this rendition, written by the producer and reported under
@@ -73,8 +75,7 @@ export class Rendition<Config> {
 
 	/**
 	 * The open track producer, or `undefined` while the network broadcast is down, after the track
-	 * closes, and, for non-audio tracks with the broadcast's `onDemand`, while no subscriber is attached
-	 * to it or its HLS records.
+	 * closes, and, for non-audio tracks with the broadcast's `onDemand`, while no subscriber is attached.
 	 * Producers should
 	 * encode only while this is set, and only media matching the current {@link config}: a new
 	 * identity swaps in a new track.
@@ -87,7 +88,6 @@ export class Rendition<Config> {
 	 */
 	readonly slot: Getter<Slot<Config> | undefined>;
 
-	readonly #hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined;
 	readonly #close: () => void;
 	#closed = false;
 
@@ -96,28 +96,17 @@ export class Rendition<Config> {
 		kind: Kind,
 		track: Getter<Moq.Track.Producer | undefined>,
 		slot: Getter<Slot<Config> | undefined>,
-		hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined,
 		close: () => void,
 	) {
 		this.name = name;
 		this.kind = kind;
 		this.track = track;
 		this.slot = slot;
-		this.#hls = hls;
 		this.#close = close;
 	}
 
 	static {
-		makeRendition = (name, kind, track, slot, hls, close) => new Rendition(name, kind, track, slot, hls, close);
-	}
-
-	/**
-	 * The HLS recorder of `track`, one of this rendition's {@link Rendition.track | tracks}, or `undefined` when it
-	 * publishes no records. Pass it to the container producer writing the track, so each group it
-	 * writes is reported into the records the catalog advertises in the rendition's `hls` field.
-	 */
-	hls(track: Moq.Track.Producer): Hls.Recorder | undefined {
-		return this.#hls(track);
+		makeRendition = (name, kind, track, slot, close) => new Rendition(name, kind, track, slot, close);
 	}
 
 	/**
