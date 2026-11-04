@@ -5,7 +5,7 @@
 A JavaScript publisher answers IETF FETCH from a native subscriber for groups
 that are no longer in its live cache, or never were, by dispatching onto the
 on-demand request surface `@moq/net` gains in
-[JS ranges](/quest/m1/subscribe-ranges/js.md).
+JS ranges ([moq-dev/moq#7696](https://github.com/moq-dev/moq/pull/7696)).
 
 ## Plan
 
@@ -23,7 +23,3 @@ supported-draft matrix and `just test interop --all` through CI.
 
 Public API: none beyond JS ranges' surface. Wire: none beyond the cached
 half's FETCH support.
-
-## Required
-
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the on-demand request surface this dispatches onto

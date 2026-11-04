@@ -89,10 +89,9 @@ pub struct Relay {
 	/// config named a source; `run` refuses to start while this is still held.
 	admissions: Option<Admissions>,
 	cluster: cluster::Cluster,
-	/// The cluster's origin and cache work, polled for as long as [`Self::run`]
+	/// The cluster's origin, cache, and stats work, polled for as long as [`Self::run`]
 	/// runs. `None` only once `run` took it.
 	driver: Option<cluster::Driver>,
-	stats: moq_stats::Producer,
 	internal: internal::Internal,
 	web: web::Web,
 	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
@@ -137,7 +136,7 @@ impl Relay {
 	/// reading key material), so a returned `Relay` reports its ephemeral ports and
 	/// a taken port fails here. Nothing runs yet: the cluster's
 	/// [`Driver`](crate::cluster::Driver), which holds the origin's lifecycle work and
-	/// the cache governor, is only stored, and no session is admitted until
+	/// the cache governor and stats publisher, is only stored, and no session is admitted until
 	/// [`Self::run`] drives both.
 	pub async fn load(config: Config) -> anyhow::Result<Self> {
 		// Keep the large debug state machine off the embedder's main-thread stack.
@@ -336,17 +335,15 @@ impl Relay {
 		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
-		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
+		let mut cluster_options = cluster::Options::new(config.cluster)
+			.with_cache(cache)
+			.with_stats(config.stats);
 		cluster_options.session = config.limits.client;
 		cluster_options.peer = config.limits.peer;
 		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
 		let cluster = cluster
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
-		let (stats, publisher) = config.stats.build(cluster.origin.clone())?;
-		// The cluster takes over keeping the publish task alive, so an embedder that
-		// drops the producer keeps publishing for as long as it serves.
-		let cluster = cluster.with_stats(stats.clone(), publisher);
 
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(Startup::Starting);
@@ -411,7 +408,6 @@ impl Relay {
 			admissions,
 			cluster,
 			driver: Some(driver),
-			stats,
 			internal,
 			web,
 			#[cfg(feature = "acme")]
@@ -506,11 +502,11 @@ impl Relay {
 		&self.cluster
 	}
 
-	/// The stats producer, for publishing extra counters through the same
-	/// registry. [`Self::cluster`] holds a clone, so the publish task lives as
-	/// long as the cluster whether or not this handle is kept.
+	/// The stats producer, for publishing extra counters through the same registry.
+	/// The cluster holds it, so publishing lasts as long as the cluster and its
+	/// driver do, whether or not this handle is cloned.
 	pub fn stats(&self) -> &moq_stats::Producer {
-		&self.stats
+		&self.cluster.stats_producer
 	}
 
 	/// Graceful-shutdown signal shared by every accepted session and web handler.

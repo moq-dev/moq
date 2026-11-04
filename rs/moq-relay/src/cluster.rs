@@ -981,11 +981,13 @@ struct LanAuth {
 	credential: String,
 }
 
-/// Construction settings for a [`Cluster`]: identity, discovery, and the origin cache.
+/// Construction settings for a [`Cluster`]: identity, discovery, the origin cache,
+/// and stats publishing.
 ///
 /// The origin is built once from these, so cache settings cannot detach a handle
-/// taken after construction. Independent services ([`Cluster::with_connect`],
-/// [`Cluster::with_stats`]) attach afterwards without rebuilding it.
+/// taken after construction, and the stats publisher joins the [`Driver`] from the
+/// start. Independent services ([`Cluster::with_connect`]) attach afterwards
+/// without rebuilding it.
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Options {
@@ -1001,6 +1003,9 @@ pub struct Options {
 	/// `None` uses an unbounded pool with the standard LRU window and no
 	/// media-timestamp ceiling.
 	pub cache: Option<crate::cache::Cache>,
+
+	/// Stats publishing on the cluster's origin. Disabled by default.
+	pub stats: crate::stats::Config,
 }
 
 impl Options {
@@ -1017,10 +1022,16 @@ impl Options {
 		self.cache = Some(cache);
 		self
 	}
+
+	/// Publish stats on the cluster's origin with this config.
+	pub fn with_stats(mut self, stats: crate::stats::Config) -> Self {
+		self.stats = stats;
+		self
+	}
 }
 
-/// The work a [`Cluster`] needs to serve at all: its origin's lifecycle driver and,
-/// when the cache has one, the headroom governor. Returned by [`Cluster::new`].
+/// The work a [`Cluster`] needs to serve: its origin's lifecycle driver, cache
+/// governor, and stats publisher. Returned by [`Cluster::new`].
 ///
 /// Nothing runs on its own: poll it, or await [`run`](Self::run), for as long as the
 /// cluster serves. Dropping it tears the origin down, failing every later mutation.
@@ -1085,9 +1096,9 @@ impl Started {
 	}
 
 	/// Run the cluster's dials and peer sources on this task until they stop, or
-	/// until one of them or a task the relay cannot serve without (its stats
-	/// publisher, ACME renewal, or certificate reload) panics. The origin's own work
-	/// is the [`Driver`]'s.
+	/// until one of them or a task the relay cannot serve without (its
+	/// ACME renewal or certificate reload) panics. The origin, cache governor, and
+	/// stats publisher are the [`Driver`]'s work.
 	///
 	/// Standalone, this only waits for such a panic. Returning, a failure
 	/// included, closes every dial as [`Cluster::close`] does. A cancelled `run`
@@ -1202,6 +1213,15 @@ impl Mesh {
 			#[cfg(feature = "cluster-lan")]
 			DialCommand::Lost(peer) => self.dialed.release(&peer, DialSource::Mdns, &mut dial),
 		}
+		// A replaced dial keeps its peer's `/nodes` history; a peer that left the
+		// dial set takes it along.
+		self.cluster.nodes.retain(|peer| self.dialed.contains(peer));
+	}
+}
+
+impl Drop for Mesh {
+	fn drop(&mut self) {
+		self.cluster.nodes.retain(|_| false);
 	}
 }
 
@@ -1210,9 +1230,11 @@ fn dialer<'a>(cluster: &'a Cluster, token: &'a str) -> impl FnMut(DialTarget) ->
 	move |target| {
 		// Logged by key, never by the target's URL, so an inline query stays out of the logs.
 		tracing::info!(peer = %target.key, lan = target.lan, "dialing cluster peer");
+		// Registered now, so `/nodes` lists the peer before its first attempt.
+		let dial = cluster.nodes.dial(&target.key);
 		Child::new(
 			"cluster dial",
-			cluster.clone().supervise_remote(target, token.to_string()),
+			cluster.clone().supervise_remote(target, token.to_string(), dial),
 		)
 	}
 }
@@ -1223,10 +1245,12 @@ fn dialer<'a>(cluster: &'a Cluster, token: &'a str) -> impl FnMut(DialTarget) ->
 /// origin. Loop prevention and route preference come from the hop list carried
 /// on each announced route (see [`moq_net::origin::Route`]).
 ///
-/// Construct with [`Cluster::new`], then attach a dial template and (optionally)
-/// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
-/// methods. Those builders do not rebuild the origin. A cluster without a
-/// dial template can serve local sessions but cannot dial remote peers.
+/// Construct with [`Cluster::new`]: its [`Options`] carry the limits, cache, and
+/// stats ([`Options::with_stats`]), and [`Cluster::stats`] is the resulting
+/// registry. Then attach a dial template with [`Cluster::with_connect`] and a LAN
+/// advertisement with [`Cluster::with_advertise`]; neither rebuilds the origin. A
+/// cluster without a dial template can serve local sessions but cannot dial
+/// remote peers.
 #[derive(Clone)]
 pub struct Cluster {
 	session_limits: moq_net::session::Limits,
@@ -1260,8 +1284,8 @@ pub struct Cluster {
 	/// view always points at the same session in the logs.
 	connection_ids: Arc<AtomicU64>,
 
-	/// The stats publisher, ACME renewal, and certificate reload: a panic in any
-	/// of them stops [`Relay::run`](crate::Relay::run).
+	/// ACME renewal and certificate reload: a panic in either stops
+	/// [`Relay::run`](crate::Relay::run).
 	pub(crate) critical: crate::critical::Critical,
 
 	/// All broadcasts, local and remote. Downstream sessions read from here
@@ -1271,16 +1295,15 @@ pub struct Cluster {
 	/// Stats registry. One instance per relay; sessions pick a billing tier via
 	/// [`stats::Registry::tier`](moq_net::stats::Registry::tier) at acceptance time
 	/// (the default tier unless configured otherwise, or any label the auth API
-	/// returns) so traffic classes land in separate counter sets. Defaults
-	/// to a disabled (no-op) registry until [`with_stats`](Self::with_stats) is called.
+	/// returns) so traffic classes land in separate counter sets. A disabled
+	/// (no-op) registry unless [`Options::stats`] enabled publishing.
 	pub stats: moq_net::stats::Registry,
 
-	/// Keeps the stats publish task running for as long as any handle on this
-	/// cluster lives. The task holds only a `Weak` to its producer, so it stops
+	/// Keeps the stats publisher alive while any cluster handle lives and its
+	/// driver runs. The publisher holds only a `Weak` to its producer, so it stops
 	/// when the last [`moq_stats::Producer`] clone drops; parking one here means
-	/// serving and publishing end together, instead of publishing ending early
-	/// because a caller dropped a producer it never asked for.
-	_stats_publisher: Option<moq_stats::Producer>,
+	/// serving and publishing end together.
+	pub(crate) stats_producer: moq_stats::Producer,
 }
 
 /// A gateway or network session admitted with its lease, scoped origins, and stats.
@@ -1325,29 +1348,31 @@ impl Cluster {
 		self.origin.hop().id()
 	}
 
-	/// Creates a cluster with one origin, using [`Options`] for identity
-	/// and cache.
+	/// Creates a cluster with one origin, using [`Options`] for identity, cache,
+	/// and stats publishing.
 	///
 	/// Use [`with_connect`](Self::with_connect) to enable dialing remote peers
-	/// (required when `config.connect` is non-empty), and
-	/// [`with_stats`](Self::with_stats) to enable metrics publishing. Those
-	/// builders do not rebuild the origin.
+	/// (required when `config.connect` is non-empty). That builder does not
+	/// rebuild the origin.
 	///
-	/// Returns the cluster with its [`Driver`]: the origin's lifecycle work and the
-	/// cache governor, which run only while the owner polls it. Poll it for as long
-	/// as the cluster serves, whether or not [`start`](Self::start) (the mesh half)
-	/// is ever called; [`Relay::run`](crate::Relay::run) does. Dropping it tears the
-	/// origin down.
+	/// Returns the cluster with its [`Driver`]: the origin's lifecycle work, the
+	/// cache governor, and the stats publisher. They run only while the owner polls
+	/// it. Poll it for as long as the cluster serves, whether or not
+	/// [`start`](Self::start) (the mesh half) is ever called;
+	/// [`Relay::run`](crate::Relay::run) does. Dropping it tears the origin down
+	/// and stops publishing stats. A stats publisher panic ends the driver like
+	/// its other work. Needs no Tokio runtime.
 	///
 	/// Errors if `config.id` is set to 0. An unset id picks a fresh random origin.
-	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint, or
-	/// `config.tier` is not a valid stats tier.
+	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint,
+	/// `config.tier` is not a valid stats tier, or the stats config is invalid.
 	pub fn new(options: Options) -> anyhow::Result<(Self, Driver)> {
 		let Options {
 			config,
 			cache,
 			session,
 			peer,
+			stats,
 		} = options;
 		let id = match config.id {
 			Some(id) => Hop::new(id).context("--cluster-id must be non-zero")?,
@@ -1380,6 +1405,10 @@ impl Cluster {
 		work.push(Child::new("origin driver", async move {
 			moq_net::time::run(driver).await;
 		}));
+		// Publish through the same origin cluster peers read from.
+		let (stats_producer, publisher) = stats.build(origin.clone())?;
+		work.push(Child::new("stats publisher", publisher.run()));
+		let stats = stats_producer.registry().clone();
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.hop(), configured = config.id.is_some(), "cluster initialized");
 		let cluster = Cluster {
@@ -1395,12 +1424,12 @@ impl Cluster {
 			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
 			nodes,
-			refusals: Default::default(),
+			refusals: crate::refusals::Refusals::new(&stats),
 			connection_ids: Arc::default(),
 			critical: Default::default(),
 			origin,
-			stats: moq_net::stats::Registry::disabled(),
-			_stats_publisher: None,
+			stats,
+			stats_producer,
 		};
 		Ok((cluster, Driver { work }))
 	}
@@ -1543,23 +1572,6 @@ impl Cluster {
 	/// accept, rather than counting separately.
 	pub fn next_connection_id(&self) -> u64 {
 		self.connection_ids.fetch_add(1, Ordering::Relaxed)
-	}
-
-	/// Attach a stats producer, replacing the default disabled registry with its
-	/// registry, and run its publisher.
-	///
-	/// Build both with [`stats::Config::build`](crate::stats::Config::build), passing
-	/// [`Self::origin`] so it publishes through the same origin cluster peers read
-	/// from. The cluster holds the producer from here on, so the caller may drop
-	/// its own handle: publishing lasts exactly as long as the cluster does. A
-	/// panic in the publisher ends [`Relay::run`](crate::Relay::run), like the
-	/// cluster's other critical tasks. Must be called within a Tokio runtime.
-	pub fn with_stats(mut self, stats: moq_stats::Producer, publisher: moq_stats::Publisher) -> Self {
-		self.critical.spawn("stats publisher", publisher.run());
-		self.stats = stats.registry().clone();
-		self.refusals = crate::refusals::Refusals::new(&self.stats);
-		self._stats_publisher = Some(stats);
-		self
 	}
 
 	/// Billing tier cluster-peer traffic records under (`--cluster-tier`).
@@ -2035,12 +2047,12 @@ impl Cluster {
 		let _ = commands.try_push(DialCommand::Api(desired));
 	}
 
-	async fn supervise_remote(self, target: DialTarget, token: String) {
+	async fn supervise_remote(self, target: DialTarget, token: String, dial: crate::nodes::Dial) {
 		let log_peer = target.key.clone();
 		let dialers = self.dialers.clone();
 		dialers
 			.supervise(async move {
-				if let Err(err) = self.run_remote(&target, token).await {
+				if let Err(err) = self.run_remote(&target, token, &dial).await {
 					tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
 				}
 			})
@@ -2048,7 +2060,7 @@ impl Cluster {
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(remote = %target.key))]
-	async fn run_remote(self, target: &DialTarget, token: String) -> anyhow::Result<()> {
+	async fn run_remote(self, target: &DialTarget, token: String, dial: &crate::nodes::Dial) -> anyhow::Result<()> {
 		let mut urls = target.addrs();
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (a per-peer inline token or object `token` wins; the
@@ -2074,7 +2086,8 @@ impl Cluster {
 
 		loop {
 			let started = kio::clock::now();
-			let result = self.run_remote_once(&addrs, target).await;
+			let result = self.run_remote_once(&addrs, target, dial).await;
+			dial.disconnected();
 			let elapsed = started.elapsed();
 
 			match result {
@@ -2089,18 +2102,29 @@ impl Cluster {
 	}
 
 	/// One session to `target` over `addrs`, which carry any credential.
-	async fn run_remote_once(&self, addrs: &moq_tokio::Addrs, target: &DialTarget) -> anyhow::Result<()> {
+	async fn run_remote_once(
+		&self,
+		addrs: &moq_tokio::Addrs,
+		target: &DialTarget,
+		dial: &crate::nodes::Dial,
+	) -> anyhow::Result<()> {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
 		// A panic fails this attempt like any other error, so the peer is redialed.
-		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target))
+		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target, dial))
 			.instrument(tracing::info_span!("conn", id))
 			.await
 			.context("cluster peer session panicked")?
 	}
 
-	async fn run_remote_session(&self, id: u64, addrs: &moq_tokio::Addrs, target: &DialTarget) -> anyhow::Result<()> {
+	async fn run_remote_session(
+		&self,
+		id: u64,
+		addrs: &moq_tokio::Addrs,
+		target: &DialTarget,
+		dial: &crate::nodes::Dial,
+	) -> anyhow::Result<()> {
 		// The peer URL may carry the cluster JWT in its query, so neither the log
 		// line nor the node label below may show the raw URL.
 		let first = addrs.as_slice().first().expect("Addrs is non-empty").url();
@@ -2160,20 +2184,15 @@ impl Cluster {
 		// and replay both announce tables there for the rest of its window. Its
 		// routes are already re-priced to the maximum, so the session serves on
 		// until the node closes it, and the redial after that finds the replacement.
-		let mut reconnect = client
+		let reconnect = client
 			.with_reconnect(true)
 			.with_restart(moq_tokio::Restart::Wait)
 			.connect(addrs.clone());
-		let mut connection = None;
+		let monitor = reconnect.monitor();
+		let mut observation = monitor.state();
 		loop {
-			match reconnect.status().await? {
-				moq_tokio::Status::Connected if connection.is_none() => {
-					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
-				}
-				moq_tokio::Status::Disconnected => connection = None,
-				moq_tokio::Status::Migrating => {}
-				_ => {}
-			}
+			dial.observe(id, &observation);
+			observation = monitor.state_changed(observation.revision).await?;
 		}
 	}
 
@@ -2598,28 +2617,66 @@ mod tests {
 		}
 	}
 
+	fn with_stats() -> Options {
+		Options::default().with_stats(crate::stats::Config {
+			enabled: true,
+			..Default::default()
+		})
+	}
+
+	#[test]
+	fn stats_build_without_a_runtime() {
+		let (cluster, driver) = Cluster::new(with_stats()).unwrap();
+		assert!(cluster.stats.is_enabled());
+		drop((cluster, driver));
+	}
+
+	#[test]
+	fn invalid_stats_config_errors() {
+		let options = Options::default().with_stats(crate::stats::Config {
+			enabled: true,
+			interval: Some(Duration::ZERO.into()),
+			..Default::default()
+		});
+		let err = Cluster::new(options).err().expect("a zero interval is refused");
+		assert!(format!("{err}").contains("stats.interval"), "got: {err}");
+	}
+
+	#[kio::test]
+	async fn stats_end_with_the_driver() {
+		let (cluster, driver) = Cluster::new(with_stats()).unwrap();
+		let consumer = cluster.origin.consume();
+		let path = Path::from_static(".stats/node");
+		let announced = async { consumer.follow(&path, None).unwrap().available().await.unwrap() };
+		let futures::future::Either::Right((broadcast, driver)) =
+			futures::future::select(Box::pin(driver.run()), Box::pin(announced)).await
+		else {
+			panic!("the driver stopped before publishing stats");
+		};
+		assert!(!broadcast.is_closed());
+		drop(driver);
+		assert!(broadcast.is_closed(), "dropping the driver stopped the publisher");
+		drop(cluster);
+	}
+
 	/// The publish task holds only a `Weak` to its producer, so it stops when the
-	/// last `moq_stats::Producer` clone drops. Attaching one must therefore hand
-	/// its lifetime to the cluster: an embedder clones handles off a `Relay` and
-	/// does not have to keep the producer, and a relay that keeps serving while
-	/// silently publishing nothing is exactly the class of failure this API
-	/// exists to rule out. Moving the ONLY handle in must keep it alive.
+	/// last `moq_stats::Producer` clone drops. The cluster must therefore hold the
+	/// producer itself: a relay that keeps serving while silently publishing
+	/// nothing is exactly the class of failure this rules out.
 	///
 	/// Asserts the broadcast is still live AFTER a few publish intervals, not
 	/// merely that one appeared: the task publishes once before it can notice its
 	/// producer is gone, so a first announcement races through either way and
 	/// proves nothing.
 	#[tokio::test(start_paused = true)]
-	async fn stats_publishing_outlives_the_producer_handle() {
+	async fn stats_publishing_lasts_with_the_cluster() {
 		let config = crate::stats::Config {
 			enabled: true,
 			node: Some("test".to_string()),
 			..Default::default()
 		};
 
-		let cluster = new_cluster(Config::default()).expect("cluster");
-		let (stats, publisher) = config.build(cluster.origin.clone()).expect("stats");
-		let cluster = cluster.with_stats(stats, publisher);
+		let cluster = Cluster::spawn(Options::default().with_stats(config)).expect("cluster");
 
 		let path = moq_net::Path::from_static(".stats/node/test");
 		let consumer = cluster.origin.consume();
@@ -2632,9 +2689,9 @@ mod tests {
 		.expect("stats broadcast resolves");
 		assert!(broadcast.info().instance.is_some(), "stats announce under an instance");
 
-		// Several publish intervals (1s each by default) after the handle went out
-		// of scope, the task is still running and its broadcast still announced: a
-		// request refuses a front whose route retracted.
+		// Several publish intervals (1s each by default) later, the task is still
+		// running and its broadcast still announced: a request refuses a front whose
+		// route retracted.
 		kio::clock::sleep(std::time::Duration::from_millis(2500)).await;
 		let still_live = consumer.request(&path, None).await;
 		assert!(
@@ -3181,6 +3238,50 @@ mod tests {
 		assert_eq!(err.to_string(), "source stopped");
 	}
 
+	/// `/nodes` lists a peer from the moment it is configured, keeps its connect
+	/// history when a new cost or credential replaces its dial, and forgets it only
+	/// once the peer leaves the dial set.
+	#[tokio::test]
+	async fn mesh_keeps_peer_history_until_the_peer_is_removed() {
+		let (mut mesh, _commands) = test_mesh();
+		let api = |peer: &str| {
+			let target = DialTarget::parse(peer).unwrap();
+			DialCommand::Api(HashMap::from([(target.key.clone(), target)]))
+		};
+		let nodes = mesh.cluster.nodes.clone();
+
+		mesh.apply(api("https://peer.example/?cost=1"));
+		let snapshot = nodes.snapshot();
+		assert_eq!(snapshot.nodes.len(), 1, "listed before its first attempt");
+		assert!(snapshot.nodes[0].last_connected_seconds_ago.is_none());
+
+		// Stand in for the dial task's own session, which these unpolled tasks never open.
+		let session = nodes.dial("https://peer.example/");
+		session.observe(
+			0,
+			&moq_tokio::connection::Observation {
+				revision: 1,
+				phase: moq_tokio::connection::Phase::Connected,
+				connects: 1,
+				failure: None,
+				version: None,
+				last_connected: Some(kio::clock::now()),
+				transport: Some(moq_tokio::Transport::Quic),
+			},
+		);
+		drop(session);
+
+		mesh.apply(api("https://peer.example/?cost=2"));
+		assert_eq!(mesh.dialed.tasks.len(), 1, "the cost change replaced the dial");
+		assert!(
+			nodes.snapshot().nodes[0].last_connected_seconds_ago.is_some(),
+			"a replaced dial keeps its history"
+		);
+
+		mesh.apply(DialCommand::Api(HashMap::new()));
+		assert!(nodes.snapshot().nodes.is_empty(), "a removed peer takes its history");
+	}
+
 	/// A dial task's panic ends the mesh with it, rather than unwinding the task
 	/// polling the mesh.
 	#[tokio::test]
@@ -3243,7 +3344,12 @@ mod tests {
 				id: Some(42),
 				..Default::default()
 			})
-			.with_cache(cache),
+			.with_cache(cache)
+			.with_stats(crate::stats::Config {
+				enabled: true,
+				node: Some("test".to_string()),
+				..Default::default()
+			}),
 		)
 		.expect("cluster");
 
@@ -3251,19 +3357,6 @@ mod tests {
 		assert_eq!(origin.hop().id(), 42);
 		assert_eq!(origin.config().cache_duration, duration);
 		assert_eq!(origin.config().pool.expiry(), Some(duration));
-
-		let (stats, publisher) = crate::stats::Config {
-			enabled: true,
-			node: Some("test".to_string()),
-			..Default::default()
-		}
-		.build(origin.clone())
-		.expect("stats");
-		let cluster = cluster.with_stats(stats, publisher);
-
-		assert_eq!(cluster.origin.hop().id(), origin.hop().id());
-		assert_eq!(cluster.origin.config().cache_duration, duration);
-		assert_eq!(cluster.origin.config().pool.expiry(), Some(duration));
 
 		let broadcast = origin.create_broadcast("cam").expect("create");
 		broadcast.announce(Default::default()).expect("announce");
@@ -4087,7 +4180,8 @@ mod tests {
 					.with_connect(Default::default(), quic);
 				let broadcast = dialer.origin.create_broadcast("from-dialer").expect("create");
 				broadcast.announce(Default::default()).expect("announce");
-				tokio::spawn(dialer.clone().supervise_remote(target, String::new()));
+				let dial = dialer.nodes.dial(&target.key);
+				tokio::spawn(dialer.clone().supervise_remote(target, String::new(), dial));
 				(dialer, broadcast)
 			})
 			.await

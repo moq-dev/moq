@@ -616,6 +616,12 @@ export const hooks: {
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
 	/**
+	 * A fetch's group `sequence`, before it reads: `true` once it is cached or asked of a fill,
+	 * written yet or not, as the Rust `fetch_group` queues one; `false` with no handler to ask;
+	 * `"pending"` while the track awaits its accept, which opens its handler.
+	 */
+	askFetch: (subscriber: Subscriber, sequence: bigint) => boolean | "pending";
+	/**
 	 * Bind a group to its track's info, so a frame whose timestamp doesn't `rescale` to the track
 	 * is refused. Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
@@ -853,6 +859,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	fetchBudget: () => {
+		throw new Error("track.ts not loaded");
+	},
+	askFetch: () => {
 		throw new Error("track.ts not loaded");
 	},
 	writeDatagram: () => {
