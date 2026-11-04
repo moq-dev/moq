@@ -1278,6 +1278,36 @@ test("a lite subscribe waiting on a stream slot for the SUBSCRIBE outlasts the d
 	}
 });
 
+// A SUBSCRIBE given up while it waits for a stream slot leaves the line: the stream admitted
+// for it goes unused to the next open, rather than being reset.
+test("a lite SUBSCRIBE open given up leaves its stream to the next open", async () => {
+	const { quic, streams, opened } = fakeSession([1]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		// Closing the broadcast retires the setup while its SUBSCRIBE waits for a stream.
+		const room = subscriber.consume(Path.from("room"));
+		room.track("video").subscribe();
+		await opened(0);
+		await streams[0].reading;
+		await answerTrackInfo(streams[0]);
+		await opened(1);
+		room.close();
+		await drainReactions();
+		streams[1].release();
+		await drainReactions();
+		expect(streams[1].written).toEqual([]);
+
+		const other = subscriber.consume(Path.from("other"));
+		other.track("video").subscribe();
+		await streams[1].writing;
+		other.close();
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+	}
+});
+
 // A SUBSCRIBE write blocked on flow control may never let the setup settle, so the deadline
 // lets go of the held TRACK stream without waiting for it.
 test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its TRACK stream", async () => {

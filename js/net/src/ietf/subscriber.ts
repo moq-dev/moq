@@ -110,11 +110,12 @@ type SubscribeSetupState = {
 	registeredAlias?: bigint;
 	requests?: Requests;
 	/**
-	 * Whether the caller has given up. Setup checks this once the stream exists so a request
-	 * opened after the timeout still unwinds: nothing else settles setup if the peer has
-	 * gone quiet, and the cleanup that fired first saw no stream to tear down.
+	 * Aborts once the caller has given up. An open still waiting leaves the line, and setup
+	 * checks it once the stream exists so a request opened after the timeout still unwinds:
+	 * nothing else settles setup if the peer has gone quiet, and the cleanup that fired first
+	 * saw no stream to tear down.
 	 */
-	cancelled?: boolean;
+	cancel: AbortController;
 	/**
 	 * Whether the publisher answered with an error. It has torn the request down already, so
 	 * there is nothing left to cancel and ours ends cleanly.
@@ -788,7 +789,7 @@ export class Subscriber {
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
-		const state: SubscribeSetupState = {};
+		const state: SubscribeSetupState = { cancel: new AbortController() };
 		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, known?.producer);
 
@@ -840,7 +841,7 @@ export class Subscriber {
 			// the first pass. The request ends once: a deadline failure already reset it through
 			// the same stream, so a second end here does nothing.
 			const cleanup = () => {
-				state.cancelled = true;
+				state.cancel.abort(e);
 
 				// A fill stream waiting on SUBSCRIBE_OK gets nothing, and a head already started goes.
 				state.fill?.(undefined);
@@ -1528,12 +1529,12 @@ export class Subscriber {
 	}> {
 		const version = this.#session.version;
 
-		state.stream = await RequestStream.open(this.#session, deadline, { quic: this.#quic });
+		const cancelled = state.cancel.signal;
+		state.stream = await RequestStream.open(this.#session, deadline, { quic: this.#quic, signal: cancelled });
 
-		// The timeout can fire while the open is still in flight, in which case cleanup ran
-		// with nothing to release. Bail now that the stream is recorded, so settling this
-		// promise hands it back to be torn down.
-		if (state.cancelled) throw new Error("subscribe cancelled before it was sent");
+		// Cleanup can run as the open hands over its stream, with nothing to release. Bail now
+		// that the stream is recorded, so settling this promise hands it back to be torn down.
+		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
 		const msg = new Subscribe({
 			requestId,
@@ -1559,7 +1560,7 @@ export class Subscriber {
 
 		// The caller may have given up while that write was in flight, resetting the request
 		// under it.
-		if (state.cancelled) throw new Error("subscribe cancelled while it was being sent");
+		if (cancelled.aborted) throw new Error("subscribe cancelled while it was being sent");
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
 		const response = await state.stream.next();
@@ -1580,7 +1581,7 @@ export class Subscriber {
 		}
 
 		const ok = await SubscribeOk.decode(response.reader, version);
-		if (state.cancelled) throw new Error("subscribe cancelled before acceptance");
+		if (cancelled.aborted) throw new Error("subscribe cancelled before acceptance");
 		const maxCacheDuration = ok.properties.maxCacheDuration;
 		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("max cache duration exceeds safe milliseconds");

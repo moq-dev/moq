@@ -924,6 +924,34 @@ test("an info-only lookup waits for TRACK_STATUS_OK instead of abandoning", asyn
 	expect((await info).priority).toBe(127 - 37);
 });
 
+// An open given up while it waits for the peer's stream credit leaves the line, so the stream
+// that credit returns serves a live request instead of being reset.
+test("an abandoned SUBSCRIBE gives up its wait for a stream", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const opening = Promise.withResolvers<AbortSignal | undefined>();
+	const gaveUp = Promise.withResolvers<unknown>();
+	const openBi = spyOn(session, "openBi").mockImplementation((options) => {
+		const signal = options?.signal;
+		opening.resolve(signal);
+		signal?.addEventListener("abort", () => gaveUp.resolve(signal.reason), { once: true });
+		return new Promise<Stream>((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)));
+	});
+	const broadcast = subscriber.consume(Path.from("room"));
+	try {
+		const track = broadcast.track("video").subscribe();
+		const signal = await opening.promise;
+		expect(signal?.aborted).toBe(false);
+		track.close();
+		expect(await gaveUp.promise).toBeInstanceOf(Error);
+	} finally {
+		openBi.mockRestore();
+		broadcast.close();
+		session.close();
+	}
+});
+
 test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);

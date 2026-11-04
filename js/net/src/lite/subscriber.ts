@@ -366,15 +366,18 @@ export class Subscriber {
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
 		try {
-			const deadline = new Deadline();
-			stream = await deadline.wait(deadline.open(Stream.open(this.#quic, { version: this.version })));
+			// The consumer leaving gives up the wait for a slot, so the next open takes it.
+			const left = new AbortController();
+			void race([announced.closed]).then(() => left.abort());
+			const opened = await Stream.tryOpen(this.#quic, { version: this.version, signal: left.signal });
+			// Handed a stream as the consumer left: give the slot back unused.
+			if (!opened || announced.closed.peek() !== undefined) {
+				opened?.close();
+				return;
+			}
+			stream = opened;
 		} catch (err: unknown) {
 			announced.close(error(err));
-			return;
-		}
-		// The consumer left while the open waited for a slot: give the slot back unused.
-		if (announced.closed.peek() !== undefined) {
-			stream.close();
 			return;
 		}
 
@@ -1416,11 +1419,17 @@ export class Subscriber {
 
 	// Open the subscribe stream and write the SUBSCRIBE on it.
 	async #sendSubscribe(state: SubscribeSetup, msg: Subscribe, deadline: Deadline): Promise<Stream> {
-		const stream = await deadline.open(Stream.open(this.#quic, { version: this.version }));
+		// Giving up leaves the line, so the next open takes the stream this one was waiting for.
+		const signal = state.cancel.signal;
+		const opening = Stream.tryOpen(this.#quic, { version: this.version, signal }).then((opened) => {
+			if (!opened) throw signal.reason;
+			return opened;
+		});
+		const stream = await deadline.open(opening);
 		state.stream = stream;
-		// The deadline passed while the open waited: the late-setup handler resets the stream, so
-		// don't send a SUBSCRIBE on it first.
-		state.cancel.signal.throwIfAborted();
+		// Setup was given up as the open handed over its stream: the late-setup handler resets
+		// the stream, so don't send a SUBSCRIBE on it first.
+		signal.throwIfAborted();
 		await stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(stream.writer, this.version);
 		return stream;
