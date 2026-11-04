@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Breaking:** the bus routes sources into several mixes. `Bus::new` returns
+  the bus and the one `Driver` that advances it on the caller's clock; each mix
+  has its own meter and independent readers whose blocks carry their clock
+  position, and a mix-minus drops one source. A strip carries a per-source sync
+  delay. See `MIGRATE.md`.
 - **Breaking:** open one `capture::Producer` and pass its independent consumers
   to the bus and encoder. Samples, timestamps, source gaps, and terminal failures
   are shared; slow readers lose only their own expired buffers. See `MIGRATE.md`.

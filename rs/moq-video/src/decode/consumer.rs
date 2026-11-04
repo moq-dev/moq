@@ -312,7 +312,12 @@ impl Reader {
 		delay: Delay,
 		lookback: u64,
 	) -> Result<Self, Error> {
-		let decoder = Sink::open(catalog, &options.decoder).await?;
+		let decoder = Sink::open(catalog, &options.decoder).await.map_err(|err| match err {
+			// Only a codec or description this build cannot decode is a refusal of the
+			// rendition. Backend and worker faults keep their own variants.
+			Error::UnsupportedCodec(reason) => Error::UnsupportedConfig(reason),
+			err => err,
+		})?;
 
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
 		let mut subscriber = track

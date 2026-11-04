@@ -71,12 +71,14 @@ use super::hang::{Catalog, CatalogExt};
 /// #     broadcast: &mut moq_net::broadcast::Producer,
 /// #     catalog: &moq_mux::catalog::Producer<Ext>,
 /// # ) -> moq_mux::Result<()> {
-/// let info = moq_net::track::Info::default().with_compress(true);
+/// let info = moq_net::track::Info::default()
+///     .with_timescale(moq_net::Timescale::MILLI)
+///     .with_compress(true);
 /// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
 /// let mut telemetry = catalog.json_stream::<serde_json::Value>(track, entry)?;
-/// telemetry.append(&serde_json::json!({ "heartbeat": 1 }))?;
+/// telemetry.append(&serde_json::json!({ "heartbeat": 1 }), catalog.clock().now())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -1067,6 +1069,25 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// A supplied zero delay is a statement, not a gap: measurement never replaces it, and the
+	/// catalog omits it on the wire, hang and MSF alike.
+	#[test]
+	fn a_supplied_zero_delay_is_never_measured() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		let mut supplied = config(None, None);
+		supplied.delay = Some(Duration::ZERO);
+		rendition.set(supplied).unwrap();
+		rendition
+			.estimate(Estimate::default().with_delay(Duration::from_millis(200)))
+			.unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["v"].delay, Some(Duration::ZERO));
+
+		let json = catalog.snapshot().to_json().unwrap();
+		assert!(!json.contains("delay"), "{json}");
+		let rendered = super::super::producer::to_msf(&catalog.snapshot(), &moq_net::Path::default());
+		assert!(rendered.tracks.iter().all(|track| track.delay.is_none()));
 	}
 
 	#[test]
