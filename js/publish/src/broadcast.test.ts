@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
+import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import { Origin, Path, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
