@@ -311,41 +311,53 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run((effect) => {
 			const preview = effect.get(this.#preview);
 			if (!preview) return;
+			// A <canvas> renders the decoded frames; a <video> shows the raw source via srcObject.
+			if (preview instanceof HTMLCanvasElement) {
+				// Own only the empty-state rule, leaving the page's inline and stylesheet display intact.
+				const hidden = "moq-publish-preview-hidden";
+				const style = document.createElement("style");
+				style.textContent = `canvas.${hidden} { display: none !important; }`;
+				this.append(style);
+				effect.cleanup(() => {
+					preview.classList.remove(hidden);
+					style.remove();
+				});
+				effect.run((inner) => {
+					const source = inner.get(this.#videoEnabled) ? inner.get(this.#videoSource) : undefined;
+					preview.classList.toggle(hidden, !source || inner.get(this.controls.preview) === "none");
+				});
+
+				// Keep the renderer while hidden, but release it when the publisher disconnects.
+				effect.run((active) => {
+					if (!active.get(this.#enabled)) return;
+					const renderer = new Preview.Renderer({
+						canvas: preview,
+						frames: this.#capture.out.frames,
+						display: this.#capture.out.display,
+						flip: this.#flip,
+						rotation: this.#capture.out.rotation,
+						encoder: this.video,
+						mode: this.controls.preview,
+						enabled: this.#videoEnabled,
+						backend: this.controls.backend,
+					});
+					active.cleanup(() => renderer.close());
+
+					// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
+					// The observer above picks it up and this effect builds a renderer for it.
+					active.run((inner) => {
+						if (inner.get(renderer.out.error)?.name === "InvalidStateError")
+							preview.replaceWith(preview.cloneNode());
+					});
+				});
+				return;
+			}
+
 			preview.style.display = "none";
 			if (!effect.get(this.#enabled)) return;
 			effect.cleanup(() => {
 				preview.style.display = "none";
 			});
-
-			// A <canvas> renders the decoded frames; a <video> shows the raw source via srcObject.
-			if (preview instanceof HTMLCanvasElement) {
-				const renderer = new Preview.Renderer({
-					canvas: preview,
-					frames: this.#capture.out.frames,
-					display: this.#capture.out.display,
-					flip: this.#flip,
-					rotation: this.#capture.out.rotation,
-					encoder: this.video,
-					mode: this.controls.preview,
-					enabled: this.#videoEnabled,
-					backend: this.controls.backend,
-				});
-				effect.cleanup(() => renderer.close());
-
-				// Keep the renderer while hidden, but let empty previews contribute no layout size.
-				effect.run((inner) => {
-					const source = inner.get(this.#videoEnabled) ? inner.get(this.#videoSource) : undefined;
-					preview.style.display = source && inner.get(this.controls.preview) !== "none" ? "block" : "none";
-				});
-
-				// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
-				// The observer above picks it up and this effect builds a renderer for it.
-				effect.run((inner) => {
-					if (inner.get(renderer.out.error)?.name === "InvalidStateError")
-						preview.replaceWith(preview.cloneNode());
-				});
-				return;
-			}
 
 			// preview="none" disables the preview entirely.
 			if (effect.get(this.controls.preview) === "none") {

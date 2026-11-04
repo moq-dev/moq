@@ -143,6 +143,10 @@ test.each(["video", "canvas"] as const)(
 			await hidden();
 			const idle = await player.boundingBox();
 			expect(idle?.height).toBeCloseTo(((idle?.width ?? 0) * 9) / 16, 0);
+			if (tag === "canvas")
+				await preview.evaluate((preview) => {
+					(preview as HTMLElement).style.display = "none";
+				});
 			await page.getByRole("button", { name: "Settings", exact: true }).click();
 			await page
 				.getByRole("tabpanel", { name: "Source" })
@@ -179,6 +183,17 @@ test.each(["video", "canvas"] as const)(
 						}),
 				);
 			};
+			if (tag === "canvas") {
+				await page.waitForFunction(
+					({ publish }) => !!publish.video.in.capture.peek()?.out.display.peek(),
+					publication,
+				);
+				await hidden();
+				expect(await preview.evaluate((preview) => (preview as HTMLElement).style.display)).toBe("none");
+				await preview.evaluate((preview) => {
+					(preview as HTMLElement).style.display = "";
+				});
+			}
 			await shown();
 			await empty(false);
 			const visible = await player.boundingBox();
@@ -240,7 +255,7 @@ test.each(["video", "canvas"] as const)(
 					({ publish }, tag) => publish.querySelector<HTMLElement>(tag)?.style.display,
 					tag,
 				),
-			).toBe("none");
+			).toBe(tag === "canvas" ? "" : "none");
 			if (tag === "video")
 				expect(
 					await publication.evaluate(({ publish }) => publish.querySelector("video")?.srcObject),
@@ -256,6 +271,42 @@ test.each(["video", "canvas"] as const)(
 			});
 			await empty(true);
 			expect((await player.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
+			if (tag === "canvas") {
+				// The page owns display even across control changes and while the component hides it.
+				for (const control of ["invisible", "preview", "source"] as const) {
+					await publication.evaluate(({ publish }, control) => {
+						if (control === "invisible") publish.invisible = true;
+						else if (control === "preview") publish.preview = "none";
+						else publish.source = undefined;
+					}, control);
+					await hidden();
+					await publication.evaluate(({ publish }, control) => {
+						if (control === "invisible") publish.invisible = false;
+						else if (control === "preview") publish.preview = "source";
+						else publish.source = "camera";
+					}, control);
+					await page.waitForFunction(
+						({ publish }) =>
+							publish.video.settled.peek() && !!publish.video.in.capture.peek()?.out.display.peek(),
+						publication,
+					);
+					await hidden();
+					expect(await preview.evaluate((preview) => (preview as HTMLElement).style.display)).toBe("none");
+				}
+				await publication.evaluate(({ publish }) => {
+					publish.preview = "none";
+				});
+				await hidden();
+				await preview.evaluate((preview) => {
+					(preview as HTMLElement).style.display = "inline-block";
+				});
+				await hidden();
+				await publication.evaluate(({ publish }) => {
+					publish.preview = "source";
+				});
+				await shown();
+				expect(await preview.evaluate((preview) => getComputedStyle(preview).display)).toBe("inline-block");
+			}
 			// Removing a visible preview must also fall back to the reserved size.
 			await preview.evaluate((preview) => {
 				(preview as HTMLElement).style.display = "";
