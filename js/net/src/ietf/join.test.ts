@@ -115,7 +115,7 @@ async function head(requestId: bigint, payloads: string[], group = GROUP, versio
 	const bytes = await Writer.collect(version, async (w) => {
 		await w.u62(requestId);
 		for (const [object, payload] of payloads.entries()) {
-			await new FetchFrame({ payload: text(payload) }).encode(
+			await new FetchFrame({ payload: text(payload), priority: 0 }).encode(
 				w,
 				{ group, object, first: object === 0 },
 				undefined,
@@ -394,7 +394,7 @@ async function deltaHead(requestId: bigint, payloads: string[], delta: number) {
 		await w.u62(requestId);
 		for (const [object, payload] of payloads.entries()) {
 			if (object === 0) {
-				await new FetchFrame({ payload: text(payload) }).encode(
+				await new FetchFrame({ payload: text(payload), priority: 0 }).encode(
 					w,
 					{ group: GROUP, object, first: true },
 					undefined,
@@ -455,13 +455,13 @@ test("a joining FETCH spanning another group drops the head", async () => {
 
 	const bytes = await Writer.collect(VERSION, async (w) => {
 		await w.u62(fetch.requestId);
-		await new FetchFrame({ payload: text("h0") }).encode(
+		await new FetchFrame({ payload: text("h0"), priority: 0 }).encode(
 			w,
 			{ group: GROUP, object: 0, first: true },
 			undefined,
 			VERSION,
 		);
-		await new FetchFrame({ payload: text("x0") }).encode(
+		await new FetchFrame({ payload: text("x0"), priority: 0 }).encode(
 			w,
 			{ group: GROUP + 1n, object: 0, first: false, previousGroup: GROUP },
 			undefined,
@@ -550,13 +550,13 @@ test("a clean end finishes a head nothing claimed", () => {
 
 test("fetch objects decode as FetchFrame wrote them", async () => {
 	const bytes = await Writer.collect(VERSION, async (w) => {
-		await new FetchFrame({ payload: text("a") }).encode(
+		await new FetchFrame({ payload: text("a"), priority: 0 }).encode(
 			w,
 			{ group: 5n, object: 0, first: true },
 			undefined,
 			VERSION,
 		);
-		await new FetchFrame({ payload: new Uint8Array() }).encode(
+		await new FetchFrame({ payload: new Uint8Array(), priority: 0 }).encode(
 			w,
 			{ group: 5n, object: 1, first: false },
 			undefined,

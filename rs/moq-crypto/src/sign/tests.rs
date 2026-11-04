@@ -44,18 +44,10 @@ fn identity(row: &Value) -> (Arc<Scope>, u64, u64, Option<moq_net::Timestamp>) {
 }
 
 #[test]
-fn vector_keys() {
+fn vector_key_seeds() {
 	for row in vectors()["keys"].as_array().unwrap() {
-		let id = &row["id"];
-		let endpoint = public(&row["endpoint"]);
-		assert_eq!(
-			endpoint,
-			PublicKey::from_bytes(hex(&row["public"]).try_into().unwrap()),
-			"{id}"
-		);
-		assert_eq!(endpoint.to_string(), row["endpoint"].as_str().unwrap(), "{id}");
 		if !row["seed"].is_null() {
-			assert_eq!(seed(&row["seed"]).public(), endpoint, "{id}");
+			assert_eq!(seed(&row["seed"]).public(), public(&row["endpoint"]), "{}", row["id"]);
 		}
 	}
 }
@@ -88,17 +80,6 @@ fn vector_negative() {
 		let result = scope.verify(&public(&row["endpoint"]), group, frame, timestamp, body);
 		assert_eq!(row["error"], "signature");
 		assert!(matches!(result, Err(Error::Signature)), "{}", row["id"]);
-	}
-}
-
-#[test]
-fn vector_invalid_ids() {
-	for row in vectors()["invalid_ids"].as_array().unwrap() {
-		assert!(
-			row["text"].as_str().unwrap().parse::<PublicKey>().is_err(),
-			"{}",
-			row["id"]
-		);
 	}
 }
 

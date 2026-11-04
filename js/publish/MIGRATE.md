@@ -4,12 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog declares `media.join.interval` and moves `clock` to `media.clock` ([#7652](https://github.com/moq-dev/moq/pull/7652))
+
+`Broadcast.catalog` advertises the page's wall-clock mapping as `media.clock` instead of the root `clock`; read `catalog.media?.clock` in a `mutate` callback.
+When the catalog first lists a video or audio rendition, the broadcast also declares the longest group among its renditions as `media.join.interval`, which an HLS or DASH export cuts its segments on, and keeps it for the network broadcast.
+The video encoder offers its `keyframeInterval` (2000 ms by default) and the audio encoder its `groupDuration`.
+A custom producer that wants its rendition exported sets `rendition.joinInterval` to its longest group before its config lists it.
+
 ### `muted` and `invisible` keep capture open
 
 `<moq-publish muted>` and `invisible` now stop only the encoder, so the microphone and camera stay open and the browser's capture indicators stay lit.
 Unmuting no longer waits on getUserMedia, a new AudioContext, or a camera reopen.
 A camera source opens both devices even when it starts muted or hidden.
-To release the devices, clear `source` or remove the element; to release one and keep the other, build the pipeline with the library and toggle `Source.Microphone` or `Source.Camera` `enabled`.
+To release each device while it is muted or hidden, as before, set `capture="release"`.
 
 ### Element reflection and invalid configuration
 

@@ -93,7 +93,7 @@ kotlin {
                     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
                     // api: the typed JSON helpers are inline+reified, so they
                     // resolve serializers at the consumer's call site.
-                    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+                    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
                 }
             }
         val commonTest =

@@ -30,6 +30,11 @@ The Tokio `web::Server` helper and `Request::connect()` accessor are removed; ac
 A receive stream's `closed()` observes an empty FIN without a read. When there is payload, read it before waiting for close. `poll_reset` still watches only failures, so it remains pending after a clean end.
 Invalid stream error codes fail as `InvalidReset` or `InvalidStopped`, rather than looking like a clean end.
 
+### `connection::Observation` reports the transport and last connect ([#7776](https://github.com/moq-dev/moq/pull/7776))
+
+`Observation` adds `transport`, the live session's transport or none while offline, and `last_connected`, when a session last connected, kept while offline.
+Code that builds an `Observation` with a struct literal, such as a test double, sets both.
+
 ### QUIC waits have caller-owned poll forms ([#7707](https://github.com/moq-dev/moq/pull/7707))
 
 The QUIC driver connection's stream opens, accepts, datagram receive and close waits,

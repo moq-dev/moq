@@ -18,7 +18,7 @@
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
 		"vitepress-plugin-llms": "^1.14.0",
-		"wrangler": "^4.152.0",
+		"wrangler": "^4.154.0",
 		"yaml": "^2.9.1"
 	}
 }

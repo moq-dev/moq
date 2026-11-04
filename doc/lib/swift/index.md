@@ -96,7 +96,7 @@ session.shutdown()
 try await session.closed()
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded `Media.TrackProducer.video` takes `lower` too, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `setEnabled(false)` after a `discontinuity()`, and `setEnabled(true)` on the keyframe that resumes it.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Pass the publication track name to the producer, alongside its input and codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded `Media.TrackProducer.video` or `Media.TrackStreamProducer.video` takes `lower` too, as a `Media.Producer` of either kind, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `setEnabled(false)` after a `discontinuity()`, and `setEnabled(true)` on the keyframe that resumes it. A `TrackStreamProducer` finds its own frames: `setEnabled(false)` drops what is written to it, and after `setEnabled(true)` it resumes at the stream's next keyframe.
 
 ## Things to know
 
@@ -104,7 +104,7 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or less often to batch frames into fewer groups.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `Media.TrackConsumer`, `Audio.Consumer`, and `Video.Consumer` yield `Read` cases in order: `.frame`, a `.gap` where media was lost, or an `.end` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: .latest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** Release each frame from a `Video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
