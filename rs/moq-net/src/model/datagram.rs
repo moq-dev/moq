@@ -452,11 +452,16 @@ impl Consumer {
 	}
 
 	fn ended(name: Arc<str>, state: &kio::Shared<State>) -> Self {
+		// Past what a finish left buffered, which is for the consumers already reading.
+		let cursor = {
+			let state = state.read();
+			state.offset + state.buffer.len() as u64
+		};
 		Self {
 			name,
 			state: state.clone(),
 			slot: None,
-			cursor: 0,
+			cursor,
 			stats: stats::Scope::default(),
 		}
 	}
@@ -662,6 +667,14 @@ mod tests {
 		assert_eq!(sequence(&mut consumer), 0);
 		assert_eq!(sequence(&mut consumer), 1);
 		assert!(matches!(recv(&mut consumer), Poll::Ready(Ok(None))));
+
+		// A consumer arriving after the finish never reads them.
+		let mut producer = Info::default().produce("dg");
+		let _reading = producer.consume();
+		producer.append(None, "a").unwrap();
+		producer.clone().finish();
+		let mut late = producer.consume();
+		assert!(matches!(recv(&mut late), Poll::Ready(Ok(None))));
 
 		// An abort drops them.
 		let mut producer = Info::default().produce("dg");
