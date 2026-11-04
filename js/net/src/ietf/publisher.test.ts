@@ -2653,7 +2653,7 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 	}
 });
 
-// Quarantined after the unchanged-main reproduction failed 30/200 runs.
+// Quarantined: the live group intermittently resets while read.
 // Investigation: quest/m0/test-flakes-2/ietf-wider-fill.md.
 test.skip.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
@@ -4545,3 +4545,33 @@ test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async
 		fx.close();
 	}
 });
+
+for (const endObject of [BigInt(Number.MAX_SAFE_INTEGER), (1n << 60n) + 1n]) {
+	test(`an IETF filter ending at object ${endObject} serves bounded model frames`, async () => {
+		using _clock = manual();
+		const fx = fixture();
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n, endObject },
+			}),
+		);
+		try {
+			writeGroup(track, 2);
+			const stream = await nextUni(fx.uni);
+			if (!stream) throw new Error("no group for the accepted filter");
+			expect((await readGroup(stream)).objects).toEqual([
+				{ id: 0, payload: "0.0" },
+				{ id: 1, payload: "0.1" },
+			]);
+		} finally {
+			fx.close();
+			client.close();
+		}
+	});
+}
