@@ -3,7 +3,7 @@
 ## Goal
 
 When the newest of two live publishers withdraws, a browser `@moq/watch`
-viewer on moq-transport-22, or on moq-lite in Firefox, plays the still-live
+viewer on moq-transport-22 or moq-lite plays the still-live
 older run within the media lane's derived 1039 ms bound. It keeps its session, and its audio resumes
 with its video. Both failures are fixed at their cause once one recurs with
 enough evidence to reproduce it deterministically.
@@ -30,7 +30,11 @@ after the fallback), on `old-moq-lite-07-wip`:
 and
 [2026-11-03](https://github.com/moq-dev/moq/actions/runs/41656613559/job/125988510133).
 [moq-dev/moq#7716](https://github.com/moq-dev/moq/pull/7716) found it
-separate from the Firefox tone problem. Read those jobs' artifacts first. If
+separate from the Firefox tone problem. Scheduled Interop runs hit the same
+stall in Chromium, also on `old-moq-lite-07-wip`:
+[41495461904](https://github.com/moq-dev/moq/actions/runs/41495461904),
+[41668668824](https://github.com/moq-dev/moq/actions/runs/41668668824), and
+[41863118968](https://github.com/moq-dev/moq/actions/runs/41863118968). Read those jobs' artifacts first. If
 they isolate the cause, the Waiting item clears. If they don't, rerun the
 Waiting section's command with `--media-engines firefox` and the same
 `RUST_LOG` filter.
