@@ -6,9 +6,11 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { supportCacheKey } from "../support-probe";
 import { type Delay, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
+import { decoderConfigKey } from "./config";
 import type { Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
@@ -131,7 +133,7 @@ function frame(): Extract<Read, { kind: "frame" }> {
 	frameTimestamp += 20_000;
 	return {
 		kind: "frame",
-		group: 0,
+		group: 0n,
 		frame: {
 			arrival: Nano.toMilli(Nano(now())),
 			timestamp: Micro(frameTimestamp),
@@ -316,13 +318,15 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	// The catalog broadcast's instance, identified by its `closed` handle.
 	const active = new Signal({ closed: {} });
 	const broadcast = new Signal<Broadcast | undefined>({
-		in: { enabled },
+		in: { enabled, name: new Signal(Moq.Path.from("watched")) },
 		out: { catalog, active },
 		relativeBroadcast,
 	} as unknown as Broadcast);
 
 	const delay = new Signal<Delay>(initial);
-	const source = new Source({ broadcast, supported: async () => true });
+	const supportProbes = mock(async () => true);
+	Object.assign(supportProbes, { [supportCacheKey]: decoderConfigKey });
+	const source = new Source({ broadcast, supported: supportProbes });
 	const buffer = new Signal(Milli(buffered ? 1000 : 0));
 	const sync = new Sync({ delay, buffer });
 	// The decoder's own switch, which a mute or pause turns off.
@@ -343,6 +347,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	};
 
 	return {
+		supportProbes,
 		delay,
 		buffer,
 		sync,
@@ -430,7 +435,7 @@ for (const cmaf of [false, true]) {
 		const playback = await play(Milli(100), true, cmaf);
 		try {
 			for (let n = 0; n < 6; n++) {
-				playback.push({ ...frame(), group: n === 0 ? 0 : 1 });
+				playback.push({ ...frame(), group: n === 0 ? 0n : 1n });
 				await microtasks();
 			}
 			expect(audioInputs).toHaveLength(6);
@@ -442,7 +447,7 @@ for (const cmaf of [false, true]) {
 			deferAudioOutput = false;
 			frameTimestamp = 160_000;
 			const resumed = frame();
-			playback.push({ ...resumed, group: 2 });
+			playback.push({ ...resumed, group: 2n });
 			await microtasks();
 			expect(audioInputs).toHaveLength(7);
 			expect(playback.inserted()).toContain(resumed.frame.timestamp);
@@ -490,7 +495,7 @@ for (const cmaf of [false, true]) {
 		try {
 			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0]) {
 				frameTimestamp = (ms - 20) * 1000;
-				playback.push({ ...frame(), group: ms / 20 });
+				playback.push({ ...frame(), group: BigInt(ms / 20) });
 				await microtasks();
 			}
 			expect(playback.inserted()).toEqual([]);
@@ -498,7 +503,7 @@ for (const cmaf of [false, true]) {
 			// The live edge moves on, so the head is complete and plays from its oldest frame, refilling
 			// the 100 ms floor.
 			frameTimestamp = 140_000;
-			playback.push({ ...frame(), group: 8 });
+			playback.push({ ...frame(), group: 8n });
 			await microtasks();
 			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000]);
 		} finally {
@@ -555,11 +560,11 @@ for (const cmaf of [false, true]) {
 		const playback = await play(Milli(100), false, cmaf);
 		try {
 			frameTimestamp = 480_000;
-			playback.push({ ...frame(), group: 0 });
+			playback.push({ ...frame(), group: 0n });
 			await microtasks();
-			playback.push({ kind: "end", group: 0, end: Micro(520_000) });
+			playback.push({ kind: "end", group: 0n, end: Micro(520_000) });
 			frameTimestamp = 0;
-			playback.push({ ...frame(), group: 1 });
+			playback.push({ ...frame(), group: 1n });
 			await microtasks();
 			expect(playback.inserted()).toEqual([500_000, 20_000]);
 		} finally {
@@ -573,7 +578,7 @@ for (const cmaf of [false, true]) {
 		try {
 			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0, 160]) {
 				frameTimestamp = (ms - 20) * 1000;
-				playback.push({ ...frame(), group: ms / 20 });
+				playback.push({ ...frame(), group: BigInt(ms / 20) });
 				await microtasks();
 			}
 			expect(playback.inserted()).toEqual([140_000, 160_000]);
@@ -718,10 +723,15 @@ describe("Decoder across a rendition's absence", () => {
 			await microtasks();
 			expect(playback.track()).toBe("audio");
 			expect(contexts).toHaveLength(1);
+			drain(playback.rings()[0]);
+			await microtasks();
+			expect(contexts[0].state).toBe("suspended");
 
 			playback.restore();
 			await microtasks();
 			expect(playback.track()).toBe("audio");
+			expect(contexts[0].state).toBe("running");
+			expect(playback.supportProbes).toHaveBeenCalledTimes(1);
 			const before = playback.inserted().length;
 			const timestamps = await playback.play(6);
 
@@ -1059,7 +1069,7 @@ async function livePlayback(burst: number) {
 	let producer = new Moq.Broadcast.Producer();
 	const media = new Signal<Moq.Broadcast.Consumer>(producer.consume());
 	const broadcast = new Signal<Broadcast | undefined>({
-		in: { enabled: new Signal(true) },
+		in: { enabled: new Signal(true), name: new Signal(Moq.Path.from("watched")) },
 		out: { catalog, active: new Signal({ closed: {} }) },
 		relativeBroadcast: (effect: Effect) => effect.get(media),
 	} as unknown as Broadcast);
@@ -1067,14 +1077,14 @@ async function livePlayback(burst: number) {
 	const sync = new Sync({ delay: new Signal<Delay>("auto") });
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
-	let track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
+	let track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
 	const decoder = new Decoder({ source, sync });
 
 	const samples = (48_000 * FRAME) / 1000;
 	const output = [new Float32Array(samples), new Float32Array(samples)];
 	const counts = { inserted: 0, played: 0, silent: 0 };
 	let frame = 0;
-	let sequence = 0;
+	let sequence = 0n;
 	let held: number[] = [];
 
 	const ring = () => worklets.findLast((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring));
@@ -1101,16 +1111,16 @@ async function livePlayback(burst: number) {
 		rename(name: string, patch: Record<string, unknown> = {}) {
 			track.finish();
 			track.close();
-			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI });
-			sequence = 0;
+			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
+			sequence = 0n;
 			catalog.set({ audio: { renditions: { [name]: Catalog.AudioConfigSchema.parse({ ...audio, ...patch }) } } });
 		},
 		// Serve the same rendition from another path, as a `broadcast` override does.
 		move(path: string) {
 			media.peek().close();
 			producer = new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path)).broadcast;
-			track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
-			sequence = 0;
+			track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
+			sequence = 0n;
 			media.set(producer.consume());
 		},
 		// Remove the rendition from the catalog.
@@ -1451,7 +1461,7 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 	const logged = spyOn(console, "warn").mockImplementation(() => {});
 	const source = new Source({
 		broadcast: {
-			in: { enabled: new Signal(true) },
+			in: { enabled: new Signal(true), name: new Signal(Moq.Path.from("watched")) },
 			out: {
 				catalog: new Signal({
 					audio: {
@@ -1507,7 +1517,7 @@ it.each([false, true])("releases shared startup across a hole in queued audio (C
 			{ start: Milli(1500), end: Milli(1600) },
 		]);
 		const next = frame();
-		next.group = 1;
+		next.group = 1n;
 		playback.push(next);
 		await microtasks();
 		await clock.advance(Nano.zero);
@@ -1543,7 +1553,7 @@ for (const cmaf of [false, true]) {
 				const start = frameTimestamp;
 				for (const ms of [140, 120, 100, 80, 60, 40, 20, 0, 160]) {
 					frameTimestamp = start + (ms - 20) * 1000;
-					playback.push({ ...frame(), group: 1 + ms / 20 });
+					playback.push({ ...frame(), group: BigInt(1 + ms / 20) });
 					await microtasks();
 				}
 				expect(playback.inserted().slice(inserted)).toEqual(

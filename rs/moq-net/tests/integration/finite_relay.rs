@@ -9,6 +9,7 @@
 //! subscribes, and the publisher then resets every group still on the wire.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -19,9 +20,12 @@ use moq_net::track::Subscription;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,7 +87,9 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 
 	let (mut heads, mut opened) = futures::channel::mpsc::unbounded();
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = Subscription::default().with_max_delay(MAX_DELAY).with_range(0..);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(MAX_DELAY))
+			.with_range(0..);
 		let mut sub = remote
 			.track("tail")
 			.unwrap()

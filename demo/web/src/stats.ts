@@ -5,7 +5,7 @@
  * `.stats/node/<node>` carrying JSON tracks that snapshot current activity. We
  * auto-discover all of those nodes (announcements under `.stats/node`), so this
  * works for a single relay and for a cluster alike, then aggregate each node and
- * let you drill into one. A restarted relay announces a new epoch at the same
+ * let you drill into one. A restarted relay announces a new instance at the same
  * path, which arrives as an end then a start, so its history starts over.
  *
  * Per node we read `group.json`, the whole node's group at the relay's default
@@ -64,8 +64,8 @@ interface Snapshot {
 	bytes?: number;
 	frames?: number;
 	groups?: number;
-	// Single-frame groups carried over unreliable QUIC datagrams: a subset of `groups`,
-	// with their payload already in `frames` / `bytes`.
+	// Datagrams of datagram tracks: they belong to no group, so they count in neither
+	// `groups` nor `frames`, while their payload is in `bytes`.
 	datagrams?: number;
 }
 type BroadcastFrame = Record<string, Snapshot>;
@@ -185,7 +185,7 @@ discovery.run((effect) => {
 	});
 });
 
-function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: Net.Path.Valid, node: string) {
+function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: Net.Path.Valid, node: string) {
 	nodeStats.mutate((s) => {
 		s[node] = {
 			egress: {},
@@ -264,7 +264,7 @@ interface Sample {
 	ingress: number; // cumulative ingress bytes
 	announce: number; // cumulative announce-control bytes (both directions)
 	fetches: number; // cumulative group fetches requested
-	datagrams: number; // cumulative single-frame groups sent as QUIC datagrams
+	datagrams: number; // cumulative datagrams of datagram tracks, apart from groups
 	broadcasters: number;
 	viewers: number;
 	tracks: number;

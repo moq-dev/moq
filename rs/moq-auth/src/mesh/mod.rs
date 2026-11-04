@@ -20,8 +20,8 @@
 //! Every refusal is a 4xx with an [`ErrorReply`].
 
 use std::fmt;
-use std::str::FromStr;
 
+use moq_crypto::sign::PublicKey;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -44,97 +44,7 @@ pub const PROOF_CONTEXT: &[u8] = b"moq-mesh-enroll-00";
 /// The length of a challenge in bytes.
 pub const CHALLENGE_LEN: usize = 32;
 
-const KEY_LEN: usize = 32;
 const SIGNATURE_LEN: usize = 64;
-
-/// z-base-32: most significant bit first, no padding, trailing bits must be zero.
-static ZBASE32: std::sync::LazyLock<data_encoding::Encoding> = std::sync::LazyLock::new(|| {
-	let mut spec = data_encoding::Specification::new();
-	spec.symbols.push_str("ybndrfg8ejkmcpqxot1uwisza345h769");
-	spec.encoding().expect("a valid z-base-32 specification")
-});
-
-/// An endpoint's Ed25519 public key, which is also its endpoint ID.
-///
-/// Its text form is the 52-character [z-base-32] of the key, the form pkarr and iroh's DNS
-/// discovery use, which is also a valid DNS label. Parsing accepts only that form (lowercase,
-/// zero trailing bits), so one key names exactly one `mesh/<id>` path.
-///
-/// [z-base-32]: https://philzimmermann.com/docs/human-oriented-base-32-encoding.txt
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct EndpointId([u8; KEY_LEN]);
-
-impl EndpointId {
-	/// The ID of the raw 32-byte Ed25519 public key.
-	pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
-		Self(bytes)
-	}
-
-	/// The raw 32-byte Ed25519 public key.
-	pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
-		&self.0
-	}
-
-	/// Whether `signature` is this key's Ed25519 signature over `message`.
-	pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
-		use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
-		UnparsedPublicKey::new(&ED25519, &self.0)
-			.verify(message, signature)
-			.is_ok()
-	}
-
-	/// The broadcasts this endpoint may publish: `mesh/<id>/**`.
-	pub fn publish(&self) -> crate::Pattern {
-		crate::Pattern::subtree(&format!("mesh/{self}")).expect("a z-base-32 segment is a valid path")
-	}
-}
-
-/// The text is not the 52-character z-base-32 of a 32-byte key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("invalid endpoint ID: expected 52 z-base-32 characters")]
-#[non_exhaustive]
-pub struct InvalidEndpoint;
-
-impl FromStr for EndpointId {
-	type Err = InvalidEndpoint;
-
-	fn from_str(text: &str) -> Result<Self, Self::Err> {
-		// The alphabet is lowercase-only and nonzero trailing bits are refused, so a key has one text form.
-		let mut out = [0u8; KEY_LEN];
-		match ZBASE32.decode_len(text.len()) {
-			Ok(KEY_LEN) => ZBASE32
-				.decode_mut(text.as_bytes(), &mut out)
-				.map_err(|_| InvalidEndpoint)?,
-			_ => return Err(InvalidEndpoint),
-		};
-		Ok(Self(out))
-	}
-}
-
-impl fmt::Display for EndpointId {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(&ZBASE32.encode(&self.0))
-	}
-}
-
-impl fmt::Debug for EndpointId {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_tuple("EndpointId").field(&format_args!("{self}")).finish()
-	}
-}
-
-impl Serialize for EndpointId {
-	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		serializer.collect_str(self)
-	}
-}
-
-impl<'de> Deserialize<'de> for EndpointId {
-	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-		text.parse().map_err(serde::de::Error::custom)
-	}
-}
 
 /// The message a [`Proof`] signs: [`PROOF_CONTEXT`], a zero byte, the coordinator's base
 /// URL as the device addressed it, a zero byte, then the raw challenge.
@@ -175,7 +85,7 @@ pub struct Challenge {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof {
 	/// The endpoint ID, which is the key that signed.
-	pub endpoint: EndpointId,
+	pub endpoint: PublicKey,
 	/// The challenge, as issued.
 	#[serde_as(as = "serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>")]
 	pub challenge: Vec<u8>,
@@ -198,28 +108,29 @@ impl Proof {
 	/// Whether the signature verifies for the coordinator `base`. The challenge's
 	/// freshness is the coordinator's to check.
 	pub fn verify(&self, base: &url::Url) -> bool {
+		use rind::signature::{PublicKey, verify};
 		self.signature.len() == SIGNATURE_LEN
-			&& self
-				.endpoint
-				.verify(&proof_message(base, &self.challenge), &self.signature)
+			&& PublicKey::new(&verify::ED25519, self.endpoint.as_bytes()).is_ok_and(|key| {
+				key.verify(&proof_message(base, &self.challenge), &self.signature)
+					.is_ok()
+			})
 	}
 }
 
 /// An endpoint's secret key, held by whatever stores it.
 ///
-/// Implemented for [`aws_lc_rs::signature::Ed25519KeyPair`]; a daemon implements it for
+/// Implemented for [`rind::signature::Ed25519KeyPair`]; a daemon implements it for
 /// its own key type.
 pub trait Signer: Send + Sync {
 	/// The endpoint ID: this key's public half.
-	fn endpoint(&self) -> EndpointId;
+	fn endpoint(&self) -> PublicKey;
 	/// The Ed25519 signature over `message`.
 	fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN];
 }
 
-impl Signer for aws_lc_rs::signature::Ed25519KeyPair {
-	fn endpoint(&self) -> EndpointId {
-		use aws_lc_rs::signature::KeyPair;
-		EndpointId(
+impl Signer for rind::signature::Ed25519KeyPair {
+	fn endpoint(&self) -> PublicKey {
+		PublicKey::from_bytes(
 			self.public_key()
 				.as_ref()
 				.try_into()
@@ -228,7 +139,7 @@ impl Signer for aws_lc_rs::signature::Ed25519KeyPair {
 	}
 
 	fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN] {
-		aws_lc_rs::signature::Ed25519KeyPair::sign(self, message)
+		rind::signature::Ed25519KeyPair::sign(self, message)
 			.as_ref()
 			.try_into()
 			.expect("a 64-byte Ed25519 signature")
@@ -270,7 +181,7 @@ pub struct Enrollment {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
 	/// Its endpoint ID.
-	pub endpoint: EndpointId,
+	pub endpoint: PublicKey,
 	/// Its unique, DNS-safe name.
 	pub name: String,
 	/// The tags of the enrollment key it joined with.
@@ -335,35 +246,27 @@ impl fmt::Display for ErrorCode {
 mod tests {
 	use super::*;
 
-	fn signer() -> aws_lc_rs::signature::Ed25519KeyPair {
-		aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap()
+	fn signer() -> rind::signature::Ed25519KeyPair {
+		rind::signature::Ed25519KeyPair::generate().unwrap()
 	}
 
 	#[test]
-	fn endpoint_ids_have_one_text_form() {
-		let id = signer().endpoint();
-		let text = id.to_string();
-		assert_eq!(text.len(), 52);
-		assert_eq!(text.parse::<EndpointId>().unwrap(), id);
-		assert!(text.to_uppercase().parse::<EndpointId>().is_err());
-		assert!(text[..51].parse::<EndpointId>().is_err());
-		assert!(format!("{text}y").parse::<EndpointId>().is_err());
-		assert!(
-			data_encoding::HEXLOWER
-				.encode(id.as_bytes())
-				.parse::<EndpointId>()
-				.is_err()
-		);
-		assert_eq!(id.publish().as_str(), format!("mesh/{text}/**"));
-	}
-
-	#[test]
-	fn endpoint_ids_are_z_base_32() {
-		assert_eq!(EndpointId::from_bytes([0; KEY_LEN]).to_string(), "y".repeat(52));
-		let ones = EndpointId::from_bytes([0xff; KEY_LEN]);
-		assert_eq!(ones.to_string(), format!("{}o", "9".repeat(51)));
-		// The last character carries 4 padding bits, which must be zero.
-		assert!(format!("{}9", "9".repeat(51)).parse::<EndpointId>().is_err());
+	fn endpoint_vectors() {
+		let vectors: serde_json::Value =
+			serde_json::from_str(include_str!("../../../../drafts/moq-sign-00.json")).unwrap();
+		for row in vectors["keys"].as_array().unwrap() {
+			let text = row["endpoint"].as_str().unwrap();
+			let member: Member = serde_json::from_value(serde_json::json!({"endpoint": text, "name": "node"})).unwrap();
+			assert_eq!(member.endpoint.to_string(), text, "{}", row["id"]);
+			assert_eq!(serde_json::to_value(&member).unwrap()["endpoint"], text);
+		}
+		for row in vectors["invalid_ids"].as_array().unwrap() {
+			assert!(
+				serde_json::from_value::<Member>(serde_json::json!({"endpoint": row["text"], "name": "node"})).is_err(),
+				"{}",
+				row["id"]
+			);
+		}
 	}
 
 	#[test]

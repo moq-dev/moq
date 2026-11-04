@@ -123,10 +123,7 @@ fn partial_frame_gives_way() {
 			.with_publisher(&pub_origin)
 			.accept(
 				moq_net::time::Instant::now(),
-				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-					quic::web::Session::raw(conn),
-					moq_net::transport::Address::Setup,
-				)),
+				moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 			)
 			.await
 			.expect("accept");
@@ -144,10 +141,7 @@ fn partial_frame_gives_way() {
 				.with_subscriber(sub.clone())
 				.connect(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						quic::web::Session::raw(conn),
-						moq_net::transport::Address::Setup,
-					)),
+					moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 				)
 				.await
 				.expect("connect");
@@ -232,8 +226,9 @@ fn partial_frame_gives_way() {
 }
 
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport endpoint whose
-/// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
-/// subscriber stops it, a high-priority frame completes, and a later low group arrives.
+/// connection window is [`WINDOW`] and holds an unsealed low-priority prefix in a frame
+/// declared twice that size. The subscriber evicts it, a high-priority frame completes, and a
+/// later low group arrives.
 /// The worker speaks moq-lite only.
 #[test]
 #[ignore = "requires Bun; run by just test receive-credit in the interop workflow"]
@@ -263,7 +258,7 @@ fn javascript_partial_frame_gives_way() {
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
-	let endpoint = quic::Endpoint::new(sock, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+	let endpoint = quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), sock).expect("endpoint");
 
 	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
 	let mut child = std::process::Command::new("bun")
@@ -294,18 +289,12 @@ fn javascript_partial_frame_gives_way() {
 				.await
 				.expect("handshake");
 			let session = request
-				.respond(quic::web::Response::default().with_protocol(ALPN))
+				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(ALPN))
 				.await
 				.expect("respond");
 			let (session, driver) = moq_net::Server::new()
 				.with_subscriber(sub.clone())
-				.accept(
-					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						session,
-						moq_net::transport::Address::Uri,
-					)),
-				)
+				.accept(moq_net::time::Instant::now(), moq_uring::transport::Local::new(session))
 				.await
 				.expect("accept");
 			let task_handle = handle.clone();
@@ -333,7 +322,7 @@ fn javascript_partial_frame_gives_way() {
 			let mut low = within(&handle, "the low subscription", subscribe("low", 1)).await;
 			let mut high = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
-			// Wait until three quarters of the window holds a frame that can never complete.
+			// The sender holds back the rest, so no segment can seal and return this credit.
 			commands.write_all(b"low\n").expect("command");
 			let mut partial = within(&handle, "the low group", low.recv_group())
 				.await
@@ -355,13 +344,10 @@ fn javascript_partial_frame_gives_way() {
 			// Half the window, which only fits once the low frame lets go.
 			commands.write_all(b"high\n").expect("command");
 			assert_eq!(next_frame(&handle, &mut high).await, vec![2u8; WINDOW / 2]);
-			loop {
-				match within(&handle, "the low stop", partial.read_chunk()).await {
-					Ok(Some(_)) => {}
-					Ok(None) => panic!("a frame larger than the window completed"),
-					Err(_) => break,
-				}
-			}
+			let err = within(&handle, "the low stop", partial.read_chunk())
+				.await
+				.expect_err("the partial frame must be evicted");
+			assert!(matches!(err, moq_net::Error::Evicted), "{err}");
 
 			// The session survives, and the low track keeps delivering what fits.
 			commands.write_all(b"after\n").expect("command");

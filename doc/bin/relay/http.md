@@ -98,9 +98,15 @@ With `--runtime-io-uring`, each QUIC worker also reports `moq_relay_uring_*`
 counters under a `worker` label. Datagrams per enter and the SQE/CQE
 histograms show whether syscalls carry useful work. Compare turns and
 queue-pressure enters with throughput: flushing deferred work can remove
-empty busy turns, so enters/turn alone does not grade efficiency. The
+empty busy turns, so enters/turn alone does not grade efficiency.
+`moq_relay_uring_passes_total` over turns is how many passes over its woken
+tasks a turn runs; a ratio near the default budget of 4 shows heavy use of
+the pass budget but does not prove that work spilled into the next turn. The
 histograms include empty enters. A dead worker shows stuck zeros rather than
-disappearing.
+disappearing. The `*_pool_bytes` gauges are the UDP buffer space each worker
+has allocated; pools grow under load and keep their high-water size. Most of
+it is reserved rather than resident: RSS grows by the buffer pages datagrams
+have touched.
 
 ### GET /sessions
 
@@ -126,10 +132,18 @@ curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?id=00ff'
 
 ### GET /nodes
 
-The peers this relay dialed and holds a session with: each node's URL, without
-its query, and the connections to it, with the same `conn` id the logs use.
+Every outbound peer this relay is configured to dial, including those still
+connecting or retrying, so an entry with no `connections` is a peer that is down.
+`node` is the peer's identity without credentials: its URL, or the mDNS instance
+of a LAN peer that advertised no node URL.
+Each live connection carries the `conn` ID its log lines use and its transport
+(`quic`, `webtransport`, `websocket`, ...).
+`last_connected_seconds_ago` is the time since a session to the peer last
+connected, kept across disconnects, failed attempts, and a redial for a new
+cost or token. It is null until the first successful connect, and the peer and
+its history go away once it is removed from the peer list.
 Peers that dialed this relay are not listed, since they declare no URL.
 
 ```json
-{ "nodes": [{ "node": "https://us-east.example.com/", "connections": [{ "id": 3 }] }] }
+{ "nodes": [{ "node": "https://us-east.example.com/", "connections": [{ "id": 3, "transport": "webtransport" }], "last_connected_seconds_ago": 12.5 }] }
 ```

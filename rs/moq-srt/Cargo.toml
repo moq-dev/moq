@@ -17,6 +17,8 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
+# The media max age an ingest declares by default.
+hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Pure-Rust SRT (no libsrt / ffmpeg). SRT carries MPEG-TS, demuxed by moq-mux.
@@ -26,11 +28,10 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-# Builds the synthetic broadcasts the egress tests mux back to TS.
-hang = { path = "../hang" }
 kio = { workspace = true, features = ["runtime"] }
 srt-protocol = "0.4"
 tracing-subscriber = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 [lints]
 workspace = true

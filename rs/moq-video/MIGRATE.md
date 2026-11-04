@@ -4,10 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `decode::Options::max_delay` is `delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+### Consumer decoder setup refusals are typed
 
-`decode::Options::max_delay: Duration` is `delay: decode::Delay` (`moq_mux::container::Delay`).
-Replace `max_delay: d` with `delay: Delay { min: playout, max: Some(d) }`: `min` is your playout delay, where a cold join starts, and `max` (`None` for no limit) is the old max delay.
+`decode::Consumer::new` reports `Error::UnsupportedConfig` for a codec or description this build cannot decode, where `decode::Decoder::new` reports `Error::UnsupportedCodec`. That now includes a missing or malformed avcC or hvcC description (previously `Error::Codec` or `Error::Mux`) and a codec no compiled-in decoder handles (previously `Error::NoDecoder`). `Error::NoDecoder` now means only that every decoder for the codec failed to open. Backend faults, scale-hint errors, and subscription failures keep their own errors. A codec worker that cannot start or exits during initialization reports `Error::CodecGone`, like a worker lost after initialization, rather than `Error::Codec`.
+
+### `decode::Options::max_delay` is `delay` ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
+
+`decode::Options::max_delay: Duration` is `delay: decode::Delay` (`moq_net::track::Delay`).
+Replace `max_delay: d` with `delay: Delay { min: Some(playout), max: Some(d) }`: `min` is your playout delay, where a cold join starts, and `max` (`None` for no limit) is the old max delay.
 
 ### A capture reopened onto a new identity publishes a new track ([#7110](https://github.com/moq-dev/moq/pull/7110))
 
@@ -71,8 +75,8 @@ Set `encode::Config::color` to the first frame's `frame.surface.color()`, and re
 
 ### `encode::Producer` takes a catalog reservation (#5715)
 
-`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as the HLS hint.
-Pass `catalog.reserve().with_hls_hint(gop)` instead of the catalog.
+`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as its join interval.
+Pass `catalog.reserve().with_interval(gop)` instead of the catalog.
 
 ### Capture takes one `encode::Capture`
 

@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use moq_net::track::Delay;
 use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Hop, Timescale, Timestamp, Version, kio, origin, track};
 
@@ -38,6 +39,11 @@ fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
 	spawn(driver);
 	origin
+}
+
+/// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
+fn timed() -> Info {
+	Info::default().with_timescale(Timescale::MILLI).with_max_age(None)
 }
 
 /// A publisher holding every group, a relay, and a viewer behind it.
@@ -73,9 +79,7 @@ impl Chain {
 			links.push(peer(version, relay, &viewer).await);
 		}
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let source = broadcast
-			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
-			.unwrap();
+		let source = broadcast.create_track("video", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		Self {
 			source,
@@ -111,7 +115,7 @@ impl Chain {
 		let consumer = self.viewer.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let subscription = Subscription::default()
-			.with_max_delay(budget)
+			.with_delay(Delay::default().with_max(budget))
 			.with_ranges([Range::oldest()]);
 		remote.track("video").unwrap().subscribe(subscription).await.unwrap()
 	}
@@ -167,11 +171,11 @@ async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 		first
 			.update(
 				Subscription::default()
-					.with_max_delay(NARROW)
+					.with_delay(Delay::default().with_max(NARROW))
 					.with_ranges([Range::oldest()]),
 			)
 			.unwrap();
-		while source.subscription_changed().await.unwrap().and_then(|s| s.max_delay) != Some(NARROW) {}
+		while source.subscription_changed().await.unwrap().and_then(|s| s.delay.max) != Some(NARROW) {}
 		chain.populate();
 		assert_eq!(received(&mut first).await, (6..GROUPS).collect());
 
@@ -207,7 +211,7 @@ async fn a_widened_reader_gets_what_was_skipped() {
 			assert_eq!(first, (6..GROUPS).collect(), "{version} relay={relay}");
 
 			let wide = Subscription::default()
-				.with_max_delay(WIDE)
+				.with_delay(Delay::default().with_max(WIDE))
 				.with_ranges([Range::oldest()]);
 			reader.update(wide).unwrap();
 			let widened = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
@@ -299,9 +303,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.session(moq_net::Path::from_static(""));
 	let _upstream = connect_mock(options).await;
 	let broadcast = publisher.create_broadcast("live").unwrap();
-	let source = broadcast
-		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
-		.unwrap();
+	let source = broadcast.create_track("video", timed()).unwrap();
 	for sequence in 0..GROUPS {
 		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
 		group
@@ -319,7 +321,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		let consumer = viewer.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let subscription = Subscription::default()
-			.with_max_delay(budget)
+			.with_delay(Delay::default().with_max(budget))
 			.with_ranges([Range::oldest()]);
 		let mut reader = remote.track("video").unwrap().subscribe(subscription).await.unwrap();
 		let got = received(&mut reader).await;

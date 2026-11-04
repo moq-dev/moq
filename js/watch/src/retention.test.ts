@@ -80,8 +80,9 @@ test("waits on a stable clock leave nothing behind", async () => {
 // the effect's teardown. Retention anywhere along it grows with the frame count.
 test("a long subscription through the player path leaves nothing behind", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	// A tiny publisher window, so the track's own replay cache stays flat too.
-	const track = broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI, maxAge: Milli(1) });
+	// The track's cache keeps every group here for its fixed 30s idle window whatever maxAge the
+	// track declares, and holds no reactions or listeners while it does.
+	const track = broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	const format = new Container.Legacy.Format("audio");
 	const producer = new Container.Legacy.Producer(track, format);
 
@@ -91,7 +92,7 @@ test("a long subscription through the player path leaves nothing behind", async 
 		broadcast: broadcast.consume(),
 		track: "audio",
 		priority: 0,
-		maxDelay: sync.out.maxDelay,
+		delay: new Derived([sync.out.delay, sync.out.maxDelay], (min, max) => ({ min, max })),
 	});
 	if (!sub) throw new Error("no subscription");
 	const consumer = new Container.Consumer(sub, {

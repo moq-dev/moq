@@ -1,20 +1,22 @@
-# [S] Backport the dot-segment and auth-redirect refusals to release
+# [M] Backport the relay HTTP hardening and credit-starved withdrawal to release
 
 ## Goal
 
-The `release` branch's relay refuses connection paths with `.` or `..` segments before asking the auth server, and `release`'s auth client refuses redirects from the auth server, matching main. The fixes ship in the next patch release a human cuts.
+`release`'s relay serves its HTTP routes with main's response hardening and ops-listener checks, and withdraws a moq-transport advertisement a peer starves of send credit, with the published API unchanged. The fixes ship in the next patch release a human cuts.
 
 ## Plan
 
-Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run): combine these backports into one later patch release, with versions chosen by a human.
+Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run): hand-port rather than cherry-pick where `release` lacks main's structure, as [moq-dev/moq#7389](https://github.com/moq-dev/moq/pull/7389) did, with a regression test for each on `release`. Version bumps stay with a human: several backports combine into one patch release, so these PRs bump nothing.
 
-- The main prerequisite [moq-dev/moq#7366](https://github.com/moq-dev/moq/pull/7366) merged on 2026-11-01. The hand-port of its dot-segment refusal and [moq-dev/moq#6384](https://github.com/moq-dev/moq/pull/6384)'s auth-client redirect refusal is [moq-dev/moq#7599](https://github.com/moq-dev/moq/pull/7599), targeting `release`.
-- That backport remains draft: full local CI and the io_uring compile cannot launch Cargo because of the existing mbx `E2BIG` defect tracked in [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594). Resume those checks after the infrastructure fix. The selected Rust package checks, all 588 selected tests, API compatibility checks, and other-vendor security review pass; the code PR records the evidence.
-- Once validated and approved, land the code PR on `release` and include it in the planned combined patch release. No versions, tags, publication, deployment, or merges were authorized for this implementation task.
-- Keep this main checkpoint draft until that patch publishes, then delete the quest and its milestone link, following [moq-dev/moq#7381](https://github.com/moq-dev/moq/pull/7381). The earlier [moq-dev/moq#7389](https://github.com/moq-dev/moq/pull/7389) backport is already merged and remains a separate scope.
+Added 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run):
 
-Public API: none. Wire format: none; the backport changes admission and auth HTTP refusal behavior.
+- **Relay HTTP hardening:** port [moq-dev/moq#7210](https://github.com/moq-dev/moq/pull/7210) (merged): `/fetch` serves bytes as `application/octet-stream`, `/fetch` and `/announced` send `nosniff` and `private, no-store` (refusals included), and the ops listener refuses any request with `Origin` and any `Host` or URI authority that isn't the accepted socket's destination. `release` has its own `rs/moq-relay/src/fetch.rs` and `internal.rs`; port the behavior and #7210's tests, not its layout.
+- **Withdraw without credit:** port [moq-dev/moq#7414](https://github.com/moq-dev/moq/pull/7414) (merged), keeping `release`'s published API: a withdrawn PUBLISH_NAMESPACE or REQUEST_UPDATE that a peer starves of send credit is reset in both directions instead of pinning the announce loop. Port its zero- and partial-credit withdrawal tests for the drafts `release` speaks.
+
+Shipped: the dot-segment and auth-redirect refusals landed on `release` in [moq-dev/moq#7599](https://github.com/moq-dev/moq/pull/7599) (2026-11-02) and published in `moq-auth` 0.2.3 and `moq-relay` 0.17.11 (2026-11-03). That also settles the redirect follow-up [moq-dev/moq#7298](https://github.com/moq-dev/moq/pull/7298) and [moq-dev/moq#7278](https://github.com/moq-dev/moq/pull/7278) suggested. [moq-dev/moq#7596](https://github.com/moq-dev/moq/pull/7596) holds this quest's claim.
+
+Public API: none. Wire: none; as on main, a withdrawal resets a partially written request without waiting for peer credit.
 
 ## Related
 
-- [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - the earlier backport in the same patch release
+- [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - the earlier backport, which shipped alongside the dot-segment and redirect refusals

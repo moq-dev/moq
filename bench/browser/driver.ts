@@ -10,12 +10,18 @@ import { cpus, freemem, loadavg, platform, totalmem } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { type Browser, type CDPSession, chromium, type Page } from "playwright";
+import { install as countCalls, withoutGetStats, withoutWebTransport } from "./calls.ts";
+import { Consoles, type Identity } from "./consoles.ts";
 import { install, read } from "./counters.ts";
 import { check, digest, payload } from "./fixture.ts";
 import type { Cmaf, Phase } from "./page/cmaf.ts";
 import type { Media } from "./page/media.ts";
+import type { Dial, Mode, Racing } from "./page/racing.ts";
+import type { Counts, Sampling } from "./page/stats.ts";
 import type { Delivery, Transport } from "./page/transport.ts";
+import { resumeFailure, type SamplingShape, samplingFailure, total } from "./sampling.ts";
 import { compare, type Row, summarize } from "./summary.ts";
+import { collections, GC_CATEGORIES, rendererPid, type TraceEvent, traceEvents } from "./trace.ts";
 
 const { values } = parseArgs({
 	options: {
@@ -25,7 +31,7 @@ const { values } = parseArgs({
 		variants: { type: "string" },
 		rounds: { type: "string", default: "5" },
 		warmup: { type: "string", default: "1" },
-		scenarios: { type: "string", default: "transport,cmaf,media" },
+		scenarios: { type: "string", default: "transport,cmaf,media,racing,stats" },
 		smoke: { type: "boolean", default: false },
 		timeout: { type: "string", default: "60" },
 	},
@@ -40,6 +46,7 @@ if (!values.relay || !values.dist || !values.out || !values.variants)
 const relay = values.relay;
 const dist = values.dist;
 const out = values.out;
+await using consoles = new Consoles(join(out, "consoles.jsonl"));
 const variants = values.variants.split(",");
 if (!variants.includes("current")) throw new Error("--variants must include current");
 // The change under test is current against base; every control is judged against current.
@@ -52,7 +59,8 @@ const warmup = smoke ? 0 : integer("warmup", values.warmup, 0);
 const timeout = integer("timeout", values.timeout, 1) * 1000;
 const scenarios = new Set(values.scenarios.split(","));
 for (const scenario of scenarios)
-	if (!["transport", "cmaf", "media"].includes(scenario)) throw new Error(`unknown scenario: ${scenario}`);
+	if (!["transport", "cmaf", "media", "racing", "stats"].includes(scenario))
+		throw new Error(`unknown scenario: ${scenario}`);
 
 // Fixed so a run on another host or day compares like with like. Software rendering and decode:
 // a hardware path appearing or disappearing would change what is measured.
@@ -63,6 +71,10 @@ const FLAGS = [
 	"--disable-backgrounding-occluded-windows",
 	"--autoplay-policy=no-user-gesture-required",
 ];
+// Shipping Chromium has no WebTransport getStats(); the stats scenario runs in a second browser
+// exposing it, so sampling does the transport work a browser with the API does. Its `absent`
+// shapes delete it again, which is what shipping Chromium and Safari present.
+const STATS_FLAGS = [...FLAGS, "--enable-blink-features=WebTransportStats"];
 
 // The costs worth reading at a glance; report.json keeps every metric.
 const HEADLINE = new Set([
@@ -73,6 +85,11 @@ const HEADLINE = new Set([
 	"watcher_ms_per_s",
 	"publisher_ms_per_s",
 	"presented_fps",
+	"getstats_per_s",
+	"main_ms_per_s",
+	"first_estimate_p50_ms",
+	"connect_p50_ms",
+	"retained_strings",
 ]);
 // Deterministic or one-off metrics from the traced, counted and probed passes.
 const INSTRUMENTED = /^(copied|allocated|gc_|frame_delay)/;
@@ -93,9 +110,79 @@ const CMAF: Cmaf[] = [
 	{ kind: "audio", sizes: Array(50).fill(160), iterations: smoke ? 2 : 200 },
 	{ kind: "video", sizes: [65536, ...Array(29).fill(4096)], iterations: smoke ? 2 : 100 },
 ];
+// One axis varies from the 16 URL x 4 reconnect x 256 character base at a time. One lane keeps
+// each dial's latency its own; the 128 URL shape takes 8 lanes to finish, so its latency is
+// contended and only its retention compares.
+type RacingShape = Pick<Racing, "mode" | "urls" | "reconnects" | "length" | "rotate" | "lanes">;
+const racingShape = (mode: Mode, shape: Partial<RacingShape> = {}): RacingShape => ({
+	mode,
+	urls: smoke ? 4 : 16,
+	reconnects: smoke ? 2 : 4,
+	length: smoke ? 64 : 256,
+	rotate: false,
+	lanes: 1,
+	...shape,
+	// A sticky URL races a WebSocket win, then two dials with WebTransport open again.
+	...(mode === "sticky" && { reconnects: 3 }),
+});
+const RACING: RacingShape[] = smoke
+	? [
+			racingShape("websocket"),
+			racingShape("websocket", { rotate: true }),
+			racingShape("webtransport"),
+			racingShape("sticky"),
+			racingShape("alternate"),
+			racingShape("disabled"),
+		]
+	: [
+			racingShape("websocket"),
+			racingShape("websocket", { urls: 1 }),
+			racingShape("websocket", { urls: 128, lanes: 8 }),
+			racingShape("websocket", { reconnects: 1 }),
+			racingShape("websocket", { reconnects: 16 }),
+			racingShape("websocket", { length: 64 }),
+			racingShape("websocket", { length: 2048 }),
+			racingShape("websocket", { rotate: true }),
+			racingShape("webtransport"),
+			racingShape("sticky"),
+			racingShape("alternate"),
+			racingShape("disabled"),
+		];
+// Past the pool's two-second linger, so nothing a closed session scheduled still holds a URL.
+const RACING_LINGER_MS = 2500;
 const MEDIA = { width: 1280, height: 720, fps: 30, codec: "avc1", bitrate: 2_500_000, keyframe_ms: 1000 };
 const MEDIA_WARMUP_MS = smoke ? 1000 : 3000;
 const MEDIA_WINDOW_MS = smoke ? 3000 : 10000;
+const grid = (mode: Sampling["mode"], connections: number[], reservations: number[], absent?: boolean) =>
+	connections.flatMap((c) =>
+		reservations.map((r): SamplingShape => ({ mode, connections: c, reservations: r, absent })),
+	);
+// Distinct connections crossed with reservations held on each, plus receive-only playback,
+// pool linger, identical pooled handles (one connection, the control), qmux, and private
+// loops on a WebTransport without getStats().
+const SAMPLING: SamplingShape[] = smoke
+	? [
+			...grid("private", [1, 4], [0, 1]),
+			...grid("receive", [1], [0]),
+			...grid("linger", [1], [0]),
+			...grid("pooled", [4], [0]),
+			...grid("qmux", [1], [0, 1]),
+			...grid("private", [1], [0, 1], true),
+		]
+	: [
+			...grid("private", [1, 4, 16], [0, 1, 4]),
+			...grid("receive", [1, 16], [0]),
+			...grid("linger", [1, 16], [0]),
+			...grid("pooled", [4], [0, 1]),
+			...grid("qmux", [4], [0, 1]),
+			...grid("private", [1, 16], [0, 1], true),
+		];
+// Each shape settles before its window, so connection setup stays out of it. Linger's window
+// must close inside the pool's two-second linger.
+const SAMPLING_SETTLE_MS = 500;
+const SAMPLING_WINDOW_MS = smoke ? 1000 : 2000;
+const LINGER_WINDOW_MS = 1200;
+const RESUME = { cycles: smoke ? 3 : 10, idle_ms: 500, limit_ms: 2000 };
 
 const server = Bun.serve({
 	hostname: "127.0.0.1",
@@ -104,7 +191,7 @@ const server = Bun.serve({
 		const path = new URL(request.url).pathname;
 		if (path === "/cmaf-fixtures.json")
 			return new Response(Bun.file(new URL("../../js/hang/src/cmaf/fixtures.json", import.meta.url)));
-		const page = /^\/([a-z0-9-]+)\/(transport|cmaf|media)$/.exec(path);
+		const page = /^\/([a-z0-9-]+)\/(transport|cmaf|media|racing|stats)$/.exec(path);
 		if (page)
 			return new Response(
 				`<!doctype html><body><script type="module" src="/${page[1]}/${page[2]}.js"></script>`,
@@ -129,7 +216,13 @@ const report = {
 	revisions: JSON.parse(process.env.BENCH_REVISIONS ?? "{}"),
 	rounds,
 	warmup,
-	browser: { executable: process.env.BROWSER_BIN ?? "playwright chromium", version: "", flags: FLAGS, page: {} },
+	browser: {
+		executable: process.env.BROWSER_BIN ?? "playwright chromium",
+		version: "",
+		flags: FLAGS,
+		stats_flags: STATS_FLAGS,
+		page: {},
+	},
 	host: {
 		platform: platform(),
 		cpu: cpus()[0]?.model,
@@ -143,6 +236,8 @@ const report = {
 		"GC pauses and reclaimed JS heap come from a separate traced pass; tracing overhead never enters a timed sample.",
 		"Copied and allocated bytes count JS-visible typed-array copies only, from a separate counted pass. Native copies (WebTransport, WebCodecs) are unavailable.",
 		"Software decode and rendering (--disable-gpu). Hardware paths are not measured.",
+		"Racing retention counts flat heap-snapshot strings holding the run's URL marker after every session closed, the pool linger passed and V8 collected. Heap growth is JSHeapUsedSize across the run and includes unrelated state V8 kept.",
+		"Racing refuses WebTransport in the page's constructor, as a blocked network fails it; the WebSocket head start still runs, so the fallback's latency matches a silent UDP drop.",
 		"Frame delay joins publisher paint time with watcher presentation time across pages on one host clock; only the probed pass reads frame ids back.",
 	],
 	samples: [] as Row[],
@@ -157,14 +252,25 @@ const save = () => {
 	return saving;
 };
 
-const browser: Browser = await chromium.launch({
-	channel: process.env.BROWSER_BIN ? undefined : "chromium",
-	executablePath: process.env.BROWSER_BIN,
-	headless: true,
-	args: FLAGS,
-});
+interface Chromium {
+	browser: Browser;
+	system: CDPSession;
+}
+
+async function launch(args: string[]): Promise<Chromium> {
+	const browser = await chromium.launch({
+		channel: process.env.BROWSER_BIN ? undefined : "chromium",
+		executablePath: process.env.BROWSER_BIN,
+		headless: true,
+		args,
+	});
+	return { browser, system: await browser.newBrowserCDPSession() };
+}
+
+const main = await launch(FLAGS);
+const { browser } = main;
 report.browser.version = browser.version();
-const system = await browser.newBrowserCDPSession();
+const exposed = scenarios.has("stats") ? await launch(STATS_FLAGS) : undefined;
 
 try {
 	for (let round = 0; round < warmup + rounds; round++) {
@@ -178,6 +284,15 @@ try {
 		if (scenarios.has("cmaf"))
 			for (const shape of CMAF) for (const variant of order) await sample(cmaf(variant, shape, round, "timed"));
 		if (scenarios.has("media")) for (const variant of order) await sample(media(variant, round, "timed"));
+		if (scenarios.has("stats")) {
+			// Nothing here receives stream chunks in bulk, so the copy control measures nothing.
+			const measured = order.filter((variant) => variant !== "copy");
+			for (const shape of SAMPLING)
+				for (const variant of measured) await sample(sampling(variant, shape, round, "timed"));
+			for (const variant of measured) await sample(resume(variant, round));
+		}
+		if (scenarios.has("racing"))
+			for (const shape of RACING) for (const variant of order) await sample(racing(variant, shape, round));
 	}
 	console.log("── traced and counted passes");
 	for (const variant of variants) {
@@ -191,9 +306,15 @@ try {
 			await sample(media(variant, -1, "traced"));
 			await sample(media(variant, -1, "probed"));
 		}
+		if (scenarios.has("stats") && variant !== "copy")
+			for (const shape of SAMPLING) {
+				await sample(sampling(variant, shape, -1, "traced"));
+				await sample(sampling(variant, shape, -1, "counted"));
+			}
 	}
 } finally {
 	await browser.close();
+	await exposed?.browser.close();
 	server.stop(true);
 	const timed = report.samples.filter((row) => row.pass === "timed" && row.round >= warmup);
 	report.summary = summarize(timed);
@@ -208,17 +329,31 @@ type Pass = "timed" | "traced" | "counted" | "probed";
 interface Opened {
 	page: Page;
 	cdp: CDPSession;
+	chromium: Chromium;
 	pid: number;
 	errors: string[];
 	close: () => Promise<void>;
 }
 
-async function open(variant: string, kind: string, counted = false): Promise<Opened> {
-	const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+// How a page is instrumented, kept out of the identity its console entries carry.
+interface Instrumentation {
+	counted?: boolean;
+	init?: (() => void)[];
+	on?: Chromium;
+}
+
+async function open(
+	identity: Identity,
+	{ counted = false, init = [], on = main }: Instrumentation = {},
+): Promise<Opened> {
+	const { variant, kind } = identity;
+	const context = await on.browser.newContext({ viewport: { width: 1280, height: 720 } });
 	const page = await context.newPage();
 	const errors: string[] = [];
+	consoles.attach(page, identity);
 	page.on("pageerror", (error) => errors.push(error.message));
 	if (counted) await page.addInitScript(install);
+	for (const script of init) await page.addInitScript(script);
 	await page.goto(`${origin}/${variant}/${kind}`);
 	await page.waitForFunction((kind) => kind in window && "environment" in window, kind);
 	const environment = await page.evaluate(() => window.environment());
@@ -228,52 +363,13 @@ async function open(variant: string, kind: string, counted = false): Promise<Ope
 	const cdp = await context.newCDPSession(page);
 	// Refuse an unavailable CPU clock rather than relabeling wall time as CPU.
 	await cdp.send("Performance.enable", { timeDomain: "threadTicks" });
-	return { page, cdp, pid: await rendererPid(page), errors, close: () => context.close() };
+	return { page, cdp, chromium: on, pid: await pagePid(page, on.browser), errors, close: () => context.close() };
 }
 
 // The renderer process behind a page, from the frame list a trace starts with.
-async function rendererPid(page: Page): Promise<number> {
+async function pagePid(page: Page, browser: Browser): Promise<number> {
 	await browser.startTracing(page, { categories: ["disabled-by-default-devtools.timeline"] });
-	const events = traceEvents(await browser.stopTracing());
-	const url = page.url();
-	for (const event of events) {
-		if (event.name !== "TracingStartedInBrowser") continue;
-		const frames = (event.args?.data?.frames ?? []) as { url: string; processId: number }[];
-		const frame = frames.find((frame) => frame.url === url);
-		if (frame) return frame.processId;
-	}
-	throw new Error(`no renderer process found for ${url}`);
-}
-
-interface TraceEvent {
-	name: string;
-	ph: string;
-	pid: number;
-	tid: number;
-	dur?: number;
-	args?: { data?: { frames?: unknown }; usedHeapSizeBefore?: number; usedHeapSizeAfter?: number };
-}
-
-function traceEvents(buffer: Buffer): TraceEvent[] {
-	const trace = JSON.parse(buffer.toString()) as { traceEvents?: TraceEvent[] } | TraceEvent[];
-	return Array.isArray(trace) ? trace : (trace.traceEvents ?? []);
-}
-
-// GC on one renderer's main thread: total pause, count, and the JS heap each collection reclaimed.
-function collections(events: TraceEvent[], pid: number) {
-	const gcs = events.filter(
-		(event) => event.pid === pid && event.tid === pid && (event.name === "MinorGC" || event.name === "MajorGC"),
-	);
-	const reclaimed = gcs.reduce(
-		(sum, event) => sum + Math.max(0, (event.args?.usedHeapSizeBefore ?? 0) - (event.args?.usedHeapSizeAfter ?? 0)),
-		0,
-	);
-	return {
-		count: gcs.length,
-		minor: gcs.filter((event) => event.name === "MinorGC").length,
-		pause_ms: gcs.reduce((sum, event) => sum + (event.dur ?? 0), 0) / 1000,
-		reclaimed_bytes: reclaimed,
-	};
+	return rendererPid(traceEvents(await browser.stopTracing()), page.url());
 }
 
 async function metrics(opened: Opened) {
@@ -284,7 +380,7 @@ async function metrics(opened: Opened) {
 	return { main_s: task, heap: value("JSHeapUsedSize") ?? null };
 }
 
-async function processes() {
+async function processes(system = main.system) {
 	const { processInfo } = (await system.send("SystemInfo.getProcessInfo")) as {
 		processInfo: { type: string; id: number; cpuTime: number }[];
 	};
@@ -345,14 +441,13 @@ async function trace(
 	page: Page,
 	name: string,
 	run: () => Promise<void>,
+	browser = main.browser,
 ): Promise<TraceEvent[] | undefined> {
 	if (pass !== "traced") {
 		await run();
 		return undefined;
 	}
-	await browser.startTracing(page, {
-		categories: ["devtools.timeline", "v8", "disabled-by-default-v8.gc", "disabled-by-default-devtools.timeline"],
-	});
+	await browser.startTracing(page, { categories: GC_CATEGORIES });
 	let buffer: Buffer | undefined;
 	try {
 		await run();
@@ -377,8 +472,11 @@ async function transport(
 		full: pass === "counted",
 	};
 	const key = `transport ${shape.size}B x${shape.frames}`;
-	const publisher = await open(variant, "transport");
-	const consumer = await open(variant, "transport", pass === "counted");
+	const publisher = await open({ variant, kind: "transport", role: "publisher", key, round, pass });
+	const consumer = await open(
+		{ variant, kind: "transport", role: "consumer", key, round, pass },
+		{ counted: pass === "counted" },
+	);
 	try {
 		await bounded(
 			publisher.page.evaluate((config) => window.transport.publish(config), config),
@@ -465,7 +563,7 @@ function gcMetrics(gc: ReturnType<typeof collections>) {
 
 async function cmaf(variant: string, shape: Cmaf, round: number, pass: Pass) {
 	const key = `cmaf ${shape.kind}`;
-	const opened = await open(variant, "cmaf");
+	const opened = await open({ variant, kind: "cmaf", role: "decoder", key, round, pass });
 	try {
 		await opened.page.evaluate((shape) => window.cmaf.prepare(shape), shape);
 		const expected = shape.sizes.reduce((sum, size, frame) => {
@@ -513,11 +611,143 @@ async function cmaf(variant: string, shape: Cmaf, round: number, pass: Pass) {
 	}
 }
 
+function racingKey(shape: RacingShape) {
+	const lanes = shape.lanes > 1 ? ` ${shape.lanes} lanes` : "";
+	return `racing ${shape.mode} ${shape.urls}u x${shape.reconnects} ${shape.length}c${shape.rotate ? " rotated" : ""}${lanes}`;
+}
+
+/**
+ * Flat strings in the page's heap holding `marker` after a full collection: how many, their V8
+ * object bytes, and the characters of their snapshot names, which V8 truncates at 1024.
+ */
+async function retained(cdp: CDPSession, marker: string) {
+	const chunks: string[] = [];
+	const onChunk = ({ chunk }: { chunk: string }) => chunks.push(chunk);
+	cdp.on("HeapProfiler.addHeapSnapshotChunk", onChunk);
+	try {
+		await cdp.send("HeapProfiler.collectGarbage");
+		await cdp.send("HeapProfiler.takeHeapSnapshot", { reportProgress: false });
+	} finally {
+		cdp.off("HeapProfiler.addHeapSnapshotChunk", onChunk);
+	}
+	const snapshot = JSON.parse(chunks.join("")) as {
+		snapshot: { meta: { node_fields: string[]; node_types: [string[], ...unknown[]] } };
+		nodes: number[];
+		strings: string[];
+	};
+	const fields = snapshot.snapshot.meta.node_fields;
+	const stride = fields.length;
+	const [typeAt, nameAt, sizeAt] = ["type", "name", "self_size"].map((field) => fields.indexOf(field));
+	// Flat strings only: a cons or sliced string's name repeats characters a flat string owns.
+	const flat = snapshot.snapshot.meta.node_types[0].indexOf("string");
+	let strings = 0;
+	let bytes = 0;
+	let chars = 0;
+	for (let node = 0; node < snapshot.nodes.length; node += stride) {
+		if (snapshot.nodes[node + typeAt] !== flat) continue;
+		const name = snapshot.strings[snapshot.nodes[node + nameAt]];
+		if (!name.includes(marker)) continue;
+		strings++;
+		bytes += snapshot.nodes[node + sizeAt];
+		chars += name.length;
+	}
+	return { strings, bytes, chars };
+}
+
+async function racing(variant: string, shape: RacingShape, round: number) {
+	const key = racingKey(shape);
+	const marker = `rh${crypto.randomUUID().replaceAll("-", "")}`;
+	const config: Racing = { url: relay, marker, ...shape };
+	const opened = await open({ variant, kind: "racing", role: "consumer", key, round, pass: "timed" });
+	try {
+		await opened.cdp.send("HeapProfiler.enable");
+		await opened.cdp.send("HeapProfiler.collectGarbage");
+		const before = await metrics(opened);
+		const start = performance.now();
+		const dials: Dial[] = await bounded(
+			opened.page.evaluate((config) => window.racing.run(config), config),
+			`${key} dials`,
+		);
+		const wall_ms = performance.now() - start;
+		await Bun.sleep(RACING_LINGER_MS);
+		// Every dialed URL extends the marker with `-`, so the bare marker the page was handed never counts.
+		const kept = await retained(opened.cdp, `${marker}-`);
+		const after = await metrics(opened);
+		if (opened.errors.length) throw new Error(opened.errors.join("; "));
+		if (dials.length !== shape.urls * shape.reconnects)
+			throw new Error(`${key} ${variant}: ${dials.length} dials, expected ${shape.urls * shape.reconnects}`);
+		// Only a refused or disabled arm fixes the winner; an open race is reported, never asserted.
+		const forced = (dial: Dial) =>
+			shape.mode === "websocket" || shape.mode === "alternate" || (shape.mode === "sticky" && dial.attempt === 0)
+				? "websocket"
+				: shape.mode === "disabled"
+					? "webtransport"
+					: undefined;
+		for (const dial of dials) {
+			const expected = forced(dial);
+			if (expected && dial.transport !== expected)
+				throw new Error(
+					`${key} ${variant}: dial ${dial.attempt} won over ${dial.transport}, expected ${expected}`,
+				);
+		}
+		const summary = (subset: Dial[]) => {
+			const ms = subset.map((dial) => dial.ms).sort((a, b) => a - b);
+			const at = (q: number) => ms[Math.min(ms.length - 1, Math.floor(q * ms.length))];
+			return {
+				websocket: subset.filter((dial) => dial.transport === "websocket").length / subset.length,
+				p50: at(0.5),
+				p95: at(0.95),
+			};
+		};
+		const all = summary(dials);
+		const first = summary(dials.filter((dial) => dial.attempt === 0));
+		// Per later attempt, such as sticky's second and third dials, which race with WebTransport open again.
+		const attempts = Object.fromEntries(
+			Array.from({ length: shape.reconnects - 1 }, (_, index) => index + 1).flatMap((attempt) => {
+				const phase = summary(dials.filter((dial) => dial.attempt === attempt));
+				return [
+					[`dial${attempt + 1}_p50_ms`, phase.p50],
+					[`dial${attempt + 1}_websocket_fraction`, phase.websocket],
+				];
+			}),
+		);
+		const wins = dials.filter((dial) => dial.transport === "websocket").length;
+		const row: Row = {
+			scenario: "racing",
+			key,
+			shape: { ...shape, linger_ms: RACING_LINGER_MS },
+			variant,
+			round,
+			pass: "timed",
+			delivered: { frames: dials.length, bytes: kept.bytes, digest: wins },
+			metrics: {
+				wall_ms,
+				connect_p50_ms: all.p50,
+				connect_p95_ms: all.p95,
+				dial1_p50_ms: first.p50,
+				...attempts,
+				websocket_fraction: all.websocket,
+				url_chars: Math.max(...dials.map((dial) => dial.chars)),
+				retained_strings: kept.strings,
+				retained_v8_bytes: kept.bytes,
+				retained_chars: kept.chars,
+				...(before.heap !== null && after.heap !== null && { heap_growth_bytes: after.heap - before.heap }),
+			},
+			heap: { before: before.heap, after: after.heap },
+			load: loadavg(),
+		};
+		record(row);
+		log(row);
+	} finally {
+		await opened.close();
+	}
+}
+
 async function media(variant: string, round: number, pass: Pass) {
 	const config: Media = { url: relay, path: `media/${crypto.randomUUID()}`, ...MEDIA, probe: pass === "probed" };
 	const key = `media ${MEDIA.width}x${MEDIA.height}@${MEDIA.fps}`;
-	const publisher = await open(variant, "media");
-	const watcher = await open(variant, "media");
+	const publisher = await open({ variant, kind: "media", role: "publisher", key, round, pass });
+	const watcher = await open({ variant, kind: "media", role: "consumer", key, round, pass });
 	try {
 		await bounded(
 			publisher.page.evaluate((config) => window.media.publish(config), config),
@@ -630,6 +860,145 @@ async function media(variant: string, round: number, pass: Pass) {
 	} finally {
 		await watcher.close();
 		await publisher.close();
+	}
+}
+
+async function sampling(variant: string, shape: SamplingShape, round: number, pass: Pass) {
+	const { absent, ...rest } = shape;
+	const config: Sampling = { url: relay, path: `stats/${crypto.randomUUID()}`, ...rest };
+	const key = `stats ${shape.mode}${absent ? " absent" : ""} c${shape.connections} r${shape.reservations}`;
+	const init = [countCalls];
+	if (shape.mode === "qmux") init.push(withoutWebTransport);
+	if (absent) init.push(withoutGetStats);
+	if (!exposed) throw new Error("the stats browser is not running");
+	const opened = await open({ variant, kind: "stats", role: "sampler", key, round, pass }, { init, on: exposed });
+	try {
+		await bounded(
+			opened.page.evaluate((config) => window.stats.setup(config), config),
+			`${key} setup`,
+		);
+		await Bun.sleep(SAMPLING_SETTLE_MS);
+		const span = shape.mode === "linger" ? LINGER_WINDOW_MS : SAMPLING_WINDOW_MS;
+		const snapshot = async () => ({
+			at: performance.now(),
+			counts: await opened.page.evaluate(() => window.stats.counts()),
+			outcome: await opened.page.evaluate(() => window.stats.outcome()),
+			page: await metrics(opened),
+			processes: await processes(exposed.system),
+		});
+		const before = await snapshot();
+		if (pass === "counted") {
+			// Collected objects included: the cost is what the window allocated, not what it kept.
+			await opened.cdp.send("HeapProfiler.enable");
+			await opened.cdp.send("HeapProfiler.startSampling", {
+				samplingInterval: 256,
+				includeObjectsCollectedByMajorGC: true,
+				includeObjectsCollectedByMinorGC: true,
+			});
+		}
+		const events = await trace(
+			pass,
+			opened.page,
+			`${key.replaceAll(" ", "-")}-${variant}`,
+			() => Bun.sleep(span),
+			exposed.browser,
+		);
+		const allocated =
+			pass === "counted" ? allocatedBytes((await opened.cdp.send("HeapProfiler.stopSampling")).profile.head) : 0;
+		const after = await snapshot();
+		if (opened.errors.length) throw new Error(opened.errors.join("; "));
+		const seconds = (after.at - before.at) / 1000;
+		const failure = samplingFailure(shape, before.outcome, after.outcome);
+		if (failure) throw new Error(`${key} ${variant}: ${failure}`);
+		const rate = (value: number) => value / seconds;
+		const cpu = processCpu(before.processes, after.processes, { renderer: opened.pid });
+		const delta = (name: keyof Counts) => after.counts[name] - before.counts[name];
+		const row: Row = {
+			scenario: "stats",
+			key,
+			shape: { ...shape, transport: after.outcome.transport, window_s: seconds },
+			variant,
+			round,
+			pass,
+			delivered: {
+				frames: total(after.outcome.received) - total(before.outcome.received),
+				bytes: 0,
+				digest: after.outcome.estimated,
+			},
+			metrics: {
+				getstats_per_s: rate(delta("getstats")),
+				timers_per_s: rate(delta("timers")),
+				main_ms_per_s: rate((after.page.main_s - before.page.main_s) * 1000),
+				...Object.fromEntries(Object.entries(cpu).map(([name, value]) => [`${name}_per_s`, rate(value)])),
+				estimated: after.outcome.estimated,
+				received_fps: rate(total(after.outcome.received) - total(before.outcome.received)),
+				...(pass === "counted" && { allocated_kib_per_s: rate(allocated / 1024) }),
+				...(events && gcMetrics(collections(events, opened.pid))),
+			},
+			heap: { before: before.page.heap, after: after.page.heap },
+			load: loadavg(),
+		};
+		record(row);
+		log(row);
+		await opened.page.evaluate(() => window.stats.stop());
+	} finally {
+		await opened.close();
+	}
+}
+
+// Bytes a sampled allocation profile attributes, summed over the whole call tree.
+function allocatedBytes(node: { selfSize: number; children: { selfSize: number; children: unknown[] }[] }): number {
+	let sum = node.selfSize;
+	for (const child of node.children) sum += allocatedBytes(child as typeof node);
+	return sum;
+}
+
+// Releases and re-takes a reservation on an idle connection, timing its first send-rate slice.
+async function resume(variant: string, round: number) {
+	const config = {
+		url: relay,
+		path: `stats/${crypto.randomUUID()}`,
+		mode: "private" as const,
+		connections: 1,
+		reservations: 0,
+		...RESUME,
+	};
+	const key = `stats resume x${RESUME.cycles}`;
+	if (!exposed) throw new Error("the stats browser is not running");
+	const opened = await open(
+		{ variant, kind: "stats", role: "sampler", key, round, pass: "timed" },
+		{ init: [countCalls], on: exposed },
+	);
+	try {
+		const waits = await bounded(
+			opened.page.evaluate((config) => window.stats.resume(config), config),
+			`${key} cycles`,
+		);
+		if (opened.errors.length) throw new Error(opened.errors.join("; "));
+		const failure = resumeFailure(waits);
+		if (failure) throw new Error(`${key} ${variant}: ${failure}`);
+		const found = waits.toSorted((a, b) => a - b);
+		const at = (q: number) => found[Math.min(found.length - 1, Math.floor(q * found.length))] ?? Number.NaN;
+		const row: Row = {
+			scenario: "stats",
+			key,
+			shape: { ...RESUME },
+			variant,
+			round,
+			pass: "timed",
+			delivered: { frames: found.length, bytes: 0, digest: waits.length },
+			metrics: {
+				first_estimate_p50_ms: at(0.5),
+				first_estimate_max_ms: found.at(-1) ?? Number.NaN,
+			},
+			heap: { before: null, after: null },
+			load: loadavg(),
+		};
+		record(row);
+		log(row);
+		await opened.page.evaluate(() => window.stats.stop());
+	} finally {
+		await opened.close();
 	}
 }
 

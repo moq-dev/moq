@@ -67,17 +67,22 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [CEA-608/708](/quest/m3/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
 - [WebXR playback](/quest/m3/watch-webxr.md) - `<moq-watch>` renders equirectangular and stereo renditions through WebXR layers on a headset
+- [Protected playback in the browser](/quest/m3/drm-playback.md) - `<moq-watch>` plays CENC renditions through MSE and EME, once a consumer asks
 - [Paced replay](/quest/m3/archive-paced-replay.md) - an archive consumer pushes stored groups to live subscribers on one shared clock, so any live player plays it
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   reads its viewers' feedback and adapts its bitrate
 - [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: a released moq-tokio and @moq/net carry close() withdrawals; then the runner's moq.dev clients switch to close()
 - [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the Safari release the gate admits
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
-- [Studio](/quest/m3/studio/README.md) - a native and wasm streaming studio on moq-scene, moq-video, and moq-audio for creators and teams who rely on OBS today
+- [moq-video in the browser](/quest/m3/video-web.md) - getUserMedia, getDisplayMedia, WebCodecs, and VideoFrame import into wgpu, for moq-dev/studio's web studio
+- [moq-audio in the browser](/quest/m3/audio-web.md) - AudioWorklet capture and playback and WebCodecs Opus and AAC, for the web studio's audio
+- [moq-audio filter chain](/quest/m3/audio-filters.md) - per-source suppression, gate, compressor, limiter, ducking, and plugins, which moq-dev/studio configures
 - [Mesh keys](/quest/m3/mesh-keys.md) - parked: encrypted and HMAC-authenticated mesh broadcasts through a wrapped `.keys` track
-- [A gate host is rented](/quest/m3/ci-host-rented.md) - condition: the maintainer rents a host for the public merge gates
-- [Gate on a rented host](/quest/m3/ci-host.md) - moq, quest, and rust2 gate on one rented box with a warm disk cache instead of the home host
 - [rust2-ts reaches moq-net's model](/quest/m3/rs2ts-model-ready.md) - rust2's translator is ready to translate the model
 - [Keep moq-net's model in rust2-ts's subset](/quest/m3/rs2ts-model-subset.md) - safe twins for the model's internal `unsafe`, `dyn Expiry` as an enum, once rust2-ts reaches the model
 - [Wait for a stable bun lint](/quest/m3/bun-lint-release.md) - condition: `bun lint` ships in a stable Bun that nixpkgs carries
-- [Evaluate bun fmt and bun lint](/quest/m3/bun-lint.md) - a measured decision on replacing Biome
+- [Rust and JS end a lite-05 track the same way after an inclusive SUBSCRIBE_END](/quest/m3/lite05-subscribe-end.md) - after a legacy inclusive SUBSCRIBE_END, Rust and JS both end the track instead of Rust sending a FIN and JS only releasing
+- [Byte-at-a-time MKV input imports as fast as chunked input](/quest/m3/mkv-input-coalesce.md) - the MKV importer fed one byte at a time is no slower than before moq-dev/moq#7234
+- [A transcode ladder probes an unseen source shape without stalling its other rungs](/quest/m3/transcode-parallel-open.md) - a source changing to an unseen size opens the new encoders without stalling the ladder's other rungs
+- [rind-instant-acme is on crates.io](/quest/m3/rind-instant-acme.md) - waiting on instant-acme 0.9 and rind publishing its adapter
+- [Relay ACME on instant-acme](/quest/m3/relay-acme.md) - moq-relay's ACME returns on instant-acme and rind, once a user needs it

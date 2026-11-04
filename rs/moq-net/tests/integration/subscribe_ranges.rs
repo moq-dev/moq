@@ -4,6 +4,7 @@
 //! subscription, and each still gets the groups its own range asks for.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -22,6 +23,13 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 		moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
+}
+
+/// A millisecond track with no publisher max age, so ranges reach its superseded groups.
+fn timed() -> Info {
+	Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 fn write_group(track: &moq_net::track::Producer, sequence: u64) {
@@ -61,9 +69,7 @@ async fn subscribe(remote: &moq_net::broadcast::Consumer, subscription: Subscrip
 async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u64>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast
-		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-		.unwrap();
+	let track = broadcast.create_track("quiet", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..=3 {
 		write_group(&track, sequence);
@@ -126,9 +132,7 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 	for version in LITE {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let track = broadcast
-			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-			.unwrap();
+		let track = broadcast.create_track("quiet", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let subscriber = produce_origin(2);
@@ -143,7 +147,7 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 			.expect("broadcast resolves");
 
 		let subscription = Subscription::default()
-			.with_max_delay(Duration::from_secs(60))
+			.with_delay(Delay::default().with_max(Duration::from_secs(60)))
 			.with_ranges(sparse);
 		let mut reader = subscribe(&remote, subscription).await;
 		kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
@@ -210,9 +214,7 @@ async fn range_fixture_version(version: &str, relay: bool) -> RangeFixture {
 async fn range_fixture_history(version: &str, relay: bool, history: u64) -> RangeFixture {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("ranges").unwrap();
-	let track = broadcast
-		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-		.unwrap();
+	let track = broadcast.create_track("quiet", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..history {
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
@@ -262,7 +264,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 						&fixture.remote,
 						Subscription::default()
 							.with_ranges([Range::live()])
-							.with_max_delay(None),
+							.with_delay(Delay::default().with_max(None)),
 					)
 					.await;
 					assert_eq!(next(&mut warm).await, Some(5));
@@ -271,7 +273,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 				}
 				let subscription = Subscription::default()
 					.with_ranges([Range::groups(1..2), Range::live()])
-					.with_max_delay(None);
+					.with_delay(Delay::default().with_max(None));
 				let mut reader = subscribe(&fixture.remote, subscription).await;
 				let mut got = Vec::new();
 				for _ in 0..2 {
@@ -290,29 +292,33 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 async fn draft22_updates_both_bounds_across_cached_groups() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture(relay).await;
+		// Reaching the live group 5, so the copy subscribes: history alone is fetched.
 		let initial = Subscription::default()
-			.with_range(2..4)
-			.with_max_delay(None)
+			.with_ranges([Range::groups(2..4), Range::groups(5..6)])
+			.with_delay(Delay::default().with_max(None))
 			.with_order(moq_net::track::Order::Ascending);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
-		let mut seen = [next(&mut reader).await.unwrap(), next(&mut reader).await.unwrap()];
+		let mut seen = Vec::new();
+		for _ in 0..3 {
+			seen.push(next(&mut reader).await.unwrap());
+		}
 		seen.sort_unstable();
-		assert_eq!(seen, [2, 3]);
+		assert_eq!(seen, [2, 3, 5]);
 		reader.update(initial.clone().with_range(0..6)).unwrap();
 		let mut got = Vec::new();
-		for _ in 0..4 {
+		for _ in 0..3 {
 			let seen = next(&mut reader).await;
 			got.push(seen.expect("a widened group never arrived"));
 		}
 		got.sort_unstable();
-		assert_eq!(got, [0, 1, 4, 5], "relay={relay}");
+		assert_eq!(got, [0, 1, 4], "relay={relay}");
 		reader.update(initial.clone().with_range(4..5)).unwrap();
 		kio::clock::timeout(
 			TIMEOUT,
 			kio::wait(|waiter| {
 				assert!(
-					reader.poll_recv_group(waiter).is_pending(),
-					"the narrowed reader has no unread group"
+					matches!(reader.poll_recv_group(waiter), std::task::Poll::Ready(Ok(None))),
+					"the narrowed reader read its range"
 				);
 				loop {
 					if fixture
@@ -348,14 +354,18 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 async fn draft22_resolves_cached_time_ends() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture(relay).await;
+		// Reaching the live group 5, so the copy subscribes: history alone is fetched.
 		let initial = Subscription::default()
-			.with_range(2..4)
-			.with_max_delay(None)
+			.with_ranges([Range::groups(2..4), Range::groups(5..6)])
+			.with_delay(Delay::default().with_max(None))
 			.with_order(moq_net::track::Order::Ascending);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
-		let mut seen = [next(&mut reader).await.unwrap(), next(&mut reader).await.unwrap()];
+		let mut seen = Vec::new();
+		for _ in 0..3 {
+			seen.push(next(&mut reader).await.unwrap());
+		}
 		seen.sort_unstable();
-		assert_eq!(seen, [2, 3]);
+		assert_eq!(seen, [2, 3, 5]);
 		let unknown = initial.clone().with_ranges([Range {
 			start: moq_net::track::Anchor::Absolute(0),
 			end: Some(moq_net::track::Anchor::Time(Timestamp::from_millis(10_000).unwrap())),
@@ -428,7 +438,9 @@ async fn draft22_can_widen_while_the_current_group_is_quiet() {
 		);
 		let mut history = subscribe(
 			&fixture.remote,
-			Subscription::default().with_range(0..2).with_max_delay(None),
+			Subscription::default()
+				.with_range(0..2)
+				.with_delay(Delay::default().with_max(None)),
 		)
 		.await;
 		let mut got = [next(&mut history).await.unwrap(), next(&mut history).await.unwrap()];
@@ -452,7 +464,9 @@ async fn draft18_updates_narrow_then_widen() {
 	let version = "moq-transport-18";
 	for relay in [false, true] {
 		let mut fixture = range_fixture_version(version, relay).await;
-		let initial = Subscription::default().with_range(5..).with_max_delay(None);
+		let initial = Subscription::default()
+			.with_range(5..)
+			.with_delay(Delay::default().with_max(None));
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = Vec::new();
 		for _ in 0..1 {
@@ -519,8 +533,9 @@ async fn draft18_updates_narrow_then_widen() {
 	}
 }
 
-/// Empty ranges retire only demand no other reader holds. A later widening reuses
-/// the copy and joins the new live group, without disturbing a sibling reader.
+/// Empty ranges end the read and retire only demand no other reader holds. A later
+/// widening reuses the copy and joins the new live group, without disturbing a sibling
+/// reader.
 #[kio::test]
 async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
@@ -532,7 +547,10 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			assert_eq!(next(&mut reader).await, Some(5));
 			assert_eq!(next(&mut sibling).await, Some(5));
 			reader.update(live.clone().with_ranges([])).unwrap();
-			assert!(reader.poll_recv_group(&kio::Waiter::noop()).is_pending());
+			assert!(matches!(
+				reader.poll_recv_group(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Ok(None))
+			));
 			let mut group = fixture
 				.track
 				.create_group(moq_net::group::Info { sequence: 6 })
@@ -549,7 +567,10 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			kio::clock::timeout(
 				TIMEOUT,
 				kio::wait(|waiter| {
-					assert!(reader.poll_recv_group(waiter).is_pending());
+					assert!(matches!(
+						reader.poll_recv_group(waiter),
+						std::task::Poll::Ready(Ok(None))
+					));
 					loop {
 						if fixture.track.subscription().is_none() {
 							return std::task::Poll::Ready(());
@@ -581,7 +602,9 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 async fn draft22_cold_widening_finishes_the_largest_group() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture_history("moq-transport-22", relay, 0).await;
-		let initial = Subscription::default().with_range(2..).with_max_delay(None);
+		let initial = Subscription::default()
+			.with_range(2..)
+			.with_delay(Delay::default().with_max(None));
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		for start in [0, 1, 2] {
 			let future = start + 1;
@@ -714,19 +737,17 @@ async fn unresolved_time_reader_never_changes_sibling_demand() {
 	}
 }
 
-/// A lite-07 publisher ends a bounded subscription once every group in range is
-/// delivered or dropped, releasing its demand, and the subscriber keeps the copy: the
-/// track does not end, the same range reads again from the cache, and a wider one
-/// subscribes again for the rest, past a group that never existed. Older versions park
-/// instead, since their subscriber reads a FIN as the track's end.
+/// A covered bounded subscription stays open on every version: a lite-07 publisher keeps
+/// the stream open for an update rather than FIN it, and older ones park, since their
+/// subscriber reads a FIN as the track's end. The track does not end, the same range reads
+/// again from the cache, and a wider one reaches upstream for the rest, past a group that
+/// never existed. The demand goes once the readers do.
 #[kio::test]
-async fn a_covered_bounded_subscription_ends_on_lite07() {
+async fn a_covered_bounded_subscription_stays_open() {
 	for version in LITE {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let track = broadcast
-			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
-			.unwrap();
+		let track = broadcast.create_track("quiet", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		for sequence in [0, 1, 2, 4, 5] {
 			write_group(&track, sequence);
@@ -745,7 +766,7 @@ async fn a_covered_bounded_subscription_ends_on_lite07() {
 
 		let bounded = |range: std::ops::Range<u64>| {
 			Subscription::default()
-				.with_max_delay(Duration::from_secs(60))
+				.with_delay(Delay::default().with_max(Duration::from_secs(60)))
 				.with_order(moq_net::track::Order::Ascending)
 				.with_ranges([Range::groups(range)])
 		};
@@ -754,34 +775,30 @@ async fn a_covered_bounded_subscription_ends_on_lite07() {
 		assert_eq!(next(&mut reader).await, Some(2), "{version}");
 
 		let released = kio::clock::timeout(TIMEOUT, crate::support::unwanted(track.demand())).await;
-		if *version != "moq-lite-07-wip" {
-			assert!(released.is_err(), "{version}: the publisher parks");
-			drop((reader, track, session, subscriber, broadcast, publisher));
-			continue;
-		}
-		released.expect("the covered subscription ends").unwrap();
+		assert!(released.is_err(), "{version}: the covered subscription stays open");
 		assert!(
 			kio::clock::timeout(TIMEOUT, reader.finished()).await.is_err(),
-			"the track goes on"
+			"{version}: the track goes on"
 		);
 
 		let mut again = subscribe(&remote, bounded(1..3)).await;
-		assert_eq!(next(&mut again).await, Some(1));
-		assert_eq!(next(&mut again).await, Some(2));
-		assert!(track.subscription().is_none(), "the cache answers the same range");
+		assert_eq!(next(&mut again).await, Some(1), "{version}");
+		assert_eq!(next(&mut again).await, Some(2), "{version}");
 
 		let mut wider = subscribe(&remote, bounded(1..6)).await;
 		let mut got = Vec::new();
 		for _ in 0..4 {
 			got.extend(next(&mut wider).await);
 		}
-		assert_eq!(got, [1, 2, 4, 5]);
-		// Group 3 may still arrive on a live track, so it is dropped once the feed gives up
-		// on it, past the arrivals grace.
+		// Before lite-07 the wire carries no order, so the upstream serves newest first.
+		got.sort();
+		assert_eq!(got, [1, 2, 4, 5], "{version}");
+
+		drop((reader, again, wider));
 		kio::clock::timeout(Duration::from_secs(60), crate::support::unwanted(track.demand()))
 			.await
-			.expect("the wider subscription ends past the missing group")
+			.unwrap_or_else(|_| panic!("{version}: the demand leaves with the readers"))
 			.unwrap();
-		drop((reader, again, wider, track, session, subscriber, broadcast, publisher));
+		drop((track, session, subscriber, broadcast, publisher));
 	}
 }

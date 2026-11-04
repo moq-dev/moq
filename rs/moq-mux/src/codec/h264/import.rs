@@ -94,19 +94,11 @@ impl Import {
 	}
 
 	fn initialize_avc3(&mut self, data: &[u8]) -> Result<()> {
-		// Resolve the config from any SPS in the seed buffer. Scan a clone so the
-		// caller's buffer is left intact for the splitter to consume.
-		let mut scan = Bytes::copy_from_slice(data);
-		let mut nals = NalIterator::new(&mut scan);
-		while let Some(nal) = nals.next().transpose()? {
+		// Resolve the config from any SPS in the seed buffer.
+		for nal in crate::codec::annexb::complete_nals(data)? {
 			if is_sps(&nal) {
 				self.seed_sps(&nal)?;
 			}
-		}
-		if let Some(nal) = nals.flush()?
-			&& is_sps(&nal)
-		{
-			self.seed_sps(&nal)?;
 		}
 		Ok(())
 	}
@@ -173,6 +165,18 @@ impl Import {
 		Ok(())
 	}
 
+	/// Report frames the encoder feeding this track skipped. See
+	/// [`Producer::report_skipped`](crate::container::Producer::report_skipped).
+	pub fn report_skipped(&self, frames: u64) {
+		self.track.report_skipped(frames);
+	}
+
+	/// Report the target bitrate of the encoder feeding this track. See
+	/// [`Producer::report_bitrate`](crate::container::Producer::report_bitrate).
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		self.track.report_bitrate(bitrate);
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
@@ -211,19 +215,7 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			if frame.keyframe {
-				let hdr =
-					crate::codec::color::access_unit(&frame.payload, self.length_size, 1, |h| h & 0x1f == NAL_TYPE_SEI);
-				// avc1 config arrives out-of-band via initialize(); avc3 carries the SPS inline.
-				let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
-				// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
-				// first, so a keyframe that also configures publishes once.
-				let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
-				self.catalog.hdr(&mut self.track, hdr, sequence)?;
-				if let Some(sps) = sps {
-					self.configure_from_sps(&sps)?;
-				}
-			}
+			self.configure(&frame)?;
 
 			if !self.catalog.configured() {
 				// A keyframe we still can't configure is undecodable, so bail
@@ -236,6 +228,30 @@ impl Import {
 			}
 
 			self.track.write(frame)?;
+		}
+		Ok(())
+	}
+
+	/// Account for a frame its caller drops rather than writes: a keyframe still configures the
+	/// rendition. The splitter re-injects the SPS and PPS into the next keyframe itself.
+	pub(crate) fn dropped(&mut self, frame: &Frame) -> Result<()> {
+		self.configure(frame)
+	}
+
+	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
+	fn configure(&mut self, frame: &Frame) -> Result<()> {
+		if !frame.keyframe {
+			return Ok(());
+		}
+		let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 1, |h| h & 0x1f == NAL_TYPE_SEI);
+		// avc1 config arrives out-of-band via initialize(); avc3 carries the SPS inline.
+		let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+		// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
+		// first, so a keyframe that also configures publishes once.
+		let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+		self.catalog.hdr(&mut self.track, hdr, sequence)?;
+		if let Some(sps) = sps {
+			self.configure_from_sps(&sps)?;
 		}
 		Ok(())
 	}
@@ -714,7 +730,7 @@ mod tests {
 		];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		// recovery-point SEI (payload type 6), then a non-IDR I-slice (type 1).
-		let sei: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
+		let sei: &[u8] = &[0x06, 0x06, 0x01, 0x84, 0x80];
 		let islice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
 
 		let mut annexb = BytesMut::new();

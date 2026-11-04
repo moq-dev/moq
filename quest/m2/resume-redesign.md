@@ -50,7 +50,7 @@ paths diverged.
 
 1. Route copies become successive writers into the logical `TrackState`,
    the only cache. Every writer is of the instance the subscription started
-   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs)
+   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-instances)
    never feeds it (the route rule in `rs/moq-net/AGENTS.md`), so its readers
    end with an error once their instance's routes are gone. Same-epoch routes
    carry identical content, so a later writer's duplicate sequence is
@@ -61,8 +61,7 @@ paths diverged.
 2. The upstream request is already the union of readers' resume points
    (`Producer::subscription`), so per-reader copy cursors are local overhead.
 3. Readers become plain cursors: delete `Inner::Resume`, `Reader`, `Copy`,
-   `Retain`, `Candidate`, per-reader datagram dedupe (dedupe once on insert),
-   and per-reader `learn_end`.
+   `Retain`, `Candidate`, and per-reader `learn_end`.
 4. `Recover` attaches to the slot, not a handed-out group: continuing a
    group whose copy failed is a
    [flight](/quest/m1/unbounded-groups/flights.md) from the reader's frame on

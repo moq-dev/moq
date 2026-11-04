@@ -60,9 +60,9 @@ func (b *BroadcastConsumer) FetchGroup(
 // Resolve returns the broadcast serving a catalog rendition, built with
 // media.VideoRendition or media.AudioRendition. The rendition's Broadcast reference, nil or
 // empty, names this broadcast; anything else names a sibling relative to it (e.g. "./source").
-// Its Epoch is the publisher instance the reference names: a broadcast proven to serve another
-// instance errors instead of resolving, and a route without an epoch cannot prove one, so there
-// it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
+// Its Instance is the stream the reference names: a broadcast proven to serve another one
+// errors instead of resolving, while a route over a wire that carries no instance cannot prove
+// one, so there it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
 // FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
 // when nil. The rendition-based media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and
 // video.Subscribe resolve it themselves.
@@ -149,12 +149,6 @@ func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
 	return bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
 }
 
-// RecvDatagram returns the next best-effort datagram in arrival order, or
-// (nil, nil) when the track ends.
-func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
-	return bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
-}
-
 // Info returns the publisher-side track properties learned during subscription.
 func (t *TrackConsumer) Info() TrackInfo {
 	return trackInfoFromFFI(t.inner.Info())
@@ -179,11 +173,6 @@ func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, er
 // out-of-sequence deliveries.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return bridge.Seq(ctx, t.RecvGroup)
-}
-
-// Datagrams ranges over best-effort datagrams in arrival order.
-func (t *TrackConsumer) Datagrams(ctx context.Context) iter.Seq2[*Datagram, error] {
-	return bridge.Seq(ctx, t.RecvDatagram)
 }
 
 // Cancel stops the stream.

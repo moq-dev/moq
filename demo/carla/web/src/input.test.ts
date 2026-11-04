@@ -15,17 +15,18 @@ import type { DriveState } from "./schemas.ts";
 const DT = 1 / 60;
 
 describe("takeoverState", () => {
-	test("adopts the vehicle's measured controls", () => {
+	test("keeps measured steering and gear with zero throttle and full brake", () => {
 		const measured: DriveState = { steering: -0.4, throttle: 0.6, brake: 0.2, gear: "reverse" };
-		expect(takeoverState(measured)).toEqual(measured);
+		expect(takeoverState(measured)).toEqual({ ...measured, throttle: 0, brake: 1 });
+		expect(measured.throttle).toBe(0.6);
 		expect(takeoverState(measured)).not.toBe(measured);
 	});
 
-	test("coasts in forward before the first measured feedback", () => {
+	test("brakes in forward before the first measured feedback", () => {
 		expect(takeoverState(undefined)).toEqual({
 			steering: 0,
 			throttle: 0,
-			brake: 0,
+			brake: 1,
 			gear: "forward",
 		});
 	});

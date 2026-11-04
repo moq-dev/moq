@@ -52,8 +52,8 @@ test("a cut makes the next update a snapshot group", async () => {
 
 	// The ratio would have kept every update in one group; the cut rolled it anyway. The replacement
 	// opens with a full snapshot, so it is one frame rather than a delta appended to the first group.
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([2, 1]);
-	expect((await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }))).at(-1)).toEqual({ a: 1, b: 3 });
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([2, 1]);
+	expect((await drain(track.subscribe({ delay: { max: REPLAY_LATENCY } }))).at(-1)).toEqual({ a: 1, b: 3 });
 });
 
 test("a cut republishes an unchanged value", async () => {
@@ -67,7 +67,7 @@ test("a cut republishes an unchanged value", async () => {
 	producer.update({ value: { a: 1 } });
 	producer.finish();
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([1, 1]);
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1, 1]);
 });
 
 test("a cut opens no replacement group", async () => {
@@ -78,7 +78,7 @@ test("a cut opens no replacement group", async () => {
 	producer.finish();
 
 	// Cutting closes the open group and stops there: no empty group for a consumer to advance into.
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([1]);
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1]);
 });
 
 test("a cut is idempotent", async () => {
@@ -96,7 +96,7 @@ test("a cut is idempotent", async () => {
 	producer.update({ value: { a: 2 } });
 	producer.finish();
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([1, 1]);
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1, 1]);
 });
 
 test("a cut is inert without deltas", async () => {
@@ -109,7 +109,7 @@ test("a cut is inert without deltas", async () => {
 	producer.update({ value: { a: 2 } });
 	producer.finish();
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([1, 1]);
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([1, 1]);
 });
 
 test("deltas off: a snapshot group per change", async () => {
@@ -122,8 +122,8 @@ test("deltas off: a snapshot group per change", async () => {
 	// Two changes => two single-frame snapshot groups. `next()` reads both in order, while `latest()`
 	// collapses the backlog to the newest value: older groups only hold superseded state (mirrors the
 	// Rust consumer). The layout itself is asserted via structure() below.
-	expect(await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ a: 1 }, { a: 2 }]);
-	expect(await drainLatest(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ a: 2 }]);
+	expect(await drain(track.subscribe({ delay: { max: REPLAY_LATENCY } }))).toEqual([{ a: 1 }, { a: 2 }]);
+	expect(await drainLatest(track.subscribe({ delay: { max: REPLAY_LATENCY } }))).toEqual([{ a: 2 }]);
 });
 
 // `latest()` holding a group must jump when a newer snapshot group rolls: the
@@ -133,7 +133,7 @@ test("deltas off: a snapshot group per change", async () => {
 test("latest abandons a held group when a newer snapshot group rolls", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });
-	const consumer = new Consumer<Value>({ track: track.subscribe({ maxDelay: REPLAY_LATENCY }) });
+	const consumer = new Consumer<Value>({ track: track.subscribe({ delay: { max: REPLAY_LATENCY } }) });
 
 	producer.update({ value: { a: 1 } });
 	expect((await consumer.latest())?.value).toEqual({ a: 1 });
@@ -153,7 +153,7 @@ test("latest abandons a held group when a newer snapshot group rolls", async () 
 test("latest stays inside the reader's range", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltas: false });
-	const subscriber = track.subscribe({ maxDelay: REPLAY_LATENCY }).withRange({ end: { excluded: 2 } });
+	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).withRange({ end: { excluded: 2n } });
 	const consumer = new Consumer<Value>({ track: subscriber });
 
 	for (let n = 0; n < 4; n++) producer.update({ value: { a: n } });
@@ -166,7 +166,7 @@ test("latest stays inside the reader's range", async () => {
 test("next reads a held group out before a newer snapshot group", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });
-	const consumer = new Consumer<Value>({ track: track.subscribe({ maxDelay: REPLAY_LATENCY }) });
+	const consumer = new Consumer<Value>({ track: track.subscribe({ delay: { max: REPLAY_LATENCY } }) });
 
 	producer.update({ value: { a: 1 } });
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
@@ -184,13 +184,13 @@ test("next reads a held group out before a newer snapshot group", async () => {
 // Reading in order is still bounded: a group the subscription's max delay proves stale is skipped,
 // as on any ordered track, so a reader that falls behind jumps ahead instead of replaying it.
 test("next skips the groups the max delay abandons", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
 	const producer = new Producer<Value>({ track, deltas: false });
 	for (let n = 1; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 1_000) });
 	producer.finish();
 
-	expect(await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
-	expect(await drain(track.subscribe({ maxDelay: Milli(500) }))).toEqual([{ n: 2 }, { n: 3 }]);
+	expect(await drain(track.subscribe({ delay: { max: REPLAY_LATENCY } }))).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
+	expect(await drain(track.subscribe({ delay: { max: Milli(500) } }))).toEqual([{ n: 2 }, { n: 3 }]);
 	// The default of zero keeps only the newest group.
 	expect(await drain(track.subscribe())).toEqual([{ n: 3 }]);
 });
@@ -335,7 +335,7 @@ test("deltas never roll without a joiner", async () => {
 	producer.finish();
 
 	// The deltas outweigh the snapshot ten times over, but nobody joined to ask for a fresh group.
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([11]);
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([11]);
 });
 
 test("a joiner over the ratio gets a fresh snapshot", async () => {
@@ -343,7 +343,7 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 		[8, [4]],
 		[1, [4, 1]],
 	] as const) {
-		const track = new Track.Producer("test").accept({ refresh });
+		const track = new Track.Producer("test").accept({ refresh, maxAge: null });
 		const producer = new Producer<Value>({ track });
 		fill(producer);
 
@@ -353,13 +353,13 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 		producer.finish();
 		joiner.close();
 
-		expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([...layout]);
+		expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([...layout]);
 		expect(await drainLatest(track.subscribe())).toEqual([{ n: 3 }]);
 	}
 });
 
 test("a refresh reuses the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1 });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	for (let n = 0; n <= 3; n++) producer.update({ value: { n }, at: Time.Timestamp.fromMillis(n * 10) });
 
@@ -368,7 +368,7 @@ test("a refresh reuses the newest timestamp", async () => {
 	producer.finish();
 	joiner.close();
 
-	const ordered = track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered();
+	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const timestamps: (number | undefined)[] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const frame = await group.readFrame();
@@ -380,7 +380,7 @@ test("a refresh reuses the newest timestamp", async () => {
 });
 
 test("a refresh after an older update starts at the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1 });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	// Deltas may carry timestamps older than their group's first frame.
 	for (const [n, ms] of [30, 10, 20, 15].entries())
@@ -391,7 +391,7 @@ test("a refresh after an older update starts at the newest timestamp", async () 
 	producer.finish();
 	joiner.close();
 
-	const ordered = track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered();
+	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const restated: [number | undefined, unknown][] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const frame = await group.readFrame();
@@ -409,7 +409,7 @@ test("a refresh after an older update starts at the newest timestamp", async () 
 // update rides as a delta against it. (Mirrors the Rust
 // `a_refresh_after_a_rejected_update_restates_the_last_written_value`.)
 test("a refresh after a rejected update restates the last written value", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 1 });
+	const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	fill(producer);
 
@@ -423,8 +423,8 @@ test("a refresh after a rejected update restates the last written value", async 
 	producer.finish();
 	joiner.close();
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([4, 2]);
-	expect(await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([4, 2]);
+	expect(await drain(track.subscribe({ delay: { max: REPLAY_LATENCY } }))).toEqual([
 		{ n: 0 },
 		{ n: 1 },
 		{ n: 2 },
@@ -444,11 +444,11 @@ test("no ratio never refreshes", async () => {
 	producer.finish();
 	joiner.close();
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([4]);
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([4]);
 });
 
 test("a compressed refresh opens a fresh group", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 0, compress: true });
+	const track = new Track.Producer("test").accept({ refresh: 0, compress: true, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
@@ -460,7 +460,7 @@ test("a compressed refresh opens a fresh group", async () => {
 	producer.finish();
 	joiner.close();
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([2, 2]);
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([2, 2]);
 	const consumer = new Consumer<Value>({ track: track.subscribe() });
 	const values: Value[] = [];
 	for await (const { value } of consumer) values.push(value);
@@ -506,7 +506,7 @@ test("frame cap rolls snapshot", async () => {
 	}
 	producer.finish();
 
-	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([256, 1]);
+	expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([256, 1]);
 });
 
 test("a rejected update leaves the previous value readable", async () => {
@@ -542,13 +542,13 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 	producer.finish();
 
 	// Two groups, a self-contained snapshot each, rather than one whose frame 0 was evicted.
-	const subscriber = track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered();
-	expect((await subscriber.nextGroup())?.sequence).toBe(0);
-	expect((await subscriber.nextGroup())?.sequence).toBe(1);
+	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
+	expect((await subscriber.nextGroup())?.sequence).toBe(0n);
+	expect((await subscriber.nextGroup())?.sequence).toBe(1n);
 	expect(await subscriber.nextGroup()).toBeUndefined();
 
 	// The newest value is readable with no earlier frame to apply it to.
-	const values = await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }));
+	const values = await drain(track.subscribe({ delay: { max: REPLAY_LATENCY } }));
 	expect(values[values.length - 1]).toEqual({ v: "y".repeat(size) });
 });
 
@@ -647,7 +647,7 @@ test("each state reads back with its frame's timestamp", async () => {
 	}
 	producer.finish();
 
-	const subscription = { maxDelay: REPLAY_LATENCY };
+	const subscription = { delay: { max: REPLAY_LATENCY } };
 	const consumer = new Consumer<Value>({ track: track.subscribe(subscription) });
 	const states: [unknown, number | undefined][] = [];
 	for await (const { value, at } of consumer) states.push([value.n, at?.as(Time.Timescale.MILLI)]);

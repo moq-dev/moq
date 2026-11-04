@@ -6,11 +6,10 @@
 //! - WebSocket (fallback via [web-transport-ws](https://crates.io/crates/web-transport-ws))
 //! - TCP via the `tcp://` (plaintext) and `tls://` schemes (qmux; requires `tcp` feature)
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
-//! - Iroh P2P (requires `iroh` feature)
 //! - A WebRTC data channel with a browser peer, signaled by the caller (qmux; requires `webrtc` feature)
 //!
-//! See [`Client`] for connecting to relays and [`Server`] for accepting
-//! connections. The `mdns` feature finds peers to connect to on the local network.
+//! With `net`, `client::Client` connects to relays; transport features enable
+//! `server::Server` for accepting connections. The `mdns` feature finds peers on the local network.
 //!
 //! With `default-features = false`, the `quic` backend must be paired
 //! with the `aws-lc-rs` or `ring` crypto-provider feature. Every other subset
@@ -35,6 +34,9 @@ mod abort;
 pub mod accept;
 pub use moq_sock::bind;
 pub mod cli;
+/// The congestion-controller traits, for a [`quic::Controller`] of the application's own.
+#[cfg(feature = "driver")]
+pub use moq_congestion as congestion;
 #[cfg(feature = "net")]
 pub mod client;
 #[cfg(feature = "net")]
@@ -89,16 +91,24 @@ pub mod webrtc;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
-/// Session settings for every qmux transport (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC).
+/// Session settings for every qmux transport (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC),
+/// with `quic`'s windows and stream count.
 ///
-/// moq-lite holds a stream open per subscription, so a qmux session grants the same
-/// stream count as QUIC rather than qmux's default of 100, past which a peer's opens
-/// wait on credit forever.
+/// A qmux session leases receive credit as QUIC does, so it takes the same per-session
+/// numbers rather than qmux's own defaults. moq-lite holds a stream open per subscription,
+/// past qmux's default of 100, where a peer's opens would wait on credit forever.
 #[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
-fn qmux_config() -> qmux::Config {
+fn qmux_config(quic: &quic::Resolved) -> qmux::Config {
 	let mut config = qmux::Config::default();
-	config.limits.max_streams = std::num::NonZeroU64::new(quic::DEFAULT_MAX_STREAMS);
+	config.limits = quic.limits();
 	config
+}
+
+/// [`qmux_config`] at the `[quic]` defaults, for a server's qmux sessions, which widen once
+/// admitted (see [`server::Request::with_quic_limits`]).
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+fn qmux_default() -> qmux::Config {
+	qmux_config(&quic::Resolved::default())
 }
 
 /// Run a qmux session's driver on the runtime, handing back the session.
@@ -139,9 +149,6 @@ pub use notify;
 /// `jni` bump is therefore a breaking change for this crate.
 #[cfg(target_os = "android")]
 pub use jni;
-
-#[cfg(feature = "iroh")]
-pub mod iroh;
 
 #[cfg(feature = "mdns")]
 pub mod mdns;

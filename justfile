@@ -70,10 +70,17 @@ bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
     BENCH_SHARD_COUNTS="$SHARDS" BENCH_SHARD_CONNECTIONS="$CONNECTIONS" bench/run.sh --shard
 
 # Profile the relay at each worker count: std mutex waits by stack (lock), CPU
-# stacks (cpu), or jemalloc heap and churn (heap), over one transport (quic, ws, wss, tcp, or tls).
+# stacks (cpu), hardware instructions and fixed-period stacks (instructions), or
+# jemalloc heap and churn (heap), over one transport (quic, ws, wss, tcp, or tls).
 # Example: `just bench-profile "cpu heap" fanout-heavy 4`, or `just bench-profile cpu chat 4 tokio-workers "" ws`.
 bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16" $RUNTIME="tokio-workers" $BASE="" $TRANSPORT="quic":
     BENCH_PROFILE_MODES="$MODES" BENCH_PROFILE_WORKLOAD="$WORKLOAD" BENCH_PROFILE_WORKERS="$WORKERS" BENCH_PROFILE_RUNTIME="$RUNTIME" BENCH_BASE="$BASE" BENCH_PROFILE_TRANSPORT="$TRANSPORT" bench/run.sh --profile
+
+# Count the chat fan-out's instructions per delivered group on one thread, through the model
+# alone and through a relay over the in-memory transport, for each revision in BASE and the
+# current tree. The counts don't move with host load: see the Fan-out section of bench/README.md.
+bench-fanout $BASE="" $SCENARIOS="model session" $SUBSCRIBERS="1 64 512":
+    BENCH_BASE="$BASE" BENCH_FANOUT_SCENARIOS="$SCENARIOS" BENCH_FANOUT_SUBSCRIBERS="$SUBSCRIBERS" bench/run.sh --fanout
 
 # Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
 # `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.
@@ -89,15 +96,16 @@ install:
 # Lints, compiles, and tests only the packages the branch changed plus
 # everything depending on them; `check --all` is the unscoped suite. BASE
 # defaults to the PR base, then a main/release upstream, then origin/main.
-# Rust compiles once: its test build doubles
-# as the clippy gate (see `rs check-test`).
+# Rust's test build doubles as the clippy gate, with a targeted default-media
+# lint for cfgs hidden by the device features (see sh/rs/select.sh).
 
 # Lint, compile, and test what the branch changed since BASE, plus its dependents.
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 
 # The landing worker runs this gate in one job. The test build also enforces
-# default-feature clippy; the feature matrix and optimized bindings run
+# clippy; a separate lint covers media tests with default features. The
+# feature matrix and optimized bindings run
 # nightly and on release PRs. Missing tools fail under CI_STRICT. The host
 # land gate also sets CHECK_FAIL_FAST=1, so a failing batch stops at its first
 # failed module.
@@ -125,6 +133,16 @@ ci-select $BASE="":
 ci-select-platform $BASE="":
     sh/dispatch.sh ci-platform "$BASE" --query
 
+# Check every supported source file; exclusions live in biome.jsonc.
+biome *args:
+    bun install --frozen-lockfile
+    bun biome check --error-on-warnings {{ args }} .
+
+# Apply Biome's fixes; installs without a frozen lockfile, like the other fixers.
+biome-fix:
+    bun install
+    bun biome check --error-on-warnings --write .
+
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"
@@ -133,6 +151,10 @@ fix $BASE="":
 [positional-arguments]
 oss-scanner *args:
     sh/oss-scanner.sh "$@"
+
+# Set every eligible package to one minor at a release cut; omit to check.
+version TARGET="":
+    python3 sh/version.py {{ if TARGET == "" { "" } else { quote(TARGET) } }}
 
 # Build the packages.
 build:

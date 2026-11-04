@@ -11,9 +11,12 @@
 use moq_tokio::moq_net::{self, Hop};
 use std::time::Duration;
 
-/// A millisecond track: the frames written here carry timestamps.
+/// A millisecond track with no publisher max age: the frames written here carry timestamps,
+/// and superseded groups stay readable.
 fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None)
 }
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -497,7 +500,9 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	let track = broadcast
 		.create_track(
 			"video",
-			moq_net::track::Info::default().with_timescale(Timescale::MICRO),
+			moq_net::track::Info::default()
+				.with_timescale(Timescale::MICRO)
+				.with_max_age(None),
 		)
 		.expect("failed to create track");
 
@@ -944,7 +949,7 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// The client connects to two servers announcing the same route. The preferred
 /// (cheaper) route serves the track; when that session dies, the broadcast
 /// re-splices through the standby at a group boundary, without the path ever
-/// being retracted: both routes carry the same epoch over lite-07, so they serve
+/// being retracted: both routes carry the same instance over lite-07, so they serve
 /// the same bytes and the subscription rides the failover.
 #[tokio::test]
 async fn broadcast_route_migration() {
@@ -952,7 +957,7 @@ async fn broadcast_route_migration() {
 
 	let publisher = Hop::new(0x42).unwrap();
 	// Replicas of one publisher instance, and the only version that carries it.
-	let epoch = moq_net::Epoch::mint();
+	let instance = moq_net::Instance::random();
 	let lite_07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 
 	// ── publisher A: the preferred route (cheaper) ──────────────────
@@ -963,7 +968,7 @@ async fn broadcast_route_migration() {
 	broadcast_a
 		.announce(
 			moq_net::origin::Route::default()
-				.with_epoch(epoch.clone())
+				.with_instance(instance.clone(), 0)
 				.with_hops(hops_a)
 				.with_cost(1),
 		)
@@ -988,7 +993,7 @@ async fn broadcast_route_migration() {
 	broadcast_b
 		.announce(
 			moq_net::origin::Route::default()
-				.with_epoch(epoch.clone())
+				.with_instance(instance.clone(), 0)
 				.with_hops(hops_b)
 				.with_cost(2),
 		)
@@ -1072,7 +1077,7 @@ async fn broadcast_route_migration() {
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
 		.with_range(1..)
-		.with_max_delay(Duration::from_secs(10));
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 	let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
@@ -1204,7 +1209,8 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
-	let budget = moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100));
+	let budget = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100)));
 	async fn recv(sub: &mut moq_net::track::Subscriber, version: &str) -> u64 {
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
@@ -1593,7 +1599,7 @@ async fn broadcast_negotiate_client_all_server_transport_18() {
 	broadcast_test("moqt", None, Some("moq-transport-18")).await;
 }
 
-// ── Retention window (track::Info::max_age) ─────────────────────
+// ── Freshness bound (track::Info::max_age) ──────────────────────
 
 async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Duration> {
 	let version: moq_net::Version = version.parse().expect("invalid version");
@@ -2066,30 +2072,33 @@ async fn broadcast_websocket_uses_newest_version() {
 
 	let expected_version: moq_net::Version = NEWEST_LITE.parse().expect("invalid version");
 
-	let server_handle = tokio::spawn(async move {
+	let accept = async {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let session = request
+			.with_publisher(&pub_origin)
+			.ok()
+			.await
+			.expect("server accept failed");
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
-		let _broadcast = broadcast;
-		let _track = track;
-		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(())
-	});
+		session
+	};
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, cc) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
-		.await
-		.expect("client connect timed out")
-		.expect("client connect failed");
+	let connect = async {
+		kio::clock::timeout(TIMEOUT, connect_once(client, url))
+			.await
+			.expect("client connect timed out")
+			.expect("client connect failed")
+	};
+	// The client can establish before the server reads SETUP. Keep it alive until
+	// both sides negotiate, or accept() can discard the closed peer and wait again.
+	let (session, (_client, cc)) = tokio::join!(accept, connect);
 
 	assert_eq!(cc.version(), Some(expected_version), "client negotiated stale version");
 
 	drop(cc);
-	server_handle
-		.await
-		.expect("server task panicked")
-		.expect("server task failed");
+	let _ = session.closed().await;
 }
 
 /// Regression guard: a Tokio runtime's session machine must run under the span
@@ -3297,8 +3306,8 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 /// left to redial, and dropping the connection closes the transport because it
 /// holds the last session clone.
 ///
-/// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the connection it just got.
+/// The client comes back because it owns the transport endpoint, and the caller
+/// has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_tokio::Client,
 	url: url::Url,
@@ -3330,7 +3339,9 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.backoff.initial = Some((Duration::ZERO).into());
-	client_config.backoff.timeout = Some((Duration::from_millis(500)).into());
+	// Any window catches the bug, since a reset window never runs out; a short one keeps the
+	// redials, each a full handshake, few.
+	client_config.backoff.timeout = Some((Duration::from_millis(100)).into());
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = client.connect(url);

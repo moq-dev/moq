@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	task::Poll,
 };
@@ -78,6 +78,8 @@ pub struct Log {
 	groups: Arc<Mutex<Vec<(usize, i64)>>>,
 	joins: Arc<Mutex<Vec<(usize, usize)>>>,
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
+	/// Set by [`Self::fail_writes`].
+	writes_fail: Arc<AtomicBool>,
 }
 
 /// One thing a send stream did, as recorded in [`Log::trail`].
@@ -106,6 +108,12 @@ impl Log {
 				code: closed.expect("closed"),
 				stream: None,
 			})
+	}
+
+	/// Fail every later write on every send stream, as a peer that stopped reading
+	/// them (STOP_SENDING) would.
+	pub fn fail_writes(&self) {
+		self.writes_fail.store(true, Ordering::Relaxed);
 	}
 
 	/// What every send stream did, in call order, tagged with the stream's id (its
@@ -302,6 +310,12 @@ impl poll::SendStream for SinkSend {
 	type Group = SinkGroup;
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if self.log.writes_fail.load(Ordering::Relaxed) {
+			return Poll::Ready(Err(SinkError {
+				stream: Some(0),
+				..Default::default()
+			}));
+		}
 		if self.prefix == 0
 			&& let Some(gate) = &self.gate
 		{
@@ -616,6 +630,8 @@ pub struct SinkSession {
 	stats: Arc<Mutex<SinkStats>>,
 	/// Set by [`Self::with_probe`].
 	probe: Option<crate::transport::Probe>,
+	/// Set by [`Self::with_receive_window`].
+	receive_window: Option<crate::transport::ReceiveWindow>,
 }
 
 impl SinkSession {
@@ -642,6 +658,12 @@ impl SinkSession {
 	/// Accept datagrams up to `max_size` bytes, recording them in the log.
 	pub fn with_datagrams(mut self, max_size: usize) -> Self {
 		self.datagram_size = max_size;
+		self
+	}
+
+	/// Report `window` as the receive windows in force.
+	pub fn with_receive_window(mut self, window: crate::transport::ReceiveWindow) -> Self {
+		self.receive_window = Some(window);
 		self
 	}
 
@@ -830,6 +852,10 @@ impl poll::Session for SinkSession {
 	fn probe(&self) -> Option<crate::transport::Probe> {
 		self.probe.clone()
 	}
+
+	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
+		self.receive_window
+	}
 }
 
 /// Connection statistics a test can dictate. Every metric defaults to unknown,
@@ -956,7 +982,6 @@ pub struct ScriptedSession {
 	unacked_fin: bool,
 	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
 	unacked_unis: Arc<AtomicUsize>,
-	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
 	/// Set by [`Self::with_send_window`].
@@ -978,11 +1003,6 @@ impl ScriptedSession {
 		self
 	}
 
-	pub fn with_datagrams(mut self, max_size: usize) -> Self {
-		self.datagram_size = max_size;
-		self
-	}
-
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
@@ -998,7 +1018,6 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			unacked_unis: Default::default(),
-			datagram_size: 0,
 			groups: false,
 			send_window: None,
 		}
@@ -1112,6 +1131,11 @@ impl ScriptedSession {
 		if let Some(wake) = &self.wake {
 			*wake.lock() = ();
 		}
+	}
+
+	/// Undo [`Self::close`], so streams opened from here park once their script runs out.
+	pub fn reopen(&self) {
+		*self.close.lock().unwrap() = None;
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
@@ -1257,7 +1281,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		self.datagram_size
+		0
 	}
 
 	fn address(&self) -> crate::transport::Address {

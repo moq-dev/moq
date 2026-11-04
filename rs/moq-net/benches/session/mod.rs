@@ -10,7 +10,9 @@
 //! as a slope. Unwatched broadcasts stay announced and silent: their cost is the
 //! route table they occupy, not a publisher writing into its own cache.
 //!
-//! `SESSION_ALLOCS=1` prints allocations per viewer-group instead of timing.
+//! `SESSION_ALLOCS=1` prints the group consumer size, allocations, allocated bytes and,
+//! where Linux perf counters are readable, user instructions per viewer-group or delivered
+//! datagram instead of timing.
 //! `SESSION_CPU=1` measures thread CPU time on Unix instead of elapsed time, excluding
 //! preemption while retaining all protocol work on this current-thread runtime. CPU-timed
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
@@ -28,6 +30,10 @@
 //! `session_delivery_prefixes` holds silent broadcasts open on one viewer session beside the
 //! one it watches, against a fixed route table. Each is an announce request the session
 //! keeps, so a per-group cost that grows with them shows as a slope over `follow`.
+//! `session_delivery_datagram` writes to a datagram track per broadcast instead of groups:
+//! one datagram per track per round across publisher and viewer axes, then larger payloads
+//! and cadences, on the lite versions (moq-transport carries no datagram tracks). Throughput
+//! counts delivered datagrams, each checked for its sequence and payload, so a lost one fails.
 //! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
 //! written plus charged cache bytes every 10s during long profiling runs. Each round
 //! advances the cache clock by a second, so the expiry window spans 30 rounds.
@@ -48,7 +54,13 @@
 //! holds others open, swept over sessions and requests held per session, so a slope
 //! here is per-request bookkeeping growing with the sessions or the requests.
 //!
-//! Everything runs on one current-thread runtime, so the only work measured is
+//! `session_fanout_threads` serves one broadcast's one-frame groups through one relay to 64
+//! viewers on multi-threaded runtimes, timed in process CPU. Each group wakes every
+//! subscription's serve task at once, so a read path that makes them take one shared lock
+//! many times pays for it in lock waits and wakes across workers: the `workers=16` rows
+//! climb above the `workers=1` ones.
+//!
+//! Everything else runs on one current-thread runtime, so the only work measured is
 //! protocol and relay work, never scheduling across threads.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench session`.
@@ -80,11 +92,13 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 pub(crate) use harness::MockConnectOptions;
 use harness::{MockPair, connect_mock};
 use mock::{MockSession, MockStats};
-use moq_net::{Hop, Timestamp, Version, broadcast, cache, group, origin, track};
+use moq_net::{Hop, Timestamp, Version, broadcast, cache, datagram, group, origin, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// The lite draft production negotiates, the next one (opt-in), and the newest
@@ -94,7 +108,14 @@ const VERSIONS: [&str; 3] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22
 /// Frames per group, so per-frame and per-group costs both appear.
 const FRAMES: usize = 4;
 
+/// Distinct datagram payloads a datagram round cycles through by sequence.
+const DATAGRAM_PAYLOADS: usize = 16;
+
 const TRACK: &str = "video";
+
+/// The datagram track's name. Lite-05/06 carry a name's stream and datagram tracks on one
+/// subscription, so a name of its own keeps the stream rounds from carrying datagrams.
+const DATAGRAMS: &str = "audio";
 
 /// Lite 06 is what the dash session and cluster peers negotiate today.
 const DASH_VERSIONS: [&str; 2] = ["moq-lite-06", "moq-transport-22"];
@@ -144,6 +165,9 @@ struct Shape {
 	compress: bool,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
+	/// Deliver each round as `burst` datagrams of `frame` bytes per watched broadcast's
+	/// datagram track instead of groups.
+	datagrams: bool,
 }
 
 impl Shape {
@@ -165,16 +189,36 @@ impl Shape {
 		credit: None,
 		fetch: false,
 		compress: false,
+		datagrams: false,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
 	/// subscription writes off as late.
 	fn subscription(&self) -> Option<track::Subscription> {
-		(self.burst > 1).then(|| track::Subscription::default().with_max_delay(Duration::from_secs(30)))
+		(self.burst > 1).then(|| {
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
+		})
 	}
 
 	fn total(&self) -> usize {
 		self.publishers * self.broadcasts
+	}
+
+	/// Datagrams every viewer reads in one datagram round.
+	fn objects(&self) -> usize {
+		self.viewers * self.watch * self.burst
+	}
+
+	/// Whether `version` carries this shape: moq-transport has no datagram tracks.
+	fn runs_on(&self, version: &str) -> bool {
+		!self.datagrams || version.parse::<Version>().unwrap().is_lite()
+	}
+
+	/// The broadcasts viewer `viewer` watches: a contiguous window starting at
+	/// `viewer * watch`, so viewers spread over the broadcasts before any doubles up.
+	fn watching(&self, viewer: usize) -> impl Iterator<Item = usize> {
+		let (watch, total) = (self.watch, self.total());
+		(0..watch).map(move |k| (viewer * watch + k) % total)
 	}
 
 	/// Frames each group gets per round.
@@ -195,6 +239,12 @@ impl Shape {
 		}
 		if self.follow > 0 {
 			return format!("{version}/broadcasts={}/follow={}", self.broadcasts, self.follow);
+		}
+		if self.datagrams {
+			return format!(
+				"{version}/publishers={}/viewers={}/payload={}/cadence={}",
+				self.publishers, self.viewers, self.frame, self.burst
+			);
 		}
 		if self.fetch && self.burst > 1 {
 			return format!(
@@ -244,6 +294,15 @@ struct Counter;
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+/// Cumulative requested allocation and reallocation sizes, not live or copied bytes.
+static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+
+fn count_allocation(bytes: usize) {
+	if COUNTING.load(Ordering::Relaxed) {
+		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+		ALLOCATED.fetch_add(bytes, Ordering::Relaxed);
+	}
+}
 
 #[global_allocator]
 static ALLOCATOR: Counter = Counter;
@@ -251,28 +310,109 @@ static ALLOCATOR: Counter = Counter;
 // Counting only. Every call forwards to the system allocator unchanged.
 unsafe impl GlobalAlloc for Counter {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		count_allocation(layout.size());
 		unsafe { System.alloc(layout) }
 	}
 
 	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		count_allocation(layout.size());
 		unsafe { System.alloc_zeroed(layout) }
 	}
 
 	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		count_allocation(new_size);
 		unsafe { System.realloc(ptr, layout, new_size) }
 	}
 
 	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
 		unsafe { System.dealloc(ptr, layout) }
+	}
+}
+
+/// User-mode instructions this thread retires, from a Linux perf counter, for the
+/// `SESSION_ALLOCS` report. Every task runs on the bench's current-thread runtime, so the
+/// thread's count is all of the protocol work. Pin the process (`taskset -c`) to repeat it.
+struct Instructions {
+	#[cfg(all(target_os = "linux", target_endian = "little"))]
+	fd: std::os::fd::OwnedFd,
+}
+
+impl Instructions {
+	/// `None` without perf access, as under `perf_event_paranoid` 3 or in most containers.
+	#[cfg(all(target_os = "linux", target_endian = "little"))]
+	fn open() -> Option<Self> {
+		use std::os::fd::FromRawFd;
+
+		/// `perf_event_attr` as of its first published size, which every kernel accepts.
+		#[repr(C)]
+		struct Attr {
+			kind: u32,
+			size: u32,
+			config: u64,
+			sample_period: u64,
+			sample_type: u64,
+			read_format: u64,
+			/// The flag bitfield, least significant bit first on a little-endian target.
+			flags: u64,
+			wakeup_events: u32,
+			bp_type: u32,
+			config1: u64,
+		}
+		const PERF_TYPE_HARDWARE: u32 = 0;
+		const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
+		const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1;
+		const PERF_FORMAT_TOTAL_TIME_RUNNING: u64 = 1 << 1;
+		const EXCLUDE_KERNEL: u64 = 1 << 5;
+		const EXCLUDE_HV: u64 = 1 << 6;
+		let attr = Attr {
+			kind: PERF_TYPE_HARDWARE,
+			size: size_of::<Attr>() as u32,
+			config: PERF_COUNT_HW_INSTRUCTIONS,
+			sample_period: 0,
+			sample_type: 0,
+			read_format: PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING,
+			flags: EXCLUDE_KERNEL | EXCLUDE_HV,
+			wakeup_events: 0,
+			bp_type: 0,
+			config1: 0,
+		};
+		// SAFETY: `attr` is a valid `perf_event_attr` of the size it declares; this thread, any CPU.
+		let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, 0) };
+		// SAFETY: a nonnegative result is a new descriptor this process owns.
+		(fd >= 0).then(|| Self {
+			fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) },
+		})
+	}
+
+	#[cfg(not(all(target_os = "linux", target_endian = "little")))]
+	fn open() -> Option<Self> {
+		None
+	}
+
+	#[cfg(all(target_os = "linux", target_endian = "little"))]
+	fn read(&self) -> u64 {
+		use std::os::fd::AsRawFd;
+
+		// PERF_FORMAT_GROUP is unset: value, time_enabled, time_running.
+		let mut values = [0u64; 3];
+		// SAFETY: `values` holds the complete read format and outlives the call.
+		let read = unsafe { libc::read(self.fd.as_raw_fd(), values.as_mut_ptr().cast(), size_of_val(&values)) };
+		assert_eq!(
+			read,
+			size_of_val(&values) as isize,
+			"perf read: {}",
+			std::io::Error::last_os_error()
+		);
+		assert_eq!(
+			values[1], values[2],
+			"perf instructions were multiplexed and undercounted"
+		);
+		values[0]
+	}
+
+	#[cfg(not(all(target_os = "linux", target_endian = "little")))]
+	fn read(&self) -> u64 {
+		unreachable!("never opened")
 	}
 }
 
@@ -283,40 +423,64 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
-/// One round's clock; the CPU variant excludes scheduling delays from other processes.
+/// A multi-threaded runtime with `workers` threads, for the scenarios timed in process CPU.
+fn threaded(workers: usize) -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_multi_thread()
+		.worker_threads(workers)
+		.enable_time()
+		.build()
+		.unwrap()
+}
+
+/// What a round is timed in.
+#[derive(Clone, Copy)]
+enum Clock {
+	Wall,
+	/// This thread's CPU time, excluding scheduling delays from other processes.
+	Thread,
+	/// Every thread's CPU time, for a multi-threaded runtime: lock waits and wakes across
+	/// its workers count too.
+	Process,
+}
+
+/// One round's clock.
 enum MeasurementClock {
 	Wall(Instant),
 	#[cfg(unix)]
-	Cpu(Duration),
+	Cpu(libc::clockid_t, Duration),
 }
 
 impl MeasurementClock {
-	fn start(cpu: bool) -> Self {
-		if cpu {
-			#[cfg(unix)]
-			return Self::Cpu(Self::cpu());
-			#[cfg(not(unix))]
-			panic!("SESSION_CPU requires Unix thread CPU clocks");
+	fn start(clock: Clock) -> Self {
+		#[cfg(unix)]
+		let id = match clock {
+			Clock::Wall => return Self::Wall(Instant::now()),
+			Clock::Thread => libc::CLOCK_THREAD_CPUTIME_ID,
+			Clock::Process => libc::CLOCK_PROCESS_CPUTIME_ID,
+		};
+		#[cfg(unix)]
+		return Self::Cpu(id, Self::cpu(id));
+		#[cfg(not(unix))]
+		match clock {
+			Clock::Wall => Self::Wall(Instant::now()),
+			_ => panic!("CPU-timed rounds require Unix CPU clocks"),
 		}
-		Self::Wall(Instant::now())
 	}
 
 	fn elapsed(self) -> Duration {
 		match self {
 			Self::Wall(start) => start.elapsed(),
 			#[cfg(unix)]
-			Self::Cpu(start) => Self::cpu()
-				.checked_sub(start)
-				.expect("thread CPU clock moved backwards"),
+			Self::Cpu(id, start) => Self::cpu(id).checked_sub(start).expect("CPU clock moved backwards"),
 		}
 	}
 
 	#[cfg(unix)]
-	fn cpu() -> Duration {
+	fn cpu(id: libc::clockid_t) -> Duration {
 		let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
 		// SAFETY: `time` is a valid, initialized output pointer for this supported clock.
-		let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
-		assert_eq!(result, 0, "thread CPU clock: {}", std::io::Error::last_os_error());
+		let result = unsafe { libc::clock_gettime(id, &mut time) };
+		assert_eq!(result, 0, "CPU clock: {}", std::io::Error::last_os_error());
 		Duration::new(
 			u64::try_from(time.tv_sec).unwrap(),
 			u32::try_from(time.tv_nsec).unwrap(),
@@ -426,6 +590,8 @@ struct Cluster<B: Backend> {
 	relays: Vec<B::Relay>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
+	/// One datagram track per broadcast, indexed like [`path`], for datagram shapes only.
+	datagrams: Vec<datagram::Producer>,
 	_broadcasts: Vec<origin::Publication>,
 	_origins: Vec<origin::Producer>,
 	_pairs: Vec<Pair>,
@@ -444,6 +610,7 @@ impl<B: Backend> Cluster<B> {
 			discovers_all: shape.follow == 0,
 			relays: Vec::new(),
 			tracks: Vec::new(),
+			datagrams: Vec::new(),
 			_broadcasts: Vec::new(),
 			_origins: Vec::new(),
 			_pairs: Vec::new(),
@@ -489,6 +656,11 @@ impl<B: Backend> Cluster<B> {
 						.create_track(TRACK, timed().with_compress(shape.compress))
 						.unwrap(),
 				);
+				if shape.datagrams {
+					let info = datagram::Info::default().with_timescale(moq_net::Timescale::MILLI);
+					this.datagrams
+						.push(broadcast.create_datagrams(DATAGRAMS, info).unwrap());
+				}
 				this._broadcasts.push(broadcast);
 			}
 
@@ -526,6 +698,7 @@ impl<B: Backend> Cluster<B> {
 		Viewer {
 			following: Vec::new(),
 			subscribers: Vec::new(),
+			datagrams: Vec::new(),
 			fetches: Vec::new(),
 			blocked: 0,
 			_pair: pair,
@@ -539,6 +712,8 @@ struct Viewer {
 	/// Announcements watched without a subscription, one announce request each.
 	following: Vec<moq_net::announce::Consumer>,
 	subscribers: Vec<track::Subscriber>,
+	/// Datagram track consumers, in the order of the broadcasts watched.
+	datagrams: Vec<datagram::Consumer>,
 	fetches: Vec<(usize, track::Consumer)>,
 	blocked: usize,
 	_pair: Pair,
@@ -558,6 +733,21 @@ impl Viewer {
 		let event = announced.next().await.expect("announced");
 		assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
 		self.following.push(announced);
+	}
+
+	/// Resolve `path` and consume its datagram track, once its publisher answers.
+	async fn watch_datagrams(&mut self, path: &str) {
+		let broadcast = self
+			.origin
+			.consume()
+			.follow(path, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
+		let consumer = broadcast.datagrams(DATAGRAMS).unwrap();
+		consumer.info().await.unwrap();
+		self.datagrams.push(consumer);
 	}
 
 	/// Resolve `path` and subscribe to each of its `tracks`.
@@ -599,8 +789,15 @@ struct Room<B: Backend> {
 	writing: Vec<Option<group::Producer>>,
 	/// The group each viewer's subscriber is reading, when paced, flattened in viewer order.
 	reading: Vec<Option<group::Consumer>>,
+	/// Distinct datagram payloads, picked by sequence so a crossed or stale delivery fails.
+	payloads: Vec<Bytes>,
+	/// The sequence each broadcast's next datagram takes.
+	next: Vec<u64>,
 	cache_now: moq_net::time::Instant,
-	cpu: bool,
+	clock: Clock,
+	/// Counts the timed rounds' instructions into `retired` for the allocation report.
+	instructions: Option<Instructions>,
+	retired: u64,
 }
 
 impl<B: Backend> Room<B> {
@@ -613,14 +810,10 @@ impl<B: Backend> Room<B> {
 		assert!(!shape.fetch || !shape.paced, "fetch rounds read finished groups");
 		let mut cluster = Cluster::<B>::new(version, shape).await;
 
-		// Viewer v watches a contiguous window starting at v * watch, so viewers
-		// spread over the broadcasts before any doubles up.
 		let mut viewers = Vec::new();
 		let mut watched = vec![false; shape.total()];
 		for viewer_index in 0..shape.viewers {
-			let broadcasts: Vec<_> = (0..shape.watch)
-				.map(|k| (viewer_index * shape.watch + k) % shape.total())
-				.collect();
+			let broadcasts: Vec<_> = shape.watching(viewer_index).collect();
 			for &broadcast in &broadcasts {
 				watched[broadcast] = true;
 			}
@@ -628,7 +821,9 @@ impl<B: Backend> Room<B> {
 			// publisher it watches whenever there is more than one.
 			let mut viewer = cluster.join((viewer_index + 1) % shape.relays, false).await;
 			for broadcast in broadcasts {
-				if shape.fetch {
+				if shape.datagrams {
+					viewer.watch_datagrams(&path(broadcast)).await;
+				} else if shape.fetch {
 					let source = viewer
 						.origin
 						.consume()
@@ -666,8 +861,17 @@ impl<B: Backend> Room<B> {
 			groups: 0,
 			writing: Vec::new(),
 			reading: Vec::new(),
+			payloads: (0..DATAGRAM_PAYLOADS)
+				.map(|index| Bytes::from(vec![index as u8; shape.frame]))
+				.collect(),
+			next: vec![0; shape.total()],
 			cache_now: moq_net::time::Instant::now(),
-			cpu: std::env::var_os("SESSION_CPU").is_some(),
+			clock: match std::env::var_os("SESSION_CPU") {
+				Some(_) => Clock::Thread,
+				None => Clock::Wall,
+			},
+			instructions: None,
+			retired: 0,
 		};
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
@@ -683,6 +887,9 @@ impl<B: Backend> Room<B> {
 			.iter()
 			.map(|viewer| viewer._pair.server_transport.blocked_writes())
 			.sum();
+		if shape.datagrams {
+			room.sync_datagrams().await;
+		}
 		// Warm every path so the timed rounds skip first-group setup.
 		for _ in 0..shape.group_frames / shape.frames() {
 			room.tick();
@@ -749,6 +956,13 @@ impl<B: Backend> Room<B> {
 		if self.shape.paced {
 			return self.paced_round().await;
 		}
+		if self.shape.datagrams {
+			return self.datagram_round().await;
+		}
+		self.group_round().await;
+	}
+
+	async fn group_round(&mut self) {
 		let constrained = self.shape.window < self.shape.frame * self.shape.group_frames;
 		if constrained {
 			for viewer in &mut self.viewers {
@@ -803,6 +1017,94 @@ impl<B: Backend> Room<B> {
 		}
 		assert_eq!(bytes, self.shape.expected());
 		self.groups += self.shape.burst * self.watched.len();
+		for &broadcast in &self.watched {
+			self.next[broadcast] = newest[broadcast] + 1;
+		}
+	}
+
+	/// Write the next datagram into every watched track.
+	fn write_datagrams(&mut self) {
+		for &broadcast in &self.watched {
+			let sequence = self.next[broadcast];
+			let payload = self.payloads[sequence as usize % DATAGRAM_PAYLOADS].clone();
+			let track = &mut self.cluster.datagrams[broadcast];
+			assert_eq!(track.append(Timestamp::ZERO, payload).unwrap(), sequence);
+			self.next[broadcast] = sequence + 1;
+		}
+	}
+
+	/// Line every viewer up on the same next sequence before the strict rounds.
+	///
+	/// A consumer is live once its track's info arrives, but on lite-05/06 the SUBSCRIBE
+	/// that carries the datagrams follows that answer, so a datagram may still miss it. Write
+	/// until every viewer has read one, then a last one each viewer reads through: the memory
+	/// transport keeps a subscription's datagrams in order, so nothing earlier arrives after.
+	async fn sync_datagrams(&mut self) {
+		let waiter = kio::Waiter::noop();
+		let mut reached = vec![false; self.shape.viewers * self.shape.watch];
+		for attempt in 0.. {
+			if !reached.contains(&false) {
+				break;
+			}
+			// Fail rather than spin: a viewer the datagrams never reach is a broken path.
+			assert!(attempt < 1024, "datagrams never reached every viewer");
+			self.write_datagrams();
+			tokio::task::yield_now().await;
+			let consumers = self.viewers.iter_mut().flat_map(|viewer| &mut viewer.datagrams);
+			for (consumer, reached) in consumers.zip(&mut reached) {
+				while let std::task::Poll::Ready(Ok(Some(_))) = consumer.poll_recv(&waiter) {
+					*reached = true;
+				}
+			}
+		}
+		self.write_datagrams();
+		for (index, viewer) in self.viewers.iter_mut().enumerate() {
+			for (consumer, broadcast) in viewer.datagrams.iter_mut().zip(self.shape.watching(index)) {
+				let last = self.next[broadcast] - 1;
+				// Bounded as above: a last datagram that never arrives fails the run.
+				let mut attempts = 0;
+				loop {
+					match consumer.poll_recv(&waiter) {
+						std::task::Poll::Ready(Ok(Some(datagram))) if datagram.sequence == last => break,
+						std::task::Poll::Ready(Ok(Some(_))) => continue,
+						std::task::Poll::Ready(end) => panic!("the datagram track ended: {end:?}"),
+						std::task::Poll::Pending => {
+							attempts += 1;
+							assert!(attempts < 1024, "the last datagram never reached a viewer");
+							tokio::task::yield_now().await;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	/// `burst` datagrams into every watched track, then every one out to each viewer
+	/// watching it. The memory transport loses none below its queue bound, so each must
+	/// arrive in order with its payload: a dropped datagram fails rather than looking
+	/// cheaper.
+	async fn datagram_round(&mut self) {
+		for _ in 0..self.shape.burst {
+			self.write_datagrams();
+		}
+		let burst = self.shape.burst as u64;
+		let mut delivered = 0;
+		for (index, viewer) in self.viewers.iter_mut().enumerate() {
+			for (consumer, broadcast) in viewer.datagrams.iter_mut().zip(self.shape.watching(index)) {
+				let first = self.next[broadcast] - burst;
+				for sequence in first..first + burst {
+					let datagram = consumer.recv().await.unwrap().expect("track ended");
+					assert_eq!(datagram.sequence, sequence, "datagram lost or reordered");
+					assert_eq!(
+						datagram.payload,
+						self.payloads[sequence as usize % DATAGRAM_PAYLOADS],
+						"datagram payload"
+					);
+					delivered += 1;
+				}
+			}
+		}
+		assert_eq!(delivered, self.shape.objects());
 	}
 
 	/// One frame into every watched group and one frame out to every viewer, so each
@@ -843,13 +1145,24 @@ impl<B: Backend> Room<B> {
 	/// number of pools, not with the delivery being measured.
 	async fn measure(&mut self, iters: u64) -> Duration {
 		let mut elapsed = Duration::ZERO;
+		let counting = std::env::var_os("SESSION_ALLOCS").is_some();
 		let report = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
 		let began = Instant::now();
 		let mut next_report = Duration::from_secs(10);
 		for _ in 0..iters {
 			self.tick();
-			let start = MeasurementClock::start(self.cpu);
+			let start = MeasurementClock::start(self.clock);
+			let before = self.instructions.as_ref().map(Instructions::read);
+			if counting {
+				COUNTING.store(true, Ordering::Relaxed);
+			}
 			self.round().await;
+			if counting {
+				COUNTING.store(false, Ordering::Relaxed);
+			}
+			if let (Some(counter), Some(before)) = (&self.instructions, before) {
+				self.retired += counter.read() - before;
+			}
 			elapsed += start.elapsed();
 			if report && began.elapsed() >= next_report {
 				eprintln!(
@@ -875,11 +1188,15 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 	};
 	let mut group = c.benchmark_group(format!("{}session_delivery_{name}{cpu}", B::PREFIX));
 	for version in VERSIONS {
-		for shape in &shapes {
+		for shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
 			// Built on first call: Criterion only calls a routine its filter
 			// selects, and calls it again for every sample.
 			let mut room = None;
-			group.throughput(Throughput::Bytes(shape.expected() as u64));
+			group.throughput(if shape.datagrams {
+				Throughput::Elements(shape.objects() as u64)
+			} else {
+				Throughput::Bytes(shape.expected() as u64)
+			});
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
 				let room = room.get_or_insert_with(|| rt.block_on(Room::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
@@ -908,6 +1225,34 @@ pub(crate) fn group_cost<B: Backend>(c: &mut Criterion) {
 		})
 	});
 	delivery::<B>(c, "group_cost", shapes);
+}
+
+/// Datagram delivery over independent publisher and viewer axes at a small payload and one
+/// datagram per track per round, then payload size and cadence at 16 publishers and 16
+/// viewers. 64 per round fills what a datagram track holds for an unread consumer exactly.
+fn datagram_shapes() -> impl Iterator<Item = Shape> {
+	let base = Shape {
+		datagrams: true,
+		..Shape::BASE
+	};
+	let cost = [1, 16].into_iter().flat_map(move |publishers| {
+		[1, 16, 64].map(move |viewers| Shape {
+			publishers,
+			viewers,
+			..base
+		})
+	});
+	let payload = [1024].map(|frame| Shape { frame, ..base });
+	let cadence = [16, 64].map(|burst| Shape { burst, ..base });
+	cost.chain(payload).chain(cadence)
+}
+
+/// Complete datagram delivery: per-object cost across publishers, viewers, payload and cadence.
+pub(crate) fn datagram<B: Backend>(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	delivery::<B>(c, "datagram", datagram_shapes());
 }
 
 /// Cached FETCH write cost across independent publishers, viewers, and group lengths.
@@ -976,7 +1321,11 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							.watch(
 								&path(0),
 								&[TRACK],
-								Some(track::Subscription::default().with_range(span..).with_max_delay(None)),
+								Some(
+									track::Subscription::default()
+										.with_range(span..)
+										.with_delay(track::Delay::default().with_max(None)),
+								),
 							)
 							.await;
 						viewers.push(viewer);
@@ -992,7 +1341,11 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let future = next + span;
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(track::Subscription::default().with_range(future..).with_max_delay(None))
+									.update(
+										track::Subscription::default()
+											.with_range(future..)
+											.with_delay(track::Delay::default().with_max(None)),
+									)
 									.unwrap();
 							}
 							kio::wait(|waiter| {
@@ -1020,7 +1373,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 									.update(
 										track::Subscription::default()
 											.with_range(future - 1..)
-											.with_max_delay(None),
+											.with_delay(track::Delay::default().with_max(None)),
 									)
 									.unwrap();
 							}
@@ -1224,9 +1577,12 @@ fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 	group.finish();
 }
 
-/// Print allocations per viewer-group instead of timing, to compare across revisions.
+/// Print Consumer size, allocations, allocated bytes and, given perf access, user
+/// instructions per viewer-group or delivered datagram, to compare across revisions.
 fn allocations<B: Backend>() {
 	const ROUNDS: usize = 256;
+
+	println!("group::Consumer: {} bytes", size_of::<moq_net::group::Consumer>());
 
 	let rt = runtime();
 	let fanout = Shape {
@@ -1234,20 +1590,38 @@ fn allocations<B: Backend>() {
 		viewers: 256,
 		..Shape::BASE
 	};
+	let groups = [Shape::BASE, fanout]
+		.into_iter()
+		.flat_map(|shape| [false, true].map(|paced| Shape { paced, ..shape }));
+	let shapes: Vec<_> = groups.chain(datagram_shapes()).collect();
 	for version in VERSIONS {
-		for shape in [Shape::BASE, fanout] {
-			for paced in [false, true] {
-				let shape = Shape { paced, ..shape };
-				let mut room = rt.block_on(Room::<B>::new(version, shape));
-				ALLOCATIONS.store(0, Ordering::Relaxed);
-				COUNTING.store(true, Ordering::Relaxed);
-				rt.block_on(room.measure(ROUNDS as u64));
-				COUNTING.store(false, Ordering::Relaxed);
+		for &shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
+			let mut room = rt.block_on(Room::<B>::new(version, shape));
+			room.instructions = Instructions::open();
+			ALLOCATIONS.store(0, Ordering::Relaxed);
+			ALLOCATED.store(0, Ordering::Relaxed);
+			rt.block_on(room.measure(ROUNDS as u64));
 
-				let groups = ROUNDS * shape.viewers * shape.watch * shape.frames() / shape.group_frames;
-				let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / groups as f64;
-				println!("{}: {allocations:.1} allocations per viewer-group", shape.id(version));
-			}
+			let (units, unit) = if shape.datagrams {
+				(ROUNDS * shape.objects(), "delivered datagram")
+			} else {
+				(
+					ROUNDS * shape.viewers * shape.watch * shape.frames() / shape.group_frames,
+					"viewer-group",
+				)
+			};
+			let per = |count: usize| count as f64 / units as f64;
+			let allocations = per(ALLOCATIONS.load(Ordering::Relaxed));
+			let bytes = per(ALLOCATED.load(Ordering::Relaxed));
+			let instructions = room
+				.instructions
+				.as_ref()
+				.map(|_| format!(", {:.0} instructions", room.retired as f64 / units as f64))
+				.unwrap_or_default();
+			println!(
+				"{}: {allocations:.2} allocations, {bytes:.0} allocated bytes{instructions} per {unit}",
+				shape.id(version)
+			);
 		}
 	}
 }
@@ -1295,10 +1669,18 @@ impl<B: Backend> ChurnRoom<B> {
 		let held: Vec<_> = (0..shape.held).map(|i| format!("held{i}")).collect();
 		let tracks: Vec<_> = held
 			.iter()
-			.map(|name| published.create_track(name.as_str(), None).unwrap())
+			.map(|name| {
+				published
+					.create_track(name.as_str(), moq_net::track::Info::default().with_max_age(None))
+					.unwrap()
+			})
 			.collect();
 		let churn: Vec<_> = (0..shape.sessions)
-			.map(|i| published.create_track(format!("churn{i}"), None).unwrap())
+			.map(|i| {
+				published
+					.create_track(format!("churn{i}"), moq_net::track::Info::default().with_max_age(None))
+					.unwrap()
+			})
 			.collect();
 
 		let mut viewers = Vec::new();
@@ -1413,6 +1795,42 @@ impl IdleRoom {
 		}
 		start.elapsed()
 	}
+}
+
+/// One relay serving one broadcast's one-frame groups to 64 viewers, as the relay load
+/// harness's `fanout` workload does, on multi-threaded runtimes timed in process CPU; see
+/// the module docs.
+pub(crate) fn fanout_threads<B: Backend>(c: &mut Criterion) {
+	// Process CPU is read through a Unix clock.
+	if !cfg!(unix) || std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some()
+	{
+		return;
+	}
+	let shape = Shape {
+		publishers: 1,
+		viewers: 64,
+		frame: 400,
+		group_frames: 1,
+		..Shape::BASE
+	};
+	let mut group = c.benchmark_group(format!("{}session_fanout_threads", B::PREFIX));
+	// Groups delivered per round: one to each viewer.
+	group.throughput(Throughput::Elements(shape.viewers as u64));
+	for workers in [1, 16] {
+		let rt = threaded(workers);
+		for version in ["moq-lite-06", "moq-lite-07-wip"] {
+			let mut room = None;
+			group.bench_function(format!("{version}/workers={workers}"), |b| {
+				let room = room.get_or_insert_with(|| {
+					let mut room = rt.block_on(Room::<B>::new(version, shape));
+					room.clock = Clock::Process;
+					room
+				});
+				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
+			});
+		}
+	}
+	group.finish();
 }
 
 pub(crate) fn idle(c: &mut Criterion) {

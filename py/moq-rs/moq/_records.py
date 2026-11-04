@@ -21,6 +21,7 @@ from moq_ffi import (
     MoqCongestionControl,
     MoqConnectionStats,
     MoqDatagram,
+    MoqDelay,
     MoqFrame,
     MoqGrant,
     MoqOrder,
@@ -117,7 +118,7 @@ class Frame:
 
 @dataclass(frozen=True)
 class Datagram:
-    """A best-effort track datagram as received: sequence number, timestamp, and payload.
+    """A datagram payload with its own sequence and optional timestamp.
 
     ``timestamp`` is ``None`` on a datagram read from an untimed track.
     """
@@ -125,6 +126,9 @@ class Datagram:
     sequence: int
     timestamp: Timestamp | None
     payload: bytes
+
+    def _ffi(self) -> MoqDatagram:
+        return MoqDatagram(sequence=self.sequence, timestamp=_opt_ts(self.timestamp), payload=self.payload)
 
     @staticmethod
     def _from_ffi(datagram: MoqDatagram) -> Datagram:
@@ -202,27 +206,52 @@ class Range:
 
 
 @dataclass(frozen=True)
+class Delay:
+    """How far behind the live edge a subscriber or decoder plays, mirroring moq-net's ``track::Delay``.
+
+    ``min`` is the target latency: the playout or jitter-buffer delay held behind the
+    live edge, and where a cold join starts. ``None`` leaves it unstated, which a decoder
+    plays as zero while the subscription keeps it unstated, so it never pulls the
+    aggregate across subscribers to zero. A ``min`` past ``max`` starts at ``max``.
+    ``max`` is how far a non-latest group may fall behind before it is skipped; zero
+    skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
+    alone to bound it, and it caps every range.
+
+    A bare ``Delay()`` is moq-net's default, zero for both.
+    """
+
+    min: timedelta | None = timedelta(0)
+    max: timedelta | None = timedelta(0)
+
+    @classmethod
+    def _from_ffi(cls, delay: MoqDelay) -> Delay:
+        return cls(min=delay.min, max=delay.max)
+
+    def _ffi(self) -> MoqDelay:
+        return MoqDelay(min=self.min, max=self.max)
+
+
+@dataclass(frozen=True)
 class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
-    ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once, ``None`` sets no subscriber limit and leaves the publisher's max
-    age alone to bound it, and it caps every range. ``ranges`` are the spans of the track
-    to deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which
-    pending group the publisher sends first, ``None`` for newest first.
+    ``delay`` is where a cold join starts and how far a non-latest group may fall behind
+    before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
+    everything ``delay.max`` still allows. ``order`` is which pending group the publisher
+    sends first, ``None`` for newest first.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
 
     priority: int = 0
-    max_delay: timedelta | None = timedelta(0)
+    delay: Delay = Delay()
     ranges: Sequence[Range] | None = None
     order: MoqOrder | None = None
 
     @classmethod
     def default(cls) -> Subscription:
-        """moq-net's defaults, whose zero ``max_delay`` skips a superseded group at once.
+        """moq-net's defaults, whose zero ``delay`` starts at the newest group and skips a superseded one at once.
 
         A ``None`` subscription means the same; ``dataclasses.replace`` this one to change
         a field.
@@ -230,7 +259,7 @@ class Subscription:
         defaults = moq_subscription_defaults()
         return cls(
             priority=defaults.priority,
-            max_delay=defaults.max_delay,
+            delay=Delay._from_ffi(defaults.delay),
             # The FFI defaults never restrict ranges, so there is no record to convert.
             ranges=None,
             order=defaults.order,
@@ -239,7 +268,7 @@ class Subscription:
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
-            max_delay=self.max_delay,
+            delay=self.delay._ffi(),
             ranges=None if self.ranges is None else [r._ffi() for r in self.ranges],
             order=self.order,
         )
@@ -254,17 +283,18 @@ class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint. It breaks
-    ties between subscriptions of equal subscriber priority. ``max_age`` is how long the
-    publisher caches a non-latest group, ``None`` for no limit. ``refresh`` is how many
-    times its first frame a group's later bytes may grow before a joining subscriber
-    asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
+    ties between subscriptions of equal subscriber priority. ``max_age`` is how long a
+    superseded group stays fresh: the default zero serves only the live edge, and
+    ``None`` sets no publisher limit, leaving only the cache to bound it. ``refresh`` is
+    how many times its first frame a group's later bytes may grow before a joining
+    subscriber asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
     ``compress`` DEFLATEs each group on the wire to peers that support it; readers
     always see the original frames.
     """
 
     priority: int = 0
-    max_age: timedelta | None = None
+    max_age: timedelta | None = timedelta(0)
     refresh: int | None = None
     timescale: int | None = None
     compress: bool = False
@@ -273,6 +303,7 @@ class TrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
             max_age=self.max_age,
+            max_age_unlimited=self.max_age is None,
             refresh=self.refresh,
             timescale=self.timescale,
             compress=self.compress,
@@ -282,7 +313,7 @@ class TrackInfo:
     def _from_ffi(info: MoqTrackInfo) -> TrackInfo:
         return TrackInfo(
             priority=info.priority,
-            max_age=info.max_age,
+            max_age=None if info.max_age_unlimited else (info.max_age or timedelta(0)),
             refresh=info.refresh,
             timescale=info.timescale,
             compress=info.compress,

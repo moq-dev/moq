@@ -9,7 +9,7 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import type * as Announce from "../announce.ts";
 import { Producer as AnnounceProducer } from "../announced.ts";
 import type * as Auth from "../auth.ts";
-import type { Handle } from "../bandwidth.ts";
+import type { Handle, Viewers } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -30,7 +30,7 @@ import {
 import type { Established as EstablishedType } from "./established.ts";
 import type { Extensions as ExtensionsType } from "./extensions.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
-import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
+import type { Drain as DrainType, GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
@@ -187,6 +187,15 @@ export class Connection {
 	readonly allocator: Getter<Handle | undefined>;
 
 	/**
+	 * The receive-side registry for the current URL, or undefined while disabled or URL-less.
+	 *
+	 * Every handle on this URL shares the same instance, so players watching over one
+	 * connection split its receive estimate instead of each selecting against all of it,
+	 * and their ceilings summed are the PROBE target. Borrowed, not owned: it has no close.
+	 */
+	readonly viewers: Getter<Pick<Viewers, "watch" | "setTarget" | "target"> | undefined>;
+
+	/**
 	 * The origin for the current URL, or undefined while disabled or URL-less.
 	 *
 	 * Publish into it or consume from it; a shared handle's origin is the same one every
@@ -222,6 +231,7 @@ export class Connection {
 	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #allocator = new Signal<Handle | undefined>(undefined);
+	readonly #viewers = new Signal<Pick<Viewers, "watch" | "setTarget" | "target"> | undefined>(undefined);
 	readonly #auth = new Signal<Auth.Handle | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
 	#signals: Effect;
@@ -252,6 +262,7 @@ export class Connection {
 		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
 		this.allocator = this.#allocator;
+		this.viewers = this.#viewers;
 		this.auth = this.#auth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
 
@@ -279,6 +290,7 @@ export class Connection {
 
 			effect.set(this.#origin, lease.origin, undefined);
 			effect.set(this.#allocator, lease.connection.allocator, undefined);
+			effect.set(this.#viewers, lease.connection.viewers, undefined);
 			effect.set(this.#auth, lease.connection.auth, undefined);
 
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
@@ -330,6 +342,7 @@ export class Connection {
 				if (!effect.get(this.enabled) || !effect.get(href)) return;
 				effect.set(this.#origin, origin, undefined);
 				effect.set(this.#allocator, loop.allocator, undefined);
+				effect.set(this.#viewers, loop.viewers, undefined);
 				effect.set(this.#auth, loop.auth, undefined);
 			});
 			signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
@@ -402,6 +415,8 @@ export namespace Connection {
 	export type Goaway = GoawayProps;
 	/** What to do with the URI a relay names in its GOAWAY. @reexport */
 	export type Redirect = RedirectType;
+	/** A relay's GOAWAY as a one-shot session received it. @reexport */
+	export type Drain = DrainType;
 	/** Current state of a {@link Connection}. @reexport */
 	export type Status = ReloadStatus;
 	/** The current connection's PROBE estimates. @reexport */
