@@ -76,9 +76,13 @@ export const CatalogSchema = z.object({
 	ext: z.optional(
 		z.pipe(
 			// A record parser drops `__proto__`; every own extension member is application data.
-			z.custom<Record<string, unknown>>(
-				(value) => typeof value === "object" && value !== null && !Array.isArray(value),
-			),
+			// Only plain objects qualify, as with a record: a `Map` or class instance has no
+			// own members to copy, so accepting one would silently empty the extension.
+			z.custom<Record<string, unknown>>((value) => {
+				if (typeof value !== "object" || value === null) return false;
+				const proto = Object.getPrototypeOf(value);
+				return proto === Object.prototype || proto === null;
+			}),
 			z.transform((value) => Object.assign(Object.create(null), value) as Record<string, unknown>),
 		),
 	),

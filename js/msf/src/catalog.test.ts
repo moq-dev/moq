@@ -273,6 +273,10 @@ test("shared Rust extension names survive decoding and the public schema", async
 		expect(Object.getPrototypeOf(parsed.ext)).toBeNull();
 		expect(decodeJson(encode(parsed))).toEqual(decodeJson(raw));
 	}
+	// Like a record, the extension accepts only plain objects: these have no own members to keep.
+	for (const bad of [new Map([["mpegts", 1]]), new Set(["mpegts"]), [1, 2], "mpegts"]) {
+		expect(() => CatalogSchema.parse({ tracks: [], ext: bad })).toThrow();
+	}
 });
 
 test("caption role, label, language and codec survive the wire", () => {
