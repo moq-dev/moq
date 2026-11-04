@@ -65,7 +65,7 @@ What remains:
   converted by hand, since the macro stays straight-line only (decided
   2026-10-28).
 - **Sibling libraries:** the poll-based libraries with hand-written wrappers
-  (moq-mux, moq-hls, moq-auth, moq-stats, moq-room, moq-sign, moq-e2ee,
+  (moq-mux, moq-hls, moq-auth, moq-stats, moq-room, moq-crypto,
   qmux, and others) gain an `async` feature, generate their wrappers, and join
   `just rs coroutines`.
 - **Default off:** moq-net's `async` feature is still on by default. Turn it off,

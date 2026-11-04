@@ -75,10 +75,12 @@ var (
 	ErrNotFound = ffi.ErrMoqErrorNotFound
 	// ErrUnsupported is returned when the requested operation is not supported by this build or peer, however it is asked for.
 	ErrUnsupported = ffi.ErrMoqErrorUnsupported
+	// ErrUnsupportedConfig is returned when media setup refuses a rendition or decoder output.
+	ErrUnsupportedConfig = ffi.ErrMoqErrorUnsupportedConfig
 	// ErrAlreadyCommitted is returned when a track already reading one way (arrival order, sequence order, or a typed reader) is asked to read another; subscribe again for a second cursor.
 	ErrAlreadyCommitted = ffi.ErrMoqErrorAlreadyCommitted
-	// ErrInvalidEpoch is returned when an epoch is not a lowercase hyphenated UUIDv7.
-	ErrInvalidEpoch = ffi.ErrMoqErrorInvalidEpoch
+	// ErrInvalidInstance is returned when an instance is empty.
+	ErrInvalidInstance = ffi.ErrMoqErrorInvalidInstance
 	// ErrInvalidPattern is returned when a path pattern is empty, has a doubled slash, or uses a reserved segment form.
 	ErrInvalidPattern = ffi.ErrMoqErrorInvalidPattern
 	// ErrUnresolvableBroadcast is returned when a referenced sibling broadcast cannot be resolved without an origin.
@@ -89,6 +91,8 @@ var (
 	ErrLog = ffi.ErrMoqErrorLog
 	// ErrConfig is returned when Dial or Listen is given a value the native side cannot use.
 	ErrConfig = ffi.ErrMoqErrorConfig
+	// ErrOutOfRange is returned when a number is outside the range the call accepts, such as viewer ceilings summing above 2^53 - 1.
+	ErrOutOfRange = ffi.ErrMoqErrorOutOfRange
 )
 
 // IsShutdown reports whether err is the expected result of a graceful shutdown

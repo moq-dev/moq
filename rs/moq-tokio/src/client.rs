@@ -81,10 +81,10 @@ pub struct Client {
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Client>,
-	#[cfg(feature = "iroh")]
-	iroh: Option<crate::iroh::Endpoint>,
-	#[cfg(feature = "iroh")]
-	iroh_addrs: Vec<std::net::SocketAddr>,
+	/// The settings each qmux dial starts from: the `[quic]` windows and stream count, so a
+	/// qmux session takes the same per-session numbers as a QUIC one.
+	#[cfg(any(feature = "websocket", feature = "tcp"))]
+	qmux: qmux::Config,
 	/// Replaces the transport dial in tests, so the reconnect loop can run over
 	/// in-memory sessions on a paused clock.
 	#[cfg(test)]
@@ -103,7 +103,7 @@ impl Client {
 	#[cfg(not(feature = "_transport"))]
 	pub fn new(_config: Config) -> crate::Result<Self> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable quic, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -125,11 +125,13 @@ impl Client {
 		quic.validate()?;
 		config.backoff.validate()?;
 
-		// Only the rustls-backed transports use this. Iroh and the plaintext
-		// qmux transports must not require a rustls crypto provider.
+		// Only the rustls-backed transports use this. The plaintext qmux
+		// transports must not require a rustls crypto provider.
 		#[cfg(any(feature = "quic", feature = "websocket"))]
 		let tls = config.tls.build()?;
 
+		#[cfg(any(feature = "websocket", feature = "tcp"))]
+		let qmux = crate::qmux_config(&quic.resolve());
 		#[cfg(feature = "quic")]
 		let quic = Some(crate::quic::Client::new(&config, &quic)?);
 
@@ -178,33 +180,11 @@ impl Client {
 			tls,
 			#[cfg(feature = "quic")]
 			quic,
-			#[cfg(feature = "iroh")]
-			iroh: None,
-			#[cfg(feature = "iroh")]
-			iroh_addrs: Vec::new(),
+			#[cfg(any(feature = "websocket", feature = "tcp"))]
+			qmux,
 			#[cfg(test)]
 			dialer: None,
 		})
-	}
-
-	/// Dial `iroh://` URLs through the given Iroh endpoint.
-	///
-	/// Required before [`connect`](Self::connect) can serve an `iroh://` URL;
-	/// without it those dials fail with [`crate::Error::IrohDisabled`].
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: crate::iroh::Endpoint) -> Self {
-		self.iroh = Some(iroh);
-		self
-	}
-
-	/// Set direct IP addresses for connecting to iroh peers.
-	///
-	/// This is useful when the peer's IP addresses are known ahead of time,
-	/// bypassing the need for peer discovery (e.g. in tests or local networks).
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh_addrs(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
-		self.iroh_addrs = addrs;
-		self
 	}
 
 	/// Publish the given origin to every session this client opens.
@@ -241,6 +221,12 @@ impl Client {
 	/// Share `allocator`'s reservations with every session this client dials.
 	pub(crate) fn with_allocator(mut self, allocator: moq_net::bandwidth::Allocator) -> Self {
 		self.moq = self.moq.with_allocator(allocator);
+		self
+	}
+
+	/// Share `viewers` with every session this client dials.
+	pub(crate) fn with_viewers(mut self, viewers: moq_net::bandwidth::Viewers) -> Self {
+		self.moq = self.moq.with_viewers(viewers);
 		self
 	}
 
@@ -288,10 +274,24 @@ impl Client {
 		Connection::new(self.clone(), addrs.into())
 	}
 
+	#[cfg(feature = "quic")]
+	pub(crate) fn quic_closed(&self) -> bool {
+		self.quic.as_ref().is_some_and(|quic| quic.is_closed())
+	}
+
+	#[cfg(feature = "quic")]
+	pub(crate) fn fresh_port(&mut self) -> crate::Result<()> {
+		if let Some(quic) = &mut self.quic {
+			quic.fresh_port()?;
+		}
+		Ok(())
+	}
+
 	/// Close every QUIC connection this client dialed, once each peer has been sent the
 	/// close.
 	///
-	/// Clones share one endpoint, so this closes theirs too. Dropping the connections
+	/// Clones share ownership of their endpoints, so this closes theirs too, including
+	/// fresh sockets opened after failed dials. Dropping the connections
 	/// only queues the close, which nothing sends once the runtime stops: a process
 	/// that exits without this leaves each peer waiting out its idle timeout.
 	///
@@ -299,8 +299,7 @@ impl Client {
 	/// Call [`Connection::close`] on each connection first to deliver it.
 	///
 	/// Only the QUIC endpoint is closed. WebSocket, TCP, and UDS sessions end when their
-	/// [`Connection`] is dropped (the kernel closes the socket on exit), and an iroh
-	/// endpoint passed to `with_iroh` is closed by its owner.
+	/// [`Connection`] is dropped (the kernel closes the socket on exit).
 	pub async fn close(self) {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic {
@@ -370,20 +369,14 @@ impl Client {
 	/// Dial the given URL and complete the MoQ handshake.
 	///
 	/// Errors if no transport feature is compiled in.
-	#[cfg(not(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	)))]
+	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")))]
 	pub(crate) async fn dial(
 		&self,
 		_addr: crate::connect::Addr,
 		_presented: &moq_net::auth::Dial,
 	) -> crate::Result<Dialed> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable quic, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -393,13 +386,7 @@ impl Client {
 	/// WebSocket fallback so a blocked UDP path still connects. The session's
 	/// protocol driver is spawned on the current tokio runtime, else the fallback; the session
 	/// closes once the last returned handle drops.
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) async fn dial(
 		&self,
 		addr: crate::connect::Addr,
@@ -438,13 +425,7 @@ impl Client {
 		Ok(dialed)
 	}
 
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	async fn connect_inner(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let url = addr.url().clone();
 		// Each session's transport says whether its own request URI carries the target or
@@ -455,8 +436,14 @@ impl Client {
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
-			let session =
-				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
+			let session = crate::tcp::connect(
+				url,
+				&self.versions.alpns(),
+				&self.qmux,
+				self.failover_delay,
+				self.resolution_delay,
+			)
+			.await?;
 			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
@@ -468,6 +455,7 @@ impl Client {
 				url,
 				&self.versions.alpns(),
 				&self.tcp_tls,
+				&self.qmux,
 				self.failover_delay,
 				self.resolution_delay,
 			)
@@ -480,7 +468,7 @@ impl Client {
 		// authenticate us by uid/gid via SO_PEERCRED.
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
-			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
+			let session = crate::unix::connect(url, &self.versions.alpns(), &self.qmux).await?;
 			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Unix));
 		}
@@ -492,29 +480,12 @@ impl Client {
 			return self.connect_websocket(&moq, addr).await;
 		}
 
-		// iroh offers the moq ALPNs ahead of H3, so two moq endpoints normally land on raw
-		// QUIC, which carries no request URI. The scheme can't tell us which we got, so the
-		// negotiated ALPN decides where the request target travels.
-		#[cfg(feature = "iroh")]
-		if url.scheme() == "iroh" {
-			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
-			let (session, address) =
-				crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &self.versions).await?;
-			let session = connect_session(&moq, crate::iroh::Session::new(session, address)).await?;
-			return Ok(Dialed::new(session, crate::Transport::Iroh));
-		}
-
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
 			let quic_addr = addr.clone();
-			let address = match quic_transport(&url) {
-				crate::Transport::Quic => moq_net::transport::Address::Setup,
-				_ => moq_net::transport::Address::Uri,
-			};
 			let quic_handle = async {
 				quic.connect(&self.tls, quic_addr, &self.versions)
 					.await
-					.map(|session| crate::transport::Session::new(session, address))
 					.map_err(Error::from)
 			};
 
@@ -542,8 +513,15 @@ impl Client {
 	#[cfg(feature = "websocket")]
 	async fn connect_websocket(&self, moq: &moq_net::Client, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let alpns = self.versions.alpns();
-		let session =
-			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
+		let session = crate::websocket::connect(
+			&self.websocket,
+			&self.tls,
+			self.tls_host_name.as_deref(),
+			addr,
+			&alpns,
+			&self.qmux,
+		)
+		.await?;
 		let session = connect_session(moq, session).await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
@@ -570,10 +548,18 @@ impl Client {
 		let ws_config = self.websocket.clone();
 		let ws_tls = self.tls.clone();
 		let ws_tls_host_name = self.tls_host_name.clone();
+		let ws_session = self.qmux.clone();
 		let websocket = async move {
-			crate::websocket::race_handle(&ws_config, &ws_tls, ws_tls_host_name.as_deref(), addr, &alpns)
-				.await
-				.map(|res| res.map_err(Error::from))
+			crate::websocket::race_handle(
+				&ws_config,
+				&ws_tls,
+				ws_tls_host_name.as_deref(),
+				addr,
+				&alpns,
+				&ws_session,
+			)
+			.await
+			.map(|res| res.map_err(Error::from))
 		};
 
 		match race_transport_connect(&url, quic, websocket).await? {
@@ -605,13 +591,7 @@ pub(crate) struct Dialed {
 
 impl Dialed {
 	#[cfg_attr(
-		not(any(
-			feature = "quic",
-			feature = "iroh",
-			feature = "websocket",
-			feature = "tcp",
-			feature = "uds"
-		)),
+		not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")),
 		allow(dead_code, reason = "only a transport feature dials")
 	)]
 	fn new(session: moq_net::Session, transport: crate::Transport) -> Self {
@@ -1099,10 +1079,7 @@ mod tests {
 		// Hold QUIC until the fallback has been refused, so the 403 is always exercised.
 		let quic = Box::pin(async move {
 			forbid.await.unwrap().expect("fallback listener failed");
-			quic.connect(&tls, quic_addr, &versions)
-				.await
-				.map(|session| crate::transport::Session::new(session, moq_net::transport::Address::Uri))
-				.map_err(Error::from)
+			quic.connect(&tls, quic_addr, &versions).await.map_err(Error::from)
 		});
 
 		let dialed = kio::clock::timeout(
@@ -1194,10 +1171,7 @@ mod tests {
 			let quic = dialer.quic.as_ref().expect("QUIC backend");
 			let session = quic.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
 			connected.send(()).expect("fallback listener alive");
-			Ok::<_, crate::Error>(crate::transport::Session::new(
-				session,
-				moq_net::transport::Address::Uri,
-			))
+			Ok::<_, crate::Error>(session)
 		});
 		let cc = client
 			.race_moq_connect(&client.moq, ws_addr, quic)
@@ -1366,14 +1340,6 @@ mod tests {
 		.expect("race waited for WebSocket after QUIC transport connected")
 		.unwrap();
 		assert!(matches!(value, super::TransportRace::Quic("quic")));
-	}
-
-	/// Iroh carries no rustls state, so constructing its client must not require an
-	/// application-installed crypto provider.
-	#[cfg(all(feature = "iroh", not(any(feature = "quic", feature = "websocket"))))]
-	#[test]
-	fn iroh_only_client_does_not_require_a_tls_provider() {
-		crate::connect::Config::default().init().expect("iroh-only client");
 	}
 
 	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm

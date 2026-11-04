@@ -105,8 +105,8 @@ fn a_published_close_has_already_left_the_client() {
 		let handle = worker.handle();
 		let sock = handle.udp(server_sock, udp::Config::default()).expect("server socket");
 		let endpoint = quic::Endpoint::new(
-			sock,
 			quic::endpoint::Config::default().with_server(server_config(&certs)),
+			sock,
 		)
 		.expect("endpoint");
 		ready.send(()).expect("test alive");
@@ -126,7 +126,7 @@ fn a_published_close_has_already_left_the_client() {
 			udp::Config::default(),
 		)
 		.expect("client socket");
-	let endpoint = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("client endpoint");
+	let endpoint = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect("client endpoint");
 
 	client_worker
 		.block_on(async move {
@@ -134,7 +134,7 @@ fn a_published_close_has_already_left_the_client() {
 				.connect(&dial_config(), server_addr, "localhost")
 				.await
 				.expect("dial");
-			conn.close(CLOSE_CODE.into(), CLOSE_REASON.as_bytes());
+			conn.close(CLOSE_CODE.into(), CLOSE_REASON);
 			conn.closed().await;
 		})
 		.expect("client worker");
@@ -179,11 +179,11 @@ fn handles_outliving_the_worker_fail() {
 			.expect("socket")
 	};
 	let server = quic::Endpoint::new(
-		socket(),
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
+		socket(),
 	)
 	.expect("server endpoint");
-	let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client endpoint");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket()).expect("client endpoint");
 
 	let (conn, mut send, mut recv) = worker
 		.block_on(async move {

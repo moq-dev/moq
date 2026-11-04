@@ -9,14 +9,14 @@
 //! sources, the tracks, the clock) and executes the actions; see
 //! `origin::run_front`.
 //!
-//! The driver only offers a front routes that serve its broadcast: those with the
-//! epoch it first resolved, whose tracks resume where they stopped, or its first
-//! route alone when that had no epoch, since nothing says another serves the
-//! same bytes. Even that route can answer a re-request with another instance, so
-//! without an epoch a track whose copy fails ends with the error instead of
-//! re-splicing. Another instance winning the path leaves the front alone: its
-//! readers stay until they leave or its routes go, and new requests get a fresh
-//! front for the winner.
+//! The driver only offers a front routes that serve its broadcast: those of the
+//! instance it first resolved, at its newest epoch, whose tracks resume where they
+//! stopped since the instance promises one continuous sequence space. An instance a
+//! session minted, for a wire that carries none, promises nothing past its route:
+//! that route can answer a re-request with another stream, so a track whose copy
+//! fails there ends with the error instead of re-splicing. Another
+//! instance winning the path leaves the front alone: its readers stay until they
+//! leave or its routes go, and new requests get a fresh front for the winner.
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
 //! so a returning reader still finds the cache) and no consumer holds its broadcast,
@@ -35,15 +35,16 @@ use std::{
 use crate::{Error, time::Instant, track};
 
 /// A route the table selected for the front: the entry id, whether it is a
-/// broadcast published on this origin, and whether it carries an epoch.
+/// broadcast published on this origin, and whether its instance was carried rather
+/// than minted by a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Candidate {
 	pub route: u64,
 	pub local: bool,
 	/// Whether a track whose copy failed may be asked for again through the route:
-	/// the epoch says the answer is the same broadcast. Without one, the route could
-	/// answer with whatever instance now wins upstream.
-	pub epoch: bool,
+	/// a carried instance says the answer is the same stream. A minted one names the
+	/// announcement, and the route could answer with whatever stream now wins upstream.
+	pub carried: bool,
 }
 
 /// Why an upstream request through a route did not produce a source.
@@ -122,8 +123,8 @@ pub(super) enum Action {
 	/// Request the path through `route`; feed the outcome back as
 	/// [`Event::Resolved`].
 	Request { route: u64 },
-	/// Drop the driver's handle on a source.
-	Detach { source: u64 },
+	/// Drop the driver's source handle, keeping its pending track queries when `drain` is true.
+	Detach { source: u64, drain: bool },
 	/// Resolve the requesters parked on the front: it has a source.
 	Resolve,
 	/// Ask `source` for its copy of `track`; feed the answer back as
@@ -394,7 +395,7 @@ impl Front {
 		let Some(upstream) = self.upstream.filter(|upstream| upstream.route == route) else {
 			// A source for a request we no longer want: let it go.
 			if let Ok(source) = result {
-				actions.push(Action::Detach { source });
+				actions.push(Action::Detach { source, drain: false });
 			}
 			return;
 		};
@@ -422,11 +423,14 @@ impl Front {
 
 	fn attach(&mut self, source: u64, candidate: Candidate, actions: &mut Vec<Action>) {
 		if let Some((old, _)) = self.serving.take() {
-			actions.push(Action::Detach { source: old });
+			actions.push(Action::Detach {
+				source: old,
+				drain: false,
+			});
 		}
 		// Every copy is from an older source, including one a track still drains from a
 		// source the previous one replaced.
-		self.drain_copies();
+		self.drain_copies(false);
 		self.serving = Some((source, candidate));
 		self.serving_closing = false;
 		if !self.resolved {
@@ -458,22 +462,23 @@ impl Front {
 		self.excluded.insert(candidate.route);
 		self.serving = None;
 		self.serving_closing = false;
-		actions.push(Action::Detach { source });
-		self.drain_copies();
+		actions.push(Action::Detach { source, drain: true });
+		self.drain_copies(true);
 		actions.push(Action::Reselect);
 	}
 
 	/// The serving source is going: a spliced copy keeps feeding its track (readers read it
 	/// until a replacement's is spliced, or it runs out), and one still being asked for is
-	/// dropped.
-	fn drain_copies(&mut self) {
+	/// kept while that source can still answer, until a replacement attaches.
+	fn drain_copies(&mut self, keep_queries: bool) {
 		for track in self.tracks.values_mut() {
 			match track.state {
 				TrackState::Spliced { source } => {
 					track.draining = Some(source);
 					track.state = TrackState::Idle;
 				}
-				TrackState::Querying { .. } => track.state = TrackState::Idle,
+				TrackState::Querying { .. } if !keep_queries => track.state = TrackState::Idle,
+				TrackState::Querying { .. } => {}
 				TrackState::Idle | TrackState::Parked { .. } => {}
 			}
 		}
@@ -494,8 +499,8 @@ impl Front {
 			return;
 		}
 		let verdict = match result {
-			// A same-epoch copy claims identical content, so any difference in
-			// its metadata is refused rather than reinterpreted.
+			// A copy of the same instance claims identical content, so any difference
+			// in its metadata is refused rather than reinterpreted.
 			Ok(info) => match self.info.get(&name) {
 				Some(expected) if *expected != info => Err(Error::Unsupported),
 				Some(_) => Ok(()),
@@ -562,13 +567,13 @@ impl Front {
 			// failover, re-splice from the serving source at the first missing group.
 			Err(err)
 				if delivered
-					&& super::resume::route_failed(&err)
-					&& self.serving.is_some_and(|(_, candidate)| candidate.epoch) =>
+					&& super::resume::retryable(&err)
+					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);
 			}
-			// A content verdict survives every copy. Without an epoch, even a route
+			// A content verdict survives every copy. Under a minted instance, even a route
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
@@ -717,7 +722,7 @@ mod tests {
 		Candidate {
 			route,
 			local: false,
-			epoch: true,
+			carried: true,
 		}
 	}
 
@@ -725,7 +730,7 @@ mod tests {
 		Candidate {
 			route,
 			local: true,
-			epoch: true,
+			carried: true,
 		}
 	}
 
@@ -758,8 +763,8 @@ mod tests {
 		assert_eq!(front.next_deadline(), scanned.first().map(|(at, _)| *at));
 	}
 
-	/// A front serving `source` through `candidate`, with `video` spliced and read.
-	fn serving(candidate: Candidate, source: u64) -> Front {
+	/// A front querying `source` through `candidate` for the read track `video`.
+	fn querying(candidate: Candidate, source: u64) -> Front {
 		let mut front = Front::new(LINGER);
 		assert_actions(
 			front.step(Event::Selected {
@@ -793,6 +798,12 @@ mod tests {
 				Action::Arm { at: None },
 			],
 		);
+		front
+	}
+
+	/// A front serving `source` through `candidate`, with `video` spliced and read.
+	fn serving(candidate: Candidate, source: u64) -> Front {
+		let mut front = querying(candidate, source);
 		assert_actions(
 			front.step(Event::TrackInfo {
 				track: name("video"),
@@ -856,7 +867,10 @@ mod tests {
 				result: Ok(200),
 			}),
 			&[
-				Action::Detach { source: 100 },
+				Action::Detach {
+					source: 100,
+					drain: false,
+				},
 				Action::Query {
 					track: name("video"),
 					source: 200,
@@ -864,6 +878,28 @@ mod tests {
 			],
 		);
 		assert_eq!(front.serving, Some((200, remote(2))));
+	}
+
+	#[test]
+	fn a_closing_source_answers_while_another_route_is_resolving() {
+		let mut front = querying(remote(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Ok(info()),
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 100,
+			}],
+		);
 	}
 
 	#[test]
@@ -886,7 +922,10 @@ mod tests {
 				route: 2,
 				result: Ok(200),
 			}),
-			&[Action::Detach { source: 200 }],
+			&[Action::Detach {
+				source: 200,
+				drain: false,
+			}],
 		);
 	}
 
@@ -895,7 +934,13 @@ mod tests {
 		let mut front = serving(remote(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_eq!(front.excluded_routes(), &HashSet::from([1]));
 		assert_actions(
@@ -1090,13 +1135,15 @@ mod tests {
 	}
 
 	#[test]
-	fn an_epoch_copy_verdict_aborts_without_querying_again() {
+	fn a_copy_verdict_aborts_without_querying_again() {
 		for candidate in [remote(1), local(1)] {
 			for err in [
 				Error::from(crate::StreamError::FrameTooLarge),
 				Error::from(crate::StreamError::MalformedTrack),
 				Error::App(7),
 				Error::NotFound,
+				Error::Unroutable,
+				Error::from(crate::StreamError::Unroutable),
 				Error::Unsupported,
 			] {
 				let mut front = serving(candidate, 100);
@@ -1118,16 +1165,16 @@ mod tests {
 		}
 	}
 
-	/// Without an epoch a re-request could reach another instance, so the track ends
+	/// Under a minted instance a re-request could reach another stream, so the track ends
 	/// with the error instead, whether the route is a peer's or a local broadcast.
 	#[test]
-	fn a_copy_dying_without_an_epoch_ends_the_track() {
+	fn a_copy_dying_under_a_minted_instance_ends_the_track() {
 		for (local, closing) in [(false, false), (false, true), (true, false)] {
 			let mut front = serving(
 				Candidate {
 					route: 1,
 					local,
-					epoch: false,
+					carried: false,
 				},
 				100,
 			);
@@ -1184,7 +1231,7 @@ mod tests {
 
 	#[test]
 	fn incompatible_copy_is_refused() {
-		// A same-epoch copy claims identical content, so every field counts, `refresh` too.
+		// A copy of the same instance claims identical content, so every field counts, `refresh` too.
 		let differing = [
 			track::Info {
 				max_age: Some(Duration::from_secs(1)),
@@ -1349,7 +1396,13 @@ mod tests {
 		front.step(Event::Forgotten { track: name("video") });
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_actions(front.step(Event::Unheld), &[]);
 		assert_actions(
@@ -1424,7 +1477,10 @@ mod tests {
 				route: 2,
 				result: Ok(200),
 			}),
-			&[Action::Detach { source: 100 }],
+			&[Action::Detach {
+				source: 100,
+				drain: false,
+			}],
 		);
 		let t1 = t0 + LINGER;
 		front.step(Event::Unwanted {
@@ -1573,7 +1629,13 @@ mod tests {
 		let mut front = serving(local(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_actions(
 			front.step(Event::Selected {
@@ -1695,6 +1757,8 @@ mod tests {
 		];
 
 		fn walk(front: &Front, alphabet: &[Event], depth: usize, sequences: &mut usize) {
+			// Rendered only when an event needs it: formatting dominates the walk.
+			let mut before = None;
 			for event in alphabet {
 				// Ids are minted once per resolution, so a source can never resolve
 				// while it is already serving; the alphabet reuses ids for brevity.
@@ -1704,7 +1768,6 @@ mod tests {
 					continue;
 				}
 				let mut next = front.clone();
-				let before = format!("{next:?}");
 				let actions = next.step(event.clone());
 				*sequences += 1;
 
@@ -1713,11 +1776,32 @@ mod tests {
 
 				// An event that changes nothing produces nothing, except letting
 				// go of a source the front never took.
-				if format!("{next:?}") == before {
-					assert!(
-						actions.iter().all(|action| matches!(action, Action::Detach { .. })),
-						"no-op event {event:?} produced {actions:?}"
-					);
+				if !actions.iter().all(|action| matches!(action, Action::Detach { .. })) {
+					// The cheap fields settle most events; the rest compare as rendered.
+					let flags = |f: &Front| {
+						(
+							f.serving,
+							f.serving_closing,
+							f.upstream,
+							f.resolved,
+							f.armed,
+							f.held,
+							f.retiring,
+							f.ended,
+						)
+					};
+					let moved = flags(&next) != flags(front)
+						|| next.parked != front.parked
+						|| next.excluded != front.excluded
+						|| next.tracks.len() != front.tracks.len();
+					if !moved {
+						let before = before.get_or_insert_with(|| format!("{front:?}"));
+						assert_ne!(
+							&format!("{next:?}"),
+							before,
+							"no-op event {event:?} produced {actions:?}"
+						);
+					}
 				}
 				// Nothing after the end.
 				if front.ended() {
@@ -1737,7 +1821,7 @@ mod tests {
 				assert!(splices <= 1);
 				// A Detach names a source the front no longer serves from.
 				for action in &actions {
-					if let Action::Detach { source } = action {
+					if let Action::Detach { source, .. } = action {
 						assert_ne!(next.serving.map(|(s, _)| s), Some(*source));
 					}
 				}
@@ -1785,7 +1869,10 @@ mod tests {
 				result: Ok(300),
 			}),
 			&[
-				Action::Detach { source: 200 },
+				Action::Detach {
+					source: 200,
+					drain: false,
+				},
 				Action::Query {
 					track: name("video"),
 					source: 300,

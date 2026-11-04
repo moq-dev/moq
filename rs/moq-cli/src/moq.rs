@@ -7,7 +7,7 @@
 use hang::moq_net;
 
 /// The MoQ side of an import: where a gateway publishes, under what name, the
-/// retention it declares on the media tracks it mints, how long a clean end stays
+/// max age it declares on the media tracks it mints, how long a clean end stays
 /// up, and the connection allocator those tracks claim on.
 ///
 /// They travel together rather than as loose arguments per entry point.
@@ -19,8 +19,8 @@ pub struct ImportTarget {
 	/// The broadcast name to publish under.
 	pub name: String,
 
-	/// How long relays keep a non-latest group of the published media tracks fetchable
-	/// (`--max-age`), or `None` for the publisher's own default.
+	/// How long a superseded group of the published media tracks stays fresh
+	/// (`--max-age`, else hang's 30 s media max age), or `None` for no publisher limit.
 	pub max_age: Option<std::time::Duration>,
 
 	/// How long a cleanly ended broadcast stays up (`--linger`).

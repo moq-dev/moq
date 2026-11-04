@@ -177,14 +177,17 @@ def status_payload(status: Status) -> dict[str, Any]:
 
 
 class StatusPublisher:
-    """The `status` track: JSON snapshots on a compressed track.
+    """The `status` track: JSON snapshots on a compressed, timed track.
 
     Snapshot rather than stream, because a late joiner wants the truck's current
-    state, not the history of every command it ever accepted.
+    state, not the history of every command it ever accepted. Every update is
+    stamped from the broadcast clock, the same epoch the media tracks use, so
+    the catalog never reads the JSON track's timeline as a delay.
     """
 
     def __init__(self, broadcast: moq.BroadcastProducer) -> None:
-        track = broadcast.publish_track("status", moq.TrackInfo(compress=True))
+        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
+        self._catalog = moq.media.CatalogProducer(broadcast)
         self._producer = moq.json.SnapshotProducer(broadcast, track)
         # Weak: watching demand neither keeps the track open nor locks it.
         self._demand = self._producer.demand()
@@ -199,7 +202,7 @@ class StatusPublisher:
         truck that cannot answer is not one anybody should be steering: let it
         reach the session, exactly as the video pump does with its own track.
         """
-        self._producer.update(payload)
+        self._producer.update(payload, self._catalog.now())
 
     async def used(self) -> None:
         while await self._demand.wanted_changed() is None:
@@ -231,7 +234,7 @@ def _parse_timestamps(raw: Any) -> tuple[TimestampEntry, ...]:
     return tuple(entries.values())
 
 
-def parse_command(driver_id: str, message: Any, epoch: str | None = None) -> Command | None:
+def parse_command(driver_id: str, message: Any, instance: str | None = None) -> Command | None:
     """Turn one `control` track message from a driver run into a Command.
 
     Returns None for anything unrecognized. A driver is an untrusted publisher,
@@ -258,7 +261,7 @@ def parse_command(driver_id: str, message: Any, epoch: str | None = None) -> Com
         return Command(
             kind="drive",
             driver_id=driver_id,
-            epoch=epoch,
+            instance=instance,
             sequence=sequence,
             state=DriveState(
                 steering=_number(message.get("steering")),
@@ -270,7 +273,7 @@ def parse_command(driver_id: str, message: Any, epoch: str | None = None) -> Com
         )
 
     if kind in ("estop", "reset_estop", "respawn"):
-        return Command(kind=kind, driver_id=driver_id, epoch=epoch, sequence=sequence, timestamps=timestamps)
+        return Command(kind=kind, driver_id=driver_id, instance=instance, sequence=sequence, timestamps=timestamps)
 
     return None
 
@@ -298,12 +301,12 @@ async def watch_drivers(
 ) -> None:
     """Discover driver broadcasts at `{prefix}/{driverId}` and fan their commands in.
 
-    Runs until cancelled. Each run of a driver, its path plus the route epoch it
+    Runs until cancelled. Each run of a driver, its path plus the route instance it
     announced under, gets its own task, so one slow or stuck driver cannot hold
-    up the others. A broadcast that ends, or restarts under another epoch, ends
+    up the others. A broadcast that ends, or restarts under another instance, ends
     its task, and with it the lease of that run; a restart starts a new task.
     """
-    drivers: dict[str, tuple[str | None, asyncio.Task[None]]] = {}
+    drivers: dict[str, tuple[str, asyncio.Task[None]]] = {}
 
     def forget(driver_id: str, task: asyncio.Task[None]) -> None:
         # Only this run's entry: a restart has already put its successor there.
@@ -322,7 +325,7 @@ async def watch_drivers(
                 # is a route that only overlaps it, not a driver's broadcast.
                 if driver_id == path or not driver_id or "/" in driver_id:
                     continue
-                epoch = announce.route.epoch
+                instance = announce.route.instance
                 current = drivers.get(driver_id)
                 if isinstance(event, moq.AnnounceEventEnd):
                     if current is not None:
@@ -331,14 +334,14 @@ async def watch_drivers(
                     continue
                 if current is not None:
                     # Same run: the route only changed hops or cost.
-                    if current[0] == epoch and not isinstance(event, moq.AnnounceEventRestart):
+                    if current[0] == instance and not isinstance(event, moq.AnnounceEventRestart):
                         continue
                     current[1].cancel()
                 task = asyncio.create_task(
-                    _pump_driver(driver_id, epoch, client, path, commands),
+                    _pump_driver(driver_id, instance, client, path, commands),
                     name=f"driver:{driver_id}",
                 )
-                drivers[driver_id] = (epoch, task)
+                drivers[driver_id] = (instance, task)
                 task.add_done_callback(lambda task, driver_id=driver_id: forget(driver_id, task))
     finally:
         for _, task in drivers.values():
@@ -347,7 +350,7 @@ async def watch_drivers(
 
 async def _pump_driver(
     driver_id: str,
-    epoch: str | None,
+    instance: str,
     client: moq.Client,
     path: str,
     commands: asyncio.Queue[Command],
@@ -357,22 +360,22 @@ async def _pump_driver(
     Always emits `driver_left` on the way out, however it leaves, so the gate
     releases a lease even when the track ends abnormally.
     """
-    log.info("driver %s connected (epoch %s)", driver_id, epoch)
+    log.info("driver %s connected (instance %s)", driver_id, instance)
     try:
         # Pinned to this run, so a newer one that took over before its own
         # announcement cancels this task is never read under this run's lease.
-        broadcast = await client.request(path, epoch=epoch)
+        broadcast = await client.request(path, instance=instance)
         control = moq.json.SnapshotConsumer(await broadcast.subscribe_track("control"))
         async for message in control:
-            command = parse_command(driver_id, message.value, epoch)
+            command = parse_command(driver_id, message.value, instance)
             if command is not None:
                 await commands.put(command)
     # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
     except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
         log.info("driver %s track ended: %s", driver_id, err)
     finally:
-        log.info("driver %s disconnected (epoch %s)", driver_id, epoch)
-        await commands.put(Command(kind="driver_left", driver_id=driver_id, epoch=epoch))
+        log.info("driver %s disconnected (instance %s)", driver_id, instance)
+        await commands.put(Command(kind="driver_left", driver_id=driver_id, instance=instance))
 
 
 __all__ = [

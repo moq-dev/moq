@@ -54,18 +54,42 @@ async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_
 
 /// Wait until the relay behind `internal` holds a session with each of the
 /// `dialed` peers it connects to.
-async fn wait_dialed(internal: u16, dialed: usize) {
+async fn wait_dialed(http: &reqwest::Client, internal: u16, dialed: usize) {
 	let url = format!("http://127.0.0.1:{internal}/nodes");
 	let deadline = kio::clock::now() + TIMEOUT;
 	loop {
-		let body = reqwest::get(&url)
+		let body = http
+			.get(&url)
+			.send()
 			.await
 			.expect("fetch /nodes")
 			.text()
 			.await
 			.expect("read /nodes");
 		let nodes: serde_json::Value = serde_json::from_str(&body).expect("parse /nodes");
-		if nodes["nodes"].as_array().expect("a node list").len() == dialed {
+		if nodes["nodes"]
+			.as_array()
+			.expect("a node list")
+			.iter()
+			.filter(|node| !node["connections"].as_array().expect("connections").is_empty())
+			.count() == dialed
+		{
+			for node in nodes["nodes"].as_array().unwrap() {
+				let connections = node["connections"].as_array().unwrap();
+				if connections.is_empty() {
+					continue;
+				}
+				assert!(
+					node["last_connected_seconds_ago"].is_number(),
+					"live peer has no successful connect: {node}"
+				);
+				for connection in connections {
+					assert!(
+						connection["transport"].is_string(),
+						"live peer has no transport: {node}"
+					);
+				}
+			}
 			return;
 		}
 		assert!(kio::clock::now() < deadline, "the mesh never formed: {nodes}");
@@ -95,8 +119,10 @@ impl Mesh {
 		)
 		.await;
 		let d = spawn_relay(14, vec![format!("tcp://127.0.0.1:{}", c.port)], cluster_version).await;
+		// One client for every poll: building one loads the system trust roots.
+		let http = reqwest::Client::new();
 		for (node, dialed) in [(&b, 1), (&c, 2), (&d, 1)] {
-			wait_dialed(node.internal, dialed).await;
+			wait_dialed(&http, node.internal, dialed).await;
 		}
 		Self { nodes: [a, b, c, d] }
 	}
@@ -219,7 +245,8 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the
 	// selected group's frame is still crossing the redundant mesh.
-	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1));
+	let subscription = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)));
 	let mut track = kio::clock::timeout(
 		TIMEOUT,
 		broadcast.track("video").expect("track handle").subscribe(subscription),

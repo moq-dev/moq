@@ -168,7 +168,7 @@ export class PublishDone {
 	}
 
 	async #encode(w: Writer): Promise<void> {
-		await w.u62(BigInt(this.statusCode));
+		await w.u53(this.statusCode);
 		await w.u62(this.streamCount);
 		await w.string(this.reasonPhrase);
 	}
@@ -182,7 +182,7 @@ export class PublishDone {
 	}
 
 	static async #decode(r: Reader): Promise<PublishDone> {
-		const statusCode = Number(await r.u62());
+		const statusCode = await r.u53();
 		const streamCount = await r.u62();
 		const reasonPhrase = await r.string();
 

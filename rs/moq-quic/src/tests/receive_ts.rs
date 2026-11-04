@@ -164,7 +164,7 @@ fn send(
 			let mut stream = pair.server_recv(server_ch, recv);
 			let mut chunks = stream.read().unwrap();
 			while let Ok(Some(_)) = chunks.next(usize::MAX) {}
-			let _ = chunks.finalize();
+			chunks.finalize();
 		}
 
 		if now >= start + end {

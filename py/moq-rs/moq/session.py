@@ -8,16 +8,20 @@ from moq_ffi import (
     MoqAllocator,
     MoqBandwidthConsumer,
     MoqGrantConsumer,
+    MoqRateControl,
+    MoqRatePolicy,
     MoqReservation,
     MoqSession,
     MoqTokens,
+    MoqViewer,
+    MoqViewers,
 )
 
 from ._records import _strs
 from .errors import is_shutdown
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand
-from .types import ConnectionState, ConnectionStats, Grant
+from .types import ConnectionState, ConnectionStats, Grant, RateTarget
 
 
 class Session:
@@ -78,9 +82,8 @@ class Session:
     def shutdown(self) -> None:
         """Request a draining close now; await :meth:`closed` for its result.
 
-        Explicit ``moq-lite-07-wip`` waits for the peer to receive finished tails;
-        older Lite versions, including the default lite-06, wait only for transport
-        ACKs. IETF also waits for transport ACKs.
+        ``moq-lite-05`` and newer wait for the peer to receive finished tails; older
+        Lite versions and IETF wait only for transport ACKs.
         """
         self._inner.shutdown()
 
@@ -130,6 +133,16 @@ class Session:
         next connection.
         """
         return Allocator(self._inner.allocator())
+
+    def viewers(self) -> Viewers:
+        """The session's viewers, dividing the receive estimate among watched broadcasts.
+
+        Every call returns a handle to the same registry, and the session sends
+        what its viewers' ceilings add up to as its PROBE target. A client handle
+        survives reconnects: a viewer reads ``None`` while disconnected and
+        resumes on the next connection.
+        """
+        return Viewers(self._inner.viewers())
 
 
 class GrantConsumer:
@@ -269,3 +282,82 @@ class Reservation:
     def update(self, max_bps: int) -> None:
         """Change the ceiling, keeping the same claim."""
         self._inner.update(max_bps)
+
+
+class Viewers:
+    """Divides one connection's receive estimate among the broadcasts watched over it.
+
+    Minted by :meth:`Session.viewers`. Handles from one session share a registry.
+    """
+
+    def __init__(self, inner: MoqViewers) -> None:
+        self._inner = inner
+
+    def watch(self, max_bps: int) -> Viewer:
+        """Watch a broadcast receiving at most ``max_bps``, returning its viewer.
+
+        ``max_bps`` is a ceiling: what the largest rendition the player would
+        switch to needs, not what it is receiving. Drop the viewer once the
+        broadcast stops being watched. Holding one requests the receive
+        estimate, like :meth:`Session.recv_bandwidth`. Raises
+        ``moq.Error.OutOfRange``, watching nothing, when the ceilings would sum
+        above ``2**53 - 1``.
+        """
+        return Viewer(self._inner.watch(max_bps))
+
+    def set_target(self, target_bps: int | None) -> None:
+        """Send ``target_bps`` as the PROBE target instead of the viewers' sum.
+
+        ``None`` follows the viewers again, and ``0`` sends no target. Raises
+        ``moq.Error.OutOfRange``, keeping the previous override, above ``2**53 - 1``.
+        """
+        self._inner.set_target(target_bps)
+
+
+class Viewer:
+    """One watched broadcast's standing claim on :class:`Viewers`.
+
+    :meth:`rate` is a snapshot: ``None`` means no receive estimate, so hold the
+    current selection, and ``0`` is a real zero rate.
+    """
+
+    def __init__(self, inner: MoqViewer) -> None:
+        self._inner = inner
+
+    def rate(self) -> int | None:
+        """This viewer's slice of the receive estimate right now, in bits per second."""
+        return self._inner.rate()
+
+    def update(self, max_bps: int) -> None:
+        """Change the ceiling, keeping the same claim.
+
+        Raises ``moq.Error.OutOfRange``, keeping the previous ceiling, when the
+        ceilings would sum above ``2**53 - 1``.
+        """
+        self._inner.update(max_bps)
+
+
+class RateControl:
+    """Turns a :class:`Reservation`'s grant into a sender's :data:`RateTarget`.
+
+    The same policy moq's own encoders follow: drops apply at once, raises climb
+    at most 25% per second, and moves under 5% are ignored. For a sender that
+    encodes on its own, such as a pre-encoded track: call :meth:`update` on every
+    frame and apply what it returns.
+
+    Pass ``lower_bps``, the next lower rendition's ``max_bps``, for a rendition
+    encoded beside lower ones of the same source: a grant below
+    ``(max_bps + 2 * lower_bps) / 3`` then disables it while a session probes for
+    the reservation.
+    """
+
+    def __init__(self, max_bps: int, *, lower_bps: int | None = None) -> None:
+        self._inner = MoqRateControl(MoqRatePolicy(max_bps=max_bps, lower_bps=lower_bps))
+
+    def target(self) -> RateTarget:
+        """What the sender should currently be doing."""
+        return self._inner.target()
+
+    def update(self, reservation: Reservation) -> RateTarget | None:
+        """Feed ``reservation``'s grant, returning a new target worth applying, or ``None``."""
+        return self._inner.update(reservation._inner)

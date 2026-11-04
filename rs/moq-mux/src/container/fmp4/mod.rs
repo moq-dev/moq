@@ -11,6 +11,7 @@ mod export;
 pub mod fragment;
 mod fragmenter;
 mod import;
+pub(crate) mod metadata;
 mod muxer;
 mod sample;
 mod text;
@@ -24,21 +25,36 @@ pub use muxer::*;
 /// A major version bump of `mp4_atom` is a breaking change for moq-mux.
 pub use mp4_atom;
 
-/// The most input [`Import`] holds whole: a `moov` or `moof` body, or one text sample.
+/// The largest text sample [`Import`] holds whole.
 ///
-/// Metadata parses and text rewrites only once their last byte arrives, so a larger declaration
-/// is refused at its header rather than retaining later input (across HLS segments, too) until
-/// it completes. It matches the transport's per-group bound,
-/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES). Real fMP4 metadata is kilobytes. Media
-/// samples stream into their frames and have no such bound.
+/// A text sample is rewritten only once its last byte arrives, so a larger one is refused before
+/// any of it is staged. It matches the transport's per-group bound,
+/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), which the rewritten sample must fit.
+/// Media samples stream into their frames and have no such bound.
 pub const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
 
-/// The most samples [`Import`] plans for one `moof`.
+/// The largest metadata box body parsed on import or from received CMAF.
 ///
-/// Every sample's byte range is resolved before any of the fragment publishes. A `moof` at
-/// [`MAX_HELD_BYTES`] holds this many 16-byte `trun` entries; a run without per-sample fields
+/// A larger declaration is refused at its header, before buffering or expanding its body.
+/// Parsing expands a body up to tenfold (a 4-byte `trun` entry becomes a 40-byte
+/// [`TrunEntry`](mp4_atom::TrunEntry)), so this keeps a parse within [`MAX_HELD_BYTES`].
+/// Counts and retained metadata-tree entries are checked separately, including entries that
+/// consume no bytes. Media payloads in `mdat` keep their transport-owned bound.
+pub const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
+
+/// The most samples parsed or planned for one CMAF fragment.
+///
+/// Every sample's byte range is resolved before any of the fragment publishes, at about 200 bytes
+/// a sample, so a fragment at this bound plans within [`MAX_HELD_BYTES`]. A `moof` at
+/// [`MAX_METADATA_BYTES`] holds this many 16-byte `trun` entries; a run without per-sample fields
 /// could otherwise declare billions of samples in a few bytes.
-pub const MAX_FRAGMENT_SAMPLES: u64 = (MAX_HELD_BYTES / 16) as u64;
+pub const MAX_FRAGMENT_SAMPLES: u64 = (MAX_METADATA_BYTES / 16) as u64;
+
+/// The most tracks [`Import`] accepts from one `moov`, refused before any is created.
+///
+/// Each track costs about 16 KiB to parse and set up, and keeps its catalog entry and output
+/// state for as long as the import runs. Real files declare a handful.
+pub const MAX_TRACKS: usize = 256;
 
 #[cfg(test)]
 mod export_test;
@@ -211,9 +227,8 @@ pub enum Error {
 	#[error("backwards per-track data offset is unsupported for streaming import")]
 	BackwardsDataOffset,
 
-	/// A `moov` or `moof` must be held whole before it parses, so one declaring more than
-	/// [`MAX_HELD_BYTES`] is refused at its header, before any of its body is buffered.
-	#[error("{kind} declares {size} bytes, more than the {MAX_HELD_BYTES} an importer holds")]
+	/// A metadata body exceeds [`MAX_METADATA_BYTES`] and is refused before parsing.
+	#[error("{kind} declares {size} bytes, more than the {MAX_METADATA_BYTES} a metadata parser accepts")]
 	MetadataTooLarge {
 		/// The box type.
 		kind: mp4_atom::FourCC,
@@ -226,11 +241,15 @@ pub enum Error {
 	#[error("text sample of {0} bytes is more than the {MAX_HELD_BYTES} an importer holds")]
 	TextSampleTooLarge(usize),
 
-	/// A fragment's samples are planned before any of them publish, so a `moof` declaring more
-	/// than [`MAX_FRAGMENT_SAMPLES`] is refused. A `trun` without per-sample fields declares its
+	/// A fragment declaring more than [`MAX_FRAGMENT_SAMPLES`] is refused before parsing.
+	/// A `trun` without per-sample fields declares its
 	/// count in four bytes, so the byte bound alone does not limit it.
-	#[error("moof declares {0} samples, more than the {MAX_FRAGMENT_SAMPLES} an importer plans")]
+	#[error("moof declares {0} samples, more than the {MAX_FRAGMENT_SAMPLES} a fragment accepts")]
 	TooManySamples(u64),
+
+	/// A `moov` declaring more than [`MAX_TRACKS`] tracks is refused before any is created.
+	#[error("moov declares {0} tracks, more than the {MAX_TRACKS} an importer accepts")]
+	TooManyTracks(usize),
 
 	/// Absolute file offsets cannot be resolved in a standalone fragment.
 	#[error("absolute base_data_offset is unsupported; use moof-relative offsets")]
@@ -370,6 +389,10 @@ pub enum Error {
 		/// What the sample tables can't express.
 		reason: &'static str,
 	},
+
+	/// A file to repair is not a recording that an MP4 export left unfinished.
+	#[error("not an unfinished mp4 recording: {0}")]
+	Unrepairable(&'static str),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -434,6 +457,7 @@ impl Wire {
 
 	/// Parse a CMAF init segment (ftyp+moov), extracting the single track and its `trex` defaults.
 	pub fn from_init(init_data: &[u8]) -> Result<Self> {
+		metadata::check(init_data)?;
 		use mp4_atom::DecodeMaybe;
 
 		let mut cursor = std::io::Cursor::new(init_data);
@@ -550,6 +574,7 @@ impl Track {
 /// rewriting the payload. An untimed frame (`None`) has no broadcast time, so its samples
 /// present at the time `tfdt` gives them.
 pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) -> Result<Vec<Frame>> {
+	metadata::check(&data)?;
 	use mp4_atom::DecodeMaybe;
 
 	let Track {
@@ -670,7 +695,7 @@ pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<By
 	let Some(first) = frames.first() else {
 		return Ok(Bytes::new());
 	};
-	encode_at(info, base_ticks(first, info.timescale)?, frames)
+	Ok(encode_at(info, base_ticks(first, info.timescale)?, frames)?.0)
 }
 
 /// A frame's presentation time as a tick count at the track's timescale.
@@ -705,8 +730,9 @@ fn timestamp_ticks(timestamp: Timestamp, timescale: moq_net::Timescale) -> Resul
 /// signed composition offset, so a reordered frame keeps its presentation time even when the
 /// fragment holds a single sample.
 ///
-/// Returns an empty `Bytes` when `frames` is empty.
-fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Bytes> {
+/// Returns the fragment with the decode time it ends at, which is where the next fragment on
+/// the same timeline continues, or an empty `Bytes` and `base_dts` when `frames` is empty.
+pub(super) fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<(Bytes, u64)> {
 	let FragmentInfo {
 		track_id,
 		timescale,
@@ -717,7 +743,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 	use mp4_atom::Encode;
 
 	if frames.is_empty() {
-		return Ok(Bytes::new());
+		return Ok((Bytes::new(), base_dts));
 	}
 
 	let mut dts = base_dts;
@@ -784,7 +810,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 	let mdat = mp4_atom::Mdat { data: mdat_data };
 	mdat.encode(&mut buf)?;
 
-	Ok(Bytes::from(buf))
+	Ok((Bytes::from(buf), dts))
 }
 
 /// Convert a duration to the exact value stored in a 32-bit `trun` sample-duration field.
@@ -1546,6 +1572,22 @@ fn first_traf(fragment: &Bytes) -> mp4_atom::Traf {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn received_metadata_is_bounded() {
+		let mut bounded = true;
+		for (name, data) in super::metadata::tests::attacks(b"moov") {
+			bounded &= super::metadata::tests::measure(name, || super::Wire::from_init(&data).is_err());
+		}
+		let config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		let wire = Wire::new(synthesize_audio_trak(1, 48_000, &config).unwrap()).unwrap();
+		for (name, data) in super::metadata::tests::attacks(b"moof") {
+			bounded &= super::metadata::tests::measure(name, || {
+				wire.decode(moq_net::frame::Frame::new(None, data.clone())).is_err()
+			});
+		}
+		assert!(bounded);
+	}
+
 	use super::*;
 
 	fn ts(micros: u64) -> Timestamp {

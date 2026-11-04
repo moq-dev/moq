@@ -1,5 +1,5 @@
 //! A session admitted as a cluster peer widens its QUIC limits before SETUP OK,
-//! while a viewer keeps the `--quic-*` ones, on the tokio listener and the
+//! while a viewer opens to the `--quic-*` ones, on the tokio listener and the
 //! io_uring workers alike.
 #![cfg(feature = "quic")]
 
@@ -59,13 +59,12 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	connect.tls.insecure = Some(true);
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
 			.expect("endpoint");
 	let conn = endpoint
 		.connect(
-			&driver::client::Config::new(std::sync::Arc::new(crypto)),
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
 			([127, 0, 0, 1], port).into(),
 			"localhost",
 		)
@@ -128,7 +127,9 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		}
 		leases
 	});
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let peer = probe(port, true).await;
 	assert_eq!(peer.streams, PROBE, "a peer opens past the viewer stream limit");
@@ -140,7 +141,8 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		"a viewer keeps the stream limit, opened {}",
 		viewer.streams
 	);
-	assert_eq!(viewer.max_data, 0, "a viewer's receive window is unchanged");
+	// Both start with only the SETUP window, which admission opens for a viewer too.
+	assert!(viewer.max_data > 0, "a viewer's receive window opens once admitted");
 
 	let _leases = deciding.await.expect("decider");
 	running.abort();
@@ -236,10 +238,9 @@ pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpo
 		.iter()
 		.map(|alpn| alpn.as_bytes().to_vec())
 		.collect();
-	let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
 	let mut transport = driver::transport::Config::default();
 	transport.idle_timeout = Some(BARE_IDLE);
-	let mut config = driver::server::Config::new(std::sync::Arc::new(crypto));
+	let mut config = driver::server::Config::new(std::sync::Arc::new(tls));
 	config.transport = transport;
 	driver::endpoint::Endpoint::new(
 		driver::endpoint::Config::default().with_server(config),
@@ -261,9 +262,7 @@ async fn static_dial(
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
 	options.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
-	let cluster = moq_relay::cluster::Cluster::new(options)
-		.expect("cluster init")
-		.with_connect(connect, quic);
+	let cluster = crate::spawn_cluster(options).with_connect(connect, quic);
 	let running = tokio::spawn(cluster.start().await.expect("cluster start").run());
 	let conn = kio::clock::timeout(TIMEOUT, server.accept())
 		.await

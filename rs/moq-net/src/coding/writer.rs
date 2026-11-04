@@ -182,6 +182,14 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		}
 	}
 
+	/// Reset the stream with `code`, for a condition no [`StreamError`] names, which the
+	/// caller has already looked up in the negotiated protocol's registry.
+	pub(crate) fn reset(mut self, code: u32) {
+		if let Some(mut stream) = self.stream.take() {
+			stream.reset(code);
+		}
+	}
+
 	/// Finish the stream and wait for the peer to acknowledge everything written.
 	///
 	/// [`Self::finish`] alone is not enough to deliver a final message. A stream that has sent
@@ -474,7 +482,7 @@ mod tests {
 		writer
 			.buffer(&lite::Track {
 				broadcast: crate::Path::from_static("test"),
-				epoch: None,
+				instance: None,
 				track: "video".into(),
 			})
 			.unwrap();

@@ -33,7 +33,7 @@ fn join(c: &mut Criterion) {
 	for tracks in TRACKS {
 		for subscribers in SUBSCRIBERS {
 			let broadcast = broadcast::Info::default().produce();
-			let info = track::Info::default().with_refresh(1);
+			let info = track::Info::default().with_max_age(None).with_refresh(1);
 			let producers: Vec<_> = (0..tracks)
 				.map(|i| broadcast.create_track(format!("bench{i}"), info.clone()).unwrap())
 				.collect();

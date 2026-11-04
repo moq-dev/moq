@@ -44,9 +44,14 @@
 //! with a domain name--then as with TLS, self-signed certificates can be used to provide
 //! encryption alone.
 #![warn(missing_docs)]
+//!
+//! Session waits take `&self` and a caller-owned `&kio::Waiter`; stream reads and writes
+//! take `&mut self`. Dropping the waiter cancels its registrations. Async helpers own their
+//! waiter, while `Future` and runtime I/O traits bridge their `Context` through `kio::Park`.
 
 pub mod connection;
 pub mod endpoint;
+pub(crate) mod forward;
 mod incoming;
 mod mutex;
 pub mod recv;
@@ -66,8 +71,8 @@ pub use moq_quic::{
 	VarInt, VarIntBoundsExceeded, Version, client, crypto, server, stream, transport,
 };
 
-#[cfg(all(test, feature = "quic"))]
-pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
+#[cfg(feature = "quic")]
+pub(crate) use crate::quic::driver::runtime::{Slot, wrap_udp_socket};
 
 #[cfg(test)]
 mod tests;

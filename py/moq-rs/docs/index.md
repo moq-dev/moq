@@ -62,6 +62,9 @@ asyncio.run(main())
    BroadcastRequests
    BroadcastRequest
    TrackProducer
+   DatagramProducer
+   DatagramRequests
+   DatagramRequest
    TrackDemand
    TrackRequests
    TrackRequest
@@ -80,6 +83,7 @@ asyncio.run(main())
 
    BroadcastConsumer
    TrackConsumer
+   DatagramConsumer
    GroupConsumer
 ```
 
@@ -234,7 +238,6 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    is_shutdown
    protocol_error
    log_level
-   mint_epoch
 ```
 
 ```{toctree}

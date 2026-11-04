@@ -1,17 +1,17 @@
-# [M] HLS export follows a resolution change under the same codec string
+# [M] HLS export lists a same-codec reconfigure's first group under the new init
 
 ## Goal
 
-When a rendition changes resolution (or any other decoder-affecting field) while keeping its codec string, the HLS and DASH export starts a new init segment and segment tag for it, so every served segment decodes under the init it is listed with, the rendition's first segments are listed, and its recording cursor keeps up.
+When a rendition changes resolution (or any other decoder-affecting field) while keeping its codec string, the first group after the change is listed under the new init and segment tag, whichever of the catalog and the HLS records reaches the export first.
+
+A regression test delivers the new config's first group to the export ahead of the catalog update and finds it under the new init.
 
 ## Plan
 
-Found by the conformance test in [moq-dev/moq#7387](https://github.com/moq-dev/moq/pull/7387): after `video1` switches from 320x180 to 480x270 with the same codec string, the export keeps the old segment tag and init. The 480x270 segments are served under the 320x180 init with no in-band parameter sets, so they don't decode, that rendition's first segments are never listed, and its recording cursor fails with `RecordingLagged`. When the codec string also changes, the importer makes a new rendition name and everything passes.
+Found by the conformance test in [moq-dev/moq#7387](https://github.com/moq-dev/moq/pull/7387). The export already replaces the instance on a decoder-identity change (the same fields hang's `same_identity` compares, plus geometry), and since [moq-dev/moq#7436](https://github.com/moq-dev/moq/pull/7436) the playlist keeps the retired instance's segments, under their own init, ahead of the replacement's behind a discontinuity (RFC 8216 6.2.2).
 
-Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Treat a change of the rendition's decoder identity (the same fields hang's `same_identity` compares) as a new instance in the export, as a codec-string change already is. Reuse the existing instance-replacement path rather than adding a second one. The conformance test's `video1` case is the regression test; it must pass with the same-codec switch restored.
+What remains is the hand-over race. Since [moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652) removed the records, each instance reads its media track and numbers its groups on the `media.join.interval` grid. A retired instance lists every group it read before the catalog update reached the export and stops at the first after; its replacement on the same track lists only groups past that boundary. The catalog and the media are still separate tracks, though, so the new config's first group can reach the old instance before the catalog update. The retiring instance claims it, so it is muxed under the old init and the replacement starts one group late. A catalog `start` field, a track per config, and a per-group marker were all dropped on 2026-11-02.
 
-Public API: none. Wire: none.
+The nightly conformance test (`rs/moq-hls/tests/integration/conformance.rs`, from [moq-dev/moq#7387](https://github.com/moq-dev/moq/pull/7387)) passes its `video1` same-codec switch, but it neither forces nor observes which of the catalog update and the new config's first group reaches the export first. It is not a test of the race, so the fix needs its own test that forces that order.
 
-## Related
-
-- [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - the test that found it, which waits on this
+Public API: none expected. Wire: decided by the removal plan.

@@ -1,4 +1,4 @@
-# Main is no slower than release
+# [S] Main is no slower than release
 
 ## Goal
 
@@ -266,11 +266,54 @@ Decided 2026-10-30 (maintainer), in
 
 - The sparse rows are accepted as that per-group model cost.
 - The fanout mode is accidental and is fixed before the cut, in
-  [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md).
+  [moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493).
+
+That fix cut the shared track lock from about 155 acquisitions per delivered
+group to 34 (release takes 31), counted on one worker. Most were the
+logical-track reader re-reading every copy's end, the retention edge, and a
+probe's fills on each of several reads per wake, plus a whole track walk on
+every group machine's wake. Its own pairing, 14 alternating rounds at load 7
+to 28, found no high-mode round on either side: relay CPU 0.066 to 0.090 cores
+against release's 0.062 to 0.104, with mixed-sign paired deltas inside
+release's own spread, and 5 to 36% fewer user-space instructions than release
+in every round. The re-pair above, on a quieter host, is what remains.
+
+Decided 2026-11-01 (maintainer), in
+[moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493): ✅ the new
+`session_fanout_threads` Criterion case joins the release pairing through a
+bench-only backport to `release`, merged in
+[moq-dev/moq#7698](https://github.com/moq-dev/moq/pull/7698). Bench-only
+backports are allowed from now on.
+
+Decided 2026-11-03 (maintainer), in
+[moq-dev/moq#7605](https://github.com/moq-dev/moq/pull/7605): these flat
+per-group costs of the relay's chat fan-out are accepted as the features they
+pay for. Each is instructions per delivered group at 512 subscribers through
+the track model, counted by `just bench-fanout` against the merge's parent:
+
+- Per-reader ranges and time anchors
+  ([moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929)): +902 when
+  it landed. moq-dev/moq#7605 took back 351 of the window reads it and
+  [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) left on every
+  peek; what remains reads each reader's window and drift edge.
+- A subscriber reads only its ranges' frames
+  ([moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129)): +183.
+- Public ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)):
+  +200.
+- Compressed tracks ([moq-dev/moq#5928](https://github.com/moq-dev/moq/pull/5928)):
+  +33.
+- Closing the relay demand gaps
+  ([moq-dev/moq#7052](https://github.com/moq-dev/moq/pull/7052)): +365.
+- Bounded reads end through routes
+  ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): +275, and
+  +450 per group through the in-process session.
+
+The first four were counted with frame pointers forced and the last two
+without, so compare each only with its own parent. None grows with
+subscribers.
 
 ## Required
 
-- [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md) - relay fanout subscribers stop contending one track lock, so main's relay CPU matches release's in every round
 - [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
 
 ## Related

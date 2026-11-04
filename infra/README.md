@@ -54,17 +54,22 @@ names the Environment, and a branch that is not on the list fails to start it.
 | Environment | Deployable from | Holds |
 | --- | --- | --- |
 | `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
-| `publish` | `main`, `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, deploy, and alert credentials, and the moq-bot key for jobs that also need one of those |
+| `publish` | `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
+| `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
 | `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
 | `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
 | `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |
 | `github-pages` | `main` | Nothing |
 
-`main` is on the `publish` list for `workflow_run`, schedule, and dispatch jobs,
-which run there, until [those publishers run on their tag](../quest/m0/ci/publish-release-only.md).
-A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the land gate runs on the
-maintainer's host, outside Actions. A job that also runs dry on other refs names the Environment
+`workflow_run`, schedule, and default dispatch jobs run as `main`, so no job
+that names `publish` runs that way: a tag's own run calls its publishers as
+reusable workflows or dispatches them with `--ref` naming the tag or `release`
+(`sh/gh/trigger-repo-publish.sh`). The `workflow_run` publishers that remain
+need only the moq-bot key and name `bot`. `publish` keeps admitting `main`
+until [the maintainer drops it](../quest/m0/ci/publish-release-only.md).
+A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the merge queue's
+build holds no secrets, and the queue watcher runs on the maintainer's host, outside Actions. A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
 'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
 repository level.
@@ -144,22 +149,25 @@ regenerates the repository metadata, signs it, and uploads the diff.
 
 ## The landing gate
 
-PRs land through `quest land serve`, a daemon on the maintainer's NixOS host
-([kixelated/nixos](https://github.com/kixelated/nixos), `modules/quest-land.nix`),
-not a workflow. It holds moq-bot's key there, checks each batch with
-`just ci "$BASE"` in an isolated container with the former queue runner's
-caches and `/dev/kvm`, and lands each PR through GitHub's squash merge. The
-main ruleset requires the `quest land` check pinned to moq-bot, which never
-reports it, so only the gate (or the administrator bypass) lands on `main`.
+PRs land through GitHub's merge queue, one at a time with squash merges. Each
+`merge_group` build runs `just ci "$BASE"` against the group's base on the
+self-hosted runner `nixos-moq-ci` (label `moq-queue`, with its local caches and
+`/dev/kvm`), read-only and without secrets (`.github/workflows/queue.yml`). The
+main ruleset requires its `Queue` context and the merge queue, so only the
+queue (or the administrator bypass) lands on `main`. moq-dev/quest's queue
+watcher, `quest land watch`, runs on the maintainer's NixOS host
+([kixelated/nixos](https://github.com/kixelated/nixos), `modules/quest-land.nix`)
+with moq-bot's key: it comments on each PR the queue drops, runs the Codex
+fixer, and re-enqueues the result.
 See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landing.
 
 ## Bootstrapping the Rust build cache
 
 `.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket,
 namespaced per runner OS and architecture. Hosted jobs on `main` write what
-they compile. The landing worker uses its persistent local store and has no R2
+they compile. The merge queue's self-hosted build uses its persistent local store and has no R2
 credentials.
-Release pull request jobs only read (main pull requests run no cloud CI), and
+Pull request jobs only read (main PRs run Check only while ready), and
 fork pull requests, which get no secrets, build cold.
 
 The write key is what enforces that: it lives in a GitHub Environment that
@@ -204,8 +212,8 @@ is done for `main`.
      -f name=main -f type=branch
    ```
 
-   Remove an existing `gh-readonly-queue/main/*` branch policy after the
-   batched landing gate replaces GitHub's queue.
+   The merge queue's `gh-readonly-queue/main/*` builds need no branch policy:
+   they run on the self-hosted runner and never deploy `cache-write`.
 
 4. **Store the keys under the same two names at both levels.** An Environment
    secret shadows a repository secret of the same name, so writers get the
@@ -250,8 +258,8 @@ ARTIFACTS_DIR=artifacts \
 Or trigger the GitHub Actions workflow manually:
 
 ```bash
-gh workflow run apt-repo.yml -f tag=moq-relay-v1.2.3
-gh workflow run rpm-repo.yml -f tag=moq-relay-v1.2.3
+gh workflow run apt-repo.yml --ref release -f tag=moq-relay-v1.2.3
+gh workflow run rpm-repo.yml --ref release -f tag=moq-relay-v1.2.3
 ```
 
 ## Bootstrapping the Nix cache
@@ -260,11 +268,21 @@ gh workflow run rpm-repo.yml -f tag=moq-relay-v1.2.3
 released packages, pushed by `release-nix.yml` on a release tag, and never
 expires. `nix-ci-moq-dev` holds the dev shells `cache.yml` pushes after every
 merge to `main`, for x86 Linux, ARM Linux, and ARM macOS. It publishes the full
-build closure from `nix develop --profile`, uploading only missing paths.
+build closure from `nix develop --profile`, uploading only missing paths, plus
+`moq-libav`, its wasm build, and its downloaded sources, which `bun install`
+builds outside the dev shell.
 Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30 days
 after upload; the next warm re-uploads what it still needs. `flake.nix`
 sets `fallback = true` because that expiry can remove a path before one that
 depends on it.
+
+The Worker logs R2 internal errors (10001) and service-unavailable errors
+(10043) and treats the failed read as a miss: the other bucket can still
+serve the path, and otherwise the 404 is non-cacheable so Nix builds from
+source.
+Other errors, including invalid object names, permissions, and bucket
+configuration, still fail the request. A failure after the archive body
+starts streaming remains a failed download, covered by `fallback`.
 
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
 the trust boundary, not the bucket keys. It lives in the `cache-write`

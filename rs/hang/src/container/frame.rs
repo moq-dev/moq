@@ -23,11 +23,11 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// [`with_timescale`](moq_net::track::Info::with_timescale) for a container that carries the
 /// source's own scale instead (CMAF and Matroska both do).
 ///
-/// Also declares a retention long enough for a segmented egress to serve a full playlist window,
-/// which is why every media track should start here rather than at `Info::default()`. It is a
-/// retention budget and a CEILING on what a subscriber may ask to wait for, so it never makes
-/// anyone play further behind live: a subscriber's own
-/// [`Subscription::max_delay`](moq_net::track::Subscription::max_delay) defaults to
+/// Also declares [`MAX_AGE`], long enough for a segmented egress to serve a full playlist window,
+/// which is why every media track should start here rather than at `Info::default()`, whose max
+/// age is zero. It bounds how long a superseded group stays fresh and caps what a subscriber may
+/// ask to wait for, so it never makes anyone play further behind live: a subscriber's own
+/// [`Delay::max`](moq_net::track::Delay::max) defaults to
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip the moment a newer group arrives).
 ///
 /// `priority` is the publisher's tie-break priority, and should come from
@@ -152,15 +152,13 @@ mod test {
 	}
 
 	#[test]
-	fn media_tracks_declare_their_retention() {
+	fn media_tracks_declare_their_max_age() {
 		// A media track is read as history (a segmented egress FETCHes segments a playlist
-		// advertised), so it declares a finite retention window.
-		assert_eq!(track_info(crate::catalog::PRIORITY.video).max_age, Some(MAX_AGE));
-
-		// Retimescaling for a container that carries the source's own scale keeps it, since that
-		// is the shape that would otherwise reach for `Info::default()` and lose the retention.
+		// advertised), so it declares a finite max age, kept through a retimescale.
+		let max_age = Some(MAX_AGE);
+		assert_eq!(track_info(crate::catalog::PRIORITY.video).max_age, max_age);
 		let at = track_info(crate::catalog::PRIORITY.video).with_timescale(Timescale::MILLI);
 		assert_eq!(at.timescale, Some(Timescale::MILLI));
-		assert_eq!(at.max_age, Some(MAX_AGE));
+		assert_eq!(at.max_age, max_age);
 	}
 }

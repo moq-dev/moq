@@ -9,7 +9,9 @@
 
 #![cfg(feature = "_quic")]
 
-use std::net::{SocketAddr, TcpListener};
+#[cfg(not(target_os = "linux"))]
+use std::net::SocketAddr;
+use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
@@ -47,14 +49,14 @@ fn client() -> moq_tokio::Client {
 		.with_reconnect(false)
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 	assert!(
 		tokio::net::TcpStream::connect(http).await.is_err(),
 		"HTTP still accepted after the owner stopped"
 	);
-	// A closed UDP port never answers, so this only ends at the timeout. A live
-	// listener answers a loopback handshake well inside it, and on Linux the
-	// socket check before this is what proves the port closed.
+	// Without the Linux socket-inode proof, probe the listeners. A closed UDP
+	// port never answers, so this only ends at the timeout.
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
 	let after = kio::clock::timeout(
 		Duration::from_millis(500),
@@ -168,7 +170,6 @@ async fn embed_and_stop(mut config: Config) {
 	// are cloned before `run` consumes the relay.
 	let origin = relay.cluster().origin.clone();
 	let trigger = relay.shutdown_trigger().clone();
-	let ready = relay.ready();
 	let web = relay
 		.web()
 		.routes()
@@ -178,6 +179,7 @@ async fn embed_and_stop(mut config: Config) {
 			axum::routing::post(|| async { ([("access-control-allow-origin", "https://trusted.example")], "private") }),
 		)
 		.route("/plain-post", axum::routing::post(|| async { "plain" }));
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.with_web(web).run());
 	ready.wait().await.expect("relay ready");
 	assert!(!running.is_finished(), "the relay stopped while serving");
@@ -334,6 +336,9 @@ async fn embed_and_stop(mut config: Config) {
 	// owner's sockets are still open.
 	#[cfg(target_os = "linux")]
 	assert!(owned.is_disjoint(&open_sockets()), "the owner's sockets outlived `run`");
+	// A freed port can already belong to another test. Linux checks the owner's
+	// socket identities instead; probe only where that proof is unavailable.
+	#[cfg(not(target_os = "linux"))]
 	assert_owner_stopped(quic, http).await;
 }
 
@@ -425,6 +430,74 @@ async fn uring_custom_route_and_quic() {
 	embed_and_stop(config).await;
 }
 
+/// The WebRTC media path on the QUIC port reaches the embedder's feed, whichever
+/// worker read it, and the feed's reply leaves from the QUIC port.
+async fn webrtc_feed(mut config: Config) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	config.drain_timeout = Some((Duration::ZERO).into());
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let quic = relay.quic_addr().expect("quic listener bound");
+	let feed = relay.webrtc().expect("tokio serves QUIC");
+	let trigger = relay.shutdown_trigger().clone();
+	let running = tokio::spawn(relay.run());
+
+	// Enough sources that a reuseport group's 4-tuple hash spreads them over every member.
+	let mut peers = Vec::new();
+	for i in 0..16u8 {
+		let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
+		peer.send_to(&[0x16, 0xfe, 0xfd, i], quic).await.expect("send DTLS");
+		peers.push(peer);
+	}
+	let mut seen = std::collections::HashSet::new();
+	kio::clock::timeout(TIMEOUT, async {
+		while seen.len() < peers.len() {
+			let datagram = feed.recv().await.expect("feed open");
+			assert_eq!(datagram.data[..3], [0x16, 0xfe, 0xfd]);
+			seen.insert(datagram.remote);
+		}
+	})
+	.await
+	.expect("every peer's datagram reached the feed");
+
+	let peer = &peers[0];
+	feed.send(&moq_tokio::quic::demux::Transmit {
+		destination: peer.local_addr().expect("peer addr"),
+		ecn: None,
+		contents: b"reply",
+		segment_size: None,
+		src_ip: None,
+	})
+	.await
+	.expect("send reply");
+	let mut buf = [0; 16];
+	let (len, from) = kio::clock::timeout(TIMEOUT, peer.recv_from(&mut buf))
+		.await
+		.expect("reply arrived")
+		.expect("recv reply");
+	assert_eq!(&buf[..len], b"reply");
+	assert_eq!(from.port(), quic.port());
+
+	stop(trigger, running).await;
+}
+
+#[tokio::test]
+async fn shared_tokio_webrtc_feed() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	webrtc_feed(http_and_quic(&cert, &key, "127.0.0.1:0".into())).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn worker_tokio_webrtc_feed() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
+	config.runtime.workers = Some(2);
+	config.runtime.pin = false;
+	webrtc_feed(config).await;
+}
+
 /// An embedder-owned accept loop joins the relay's own /metrics exposition.
 #[tokio::test]
 async fn embedded_listener_health_reaches_metrics() {
@@ -435,9 +508,9 @@ async fn embedded_listener_health_reaches_metrics() {
 	config.drain_timeout = Some((Duration::ZERO).into());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let internal = relay.internal().addr().expect("internal listener bound");
-	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
 	let health = moq_tokio::accept::Health::new("embedded");
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.with_listeners([health]).run());
 	ready.wait().await.expect("relay ready");
 	let body = reqwest::get(format!("http://{internal}/metrics"))

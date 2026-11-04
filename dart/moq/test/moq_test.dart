@@ -19,6 +19,31 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('datagram-only requests have independent priority demand', () async {
+    final broadcast = BroadcastProducer();
+    final stream = broadcast.publishTrack(name: 'events', info: null);
+    final requests = broadcast.requests().datagrams();
+    final consumer = broadcast.consume().datagrams(name: 'events');
+    consumer.setPriority(priority: 12);
+    final request = await requests.requested().timeout(timeout);
+    expect(request.name(), 'events');
+    expect(request.priority(), 12);
+    final producer = request.accept(info: null);
+    expect(producer.priority(), 12);
+    expect(stream.demand().wanted(), isNull);
+    producer.insert(
+      datagram: Datagram(sequence: 7, payload: utf8.encode('seven')),
+    );
+    final datagram = await consumer.recv().timeout(timeout);
+    expect(datagram?.sequence, 7);
+    expect(datagram?.payload, utf8.encode('seven'));
+    consumer.cancel();
+    expect(await producer.priorityChanged(last: 12).timeout(timeout), isNull);
+    producer.finish();
+    requests.cancel();
+    broadcast.close();
+  });
+
   test('container timebase belongs to one broadcast', () {
     final owner = BroadcastProducer();
     final other = BroadcastProducer();
@@ -67,9 +92,30 @@ void main() {
     broadcast.close();
   });
 
+  test('an omitted max age is zero and the unlimited flag sets none', () {
+    final broadcast = BroadcastProducer();
+    final omitted = broadcast
+        .publishTrack(name: 'omitted', info: null)
+        .consume(subscription: null)
+        .info();
+    expect(omitted.maxAge, Duration.zero);
+    final unlimited = broadcast
+        .publishTrack(name: 'unlimited', info: TrackInfo(maxAgeUnlimited: true))
+        .consume(subscription: null)
+        .info();
+    expect(unlimited.maxAge, isNull);
+    expect(unlimited.maxAgeUnlimited, isTrue);
+    broadcast.close();
+  });
+
   test('a default subscription skips superseded groups at once', () {
-    expect(defaultSubscription().maxDelay, Duration.zero);
-    expect(Subscription().maxDelay, isNull);
+    for (final subscription in [defaultSubscription(), Subscription()]) {
+      expect(subscription.delay.min, Duration.zero);
+      expect(subscription.delay.max, Duration.zero);
+    }
+    final unset = Delay(min: null, max: null);
+    expect(unset.min, isNull);
+    expect(unset.max, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -77,7 +123,9 @@ void main() {
     final track = broadcast.publishTrack(name: 'negative', info: null);
     expect(
       () => track.consume(
-        subscription: Subscription(maxDelay: const Duration(microseconds: -1)),
+        subscription: Subscription(
+          delay: Delay(max: const Duration(microseconds: -1)),
+        ),
       ),
       throwsArgumentError,
     );
@@ -90,7 +138,7 @@ void main() {
       final broadcast = BroadcastProducer();
       final track = broadcast.publishTrack(
         name: 'backlog',
-        info: TrackInfo(timescale: 1000000),
+        info: TrackInfo(maxAgeUnlimited: true, timescale: 1000000),
       );
       for (var ms = 0; ms < 3; ms++) {
         final group = track.appendGroup();
@@ -105,7 +153,7 @@ void main() {
 
       final consumer = track.consume(
         subscription: Subscription(
-          maxDelay: const Duration(seconds: 10),
+          delay: Delay(max: const Duration(seconds: 10)),
           ranges: [Range(start: RelativeMoqAnchor(2))],
           order: Order.ascending,
         ),
@@ -213,6 +261,22 @@ void main() {
     ).timeout(timeout);
     final serverSession = await accepted;
     expect(client.allocator(), isA<MoqAllocator>());
+
+    final viewers = client.viewers();
+    expect(viewers, isA<Viewers>());
+    final viewer = viewers.watch(maxBps: 4000000);
+    expect(viewer, isA<Viewer>());
+    // A slice never exceeds its ceiling, whether or not QUIC has an estimate yet.
+    viewer.update(maxBps: 1000000);
+    expect(viewer.rate() ?? 0, lessThanOrEqualTo(1000000));
+    viewers.setTarget(targetBps: 0);
+    viewers.setTarget(targetBps: null);
+    // Past what a PROBE target carries: refused.
+    expect(
+      () => viewers.watch(maxBps: 1 << 53),
+      throwsA(isA<OutOfRangeMoqException>()),
+    );
+    viewer.dispose();
 
     final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
@@ -393,6 +457,16 @@ void main() {
     expect(() => catalog.finish(), throwsA(isA<ClosedMoqException>()));
   });
 
+  test('a broadcast consumer\'s closed() resolves once it closes', () async {
+    final broadcast = BroadcastProducer();
+    var resolved = false;
+    final closed = broadcast.consume().closed().then((_) => resolved = true);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(resolved, isFalse, reason: 'resolved while the broadcast is live');
+    broadcast.close();
+    await closed.timeout(timeout);
+  });
+
   test('timestamps round-trip exactly at the track scale', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(
@@ -506,24 +580,22 @@ void main() {
     replacement.broadcast().close();
   });
 
-  test('a new epoch restarts announce consumers', () async {
+  test('a new instance restarts announce consumers', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(config: MoqAnnounceConfig());
-    final publication = origin.createBroadcast(path: 'epoch');
+    final publication = origin.createBroadcast(path: 'instance');
 
-    final first = mintEpoch();
-    publication.announce(route: AnnounceRoute(epoch: first));
+    publication.announce(route: AnnounceRoute());
     final start = await nextRoute(announced) as AnnounceEventStart;
-    expect(start.announce.route.epoch, first);
+    expect(start.announce.route.instance, isNotEmpty);
 
-    final second = mintEpoch();
-    publication.announce(route: AnnounceRoute(epoch: second));
+    publication.announce(route: AnnounceRoute(instance: 'camera', epoch: 1));
     final restart = await nextRoute(announced) as AnnounceEventRestart;
-    expect(restart.announce.route.epoch, second);
+    expect(restart.announce.route.instance, 'camera');
 
     expect(
-      () => publication.announce(route: AnnounceRoute(epoch: 'not-an-epoch')),
-      throwsA(isA<MoqException>()),
+      () => publication.announce(route: AnnounceRoute(instance: '')),
+      throwsA(isA<InvalidInstanceMoqException>()),
     );
     announced.cancel();
     announced.dispose();
@@ -548,7 +620,7 @@ void main() {
     final pending = origin.consume().request(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
-    final prepared = request.prepare(epoch: mintEpoch());
+    final prepared = request.prepare();
     final served = prepared.publish();
     await pending.timeout(timeout);
     // The publication controls the prepared fill: closing that ends its announcement.
@@ -751,10 +823,7 @@ void main() {
 
     final fixedOutput = moq_audio.DecoderOutput(
       format: moq_audio.SampleFormat.f32,
-      delay: moq_media.Delay(
-        min: Duration(milliseconds: 80),
-        max: Duration.zero,
-      ),
+      delay: Delay(min: Duration(milliseconds: 80)),
       estimate: false,
     );
     final fixed = await moq_audio.Consumer.subscribe(

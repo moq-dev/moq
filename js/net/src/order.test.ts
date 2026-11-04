@@ -81,8 +81,8 @@ function writeGroup(track: TrackProducer): GroupProducer {
 
 // Receiving a group means its stream header was written, which the publisher does only after
 // ranking the stream.
-async function receive(subscriber: TrackSubscriber, count: number): Promise<number[]> {
-	const sequences: number[] = [];
+async function receive(subscriber: TrackSubscriber, count: number): Promise<bigint[]> {
+	const sequences: bigint[] = [];
 	for (let i = 0; i < count; i++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended early");
@@ -122,19 +122,19 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const groups = [0, 1, 2].map(() => writeGroup(video));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe({
-		maxDelay: MAX_DELAY,
+		delay: { max: MAX_DELAY },
 		order,
-		groups: { start: { included: 0 } },
+		ranges: [{ start: { absolute: 0n } }],
 	});
 	await receive(subscriber, groups.length);
 
 	if (update !== undefined) {
-		subscriber.update({ maxDelay: MAX_DELAY, order: update, groups: { start: { included: 0 } } });
+		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: { absolute: 0n } }] });
 		await aggregate(video, (upstream) => upstream === update);
 	}
 
@@ -176,10 +176,10 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ maxDelay: MAX_DELAY, order });
+	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order });
 	await aggregate(video, (upstream) => upstream === order);
 
 	const groups: GroupProducer[] = [];
@@ -244,10 +244,10 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ maxDelay: MAX_DELAY, order: "descending" });
+	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
 	await aggregate(video, (upstream) => upstream === "descending");
 
 	const groups: GroupProducer[] = [];
@@ -271,7 +271,7 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 });
 
 // One track fanned out to an ascending and a descending subscriber, the shape a relay serves
-// from one upstream request (a JS app does not proxy, so the track is local here). The
+// from one upstream request (the track is local here). The
 // aggregate a wire would request upstream turns descending once the descending subscriber
 // joins, so it is never held behind the other's backlog, and each session still serves its
 // own subscriber in its own order.
@@ -285,14 +285,16 @@ test("a shared track aggregates descending and serves each subscriber in its own
 	const broadcastPublication = origin.createBroadcast(Path.from("test"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcastPublication.announce();
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const ascendingRemote = wireOf(ascending.client).consume(Path.from("test"));
-	const ascendingTrack = ascendingRemote.track("video").subscribe({ maxDelay: MAX_DELAY, order: "ascending" });
+	const ascendingTrack = ascendingRemote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "ascending" });
 	await aggregate(video, (order) => order === "ascending");
 
 	const descendingRemote = wireOf(descending.client).consume(Path.from("test"));
-	const descendingTrack = descendingRemote.track("video").subscribe({ maxDelay: MAX_DELAY, order: "descending" });
+	const descendingTrack = descendingRemote
+		.track("video")
+		.subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
 	await aggregate(video, (order) => order === "descending");
 
 	// One at a time, so each session opens its streams in sequence order.

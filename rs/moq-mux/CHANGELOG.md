@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - MP4 and Matroska import fill a video rendition's `projection` and `stereo` from Spherical Video V2's `sv3d`/`st3d` boxes and Matroska's `Projection`/`StereoMode`, and Opus channel mapping family 2 (raw Opus, Matroska, and other OpusHead sources) imports with `layout: "ambisonic"`. What the catalog cannot describe is refused with `fmp4::Error::UnsupportedSpatial`, `mkv::Error::UnsupportedSpatial`, or `opus::Error::UnsupportedChannelCount`: a cubemap or mesh projection, a nonzero pose, uncentred or vertically cropped equirectangular bounds, a stereo packing other than mono, left-right, or top-bottom with the left eye first, and family 2 at zeroth order or with RFC 8486's non-diegetic stereo pair.
 - fMP4 carries surround Opus: a `dOps` channel mapping table (family 1, 2, or 255) imports into the OpusHead description, and an exported `dOps` writes the description's table back instead of refusing it with `opus::Error::UnsupportedMappingFamily`. Family 3, whose OpusHead carries a demixing matrix rather than a table, is still refused both ways.
+- `container::mp4::Export::stop` ends a recording before the broadcast does: `next` still returns the fragment each track was buffering, then `None`, so `finish` indexes it.
+- `container::Producer::fail` finishes a track with an error instead of aborting it: every group written stays readable, and a reader reaching the end gets the error instead of the end of stream.
 
 ### Changed
 
@@ -19,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Received CMAF init segments and fragments use the importer's metadata and sample limits before mp4-atom parses any box, including discarded known types and the children it keeps from spatial sample-entry boxes. MSF catalog derivation and regular MP4 recording share the checks; zero-byte entry counts cannot amplify a small input.
+
+- fMP4 import bounds what a `moov` or `moof` costs to parse and plan: a body over `fmp4::MAX_METADATA_BYTES` (2 MiB) is refused at its header, since parsing expands it up to tenfold, a `moof` of more than `fmp4::MAX_FRAGMENT_SAMPLES` (now 131,072) samples is refused before planning, and a `moov` of more than `fmp4::MAX_TRACKS` (256) tracks with `Error::TooManyTracks` before any is created. `fmp4::MAX_HELD_BYTES` (32 MiB) now bounds only a text sample. A 116-byte `moof` no longer plans 584 MB.
+- Declaring a catalog rendition costs the same however many the catalog already holds: it is checked on its own rather than by cloning and serializing the whole catalog, which made N tracks cost N².
 - `container::Consumer` no longer plays a backlog that landed before its first read from the oldest group: until the first item, the start moves past each group whose first frame trails the newest content by more than the max delay plus the warmup, as `@moq/hang`'s consumer does, keeping the group covering the live edge less `Delay::min` and the warmup. A join starts at the same group in Rust and the browser. Once reading begins, only a blocking group is skipped, as before.
 - fMP4 import applies each track's edit list to its frame timestamps and drops the samples before the edit, such as AAC priming, along with the video samples decoding from a dropped sync sample, and a passthrough init no longer carries the `edts`. A consumer that offsets AAC priming itself must stop, or it shifts the track twice. An edit list it can't reduce to one shift (several media edits, or a rate other than 1) is refused with `Error::UnsupportedEditList`.
 

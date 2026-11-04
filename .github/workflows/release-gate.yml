@@ -81,6 +81,7 @@ jobs:
               - "Cargo.toml"
               - "Cargo.lock"
               - "rust-toolchain.toml"
+              - "sh/rs/android-test.sh"
               - ".github/workflows/android.yml"
             # Anything a published API is built from, including the lockfiles,
             # since a bumped dependency can change a re-exported type.
@@ -139,6 +140,8 @@ jobs:
               - "test/max-age/**"
               - "test/portrait/**"
               - "rs/moq-tokio/tests/integration/max_age.rs"
+              - "test/relay-fill/**"
+              - "rs/moq-tokio/tests/integration/relay_fill.rs"
               - "test/receive-credit/**"
               - "rs/moq-tokio/tests/integration/receive_credit.rs"
               - "rs/moq-uring/tests/integration/receive_credit.rs"
@@ -173,6 +176,7 @@ jobs:
               - ".github/workflows/obs.yml"
             oss-scanner:
               - ".oss-scanner/**"
+              - ".github/actions/nextest/VERSION"
               - "sh/oss-scanner.sh"
               - ".github/workflows/oss-scanner.yml"
             release-dart:
@@ -244,6 +248,7 @@ jobs:
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"
               - "rs/moq-congestion/**"
+              - "rs/moq-crypto/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"
               - "rs/moq-json/**"
@@ -463,7 +468,6 @@ jobs:
     uses: ./.github/workflows/release-kt-lib.yml
     permissions:
       contents: read
-      actions: read
 
   release-swift-lib:
     name: Release Swift Lib

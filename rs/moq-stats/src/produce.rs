@@ -8,12 +8,12 @@ use std::task::Poll;
 
 use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
-use moq_net::{Epoch, Path, broadcast, kio, origin, track};
+use moq_net::{Path, broadcast, kio, origin, track};
 use serde::Serialize;
 use tracing::Instrument as _;
 
 use crate::{
-	Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
+	Epoch, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
 };
 
 /// Settings for a [`Producer`]. Construct with [`Config::new`] and chain
@@ -32,7 +32,7 @@ pub struct Config {
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
-	/// `node` is unset), announced under a fresh [`Epoch`] each time. Also the
+	/// `node` is unset), announced under a fresh [`Instance`](moq_net::Instance) each time. Also the
 	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
 	/// more stats.
 	pub prefix: Path,
@@ -54,7 +54,7 @@ pub struct Config {
 	/// first segment, and larger values include more leading segments. A
 	/// group's track is listed while its group has live traffic, plus the
 	/// [`Self::linger`], and a group returning after that is a new track
-	/// instance with a new [`GroupFrame::epoch`](crate::GroupFrame::epoch),
+	/// run with a new [`GroupFrame::epoch`](crate::GroupFrame::epoch),
 	/// counted from zero.
 	pub depth: usize,
 	/// How long a group's track stays listed after its group's last entry
@@ -661,7 +661,7 @@ fn tier_entry<'a, V: Default>(tiers: &'a mut HashMap<Tier, V>, tier: &Tier) -> &
 }
 
 /// The always-present `totals.json` track and its per-tier sums. Never pruned
-/// while the broadcast lives, so it is cumulative within the epoch.
+/// while the broadcast lives, so it is cumulative within the broadcast instance.
 struct TotalsTrack {
 	output: Output<Totals>,
 	sums: Cumulative<Totals>,
@@ -777,7 +777,7 @@ impl PrefixTrack {
 }
 
 /// One group's track: listed from the group's first entry until it lingers
-/// empty, then finished. A return after that is a new instance under a new
+/// empty, then finished. A return after that is a new run under a new
 /// epoch, counted from zero, so it holds no state for groups that left.
 struct GroupTrack {
 	/// The track name, for logs.
@@ -793,10 +793,8 @@ struct GroupTrack {
 
 /// A group track's frame, byte-identical to a [`GroupFrame`](crate::GroupFrame)
 /// once sorted.
-#[serde_with::serde_as]
 #[derive(Serialize)]
 struct GroupBody {
-	#[serde_as(as = "serde_with::DisplayFromStr")]
 	epoch: Epoch,
 	tiers: Frame<GroupTier>,
 }
@@ -833,8 +831,7 @@ impl GroupTrack {
 			name,
 			snapshot: Snapshot::new(track, config()),
 			body: GroupBody {
-				// A new instance of the name: readers keep its counters apart from
-				// an earlier instance's.
+				// A new counter run: readers keep its counters apart from an earlier epoch's.
 				epoch: Epoch::mint(),
 				tiers: Frame::default(),
 			},
@@ -956,9 +953,9 @@ impl NodePublisher {
 		let advertised = advertised_path(&task.prefix, task.node.as_ref())
 			.inspect_err(|err| tracing::warn!(%err, "stats: node path too long"))
 			.ok()?;
-		// A fresh epoch per announcement: a restart is a new broadcast, so no relay
+		// A fresh instance per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
-		let route = origin::Route::default().with_epoch(Epoch::mint());
+		let route = origin::Route::default();
 		let broadcast = match task.origin.publish(&advertised, route) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
@@ -1557,7 +1554,7 @@ mod tests {
 			assert_eq!(
 				(total.wire_tx, total.wire_rx),
 				(1_307, 2_614),
-				"epoch totals never reset on re-hold"
+				"broadcast totals never reset on re-hold"
 			);
 		}
 	}
@@ -1638,7 +1635,7 @@ mod tests {
 	use std::collections::BTreeMap;
 
 	use moq_net::stats::{Registry, Tier};
-	use moq_net::{Timestamp, announce, broadcast, track};
+	use moq_net::{Instance, Timestamp, announce, broadcast, track};
 
 	use super::*;
 	use crate::{PrefixFrame, PresenceFrame, TotalsFrame};
@@ -1941,35 +1938,35 @@ mod tests {
 		))
 	}
 
-	/// A producer restarted on the same origin ends its old epoch and announces
+	/// A producer restarted on the same origin ends its old instance and announces
 	/// the same path under a new one.
 	#[tokio::test(start_paused = true)]
-	async fn restarted_producer_announces_a_new_epoch() {
+	async fn restarted_producer_announces_a_new_instance() {
 		let origin = produce_origin();
 		let mut events = origin.consume().with_hidden(true).announced();
 
 		let first = node_producer(&origin);
 		drive_tick().await;
-		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
+		let [(path, true, before)] = &take_instances(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		assert_eq!(path, ".stats/node/sjc");
 
 		drop(first);
 		drive_tick().await;
-		assert_eq!(take_epochs(&mut events), [(path.clone(), false, before.clone())]);
+		assert_eq!(take_instances(&mut events), [(path.clone(), false, before.clone())]);
 
 		let _second = node_producer(&origin);
 		drive_tick().await;
-		let [(after_path, true, after)] = &take_epochs(&mut events)[..] else {
+		let [(after_path, true, after)] = &take_instances(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		assert_eq!(after_path, path);
-		assert!(after > before, "a restart mints a newer epoch");
+		assert_ne!(after, before, "a restart mints a new instance");
 	}
 
 	/// A restart while the old instance is still announced (a route the mesh
-	/// has not withdrawn yet) takes the path at once: the newer epoch restarts
+	/// has not withdrawn yet) takes the path at once: the newer instance restarts
 	/// it, so a reader re-requests the new broadcast instead of stalling on the
 	/// old one, while the old subscription stays on the old instance.
 	#[tokio::test(start_paused = true)]
@@ -1980,7 +1977,7 @@ mod tests {
 		let first = node_producer(&origin);
 		let _f1 = feed(first.registry(), Tier::default(), "foo/bar", true, 1, 100).await;
 		drive_tick().await;
-		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
+		let [(path, true, before)] = &take_instances(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
@@ -1990,11 +1987,11 @@ mod tests {
 		let second = node_producer(&origin);
 		let _f2 = feed(second.registry(), Tier::default(), "foo/bar", true, 1, 30).await;
 		drive_tick().await;
-		let [(started, true, after)] = &take_epochs(&mut events)[..] else {
-			panic!("expected the new epoch to restart the path");
+		let [(started, true, after)] = &take_instances(&mut events)[..] else {
+			panic!("expected the new instance to restart the path");
 		};
 		assert_eq!(started, path);
-		assert!(after > before);
+		assert_ne!(after, before);
 		drop(old);
 
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
@@ -2017,13 +2014,13 @@ mod tests {
 
 		let _newer = node_producer(&origin);
 		drive_tick().await;
-		let [(_, true, _)] = &take_epochs(&mut events)[..] else {
+		let [(_, true, _)] = &take_instances(&mut events)[..] else {
 			panic!("expected the newer producer's announce");
 		};
 
 		publisher.run().await;
 		drive_tick().await;
-		assert_eq!(take_epochs(&mut events), []);
+		assert_eq!(take_instances(&mut events), []);
 	}
 
 	/// Cancelling a running publisher ends its tracks deliberately, so a reader
@@ -2228,13 +2225,13 @@ mod tests {
 	}
 
 	/// The announce events buffered so far in delivery order, as
-	/// `(path, active, epoch)`. Every stats route carries an epoch.
-	fn take_epochs(events: &mut announce::Consumer) -> Vec<(String, bool, Epoch)> {
+	/// `(path, active, instance)`. Every stats route carries an instance.
+	fn take_instances(events: &mut announce::Consumer) -> Vec<(String, bool, Instance)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
 		while let Some(Some((update, active))) = next_update(events).now_or_never() {
-			let epoch = update.route.epoch.expect("a stats route carries an epoch");
-			out.push((update.prefix.as_str().to_string(), active, epoch));
+			let instance = update.route.instance.expect("a stats route carries an instance");
+			out.push((update.prefix.as_str().to_string(), active, instance));
 		}
 		out
 	}
@@ -3072,9 +3069,9 @@ mod tests {
 		);
 	}
 
-	/// A group that returns after its linger is a new track instance: a new
+	/// A group that returns after its linger starts a new counter run: a new
 	/// epoch counted from zero, so a reader summing each epoch never counts the
-	/// old one twice, and group numbers that continue past the old instance's.
+	/// old one twice, and group numbers that continue past the old run's.
 	#[tokio::test(start_paused = true)]
 	async fn a_relisted_group_starts_a_new_epoch_from_zero() {
 		let (producer, origin) = grouped_producer(Duration::ZERO);
@@ -3117,14 +3114,17 @@ mod tests {
 			.await
 			.unwrap()
 			.unwrap();
-		assert!(second.epoch > first.epoch, "a returning group mints a new epoch");
+		assert!(
+			second.epoch.as_str() > first.epoch.as_str(),
+			"a returning group mints a newer UUIDv7"
+		);
 		assert_eq!(
 			second.tiers[""].sessions.sessions_started, 1,
 			"a new epoch counts from zero"
 		);
 		assert!(
 			sequence(&broadcast).await > old_sequence,
-			"group numbers continue past the old instance"
+			"group numbers continue past the old run"
 		);
 		assert_eq!(
 			default_totals(&broadcast).await.sessions.sessions_started,

@@ -7,6 +7,9 @@ import { Fanout } from "../fanout";
 import { Estimator, Order } from "../order";
 import { Encoder } from "./encoder";
 
+// A probe chunk's bytes: an Annex B start code, which the probe requires of H.264 and HEVC.
+const ANNEX_B = { byteLength: 4, copyTo: (dest: Uint8Array) => dest.set([0, 0, 0, 1]) };
+
 // Model an encoder that cannot accept more work until the test completes its pending input.
 // The codec probe completes immediately, independently of the live encoder's service rate.
 class SlowEncoder {
@@ -55,7 +58,7 @@ class SlowEncoder {
 
 	async flush() {
 		this.output(
-			{ type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} } as never,
+			{ type: "key", timestamp: 0, ...ANNEX_B } as never,
 			{ decoderConfig: { codec: this.codec } } as never,
 		);
 	}
@@ -110,15 +113,18 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	// An on-time audio rendition shares the broadcast, writing each capture as it happens.
 	const audio = new Estimator();
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal(track),
+		joinInterval: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
 		},
 	};
 	const encoder = new Encoder("video", {
-		broadcast: { video: () => rendition, order } as never,
+		broadcast: { video: () => rendition, order, join: new Signal(undefined) } as never,
 		capture: {
 			in: { source: new Signal({ getSettings: () => ({ frameRate: 25 }), getConstraints: () => ({}) }) },
 			out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },
@@ -128,7 +134,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 	const send = async (millis = 40) => {
 		await clock.advance(Nano.fromMilli(Milli(millis)));
 		const timestamp = Nano.toMicro(Nano(clock.now()));
-		audio.write(timestamp, order);
+		audio.write(timestamp, order, true);
 		controller.enqueue(new Input(timestamp) as never);
 		await clock.advance(Nano.zero);
 	};

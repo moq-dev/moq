@@ -18,10 +18,10 @@
 //!
 //! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>`
 //! (default prefix `.stats`); parse announce paths back with
-//! [`parse_node_path`]. Each announcement carries a fresh [`Epoch`] on its
+//! [`parse_node_path`]. Each announcement carries a fresh [`Instance`](moq_net::Instance) on its
 //! route, so a restarted node is a new broadcast at the same path; a reader
-//! tells them apart by the announced route's epoch. The broadcast carries a
-//! `totals.json` track of each [`Tier`]'s [`Totals`] for the epoch, and a
+//! tells them apart by the announced route's instance. The broadcast carries a
+//! `totals.json` track of each [`Tier`]'s [`Totals`] for the instance, and a
 //! reader may request any stats label's `<label>/presence.json` track and any
 //! broadcast prefix's `<path>/prefix.json` track of [`Prefix`] counters. Each
 //! is a compressed [`moq_json::snapshot`] track; compute names with
@@ -39,7 +39,10 @@ pub mod aggregate;
 pub mod consume;
 pub mod produce;
 
+mod epoch;
+
 pub use consume::Consumer;
+pub use epoch::{Epoch, InvalidEpoch};
 pub use produce::{Producer, Publisher};
 
 use std::collections::BTreeMap;
@@ -48,7 +51,7 @@ use std::collections::BTreeMap;
 /// can depend on this crate alone.
 pub use moq_net::stats::{Failure, Failures, Handle, Presence, RefusalKind, Refusals, Registry, Role, Tier, Traffic};
 
-use moq_net::{Epoch, Path};
+use moq_net::Path;
 
 /// One frame off the totals track: each tier's [`Totals`], keyed by tier label
 /// (`""` for the default tier).
@@ -123,15 +126,13 @@ pub struct Prefix {
 	pub children: BTreeMap<String, Usage>,
 }
 
-/// One frame off a group track: one instance of the track, and its counters.
-#[serde_with::serde_as]
+/// One frame off a group track: its counter epoch and counters.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct GroupFrame {
-	/// Minted each time the group's track is created. Every counter in a frame
-	/// with a new epoch starts from zero, so a reader keeps each epoch's counters
-	/// apart rather than diffing across them.
-	#[serde_as(as = "serde_with::DisplayFromStr")]
+	/// Minted each time the group's track is created, as the text of a UUIDv7. Every
+	/// counter in a frame with a new epoch starts from zero, so a reader keeps each
+	/// epoch's counters apart rather than diffing across them.
 	pub epoch: Epoch,
 	/// Each tier's [`Group`] counters, keyed by tier label (`""` for the default
 	/// tier).
@@ -273,6 +274,31 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn group_epoch_wire_values() {
+		// Readers keep the text opaque, including values that are not UUIDs.
+		for text in ["0192f4e6-7b8a-7c3d-9e1f-2a3b4c5d6e7f", "legacy", "~minted", "é/\0"] {
+			let json = serde_json::json!({ "epoch": text, "tiers": {} });
+			let frame: GroupFrame = serde_json::from_value(json.clone()).unwrap();
+			assert_eq!(frame.epoch.as_str(), text);
+			assert_eq!(serde_json::to_value(frame).unwrap(), json);
+			assert_eq!(Epoch::try_from(text.to_string()).unwrap(), text.parse().unwrap());
+		}
+
+		for epoch in [
+			serde_json::json!(""),
+			serde_json::json!(null),
+			serde_json::json!(1),
+			serde_json::json!([]),
+			serde_json::json!({}),
+		] {
+			assert!(serde_json::from_value::<GroupFrame>(serde_json::json!({ "epoch": epoch })).is_err());
+		}
+		assert!(serde_json::from_value::<GroupFrame>(serde_json::json!({})).is_err());
+		assert!("".parse::<Epoch>().is_err());
+		assert!(Epoch::try_from(String::new()).is_err());
+	}
 
 	#[test]
 	fn parse_node_path_variants() {

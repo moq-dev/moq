@@ -176,6 +176,109 @@ func (r *Reservation) Update(maxBps uint64) {
 	r.inner.Update(maxBps)
 }
 
+// Viewers returns the session's viewers, dividing the connection's receive
+// estimate among the broadcasts watched over it. Every call returns a handle to
+// the same registry, and the session sends what its viewers' ceilings add up to
+// as its PROBE target. A client handle survives reconnects: a viewer reads nil
+// while disconnected and resumes on the next connection.
+func (s *Session) Viewers() *Viewers {
+	return &Viewers{inner: s.inner.Viewers()}
+}
+
+// Viewers divides one connection's receive estimate among the broadcasts
+// watched over it, max-min fair by each viewer's ceiling.
+type Viewers struct {
+	inner *ffi.MoqViewers
+}
+
+// Watch claims up to maxBps for a broadcast, returning its viewer. maxBps is a
+// ceiling: what the largest rendition the player would switch to needs, not what
+// it is receiving. Holding the viewer requests the receive estimate, like
+// Session.RecvBandwidth; Close it once the broadcast stops being watched.
+// Errors with ErrOutOfRange, watching nothing, when the ceilings would sum
+// above 2^53 - 1.
+func (v *Viewers) Watch(maxBps uint64) (*Viewer, error) {
+	inner, err := v.inner.Watch(maxBps)
+	if err != nil {
+		return nil, err
+	}
+	return &Viewer{inner: inner}, nil
+}
+
+// SetTarget sends targetBps as the PROBE target instead of the viewers' sum, or
+// nil to follow them again. Zero sends no target. Errors with ErrOutOfRange,
+// keeping the previous override, above 2^53 - 1.
+func (v *Viewers) SetTarget(targetBps *uint64) error {
+	return v.inner.SetTarget(targetBps)
+}
+
+// Viewer is one watched broadcast's standing claim on Viewers.
+//
+// Rate is a snapshot: nil means no receive estimate, so hold the current
+// selection, and 0 is a real zero rate.
+type Viewer struct {
+	inner *ffi.MoqViewer
+}
+
+// Rate returns this viewer's slice of the receive estimate right now, in bits
+// per second.
+func (v *Viewer) Rate() *uint64 {
+	return v.inner.Rate()
+}
+
+// Update changes the ceiling, keeping the same claim, as when a catalog enables
+// or disables a rendition. Errors with ErrOutOfRange, keeping the previous
+// ceiling, when the ceilings would sum above 2^53 - 1.
+func (v *Viewer) Update(maxBps uint64) error {
+	return v.inner.Update(maxBps)
+}
+
+// Close releases the claim, handing its share to the other viewers, lowering
+// the PROBE target, and ending its receive-estimate demand without waiting for
+// garbage collection. Call it from the goroutine that last used the viewer;
+// the viewer is unusable afterwards.
+func (v *Viewer) Close() {
+	v.inner.Destroy()
+}
+
+// RatePolicy maps a reservation's grant onto a sender's bitrate: MaxBps caps it,
+// and LowerBps, the next lower rendition's MaxBps, disables this rendition while
+// the grant is below (MaxBps + 2*LowerBps) / 3 and a session probes for it.
+type RatePolicy = ffi.MoqRatePolicy
+
+// RateTarget is what a sender following a RateControl should be doing: a
+// RateTargetEnabled bitrate, or RateTargetDisabled.
+type RateTarget = ffi.MoqRateTarget
+
+// RateTargetEnabled produces at BitrateBps and advertises the rendition as enabled.
+type RateTargetEnabled = ffi.MoqRateTargetEnabled
+
+// RateTargetDisabled stops sending and advertises the rendition as disabled.
+type RateTargetDisabled = ffi.MoqRateTargetDisabled
+
+// RateControl turns a Reservation's grant into a sender's RateTarget, with the
+// policy moq's own encoders follow: drops apply at once, raises climb at most 25%
+// per second, and moves under 5% are ignored. For a sender that encodes on its
+// own, call Update on every frame and apply what it returns.
+type RateControl struct {
+	inner *ffi.MoqRateControl
+}
+
+// NewRateControl starts at policy.MaxBps until a grant says otherwise.
+func NewRateControl(policy RatePolicy) *RateControl {
+	return &RateControl{inner: ffi.NewMoqRateControl(policy)}
+}
+
+// Target returns what the sender should currently be doing.
+func (c *RateControl) Target() RateTarget {
+	return c.inner.Target()
+}
+
+// Update feeds reservation's grant, returning a new target worth applying, or nil.
+func (c *RateControl) Update(reservation *Reservation) *RateTarget {
+	return c.inner.Update(reservation.inner)
+}
+
 // Publish returns the origin used to advertise local broadcasts to the remote.
 func (s *Session) Publish() *OriginProducer {
 	return &OriginProducer{inner: s.inner.Publish()}
@@ -187,8 +290,8 @@ func (s *Session) Consume() *OriginConsumer {
 }
 
 // Shutdown requests a draining close now; wait for its result with Closed.
-// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older
-// Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+// moq-lite-05 and newer wait for the peer to receive finished tails; older Lite
+// versions and IETF wait only for transport ACKs.
 // Finish or abort live tracks first; the drain times out after one second.
 func (s *Session) Shutdown() {
 	s.inner.Shutdown()

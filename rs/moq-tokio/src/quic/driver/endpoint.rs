@@ -21,9 +21,8 @@ use moq_quic::{
 	endpoint::{ConnectionHandle, DatagramEvent, Received},
 };
 use moq_sock::udp::{BATCH_SIZE, RecvMeta, is_msg_size_err};
-use pin_project_lite::pin_project;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tokio::sync::{Notify, futures::Notified, mpsc};
+use tokio::sync::mpsc;
 use tracing::{Instrument, Span};
 
 pub use super::incoming::Incoming;
@@ -31,6 +30,7 @@ pub use crate::quic::driver::runtime::AsyncUdpSocket;
 use crate::quic::driver::{
 	ConnectionEvent, IO_LOOP_BOUND, Instant, RECV_TIME_BOUND, VarInt,
 	connection::Connecting,
+	forward::Forward,
 	runtime::{Slot, wrap_udp_socket},
 	udp_transmit,
 	work_limiter::WorkLimiter,
@@ -94,14 +94,45 @@ pub struct Endpoint {
 	pub(crate) inner: EndpointRef,
 }
 
+/// Observe an endpoint without keeping its socket or driver alive.
+#[cfg(feature = "quic")]
+pub(crate) struct WeakEndpoint(std::sync::Weak<EndpointInner>);
+
+#[cfg(feature = "quic")]
+impl WeakEndpoint {
+	pub(crate) fn upgrade(&self) -> Option<Endpoint> {
+		let inner = self.0.upgrade()?;
+		inner.ref_count.fetch_add(1, Ordering::Relaxed);
+		Some(Endpoint {
+			inner: EndpointRef(inner),
+		})
+	}
+}
+
 impl Endpoint {
+	#[cfg(feature = "quic")]
+	pub(crate) fn downgrade(&self) -> WeakEndpoint {
+		WeakEndpoint(Arc::downgrade(&self.inner.0))
+	}
+
 	/// Run an endpoint on `socket`, serving incoming connections if [`Config::server`] is set
 	///
 	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback. With
 	/// the `sim` feature, an endpoint made inside `kio::clock::sim::run` runs them on the simulator.
 	pub fn new(config: Config, socket: impl Into<Socket>) -> Result<Self, Error> {
+		Self::start(config, socket.into(), None)
+	}
+
+	/// [`new`](Self::new), forwarding each packet whose QUIC-LB server ID names another server
+	/// and accepting the packets those servers forward here.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the QUIC backend forwards"))]
+	pub(crate) fn forwarding(config: Config, socket: impl Into<Socket>, forward: Forward) -> Result<Self, Error> {
+		Self::start(config, socket.into(), Some(forward))
+	}
+
+	fn start(config: Config, socket: Socket, forward: Option<Forward>) -> Result<Self, Error> {
 		let runtime = crate::runtime::Spawner::current();
-		let socket = socket.into().into_async()?;
+		let socket = socket.into_async()?;
 		let addr = socket.local_addr()?;
 		let allow_mtud = !socket.may_fragment();
 		let max_receive_segments = socket.max_receive_segments();
@@ -113,6 +144,7 @@ impl Endpoint {
 			max_udp_payload_size,
 			max_receive_segments,
 			runtime.clone(),
+			forward,
 		);
 		let driver = EndpointDriver(rc.clone());
 		runtime.spawn(
@@ -131,10 +163,31 @@ impl Endpoint {
 	/// Yields [`Incoming`]s, or `None` if the endpoint is [`close`](Self::close)d.
 	/// Call [`Incoming::accept`] and await its [`Connecting`] to finish the handshake.
 	pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
-		Accept {
-			endpoint: self,
-			notify: self.inner.shared.incoming.notified(),
+		kio::wait(|waiter| self.poll_accept(waiter))
+	}
+
+	/// Get the next incoming connection attempt, or `None` once the endpoint closes.
+	pub fn poll_accept(&self, waiter: &kio::Waiter) -> Poll<Option<Incoming>> {
+		let mut endpoint = self.inner.state.lock().unwrap();
+		if endpoint.driver_lost {
+			return Poll::Ready(None);
 		}
+		if let Some(incoming) = endpoint.recv_state.incoming.pop_front() {
+			// A handed-out attempt no longer holds off `wait_all_draining`, and refusing,
+			// ignoring, or dropping it sends no event that would wake the waiter later.
+			if endpoint.all_draining() {
+				endpoint.all_draining_waiters.wake();
+			}
+			// Release the mutex lock on endpoint so cloning it doesn't deadlock
+			drop(endpoint);
+			let incoming = Incoming::new(incoming, self.inner.clone());
+			return Poll::Ready(Some(incoming));
+		}
+		if endpoint.recv_state.connections.close.is_some() {
+			return Poll::Ready(None);
+		}
+		waiter.register(&mut endpoint.incoming_waiters);
+		Poll::Pending
 	}
 
 	/// Connect to `addr`, verifying it as `server_name`
@@ -230,8 +283,11 @@ impl Endpoint {
 		async move {
 			endpoint.wait_all_draining().await;
 			endpoint.inner.slot.release();
+			let state = &mut *endpoint.inner.state.lock().unwrap();
 			// A rebind keeps the old socket until traffic arrives on the new one.
-			endpoint.inner.state.lock().unwrap().prev_socket = None;
+			state.prev_socket = None;
+			// Nothing reaches the endpoint to forward once its socket is gone.
+			state.forward = None;
 		}
 	}
 
@@ -254,26 +310,24 @@ impl Endpoint {
 			let transmit = endpoint.inner.refuse(incoming, &mut response_buffer);
 			respond(transmit, &response_buffer, &self.inner.slot);
 		}
-		self.inner.shared.incoming.notify_waiters();
+		endpoint.incoming_waiters.wake();
 		if endpoint.all_draining() {
-			self.inner.shared.all_draining.notify_waiters();
+			endpoint.all_draining_waiters.wake();
 		}
 	}
 
 	/// Wait for all connections on the endpoint to be cleanly shut down
 	#[cfg(test)]
 	pub(crate) async fn wait_idle(&self) {
-		loop {
-			{
-				let endpoint = &mut *self.inner.state.lock().unwrap();
-				if endpoint.is_idle() {
-					break;
-				}
-				// Construct future while lock is held to avoid race
-				self.inner.shared.idle.notified()
+		kio::wait(|waiter| {
+			let mut endpoint = self.inner.state.lock().unwrap();
+			if endpoint.is_idle() {
+				return Poll::Ready(());
 			}
-			.await;
-		}
+			waiter.register(&mut endpoint.idle_waiters);
+			Poll::Pending
+		})
+		.await
 	}
 
 	/// Wait until no connection on the endpoint is still active
@@ -283,17 +337,15 @@ impl Endpoint {
 	/// queued for [`accept()`](Self::accept) or partway through [`Incoming::accept`] still counts
 	/// as active.
 	pub(crate) async fn wait_all_draining(&self) {
-		loop {
-			{
-				let endpoint = &mut *self.inner.state.lock().unwrap();
-				if endpoint.all_draining() {
-					break;
-				}
-				// Construct future while lock is held to avoid race
-				self.inner.shared.all_draining.notified()
+		kio::wait(|waiter| {
+			let mut endpoint = self.inner.state.lock().unwrap();
+			if endpoint.all_draining() {
+				return Poll::Ready(());
 			}
-			.await;
-		}
+			waiter.register(&mut endpoint.all_draining_waiters);
+			Poll::Pending
+		})
+		.await
 	}
 
 	/// Set the client configuration [`dial`](Self::dial) uses, so tests need not carry it
@@ -312,17 +364,15 @@ impl Endpoint {
 	/// Wait until a connection attempt is queued for [`accept()`](Endpoint::accept)
 	#[cfg(test)]
 	pub(crate) async fn wait_queued(&self) {
-		loop {
-			{
-				let endpoint = self.inner.state.lock().unwrap();
-				if !endpoint.recv_state.incoming.is_empty() {
-					break;
-				}
-				// Construct future while lock is held to avoid race
-				self.inner.shared.incoming.notified()
+		kio::wait(|waiter| {
+			let mut endpoint = self.inner.state.lock().unwrap();
+			if !endpoint.recv_state.incoming.is_empty() {
+				return Poll::Ready(());
 			}
-			.await;
-		}
+			waiter.register(&mut endpoint.incoming_waiters);
+			Poll::Pending
+		})
+		.await
 	}
 }
 
@@ -353,13 +403,13 @@ impl Future for EndpointDriver {
 		let now = Instant::now();
 		let mut keep_going = false;
 		keep_going |= endpoint.drive_recv(cx, &self.0.slot, now)?;
-		keep_going |= endpoint.handle_events(cx, &self.0.shared);
+		keep_going |= endpoint.handle_events(cx);
 
 		if !endpoint.recv_state.incoming.is_empty() {
-			self.0.shared.incoming.notify_waiters();
+			endpoint.incoming_waiters.wake();
 		}
 
-		if self.0.shared.ref_count.load(Ordering::Relaxed) == 0 && endpoint.is_idle() {
+		if self.0.ref_count.load(Ordering::Relaxed) == 0 && endpoint.is_idle() {
 			Poll::Ready(Ok(()))
 		} else {
 			drop(endpoint);
@@ -381,8 +431,9 @@ impl Drop for EndpointDriver {
 		self.0.slot.release();
 		let endpoint = &mut *self.0.state.lock().unwrap();
 		endpoint.prev_socket = None;
+		endpoint.forward = None;
 		endpoint.driver_lost = true;
-		self.0.shared.incoming.notify_waiters();
+		endpoint.incoming_waiters.wake();
 		// Drop all outgoing channels, signaling the termination of the endpoint to the associated
 		// connections.
 		endpoint.recv_state.connections.senders.clear();
@@ -392,12 +443,12 @@ impl Drop for EndpointDriver {
 		for incoming in endpoint.recv_state.incoming.drain(..) {
 			endpoint.inner.ignore(incoming);
 		}
-		self.0.shared.all_draining.notify_waiters();
+		endpoint.all_draining_waiters.wake();
 		// Clearing the senders is what makes the endpoint idle, but a waiter already parked on
 		// `idle` only re-reads that after being notified, and with the driver gone nothing else
 		// can wake it. Same reason as the equivalent check in `EndpointInner::accept`.
 		if endpoint.is_idle() {
-			self.0.shared.idle.notify_waiters();
+			endpoint.idle_waiters.wake();
 		}
 	}
 }
@@ -405,7 +456,8 @@ impl Drop for EndpointDriver {
 #[derive(Debug)]
 pub(crate) struct EndpointInner {
 	pub(crate) state: Mutex<State>,
-	pub(crate) shared: Shared,
+	/// Number of live handles that can initiate or handle I/O, excluding the driver.
+	ref_count: AtomicUsize,
 	/// The socket, which connections send through without keeping it open
 	pub(crate) slot: Arc<Slot>,
 	/// Where the endpoint's and its connections' tasks run
@@ -462,11 +514,11 @@ impl EndpointInner {
 		// Failed accepts and accepts completed after driver loss cannot rely on a Drained event
 		// being processed to wake idle waiters.
 		if state.is_idle() {
-			self.shared.idle.notify_waiters();
+			state.idle_waiters.wake();
 		}
 		// The pending accept held off `wait_all_draining`, and a failed one sends no event.
 		if state.all_draining() {
-			self.shared.all_draining.notify_waiters();
+			state.all_draining_waiters.wake();
 		}
 		result
 	}
@@ -490,6 +542,9 @@ impl EndpointInner {
 
 #[derive(Debug)]
 pub(crate) struct State {
+	incoming_waiters: kio::WaiterList,
+	idle_waiters: kio::WaiterList,
+	all_draining_waiters: kio::WaiterList,
 	/// During an active migration, abandoned_socket receives traffic
 	/// until the first packet arrives on the new socket.
 	prev_socket: Option<Box<dyn AsyncUdpSocket>>,
@@ -503,15 +558,8 @@ pub(crate) struct State {
 	driver_lost: bool,
 	/// Connections in the process of being accepted
 	pending_accepts: usize,
-}
-
-#[derive(Debug)]
-pub(crate) struct Shared {
-	incoming: Notify,
-	idle: Notify,
-	all_draining: Notify,
-	/// Number of live handles that can be used to initiate or handle I/O; excludes the driver
-	ref_count: AtomicUsize,
+	/// QUIC-LB forwarding to and from the other servers behind this one's address
+	forward: Option<Forward>,
 }
 
 impl State {
@@ -523,6 +571,7 @@ impl State {
 			let poll_res = self.recv_state.poll_socket(
 				cx,
 				&mut self.inner,
+				self.forward.as_mut(),
 				&mut |cx, bufs, meta| socket.poll_recv(cx, bufs, meta),
 				slot,
 				now,
@@ -534,10 +583,19 @@ impl State {
 		let poll_res = self.recv_state.poll_socket(
 			cx,
 			&mut self.inner,
+			self.forward.as_mut(),
 			&mut |cx, bufs, meta| slot.poll_recv(cx, bufs, meta),
 			slot,
 			now,
 		);
+		// Polled even when the socket used up the budget, which still admits one forward, so a
+		// busy socket cannot starve them.
+		let forwards = match self.forward.as_mut() {
+			Some(forward) => self
+				.recv_state
+				.poll_forwards(cx, &mut self.inner, forward, self.ipv6, slot, now),
+			None => Ok(false),
+		};
 		self.recv_state.recv_limiter.finish_cycle(get_time);
 		let poll_res = poll_res?;
 		if poll_res.received_connection_packet {
@@ -545,10 +603,10 @@ impl State {
 			// one anymore. TODO: Account for multiple outgoing connections.
 			self.prev_socket = None;
 		}
-		Ok(poll_res.keep_going)
+		Ok(poll_res.keep_going || forwards?)
 	}
 
-	fn handle_events(&mut self, cx: &mut Context<'_>, shared: &Shared) -> bool {
+	fn handle_events(&mut self, cx: &mut Context<'_>) -> bool {
 		for _ in 0..IO_LOOP_BOUND {
 			let (ch, event) = match self.events.poll_recv(cx) {
 				Poll::Ready(Some(x)) => x,
@@ -566,11 +624,11 @@ impl State {
 				connections.senders.remove(&ch);
 				connections.draining.remove(&ch);
 				if self.is_idle() {
-					shared.idle.notify_waiters();
+					self.idle_waiters.wake();
 				}
 			}
 			if (event.is_draining() || event.is_drained()) && self.all_draining() {
-				shared.all_draining.notify_waiters();
+				self.all_draining_waiters.wake();
 			}
 			let Some(event) = self.inner.handle_event(ch, event) else {
 				continue;
@@ -716,48 +774,6 @@ fn ensure_ipv6(x: SocketAddr) -> SocketAddrV6 {
 	}
 }
 
-pin_project! {
-	/// Future produced by [`Endpoint::accept`]
-	struct Accept<'a> {
-		endpoint: &'a Endpoint,
-		#[pin]
-		notify: Notified<'a>,
-	}
-}
-
-impl Future for Accept<'_> {
-	type Output = Option<Incoming>;
-	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-		let mut this = self.project();
-		let mut endpoint = this.endpoint.inner.state.lock().unwrap();
-		if endpoint.driver_lost {
-			return Poll::Ready(None);
-		}
-		if let Some(incoming) = endpoint.recv_state.incoming.pop_front() {
-			// A handed-out attempt no longer holds off `wait_all_draining`, and refusing,
-			// ignoring, or dropping it sends no event that would wake the waiter later.
-			if endpoint.all_draining() {
-				this.endpoint.inner.shared.all_draining.notify_waiters();
-			}
-			// Release the mutex lock on endpoint so cloning it doesn't deadlock
-			drop(endpoint);
-			let incoming = Incoming::new(incoming, this.endpoint.inner.clone());
-			return Poll::Ready(Some(incoming));
-		}
-		if endpoint.recv_state.connections.close.is_some() {
-			return Poll::Ready(None);
-		}
-		loop {
-			match this.notify.as_mut().poll(ctx) {
-				// `state` lock ensures we didn't race with readiness
-				Poll::Pending => return Poll::Pending,
-				// Spurious wakeup, get a new future
-				Poll::Ready(()) => this.notify.set(this.endpoint.inner.shared.incoming.notified()),
-			}
-		}
-	}
-}
-
 #[derive(Debug)]
 pub(crate) struct EndpointRef(Arc<EndpointInner>);
 
@@ -769,6 +785,7 @@ impl EndpointRef {
 		max_udp_payload_size: u16,
 		max_receive_segments: usize,
 		runtime: crate::runtime::Spawner,
+		forward: Option<Forward>,
 	) -> Self {
 		let (sender, events) = mpsc::unbounded_channel();
 		let recv_state = RecvState::new(sender, max_receive_segments, max_udp_payload_size);
@@ -777,13 +794,11 @@ impl EndpointRef {
 			runtime,
 			#[cfg(test)]
 			default_client: Mutex::new(None),
-			shared: Shared {
-				incoming: Notify::new(),
-				idle: Notify::new(),
-				all_draining: Notify::new(),
-				ref_count: AtomicUsize::new(0),
-			},
+			ref_count: AtomicUsize::new(0),
 			state: Mutex::new(State {
+				incoming_waiters: kio::WaiterList::new(),
+				idle_waiters: kio::WaiterList::new(),
+				all_draining_waiters: kio::WaiterList::new(),
 				prev_socket: None,
 				local_addr,
 				inner,
@@ -793,6 +808,7 @@ impl EndpointRef {
 				driver_lost: false,
 				recv_state,
 				pending_accepts: 0,
+				forward,
 			}),
 		}))
 	}
@@ -800,14 +816,14 @@ impl EndpointRef {
 
 impl Clone for EndpointRef {
 	fn clone(&self) -> Self {
-		self.0.shared.ref_count.fetch_add(1, Ordering::Relaxed);
+		self.0.ref_count.fetch_add(1, Ordering::Relaxed);
 		Self(self.0.clone())
 	}
 }
 
 impl Drop for EndpointRef {
 	fn drop(&mut self) {
-		if self.shared.ref_count.fetch_sub(1, Ordering::Relaxed) > 1 {
+		if self.ref_count.fetch_sub(1, Ordering::Relaxed) > 1 {
 			return;
 		}
 
@@ -869,6 +885,7 @@ impl RecvState {
 		&mut self,
 		cx: &mut Context<'_>,
 		endpoint: &mut moq_quic::endpoint::Endpoint,
+		mut forward: Option<&mut Forward>,
 		recv: &mut PollRecv<'_>,
 		slot: &Slot,
 		now: Instant,
@@ -889,7 +906,9 @@ impl RecvState {
 		loop {
 			match recv(cx, &mut iovs, &mut metas) {
 				Poll::Ready(Ok(msgs)) => {
-					self.recv_limiter.record_work(msgs);
+					// A demuxing socket can hand back an empty batch after diverting every
+					// datagram it read; that read is still work, or a flood of it never yields.
+					self.recv_limiter.record_work(msgs.max(1));
 					let received = Instant::now();
 					self.wall.sample(received, kio::clock::Wall::now());
 					// Copy the received batch into `datagrams` and split each datagram off as
@@ -916,7 +935,12 @@ impl RecvState {
 						);
 						while !data.is_empty() {
 							let buf = data.split_to(meta.stride.min(data.len()));
-							let mut response_buffer = Vec::new();
+							if let Some(forward) = forward.as_deref_mut()
+								&& forward.route(&buf, meta.addr, meta.dst_ip, meta.ecn, || {
+									endpoint.is_stateless_reset(meta.addr, &buf)
+								}) {
+								continue;
+							}
 							let received = Received {
 								remote: meta.addr,
 								local_ip: meta.dst_ip,
@@ -924,30 +948,8 @@ impl RecvState {
 								data: buf,
 								arrival: arrival.take(),
 							};
-							match endpoint.handle(now, received, &mut response_buffer) {
-								Some(DatagramEvent::NewConnection(incoming)) => {
-									if self.connections.close.is_none() {
-										self.incoming.push_back(incoming);
-									} else {
-										let transmit = endpoint.refuse(incoming, &mut response_buffer);
-										respond(transmit, &response_buffer, slot);
-									}
-								}
-								Some(DatagramEvent::ConnectionEvent(handle, event)) => {
-									// Ignoring errors from dropped connections that haven't yet been cleaned up
-									received_connection_packet = true;
-									let _ = self
-										.connections
-										.senders
-										.get_mut(&handle)
-										.unwrap()
-										.send(ConnectionEvent::Proto(event));
-								}
-								Some(DatagramEvent::Response(transmit)) => {
-									respond(transmit, &response_buffer, slot);
-								}
-								None => {}
-							}
+							received_connection_packet |=
+								Self::handle(&mut self.incoming, &mut self.connections, endpoint, now, received, slot);
 						}
 					}
 				}
@@ -978,6 +980,92 @@ impl RecvState {
 					received_connection_packet,
 					keep_going: true,
 				});
+			}
+		}
+	}
+}
+
+impl RecvState {
+	/// Hand one received datagram to the endpoint, returning whether it reached a connection.
+	fn handle(
+		incoming_queue: &mut VecDeque<moq_quic::endpoint::Incoming>,
+		connections: &mut ConnectionSet,
+		endpoint: &mut moq_quic::endpoint::Endpoint,
+		now: Instant,
+		received: Received,
+		slot: &Slot,
+	) -> bool {
+		let mut response_buffer = Vec::new();
+		match endpoint.handle(now, received, &mut response_buffer) {
+			Some(DatagramEvent::NewConnection(incoming)) => {
+				if connections.close.is_none() {
+					incoming_queue.push_back(incoming);
+				} else {
+					let transmit = endpoint.refuse(incoming, &mut response_buffer);
+					respond(transmit, &response_buffer, slot);
+				}
+			}
+			Some(DatagramEvent::ConnectionEvent(handle, event)) => {
+				// Ignoring errors from dropped connections that haven't yet been cleaned up
+				let _ = connections
+					.senders
+					.get_mut(&handle)
+					.unwrap()
+					.send(ConnectionEvent::Proto(event));
+				return true;
+			}
+			Some(DatagramEvent::Response(transmit)) => {
+				respond(transmit, &response_buffer, slot);
+			}
+			None => {}
+		}
+		false
+	}
+
+	/// Process the packets other servers forwarded here, returning whether the work limiter
+	/// stopped before they ran out.
+	fn poll_forwards(
+		&mut self,
+		cx: &mut Context<'_>,
+		endpoint: &mut moq_quic::endpoint::Endpoint,
+		forward: &mut Forward,
+		ipv6: bool,
+		slot: &Slot,
+		now: Instant,
+	) -> Result<bool, io::Error> {
+		loop {
+			match forward.poll_recv(cx) {
+				Poll::Ready(Ok(Some(unwrapped))) => {
+					// The client's address as this socket would have reported it, so the
+					// connection sees the path its handshake took. An IPv6 client cannot have
+					// shaken hands on an IPv4 socket.
+					let remote = match (ipv6, unwrapped.remote) {
+						(true, remote) => Some(SocketAddr::V6(ensure_ipv6(remote))),
+						(false, remote @ SocketAddr::V4(_)) => Some(remote),
+						(false, SocketAddr::V6(_)) => None,
+					};
+					if let Some(remote) = remote {
+						self.datagrams.extend_from_slice(unwrapped.packet);
+						let received = Received {
+							remote,
+							local_ip: unwrapped.local_ip,
+							ecn: unwrapped.ecn.map(proto_ecn),
+							data: self.datagrams.split(),
+							// When the forward reached this server: the hop between servers is
+							// part of the client's path now, and their clocks are not shared.
+							arrival: Some(Instant::now()),
+						};
+						Self::handle(&mut self.incoming, &mut self.connections, endpoint, now, received, slot);
+					}
+				}
+				Poll::Ready(Ok(None)) => {}
+				Poll::Pending => return Ok(false),
+				Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::ConnectionReset || is_msg_size_err(&e) => {}
+				Poll::Ready(Err(e)) => return Err(e),
+			}
+			self.recv_limiter.record_work(1);
+			if !self.recv_limiter.allow_work(Instant::now) {
+				return Ok(true);
 			}
 		}
 	}
@@ -1041,6 +1129,7 @@ mod tests {
 					.poll_socket(
 						&mut cx,
 						&mut endpoint,
+						None,
 						&mut |cx, bufs, meta| socket.poll_recv(cx, bufs, meta),
 						&slot,
 						now,

@@ -37,9 +37,9 @@ export type DatagramBody = { payload: Uint8Array } | { status: number };
 /** A decoded OBJECT_DATAGRAM. */
 export class ObjectDatagram {
 	trackAlias: bigint;
-	groupId: number;
+	groupId: bigint;
 	/** The Object ID, or `undefined` when the ZERO_OBJECT_ID bit omits it (Object 0). */
-	objectId?: number;
+	objectId?: bigint;
 	/** The Publisher Priority, or `undefined` to inherit the subscription's. */
 	publisherPriority?: number;
 	/** No Object past this one exists in the group. */
@@ -50,8 +50,8 @@ export class ObjectDatagram {
 
 	constructor(props: {
 		trackAlias: bigint;
-		groupId: number;
-		objectId?: number;
+		groupId: bigint;
+		objectId?: bigint;
 		publisherPriority?: number;
 		endOfGroup: boolean;
 		properties?: Uint8Array;
@@ -150,8 +150,8 @@ function decodeFields(c: Cursor): ObjectDatagram {
 	}
 
 	const trackAlias = c.u62();
-	const groupId = c.u53();
-	const objectId = kind & ZERO_OBJECT_ID ? undefined : c.u53();
+	const groupId = c.u62();
+	const objectId = kind & ZERO_OBJECT_ID ? undefined : c.u62();
 	const publisherPriority = kind & DEFAULT_PRIORITY ? undefined : c.u8();
 	let properties: Uint8Array | undefined;
 	if (kind & PROPERTIES) {

@@ -3,7 +3,10 @@ import 'package:moq_ffi/moq_ffi.dart';
 // Re-export the UniFFI types without their `Moq` prefix, so consumers spell
 // them the way the Rust API does. These are type aliases, not wrappers: the
 // values are the exact same objects, so every generated method applies
-// unchanged and the prefixed names stay valid.
+// unchanged and the prefixed names stay valid. `Delay` and `Subscription` are
+// extension types instead, which are the same objects too but give an omitted
+// delay bound the zero moq-net defaults to, where the generated record leaves
+// it null.
 //
 // Four types are deliberately not aliased, because the unprefixed name is
 // already taken where this package is used:
@@ -64,10 +67,10 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// Follows a specific broadcast path across the publisher instances that serve it.
 typedef Following = MoqFollowing;
 
-/// How a broadcast advertises its exact path: its static production cost and publisher epoch.
+/// How a broadcast advertises its exact path: its static production cost and stream instance.
 typedef AnnounceRoute = MoqAnnounceRoute;
 
-/// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
+/// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventStart],
@@ -125,7 +128,7 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
-/// A datagram-delivered frame, tagged with a per-track sequence number.
+/// A datagram payload with its own sequence and optional timestamp.
 typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.
@@ -134,14 +137,39 @@ typedef Frame = MoqFrame;
 /// An exact media time: `value` units at `scale` units per second.
 typedef Timestamp = MoqTimestamp;
 
-/// Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering.
-typedef Subscription = MoqSubscription;
+/// How far behind the live edge a subscriber or decoder plays: where it starts, and how late it may fall.
+extension type Delay._(MoqDelay _delay) implements MoqDelay {
+  /// `min` is the target latency and where a cold join starts, and `max` is how far a
+  /// non-latest group may fall behind before it is skipped. Both default to zero, moq-net's
+  /// default. An explicit null `min` leaves it unstated, which a decoder plays as zero, and an
+  /// explicit null `max` sets no subscriber limit. A `min` past `max` starts at `max`.
+  Delay({Duration? min = Duration.zero, Duration? max = Duration.zero})
+    : this._(MoqDelay(min: min, max: max));
+}
 
-/// moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once.
+/// Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering.
+extension type Subscription._(MoqSubscription _subscription)
+    implements MoqSubscription {
+  /// An omitted `delay` is a zero [Delay], so a bare `Subscription()` is moq-net's defaults.
+  Subscription({
+    int priority = 0,
+    MoqDelay? delay,
+    List<MoqRange>? ranges,
+    MoqOrder? order,
+  }) : this._(
+         MoqSubscription(
+           priority: priority,
+           delay: delay ?? Delay(),
+           ranges: ranges,
+           order: order,
+         ),
+       );
+}
+
+/// moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once.
 ///
-/// A null subscription means the same. A `Subscription()` leaves `maxDelay` null, which
-/// sets no subscriber limit, so pass `maxDelay: Duration.zero` when building one to match.
-Subscription defaultSubscription() => moqSubscriptionDefaults();
+/// A null subscription and a bare `Subscription()` mean the same.
+Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
 typedef Range = MoqRange;
@@ -170,6 +198,22 @@ typedef BandwidthConsumer = MoqBandwidthConsumer;
 /// One track's standing claim on an [Allocator].
 typedef Reservation = MoqReservation;
 
+/// Divides one connection's receive estimate among the broadcasts watched over it.
+typedef Viewers = MoqViewers;
+
+/// One watched broadcast's standing claim on [Viewers]; holding it requests
+/// PROBE, disposing it releases the claim.
+typedef Viewer = MoqViewer;
+
+/// Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame.
+typedef RateControl = MoqRateControl;
+
+/// How a [RateControl] maps a grant onto a bitrate, and the lower rendition that disables it.
+typedef RatePolicy = MoqRatePolicy;
+
+/// What a sender following a [RateControl] should be doing: an enabled bitrate, or disabled.
+typedef RateTarget = MoqRateTarget;
+
 /// A snapshot of transport connection statistics.
 typedef ConnectionStats = MoqConnectionStats;
 
@@ -196,3 +240,18 @@ typedef ProtocolKind = MoqProtocolKind;
 
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 typedef ProtocolException = MoqProtocolException;
+
+/// Writes live datagrams with an independent sequence counter and no cache.
+typedef DatagramProducer = MoqDatagramProducer;
+
+/// Reads a live datagram track in arrival order from its own cursor.
+typedef DatagramConsumer = MoqDatagramConsumer;
+
+/// A requested datagram track awaiting acceptance or rejection.
+typedef DatagramRequest = MoqDatagramRequest;
+
+/// Serves on-demand datagram tracks through their own request queue.
+typedef DatagramRequests = MoqDatagramRequests;
+
+/// Publisher priority and optional timestamp scale fixed for a datagram track.
+typedef DatagramInfo = MoqDatagramInfo;

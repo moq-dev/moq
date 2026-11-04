@@ -32,7 +32,12 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let viewer = origin(3);
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let source = broadcast
-		.create_track("audio", track::Info::default().with_timescale(Timescale::MILLI))
+		.create_track(
+			"audio",
+			track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -55,7 +60,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let consumer = viewer.consume();
 	crate::support::announced(&consumer, "live").await;
 	let remote = consumer.request("live", None).await.unwrap();
-	let subscription = track::Subscription::default().with_max_delay(budget);
+	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
 	let mut reader = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 	kio::clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
 

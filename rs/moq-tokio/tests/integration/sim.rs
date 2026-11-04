@@ -144,13 +144,18 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 	let viewer = origin_producer(2);
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let source = broadcast
-		.create_track("video", track::Info::default().with_timescale(Timescale::MILLI))
+		.create_track(
+			"video",
+			track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let accept = async {
 		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
-		let session = moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup);
+		let session = web::Session::raw(conn);
 		let (session, driver) = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_publisher(publisher.consume())
@@ -166,7 +171,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 			.unwrap()
 			.await
 			.unwrap();
-		let session = moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup);
+		let session = web::Session::raw(conn);
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
 			.with_subscriber(viewer.clone())
@@ -184,7 +189,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		.track("video")
 		.unwrap()
 		// A budget spanning the run, so recovery has to deliver every group, however late.
-		.subscribe(track::Subscription::default().with_max_delay(TIMEOUT))
+		.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(TIMEOUT)))
 		.await
 		.unwrap();
 
@@ -253,7 +258,6 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 		.with_single_cert(vec![cert.der().clone()], key)
 		.unwrap();
 	server.alpn_protocols = alpn.clone();
-	let server = driver::crypto::rustls::QuicServerConfig::try_from(server).unwrap();
 
 	let mut roots = rustls::RootCertStore::empty();
 	roots.add(cert.der().clone()).unwrap();
@@ -261,7 +265,6 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 		.with_root_certificates(roots)
 		.with_no_client_auth();
 	client.alpn_protocols = alpn;
-	let client = driver::crypto::rustls::QuicClientConfig::try_from(client).unwrap();
 
 	(
 		driver::server::Config::new(Arc::new(server)),

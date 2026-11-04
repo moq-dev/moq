@@ -7,8 +7,8 @@ use bytes::BytesMut;
 
 /// A drift budget no test timeline comes close to, so the reader sees every group.
 ///
-/// The media track's full retention window, so a reader started after importing can
-/// still read every retained group. These tests import a whole file first, which the default
+/// The media track's full max age, so a reader started after importing can
+/// still read every fresh group. These tests import a whole file first, which the default
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live edge:
 /// completeness has to be asked for.
 const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -254,7 +254,10 @@ async fn import_opus_frames() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -286,7 +289,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().clock.expect("a clock");
+	let provisional = catalog.snapshot().media.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
@@ -299,7 +302,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 	import.finish().unwrap();
 	published.extend(clocks.drain());
 
-	let anchored = catalog.snapshot().clock.expect("a clock");
+	let anchored = catalog.snapshot().media.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first PES anchors the clock");
 	assert!(!published.is_empty(), "the catalog publishes");
 	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
@@ -533,7 +536,10 @@ async fn survives_midstream_join() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -588,7 +594,10 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+		)
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -719,7 +728,7 @@ async fn import_stream(data: &[u8]) -> Imported {
 	let snapshot = catalog.snapshot();
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
-		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 	}
 }

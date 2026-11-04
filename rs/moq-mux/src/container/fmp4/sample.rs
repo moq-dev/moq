@@ -74,6 +74,11 @@ impl Sample {
 	}
 }
 
+/// The samples a `traf`'s runs declare, counted wide enough that no run count overflows it.
+pub(crate) fn count(traf: &mp4_atom::Traf) -> u64 {
+	traf.trun.iter().map(|run| run.samples.len() as u64).sum()
+}
+
 /// Resolve one fragment's samples against its mdat, sharing byte ownership across tracks.
 pub(crate) struct Resolver {
 	data_start: usize,
@@ -194,10 +199,15 @@ impl Claimed {
 			return Err(super::Error::EmptySample);
 		}
 		// The taken ranges are disjoint, so the last one starting before `range` ends reaches furthest.
-		if let Some((_, &end)) = self.0.range(..range.end).next_back()
-			&& end > range.start
-		{
-			return Err(super::Error::InvalidDataOffset);
+		if let Some((_, end)) = self.0.range_mut(..range.end).next_back() {
+			if *end > range.start {
+				return Err(super::Error::InvalidDataOffset);
+			}
+			// Samples usually sit back to back, so extending the range keeps one entry per run.
+			if *end == range.start {
+				*end = range.end;
+				return Ok(());
+			}
 		}
 		self.0.insert(range.start, range.end);
 		Ok(())

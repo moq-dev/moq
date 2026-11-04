@@ -85,7 +85,10 @@ typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** Follows a specific broadcast path across the publisher instances that serve it. */
 typealias Following = uniffi.moq.MoqFollowing
 
-/** A route over a prefix: its origin-relative path, wildcard captures, and route metadata. */
+/**
+ * A route over a prefix: its origin-relative path, required wildcard captures (empty without
+ * wildcards), and route metadata.
+ */
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
@@ -156,7 +159,7 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Data types.
-/** A datagram-delivered frame, tagged with a per-track sequence number. */
+/** A datagram payload with its own sequence and optional timestamp. */
 typealias Datagram = uniffi.moq.MoqDatagram
 
 /** A payload plus the timestamp it should be presented at. */
@@ -166,27 +169,33 @@ typealias Frame = uniffi.moq.MoqFrame
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
- * How a broadcast advertises its exact path: its static production cost (lower wins) and the
- * publisher epoch it serves (null when unknown).
+ * How a broadcast advertises its exact path: its static production cost (lower wins), an optional
+ * stable instance (null keeps the one the broadcast minted), and the epoch, which only matters with
+ * a stable instance.
  */
 typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
 
 /**
- * An observed path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * An observed path-prefix route: the instance of the stream it serves, relay hop ids (oldest
+ * first), and static production and link cost (lower wins).
  */
 typealias Route = uniffi.moq.MoqRoute
 
-/**
- * Tunes how a track subscription is delivered: priority, latency budget, ranges, and group
- * ordering.
- */
+/** Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
 
 /**
- * moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once. A null
- * subscription means the same; `copy` this one to change a field. A `Subscription(...)` must name
- * `maxDelay`, where null sets no subscriber limit.
+ * How far behind the live edge a subscriber or decoder plays: `min` is the target latency and where
+ * a cold join starts, null to leave it unstated (a decoder plays it as zero), and `max`, null for
+ * no subscriber limit, is how far a non-latest group may fall behind before it is skipped. A `min`
+ * past `max` starts at `max`.
+ */
+typealias Delay = uniffi.moq.MoqDelay
+
+/**
+ * moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at
+ * once. A null subscription means the same; `copy` this one to change a field. A
+ * `Subscription(...)` must name `delay`.
  */
 fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
     uniffi.moq.moqSubscriptionDefaults()
@@ -279,6 +288,24 @@ typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 /** One track's standing claim on an [Allocator]. */
 typealias Reservation = uniffi.moq.MoqReservation
 
+/** Divides one connection's receive estimate among the broadcasts watched over it. */
+typealias Viewers = uniffi.moq.MoqViewers
+
+/**
+ * One watched broadcast's standing claim on [Viewers]; holding it requests PROBE, closing it
+ * releases the claim.
+ */
+typealias Viewer = uniffi.moq.MoqViewer
+
+/** Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame. */
+typealias RateControl = uniffi.moq.MoqRateControl
+
+/** How a [RateControl] maps a grant onto a bitrate, and the lower rendition that disables it. */
+typealias RatePolicy = uniffi.moq.MoqRatePolicy
+
+/** What a sender following a [RateControl] should be doing: an enabled bitrate, or disabled. */
+typealias RateTarget = uniffi.moq.MoqRateTarget
+
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
 
@@ -314,3 +341,18 @@ typealias ProtocolError = uniffi.moq.MoqProtocolError
 // variants still need the full name (`uniffi.moq.MoqContainer.Loc`). Enums
 // (AudioFormat) are fine: entry access through the alias works. Objects
 // (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).
+
+/** Writes live datagrams with an independent sequence counter and no cache. */
+typealias DatagramProducer = uniffi.moq.MoqDatagramProducer
+
+/** Reads a live datagram track in arrival order from its own cursor. */
+typealias DatagramConsumer = uniffi.moq.MoqDatagramConsumer
+
+/** A requested datagram track awaiting acceptance or rejection. */
+typealias DatagramRequest = uniffi.moq.MoqDatagramRequest
+
+/** Serves on-demand datagram tracks through their own request queue. */
+typealias DatagramRequests = uniffi.moq.MoqDatagramRequests
+
+/** Publisher priority and optional timestamp scale fixed for a datagram track. */
+typealias DatagramInfo = uniffi.moq.MoqDatagramInfo

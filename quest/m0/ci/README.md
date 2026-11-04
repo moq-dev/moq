@@ -3,7 +3,7 @@
 ## Goal
 
 Pull requests are validated locally with `just ci` and get their cloud verdict
-from the [batched gate](/quest/m0/ci/land.md) without waiting behind the
+from the [merge queue](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md) without waiting behind the
 hosted runner limits, and every job spends its minutes on the work its diff
 selected rather than on setup, cold caches, or repeated builds. Concurrent local agents share
 expensive-command capacity, and retained tests earn their cost through useful
@@ -71,13 +71,23 @@ Decided 2026-10-26 (maintainer), from 414 queue merges over 2026-10-23 to
 (about 1 minute per merge), with a median of 18 entries ahead and 12.7% of
 runs failing. GitHub's merge queue cannot test several PRs in one run, so a
 batched gate replaces it: `quest land`, shared through moq-dev/quest, lands
-a tested chain of squash commits ([land](/quest/m0/ci/land.md)). Decided
+a tested chain of squash commits ([land](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)). Decided
 2026-10-30 (maintainer): it runs as a daemon on the maintainer's host, not as
 a workflow on the self-hosted runner. This supersedes concurrent queue
 entries on a second runner. Batching gains most when failures are rare, so the
 [flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
 `MIGRATE.md` Unreleased sections, a top source of conflicts, stop being
-written per PR.
+written per PR. The batched gate was superseded 2026-11-01, below.
+
+Decided 2026-11-01 (maintainer), reversing 2026-10-26: moq serializes
+through GitHub's merge queue again, one entry at a time on the self-hosted
+runner, and moq-dev/quest's queue watcher resolves dropped PRs' conflicts and
+re-enqueues them. Batching and pre-checks are dropped, and the host gate is
+frozen. The landing quest closed 2026-11-04 with busy hours merging a median
+11.0 PRs against the queue baseline's 6.0 (its
+[last version](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)
+holds the cutover record); a second concurrent entry is a
+[measured trial](/quest/m0/ci/queue-concurrency.md).
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
@@ -152,19 +162,15 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
-- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - one PR at a time on the self-hosted runner; the host's Codex fixer fixes and re-enqueues every dropped PR
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
-- [Every io_uring test in the io-uring group](/quest/m0/ci/io-uring-test-group.md) - the parallel tests of one `just ci` stop exhausting the shared `RLIMIT_MEMLOCK`, and a too-low limit fails clearly
-- [Cheap checks skip the queue](/quest/m0/ci/gate-quick.md) - condition: quest ships `quest gate --quick`; then cheap modules wait at most a minute
-- [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check` and `just test` each finish within a worker's 5-minute prompt cache, admission wait included
+- [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check`, test phases included, finishes within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
-- [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
-- [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
-- [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
-- [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
-- [The next test-CPU cuts](/quest/m0/ci/test-cost-followups.md) - the slow-test leftovers from #6987, cut at their source
-- [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
-- [dispatch.sh's tests pass without KVM](/quest/m0/ci/dispatch-test-kvm.md) - `sh/dispatch-query.test.py` fakes the KVM probe instead of failing 20 tests on hosts without `/dev/kvm`
-- [mbx launches Cargo with any argument length](/quest/m0/ci/mbx-arg-max.md) - no "Argument list too long" in `sh/rs/select.test.py`'s recipe test
+- [Unify dependency features](/quest/m0/ci/hakari.md) - align the FFI builds' features and record the hosted platform jobs' hits once the workspace-hack lands
+- [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
+- [Binary release publishers run on their tag](/quest/m0/ci/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main
+- [The bench comparison builds moq-gst's catalog bench on its base](/quest/m0/ci/bench-base-build.md) - A paired bench comparison that selects `rust/gst/moq-gst/catalog` against `origin/main` builds the base side and reports a comparison, instead of marking it unavailable with "base build failed"
+- [The workspace-hack refuses trybuild edges and spares non-media builds](/quest/m0/ci/hakari-followups.md) - `hakari.py` refuses trybuild dev-dependency edges, and non-media Linux test builds stop needing libpipewire and libclang
+- [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
+- [Build two queue entries at once if it helps](/quest/m0/ci/queue-concurrency.md) - a measured trial of `maximumEntriesToBuild: 2` against the serial lane's burst latency

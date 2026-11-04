@@ -7,8 +7,8 @@ use std::task::Poll;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use super::StreamId;
 use super::recv::{Error, Stream};
-use super::{ShouldTransmit, StreamEvent, StreamId};
 use super::{StreamsState, state::get_or_insert_recv};
 use crate::VarInt;
 use crate::connection::assembler::Assembler;
@@ -68,6 +68,12 @@ impl Leased {
 	/// Whether the peer finished the stream right after the leased bytes.
 	pub(super) fn is_fin(&self) -> bool {
 		matches!(self.end, Some(End::Fin))
+	}
+
+	/// Whether the reader leased bytes it has not read: they sit here, or are out in a
+	/// [`Lease`] that may hand some back.
+	pub(super) fn has_unread(&self) -> bool {
+		self.len > 0 || self.out
 	}
 
 	/// The number of leased bytes not out in a [`Lease`].
@@ -262,10 +268,9 @@ impl Stream<'_> {
 	///
 	/// The bytes keep their connection credit until the [`Lease`] is handed back with
 	/// [`Self::release()`], and those not read are leased again next time. Hand every lease
-	/// back before leasing again. If the returned [`ShouldTransmit::should_transmit()`] is
-	/// `true`, transmit soon, whatever the result.
+	/// back before leasing again.
 	///
-	/// [`Error::Blocked`] records the `want`, so the next [`StreamEvent::Readable`] for this
+	/// [`Error::Blocked`] records the `want`, so the next wake of a [`Self::poll_lease()`] on this
 	/// stream means it may be met, and so that a connection window every reader is waiting on
 	/// can be recovered by evicting the stream ranked lowest by [`Self::set_priority()`].
 	///
@@ -286,18 +291,23 @@ impl Stream<'_> {
 	///
 	/// # Panics
 	/// - when the last lease of the stream was not handed back
-	#[must_use = "a lease may need a transmit"]
-	pub fn lease(&mut self, want: usize) -> (Result<Lease, Error>, ShouldTransmit) {
+	pub fn lease(&mut self, want: usize) -> Result<Lease, Error> {
+		let (result, transmit) = self.lease_inner(want);
+		self.transmit(transmit);
+		result
+	}
+
+	fn lease_inner(&mut self, want: usize) -> (Result<Lease, Error>, bool) {
 		// Bytes out in a lease do not count: a unit that outgrows the window with them is one
 		// the stuck window evicts by rank, so it gives way like any other rather than failing
 		// alone.
 		let want = want as u64;
 		if want > self.state.receive_window {
-			return (Err(Error::TooLarge), ShouldTransmit(false));
+			return (Err(Error::TooLarge), false);
 		}
 		let transmit = match self.fill() {
 			Ok(transmit) => transmit,
-			Err(err) => return (Err(err), ShouldTransmit(false)),
+			Err(err) => return (Err(err), false),
 		};
 		let lease = self.state.lease_mut(self.id).expect("filled above");
 		if lease.len >= want || lease.is_fin() {
@@ -314,7 +324,7 @@ impl Stream<'_> {
 		match lease.end {
 			Some(End::Fin) => unreachable!("handed out above"),
 			Some(End::Reset(code)) => {
-				debug_assert!(!transmit.should_transmit(), "a reset stream takes no credit");
+				debug_assert!(!transmit, "a reset stream takes no credit");
 				(Err(Error::Reset(code)), transmit)
 			}
 			None => {
@@ -323,10 +333,7 @@ impl Stream<'_> {
 				self.state.unlooked.insert(self.id);
 				// An eviction always has a reader to wake, even with no `MAX_DATA` due yet.
 				let evicted = self.unstick();
-				(
-					Err(Error::Blocked),
-					ShouldTransmit(transmit.should_transmit() || evicted),
-				)
+				(Err(Error::Blocked), transmit || evicted)
 			}
 		}
 	}
@@ -335,15 +342,13 @@ impl Stream<'_> {
 	///
 	/// Pending registers `waiter` until more arrives, the stream ends, or an eviction fails it.
 	/// Bytes that arrived stay leasable after the connection is lost, and only then does this
-	/// fail with [`Error::ConnectionLost`]. As with [`Self::lease()`], transmit soon if the
-	/// returned [`ShouldTransmit::should_transmit()`] is `true`, whatever the result.
+	/// fail with [`Error::ConnectionLost`].
 	///
 	/// # Panics
 	/// - when the last lease of the stream was not handed back
-	#[must_use = "a lease may need a transmit"]
-	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> (Poll<Result<Lease, Error>>, ShouldTransmit) {
-		let (result, transmit) = self.lease(want);
-		let poll = match result {
+	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease, Error>> {
+		let result = self.lease(want);
+		match result {
 			// A stuck window may have evicted this very stream, waking its readers before this
 			// one parked.
 			Err(Error::Blocked) if self.state.lease_mut(self.id).is_some_and(|lease| lease.evicted) => {
@@ -355,50 +360,55 @@ impl Stream<'_> {
 				Poll::Pending
 			}
 			result => Poll::Ready(result),
-		};
-		(poll, transmit)
+		}
 	}
 
 	/// Hand a lease back, keeping the connection credit of the bytes read from it
 	///
 	/// They wait for a later [`Self::release()`], as the start of a message read only in part
-	/// does. If [`ShouldTransmit::should_transmit()`] returns `true`, transmit soon: the window
-	/// may have been stuck on this lease.
-	pub fn restore(&mut self, lease: Lease) -> ShouldTransmit {
+	/// does.
+	pub fn restore(&mut self, lease: Lease) {
 		self.put_back(lease);
 		// Only a stuck pass that waited reruns: a reader handing back what it looked at is not
 		// stuck itself, and one that is waits for more with its next lease.
-		ShouldTransmit(self.state.stuck_waiting && self.unstick())
+		let transmit = self.state.stuck_waiting && self.unstick();
+		self.transmit(transmit);
 	}
 
 	/// Hand a lease back, returning the connection credit of every byte read from it or from an
 	/// earlier one, once the units they belong to are complete
-	///
-	/// If [`ShouldTransmit::should_transmit()`] returns `true`, transmit soon so the peer learns
-	/// of the larger window.
-	pub fn release(&mut self, lease: Lease) -> ShouldTransmit {
+	pub fn release(&mut self, lease: Lease) {
 		self.put_back(lease);
-		self.release_credit()
+		let transmit = self.release_credit();
+		self.transmit(transmit);
+	}
+
+	/// Wake the driver when a frame is due
+	fn transmit(&mut self, transmit: bool) {
+		if transmit {
+			self.state.waits.wake_transmit();
+		}
 	}
 
 	/// Return the credit of every byte read out of a lease.
-	fn release_credit(&mut self) -> ShouldTransmit {
+	fn release_credit(&mut self) -> bool {
 		let Some(lease) = self.state.lease_mut(self.id) else {
-			return ShouldTransmit(false);
+			return false;
 		};
 		let freed = lease.release();
 		if lease.evicted {
 			self.state.evicted_held -= freed;
 		}
 		let transmit = self.return_credit(freed);
-		ShouldTransmit(transmit.should_transmit() || self.unstick())
+		transmit || self.unstick()
 	}
 
 	/// [`Self::lease()`] and hand it straight back, for tests that read through the lease's
 	/// bookkeeping rather than a [`Lease`].
 	#[cfg(test)]
-	pub(crate) fn peek(&mut self, want: usize) -> (Result<(), Error>, ShouldTransmit) {
-		let (lease, transmit) = self.lease(want);
+	pub(crate) fn peek(&mut self, want: usize) -> (Result<(), Error>, bool) {
+		let (lease, transmit) = self.lease_inner(want);
+		self.transmit(transmit);
 		(lease.map(|lease| self.put_back(lease)), transmit)
 	}
 
@@ -424,8 +434,10 @@ impl Stream<'_> {
 
 	/// Return the credit of every byte read out, as [`Self::release()`] does.
 	#[cfg(test)]
-	pub(crate) fn release_taken(&mut self) -> ShouldTransmit {
-		self.release_credit()
+	pub(crate) fn release_taken(&mut self) -> bool {
+		let transmit = self.release_credit();
+		self.transmit(transmit);
+		transmit
 	}
 
 	/// Put the bytes `lease` did not read back in front of the stream's lease.
@@ -459,7 +471,7 @@ impl Stream<'_> {
 	}
 
 	/// Move what has arrived in order from the stream's receive buffer into its lease.
-	fn fill(&mut self) -> Result<ShouldTransmit, Error> {
+	fn fill(&mut self) -> Result<bool, Error> {
 		let Some(slot) = self.state.recv.get_mut(&self.id) else {
 			return Err(Error::Closed);
 		};
@@ -484,19 +496,19 @@ impl Stream<'_> {
 			};
 		}
 		let (_, transmit) = recv.max_stream_data(self.state.stream_receive_window);
-		if transmit.should_transmit() {
+		if transmit {
 			self.pending.max_stream_data.insert(self.id);
 		}
 		Ok(transmit)
 	}
 
 	/// Return `bytes` of withheld connection credit to the peer.
-	fn return_credit(&mut self, bytes: u64) -> ShouldTransmit {
+	fn return_credit(&mut self, bytes: u64) -> bool {
 		if bytes == 0 {
-			return ShouldTransmit(false);
+			return false;
 		}
 		let transmit = self.state.release(bytes);
-		self.pending.max_data |= transmit.should_transmit();
+		self.pending.max_data |= transmit;
 		transmit
 	}
 
@@ -507,7 +519,7 @@ impl Stream<'_> {
 		let Some(transmit) = self.state.evict_if_stuck() else {
 			return false;
 		};
-		self.pending.max_data |= transmit.should_transmit();
+		self.pending.max_data |= transmit;
 		true
 	}
 }
@@ -516,18 +528,18 @@ impl StreamsState {
 	/// The lease of a receive stream, if a reader leased it and has not stopped it since.
 	#[cfg(test)]
 	pub(super) fn leased(&self, id: StreamId) -> Option<&Leased> {
-		let recv = self.recv.get(&id)?.as_ref()?.as_open_recv()?;
+		let recv = self.recv.get(&id)?.as_deref()?;
 		let lease = &recv.lease;
 		(lease.filled && (!recv.stopped || lease.evicted)).then_some(lease)
 	}
 
 	fn lease_mut(&mut self, id: StreamId) -> Option<&mut Leased> {
-		let recv = self.recv.get_mut(&id)?.as_mut()?.as_open_recv_mut()?;
+		let recv = self.recv.get_mut(&id)?.as_deref_mut()?;
 		Some(&mut recv.lease)
 	}
 
 	/// Return `bytes` of credit withheld by a lease to the peer.
-	pub(super) fn release(&mut self, bytes: u64) -> ShouldTransmit {
+	pub(super) fn release(&mut self, bytes: u64) -> bool {
 		assert!(
 			bytes <= self.held,
 			"released {bytes} bytes of credit with only {} held",
@@ -539,7 +551,7 @@ impl StreamsState {
 
 	/// Take the lease of `id`, stopped or freed, out of the eviction order and return the credit
 	/// of the bytes it holds.
-	pub(super) fn discard_lease(&mut self, id: StreamId, lease: &mut Leased) -> ShouldTransmit {
+	pub(super) fn discard_lease(&mut self, id: StreamId, lease: &mut Leased) -> bool {
 		if std::mem::take(&mut lease.ranked) {
 			self.ranks.remove(&lease.rank(id));
 		}
@@ -569,8 +581,8 @@ impl StreamsState {
 	/// arrival pays for one look at most.
 	///
 	/// Returns `None` if nothing was evicted, or whether to transmit the `MAX_DATA` the evictions
-	/// freed; each evicted stream's reader is woken by a [`StreamEvent::Readable`].
-	pub(super) fn evict_if_stuck(&mut self) -> Option<ShouldTransmit> {
+	/// freed; each evicted stream's reader wakes.
+	pub(super) fn evict_if_stuck(&mut self) -> Option<bool> {
 		self.stuck_waiting = false;
 		// The window, not the credit a rate cap paces, says whether memory is stuck: a capped
 		// peer out of credit is waiting on time, not on a reader.
@@ -599,7 +611,7 @@ impl StreamsState {
 			let recv = self
 				.recv
 				.get_mut(&id)
-				.and_then(|slot| slot.as_mut()?.as_open_recv_mut())
+				.and_then(|slot| slot.as_deref_mut())
 				.expect("a freed stream leaves the ranks");
 			recv.lease.ranked = false;
 			if recv.stopped || recv.unread_credit() + recv.lease.held == 0 {
@@ -627,7 +639,7 @@ impl StreamsState {
 			let recv = self
 				.recv
 				.get(&id)
-				.and_then(|slot| slot.as_ref()?.as_open_recv())
+				.and_then(|slot| slot.as_deref())
 				.filter(|recv| !recv.stopped && unlooked(recv.unread_credit(), &recv.lease));
 			if let Some(recv) = recv {
 				// Nothing else reruns the pass once the lease comes back.
@@ -647,12 +659,12 @@ impl StreamsState {
 	///
 	/// The stream stays until the application stops it, which tells the peer, and bytes the
 	/// reader took live on outside the connection until then, so their credit stays held too.
-	fn evict(&mut self, id: StreamId) -> ShouldTransmit {
+	fn evict(&mut self, id: StreamId) -> bool {
 		tracing::debug!(%id, "evicting a stream to free a stuck receive window");
 		let recv = self
 			.recv
 			.get_mut(&id)
-			.and_then(|slot| slot.as_mut()?.as_open_recv_mut())
+			.and_then(|slot| slot.as_deref_mut())
 			.expect("a candidate is open");
 		let leased = recv.lease.evict();
 		self.evicted_held += recv.lease.held;
@@ -661,7 +673,7 @@ impl StreamsState {
 		self.held -= leased;
 		self.unlooked.remove(&id);
 		self.evicted += 1;
-		self.notify(StreamEvent::Readable { id });
+		self.waits.wake(id, Wait::Read);
 		self.add_read_credits(leased + unread)
 	}
 
@@ -671,7 +683,7 @@ impl StreamsState {
 	pub(crate) fn check_leases(&self) {
 		let (mut held, mut evicted_held, mut ranked) = (0, 0, 0);
 		for (&id, slot) in &self.recv {
-			let Some(recv) = slot.as_ref().and_then(|slot| slot.as_open_recv()) else {
+			let Some(recv) = slot.as_deref() else {
 				continue;
 			};
 			let lease = &recv.lease;

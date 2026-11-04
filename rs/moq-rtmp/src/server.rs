@@ -572,8 +572,8 @@ pub struct Publish<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// Retention declared on the media tracks this publish mints, or `None` for hang's
-	/// own default. Override with [`with_max_age`](Self::with_max_age).
+	/// Max age declared on the media tracks this publish mints, or `None` for no publisher
+	/// limit. Override with [`with_max_age`](Self::with_max_age).
 	max_age: Option<Duration>,
 	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
 	/// Override with [`with_bandwidth`](Self::with_bandwidth).
@@ -608,14 +608,14 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Set how long relays keep a non-latest group of this publish's media tracks
-	/// fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of this publish's media tracks stays fresh, or
+	/// `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -682,7 +682,7 @@ impl<S: Stream> Publish<S> {
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
 
-		tracing::info!(peer = %self.peer, %path, epoch = %publisher.epoch, "rtmp publish accepted");
+		tracing::info!(peer = %self.peer, %path, instance = %publisher.instance, "rtmp publish accepted");
 
 		let result = pump(
 			&mut self.stream,
@@ -1197,7 +1197,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_age: None,
+							max_age: Some(hang::container::MAX_AGE),
 							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 							linger: moq_mux::Linger::DEFAULT,
 						})));
@@ -1513,15 +1513,18 @@ struct Publisher {
 	broadcast: moq_net::origin::Publication,
 	// This connection's publisher instance, so an encoder reconnecting under the
 	// same key replaces this broadcast at once instead of resuming into it.
-	epoch: moq_net::Epoch,
+	instance: moq_net::Instance,
 }
 
 impl Publisher {
-	/// Open a broadcast at `path` under a fresh epoch and prime the importer with
+	/// Open a broadcast at `path` under a fresh instance and prime the importer with
 	/// the FLV file header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
-		let epoch = moq_net::Epoch::mint();
-		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+		let instance = moq_net::Instance::random();
+		let broadcast = origin.publish(
+			path,
+			moq_net::origin::Route::default().with_instance(instance.clone(), 0),
+		)?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
@@ -1534,7 +1537,7 @@ impl Publisher {
 			catalog,
 			metadata: crate::metadata::Dropped::new(path),
 			broadcast: handle,
-			epoch,
+			instance,
 		})
 	}
 
@@ -2189,10 +2192,10 @@ mod tests {
 		}
 	}
 
-	/// The retention a publish declares has to reach the media tracks the FLV importer
+	/// The max age a publish declares has to reach the media tracks the FLV importer
 	/// mints, not stop at the catalog producer it was set on.
 	#[tokio::test]
-	async fn publisher_declares_the_configured_retention() {
+	async fn publisher_declares_the_configured_max_age() {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
@@ -2281,11 +2284,11 @@ mod tests {
 		server_task.abort();
 	}
 
-	/// Publish an AVC broadcast at `live/cam0` under `epoch`, starting with a keyframe carrying
+	/// Publish an AVC broadcast at `live/cam0` under `instance`, starting with a keyframe carrying
 	/// `idr`, and return its importer for more tags.
 	fn publish_avc(
 		origin: &origin::Producer,
-		epoch: moq_net::Epoch,
+		instance: moq_net::Instance,
 		idr: &[u8],
 	) -> (FlvImport, moq_mux::catalog::Producer) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
@@ -2295,7 +2298,9 @@ mod tests {
 		vframe.extend_from_slice(idr);
 
 		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast.announce(origin::Route::default().with_epoch(epoch)).unwrap();
+		broadcast
+			.announce(origin::Route::default().with_instance(instance, 0))
+			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
@@ -2314,7 +2319,7 @@ mod tests {
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let (mut old, old_catalog) = publish_avc(&origin, moq_net::Epoch::mint(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
+		let (mut old, old_catalog) = publish_avc(&origin, moq_net::Instance::random(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2337,9 +2342,9 @@ mod tests {
 		assert_eq!(next().await.1[..2], [0x17, 0x00]);
 		assert_eq!(next().await.1[..2], [0x17, 0x01]);
 
-		let epoch = moq_net::Epoch::mint();
-		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&epoch)).unwrap();
-		let (_new, _new_catalog) = publish_avc(&origin, epoch, &[0x65, 0x99, 0x99, 0x99, 0x99]);
+		let instance = moq_net::Instance::random();
+		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&instance)).unwrap();
+		let (_new, _new_catalog) = publish_avc(&origin, instance, &[0x65, 0x99, 0x99, 0x99, 0x99]);
 		kio::clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
@@ -2775,7 +2780,7 @@ mod tests {
 	}
 
 	/// An encoder reconnecting under the same key while its stale connection is still
-	/// open restarts the broadcast at once: each connection is its own epoch, so a
+	/// open restarts the broadcast at once: each connection is its own instance, so a
 	/// fresh request reaches the reconnect, while the stale viewer stays on the old one
 	/// until it leaves.
 	#[tokio::test]

@@ -78,6 +78,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	buffer: BytesMut,
 	body: Option<Body>,
 
+	// A refused chunk may contain unread bytes, so no later chunk can resume its framing.
+	failed: Option<crate::Error>,
+
 	// A segment boundary (a styp or an explicit `cut()`) waiting to land on the next fragment.
 	pending_cut: bool,
 
@@ -85,9 +88,6 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// open group belongs to an older one rolls, so every track segments identically.
 	segment: u64,
 
-	// The current segment's boundary was declared by the source (rather than inferred from a
-	// keyframe), so each track cuts its HLS segments where it opens its group for the segment.
-	declared: bool,
 	dropped_metadata: u64,
 
 	// A seek or discontinuity waiting for the fragment still publishing.
@@ -161,10 +161,9 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	/// The latest group's start, which the next group may not start below.
 	start: Option<Timestamp>,
 
-	// Reports this track's groups into its HLS records, unless disabled. Passthrough writes groups by
-	// hand (no `container::Producer`), so the recorder is fed directly rather than through
-	// `with_recorder`.
-	recorder: Option<crate::hls::Recorder>,
+	// This track's place in the broadcast's join interval. Passthrough writes groups by hand (no
+	// `container::Producer`), so it reports what its estimator measured itself.
+	member: Option<crate::catalog::interval::Member>,
 
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
@@ -186,6 +185,9 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn publish_estimate(&mut self) -> crate::Result<()> {
 		let reading = self.estimator.reading();
 		self.claim.update(&self.track.demand(), reading.estimate.bitrate);
+		if let Some(member) = self.member.as_mut() {
+			member.report(reading.interval);
+		}
 		self.rendition.estimate(reading)
 	}
 
@@ -203,10 +205,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	fn finish(&mut self) -> crate::Result<()> {
 		self.close()?;
 		self.track.finish()?;
+		// A track that ended before measuring declares what it saw, and no longer holds the join
+		// interval back.
+		if let Some(mut member) = self.member.take() {
+			member.finish(self.estimator.partial_interval());
+		}
 		// The importer may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();
-		// Dropping the recorder stops the open HLS segment, so the track is advertised.
-		self.recorder = None;
 		Ok(())
 	}
 
@@ -276,9 +281,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			buffer: BytesMut::new(),
 			body: None,
+			failed: None,
 			pending_cut: false,
 			segment: 0,
-			declared: false,
 			dropped_metadata: 0,
 			deferred: Deferred::default(),
 		}
@@ -302,6 +307,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// it follows the same segmentation as video. A passthrough video track rolls there as well,
 	/// while an unwrapped one opens a group at each sync sample.
 	pub fn cut(&mut self) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		self.pending_cut = true;
 		Ok(())
 	}
@@ -344,15 +352,35 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// `default_base_moof`. Forward gaps and interleaved tracks are supported.
 	///
 	/// Media samples stream into their frames as bytes arrive. What must be held whole is
-	/// bounded: a `moov` or `moof` body, or a text sample, larger than
-	/// [`MAX_HELD_BYTES`](super::MAX_HELD_BYTES), or a `moof` declaring more than
-	/// [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples, is refused before it is
-	/// held.
+	/// bounded: a `moov` or `moof` body larger than
+	/// [`MAX_METADATA_BYTES`](super::MAX_METADATA_BYTES), or a text sample larger than
+	/// [`MAX_HELD_BYTES`](super::MAX_HELD_BYTES), is refused before it is held. A `moof` declaring
+	/// more than [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples is refused before
+	/// they are planned, and a `moov` declaring more than [`MAX_TRACKS`](super::MAX_TRACKS)
+	/// tracks before any is created.
 	///
-	/// A refused box or fragment publishes nothing more, and the rest of its body is discarded.
-	/// The rest of the refused call's input is not read, so input fed in box-aligned chunks (such
-	/// as one HLS segment per call) resumes at the next call.
-	pub fn decode(&mut self, mut data: &[u8]) -> Result<()> {
+	/// A decode error is terminal: later decodes, cuts, seeks and discontinuities return the same
+	/// error without reading input or changing the tracks.
+	/// The refusing call may leave bytes unread, so even box-aligned callers must replace the
+	/// importer to resume. [`finish`](Self::finish) still ends the tracks with what was accepted.
+	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
+		let result = self.drain(data);
+		if let Err(err) = &result {
+			if let Some(Body::Media(mut mdat)) = self.body.take() {
+				mdat.abort(moq_net::Error::MalformedTrack);
+			}
+			self.buffer = BytesMut::new();
+			self.moof = None;
+			self.deferred = Deferred::default();
+			self.failed = Some(err.clone());
+		}
+		result
+	}
+
+	fn drain(&mut self, mut data: &[u8]) -> Result<()> {
 		loop {
 			let Some(body) = self.body.take() else {
 				let needed = if self.buffer.len() >= 4 && self.buffer[..4] == [0, 0, 0, 1] {
@@ -393,22 +421,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						Ok(Body::Skip(header.size))
 					}
 				};
-				match body {
-					Ok(body) => self.body = Some(body),
-					Err(err) => {
-						// Nothing of a refused box is held or published. Discard its body, including
-						// what this call carries, so framing resumes at the next box.
-						let count = header.size.unwrap_or(data.len()).min(data.len());
-						let remaining = header.size.map(|size| size - count);
-						if self.moof.is_some() {
-							self.moof_span = self.moof_span.saturating_add(count);
-						}
-						if remaining != Some(0) {
-							self.body = Some(Body::Skip(remaining));
-						}
-						return Err(err);
-					}
-				}
+				self.body = Some(body?);
 				continue;
 			};
 			match body {
@@ -435,8 +448,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					data = &data[count..];
 					remaining -= count;
 					if remaining == 0 {
-						// Release the held body before parsing, so a refused box leaves no partial
-						// header behind for the next one.
 						let body = std::mem::take(&mut self.buffer).freeze();
 						self.end_metadata(kind, body, header_size)?;
 					} else {
@@ -455,15 +466,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						*remaining -= count;
 					}
 					if let Err(err) = written {
-						// The fragment is refused: its open frames fail, and the rest of its mdat is
-						// discarded so framing resumes at the next box.
 						mdat.abort(moq_net::Error::MalformedTrack);
-						if mdat.remaining != Some(0) {
-							self.body = Some(Body::Skip(mdat.remaining));
-						}
-						if let Err(settle) = self.settle() {
-							tracing::warn!(%settle, "failed to apply a control deferred by a refused fMP4 fragment");
-						}
 						return Err(err);
 					}
 					let published = mdat.chunks.is_empty();
@@ -490,7 +493,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::DuplicateMoof.into());
 		}
 		let size = size.ok_or(mp4_atom::Error::InvalidSize)?;
-		if size > super::MAX_HELD_BYTES {
+		if size > super::MAX_METADATA_BYTES {
 			return Err(Error::MetadataTooLarge { kind, size }.into());
 		}
 		Ok(Body::Metadata {
@@ -502,6 +505,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	// Parse a held moov or moof body once its last byte has arrived.
 	fn end_metadata(&mut self, kind: mp4_atom::FourCC, body: Bytes, header_size: usize) -> Result<()> {
+		super::metadata::body(kind, &body)?;
 		if kind == Moov::KIND {
 			return self.init(Moov::decode_body(&mut body.as_ref())?);
 		}
@@ -509,17 +513,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::DuplicateMoof.into());
 		}
 		let moof = Moof::decode_body(&mut body.as_ref())?;
-		// Planning resolves every sample, and a run without per-sample fields declares its count
-		// in four bytes, so the byte bound alone does not limit what planning would hold.
-		let samples: u64 = moof
-			.traf
-			.iter()
-			.flat_map(|traf| &traf.trun)
-			.map(|trun| trun.samples.len() as u64)
-			.sum();
-		if samples > super::MAX_FRAGMENT_SAMPLES {
-			return Err(Error::TooManySamples(samples).into());
-		}
 		self.moof = Some(moof);
 		self.moof_span = header_size.checked_add(body.len()).ok_or(Error::InvalidDataOffset)?;
 		Ok(())
@@ -529,6 +522,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// A second moov would re-declare a track set the catalog already advertises.
 		if self.moov.is_some() {
 			return Err(Error::DuplicateMoov.into());
+		}
+		if moov.trak.len() > super::MAX_TRACKS {
+			return Err(Error::TooManyTracks(moov.trak.len()).into());
 		}
 		// Only `finish()` releases the reservation before a moov, since a fragment needs one.
 		let reserved = self.initial_reservation.clone().ok_or(Error::MoovAfterFinish)?;
@@ -608,12 +604,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			self.catalog.track_info(kind.priority()).with_timescale(timescale),
 		)?;
 
-		// Enroll every track for HLS records: passthrough writes groups by hand (no
-		// `container::Producer`), so the recorder is fed directly at each fragment.
-		let mut recorder = self.catalog.enroll(track.name(), None)?;
-		if let Some(recorder) = recorder.as_mut() {
-			recorder.lend(&track);
-		}
+		// Join the broadcast's join interval, measured: an fMP4 declares no GOP.
+		let member = Some(self.catalog.join(None));
 
 		// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 		// `estimate` as fragments arrive.
@@ -638,7 +630,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track,
 			group: None,
 			start: None,
-			recorder,
+			member,
 			pending_sequence: None,
 			estimator: self.catalog.estimator(),
 			claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
@@ -1094,18 +1086,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let has_video = self.tracks.values().any(|t| t.kind == Kind::Video);
 		if self.starts_segment(&moof, has_video, len.unwrap_or(usize::MAX)) {
 			self.segment += 1;
-			// A boundary the source declared is also an HLS segment boundary; one merely inferred
-			// from a keyframe is not, since the default pacing already sees that group open.
-			self.declared = self.pending_cut;
 			self.pending_cut = false;
 		}
 		let mut resolver = sample::Resolver::new(self.moof_span, len.unwrap_or(usize::MAX));
 		resolver.streaming();
+		// `end_metadata` bounded the count, so the plan is sized once instead of growing.
+		let samples = moof.traf.iter().map(sample::count).sum::<u64>() as usize;
 		let mut mdat = Mdat {
 			remaining: len,
 			position: 0,
 			tracks: Vec::new(),
-			chunks: std::collections::VecDeque::new(),
+			text: Vec::new(),
+			staged: BytesMut::new(),
+			chunks: std::collections::VecDeque::with_capacity(samples),
 		};
 		// Validate every track before opening any payload writer. Otherwise a later traf's
 		// backwards run or reused bytes could fail after earlier tracks published data.
@@ -1113,15 +1106,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for traf in &moof.traf {
 			let id = traf.tfhd.track_id;
 			if let Some(track) = self.text.get_mut(&id) {
-				for sample in track.prepare(traf, &mut resolver, &mut self.timebase)? {
+				let samples = track.prepare(traf, &mut resolver, &mut self.timebase)?;
+				mdat.text.reserve(samples.len());
+				for sample in samples {
 					mdat.chunks.push_back(Chunk {
 						range: sample.range.clone(),
-						output: ChunkOutput::Text {
-							id,
-							sample,
-							data: BytesMut::new(),
-						},
+						output: ChunkOutput::Text(mdat.text.len()),
 					});
+					mdat.text.push((id, sample));
 				}
 				anchored = true;
 				continue;
@@ -1141,7 +1133,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let placement = Placement {
 				offset,
 				new_segment: track.segment != Some(self.segment),
-				declared: track.segment != Some(self.segment) && self.declared,
 			};
 			let prefix = match track.output {
 				Output::Passthrough(_) => Some(fragment(traf, &moof, &run, &track.defaults)?),
@@ -1190,17 +1181,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let count = (chunk.range.end - mdat.position).min(data.len());
 			let complete = mdat.position + count == chunk.range.end;
 			match &mut chunk.output {
-				ChunkOutput::Text {
-					id,
-					sample,
-					data: buffer,
-				} => {
-					buffer.extend_from_slice(&data[..count]);
+				ChunkOutput::Text(index) => {
+					mdat.staged.extend_from_slice(&data[..count]);
 					if complete {
+						let (id, sample) = &mdat.text[*index];
+						let staged = std::mem::take(&mut mdat.staged);
 						self.text
 							.get_mut(id)
 							.expect("planned text track")
-							.write(sample, buffer)?;
+							.write(sample, &staged)?;
 					}
 				}
 				ChunkOutput::Media {
@@ -1212,7 +1201,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					if pending.writer.is_none() {
 						if *sample_index == 0 {
 							pending.placement.new_segment = track.segment != Some(self.segment);
-							pending.placement.declared = pending.placement.new_segment && self.declared;
 						}
 						let (writer, opened) = match &mut track.output {
 							Output::Passthrough(output) => {
@@ -1284,6 +1272,11 @@ struct Mdat {
 	remaining: Option<usize>,
 	position: usize,
 	tracks: Vec<PendingTrack>,
+	/// Each planned text sample and the track it belongs to.
+	text: Vec<(u32, super::text::Sample)>,
+	/// The bytes of the text sample arriving now, which is rewritten once whole.
+	staged: BytesMut,
+	/// Every planned sample in `mdat` order, kept small since a fragment may plan many.
 	chunks: std::collections::VecDeque<Chunk>,
 }
 
@@ -1335,15 +1328,10 @@ struct Chunk {
 }
 
 enum ChunkOutput {
-	Media {
-		track: usize,
-		sample: usize,
-	},
-	Text {
-		id: u32,
-		sample: super::text::Sample,
-		data: BytesMut,
-	},
+	/// A sample of `Mdat::tracks[track]`.
+	Media { track: usize, sample: usize },
+	/// The sample at this index of `Mdat::text`.
+	Text(usize),
 }
 
 /// Where a fragment lands on its track.
@@ -1353,8 +1341,6 @@ struct Placement {
 	offset: crate::catalog::Offset,
 	/// The fragment is this track's first in the current segment.
 	new_segment: bool,
-	/// That segment was declared by the source, so it is an HLS segment boundary too.
-	declared: bool,
 }
 
 impl Placement {
@@ -1391,7 +1377,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 
 		let mut earliest = None;
 		let mut end = None;
-		let mut samples = Vec::new();
+		let mut samples = Vec::with_capacity(sample::count(traf) as usize);
 		let mut dropped = false;
 		for resolved in resolver.resolve(traf, self.defaults)? {
 			let sample::Resolved { sample, cts, range } = resolved?;
@@ -1603,13 +1589,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		};
 
 		if start_group {
-			// A group reopened mid-segment (after a `seek`) is no segment boundary.
-			if placement.declared
-				&& let Some(recorder) = self.recorder.as_mut()
-			{
-				recorder.cut(timestamp);
-			}
-
 			// Close the previous group for the bitrate estimator (used only when the
 			// descriptor didn't declare a bitrate).
 			self.estimator.cut(Some(timestamp));
@@ -1631,7 +1610,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	fn complete(&mut self, writer: moq_net::frame::Producer, pending: &PendingTrack, kind: Kind) -> Result<()> {
 		let group = writer.finish()?;
-		let sequence = group.sequence;
 		let run = &pending.run;
 		let timestamp = pending.placement.offset.apply(run.earliest)?;
 		let end = pending.placement.offset.apply(run.end)?;
@@ -1641,20 +1619,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			Kind::Video => run.samples.iter().filter(|sample| sample.sync).count() as u64,
 			Kind::Audio => 0,
 		};
-		// Only once published, so a rejected fragment is never listed.
-		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.frame(sequence, timestamp);
-		}
-
 		self.group = Some(group);
 
 		self.estimator.write(timestamp, pending.size);
 		let bytes = run.samples.iter().map(|sample| sample.range.len()).sum();
 		self.sent.add(run.samples.len() as u64, bytes, keyframes);
-		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.end(end);
-		}
 		self.estimator.burst(end.checked_sub(timestamp)?.into());
+		self.estimator.reach(end);
 		self.publish_estimate()?;
 		Ok(())
 	}
@@ -1680,9 +1651,6 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 			Kind::Video => sample.sync,
 			Kind::Audio => (index == 0 && placement.new_segment) || producer.needs_keyframe(),
 		};
-		if keyframe && placement.declared && !pending.opened {
-			producer.boundary(placement.offset.apply(run.earliest)?);
-		}
 		if sample.pts > sample.dts {
 			producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
 		}
@@ -1698,7 +1666,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	///
 	/// A fragment whose samples are still arriving was truncated: its open frames abort, failing
 	/// their groups, every track still finishes, and this returns
-	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof).
+	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof). After a decode error, this ends the
+	/// accepted media without reading more input; it does not clear that error for later decodes.
 	pub fn finish(&mut self) -> Result<()> {
 		// No input follows, so the buffer that waited for the rest of an atom is done.
 		self.buffer = BytesMut::new();
@@ -1765,6 +1734,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A fragment whose samples are still arriving owns its groups until its last sample, so the
 	/// seek waits for it to finish publishing.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		if self.publishing() {
 			self.deferred.seek = Some(sequence);
 			return Ok(());
@@ -1797,6 +1769,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// rewinds, before publishing any of it. Like [`seek`](Self::seek), it waits for a fragment
 	/// still arriving to finish publishing.
 	pub fn discontinuity(&mut self) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		if self.publishing() {
 			self.deferred.discontinuity = true;
 			return Ok(());
@@ -1853,14 +1828,11 @@ impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 			}
 		}
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
-			let (name, ended) = media!(&mut track.output,
-				producer => (producer.name().to_string(), producer.end()),
-				passthrough => (passthrough.track.name().to_string(), passthrough.end()));
+			let ended = media!(&mut track.output, producer => producer.end(), passthrough => passthrough.end());
 			drop(track);
 			if let Err(err) = ended {
 				tracing::warn!(%err, "failed to end a dropped fMP4 track");
 			}
-			self.catalog.retire_dropped(&name);
 		}
 	}
 }
@@ -1973,12 +1945,9 @@ mod tests {
 			let err = import.decode(&header).unwrap_err();
 			assert!(matches!(err, crate::Error::Cmaf(Error::BackwardsDataOffset)), "{err:?}");
 			assert!(consumer.recv_group().now_or_never().is_none());
-			// The refused mdat is discarded rather than parsed as boxes.
-			import.decode(&[0xA5; 8]).unwrap();
-			import.decode(&media_header(id, 1024, &[0], 4, Some(4))).unwrap();
-			import.decode(&[0xA5; 4]).unwrap();
+			assert_eq!(import.decode(&[0xA5; 8]).unwrap_err().to_string(), err.to_string());
 			import.finish().unwrap();
-			assert!(consumer.recv_group().now_or_never().is_some());
+			assert!(consumer.recv_group().now_or_never().unwrap().unwrap().is_none());
 		}
 	}
 
@@ -1993,10 +1962,37 @@ mod tests {
 		header
 	}
 
+	/// The refusing call can also carry a prefix of the next box. None of that input may
+	/// disappear behind a successful decode, regardless of where the caller splits it.
+	#[test]
+	fn a_refusal_is_terminal_across_chunk_boundaries() {
+		let mut data = box_header(b"mdat", Some(4));
+		data.extend_from_slice(&[0xA5; 4]);
+		data.extend_from_slice(&box_header(b"styp", Some(0)));
+		for split in 8..=data.len() {
+			let mut import = importer();
+			let first = import.decode(&data[..split]).unwrap_err().to_string();
+			assert_eq!(
+				import.decode(&data[split..]).unwrap_err().to_string(),
+				first,
+				"split: {split}"
+			);
+			assert_eq!(import.cut().unwrap_err().to_string(), first);
+			assert_eq!(import.seek(100).unwrap_err().to_string(), first);
+			assert_eq!(import.discontinuity().unwrap_err().to_string(), first);
+			import.finish().unwrap();
+			assert_eq!(import.decode(&[]).unwrap_err().to_string(), first);
+			assert_eq!(
+				import.decode(&box_header(b"free", Some(0))).unwrap_err().to_string(),
+				first
+			);
+		}
+	}
+
 	#[test]
 	fn oversized_metadata_is_refused_at_its_header() {
 		for kind in [b"moov", b"moof"] {
-			for size in [super::super::MAX_HELD_BYTES + 1, 1usize << 62] {
+			for size in [super::super::MAX_METADATA_BYTES + 1, 1usize << 62] {
 				let mut import = importer();
 				let header = box_header(kind, Some(size));
 				let (last, prefix) = header.split_last().unwrap();
@@ -2008,12 +2004,9 @@ mod tests {
 					matches!(err, crate::Error::Cmaf(Error::MetadataTooLarge { size: refused, .. }) if refused == size),
 					"{kind:?}: {err:?}"
 				);
-				// Its body is discarded as it arrives, across segments.
-				for _ in 0..256 {
-					import.cut().unwrap();
-					import.decode(&[0xA5; 1024]).unwrap();
-					assert!(import.buffer.is_empty(), "{kind:?}: {} held bytes", import.buffer.len());
-				}
+				assert_eq!(import.decode(&[0xA5; 1024]).unwrap_err().to_string(), err.to_string());
+				assert!(import.buffer.is_empty());
+				assert!(import.body.is_none());
 			}
 		}
 	}
@@ -2022,15 +2015,15 @@ mod tests {
 	fn metadata_at_the_bound_holds_only_what_arrived() {
 		let mut import = importer();
 		import
-			.decode(&box_header(b"moof", Some(super::super::MAX_HELD_BYTES)))
+			.decode(&box_header(b"moof", Some(super::super::MAX_METADATA_BYTES)))
 			.unwrap();
 		import.decode(&[0xA5; 1024]).unwrap();
 		assert!(matches!(import.body, Some(Body::Metadata { .. })));
 		assert_eq!(import.buffer.len(), 1024);
 	}
 
-	// A moof whose runs carry no per-sample fields, each declaring `count` samples in a few bytes.
-	fn inherited_moof(id: u32, counts: &[u32]) -> Vec<u8> {
+	// A moof of one traf on track `id` carrying `trun`, whose samples are a byte and 1024 ticks each.
+	fn runs_moof(id: u32, trun: Vec<mp4_atom::Trun>) -> Vec<u8> {
 		let moof = Moof {
 			mfhd: Default::default(),
 			traf: vec![mp4_atom::Traf {
@@ -2043,22 +2036,28 @@ mod tests {
 				tfdt: Some(mp4_atom::Tfdt {
 					base_media_decode_time: 0,
 				}),
-				trun: counts
-					.iter()
-					.map(|&count| mp4_atom::Trun {
-						data_offset: None,
-						samples: mp4_atom::TrunSamples::Inherited {
-							count,
-							first_flags: None,
-						},
-					})
-					.collect(),
+				trun,
 				..Default::default()
 			}],
 		};
 		let mut data = Vec::new();
 		moof.encode(&mut data).unwrap();
 		data
+	}
+
+	// A moof whose runs carry no per-sample fields, each declaring `count` samples in a few bytes.
+	fn inherited_moof(id: u32, counts: &[u32]) -> Vec<u8> {
+		let trun = counts
+			.iter()
+			.map(|&count| mp4_atom::Trun {
+				data_offset: None,
+				samples: mp4_atom::TrunSamples::Inherited {
+					count,
+					first_flags: None,
+				},
+			})
+			.collect();
+		runs_moof(id, trun)
 	}
 
 	#[test]
@@ -2077,12 +2076,10 @@ mod tests {
 			);
 			assert!(import.moof.is_none());
 			assert!(import.buffer.is_empty());
-			// With no moof, the mdat after it is refused and discarded.
-			let err = import.decode(&box_header(b"mdat", Some(4))).unwrap_err();
-			assert!(matches!(err, crate::Error::Cmaf(Error::NoMoof)), "{err:?}");
-			import.decode(&[0xA5; 4]).unwrap();
-			import.decode(&media_header(id, 0, &[0], 4, Some(4))).unwrap();
-			import.decode(&[0xA5; 4]).unwrap();
+			assert_eq!(
+				import.decode(&box_header(b"mdat", Some(4))).unwrap_err().to_string(),
+				err.to_string()
+			);
 			import.finish().unwrap();
 		}
 
@@ -2090,6 +2087,150 @@ mod tests {
 		let (mut import, id, _) = initialized(false);
 		import.decode(&inherited_moof(id, &[half, half])).unwrap();
 		assert!(import.moof.is_some());
+	}
+
+	/// A fragment within the bounds plans within [`MAX_HELD_BYTES`](super::super::MAX_HELD_BYTES)
+	/// however its runs declare their samples, and a `moof` at the byte bound that declares too
+	/// many parses within it before it is refused.
+	#[test]
+	fn fragment_plans_within_the_held_bound() {
+		use super::super::{MAX_FRAGMENT_SAMPLES, MAX_HELD_BYTES, MAX_METADATA_BYTES};
+		let entries = |count: usize, entry: mp4_atom::TrunEntry| {
+			vec![mp4_atom::Trun {
+				data_offset: None,
+				samples: vec![entry; count].into(),
+			}]
+		};
+		// Parsing expands a 4-byte entry most; all four fields are the most a real run carries.
+		let small = mp4_atom::TrunEntry {
+			size: Some(1),
+			..Default::default()
+		};
+		let full = mp4_atom::TrunEntry {
+			duration: Some(1024),
+			size: Some(1),
+			flags: Some(0),
+			cts: Some(0),
+		};
+		// Room for the boxes around the runs.
+		let room = MAX_METADATA_BYTES - 1024;
+		let (_, id, _) = initialized(false);
+		// One sample per run, each a byte past the last, so no two samples' bytes are adjacent.
+		let gapped = |start: usize| {
+			(0..room / 20)
+				.map(|index| mp4_atom::Trun {
+					data_offset: Some((start + 2 * index) as i32),
+					samples: mp4_atom::TrunSamples::Inherited {
+						count: 1,
+						first_flags: None,
+					},
+				})
+				.collect()
+		};
+		let start = runs_moof(id, gapped(0)).len() + 8;
+		let inputs = [
+			(
+				"field-less runs",
+				inherited_moof(id, &[MAX_FRAGMENT_SAMPLES as u32]),
+				None,
+			),
+			("full entries", runs_moof(id, entries(room / 16, full)), None),
+			(
+				"4-byte entries",
+				runs_moof(id, entries(room / 4, small)),
+				Some(room / 4),
+			),
+			("one-sample runs", runs_moof(id, gapped(start)), None),
+		];
+		for passthrough in [false, true] {
+			for (name, moof, refused) in &inputs {
+				let (mut import, _, _) = initialized(passthrough);
+				let mut data = moof.clone();
+				assert!(data.len() <= MAX_METADATA_BYTES + 8, "{name}: {} bytes", data.len());
+				data.extend_from_slice(&box_header(b"mdat", None));
+				let (result, usage) = crate::allocation::measure(|| import.decode(&data));
+				match refused {
+					None => result.unwrap(),
+					Some(count) => assert!(
+						matches!(result, Err(crate::Error::Cmaf(Error::TooManySamples(refused))) if refused == *count as u64),
+						"{name}: {result:?}"
+					),
+				}
+				assert!(
+					usage.peak <= MAX_HELD_BYTES,
+					"{name}, passthrough {passthrough}: held {} bytes",
+					usage.peak
+				);
+			}
+		}
+	}
+
+	// A moov of bbb.mp4's audio track, repeated `count` times under fresh ids.
+	fn tracks_moov(count: usize) -> Vec<u8> {
+		use mp4_atom::Decode;
+		let mut data = include_bytes!("test_data/bbb.mp4").as_slice();
+		mp4_atom::Ftyp::decode(&mut data).unwrap();
+		let mut moov = Moov::decode(&mut data).unwrap();
+		let audio = moov
+			.trak
+			.iter()
+			.find(|trak| trak.mdia.hdlr.handler.as_ref() == b"soun")
+			.unwrap()
+			.clone();
+		moov.mvex = None;
+		moov.trak = (1..=count as u32)
+			.map(|id| {
+				let mut trak = audio.clone();
+				trak.tkhd.track_id = id;
+				trak
+			})
+			.collect();
+		let mut data = Vec::new();
+		moov.encode(&mut data).unwrap();
+		data
+	}
+
+	/// Each track a moov declares costs the same, whatever came before it, and a moov declaring
+	/// more than [`MAX_TRACKS`](super::super::MAX_TRACKS) creates none, even at the byte bound.
+	#[test]
+	fn moov_tracks_are_bounded() {
+		use super::super::{MAX_HELD_BYTES, MAX_METADATA_BYTES, MAX_TRACKS};
+		let decode = |count: usize| {
+			let mut import = importer();
+			let data = tracks_moov(count);
+			let (result, usage) = crate::allocation::measure(|| import.decode(&data));
+			(import, data.len(), result, usage)
+		};
+
+		let (import, _, result, half) = decode(MAX_TRACKS / 2);
+		result.unwrap();
+		assert_eq!(import.tracks.len(), MAX_TRACKS / 2);
+		let (import, _, result, all) = decode(MAX_TRACKS);
+		result.unwrap();
+		assert_eq!(import.tracks.len(), MAX_TRACKS);
+		// Twice the tracks; a step revisiting every earlier track would cost about four times.
+		assert!(
+			all.allocated < 3 * half.allocated,
+			"{} tracks allocated {}, {} allocated {}",
+			MAX_TRACKS / 2,
+			half.allocated,
+			MAX_TRACKS,
+			all.allocated
+		);
+		assert!(all.peak <= MAX_HELD_BYTES, "held {} bytes", all.peak);
+
+		let per_track = tracks_moov(2).len() - tracks_moov(1).len();
+		let fill = (MAX_METADATA_BYTES - 1024) / per_track;
+		for count in [MAX_TRACKS + 1, fill] {
+			let (import, len, result, usage) = decode(count);
+			assert!(len <= MAX_METADATA_BYTES + 8);
+			assert!(
+				matches!(result, Err(crate::Error::Cmaf(Error::TooManyTracks(refused))) if refused == count),
+				"{count}: {result:?}"
+			);
+			assert!(import.tracks.is_empty() && import.text.is_empty());
+			assert!(usage.peak <= MAX_HELD_BYTES, "{count} tracks held {} bytes", usage.peak);
+		}
 	}
 
 	#[test]
@@ -2136,7 +2277,8 @@ mod tests {
 	}
 
 	fn replay(output: &Output<()>) -> moq_net::track::Subscriber {
-		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		match output {
 			Output::Audio(output) => output.subscribe(replay),
 			Output::Passthrough(output) => output.track.subscribe(replay),
@@ -2223,7 +2365,7 @@ mod tests {
 	}
 
 	#[test]
-	fn refused_fragment_discards_its_mdat() {
+	fn refused_fragment_ends_its_import() {
 		const SIZE: usize = 64;
 		for passthrough in [false, true] {
 			let (mut import, id, _) = initialized(passthrough);
@@ -2237,19 +2379,13 @@ mod tests {
 			import
 				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
-			import.decode(&[0xA5; SIZE / 2]).unwrap_err();
-			// The rest of the refused mdat is discarded rather than parsed as boxes.
-			import.decode(&[0xA5; SIZE / 2]).unwrap();
-			import
-				.decode(&media_header(id, 96_000, &[0], SIZE as u32, Some(SIZE)))
-				.unwrap();
-			import.decode(&[0xA5; SIZE]).unwrap();
-			import.finish().unwrap();
+			let err = import.decode(&[0xA5; SIZE / 2]).unwrap_err();
 			assert_eq!(
-				groups(&mut consumer),
-				[(0, Some(1)), (1, Some(1))],
-				"passthrough: {passthrough}"
+				import.decode(&[0xA5; SIZE / 2]).unwrap_err().to_string(),
+				err.to_string()
 			);
+			import.finish().unwrap();
+			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
 		}
 	}
 }

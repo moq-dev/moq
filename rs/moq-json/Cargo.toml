@@ -37,6 +37,7 @@ json-patch = "4"
 # Compile the generated wrappers used by the tests.
 moq-json = { path = ".", features = ["async"] }
 proptest = { workspace = true, features = ["handle-panics"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "codec"

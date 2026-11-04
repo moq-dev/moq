@@ -66,12 +66,15 @@ The simplest way to publish a stream:
 | `url`       | string  | required | Relay server URL                |
 | `name`      | string  | required | Broadcast name                  |
 | `versions`  | string  | stable versions | Comma-separated protocol versions to offer, most preferred first, like `moq-transport-18,moq-lite-06` |
-| `source`    | string  | —        | `"camera"`, `"screen"`, `"file"` |
-| `muted`     | boolean | false    | Stop publishing audio; the microphone stays open |
-| `invisible` | boolean | false    | Stop publishing video; the camera stays open |
+| `source`    | string  | -        | `"camera"`, `"screen"`, `"file"` |
+| `muted`     | boolean | false    | Stop publishing audio |
+| `invisible` | boolean | false    | Stop publishing video |
+| `capture`   | string  | `"hold"` | What a muted or invisible track does with its device: `"hold"` keeps it open so resuming is instant, `"release"` closes it so the browser's capture indicator goes dark. A screen share or file stops once both are off. |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
 | `backend`   | string  | `"auto"` | Graphics API for a `<canvas>` preview: `"auto"`, `"webgpu"`, `"2d"` |
 | `announce`  | string  | `"source"` | When to advertise: `"always"` or `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. After its first announcement, a camera stays announced until deselected or disconnected, including mute, hide, device swaps, and capture retries. The broadcast is created while connected either way. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
+| `stats`     | boolean | false    | Publish a `stats.json` track, named in the catalog, reporting what each rendition sent and the PROBE round-trip time |
+| `echo-path` | string  | -        | Solicit viewer feedback under this path, relative to the broadcast (from `room/live`, `viewers` is `room/viewers`) |
 
 Property and built-in UI changes reflect into attributes. Invalid URLs, version lists, and
 source/preview/backend/announce modes are refused: their property setters throw, and malformed markup

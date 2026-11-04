@@ -17,6 +17,9 @@ pub(crate) struct Sent {
 	frames: AtomicU64,
 	bytes: AtomicU64,
 	keyframes: AtomicU64,
+	skipped: AtomicU64,
+	/// The encoder's latest target, in bits per second, or zero before one is reported.
+	bitrate: AtomicU64,
 }
 
 impl Sent {
@@ -27,11 +30,23 @@ impl Sent {
 		self.keyframes.fetch_add(keyframes, Relaxed);
 	}
 
+	/// Count `frames` frames the source produced but never sent.
+	pub(crate) fn skip(&self, frames: u64) {
+		self.skipped.fetch_add(frames, Relaxed);
+	}
+
+	/// Record the encoder's latest target bitrate.
+	pub(crate) fn target(&self, bitrate: moq_net::bandwidth::Rate) {
+		self.bitrate.store(bitrate.as_bps(), Relaxed);
+	}
+
 	fn report(&self) -> hang::stats::Rendition {
 		let mut report = hang::stats::Rendition::default();
 		report.frames = self.frames.load(Relaxed);
 		report.bytes = self.bytes.load(Relaxed);
 		report.keyframes = self.keyframes.load(Relaxed);
+		report.skipped = self.skipped.load(Relaxed);
+		report.bitrate = Some(self.bitrate.load(Relaxed)).filter(|&bitrate| bitrate != 0);
 		report
 	}
 }
@@ -175,6 +190,22 @@ mod tests {
 			assert_eq!(report["video"].bytes, 300);
 			assert_eq!(report["video"].keyframes, 1);
 		}
+	}
+
+	/// An encoder's skips accumulate, and its target is the latest one set: none until then.
+	#[test]
+	fn an_encoder_reports_skips_and_its_latest_target() {
+		let registry = Registry::<Sent>::default();
+		let track = registry.track("video");
+		assert_eq!(registry.sent()["video"].bitrate, None);
+
+		track.skip(2);
+		track.skip(1);
+		track.target(moq_net::bandwidth::Rate::from_bps(2_000_000));
+		track.target(moq_net::bandwidth::Rate::from_bps(1_500_000));
+		let report = &registry.sent()["video"];
+		assert_eq!(report.skipped, 3);
+		assert_eq!(report.bitrate, Some(1_500_000));
 	}
 
 	#[test]

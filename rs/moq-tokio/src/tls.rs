@@ -364,7 +364,7 @@ impl rustls::client::ResolvesClientCert for IdentityResolver {
 ///
 /// A peer whose fingerprint is absent fails the TLS handshake, so a session that
 /// reaches the application is always one of these. Which one is
-/// [`crate::server::Request::peer_identity`] plus [`PeerIdentity::fingerprint`].
+/// `server::Request::peer_identity` on a MoQ transport, plus [`PeerIdentity::fingerprint`].
 #[derive(Clone, Debug, Default)]
 pub struct Peers {
 	allowed: Arc<RwLock<std::collections::HashSet<[u8; 32]>>>,
@@ -812,7 +812,7 @@ impl Connect {
 	/// the `--client-tls-*` pair that replaced those before `connect` did.
 	///
 	/// Public because this type is flattened into parsers of its own, not only
-	/// through [`crate::connect::Config`]. Such a caller should report this and stop
+	/// through MoQ's `connect::Config`. Such a caller should report this and stop
 	/// while it still can; [`build`](Self::build) refuses either way, since a
 	/// released `--client-tls-root` silently falling back to the system store is a
 	/// downgrade of exactly the setting that was meant to restrict trust.
@@ -1266,7 +1266,7 @@ pub struct Listen {
 	/// The peer-mesh counterpart to `root`: membership is a set of fingerprints
 	/// that changes as peers are discovered, rather than an authority that issues
 	/// certificates. A client whose certificate isn't in the set fails the
-	/// handshake, and one that is arrives with a [`crate::server::Request::peer_identity`]
+	/// handshake, and one that is arrives with a MoQ `server::Request::peer_identity`
 	/// naming which peer it is.
 	///
 	/// Combining this with `root` is an error: pinning bypasses the chain, so one
@@ -1396,7 +1396,7 @@ impl Listen {
 	/// The released spellings in use, each paired with what replaced it.
 	///
 	/// Public for the same reason as [`Connect::deprecated`]: this type is flattened
-	/// into custom listener parsers, not only through [`crate::listen::Config`]. The methods that build a server config refuse
+	/// into custom listener parsers, not only through MoQ's `listen::Config`. The methods that build a server config refuse
 	/// anyway, since a dropped `--server-tls-root` would take the mTLS client CAs
 	/// with it and leave the listener accepting unauthenticated peers.
 	pub fn deprecated(&self) -> crate::cli::Deprecated {
@@ -1652,25 +1652,15 @@ impl Serve {
 
 /// A peer's validated client-certificate chain from the mTLS handshake.
 ///
-/// Returned by [`crate::server::Request::peer_identity`] when the peer presented a
+/// Returned by MoQ's `server::Request::peer_identity` when the peer presented a
 /// certificate that chained to a configured [`Listen::root`]. Owns the chain
-/// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
-/// without re-parsing the type-erased QUIC identity.
+/// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry).
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 }
 
 impl PeerIdentity {
-	/// Wrap the type-erased identity from the QUIC connection.
-	/// Returns `None` if the peer presented no certificate or the identity is
-	/// not a certificate chain.
-	#[cfg(feature = "quic")]
-	pub(crate) fn from_any(identity: Option<Box<dyn std::any::Any>>) -> Option<Self> {
-		let chain = identity?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
-		Some(Self { chain: *chain })
-	}
-
 	/// Wrap a certificate chain a QUIC backend already validated, leaf first.
 	///
 	/// For a listener living outside this crate (the io_uring workers, say)
@@ -1754,11 +1744,11 @@ pub(crate) struct Info {
 	pub(crate) fingerprints: Vec<String>,
 }
 
-/// A live handle to the certificates a [`crate::Server`] is serving.
+/// A live handle to the certificates a MoQ server is serving.
 ///
 /// Cheap to clone, and every read reflects the latest hot reload of the files on
 /// disk, so a caller can build one at startup and hold it for the process
-/// lifetime. Obtained from [`crate::Server::certificates`].
+/// lifetime. Obtained from `server::Server::certificates` on a MoQ transport.
 #[derive(Clone, Debug)]
 pub struct Certificates {
 	info: Arc<RwLock<Info>>,
@@ -2288,7 +2278,6 @@ mod tests {
 		params.self_signed(&key).unwrap().into()
 	}
 
-	#[cfg(feature = "quic")]
 	#[test]
 	fn peer_identity_expiry_reads_not_after() {
 		// notAfter at a whole second so the round-trip is exact.
@@ -2299,10 +2288,7 @@ mod tests {
 		params.not_after = not_after;
 		let cert: CertificateDer<'static> = params.self_signed(&key).unwrap().into();
 
-		// The QUIC backend hands back the chain as a boxed Vec<CertificateDer>.
-		let identity: Box<dyn std::any::Any> = Box::new(vec![cert]);
-		let parsed = PeerIdentity::from_any(Some(identity)).expect("chain parsed");
-		let expiry = parsed.expiry().expect("expiry parsed");
+		let expiry = PeerIdentity::from_chain(vec![cert]).expiry().expect("expiry parsed");
 		assert_eq!(
 			expiry.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH).as_secs(),
 			2_000_000_000
@@ -2326,15 +2312,6 @@ mod tests {
 			let peer = PeerIdentity { chain: vec![cert] };
 			assert_eq!(peer.expiry(), Some(expected));
 		}
-	}
-
-	#[cfg(feature = "quic")]
-	#[test]
-	fn peer_identity_none_without_chain() {
-		assert!(PeerIdentity::from_any(None).is_none());
-		// A wrong downcast type (not a cert chain) yields None rather than panicking.
-		let bogus: Box<dyn std::any::Any> = Box::new(42u32);
-		assert!(PeerIdentity::from_any(Some(bogus)).is_none());
 	}
 
 	#[test]
@@ -2691,7 +2668,7 @@ mod tests {
 		);
 	}
 
-	/// An ACME-style resolver retains CA verification of presented client certificates.
+	/// An external resolver retains CA verification of presented client certificates.
 	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[tokio::test]
 	async fn external_resolver_retains_client_roots() {

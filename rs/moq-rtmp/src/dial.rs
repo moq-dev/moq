@@ -70,8 +70,8 @@ pub struct Client<S = TcpStream> {
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping.
 	max_delay: Duration,
-	/// Retention declared on the media tracks [`pull`](Self::pull) publishes, or `None`
-	/// for hang's own default.
+	/// Max age declared on the media tracks [`pull`](Self::pull) publishes, or `None` for
+	/// no publisher limit.
 	max_age: Option<Duration>,
 	/// Connection allocator each track [`pull`](Self::pull) ingests claims its peak-hold bitrate on.
 	bandwidth: moq_net::bandwidth::Allocator,
@@ -174,7 +174,7 @@ impl<S: Stream> Client<S> {
 			work,
 			app: app.to_string(),
 			max_delay: crate::DEFAULT_MAX_DELAY,
-			max_age: None,
+			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			linger: moq_mux::Linger::DEFAULT,
 			metadata: Default::default(),
@@ -191,14 +191,14 @@ impl<S: Stream> Client<S> {
 		self
 	}
 
-	/// Set how long relays keep a non-latest group of the media tracks
-	/// [`pull`](Self::pull) publishes fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of the media tracks [`pull`](Self::pull) publishes
+	/// stays fresh, or `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
 	/// someone else declared, and takes [`with_max_delay`](Self::with_max_delay) instead.
@@ -344,7 +344,7 @@ impl<S: Stream> Client<S> {
 
 		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
 		// app and broadcast path stand in for it.
-		tracing::info!(app = %self.app, %path, epoch = %publisher.epoch, "rtmp play accepted by remote");
+		tracing::info!(app = %self.app, %path, instance = %publisher.instance, "rtmp play accepted by remote");
 
 		let result = self.pull_media(&mut publisher).await;
 		match result {
@@ -590,15 +590,18 @@ struct Publisher {
 	// Controls publication so an end can retract before the importer's fill clone drops.
 	broadcast: moq_net::origin::Publication,
 	// This pull's publisher instance, so pulling again replaces it rather than resuming into it.
-	epoch: moq_net::Epoch,
+	instance: moq_net::Instance,
 	media_deadline: kio::clock::Instant,
 }
 
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
-		let epoch = moq_net::Epoch::mint();
+		let instance = moq_net::Instance::random();
 		let broadcast = origin
-			.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))
+			.publish(
+				path,
+				moq_net::origin::Route::default().with_instance(instance.clone(), 0),
+			)
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
@@ -609,7 +612,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			catalog,
-			epoch,
+			instance,
 			media_deadline: kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
 			broadcast: handle,
 		})
@@ -891,7 +894,7 @@ mod tests {
 		const OLD_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x00];
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		const NEW_IDR: &[u8] = &[0x65, 0x99, 0x99, 0x99, 0x99];
-		let publish = |origin: &origin::Producer, epoch: &moq_net::Epoch, idr: &[u8]| {
+		let publish = |origin: &origin::Producer, instance: &moq_net::Instance, idr: &[u8]| {
 			let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 			vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 			vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
@@ -899,7 +902,7 @@ mod tests {
 			vframe.extend_from_slice(idr);
 			let broadcast = origin.create_broadcast("live/cam0").unwrap();
 			broadcast
-				.announce(origin::Route::default().with_epoch(epoch.clone()))
+				.announce(origin::Route::default().with_instance(instance.clone(), 0))
 				.unwrap();
 			let catalog = moq_mux::catalog::Producer::new(
 				&mut broadcast.broadcast().clone(),
@@ -915,7 +918,7 @@ mod tests {
 
 		let upstream = moq_tokio::origin::spawn();
 		let downstream = moq_tokio::origin::spawn();
-		let (mut old, old_catalog) = publish(&upstream, &moq_net::Epoch::mint(), OLD_IDR);
+		let (mut old, old_catalog) = publish(&upstream, &moq_net::Instance::random(), OLD_IDR);
 		let (client_io, server_io) = tokio::io::duplex(64 * 1024);
 		let ingest = downstream.clone();
 		let server = tokio::spawn(async move {
@@ -951,9 +954,9 @@ mod tests {
 		};
 		until(OLD_IDR).await;
 
-		let epoch = moq_net::Epoch::mint();
-		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
-		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
+		let instance = moq_net::Instance::random();
+		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&instance)).unwrap();
+		let (_new, _new_catalog) = publish(&upstream, &instance, NEW_IDR);
 		kio::clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
