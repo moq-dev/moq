@@ -2282,7 +2282,10 @@ run_claims_case() {
     fi
     harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" "${command[@]}" "$CLIENTS/js-native/claims.ts" \
         "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
-    if harness_wait "$HARNESS_PID"; then
+    # Judged by its printed marker, as run_native is: the addon can crash during Bun's exit
+    # teardown after every assertion has passed.
+    harness_wait "$HARNESS_PID" || true
+    if grep -qx 'claims resolved own-path=2 child-path=2 late-follow=1 absent=Unroutable' "$LOGS/$name.log"; then
         echo "  PASS  claims $runtime $transport"
         record pass "${cell[@]}" seconds=$((SECONDS - started))
     else

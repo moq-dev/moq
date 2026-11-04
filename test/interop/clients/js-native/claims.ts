@@ -107,3 +107,5 @@ try {
 	await serving;
 	await Promise.all([reader.close(), publisher?.close()]);
 }
+
+process.exit(0);
