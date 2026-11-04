@@ -37,7 +37,3 @@ overflow on hostile SPS fields.
 
 Public API: removes the shared walk if moq-video no longer needs it.
 Wire: none.
-
-## Related
-
-- [moq-video shares moq-mux's bounded H.265 SPS walk](/quest/m0/video-sps-walk.md) - the second user of the walk
