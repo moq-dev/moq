@@ -5,10 +5,16 @@
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// An audio consumer's decoder or output setup was refused before subscribing to its track.
+	#[error("audio decoder setup refused: {0}")]
+	UnsupportedConfig(String),
+
 	/// The requested configuration is outside what the codec or device supports,
 	/// e.g. a sample rate, channel count, or frame duration Opus can't encode, or a
 	/// capture format the microphone can't deliver. The
 	/// caller asked for something impossible; picking different settings fixes it.
+	/// This also covers a playout delay beyond the subscribed track's retention;
+	/// consumer decoder setup is tagged as [`Self::UnsupportedConfig`] instead.
 	#[error("unsupported audio configuration: {0}")]
 	Unsupported(String),
 
@@ -35,6 +41,12 @@ pub enum Error {
 	/// capture or playback handle.
 	#[error("audio resource already in use: {0}")]
 	Busy(String),
+
+	/// The codec library failed for a reason the configuration does not explain,
+	/// such as an allocation or internal error. Other settings are no more likely
+	/// to work; the codec itself is at fault.
+	#[error("audio codec: {0}")]
+	Codec(String),
 
 	/// A packet could not be decoded: truncated, corrupt, or using a codec
 	/// feature this build doesn't implement. The stream itself may be fine, so a
