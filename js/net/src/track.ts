@@ -783,14 +783,6 @@ let goneAt: (producer: Producer, sequence: bigint) => bigint | undefined;
 type Coverage = { start: bigint; end?: bigint } | undefined;
 
 /**
- * Whether `run` settles a reader judging under `budget` with `coverage`, on a track whose upstream
- * judged stale runs against ranges ending at `judgedEnd` (undefined past the live edge, or
- * unknown). Any run but a received stale one does. A stale verdict holds for a reader no wider
- * than the budget it was judged under, whose range covers the run and every group above it up to
- * where the upstream's range ended: its own successor and edge are then no older than those the
- * verdict was judged against. Mirrors the Rust `settles`.
- */
-/**
  * Whether the live edge `received` reached `final`: no sequence below it is left that was neither
  * written nor given up, as a declared skip or a drop. Mirrors the Rust `TrackState::reaches`.
  */
@@ -798,6 +790,14 @@ function reaches(received: bigint, drops: readonly Run[], final: bigint): boolea
 	return received >= final || runGaps(drops, received, final).length === 0;
 }
 
+/**
+ * Whether `run` settles a reader judging under `budget` with `coverage`, on a track whose upstream
+ * judged stale runs against ranges ending at `judgedEnd` (undefined past the live edge, or
+ * unknown). Any run but a received stale one does. A stale verdict holds for a reader no wider
+ * than the budget it was judged under, whose range covers the run and every group above it up to
+ * where the upstream's range ended: its own successor and edge are then no older than those the
+ * verdict was judged against. Mirrors the Rust `settles`.
+ */
 function settles(run: DropRun, budget: number, coverage: Coverage, judgedEnd: bigint | undefined): boolean {
 	if (run.stale === undefined) return true;
 	if (budget > run.stale || coverage === undefined || coverage.start > run.start) return false;

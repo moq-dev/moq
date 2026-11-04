@@ -1287,6 +1287,9 @@ export class Publisher {
 		// Lite-07: the part of `served` named in SUBSCRIBE_DROP, never served. A skip replaces a
 		// drop, so it is sent over one of these, but never over a group served.
 		let dropped: Run[] = [];
+		// Lite-07: the part of `dropped` named stale (OLD), which a final drop or a group replaces,
+		// as one a route the front switched to delivers after the update that reopens it.
+		let droppedStale: Run[] = [];
 
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
@@ -1294,17 +1297,24 @@ export class Publisher {
 			if (!served) return true;
 			const gaps = runGaps(served, start, end);
 			if (hasSkip(this.version)) {
-				if (hole.skip) {
-					// A skip replaces a drop already sent, so the subscriber learns the groups were
-					// never produced; a reader the drop ended stays ended.
-					for (const run of dropped) {
-						const from = max(run.start, start);
-						const to = min(run.end, end);
-						if (from < to) insertRun(gaps, from, to);
+				// A skip replaces any drop already sent, so the subscriber learns the groups were
+				// never produced, and a final drop replaces a stale one, which the next update would
+				// otherwise reopen. A reader the earlier drop ended stays ended.
+				const replaces = hole.skip ? dropped : hole.stale === undefined ? droppedStale : [];
+				for (const run of replaces) {
+					const from = max(run.start, start);
+					const to = min(run.end, end);
+					if (from < to) insertRun(gaps, from, to);
+				}
+				for (const gap of gaps) {
+					if (hole.skip) {
+						dropped = removeRun(dropped, gap.start, gap.end);
+						droppedStale = removeRun(droppedStale, gap.start, gap.end);
+						continue;
 					}
-					dropped = removeRun(dropped, start, end);
-				} else {
-					for (const gap of gaps) insertRun(dropped, gap.start, gap.end);
+					if (hole.stale === undefined) droppedStale = removeRun(droppedStale, gap.start, gap.end);
+					else insertRun(droppedStale, gap.start, gap.end);
+					insertRun(dropped, gap.start, gap.end);
 				}
 			}
 			for (const gap of gaps) {
@@ -1456,6 +1466,7 @@ export class Publisher {
 								const owe = (start: bigint, end: bigint) => {
 									if (served) served.splice(0, served.length, ...removeRun(served, start, end));
 									dropped = removeRun(dropped, start, end);
+									droppedStale = removeRun(droppedStale, start, end);
 								};
 								for (const run of hooks.reofferStale(track)) owe(run.start, run.end);
 								// A stale drop not sent yet, such as one an earlier update left to drop
@@ -1663,7 +1674,13 @@ export class Publisher {
 				// Never a second stream for a sequence this subscription already accounted for
 				// (served, sent as a datagram, or dropped): before lite-07 a subscriber settles a
 				// drop for good. A stale drop a lite-07 update reopened is owed again (see the update above).
-				if (served && runGaps(served, group.sequence, group.sequence + 1n).length === 0) {
+				// A lite-07 stale drop is no final verdict, and a Group Stream wins over it, so a group
+				// handed out after one is served, as one a route the front switched to delivers: the
+				// update that reopens the drop would never re-offer it.
+				if (runGaps(droppedStale, group.sequence, group.sequence + 1n).length === 0) {
+					droppedStale = removeRun(droppedStale, group.sequence, group.sequence + 1n);
+					dropped = removeRun(dropped, group.sequence, group.sequence + 1n);
+				} else if (served && runGaps(served, group.sequence, group.sequence + 1n).length === 0) {
 					group.close();
 					continue;
 				}

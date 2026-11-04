@@ -6,7 +6,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
-import { hooks } from "../internal.ts";
+import { hooks, staleHole } from "../internal.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -1061,6 +1061,30 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				if ("end" in next && keepsSubscribeOpen(version)) break;
 			}
 			expect(holes).toEqual([]);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	// A lite-07 stale (OLD) drop is no final verdict, so a group handed out after it is served, as
+	// when a front switches to a route that delivers what the old route reported stale, before the
+	// update that reopens it. Earlier versions' drops are final. Mirrors Rust.
+	test(`lite ${version}: a group ${version === Version.DRAFT_07 ? "replaces" : "stays dropped after"} a stale drop`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 0n });
+		try {
+			sub.serve(0n);
+			expect(await sub.servedSequence()).toBe(0n);
+			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+			hooks.dropTrackGroups(sub.track, 1n, 2n, staleHole(60_000));
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+			expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
+
+			sub.serve(1n);
+			sub.serve(2n);
+			const next = await sub.servedSequence();
+			expect(next).toBe(version === Version.DRAFT_07 ? 1n : 2n);
 		} finally {
 			await sub.close();
 		}

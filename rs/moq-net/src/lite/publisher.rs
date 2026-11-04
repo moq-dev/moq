@@ -4444,6 +4444,9 @@ struct TrackRun {
 	// Lite-07: the part of `served` named in SUBSCRIBE_DROP, never served. A skip replaces a
 	// drop, so it is sent over one of these, but never over a group served.
 	dropped: RangeSet<u64>,
+	// Lite-07: the part of `dropped` named stale (OLD), which a final drop or a group replaces,
+	// as one a route the front switched to delivers after the update that reopens it.
+	dropped_stale: RangeSet<u64>,
 	/// The one group waiting for stream credit. The rest of the backlog waits in the cache,
 	/// which bills, ages, and evicts it, and the cursor's budget skips whatever went stale
 	/// meanwhile: a machine per parked group would hold state for as long as the peer
@@ -4498,6 +4501,7 @@ impl TrackRun {
 			end_sent: false,
 			served,
 			dropped: RangeSet::new(),
+			dropped_stale: RangeSet::new(),
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -4820,15 +4824,23 @@ impl TrackRun {
 					// Never a second stream for a sequence this subscription already accounted
 					// for (served or dropped): a group re-created after its
 					// DROP stays dropped, since the subscriber may settle before it arrives. A
-					// stale drop a lite-07 update reopened is owed again (see `Self::owe`).
-					if self
+					// stale drop a lite-07 update reopened is owed again (see `Self::owe`). A
+					// lite-07 stale drop is no final verdict, and a Group Stream wins over it, so a
+					// group handed out after one is served, as one a route the front switched to
+					// delivers: the update that reopens the drop would never re-offer it.
+					let sequence = group.sequence;
+					if self.dropped_stale.contains(&sequence)
+						&& let Some(end) = sequence.checked_add(1)
+					{
+						self.dropped_stale.remove(sequence..end);
+						self.dropped.remove(sequence..end);
+					} else if self
 						.served
 						.as_ref()
-						.is_some_and(|served| served.contains(&group.sequence))
+						.is_some_and(|served| served.contains(&sequence))
 					{
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
-					let sequence = group.sequence;
 					let Some(group) = position_group(group, &self.frames) else {
 						// Its head is gone, and this subscriber didn't ask for a
 						// partial group. Skip it rather than open a stream that can
@@ -4944,6 +4956,7 @@ impl TrackRun {
 		if let Some(served) = &mut self.served {
 			for run in reopened {
 				self.dropped.remove(run.clone());
+				self.dropped_stale.remove(run.clone());
 				served.remove(run);
 			}
 		}
@@ -4975,21 +4988,34 @@ impl TrackRun {
 		}
 		let mut gaps: RangeSet<u64> = served.gaps(&range).collect();
 		if self.ctx.version.has_skip() {
+			// A skip replaces any drop already sent, so the subscriber learns the groups were
+			// never produced, and a final drop replaces a stale one, which the next update
+			// would otherwise reopen. A reader the earlier drop ended stays ended.
+			let replaces = match hole {
+				Hole::Skip => &self.dropped,
+				hole if hole.stale_budget().is_none() => &self.dropped_stale,
+				Hole::Drop { .. } => &RangeSet::new(),
+			};
+			let replaced: Vec<_> = replaces
+				.overlapping(&range)
+				.map(|run| run.start.max(range.start)..run.end.min(range.end))
+				.collect();
+			for run in replaced {
+				self.dropped_stale.remove(run.clone());
+				gaps.insert(run);
+			}
 			match hole {
-				// A skip replaces a drop already sent, so the subscriber learns the groups
-				// were never produced; a reader the drop ended stays ended.
 				Hole::Skip => {
-					let replaced: Vec<_> = self
-						.dropped
-						.overlapping(&range)
-						.map(|run| run.start.max(range.start)..run.end.min(range.end))
-						.collect();
-					for run in replaced {
+					for run in gaps.iter() {
 						self.dropped.remove(run.clone());
-						gaps.insert(run);
 					}
 				}
-				Hole::Drop { .. } => self.dropped.extend(gaps.iter().cloned()),
+				Hole::Drop { .. } => {
+					self.dropped.extend(gaps.iter().cloned());
+					if hole.stale_budget().is_some() {
+						self.dropped_stale.extend(gaps.iter().cloned());
+					}
+				}
 			}
 		}
 		served.extend(gaps.iter().cloned());
@@ -7078,6 +7104,38 @@ mod serve_group_test {
 			}
 		}
 		drops
+	}
+
+	/// A lite-07 stale (OLD) drop is no final verdict: a final drop of the same group replaces
+	/// it, and a group handed out after it is served, as when a front switches to a route that
+	/// delivers what the old route reported stale, before the update that reopens it. Earlier
+	/// versions' drops are final, so neither goes out there.
+	#[kio::test]
+	async fn a_final_drop_or_a_group_replaces_a_stale_drop_on_lite07() {
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let subscriber = track.subscribe(None);
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			write_group(&mut track, 0, 0);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert!(run.start.is_some(), "{version}: started");
+			let stale = Hole::stale(Duration::from_secs(1));
+			run.drop_range(1..3, &stale, &mut writer).unwrap();
+			run.drop_range(1..2, &Hole::drop(StreamError::Cancel), &mut writer).unwrap();
+			write_group(&mut track, 2, 2);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+			let (drops, opened) = match version.has_skip() {
+				true => (vec![(1, 2, 0), (1, 1, 0)], 2),
+				false => (vec![(1, 2, 0)], 1),
+			};
+			assert_eq!(drop_updates(&mut writer, &log, version).await, drops, "{version}");
+			assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), opened, "{version}");
+		}
 	}
 
 	/// A stale group already named in SUBSCRIBE_DROP stays dropped before lite-07 after any
