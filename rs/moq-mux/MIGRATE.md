@@ -4,6 +4,12 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### Shared H.265 SPS parsing
+
+Use `codec::h265::parse_full_sps` to read an SPS NAL unit through the same bounded
+walk as moq-mux before scuffle-h265 parses it. moq-video uses it for VUI colour
+labels, clearing the label when an SPS is refused. No wire format changes.
+
 ### Shared playout timing
 
 Native players can use `timeline::Producer` and its read-only `Consumer` instead

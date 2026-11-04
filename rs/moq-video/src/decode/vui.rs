@@ -93,16 +93,15 @@ fn h264(nal: &[u8]) -> Option<Option<Color>> {
 }
 
 fn h265(nal: &[u8]) -> Option<Option<Color>> {
-	use scuffle_h265::{NALUnitType, SpsNALUnit};
+	use scuffle_h265::NALUnitType;
 
 	// The type is the six bits after the forbidden zero bit (H.265 7.3.1.2).
 	if NALUnitType::from((nal.first()? >> 1) & 0x3f) != NALUnitType::SpsNut {
 		return None;
 	}
-	let Ok(sps) = SpsNALUnit::parse(&mut &nal[..]) else {
+	let Ok(sps) = moq_mux::codec::h265::parse_full_sps(nal) else {
 		return Some(None);
 	};
-	let sps = sps.rbsp;
 	let Some(size) = h265_size(&sps) else {
 		return Some(None);
 	};

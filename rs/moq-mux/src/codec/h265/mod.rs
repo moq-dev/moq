@@ -15,13 +15,14 @@ mod sps;
 pub use export::*;
 pub use import::*;
 pub use split::*;
+pub use sps::parse_full as parse_full_sps;
 
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::codec::annexb::{InBandCodec, ParameterSets};
 use scuffle_h265::NALUnitType;
 use sps::Sps;
-pub(crate) use sps::{id as sps_id, parse_full as parse_full_sps};
+pub(crate) use sps::id as sps_id;
 
 /// Wrap one hvc1 (length-prefixed NALU) access unit as a single
 /// [`Frame`](crate::container::Frame), with the keyframe flag set when it
