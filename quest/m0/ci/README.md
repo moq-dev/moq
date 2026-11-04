@@ -77,7 +77,17 @@ a workflow on the self-hosted runner. This supersedes concurrent queue
 entries on a second runner. Batching gains most when failures are rare, so the
 [flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
 `MIGRATE.md` Unreleased sections, a top source of conflicts, stop being
-written per PR.
+written per PR. The batched gate was superseded 2026-11-01, below.
+
+Decided 2026-11-01 (maintainer), reversing 2026-10-26: moq serializes
+through GitHub's merge queue again, one entry at a time on the self-hosted
+runner, and moq-dev/quest's queue watcher resolves dropped PRs' conflicts and
+re-enqueues them. Batching and pre-checks are dropped, and the host gate is
+frozen. The landing quest closed 2026-11-04 with busy hours merging a median
+11.0 PRs against the queue baseline's 6.0 (its
+[last version](https://github.com/moq-dev/moq/blob/17a81d6c64/quest/m0/ci/land.md)
+holds the cutover record); a second concurrent entry is a
+[measured trial](/quest/m0/ci/queue-concurrency.md).
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
