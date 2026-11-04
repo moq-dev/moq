@@ -20,16 +20,8 @@ import {
 } from "../error.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import {
-	finalSequence,
-	groupBounds,
-	hiddenBelow,
-	hooks,
-	maxDelayOf,
-	scopeCaptures,
-	scopeHead,
-	scopeOverlaps,
-} from "../internal.ts";
+import * as Instance from "../instance.ts";
+import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
@@ -42,6 +34,7 @@ import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
+import { wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
@@ -92,7 +85,7 @@ type Subscription = {
 	// says are still owed.
 	tail: Tail;
 	// The track's exclusive end, once an END_OF_TRACK declares it.
-	end?: number;
+	end?: bigint;
 	// The join of SUBSCRIBE_OK's Largest group, whose head a draft-18 joining FETCH or a
 	// draft-22 fill brings.
 	join?: Join;
@@ -117,15 +110,8 @@ type SubscribeSetupState = {
 	 */
 	cancelled?: boolean;
 	/**
-	 * Whether the SUBSCRIBE reached the wire. From that moment the publisher may be serving,
-	 * even before it answers, so abandoning owes it a cancellation regardless of whether we
-	 * ever saw the SUBSCRIBE_OK.
-	 */
-	sent?: boolean;
-	/**
 	 * Whether the publisher answered with an error. It has torn the request down already, so
-	 * there is nothing left to cancel and naming the dead request id at it risks being read
-	 * as a protocol violation.
+	 * there is nothing left to cancel and ours ends cleanly.
 	 */
 	rejected?: boolean;
 	/** Hands a draft-22 fill stream that overtook SUBSCRIBE_OK the subscription it heads, or nothing. */
@@ -310,7 +296,7 @@ export class Subscriber {
 	}
 
 	/**
-	 * The epochless route an advertisement carries; one without a path is anonymous and free.
+	 * The route an advertisement carries, before it is minted an instance; one without a path is anonymous and free.
 	 */
 	#route({ cluster }: AdvertParams): Route {
 		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
@@ -390,7 +376,9 @@ export class Subscriber {
 			this.#settleAnnounce(path, existing);
 			return id;
 		}
-		route = this.#priced(route);
+		// moq-transport carries no instance, so each namespace the peer advertises anew is a
+		// stream of its own, even one it advertised before on this session.
+		route = this.#priced({ ...route, instance: Instance.minted(), epoch: 0n });
 		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
@@ -422,7 +410,9 @@ export class Subscriber {
 	#settleAnnounce(path: Path.Valid, existing: Announced) {
 		const newest = existing.adverts.at(-1);
 		if (newest === undefined) return;
-		const route = this.#priced(newest.route);
+		// Every advertisement of a path the peer holds is the stream its first one named.
+		const { instance, epoch } = existing.route;
+		const route = this.#priced({ ...newest.route, instance, epoch });
 		if (routesEqual(existing.route, route)) return;
 		existing.route = route;
 		this.#consumes.announce(path, existing, route, false);
@@ -531,11 +521,7 @@ export class Subscriber {
 
 		try {
 			const deadline = new Deadline();
-			const request = new RequestStream(
-				await deadline.wait(deadline.open(this.#session.openBi(requestOptions))),
-				this.#session,
-				this.#quic,
-			);
+			const request = await deadline.wait(RequestStream.open(this.#session, deadline, this.#quic));
 
 			const run = async () => {
 				const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
@@ -833,9 +819,9 @@ export class Subscriber {
 			);
 			// Runs now for whatever is already open, and again if `setup` settles late.
 			// Retirement is repeated because a late SUBSCRIBE_OK can register an alias after
-			// the first pass; the stream is torn down once.
-			let torn = false;
-			const cleanup = async (afterSetup: boolean) => {
+			// the first pass. The request ends once: a deadline failure already reset it through
+			// the same stream, so a second end here does nothing.
+			const cleanup = () => {
 				state.cancelled = true;
 
 				// A fill stream waiting on SUBSCRIBE_OK gets nothing, and a head already started goes.
@@ -851,31 +837,18 @@ export class Subscriber {
 					this.#timescales.delete(state.registeredAlias);
 				}
 
-				if (!state.stream || torn) return;
-
-				// A SUBSCRIBE still being written must not be torn down from here. Aborting a
-				// Web Stream waits for the in-flight write, so the request can still reach the
-				// peer while the abort destroys the stream we would have cancelled on. Setup
-				// unwinds on the cancelled flag once that write lands, and its pass below has
-				// the finished picture.
-				if (!state.sent && !afterSetup) return;
-				torn = true;
-
 				// A refusal already ended the request, so end ours cleanly: a reset would tell the
 				// publisher we failed.
-				if (state.rejected) state.stream.close();
-				else state.stream.abort(e);
+				if (state.rejected) state.stream?.close();
+				else state.stream?.abort(e);
 			};
 
 			// Tear down what is already open rather than waiting on `setup`. A peer that
 			// opened the stream and then went quiet never settles it, and deferring would
 			// leave the request outstanding for the life of the session -- which is the
 			// timeout case, not a rare one.
-			void cleanup(false);
-			setup.then(
-				() => cleanup(true),
-				() => cleanup(true),
-			);
+			cleanup();
+			setup.then(cleanup, cleanup);
 			return;
 		}
 
@@ -1010,6 +983,13 @@ export class Subscriber {
 		const done = await PublishDone.decode(framed.reader, version);
 		// A revocation reads the same as one from a moq-lite peer.
 		if (done.statusCode === PublishDoneStatus.UNAUTHORIZED) throw unauthorized(broadcast);
+		// The peer's code, as a moq-lite MALFORMED_TRACK reset reads, so a consumer can tell a
+		// malformed upstream apart from a relay bug.
+		if (done.statusCode === PublishDoneStatus.MALFORMED_TRACK) {
+			throw new StreamError(StreamCode.MalformedTrack, {
+				message: `publish done: malformed track reason=${done.reasonPhrase}`,
+			});
+		}
 		if (!publishDoneClean(done.statusCode, version)) {
 			throw new Error(`publish done: status=0x${done.statusCode.toString(16)} reason=${done.reasonPhrase}`);
 		}
@@ -1209,11 +1189,7 @@ export class Subscriber {
 	}> {
 		const version = this.#session.version;
 
-		state.stream = new RequestStream(
-			await deadline.open(this.#session.openBi(requestOptions)),
-			this.#session,
-			this.#quic,
-		);
+		state.stream = await RequestStream.open(this.#session, deadline, this.#quic);
 
 		// The timeout can fire while the open is still in flight, in which case cleanup ran
 		// with nothing to release. Bail now that the stream is recorded, so settling this
@@ -1226,7 +1202,7 @@ export class Subscriber {
 			trackName: request.name,
 			// Read now, since a subscriber can join while the stream opened. Updates follow it.
 			subscriberPriority: toWire(request.priority),
-			maxAge: this.#maxAge ? (request.subscription.maxDelay ?? 0) : undefined,
+			maxAge: this.#maxAge ? maxDelayOf(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
 			// Joins at the current group, from its first object: the subscription delivers the
@@ -1241,11 +1217,9 @@ export class Subscriber {
 			state.fill = accepted.resolve;
 		}
 		await Message.write(state.stream.writer, Subscribe.id, msg, version);
-		state.sent = true;
 
-		// The caller may have given up while that write was in flight. It deliberately left
-		// the stream alone, so unwind here and let its cleanup send the cancellation now that
-		// the SUBSCRIBE has actually reached the peer.
+		// The caller may have given up while that write was in flight, resetting the request
+		// under it.
 		if (state.cancelled) throw new Error("subscribe cancelled while it was being sent");
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
@@ -1272,9 +1246,6 @@ export class Subscriber {
 		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("max cache duration exceeds safe milliseconds");
 		}
-		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
-			throw new RangeError("largest group exceeds safe integers");
-		}
 		// Staged until the answer is written in below, so no reader sees the track before its
 		// Largest and start.
 		const staged = hooks.stageRequest(request, {
@@ -1286,13 +1257,14 @@ export class Subscriber {
 			ietf: version,
 		});
 		const producer = staged.producer;
+		hooks.receiveTrack(producer);
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
 		// The subscription starts after Largest, so the joining FETCH or the fill brings its
 		// group's head. With no Largest the track is empty and every group whole. A draft-22 fill
 		// is one of the subscription's own streams, so the Stream Count already waits for it.
 		if (ok.largest) {
-			subscription.join = new Join(Number(ok.largest.groupId), tail, { counted: msg.fill !== undefined });
+			subscription.join = new Join(ok.largest.groupId, tail, { counted: msg.fill !== undefined });
 		}
 		if (msg.fill) subscription.fetchIds.push(requestId);
 		state.subscription = subscription;
@@ -1300,15 +1272,14 @@ export class Subscriber {
 			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
 			// the group carries over: its first frame is the edge a reader can count on. It names
 			// no object, so a Next Object join served onward still starts at the group's first.
-			hooks.reportedGroup(producer, Number(ok.largest.groupId));
+			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
 		// The live join starts at the publisher's edge, whatever floor the demand asked for.
 		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
 		// still arrive after a higher one's.
-		const groups = request.subscription.groups;
 		hooks.startTrack(producer, {
-			start: ok.largest ? Number(ok.largest.groupId) : 0,
-			requested: groups?.start === undefined ? undefined : groupBounds(groups).start,
+			start: ok.largest ? ok.largest.groupId : 0n,
+			requested: wireSpan(request.subscription.ranges ?? [{}]).start,
 		});
 		staged.commit();
 		state.fill?.(subscription);

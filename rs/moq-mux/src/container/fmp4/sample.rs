@@ -74,11 +74,17 @@ impl Sample {
 	}
 }
 
+/// The samples a `traf`'s runs declare, counted wide enough that no run count overflows it.
+pub(crate) fn count(traf: &mp4_atom::Traf) -> u64 {
+	traf.trun.iter().map(|run| run.samples.len() as u64).sum()
+}
+
 /// Resolve one fragment's samples against its mdat, sharing byte ownership across tracks.
 pub(crate) struct Resolver {
 	data_start: usize,
 	len: usize,
 	claimed: Claimed,
+	forward: Option<std::collections::HashMap<u32, usize>>,
 }
 
 /// A sample whose byte range and duration have been validated.
@@ -94,7 +100,13 @@ impl Resolver {
 			data_start,
 			len,
 			claimed: Claimed::default(),
+			forward: None,
 		}
+	}
+
+	// A sequential track writer cannot retain an earlier byte range for a later frame.
+	pub fn streaming(&mut self) {
+		self.forward = Some(Default::default());
 	}
 
 	/// Walk samples without allocating from the untrusted sample count.
@@ -147,6 +159,13 @@ impl Resolver {
 				}
 				let range = offset..end;
 				self.claimed.take(range.clone())?;
+				if let Some(forward) = &mut self.forward {
+					let previous = forward.entry(traf.tfhd.track_id).or_default();
+					if range.start < *previous {
+						return Err(super::Error::BackwardsDataOffset);
+					}
+					*previous = range.end;
+				}
 				if sample.duration.is_none() && remaining > 1 {
 					return Err(super::Error::MissingSampleDuration);
 				}
@@ -180,10 +199,15 @@ impl Claimed {
 			return Err(super::Error::EmptySample);
 		}
 		// The taken ranges are disjoint, so the last one starting before `range` ends reaches furthest.
-		if let Some((_, &end)) = self.0.range(..range.end).next_back()
-			&& end > range.start
-		{
-			return Err(super::Error::InvalidDataOffset);
+		if let Some((_, end)) = self.0.range_mut(..range.end).next_back() {
+			if *end > range.start {
+				return Err(super::Error::InvalidDataOffset);
+			}
+			// Samples usually sit back to back, so extending the range keeps one entry per run.
+			if *end == range.start {
+				*end = range.end;
+				return Ok(());
+			}
 		}
 		self.0.insert(range.start, range.end);
 		Ok(())

@@ -4,6 +4,34 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The iroh backend is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+The `iroh` feature and module are gone, with `settings::Iroh`, `Client::with_iroh` and `with_iroh_addrs`, `server::Config::iroh`, `Server::iroh_endpoint` and `Listener::iroh_endpoint`, `Transport::Iroh`, `Error::Iroh` and `Error::IrohDisabled`, `secret::load_or_create`, and `quic::Resolved::gso_disabled`.
+Connect over QUIC or WebTransport instead; an `iroh://` URL no longer dials.
+
+### QUIC handshake data needs no downcast ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+`quic::driver::Connecting::handshake_data` returns `crypto::HandshakeData` and `Connection::handshake_data` returns `Option<crypto::HandshakeData>`, so drop the `downcast`.
+`Connection::peer_identity` returns `Option<Vec<CertificateDer<'static>>>`.
+Pass a rustls config straight to `quic::driver::client::Config::new` or `server::Config::new` instead of wrapping it in `crypto::rustls::QuicClientConfig::try_from` or `QuicServerConfig::try_from`.
+`quic::Error::NoInitialCipherSuite` is removed.
+
+### Smaller default windows, which qmux shares ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`quic::DEFAULT_RECEIVE_WINDOW` is 4 MiB, `DEFAULT_STREAM_RECEIVE_WINDOW` 1 MiB, and `DEFAULT_SEND_WINDOW` 4 MiB, down from 128 MiB, 4 MiB, and 16 MiB. `Error::ReceiveWindowTooSmall` now refuses only a `receive_window` below 1 MiB.
+Set `[quic]` windows explicitly to keep the old behavior, such as for a path whose bandwidth-delay product exceeds them.
+Every qmux session (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC) starts at the `[quic]` windows and stream count, which a client's or server's `[quic]` overrides, and leases receive credit, so a stream can now fail as evicted.
+A `Server` applies its `[quic]` to every qmux listener and to `tls_acceptor`. `websocket::accept` reads it from the new `websocket::Options::quic`, which defaults to the `[quic]` defaults, so set it to your config's `quic.resolve()`; `tcp::Listener::with_quic` and `websocket::Listener::with_quic` set it on a listener built outside a `Server`.
+`server::Request::with_quic_limits` also widens a qmux session at `ok()`, except a WebRTC session's receive window, which sizes its read queue; one refusing them, such as a rate cap, which qmux cannot pace, fails `ok()` with the new `Error::QmuxLimits`.
+`quic::driver::recv::Stream::received_reset`, and so `quic::web::RecvStream::poll_reset`, fail with `Evicted` for a stream evicted to free a stuck window.
+`quic::web::RecvStream::received_reset` now fails with a `ReadError`, `ReadError::SessionError` for what was its `SessionError` or `ReadError::Evicted`, rather than panicking on an eviction.
+
+### `listen::LoadBalancer` has a `forward` field ([#7539](https://github.com/moq-dev/moq/pull/7539))
+
+`listen::LoadBalancer` gained `forward: listen::Forward`, the `[listen.lb.forward]` settings that forward QUIC packets to the server their connection ID names.
+The struct is not `#[non_exhaustive]`, so add `..Default::default()` to a `LoadBalancer { id, nonce }` literal, which leaves forwarding off.
+An exhaustive destructure, such as a QUIC runtime mapping the resolved listener settings, must name `forward`: honor it, or ignore it with `forward: _` only where `lb.id` is already refused.
+
 ### `tls://` listeners verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
 
 A `listen.tcp.tls` listener serves the listen policy's client-certificate verifier, so `--listen-tls-root` and pinned `tls.peers` apply to it as they do to QUIC, and a stream-only server with that listener accepts them instead of returning `Error::MtlsUnsupported`.
@@ -49,7 +77,7 @@ A WebSocket client must offer a QMux subprotocol: `websocket::accept` refuses an
 
 ### MoQ sessions need the `net` feature (#6132)
 
-moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.
+moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `webrtc`) turns on.
 A build with `default-features = false` and no transport feature loses `client`, `connect`, `connection`, `listen`, `origin`, `transport`, their root re-exports (`Client`, `Connection`, `ConnectError`, `Transport`, ...), `Error::MoqNet`, `Error::Connect`, `Error::connect_error`, `Error::is_auth`, and the `moq_net` re-export.
 Enable `net`, or a transport feature, to keep them.
 
@@ -78,7 +106,7 @@ Rename a `usage = { package = "usage-rs" }` alias to `usage-rs`, or add `#[usage
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
-Set `quic::Config::keylog` (`--quic-keylog`, `MOQ_QUIC_KEYLOG`, `[quic] keylog`) as well; it now covers the iroh backend too.
+Set `quic::Config::keylog` (`--quic-keylog`, `MOQ_QUIC_KEYLOG`, `[quic] keylog`) as well.
 Setting it without `SSLKEYLOGFILE` fails with `Error::KeylogUnset`.
 
 ### QUIC limits are `moq_quic::Limits`, set through `Request::quic` (#5871)

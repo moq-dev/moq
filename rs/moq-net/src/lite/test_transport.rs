@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	task::Poll,
 };
@@ -72,12 +72,14 @@ pub struct Log {
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	pub request_attempts: Arc<AtomicUsize>,
-	priorities: Arc<Mutex<Vec<u8>>>,
+	priorities: Arc<Mutex<Vec<i64>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
 	groups: Arc<Mutex<Vec<(usize, i64)>>>,
 	joins: Arc<Mutex<Vec<(usize, usize)>>>,
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
+	/// Set by [`Self::fail_writes`].
+	writes_fail: Arc<AtomicBool>,
 }
 
 /// One thing a send stream did, as recorded in [`Log::trail`].
@@ -106,6 +108,12 @@ impl Log {
 				code: closed.expect("closed"),
 				stream: None,
 			})
+	}
+
+	/// Fail every later write on every send stream, as a peer that stopped reading
+	/// them (STOP_SENDING) would.
+	pub fn fail_writes(&self) {
+		self.writes_fail.store(true, Ordering::Relaxed);
 	}
 
 	/// What every send stream did, in call order, tagged with the stream's id (its
@@ -137,7 +145,7 @@ impl Log {
 	/// Every value handed to the transport's `set_priority`, in call order. These are
 	/// trait-contract send orders (higher = transmitted first), recorded so tests can
 	/// verify priority conversions at their protocol boundaries.
-	pub fn priorities(&self) -> Vec<u8> {
+	pub fn priorities(&self) -> Vec<i64> {
 		self.priorities.lock().unwrap().clone()
 	}
 
@@ -302,6 +310,12 @@ impl poll::SendStream for SinkSend {
 	type Group = SinkGroup;
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if self.log.writes_fail.load(Ordering::Relaxed) {
+			return Poll::Ready(Err(SinkError {
+				stream: Some(0),
+				..Default::default()
+			}));
+		}
 		if self.prefix == 0
 			&& let Some(gate) = &self.gate
 		{
@@ -342,7 +356,10 @@ impl poll::SendStream for SinkSend {
 			self.log.orders.lock().unwrap().push((self.id, order));
 			return;
 		}
-		let order = u8::try_from(order).expect("moq-net sends u8 send orders outside a group");
+		assert!(
+			(0..=crate::coding::TRACK_INFO_SEND_ORDER).contains(&order),
+			"moq-net sends u8 send orders outside a group, and TRACK_INFO just above them"
+		);
 		self.log.priorities.lock().unwrap().push(order);
 	}
 
@@ -613,6 +630,8 @@ pub struct SinkSession {
 	stats: Arc<Mutex<SinkStats>>,
 	/// Set by [`Self::with_probe`].
 	probe: Option<crate::transport::Probe>,
+	/// Set by [`Self::with_receive_window`].
+	receive_window: Option<crate::transport::ReceiveWindow>,
 }
 
 impl SinkSession {
@@ -639,6 +658,12 @@ impl SinkSession {
 	/// Accept datagrams up to `max_size` bytes, recording them in the log.
 	pub fn with_datagrams(mut self, max_size: usize) -> Self {
 		self.datagram_size = max_size;
+		self
+	}
+
+	/// Report `window` as the receive windows in force.
+	pub fn with_receive_window(mut self, window: crate::transport::ReceiveWindow) -> Self {
+		self.receive_window = Some(window);
 		self
 	}
 
@@ -826,6 +851,10 @@ impl poll::Session for SinkSession {
 
 	fn probe(&self) -> Option<crate::transport::Probe> {
 		self.probe.clone()
+	}
+
+	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
+		self.receive_window
 	}
 }
 
@@ -1109,6 +1138,11 @@ impl ScriptedSession {
 		if let Some(wake) = &self.wake {
 			*wake.lock() = ();
 		}
+	}
+
+	/// Undo [`Self::close`], so streams opened from here park once their script runs out.
+	pub fn reopen(&self) {
+		*self.close.lock().unwrap() = None;
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that

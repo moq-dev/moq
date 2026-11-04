@@ -132,7 +132,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	const sync = new Sync({ delay: options.delay });
 	const track = new Track.Producer("audio");
-	const consumer = new Container.Consumer(track.subscribe({ maxDelay: WIRE_MAX_DELAY }), {
+	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
 		format: new Container.Legacy.Format("audio"),
 		delay: new Derived([sync.out.delay, sync.out.maxDelay], (min, max) => ({ min, max })),
 	});
@@ -236,7 +236,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				}
 				let group = groups.get(arrival.group);
 				if (!group) {
-					group = track.createGroup(arrival.group);
+					group = track.createGroup(BigInt(arrival.group));
 					groups.set(arrival.group, group);
 				}
 				const timestamp = micros(arrival.timestamp);

@@ -129,6 +129,8 @@ pub(crate) enum PublishDoneStatus {
 	TrackEnded,
 	/// A requested subscription update could not be applied.
 	UpdateFailed,
+	/// A relay found the track malformed, so it ended every subscription to it.
+	MalformedTrack,
 }
 
 impl PublishDoneStatus {
@@ -140,6 +142,7 @@ impl PublishDoneStatus {
 			Self::Unauthorized => 0x1,
 			Self::TrackEnded => 0x2,
 			Self::UpdateFailed => 0x8,
+			Self::MalformedTrack => 0x12,
 		}
 	}
 }
@@ -169,6 +172,10 @@ impl PublishDone<'_> {
 		match self.status_code {
 			code if code == PublishDoneStatus::TrackEnded.code() => Ok(()),
 			code if code == PublishDoneStatus::Unauthorized.code() => Err(crate::Error::Unauthorized),
+			// The peer's code, as a moq-lite MALFORMED_TRACK reset reads, so bindings name it.
+			code if code == PublishDoneStatus::MalformedTrack.code() => {
+				Err(crate::Error::Stream(crate::StreamError::MalformedTrack))
+			}
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
 			// Draft-22 removed it and left 0x3 unassigned.
 			0x3 if matches!(version, Version::Draft18) => Ok(()),
@@ -202,6 +209,8 @@ impl<'a> Message<'a> for PublishDone<'a> {
 
 #[derive(Debug)]
 pub struct Publish<'a> {
+	/// The credential authorizing this request alone.
+	pub authorization_token: Option<super::token::RequestToken>,
 	pub request_id: RequestId,
 	pub track_namespace: Path,
 	pub track_name: Cow<'a, str>,
@@ -224,6 +233,7 @@ impl Publish<'_> {
 	pub fn into_owned(self) -> Publish<'static> {
 		Publish {
 			request_id: self.request_id,
+			authorization_token: self.authorization_token,
 			track_namespace: self.track_namespace,
 			track_name: Cow::Owned(self.track_name.into_owned()),
 			track_alias: self.track_alias,
@@ -251,6 +261,7 @@ impl<'a> Message<'a> for Publish<'a> {
 		// property instead.
 		let draft20 = Filter::is_draft20(version);
 		encode_params!(w, version,
+			0x03 => self.authorization_token.clone(),
 			0x09 => self.largest_location,
 			0x10 => self.forward,
 			0x20 => self.subscriber_priority.filter(|_| draft20),
@@ -290,9 +301,10 @@ impl<'a> Message<'a> for Publish<'a> {
 		);
 		let properties = Properties::decode(r, version)?;
 		// Last, so a malformed field closes the session before a token refusal.
-		super::token::single(authorization_token)?;
+		let authorization_token = super::token::single(authorization_token)?;
 
 		Ok(Self {
+			authorization_token,
 			request_id,
 			track_namespace,
 			track_name,
@@ -475,10 +487,11 @@ mod tests {
 
 	#[test]
 	fn test_publish_done_registered_statuses_all_versions() {
-		for version in [Version::Draft18] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for (status, expected) in [
 				(PublishDoneStatus::InternalError, 0x0),
 				(PublishDoneStatus::TrackEnded, 0x2),
+				(PublishDoneStatus::MalformedTrack, 0x12),
 			] {
 				assert_eq!(status.code(), expected);
 
@@ -517,6 +530,13 @@ mod tests {
 				matches!(done(0x0).end(version), Err(crate::Error::Remote(0x0))),
 				"{version:?}"
 			);
+			assert!(
+				matches!(
+					done(0x12).end(version),
+					Err(crate::Error::Stream(crate::StreamError::MalformedTrack))
+				),
+				"{version:?}"
+			);
 		}
 
 		// SUBSCRIPTION_ENDED is clean until draft-22 unassigned it.
@@ -530,6 +550,7 @@ mod tests {
 	#[test]
 	fn test_publish_v18_round_trip() {
 		let msg = Publish {
+			authorization_token: None,
 			request_id: RequestId(1),
 			track_namespace: Path::from_static("test/ns"),
 			track_name: "video".into(),
@@ -560,6 +581,7 @@ mod tests {
 	fn publish_priority_property_bytes_on_every_draft() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut msg = Publish {
+				authorization_token: None,
 				request_id: RequestId(1),
 				track_namespace: Path::from_static("ns"),
 				track_name: "video".into(),
@@ -592,6 +614,7 @@ mod tests {
 	#[test]
 	fn test_publish_v18_group_order_is_a_property() {
 		let msg = Publish {
+			authorization_token: None,
 			request_id: RequestId(1),
 			track_namespace: Path::from_static("ns"),
 			track_name: "video".into(),

@@ -4,7 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### RSA uses aws-lc-rs (#6898)
+### Crypto runs on rind (#7570)
+
+Signing, verifying, key generation, and the HTTP clients' TLS run on [rind](https://github.com/moq-dev/rind), a pure-Rust library, instead of aws-lc-rs, `p256`, and `p384`.
+Token, JWK, and key formats are unchanged.
+
+- `Error` no longer implements `From` for `aws_lc_rs::error::{Unspecified, KeyRejected}` or `p256::elliptic_curve::{Error, pkcs8::Error}`: convert those errors in your own code, since moq-auth no longer produces them.
+- `KeyError::MissingEcX` and `KeyError::MissingEcY` are removed, since nothing returned them. Drop any match arms on them.
+- Building a `Key`, or a `Client` given no TLS config, on a CPU that rind refuses fails with the new `Error::UnsupportedCpu`, which names the missing feature.
+- A private EC JWK whose `d` does not match its `x` and `y` now fails `Key::sign`, instead of signing tokens its own public key can't verify.
+- moq-auth installs rind's jsonwebtoken provider unless the process installed one first, so to use another provider, install it before building a `Key`.
+- `Client::new(url, None)` uses rind's TLS with the platform's roots. Pass a `rustls::ClientConfig` to use a different provider.
+
+### Private RSA JWKs are complete (#6898)
 
 Private RSA JWKs must supply `d`, `p`, `q`, `dp`, `dq`, and `qi`; partial private keys and multi-prime `oth` are refused, including on verify-only imports.
 Export a complete two-prime JWK from your key provider or generate one with `moq auth generate --algorithm RS256`.

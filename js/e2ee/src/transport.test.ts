@@ -6,6 +6,7 @@ import { type Broadcast, Connection, Origin, type Path, Time } from "@moq/net";
 import { createMockTransportPair } from "../../net/src/mock.ts";
 import * as Protected from "./broadcast.ts";
 import { Credential } from "./credential.ts";
+import * as Epoch from "./epoch.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -47,7 +48,7 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 	}
 }
 
-// Whether the wire carries the route's epoch, and the track's timestamps. Neither is
+// Whether the wire carries the route's instance, and the track's timestamps. Neither is
 // authenticated, so the frames open either way.
 const transports = [
 	["moq-lite-07", "moq-lite-07-wip", true, true],
@@ -66,7 +67,7 @@ for (const [name, protocol, routed, timed] of transports) {
 		const video = await new Protected.Producer(broadcast, generation).createTrack("video", {
 			timescale: Time.Timescale.MILLI,
 		});
-		broadcastPublication.announce({ epoch: generation.epoch });
+		broadcastPublication.announce({ instance: Epoch.instance(generation.epoch) });
 
 		const group = video.appendGroup();
 		await group.writeFrame(ms(1), encoder.encode("keyframe"));
@@ -74,15 +75,15 @@ for (const [name, protocol, routed, timed] of transports) {
 
 		const remote = await active(subscriber, path);
 		// The epoch rides the route where the wire carries it; elsewhere the application supplies it.
-		expect(remote.epoch).toBe(routed ? generation.epoch : undefined);
-		const epoch = remote.epoch ?? generation.epoch;
+		expect(Epoch.of(remote)).toBe(routed ? generation.epoch : undefined);
+		const epoch = Epoch.of(remote) ?? generation.epoch;
 		const consumer = await new Protected.Consumer(remote, cred.consume(epoch)).subscribe("video", {
-			maxDelay: Milli(60_000),
+			delay: { max: Milli(60_000) },
 		});
 
 		const received = await consumer.recvGroup();
 		if (!received) throw new Error("expected a group");
-		expect(received.sequence).toBe(0);
+		expect(received.sequence).toBe(0n);
 		const first = await received.readFrame();
 		expect(decoder.decode(first?.plaintext)).toBe("keyframe");
 		expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(timed ? 1 : undefined);
@@ -98,7 +99,7 @@ for (const [name, protocol, routed, timed] of transports) {
 		await next.writeFrame(ms(4), encoder.encode("next"));
 		next.finish();
 		const second = await consumer.recvGroup();
-		expect(second?.sequence).toBe(1);
+		expect(second?.sequence).toBe(1n);
 		expect(decoder.decode((await second?.readFrame())?.plaintext)).toBe("next");
 
 		consumer.close();
@@ -123,7 +124,7 @@ for (const [name, protocol] of [
 		const audio = await new Protected.Producer(broadcast, generation).createTrack("audio", {
 			timescale: Time.Timescale.MILLI,
 		});
-		broadcastPublication.announce({ epoch: generation.epoch });
+		broadcastPublication.announce({ instance: Epoch.instance(generation.epoch) });
 
 		// A group first, so the subscription is serving before datagrams, which are never cached.
 		const group = audio.appendGroup();
@@ -131,19 +132,19 @@ for (const [name, protocol] of [
 		group.finish();
 
 		const remote = await active(subscriber, path);
-		const consumer = await new Protected.Consumer(remote, cred.consume(remote.epoch ?? generation.epoch)).subscribe(
-			"audio",
-			{ maxDelay: Milli(60_000) },
-		);
+		const consumer = await new Protected.Consumer(
+			remote,
+			cred.consume(Epoch.of(remote) ?? generation.epoch),
+		).subscribe("audio", { delay: { max: Milli(60_000) } });
 		expect(decoder.decode((await (await consumer.recvGroup())?.readFrame())?.plaintext)).toBe("init");
 
 		// Sequences continue past the group, preserved hop to hop by insertDatagram.
 		const sequence = await audio.appendDatagram(ms(20), encoder.encode("opus"));
-		expect(sequence).toBe(1);
+		expect(sequence).toBe(1n);
 		const event = await consumer.recvDatagram();
 		expect(event?.kind).toBe("datagram");
 		if (event?.kind !== "datagram") return;
-		expect(event.datagram.sequence).toBe(1);
+		expect(event.datagram.sequence).toBe(1n);
 		expect(event.datagram.timestamp?.as(Time.Timescale.MILLI)).toBe(20);
 		expect(decoder.decode(event.datagram.plaintext)).toBe("opus");
 

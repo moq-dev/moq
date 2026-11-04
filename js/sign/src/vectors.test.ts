@@ -1,6 +1,6 @@
 // Every vector in drafts/moq-sign-00.json, run against the internal primitives.
 import { expect, test } from "bun:test";
-import { Epoch, type Path, Time } from "@moq/net";
+import { Instance, type Path, Time } from "@moq/net";
 import { Failure } from "./failure.ts";
 import { PublicKey, SecretKey } from "./key.ts";
 import { Scope } from "./scope.ts";
@@ -24,7 +24,7 @@ function hex(bytes: Uint8Array): string {
 
 // The vectors' path field is the raw signed text, including an empty one.
 function scope(row: Row): Scope {
-	return new Scope(String(row.path) as Path.Valid, Epoch.parse(String(row.epoch)), String(row.track));
+	return new Scope(String(row.path) as Path.Valid, Instance.parse(String(row.instance)), String(row.track));
 }
 
 // A row's timestamp at its timescale, or undefined when the timescale is 0 (untimed).
@@ -47,7 +47,7 @@ test("keys", async () => {
 test("frames", async () => {
 	for (const row of vectors.frames) {
 		const s = scope(row);
-		const [group, frame, at] = [Number(row.group), Number(row.frame), timestamp(row)];
+		const [group, frame, at] = [BigInt(row.group as number | string), Number(row.frame), timestamp(row)];
 		expect(hex(s.message(group, frame, at, unhex(row.payload)))).toBe(String(row.message));
 		const body = await s.sign(await SecretKey.fromSeed(unhex(row.seed)), group, frame, at, unhex(row.payload));
 		expect(hex(body)).toBe(String(row.body));
@@ -60,7 +60,7 @@ test("negative", async () => {
 	for (const row of vectors.negative) {
 		const verified = scope(row).verify(
 			PublicKey.parse(String(row.endpoint)),
-			Number(row.group),
+			BigInt(row.group as number | string),
 			Number(row.frame),
 			timestamp(row),
 			unhex(row.body),
@@ -75,7 +75,7 @@ test("a fractional timestamp never verifies", async () => {
 	const at = new Time.Timestamp(Number(row.timestamp) + 0.5, Time.Timescale(Number(row.timescale)));
 	const verified = scope(row).verify(
 		PublicKey.parse(String(row.endpoint)),
-		Number(row.group),
+		BigInt(row.group as number | string),
 		Number(row.frame),
 		at,
 		unhex(row.body),

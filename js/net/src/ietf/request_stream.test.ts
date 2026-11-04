@@ -1,6 +1,8 @@
-import { expect, test } from "bun:test";
-import { ProtocolViolation, SessionCode } from "../error.ts";
+import { expect, mock, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
+import { NoStreamCredit, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import * as Varint from "../varint.ts";
 import { RequestError } from "./request.ts";
 import { namespaceUpdate, nextMessage, RequestStream, refuse } from "./request_stream.ts";
@@ -162,5 +164,92 @@ test("a refusal carries its reason", async () => {
 		expect(await r.u53()).toBe(RequestError.id);
 		const err = await RequestError.decode(r, version);
 		expect(err.reasonPhrase).toBe("no");
+	}
+});
+
+test("a request's deadline ends it through the request, so later ends do nothing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>(),
+			version: Version.DRAFT_18,
+		});
+		const aborts = spyOn(stream, "abort");
+		const session = { version: Version.DRAFT_18, client: true, openBi: () => stream } as unknown as Session;
+		const deadline = new Deadline();
+		const request = await RequestStream.open(session, deadline);
+		const answer = deadline.wait(new Promise<never>(() => {})).catch((e: unknown) => e);
+		await clock.advance(Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)));
+		const err = await answer;
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.ControlTimeout);
+		await request.ended;
+
+		// The caller's own cleanup after the deadline.
+		request.abort(new Error("abandoned"));
+		request.close();
+		expect(aborts).toHaveBeenCalledTimes(1);
+		expect(aborts.mock.calls[0]?.[0]).toBe(err as StreamError);
+	} finally {
+		installed.close();
+	}
+});
+
+test("a request opening after its deadline is aborted through its owner once and never sends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const owners: RequestStream[] = [];
+	const abort = RequestStream.prototype.abort;
+	const ownerAborts = spyOn(RequestStream.prototype, "abort").mockImplementation(function (
+		this: RequestStream,
+		err: unknown,
+	) {
+		owners.push(this);
+		abort.call(this, err);
+	});
+	try {
+		const write = mock((_chunk: Uint8Array) => {});
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({ write }),
+			version: Version.DRAFT_18,
+		});
+		const aborts = spyOn(stream, "abort");
+		const opening = Promise.withResolvers<Stream>();
+		const session = {
+			version: Version.DRAFT_18,
+			client: true,
+			openBi: () => opening.promise,
+		} as unknown as Session;
+		const deadline = new Deadline();
+		const send = mock((request: RequestStream) => request.writer.u8(1));
+		const sending = RequestStream.open(session, deadline).then(send);
+		const answer = deadline.wait(sending).catch((e: unknown) => e);
+		await clock.advance(Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)));
+		const err = await answer;
+		expect(err).toBeInstanceOf(NoStreamCredit);
+		expect(ownerAborts).not.toHaveBeenCalled();
+		expect(aborts).not.toHaveBeenCalled();
+
+		opening.resolve(stream);
+		await expect(sending).rejects.toBe(err);
+		expect(ownerAborts).toHaveBeenCalledTimes(1);
+		expect(ownerAborts.mock.calls[0]?.[0]).toBe(err);
+		const [request] = owners;
+		expect(request).toBeInstanceOf(RequestStream);
+		await request.ended;
+
+		// The caller's cleanup cannot reset the late stream a second time.
+		request.abort(new Error("abandoned"));
+		request.close();
+		expect(aborts).toHaveBeenCalledTimes(1);
+		expect(aborts.mock.calls[0]?.[0]).toBe(err as NoStreamCredit);
+		expect(send).not.toHaveBeenCalled();
+		expect(write).not.toHaveBeenCalled();
+	} finally {
+		ownerAborts.mockRestore();
+		installed.close();
 	}
 });

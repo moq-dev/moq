@@ -61,15 +61,20 @@ void main() {
     final consumer = track.consume(subscription: null);
     track.writeFrame(frame: Frame(payload: utf8.encode('payload')));
     final frame = await consumer.readFrame().timeout(timeout);
-    expect(frame?.timestampUs, isNull);
+    expect(frame?.timestamp, isNull);
     expect(consumer.info().timescale, isNull);
     track.finish();
     broadcast.close();
   });
 
   test('a default subscription skips superseded groups at once', () {
-    expect(defaultSubscription().maxDelay, Duration.zero);
-    expect(Subscription().maxDelay, isNull);
+    for (final subscription in [defaultSubscription(), Subscription()]) {
+      expect(subscription.delay.min, Duration.zero);
+      expect(subscription.delay.max, Duration.zero);
+    }
+    final unset = Delay(min: null, max: null);
+    expect(unset.min, isNull);
+    expect(unset.max, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -77,7 +82,9 @@ void main() {
     final track = broadcast.publishTrack(name: 'negative', info: null);
     expect(
       () => track.consume(
-        subscription: Subscription(maxDelay: const Duration(microseconds: -1)),
+        subscription: Subscription(
+          delay: Delay(max: const Duration(microseconds: -1)),
+        ),
       ),
       throwsArgumentError,
     );
@@ -95,14 +102,17 @@ void main() {
       for (var ms = 0; ms < 3; ms++) {
         final group = track.appendGroup();
         group.writeFrame(
-          frame: Frame(payload: utf8.encode('x'), timestampUs: ms * 1000),
+          frame: Frame(
+            payload: utf8.encode('x'),
+            timestamp: Duration(milliseconds: ms).toTimestamp(),
+          ),
         );
         group.finish();
       }
 
       final consumer = track.consume(
         subscription: Subscription(
-          maxDelay: const Duration(seconds: 10),
+          delay: Delay(max: const Duration(seconds: 10)),
           ranges: [Range(start: RelativeMoqAnchor(2))],
           order: Order.ascending,
         ),
@@ -236,7 +246,10 @@ void main() {
 
     final producer = track.appendGroup();
     producer.writeFrame(
-      frame: MoqFrame(payload: utf8.encode('dart round trip'), timestampUs: 0),
+      frame: MoqFrame(
+        payload: utf8.encode('dart round trip'),
+        timestamp: Duration.zero.toTimestamp(),
+      ),
     );
     producer.finish();
 
@@ -387,14 +400,70 @@ void main() {
     expect(() => catalog.finish(), throwsA(isA<ClosedMoqException>()));
   });
 
-  test('microsecond timestamps read back as Durations', () {
+  test('a broadcast consumer\'s closed() resolves once it closes', () async {
+    final broadcast = BroadcastProducer();
+    var resolved = false;
+    final closed = broadcast.consume().closed().then((_) => resolved = true);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(resolved, isFalse, reason: 'resolved while the broadcast is live');
+    broadcast.close();
+    await closed.timeout(timeout);
+  });
+
+  test('timestamps round-trip exactly at the track scale', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'video',
+      info: TrackInfo(timescale: 90000),
+    );
+    final consumer = track.consume(subscription: null);
+    // A present zero stays present, and one 90 kHz tick reads back as itself
+    // rather than the 11 us a microsecond field floors it to.
+    for (final value in [0, 1]) {
+      track.writeFrame(
+        frame: Frame(
+          payload: utf8.encode('frame'),
+          timestamp: Timestamp(value: value, scale: 90000),
+        ),
+      );
+      final frame = await consumer.readFrame().timeout(timeout);
+      expect(frame?.timestamp?.value, value);
+      expect(frame?.timestamp?.scale, 90000);
+    }
+
+    for (final invalid in [
+      Timestamp(value: 0, scale: 0),
+      Timestamp(value: 0, scale: 1 << 62),
+      Timestamp(value: 1 << 61, scale: 90000),
+    ]) {
+      expect(
+        () => track.writeFrame(
+          frame: Frame(payload: utf8.encode('frame'), timestamp: invalid),
+        ),
+        throwsA(isA<TimeOverflowMoqException>()),
+      );
+    }
+    track.finish();
+    broadcast.close();
+  });
+
+  test('timestamps convert to and from Durations', () {
+    final exact = const Duration(milliseconds: 20).toTimestamp();
+    expect([exact.value, exact.scale], [20000, 1000000]);
+    expect(exact.toDuration(), const Duration(milliseconds: 20));
+    // 5 ticks at 90 kHz is 55.6 us, and half a microsecond is 0.5: both round down.
     expect(
-      Frame(payload: Uint8List(0), timestampUs: 20000).timestamp,
-      const Duration(milliseconds: 20),
+      Timestamp(value: 5, scale: 90000).toDuration(),
+      const Duration(microseconds: 55),
+    );
+    expect(Timestamp(value: 1, scale: 2000000).toDuration(), Duration.zero);
+    expect(
+      () => Timestamp(value: (1 << 61) - 1, scale: 1).toDuration(),
+      throwsRangeError,
     );
     expect(
-      moq_video.Frame(timestampUs: 33333, data: Uint8List(0)).timestamp,
-      const Duration(microseconds: 33333),
+      () => const Duration(microseconds: -1).toTimestamp(),
+      throwsArgumentError,
     );
   });
 
@@ -454,24 +523,22 @@ void main() {
     replacement.broadcast().close();
   });
 
-  test('a new epoch restarts announce consumers', () async {
+  test('a new instance restarts announce consumers', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(config: MoqAnnounceConfig());
-    final publication = origin.createBroadcast(path: 'epoch');
+    final publication = origin.createBroadcast(path: 'instance');
 
-    final first = mintEpoch();
-    publication.announce(route: AnnounceRoute(epoch: first));
+    publication.announce(route: AnnounceRoute());
     final start = await nextRoute(announced) as AnnounceEventStart;
-    expect(start.announce.route.epoch, first);
+    expect(start.announce.route.instance, isNotEmpty);
 
-    final second = mintEpoch();
-    publication.announce(route: AnnounceRoute(epoch: second));
+    publication.announce(route: AnnounceRoute(instance: 'camera', epoch: 1));
     final restart = await nextRoute(announced) as AnnounceEventRestart;
-    expect(restart.announce.route.epoch, second);
+    expect(restart.announce.route.instance, 'camera');
 
     expect(
-      () => publication.announce(route: AnnounceRoute(epoch: 'not-an-epoch')),
-      throwsA(isA<MoqException>()),
+      () => publication.announce(route: AnnounceRoute(instance: '')),
+      throwsA(isA<InvalidInstanceMoqException>()),
     );
     announced.cancel();
     announced.dispose();
@@ -496,7 +563,7 @@ void main() {
     final pending = origin.consume().request(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
-    final prepared = request.prepare(epoch: mintEpoch());
+    final prepared = request.prepare();
     final served = prepared.publish();
     await pending.timeout(timeout);
     // The publication controls the prepared fill: closing that ends its announcement.
@@ -524,18 +591,21 @@ void main() {
     final consumer = moq_json.SnapshotConsumer(track: track);
 
     for (var n = 1; n <= 4; n++) {
-      producer.update(value: jsonEncode({'n': n}), timestampUs: n * 1000);
+      producer.update(
+        value: jsonEncode({'n': n}),
+        timestamp: Duration(milliseconds: n).toTimestamp(),
+      );
     }
 
     // next() yields every state in order; latest() skips the buffered third.
     moq_json.Value? value = await consumer.next().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 1});
-    expect(value.timestampUs, 1000);
+    expect(value.timestamp?.toDuration(), const Duration(milliseconds: 1));
     value = await consumer.next().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 2});
     value = await consumer.latest().timeout(timeout);
     expect(jsonDecode(value!.value), {'n': 4});
-    expect(value.timestampUs, 4000);
+    expect(value.timestamp?.toDuration(), const Duration(milliseconds: 4));
 
     consumer.cancel();
     producer.finish();
@@ -558,29 +628,38 @@ void main() {
     final consumer = moq_json.WindowConsumer(track: track);
 
     for (var n = 0; n < 3; n++) {
-      producer.push(value: jsonEncode({'n': n}), timestampUs: n * 1000);
+      producer.push(
+        value: jsonEncode({'n': n}),
+        timestamp: Duration(milliseconds: n).toTimestamp(),
+      );
     }
-    producer.pop(count: 2, timestampUs: 3000);
+    producer.pop(
+      count: 2,
+      timestamp: const Duration(milliseconds: 3).toTimestamp(),
+    );
 
     for (var n = 0; n < 3; n++) {
       final timed = await consumer.next().timeout(timeout);
       final push = timed!.event as moq_json.WindowEventPush;
       expect(push.index, n);
       expect(jsonDecode(push.value), {'n': n});
-      expect(timed.timestampUs, n * 1000);
+      expect(timed.timestamp?.toDuration(), Duration(milliseconds: n));
     }
     final timed = await consumer.next().timeout(timeout);
     final pop = timed!.event as moq_json.WindowEventPop;
     expect([pop.start, pop.end], [0, 2]);
-    expect(timed.timestampUs, 3000);
+    expect(timed.timestamp?.toDuration(), const Duration(milliseconds: 3));
 
     // The cut's new group restates record 2, which this reader already has.
     producer.cut();
-    producer.push(value: jsonEncode({'n': 3}), timestampUs: 4000);
+    producer.push(
+      value: jsonEncode({'n': 3}),
+      timestamp: const Duration(milliseconds: 4).toTimestamp(),
+    );
     final pushed = await consumer.next().timeout(timeout);
     final push = pushed!.event as moq_json.WindowEventPush;
     expect(push.index, 3);
-    expect(pushed.timestampUs, 4000);
+    expect(pushed.timestamp?.toDuration(), const Duration(milliseconds: 4));
 
     producer.finish();
     expect(await consumer.next().timeout(timeout), isNull);
@@ -612,7 +691,10 @@ void main() {
     video.cut();
     for (var i = 0; i < 10; i++) {
       video.write(
-        frame: moq_video.Frame(timestampUs: i * 33333, data: rgba),
+        frame: moq_video.Frame(
+          timestamp: Timestamp(value: i * 3003, scale: 90000),
+          data: rgba,
+        ),
       );
     }
 
@@ -631,7 +713,10 @@ void main() {
     // Keep the encoder fed so the decoder sees frames after it joined.
     for (var i = 10; i < 40; i++) {
       video.write(
-        frame: moq_video.Frame(timestampUs: i * 33333, data: rgba),
+        frame: moq_video.Frame(
+          timestamp: Timestamp(value: i * 3003, scale: 90000),
+          data: rgba,
+        ),
       );
     }
 
@@ -681,10 +766,7 @@ void main() {
 
     final fixedOutput = moq_audio.DecoderOutput(
       format: moq_audio.SampleFormat.f32,
-      delay: moq_media.Delay(
-        min: Duration(milliseconds: 80),
-        max: Duration.zero,
-      ),
+      delay: Delay(min: Duration(milliseconds: 80)),
       estimate: false,
     );
     final fixed = await moq_audio.Consumer.subscribe(
@@ -706,7 +788,7 @@ void main() {
     for (var i = 0; i < 2; i++) {
       audio.write(
         frame: moq_audio.Frame(
-          timestampUs: i * 20000,
+          timestamp: Duration(milliseconds: i * 20).toTimestamp(),
           data: Uint8List(960 * 4),
         ),
       );
@@ -742,7 +824,10 @@ void main() {
       ),
     );
     producer.write(
-      frame: moq_audio.Frame(timestampUs: 0, data: Uint8List(960 * 4)),
+      frame: moq_audio.Frame(
+        timestamp: Duration.zero.toTimestamp(),
+        data: Uint8List(960 * 4),
+      ),
     );
     expect(producer.demand().name(), 'mic');
     producer.finish();

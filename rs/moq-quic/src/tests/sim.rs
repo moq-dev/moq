@@ -266,9 +266,8 @@ impl Peer {
 			};
 			let mut stream = conn.send_stream(id);
 			while sending.written < sending.spec.len {
-				let end = sending.spec.len.min(sending.written + 65_536);
-				let data = payload(index, sending.written..end);
-				match stream.write(&mut &data[..]) {
+				let end = sending.spec.len.min(sending.written + PAYLOAD_MAX);
+				match stream.write(&mut payload(index, sending.written..end)) {
 					Ok(written) => sending.written += written,
 					Err(send::Error::Blocked) => break,
 					Err(error) => panic!("writing stream {index}: {error}"),
@@ -318,7 +317,7 @@ impl Peer {
 						let end = receiving.read + chunk.bytes.len();
 						prop_assert!(end <= len, "stream {index} ran past its {len} bytes");
 						prop_assert!(
-							chunk.bytes == payload(index, receiving.read..end),
+							is_payload(index, receiving.read, &chunk.bytes),
 							"stream {index} corrupted at {}",
 							receiving.read
 						);
@@ -351,15 +350,13 @@ impl Peer {
 		Ok(())
 	}
 
-	/// Drains events, failing if the connection was lost
-	fn poll(&self, pair: &mut Pair) -> Result<(), TestCaseError> {
-		while let Some(event) = self.conn(pair).poll() {
-			if let Event::ConnectionLost { reason } = event {
-				return Err(TestCaseError::fail(format!(
-					"{} lost the connection: {reason}",
-					self.side()
-				)));
-			}
+	/// Fails if the connection was lost
+	fn check_alive(&self, pair: &mut Pair) -> Result<(), TestCaseError> {
+		if let Some(reason) = self.conn(pair).error() {
+			return Err(TestCaseError::fail(format!(
+				"{} lost the connection: {reason}",
+				self.side()
+			)));
 		}
 		Ok(())
 	}
@@ -373,9 +370,27 @@ impl Peer {
 	}
 }
 
+/// The longest range `payload` serves
+const PAYLOAD_MAX: usize = 65_536;
+
 /// The bytes at `range` of stream `index`, distinct per stream and offset
-fn payload(index: usize, range: ops::Range<usize>) -> Vec<u8> {
-	range.map(|i| (i % 251) as u8 ^ (index as u8)).collect()
+///
+/// Each stream reads one cycle of prime length from its own rotation, so streams fewer than 251
+/// apart differ at every offset. Slicing a shared buffer keeps the per-step writes and checks from
+/// dominating the simulation.
+fn payload(index: usize, range: ops::Range<usize>) -> &'static [u8] {
+	static CYCLE: std::sync::LazyLock<Vec<u8>> =
+		std::sync::LazyLock::new(|| (0..251 + PAYLOAD_MAX).map(|i| (i % 251) as u8).collect());
+	let start = (index + range.start) % 251;
+	&CYCLE[start..][..range.len()]
+}
+
+/// Whether `bytes` are stream `index`'s payload from `offset`, however long the chunk
+fn is_payload(index: usize, offset: usize, bytes: &[u8]) -> bool {
+	bytes.chunks(PAYLOAD_MAX).enumerate().all(|(i, piece)| {
+		let start = offset + i * PAYLOAD_MAX;
+		piece == payload(index, start..start + piece.len())
+	})
 }
 
 fn run(case: &Case) -> Result<Outcome, TestCaseError> {
@@ -452,8 +467,8 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 			}
 			next_read = pair.time + case.read_interval;
 		}
-		client.poll(&mut pair)?;
-		server.poll(&mut pair)?;
+		client.check_alive(&mut pair)?;
+		server.check_alive(&mut pair)?;
 		if client.done(&server.sends) && server.done(&client.sends) && extra.as_ref().is_none_or(|extra| extra.done()) {
 			break;
 		}
@@ -501,12 +516,8 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 	let now = pair.time;
 	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
 	pair.drive();
-	let reason = loop {
-		match pair.server_conn_mut(server_ch).poll() {
-			Some(Event::ConnectionLost { reason }) => break reason,
-			Some(_) => {}
-			None => return Err(TestCaseError::fail("server never saw the close")),
-		}
+	let Some(reason) = pair.server_conn_mut(server_ch).error().cloned() else {
+		return Err(TestCaseError::fail("server never saw the close"));
 	};
 	prop_assert!(
 		matches!(&reason, ConnectionError::ApplicationClosed(close) if close.error_code == VarInt(0)),

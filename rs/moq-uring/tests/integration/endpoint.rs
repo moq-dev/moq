@@ -101,7 +101,8 @@ fn dial_and_accept_share_one_socket() {
 		.expect("worker");
 }
 
-/// A session owns the connection independently of the driver and stream handles.
+/// A session closes once its last clone and the last stream it handed out are
+/// gone, whatever background tasks still hold the connection.
 #[test]
 fn dropping_the_last_raw_session_closes_the_connection() {
 	dropped_raw_session_closes(false);
@@ -155,13 +156,67 @@ fn dropped_raw_session_closes(explicit: bool) {
 				0
 			};
 			drop(remaining);
-			// Stream handles intentionally survive the final session handle.
+			if !explicit {
+				// The stream outlives every session clone and keeps it open.
+				std::future::poll_fn(|cx| send.poll_write(cx, b"still"))
+					.await
+					.expect("the stream keeps the session open");
+				let read = recv.read(&mut &mut payload[..]).await.expect("read");
+				assert_eq!(read, Some(5));
+				assert_eq!(&payload, b"still");
+			}
+			drop(send);
 			let error = peer.closed().await;
 			assert!(
 				matches!(error, quic::Error::App { code: actual, .. } if actual == code),
 				"peer saw {error:?}"
 			);
-			drop((send, recv));
+			drop(recv);
+		})
+		.expect("worker");
+}
+
+/// A raw connection closes with code 0 once its last handle and stream are
+/// gone, rather than leaving the peer to idle out.
+#[test]
+fn dropping_the_last_connection_handle_closes_it() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let socket = || {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		socket(),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client endpoint");
+	worker
+		.block_on(async move {
+			let conn = client
+				.connect(&dial_config(), server.local_addr(), "localhost")
+				.await
+				.expect("dial");
+			let peer = server.accept().await.expect("accept");
+			let mut send = conn.open_uni(Default::default()).await.expect("open");
+			let clone = conn.clone();
+			drop(conn);
+			drop(clone);
+
+			// The stream outlives every connection handle and keeps it open.
+			send.write_all(&b"alive"[..])
+				.await
+				.expect("the stream keeps the connection open");
+			let mut recv = peer.accept_uni().await.expect("accept stream");
+			let mut payload = [0; 5];
+			recv.read_exact(&mut payload).await.expect("read");
+
+			drop(send);
+			let error = peer.closed().await;
+			assert!(matches!(error, quic::Error::App { code: 0, .. }), "peer saw {error:?}");
 		})
 		.expect("worker");
 }
@@ -286,8 +341,9 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 			}
 			sock.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-			// The long-header type bits are version-specific. Use bits that mean
-			// 0-RTT in v1 to prove we negotiate before interpreting them.
+			// The long-header type bits are version-specific. These bits mean
+			// 0-RTT in v1, which moq-quic drops unanswered, so a reply proves we
+			// negotiate the version before interpreting them.
 			let mut packet = Vec::new();
 			packet.push(0xD0); // long header, fixed bit, unknown-version type
 			packet.extend_from_slice(&0x0a0a_0a0au32.to_be_bytes());

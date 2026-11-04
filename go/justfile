@@ -16,6 +16,10 @@ default:
 check:
     bash ../sh/go/check.sh
 
+# Format the handwritten Go that `just go check` runs `gofmt -l` over.
+fix:
+    gofmt -w . ../sh/go
+
 # Check the staged modules against the Go vulnerability database. Nightly: advisories land without a diff.
 audit:
     bash ../sh/go/audit.sh

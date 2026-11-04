@@ -5,6 +5,31 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### The iroh transport is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
+
+The `iroh` feature, the `[iroh]` table, the `--iroh-*` flags, and `Cluster::with_iroh` are gone.
+An `[iroh]` table is refused as an unknown field, and a `MOQ_IROH_*` variable stops startup like any other unknown `MOQ_*` variable: remove them, and serve clients and cluster peers over QUIC or WebTransport.
+
+### Smaller default receive windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`[quic]` defaults to a 4 MiB `receive_window`, a 1 MiB `stream_receive_window`, and a 4 MiB `send_window`, down from 128 MiB, 4 MiB, and 16 MiB, and the smallest `receive_window` accepted here or in `[limits.peer.quic]` is 1 MiB instead of about 64 MiB.
+`[limits.peer.quic]` defaults to a 16 MiB `receive_window` and `send_window`, down from 640 MiB. Set the old values to keep them: a link that must carry more than about 450 Mbps at a 250 ms RTT needs a larger window.
+WebSocket, `tcp://`, `tls://`, and `unix://` sessions take the `[quic]` windows and stream count instead of qmux's own 1 MiB and 256 KiB, cancel the least urgent stream when incomplete messages fill the window as QUIC does, and peers over them widen to `[limits.peer.quic]`.
+An embedder that builds `web::Web` itself passes the relay's `[quic]` with `Web::with_quic`; without it, WebSocket sessions start at the `[quic]` defaults until admitted.
+A lite-01/02 peer whose initial announcement set exceeds 1 MiB is refused; it needs lite-03 or later.
+
+### `Cluster::new` returns a driver to poll ([#7626](https://github.com/moq-dev/moq/pull/7626))
+
+`Cluster::new` no longer spawns the origin's lifecycle work or the cache governor; it returns `(Cluster, Driver)`, and nothing runs until the driver is polled.
+`Relay` polls it for you. An embedder building a `Cluster` itself keeps the driver for as long as the cluster serves, and polls it with `Driver::poll` or runs it with `Driver::run`, for example `tokio::spawn(driver.run())`:
+
+```rust
+let (cluster, driver) = moq_relay::cluster::Cluster::new(options)?;
+tokio::spawn(driver.run());
+```
+
+Dropping the driver tears the origin down. `Driver::run` returns the first panic among its tasks, such as `origin driver panicked: ...`, which `Started::run` used to report.
+
 ### `tls://` links verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
 
 The `listen.tcp.tls` listener applies `listen.tls.root` and pinned `tls.peers` as the QUIC listener does, so a stream-only relay with that listener no longer refuses them.
@@ -111,7 +136,7 @@ Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them;
 ### Cluster dials build from a template (#5674)
 
 `Relay::client()` and `Cluster::with_client` are removed.
-Give the cluster `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `iroh://` peers, and build your own `moq_tokio::Client` for other outbound dials.
+Give the cluster `with_connect(connect, quic)`, and build your own `moq_tokio::Client` for other outbound dials.
 
 ### `max_streams = 0` is refused (#5871)
 
@@ -133,11 +158,6 @@ Set it to keep the old placement.
 [runtime]
 pin = true
 ```
-
-### iroh is opt-in (#5223)
-
-The default build has no iroh listener and no `--iroh-*` flags or `[iroh]` table.
-Build with `--features iroh` to keep it.
 
 ### The `noq` cargo feature is `quic`
 

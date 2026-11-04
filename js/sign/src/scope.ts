@@ -1,5 +1,5 @@
 // The signed message: what a frame's signature binds besides its payload.
-import type { Epoch, Path, Time } from "@moq/net";
+import type { Instance, Path, Time } from "@moq/net";
 import { Failure } from "./failure.ts";
 import type { PublicKey, SecretKey } from "./key.ts";
 
@@ -12,11 +12,11 @@ const LABEL = encoder.encode("moq-sign-00");
 
 /** One track of one publisher instance: the identity every frame on it is signed under. */
 export class Scope {
-	// The canonical prefix: label, path, epoch, and track, each length-prefixed.
+	// The canonical prefix: label, path, instance, and track, each length-prefixed.
 	#prefix: Uint8Array<ArrayBuffer>;
 
-	constructor(path: Path.Valid, epoch: Epoch.Valid, track: string) {
-		const fields = [path, epoch, track].map((field) => encoder.encode(field));
+	constructor(path: Path.Valid, instance: Instance.Valid, track: string) {
+		const fields = [path, instance, track].map((field) => encoder.encode(field));
 		this.#prefix = new Uint8Array(LABEL.byteLength + fields.reduce((sum, field) => sum + 8 + field.byteLength, 0));
 		const view = new DataView(this.#prefix.buffer);
 		this.#prefix.set(LABEL);
@@ -36,7 +36,7 @@ export class Scope {
 	 * timescale can be. A fractional value, which no hop carries, never verifies.
 	 */
 	message(
-		group: number,
+		group: bigint,
 		frame: number,
 		timestamp: Time.Timestamp | undefined,
 		payload: Uint8Array,
@@ -46,7 +46,9 @@ export class Scope {
 		const view = new DataView(out.buffer);
 		out.set(this.#prefix);
 		let offset = this.#prefix.byteLength;
-		for (const field of [group, frame, timestamp?.scale ?? 0, timestamp?.value ?? 0]) {
+		view.setBigUint64(offset, group);
+		offset += 8;
+		for (const field of [frame, timestamp?.scale ?? 0, timestamp?.value ?? 0]) {
 			view.setBigUint64(offset, BigInt(field));
 			offset += 8;
 		}
@@ -57,7 +59,7 @@ export class Scope {
 	/** The frame body: `payload` followed by its signature. */
 	async sign(
 		key: SecretKey,
-		group: number,
+		group: bigint,
 		frame: number,
 		timestamp: Time.Timestamp | undefined,
 		payload: Uint8Array,
@@ -72,7 +74,7 @@ export class Scope {
 	/** The payload of a frame body whose signature verifies, as a view into `body`; throws {@link Failure} `signature`. */
 	async verify(
 		key: PublicKey,
-		group: number,
+		group: bigint,
 		frame: number,
 		timestamp: Time.Timestamp | undefined,
 		body: Uint8Array,

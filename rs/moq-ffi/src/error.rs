@@ -252,7 +252,7 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	/// A timestamp is outside the supported range.
+	/// A timestamp value or scale is outside the supported range, or the scale is zero.
 	#[error("timestamp overflow")]
 	TimeOverflow,
 
@@ -366,9 +366,9 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	/// An epoch was not a lowercase hyphenated UUIDv7.
+	/// An instance was empty.
 	#[error("{reason}")]
-	InvalidEpoch {
+	InvalidInstance {
 		/// A diagnostic message describing the failure.
 		reason: String,
 	},
@@ -533,7 +533,7 @@ from_message! {
 	tracing::metadata::ParseLevelError => LogLevel,
 	serde_json::Error => Json,
 	moq_net::InvalidPattern => InvalidPattern,
-	moq_net::InvalidEpoch => InvalidEpoch,
+	moq_net::InvalidInstance => InvalidInstance,
 }
 
 from_message! {
@@ -687,6 +687,21 @@ mod tests {
 				assert_eq!(protocol.scope, MoqErrorScope::Stream);
 				assert_eq!(protocol.code, 0x3b);
 				assert_eq!(protocol.kind, MoqProtocolKind::Unauthorized);
+			}
+			other => panic!("expected Protocol, got {other}"),
+		}
+	}
+
+	/// A relay that found its upstream malformed says so, and a binding can tell that
+	/// apart from a relay bug's INTERNAL_ERROR.
+	#[test]
+	fn stream_malformed_track_keeps_its_kind() {
+		let err = MoqError::from(moq_net::Error::from(moq_net::StreamError::MalformedTrack));
+		match err {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.scope, MoqErrorScope::Stream);
+				assert_eq!(protocol.code, 0x12);
+				assert_eq!(protocol.kind, MoqProtocolKind::MalformedTrack);
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}

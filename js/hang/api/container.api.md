@@ -6,6 +6,7 @@ import { Format as Format_1 } from "@moq/hang/container";
 import { Micro } from "@moq/clock";
 import { Milli } from "@moq/clock";
 import { Net } from "@moq/hang";
+import { Recorder } from "@moq/hang/hls";
 import { Signals } from "@moq/hang";
 import { Video } from "@moq/hang/catalog";
 
@@ -25,7 +26,7 @@ export class Consumer {
 }
 
 export interface ConsumerProps {
-	delay?: Signals.GetterInit<Delay>;
+	delay?: Signals.GetterInit<Net.Track.Delay>;
 	format: Format;
 	maxBuffer?: number;
 	predecessor?: Consumer;
@@ -33,11 +34,6 @@ export interface ConsumerProps {
 }
 
 export const DEFAULT_MAX_BUFFER: number;
-
-export interface Delay {
-	max?: Milli | null;
-	min?: Milli;
-}
 
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
@@ -64,7 +60,7 @@ export namespace Legacy {
 	}
 	export { Frame };
 	export class Producer {
-		constructor(track: Net.Track.Producer, format: Legacy.Format);
+		constructor(track: Net.Track.Producer, format: Legacy.Format, recorder?: Recorder);
 		close(err?: Error): void;
 		discontinuity(end?: Micro): void;
 		encode(data: Uint8Array | Legacy.Source, timestamp: Micro, keyframe: boolean): void;
@@ -80,7 +76,7 @@ export * as Loc from "@moq/loc";
 
 export type Read = {
 	frame: ReceivedFrame;
-	group: number;
+	group: bigint;
 	kind: "frame";
 } | {
 	duration: Micro;
@@ -88,7 +84,7 @@ export type Read = {
 	timestamp: Micro;
 } | {
 	end: Micro;
-	group: number;
+	group: bigint;
 	kind: "end";
 };
 

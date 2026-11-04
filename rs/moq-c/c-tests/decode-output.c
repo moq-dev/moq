@@ -34,6 +34,7 @@ _Static_assert(MOQ_VIDEO_PIXEL_FORMAT_RGBA == 1, "RGBA discriminant moved");
 _Static_assert(offsetof(moq_delay, min_us) == 0, "min_us moved");
 _Static_assert(offsetof(moq_delay, max_us) == 8, "max_us moved");
 _Static_assert(offsetof(moq_delay, max_unlimited) == 16, "max_unlimited moved");
+_Static_assert(offsetof(moq_delay, min_unstated) == 17, "min_unstated moved");
 _Static_assert(sizeof(moq_delay) == 24, "delay size changed");
 _Static_assert(offsetof(moq_video_decoder_output, delay) == 0, "delay moved");
 _Static_assert(offsetof(moq_video_decoder_output, format) == 24, "format moved");
@@ -187,7 +188,7 @@ static uint64_t next_ts;
 
 static void publish_frames(int32_t producer, int count) {
     for (int i = 0; i < count; i++) {
-        moq_video_encoder_frame frame = {next_ts, gray_rgba, sizeof(gray_rgba)};
+        moq_video_encoder_frame frame = {{next_ts, 1000000}, gray_rgba, sizeof(gray_rgba)};
         next_ts += 33333;
         int32_t rc = moq_encode_video_frame((uint32_t)producer, &frame);
         if (rc < 0) fail("error: moq_encode_video_frame failed: %d (%s)\n", rc, moq_error());

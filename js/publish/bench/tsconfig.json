@@ -1,0 +1,5 @@
+{
+	"extends": "../../tsconfig.json",
+	"compilerOptions": { "types": ["bun", "vite/client"], "noEmit": true },
+	"include": ["*.ts", "../../common/worklet.d.ts"]
+}

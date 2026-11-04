@@ -89,6 +89,8 @@ pub struct Producer<C: Container, R = ()> {
 	/// Measures bitrate, reorder, batch, and explicit encoder flush observations for the catalog.
 	/// A caller without a published rendition simply never reads the estimate.
 	estimator: crate::catalog::Estimator,
+	/// Frames at or before this are history caught up behind the live edge; see [`Self::history`].
+	history: Option<moq_net::Timestamp>,
 
 	/// Peak-hold claim on the connection allocator, when one was supplied.
 	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
@@ -266,6 +268,7 @@ impl<C: Container> Producer<C> {
 			cadence: None,
 			reordered: false,
 			estimator: crate::catalog::Estimator::new(),
+			history: None,
 			bandwidth: None,
 			rendition: None,
 			sent: None,
@@ -303,6 +306,7 @@ where
 			cadence: None,
 			reordered: false,
 			estimator: rendition.estimator(),
+			history: None,
 			bandwidth: None,
 			rendition: Some(Box::new(rendition)),
 			sent: None,
@@ -310,6 +314,8 @@ where
 	}
 
 	/// Publish or replace this track's catalog config.
+	///
+	/// Unset jitter and delay keep their published floor; explicitly lowering either is refused.
 	pub fn set(&mut self, config: R) -> crate::Result<()> {
 		self.rendition.as_mut().ok_or(crate::Error::NotPublished)?.set(config)
 	}
@@ -459,6 +465,16 @@ where
 		self.estimator.reorder(delay);
 	}
 
+	/// Mark frames at or before `until` as retained history being caught up, rather than live
+	/// frames written late.
+	///
+	/// History never measures [`delay`](crate::catalog::Estimate::delay) against the other tracks:
+	/// a publisher replaying a backlog behind the live edge would otherwise advertise the backlog's
+	/// age as playout delay for the rest of the track.
+	pub fn history(&mut self, until: moq_net::Timestamp) {
+		self.history = Some(until);
+	}
+
 	/// Record the media duration emitted together by a container importer.
 	pub(crate) fn burst(&mut self, duration: std::time::Duration) -> crate::Result<()> {
 		self.estimator.burst(duration);
@@ -527,6 +543,22 @@ where
 	pub(crate) fn with_sent(mut self, sent: std::sync::Arc<crate::stats::Sent>) -> Self {
 		self.sent = Some(sent);
 		self
+	}
+
+	/// Report `frames` frames the source produced but never handed to this track, such as ones an
+	/// encoder fell behind on, in its catalog's [`stats`](crate::catalog::Producer::stats).
+	pub fn report_skipped(&self, frames: u64) {
+		if let Some(sent) = &self.sent {
+			sent.skip(frames);
+		}
+	}
+
+	/// Report the encoder's latest target bitrate in its catalog's
+	/// [`stats`](crate::catalog::Producer::stats). The catalog's `bitrate` stays the maximum.
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		if let Some(sent) = &self.sent {
+			sent.target(bitrate);
+		}
 	}
 
 	/// Count a written frame. Only video keyframes count as keyframes: elsewhere the bit only
@@ -671,9 +703,20 @@ where
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.frame(sequence, timestamp);
 		}
-		self.estimator.write(timestamp, bytes);
+		self.estimator.rate(timestamp, bytes);
+		self.order(timestamp);
 		self.count(bytes, keyframe);
 		self.observe_end(timestamp, duration);
+	}
+
+	/// Place a written frame in the write order, unless it is history; see [`Self::history`].
+	fn order(&mut self, timestamp: moq_net::Timestamp) {
+		if self
+			.history
+			.is_none_or(|until| timestamp.as_micros() > until.as_micros())
+		{
+			self.estimator.order(timestamp);
+		}
 	}
 
 	/// Cut the current group, flushing buffered frames and closing it.
@@ -885,11 +928,13 @@ where
 			recorder.frame(group.sequence, self.buffer[0].timestamp);
 		}
 		// Counted only once written: an abort discards the buffer, and those frames were never sent.
-		for frame in &self.buffer {
-			self.estimator.order(frame.timestamp);
+		let mut buffer = std::mem::take(&mut self.buffer);
+		for frame in &buffer {
+			self.order(frame.timestamp);
 			self.count(frame.payload.len(), frame.keyframe);
 		}
-		self.buffer.clear();
+		buffer.clear();
+		self.buffer = buffer;
 
 		Ok(())
 	}
@@ -972,7 +1017,8 @@ mod tests {
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 	/// edge: history has to be asked for.
 	fn replay() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY)
+		moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
 	}
 
 	/// The media track's full retention window, so readers started after publishing
@@ -1052,6 +1098,80 @@ mod tests {
 		assert_eq!(renditions["slow"].delay, Some(ms(200)));
 		assert_eq!(renditions["fast"].delay, None);
 		assert_eq!(renditions["slow"].jitter, None, "a constant trail is not jitter");
+	}
+
+	#[test]
+	fn reconfigure_keeps_floors_until_the_track_identity_changes() {
+		let ms = std::time::Duration::from_millis;
+		for codec in ["avc3.42c01e", "hev1.1.6.L93.B0"] {
+			let (_broadcast, catalog, mut tracks) = renditions(&["fast", "slow"]);
+			let slow = &mut tracks[1];
+			// Start a new identity, as an importer does when it resolves its codec.
+			let mut config = hang::catalog::VideoConfig::new(codec.parse::<hang::catalog::VideoCodec>().unwrap());
+			config.coded_width = Some(640);
+			config.coded_height = Some(360);
+			slow.reconfigure(config.clone()).unwrap();
+			let name = slow.name().to_string();
+			tracks[0].write(frame(240_000, true)).unwrap();
+			tracks[1].reorder(Timestamp::from_millis(100).unwrap());
+			tracks[1].write(frame(40_000, true)).unwrap();
+			tracks[1].cut(None).unwrap();
+			let measured = catalog.snapshot().video.renditions[&name].clone();
+			assert_eq!((measured.jitter, measured.delay), (Some(ms(100)), Some(ms(200))));
+
+			// Match an external catalog edit, such as the HLS conformance fixture's raise.
+			let mut edit = tracks[1].modify().unwrap();
+			edit.jitter = Some(ms(300));
+			edit.delay = Some(ms(400));
+			edit.commit().unwrap();
+			config.coded_width = Some(1280);
+			config.coded_height = Some(720);
+			tracks[1].reconfigure(config.clone()).unwrap();
+			assert_eq!(tracks[1].name(), name);
+			let current = catalog.snapshot().video.renditions[&name].clone();
+			assert_eq!((current.coded_width, current.coded_height), (Some(1280), Some(720)));
+			assert_eq!((current.jitter, current.delay), (Some(ms(300)), Some(ms(400))));
+
+			for (jitter, delay) in [(Some(ms(250)), None), (None, Some(ms(350)))] {
+				let mut lower = config.clone();
+				lower.jitter = jitter;
+				lower.delay = delay;
+				let err = tracks[1].reconfigure(lower).unwrap_err();
+				assert!(matches!(
+					(jitter, err),
+					(Some(_), crate::Error::JitterDecreased) | (None, crate::Error::DelayDecreased)
+				));
+				assert_eq!(catalog.snapshot().video.renditions[&name], current);
+			}
+
+			// A new identity owns a new floor, even when it supplies lower values.
+			config.codec = hang::catalog::VideoCodec::VP8;
+			config.jitter = Some(ms(20));
+			config.delay = Some(ms(30));
+			tracks[1].reconfigure(config).unwrap();
+			assert_ne!(tracks[1].name(), name);
+			let current = catalog.snapshot().video.renditions[tracks[1].name()].clone();
+			assert_eq!((current.jitter, current.delay), (Some(ms(20)), Some(ms(30))));
+		}
+	}
+
+	/// History caught up behind the live edge is not a late write: only what follows it measures delay.
+	#[test]
+	fn history_measures_no_delay() {
+		let (_broadcast, catalog, mut tracks) = renditions(&["live", "replay"]);
+		tracks[0].write(frame(2_000_000, true)).unwrap();
+
+		tracks[1].history(moq_net::Timestamp::from_micros(1_960_000).unwrap());
+		for i in 1..=49u64 {
+			tracks[1].write(frame(i * 40_000, true)).unwrap();
+		}
+		tracks[1].cut(None).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["replay"].delay, None);
+
+		// A live frame past the history that still trails the other rendition is a late write.
+		tracks[1].write(frame(1_980_000, true)).unwrap();
+		tracks[1].cut(None).unwrap();
+		assert_eq!(tracks[1].estimate().delay, Some(std::time::Duration::from_millis(20)));
 	}
 
 	/// Buffered frames reach the transport when the buffer flushes, so that is where they are ordered:
@@ -1281,7 +1401,10 @@ mod tests {
 		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
-		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_delay(discontinuity_max_age));
+		let consumer = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(discontinuity_max_age)),
+		);
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();
@@ -1695,7 +1818,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_wholly_buffered_group_records_its_end() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = crate::hls::Tracks::new(&broadcast);
+		let tracks = crate::hls::Tracks::new(&broadcast, crate::Clock::new());
 		let recorder = tracks.track("video", crate::hls::Config::default()).unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
@@ -1714,7 +1837,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_discontinuity_stops_the_segment_at_the_marker() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = crate::hls::Tracks::new(&broadcast);
+		let tracks = crate::hls::Tracks::new(&broadcast, crate::Clock::new());
 		let recorder = tracks.track("video", crate::hls::Config::default()).unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
 		let mut producer =

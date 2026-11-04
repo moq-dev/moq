@@ -19,9 +19,9 @@ from moq_ffi import (
 )
 
 from ._read import End, Gap, _end, _gap
-from ._records import _from_us, _to_us
+from ._records import Delay, Timestamp
 from ._stream import _Stream
-from .media import Audio, AudioInit, CatalogProducer, DecodeStart, Delay
+from .media import Audio, AudioInit, CatalogProducer, DecodeStart
 from .publish import TrackDemand
 from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
@@ -40,15 +40,15 @@ EncoderFinish = MoqAudioEncoderFinished
 class Frame:
     """Interleaved PCM with its presentation timestamp."""
 
-    timestamp: timedelta
+    timestamp: Timestamp
     data: bytes
 
     def _ffi(self) -> MoqAudioFrame:
-        return MoqAudioFrame(timestamp_us=_to_us(self.timestamp, "timestamp"), data=self.data)
+        return MoqAudioFrame(timestamp=self.timestamp._ffi(), data=self.data)
 
     @staticmethod
     def _from_ffi(value: MoqAudioFrame) -> Frame:
-        return Frame(timestamp=_from_us(value.timestamp_us), data=value.data)
+        return Frame(timestamp=Timestamp._from_ffi(value.timestamp), data=value.data)
 
 
 Read = Frame | Gap | End
@@ -86,7 +86,7 @@ class DecoderOutput:
     ``delay.min`` is the jitter buffer to hold ahead of the playhead, and where a
     cold join starts; with ``estimate`` (the default) it floors the delay measured
     from arrival timing instead. ``delay.max`` only bounds how stale a group may
-    get before it is skipped, and adds no buffering. ``None`` is zero for both.
+    get before it is skipped, and adds no buffering. Both default to zero.
     ``start`` picks where to begin on a track that already holds groups, ``None``
     for the oldest: a live player passes ``DecodeStart.LATEST`` so a reopened
     decoder skips the cached backlog.
@@ -95,7 +95,7 @@ class DecoderOutput:
     format: SampleFormat
     sample_rate: int | None = None
     channels: int | None = None
-    delay: Delay | None = None
+    delay: Delay = Delay()
     estimate: bool = True
     start: DecodeStart | None = None
 
@@ -104,7 +104,7 @@ class DecoderOutput:
             format=self.format,
             sample_rate=self.sample_rate,
             channels=self.channels,
-            delay=self.delay,
+            delay=self.delay._ffi(),
             estimate=self.estimate,
             start=self.start,
         )
@@ -185,9 +185,9 @@ class Consumer(_Stream[Read]):
         if isinstance(value, MoqAudioRead.FRAME):
             return Frame._from_ffi(value.frame)
         if isinstance(value, MoqAudioRead.GAP):
-            return _gap(value.timestamp_us, value.duration)
+            return _gap(value.timestamp, value.duration)
         if isinstance(value, MoqAudioRead.END):
-            return _end(value.end_us)
+            return _end(value.end)
         raise TypeError(f"unknown audio read: {value!r}")
 
     @property

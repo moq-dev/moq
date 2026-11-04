@@ -9,8 +9,8 @@ aws-lc-sys, ring, or `cc` in a crypto crate's graph. rind is MoQ's only crypto,
 replacing aws-lc-rs, ring, and the RustCrypto `hmac`/`sha1`/`sha2`/`p256`/`p384`
 crates in MoQ's own code.
 
-Non-goals: CPUs or targets rind refuses (see Plan), and moq-tokio's `iroh`
-feature, which is deleted instead.
+Non-goals: CPUs or targets rind refuses (see Plan). moq-tokio's iroh backend,
+which hard-wired aws-lc-rs or ring, was deleted instead.
 
 ## Plan
 
@@ -45,9 +45,9 @@ instead, so every crate drops C, not just the relay.
   kept as alternatives, so there is one provider and no exclusion gate.
 - The migration waits for rind's armv7 support, so no target is dropped.
   Decided 2026-10-31 (maintainer): each area waits only on the rind pieces it
-  uses, so most areas switch once rind runs on CPUs without the crypto
-  extensions (0.1.0 shipped 2026-10-31 without it; e2ee, which no binary
-  links, switches on 0.1.0), and only relay
+  uses, so most areas switch on rind 0.1.2 (published 2026-11-01), which runs on
+  CPUs without the crypto extensions (e2ee, which no binary links, switched
+  on 0.1.0), and only relay
   ACME waits on `rind-instant-acme`. aws-lc-rs stays in the workspace until
   the last area lands, which is when this epic removes it.
 - Split per area, each landing once rind covers it. Docs a change makes stale
@@ -65,10 +65,6 @@ The epic's own work, once every child has merged:
 ## Required
 
 - [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - waiting on the adapter relay ACME needs
-- [rind runs on CPUs without the crypto extensions](/quest/m2/rind/older-cpus.md) - waiting on the rind release the areas in moq-cli and moq-relay switch to
-- [Drop iroh](/quest/m2/rind/drop-iroh.md) - moq-tokio, moq-relay, and moq-cli lose the `iroh` feature and web-transport-iroh
 - [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
-- [moq-auth on rind](/quest/m2/rind/auth.md) - JWT signing, key generation, and JWK loading run on rind
 - [moq-rtc on rind](/quest/m2/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
 - [Relay ACME on instant-acme](/quest/m2/rind/acme.md) - moq-relay replaces rustls-acme with instant-acme on rind and owns renewal
-- [moq-cli and moq-hls on rind](/quest/m2/rind/cli.md) - object_store, reqwest, and axum-server take rind's provider

@@ -96,7 +96,7 @@ impl<O: Output> Media<O> {
 					};
 					tracing::info!(
 						broadcast = %self.broadcast,
-						epoch = broadcast.info().epoch.as_ref().map(tracing::field::display),
+						instance = ?broadcast.info().instance,
 						"online"
 					);
 
@@ -255,7 +255,10 @@ impl<O: Output> Media<O> {
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
-					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
+					let rendition = match source
+						.resolve(config.broadcast.as_ref(), config.instance.as_ref())
+						.await
+					{
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve video rendition");
@@ -267,7 +270,7 @@ impl<O: Output> Media<O> {
 					// doubles as the staleness budget on the wire.
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					// A decoder and its subscription, starting `lookback` groups before the live edge.
-					let open = async |delay: moq_mux::container::Delay, lookback: u64| {
+					let open = async |delay: moq_net::track::Delay, lookback: u64| {
 						// The window's renderer refuses a GPU surface it cannot import, so
 						// the decoder downloads those instead, all of them on a device
 						// that imports none.
@@ -279,7 +282,9 @@ impl<O: Output> Media<O> {
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(hang::catalog::PRIORITY.video)
-									.with_max_delay(delay.max),
+									// The whole delay from the first request, so a cold join never
+									// states a zero minimum before the container's update.
+									.with_delay(delay),
 							)
 							.await?;
 						// Start at the live edge without asking the shared publisher
@@ -290,14 +295,13 @@ impl<O: Output> Media<O> {
 							subscriber = subscriber.with_range(largest.group.saturating_sub(lookback)..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
-						// The playout delay is the target latency; the floor above bounds how far
-						// back the start can wait, but the consumer still learns both bounds.
+						// The playout delay is the target latency, and the max how late a group may be.
 						let track = moq_mux::container::Consumer::new(subscriber, format).with_delay(delay);
 						Ok::<_, anyhow::Error>((track, decoder))
 					};
 					let opened = async {
-						let delay = moq_mux::container::Delay {
-							min: self.args.video_delay(),
+						let delay = moq_net::track::Delay {
+							min: Some(self.args.video_delay()),
 							max: Some(max_delay),
 						};
 						let (track, decoder) = open(delay, 0).await?;
@@ -310,8 +314,8 @@ impl<O: Output> Media<O> {
 						} else {
 							// The min-delay decoder's delay plus one sweep, as in
 							// `moq_video::decode::Consumer`.
-							let delay = moq_mux::container::Delay {
-								min: delay.min.saturating_add(warmup),
+							let delay = moq_net::track::Delay {
+								min: delay.min.map(|min| min.saturating_add(warmup)),
 								max: Some(max_delay.saturating_add(warmup)),
 							};
 							let (track, decoder) = open(delay, 1).await?;
@@ -382,7 +386,10 @@ impl<O: Output> Media<O> {
 					if playback.finished(&reference) {
 						continue;
 					}
-					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
+					let rendition = match source
+						.resolve(config.broadcast.as_ref(), config.instance.as_ref())
+						.await
+					{
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve audio rendition");
@@ -397,7 +404,7 @@ impl<O: Output> Media<O> {
 					// still have reached, and would size the hole fill below to a playhead
 					// that does not exist.
 					decode.delay = moq_audio::decode::Delay {
-						min: self.args.fixed_delay().unwrap_or_default(),
+						min: Some(self.args.fixed_delay().unwrap_or_default()),
 						max: Some(self.args.max_delay().max(AUDIO_BUFFER_MIN)),
 					};
 					decode.estimate = self.args.fixed_delay().is_none();
@@ -907,7 +914,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1006,14 +1013,16 @@ mod tests {
 			.unwrap();
 		let subscriber = video
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let mut audio = moq_mux::container::Producer::new(audio, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut video = moq_mux::container::Producer::new(video, Container::Legacy(moq_mux::container::Kind::Video));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1172,7 +1181,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1258,7 +1267,7 @@ mod tests {
 		// Joins at the end marker: the stopped encoder's media is already behind it.
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1313,7 +1322,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		};
 		options.estimate = false;
@@ -1394,7 +1403,10 @@ mod tests {
 		// The network keeps every group; only the player's age budget evicts.
 		let subscriber = video
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+			)
 			.await
 			.unwrap();
 		let mut video = moq_mux::container::Producer::new(video, Container::Legacy(moq_mux::container::Kind::Video));
@@ -1743,10 +1755,9 @@ mod tests {
 		(broadcast, catalog, audio)
 	}
 
-	/// Answer the next request through `claim` with one `audio` rendition, under `route`'s epoch.
+	/// Answer the next request through `claim` with one `audio` rendition, under a fresh instance.
 	async fn answer(
 		claim: &moq_net::origin::Requests,
-		route: &moq_net::origin::Route,
 	) -> (
 		moq_net::origin::Publication,
 		catalog::Producer,
@@ -1756,7 +1767,7 @@ mod tests {
 			.await
 			.expect("the claim is asked")
 			.unwrap();
-		let prepared = request.prepare(route.epoch.clone().expect("an epoch")).unwrap();
+		let prepared = request.prepare().unwrap();
 		let mut broadcast = prepared.broadcast().clone();
 		let catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let audio = rendition(&broadcast, &catalog, "audio");
@@ -1795,7 +1806,7 @@ mod tests {
 		player.abort();
 	}
 
-	/// A restarted publisher announces a fresh epoch while its old run still
+	/// A restarted publisher announces a fresh instance while its old run still
 	/// stands. The restart drops the old broadcast and plays the new one, whose
 	/// timeline starts over, instead of waiting for it to catch up.
 	#[tokio::test]
@@ -1805,14 +1816,12 @@ mod tests {
 		const OLD: f32 = 0.25;
 		const NEW: f32 = 0.5;
 		let origin = moq_tokio::origin::spawn();
-		let epoch = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-
-		let (_old_broadcast, _old_catalog, mut old) = publish(&origin, epoch());
+		let (_old_broadcast, _old_catalog, mut old) = publish(&origin, Default::default());
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		write(&mut old, 10, OLD).await;
 
-		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, epoch());
+		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
@@ -1845,10 +1854,10 @@ mod tests {
 		assert!(recorder.events().iter().any(|event| matches!(event, Event::Failed(_))));
 	}
 
-	/// Without epochs (moq-lite 06), a restart that overlaps the old route still
-	/// replaces it: the newest announcement wins the path.
+	/// A restart that overlaps the old route still replaces it: it is a new instance, and
+	/// the newest announcement at the exact path wins it.
 	#[tokio::test]
-	async fn an_epochless_republish_plays_the_new_broadcast() {
+	async fn an_overlapping_republish_plays_the_new_broadcast() {
 		tokio::time::pause();
 
 		const OLD: f32 = 0.25;
@@ -1861,9 +1870,8 @@ mod tests {
 		write(&mut old, 10, OLD).await;
 
 		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
-		// A restart without an epoch waits out the origin's update hold, since a
-		// withdrawal wave's stale route looks just like one, and the player joins the
-		// new broadcast at its live edge.
+		// Give the player the update hold to see the restart, so it joins the new
+		// broadcast at its live edge.
 		kio::clock::sleep(moq_net::origin::Config::default().update_hold).await;
 		write(&mut new, 10, NEW).await;
 
@@ -1975,8 +1983,8 @@ mod tests {
 		assert_eq!(Track::of(&source, &config, "audio"), absent);
 	}
 
-	/// A covering route of the same epoch that arrives as the exact route goes, both
-	/// before the player looks, is the path served again after a gap. A player with
+	/// A covering route that arrives as the exact route goes, both before the player
+	/// looks, is the path served again after a gap. A player with
 	/// nothing playing plays it.
 	#[tokio::test]
 	async fn a_covering_route_after_a_gap_plays_while_idle() {
@@ -1985,7 +1993,7 @@ mod tests {
 		const OLD: f32 = 0.25;
 		const NEW: f32 = 0.5;
 		let origin = moq_tokio::origin::spawn();
-		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = moq_net::origin::Route::default();
 
 		let (exact, mut exact_catalog, mut old) = publish(&origin, route.clone());
 		let recorder = Recorder::default();
@@ -1999,7 +2007,7 @@ mod tests {
 
 		let pool = origin.requests("").unwrap();
 		drop(exact);
-		let (served, served_catalog, mut new) = answer(&pool, &route).await;
+		let (served, served_catalog, mut new) = answer(&pool).await;
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
@@ -2012,9 +2020,8 @@ mod tests {
 	}
 
 	/// The exact route goes while the old run still holds its delay, and a covering
-	/// route of the same epoch takes over. Playback reaches the covering route, whether
-	/// the announcements show the gap (a restart) or the origin rides it out (the same
-	/// run carrying on).
+	/// route takes over under another instance. Playback reaches the covering route as
+	/// a restart.
 	#[tokio::test]
 	async fn a_handoff_to_a_covering_route_plays_on_while_draining() {
 		tokio::time::pause();
@@ -2022,7 +2029,7 @@ mod tests {
 		const OLD: f32 = 0.25;
 		const NEW: f32 = 0.5;
 		let origin = moq_tokio::origin::spawn();
-		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = moq_net::origin::Route::default();
 
 		// One instance, served by the exact route and then answered again behind a covering one.
 		let (exact, exact_catalog, mut old) = publish(&origin, route.clone());
@@ -2035,7 +2042,7 @@ mod tests {
 
 		exact.unannounce();
 		let pool = origin.requests("").unwrap();
-		let (mirror, mirror_catalog, mut copy) = answer(&pool, &route).await;
+		let (mirror, mirror_catalog, mut copy) = answer(&pool).await;
 		for index in 50..60 {
 			copy.write(packet(index, NEW)).unwrap();
 			kio::clock::sleep(PACKET_DURATION).await;
@@ -2057,7 +2064,7 @@ mod tests {
 
 		const SAMPLE: f32 = 0.25;
 		let origin = moq_tokio::origin::spawn();
-		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = moq_net::origin::Route::default();
 
 		let (broadcast, _catalog, mut audio) = publish(&origin, route.clone());
 		let recorder = Recorder::default();
@@ -2170,7 +2177,9 @@ mod tests {
 			.consume()
 			.track("video")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let track = moq_mux::container::Consumer::new(subscriber, Container::try_from(&catalog).unwrap());

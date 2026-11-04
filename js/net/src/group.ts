@@ -11,6 +11,7 @@ import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replac
 import { Queue } from "./queue.ts";
 import type { Timestamp } from "./time.ts";
 import { MAX_FRAME_BYTES, SEGMENT_BYTES } from "./util/limits.ts";
+import { checkSequence } from "./util/sequence.ts";
 
 // A live tail budget, including a conservative charge for each frame's object and queue slot.
 const TAIL_BYTES = 32 * 1024 * 1024;
@@ -191,12 +192,12 @@ export interface ReadOptions {
 /** Immutable group metadata. */
 export interface Info {
 	/** Sequence number of this group within its track. */
-	sequence: number;
+	sequence: bigint;
 }
 
 /** Reactive backing state shared by the group producer and one consumer. */
 class GroupState {
-	readonly sequence: number;
+	readonly sequence: bigint;
 	frames = new Signal(new Queue<Frame>());
 	closed = new Once<Error | null>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
@@ -230,7 +231,7 @@ class GroupState {
 	progress = new Set<(total: number) => void>();
 	shedRead?: () => void;
 
-	constructor(sequence: number) {
+	constructor(sequence: bigint) {
 		this.sequence = sequence;
 	}
 }
@@ -271,7 +272,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	for (const fn of state.progress) fn(state.total.peek());
 }
 
-let makeDemand: (sequence: number, wanted: Getter<boolean>, state: GroupState) => Demand;
+let makeDemand: (sequence: bigint, wanted: Getter<boolean>, state: GroupState) => Demand;
 
 /**
  * A watch-only view of a group's mirror readers, including coalesced fetches.
@@ -280,11 +281,11 @@ let makeDemand: (sequence: number, wanted: Getter<boolean>, state: GroupState) =
  */
 export class Demand {
 	/** The group sequence this handle watches. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 	#wanted: Getter<boolean>;
 	#state: GroupState;
 
-	private constructor(sequence: number, wanted: Getter<boolean>, state: GroupState) {
+	private constructor(sequence: bigint, wanted: Getter<boolean>, state: GroupState) {
 		this.sequence = sequence;
 		this.#wanted = wanted;
 		this.#state = state;
@@ -312,7 +313,7 @@ export class Demand {
  */
 export class Producer {
 	/** Sequence number of this group within its track. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 
 	#state: GroupState;
 	#mirrors?: Set<GroupState>;
@@ -338,7 +339,8 @@ export class Producer {
 	// timestamp against its neighbors' starts.
 	#admits?: ((start: Timestamp) => () => void)[];
 
-	constructor(sequence: number) {
+	constructor(sequence: bigint) {
+		checkSequence(sequence);
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
 		this.#demand = makeDemand(sequence, this.#wanted, this.#state);
@@ -1061,7 +1063,7 @@ class CombinedClosed implements GetPromise<Error | null> {
  */
 export class Consumer {
 	/** Sequence number of this group within its track. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 
 	#state: GroupState;
 	// The copy it was mirrored from, which that copy's cache evicts.
@@ -1120,7 +1122,7 @@ export class Consumer {
 	}
 
 	/**
-	 * Settles with a `StreamError` of code `Old` once the subscription's `maxDelay` gives up
+	 * Settles with a `StreamError` of code `Old` once the subscription's `delay.max` gives up
 	 * on this group, even after every frame was read or the group closed: a publisher still
 	 * writing or draining it races its writes against this, and against {@link closed}
 	 * settling with an error, and abandons the stream once either does. Peek it synchronously

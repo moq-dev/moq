@@ -35,8 +35,8 @@ owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land. Decided 2026-10-25: no routing identity proof
-gates the cut; the key and its proof belong to Peer grants, and lite-07
-routing identities stay declared and unverified. Decided 2026-10-26
+gates the cut, and lite-07 routing identities stay declared and unverified
+(2026-11-02: peer grants are dropped and no key proof is planned). Decided 2026-10-26
 (maintainer): receivers do not stamp per-session identities either, since
 that splits one origin into several identities across a relay mesh.
 
@@ -113,7 +113,8 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite FETCH is gone from lite-07, in Rust and JS
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - the job's route inherits the claim's identity, with no new wire message
+- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - the job's route inherits the claim's instance, with no new wire message
+- [Datagram tracks](/quest/m1/datagram-tracks/README.md) - lite-07 subscribes to datagram tracks through their own request, and datagrams carry their own sequence
 
 ## Related
 

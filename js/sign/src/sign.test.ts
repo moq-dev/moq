@@ -14,7 +14,7 @@ import * as Track from "./track.ts";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const url = new URL("https://localhost:4443/test");
-const subscription = { maxDelay: Milli(60_000) };
+const subscription = { delay: { max: Milli(60_000) } };
 
 async function session() {
 	const pair = createMockTransportPair("moq-lite-07-wip");
@@ -48,14 +48,14 @@ async function publish(key: SecretKey, path: Path.Valid) {
 	const net = await session();
 	const publication = net.publisher.createBroadcast(path);
 	const signed = new Signed.Producer(publication.broadcast, key, path);
-	publication.announce({ epoch: signed.epoch });
+	publication.announce({ instance: signed.instance });
 	return {
 		...net,
 		signed,
 		/** A signed track over a net track the test can also write forged frames to. */
 		track(name: string) {
 			const raw = publication.broadcast.createTrack(name);
-			return { signed: Track.Producer.make(raw, key, new Scope(path, signed.epoch, name), { next: 0 }), raw };
+			return { signed: Track.Producer.make(raw, key, new Scope(path, signed.instance, name), { next: 0n }), raw };
 		},
 		async consume(expected: PublicKey): Promise<Signed.Consumer> {
 			return new Signed.Consumer(await active(net.subscriber, path), expected, path);
@@ -80,7 +80,7 @@ test("frames roundtrip signed, timestamps included", async () => {
 	await group.writeFrame(Time.Timestamp.fromMicros(2_400), new Uint8Array());
 
 	const consumer = await published.consume(key.public);
-	expect(consumer.epoch).toBe(published.signed.epoch);
+	expect(consumer.instance).toBe(published.signed.instance);
 	const track = consumer.subscribe("video", subscription);
 	const received = await track.recvGroup();
 	const first = await received?.readFrame();
@@ -119,7 +119,7 @@ test("a forged frame delivers nothing and ends only its group", async () => {
 	await expect(group?.readFrame()).rejects.toEqual(new Failure("signature"));
 	await expect(group?.readFrame()).rejects.toEqual(new Failure("signature"));
 
-	const next = signed.createGroup(1);
+	const next = signed.createGroup(1n);
 	await next.writeFrame(undefined, encoder.encode("after"));
 	next.finish();
 	expect(await payload(await track.recvGroup())).toBe("after");
@@ -153,7 +153,7 @@ test("a frame replayed into another group or track is refused", async () => {
 	await expect((await readA.recvGroup())?.readFrame()).rejects.toEqual(new Failure("signature"));
 
 	// The same group and index of another track.
-	const moved = b.raw.createGroup(0);
+	const moved = b.raw.createGroup(0n);
 	moved.writeFrame({ payload: body });
 	moved.finish();
 	await expect((await readB.recvGroup())?.readFrame()).rejects.toEqual(new Failure("signature"));
@@ -174,17 +174,17 @@ test("a group sequence is never signed twice", async () => {
 
 	// Net would serve the aborted sequence again, but frames of both incarnations would verify,
 	// so a relay holding both could splice them into one group.
-	expect(() => track.createGroup(0)).toThrow("duplicate group");
-	expect(track.appendGroup().sequence).toBe(1);
-	expect(() => track.createGroup(1)).toThrow("duplicate group");
-	expect(track.createGroup(5).sequence).toBe(5);
-	expect(() => track.createGroup(3)).toThrow("duplicate group");
+	expect(() => track.createGroup(0n)).toThrow("duplicate group");
+	expect(track.appendGroup().sequence).toBe(1n);
+	expect(() => track.createGroup(1n)).toThrow("duplicate group");
+	expect(track.createGroup(5n).sequence).toBe(5n);
+	expect(() => track.createGroup(3n)).toThrow("duplicate group");
 
-	// A replacement track continues past its predecessor's sequences under the same epoch.
+	// A replacement track continues past its predecessor's sequences under the same instance.
 	track.abort(new Error("replaced"));
 	const replacement = published.signed.createTrack("stream");
-	expect(() => replacement.createGroup(0)).toThrow("duplicate group");
-	expect(replacement.appendGroup().sequence).toBe(6);
+	expect(() => replacement.createGroup(0n)).toThrow("duplicate group");
+	expect(replacement.appendGroup().sequence).toBe(6n);
 
 	replacement.close();
 	published.signed.close();

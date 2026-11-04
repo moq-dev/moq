@@ -23,7 +23,7 @@ Decided with the maintainer on 2026-10-17 (see the
   ordinary stream data that any controller counts and paces, and it
   implements the sender hook in `js/net`, mirroring Rust's
   `transport::Probe`. Decided 2026-10-20: browser-only. A native session without
-  native probing (iroh on noq, or moq-quic under CUBIC) has no sender, so
+  native probing (moq-quic under CUBIC) has no sender, so
   [native rung disable](/quest/m1/simulcast-rung-disable.md) never stops a
   rung there.
 - **The browser's send target.** The `js/net` mirror of the Rust send
@@ -71,3 +71,7 @@ Tests, on `@moq/clock`'s `Manual`:
   Assert that repeated clusters on a path with no room stay within the
   overhead budget.
   Wire it into CI at least nightly, sharing the epic's shaped-uplink setup.
+
+## Required
+
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari have no estimate for a probe cluster to pace against or raise until the PROBE estimate feeds the allocator

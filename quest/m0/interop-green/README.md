@@ -1,4 +1,4 @@
-# Interop and Video pass on main
+# [XS] Interop and Video pass on main
 
 ## Goal
 
@@ -28,7 +28,3 @@ This README's own work, after the children: confirm a scheduled Interop
 and Video run each pass.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Browser tests expect current behavior](/quest/m0/interop-green/stale-browser-tests.md) - the renderer and element version tests match the shipped validation and version list

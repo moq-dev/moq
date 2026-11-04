@@ -17,7 +17,7 @@ const PACKET: u16 = 1200;
 fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
     let base = Instant::now();
     let region = Region::new(ALLOCATOR);
-    let config = Bbr3Config {
+    let config = Config {
         probe_rng_seed: Some([7; 16]),
         ..Default::default()
     };
@@ -90,11 +90,10 @@ fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
 #[test]
 #[ignore = "controller benchmark: run with --release and --success-output immediate"]
 fn benchmark_per_packet() {
-    println!(
-        "bbr_packet controller_stack_bytes={} packet_state_bytes={}",
-        size_of::<Bbr3>(),
-        size_of::<Packet>()
-    );
+    println!("state,size_bytes");
+    println!("controller_stack,{}", size_of::<Bbr3>());
+    println!("packet,{}", size_of::<Packet>());
+    println!("steady,flight,batch,cpu_ns,peak_bytes");
     for steady in [false, true] {
         for flight in [16, 64, 1000, 4000, 16000] {
             for batch in [1, 8, 32] {
@@ -107,7 +106,7 @@ fn benchmark_per_packet() {
                 }
                 samples.sort();
                 println!(
-                    "bbr_packet steady={steady} flight={flight} batch={batch} cpu_ns={} peak_bytes={bytes}",
+                    "{steady},{flight},{batch},{},{bytes}",
                     samples[1].as_nanos()
                 );
             }

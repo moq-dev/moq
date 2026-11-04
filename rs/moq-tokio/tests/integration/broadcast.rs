@@ -944,7 +944,7 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// The client connects to two servers announcing the same route. The preferred
 /// (cheaper) route serves the track; when that session dies, the broadcast
 /// re-splices through the standby at a group boundary, without the path ever
-/// being retracted: both routes carry the same epoch over lite-07, so they serve
+/// being retracted: both routes carry the same instance over lite-07, so they serve
 /// the same bytes and the subscription rides the failover.
 #[tokio::test]
 async fn broadcast_route_migration() {
@@ -952,7 +952,7 @@ async fn broadcast_route_migration() {
 
 	let publisher = Hop::new(0x42).unwrap();
 	// Replicas of one publisher instance, and the only version that carries it.
-	let epoch = moq_net::Epoch::mint();
+	let instance = moq_net::Instance::random();
 	let lite_07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 
 	// ── publisher A: the preferred route (cheaper) ──────────────────
@@ -963,7 +963,7 @@ async fn broadcast_route_migration() {
 	broadcast_a
 		.announce(
 			moq_net::origin::Route::default()
-				.with_epoch(epoch.clone())
+				.with_instance(instance.clone(), 0)
 				.with_hops(hops_a)
 				.with_cost(1),
 		)
@@ -988,7 +988,7 @@ async fn broadcast_route_migration() {
 	broadcast_b
 		.announce(
 			moq_net::origin::Route::default()
-				.with_epoch(epoch.clone())
+				.with_instance(instance.clone(), 0)
 				.with_hops(hops_b)
 				.with_cost(2),
 		)
@@ -1072,7 +1072,7 @@ async fn broadcast_route_migration() {
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
 		.with_range(1..)
-		.with_max_delay(Duration::from_secs(10));
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 	let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
@@ -1204,7 +1204,8 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
-	let budget = moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100));
+	let budget = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100)));
 	async fn recv(sub: &mut moq_net::track::Subscriber, version: &str) -> u64 {
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
@@ -3297,8 +3298,8 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 /// left to redial, and dropping the connection closes the transport because it
 /// holds the last session clone.
 ///
-/// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the connection it just got.
+/// The client comes back because it owns the transport endpoint, and the caller
+/// has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_tokio::Client,
 	url: url::Url,
@@ -3330,7 +3331,9 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.backoff.initial = Some((Duration::ZERO).into());
-	client_config.backoff.timeout = Some((Duration::from_millis(500)).into());
+	// Any window catches the bug, since a reset window never runs out; a short one keeps the
+	// redials, each a full handshake, few.
+	client_config.backoff.timeout = Some((Duration::from_millis(100)).into());
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = client.connect(url);

@@ -58,7 +58,7 @@ function frames(sequence: number): Uint8Array[] {
 
 /** Publish every group, cutting group 1 for `drop`. The end precedes the last group's data. */
 function write(track: Moq.Track.Producer) {
-	track.finishAt({ group: GROUPS, frame: 0 });
+	track.finishAt({ group: BigInt(GROUPS), frame: 0 });
 	for (let sequence = 0; sequence < GROUPS; sequence++) {
 		const group = track.appendGroup();
 		if (drop && sequence === 1) {
@@ -73,11 +73,11 @@ function write(track: Moq.Track.Producer) {
 
 /** Read one whole group, checking every frame's bytes, and report when the `late` head is in. */
 async function read(group: Moq.Group.Consumer) {
-	for (const [index, want] of frames(group.sequence).entries()) {
+	for (const [index, want] of frames(Number(group.sequence)).entries()) {
 		const frame = await group.readFrame();
 		assert(frame, "short group");
 		assert(Buffer.from(frame.payload).equals(want), `wrong frame ${index} in group ${group.sequence}`);
-		if (late && group.sequence === 0 && index + 1 === LATE_HEAD) process.stdout.write("late head\n");
+		if (late && group.sequence === 0n && index + 1 === LATE_HEAD) process.stdout.write("late head\n");
 	}
 	assert.equal(await group.readFrame(), undefined, "extra frame");
 }
@@ -146,8 +146,8 @@ try {
 			// `late` names no start, joining the latest group as a player does: group 0, whose
 			// head predates the subscription.
 			const track = broadcast.track("tail").subscribe({
-				maxDelay: Milli(drop ? 60_000 : 5000),
-				...(late ? {} : { groups: { start: { included: 0 } } }),
+				delay: { max: Milli(drop ? 60_000 : 5000) },
+				...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
 			});
 			if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
 			const seen: number[] = [];
@@ -158,7 +158,7 @@ try {
 					for (let sequence = 0; sequence < GROUPS; sequence++) {
 						const frame = await track.recvDatagram();
 						assert(frame, "missing datagram");
-						assert.equal(frame.sequence, sequence, "wrong datagram sequence");
+						assert.equal(frame.sequence, BigInt(sequence), "wrong datagram sequence");
 						assert.equal(frame.payload.byteLength, 900, "truncated datagram");
 						assert(
 							frame.payload.every((byte) => byte === sequence),
@@ -173,14 +173,14 @@ try {
 						const group = await track.recvGroup();
 						assert(group, "missing group");
 						try {
-							assert.equal(group.sequence, sequence, "joined the wrong group");
+							assert.equal(group.sequence, BigInt(sequence), "joined the wrong group");
 							await read(group);
 						} finally {
 							group.close();
 						}
 					}
 					assert.equal(await track.recvGroup(), undefined, "extra group");
-					assert.deepEqual(await track.finished(), { group: LATE_GROUPS, frame: 0 });
+					assert.deepEqual(await track.finished(), { group: BigInt(LATE_GROUPS), frame: 0 });
 					console.error("late join clean groups=0,1 frames=6");
 				} else {
 					for (;;) {
@@ -189,7 +189,7 @@ try {
 						try {
 							assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
 							await read(group);
-							seen.push(group.sequence);
+							seen.push(Number(group.sequence));
 						} finally {
 							group.close();
 						}
@@ -198,7 +198,7 @@ try {
 					const first = join ? (seen[0] ?? 0) : 0;
 					const all = Array.from({ length: GROUPS - first }, (_, i) => first + i);
 					assert.deepEqual(seen, drop ? [0, 2, 3] : all);
-					assert.deepEqual(await track.finished(), { group: GROUPS, frame: 0 });
+					assert.deepEqual(await track.finished(), { group: BigInt(GROUPS), frame: 0 });
 					if (join) console.error(`tail join clean end=4 groups=${seen.join(",")}`);
 					else if (drop) console.error("tail drop clean end=4 groups=0,2,3 bytes=786432");
 					else console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");

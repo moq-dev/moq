@@ -65,7 +65,7 @@ async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
         ]
         audio.write(
             moq.audio.Frame(
-                timestamp=timedelta(microseconds=timestamp_us), data=struct.pack(f"<{len(samples)}f", *samples)
+                timestamp=moq.Timestamp(timestamp_us, 1_000_000), data=struct.pack(f"<{len(samples)}f", *samples)
             )
         )
         phase += AUDIO_BATCH_SAMPLES
@@ -82,6 +82,7 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     """Wait for the relay's grant and print it, in the Rust client's `auth granted` shape."""
     session = client.session
     assert session is not None
+
     async def first() -> moq.Grant:
         async with session.grants() as grants:
             async for grant in grants:
@@ -195,7 +196,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                     raise RuntimeError("catalog ended without video")
                 id, video = next(iter(catalog.video.items()))
                 async with await moq.media.TrackConsumer.subscribe(
-                    consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
+                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
                 ) as media:
                     count = 0
                     async for frame in media:
@@ -256,7 +257,10 @@ async def _decode_audio(
     """
     out = f"{out}.{audio.codec.split('.')[0]}"
     decoder = await moq.audio.Consumer.subscribe(
-        consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.media.Delay(min=timedelta(0), max=MAX_DELAY))
+        consumer,
+        id,
+        audio,
+        moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.Delay(max=MAX_DELAY)),
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0
@@ -269,7 +273,7 @@ async def _decode_audio(
             if isinstance(frame, moq.audio.End):
                 raise RuntimeError("audio track ended early")
             samples = len(frame.data) // frame_bytes
-            log.write(f"{frame.timestamp // timedelta(microseconds=1)} {samples}\n")
+            log.write(f"{frame.timestamp.to_timedelta() // timedelta(microseconds=1)} {samples}\n")
             pcm.write(frame.data)
             decoded += samples
             if decoded * 1000 >= audio_ms * audio.sample_rate:
@@ -306,7 +310,7 @@ async def subscribe(
         id, video = next(iter(catalog.video.items()))
 
         media = await moq.media.TrackConsumer.subscribe(
-            consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
+            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
         )
 
         total = 0

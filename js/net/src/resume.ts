@@ -3,8 +3,8 @@
  * `rs/moq-net`.
  *
  * A {@link Front} is one broadcast served through one route at a time: the origin re-sources it
- * when another route of the same epoch takes over, since routes with one epoch serve one
- * broadcast and so hold the same groups and frames. A reader of a logical track reads the
+ * when another route of the same instance takes over, since routes with one instance serve one
+ * stream and so hold the same groups and frames. A reader of a logical track reads the
  * serving route's copy directly, through its own subscription: nothing is copied, and with one
  * route it is a passthrough.
  *
@@ -55,11 +55,11 @@ import {
 	type DropRun,
 	finalSequence,
 	type GroupRecover,
-	groupBounds,
 	hooks,
 	insertDrop,
 	insertRun,
 	MAX_DATAGRAMS,
+	maxDelayOf,
 	type Recv,
 	type RecvDatagram,
 	type Replacement,
@@ -72,6 +72,8 @@ import {
 import { grace } from "./ledger.ts";
 import type { Lister, Tracks, TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
+import { max, min, UNBOUNDED } from "./util/sequence.ts";
+import { clamped, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing to deliver rather than judging what it carried:
@@ -138,8 +140,15 @@ function ask(source: Source, name: string, retired: AbortSignal, hold?: AbortSig
 	});
 }
 
+let sources = 0;
+
 /** One route's broadcast, held while the front serves it or a reader still reads a copy of it. */
 class Source {
+	/**
+	 * Names this source where it outlives its route, as a front's record of who said what a
+	 * track is: a reference there would keep a retired route's session reachable.
+	 */
+	readonly id = sources++;
 	readonly wire: BroadcastWire;
 	/** The table's handle this was served from, so serving it again is a no-op. */
 	readonly from: broadcast.Consumer;
@@ -239,7 +248,7 @@ interface Copy {
 	source: Source;
 	sub: track.Subscriber;
 	/** Where the subscription was asked to start, so demand updates never ask for less. */
-	floor?: number;
+	floor?: bigint;
 	/** Replaced by a newer route: its datagrams are the newer copy's to deliver. */
 	replaced: boolean;
 	/**
@@ -247,7 +256,7 @@ interface Copy {
 	 * from it. `null` when that leaves nothing. Unset while it is the only copy still feeding
 	 * groups the newer one may never have.
 	 */
-	until?: number | null;
+	until?: bigint | null;
 	/** The group channel ran out: cleanly (`null`) or failed. */
 	done?: Error | null;
 	/** The datagram channel ran out. */
@@ -262,26 +271,30 @@ interface Copy {
 	lease: number;
 }
 
-/** Subscribe to a route's copy, or to a failed stand-in when that route can no longer serve. */
+/**
+ * Subscribe to a route's copy, or to a failed stand-in when that route can no longer serve. A
+ * copy parks past the end of a bounded window: the logical reader judges that end across its
+ * copies; see {@link Reader.exhausted}.
+ */
 function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscription): track.Subscriber {
 	try {
-		return wire.subscribe(name, subscription);
+		return hooks.parked(wire.subscribe(name, subscription));
 	} catch (err) {
 		const failed = new track.Producer(name);
 		failed.abort(err instanceof Error ? err : new Error(String(err)));
-		return failed.subscribe(subscription);
+		return hooks.parked(failed.subscribe(subscription));
 	}
 }
 
 /** Take a copy's next group, in sequence or arrival order. */
-function take(copy: Copy, ordered: boolean): Recv {
-	return ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
+function take(copy: Copy, ordered: boolean, floor?: bigint): Recv {
+	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, false);
 }
 
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
-function copyEnd(copy: Pick<Copy, "until">): number | undefined {
+function copyEnd(copy: Pick<Copy, "until">): bigint | undefined {
 	if (copy.until === undefined) return undefined;
-	return copy.until === null ? 0 : copy.until + 1;
+	return copy.until === null ? 0n : copy.until + 1n;
 }
 
 /** One reader's subscription to a logical track; see the module docs. */
@@ -296,24 +309,24 @@ class Reader implements ResumeSource {
 	 */
 	#copies: Copy[] = [];
 	/** The cursor start the copies were last bounded at: a lower one asks for a backfill. */
-	#start: number;
+	#start: bigint;
 	/** The newest group handed out: where a new copy is asked to start. */
-	#newest?: number;
+	#newest?: bigint;
 	/**
 	 * Set once the route changed, so the serving copy's resume point may pass over groups the
 	 * reader lacks. Kept until the gaps are backfilled; see {@link #backfillGaps}.
 	 */
 	#resumed = false;
 	/** The last datagram handed out, which never ages until another supersedes it. */
-	#datagram?: number;
+	#datagram?: bigint;
 	/**
 	 * Previously handed-out identities, in the order they were superseded. A replacement copy
 	 * replays at most its buffered datagrams, so no more than that many are kept, whatever the
 	 * budget: a publisher cannot grow it.
 	 */
-	#datagrams = new Map<number, Instant>();
+	#datagrams = new Map<bigint, Instant>();
 	/** The newest datagram handed out, which a declared end must stay past. */
-	#newestDatagram?: number;
+	#newestDatagram?: bigint;
 	/** Bumped when this reader subscribes a new copy or a copy's last lease ends, waking its parked reads. */
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
@@ -413,7 +426,7 @@ class Reader implements ResumeSource {
 			copy.datagramsDone = undefined;
 			// Resume where a fresh copy would: a group it buffered while replaced, below the newest
 			// another route handed out, is not handed out.
-			if (this.#newest !== undefined) copy.floor = Math.max(copy.floor ?? 0, this.#newest);
+			if (this.#newest !== undefined) copy.floor = max(copy.floor ?? 0n, this.#newest);
 			this.#update(copy);
 			this.#bound(copy);
 			this.#copies.push(copy);
@@ -478,17 +491,9 @@ class Reader implements ResumeSource {
 	/** What `copy` is asked for: the reader's own preferences, from its floor and through its replacement. */
 	#wire(copy: Pick<Copy, "floor" | "until">): track.Subscription {
 		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
-		const bounds = groupBounds(preferences.groups);
-		const start = Math.max(bounds.start, copy.floor ?? 0);
-		const replaced = copyEnd(copy);
-		const end = replaced === undefined ? bounds.end : Math.min(bounds.end ?? replaced, replaced);
-		return {
-			...preferences,
-			groups: {
-				start: start > 0 ? { included: start } : undefined,
-				end: end === undefined ? undefined : { excluded: end },
-			},
-		};
+		const floor = copy.floor ? copy.floor : undefined;
+		// The copies resolve relative anchors against the groups they hold.
+		return { ...preferences, ranges: clamped(preferences.ranges ?? [{}], floor, copyEnd(copy), []) };
 	}
 
 	#update(copy: Copy): void {
@@ -501,9 +506,9 @@ class Reader implements ResumeSource {
 	 */
 	#bound(copy: Copy): void {
 		const cursor = this.#shell.cursor.peek();
-		const start = Math.max(cursor.start, copy.floor ?? 0);
+		const start = max(cursor.start, copy.floor ?? 0n);
 		const replaced = copyEnd(copy);
-		const end = replaced === undefined ? cursor.end : Math.min(cursor.end ?? replaced, replaced);
+		const end = replaced === undefined ? cursor.end : min(cursor.end ?? replaced, replaced);
 		copy.sub.withRange({
 			start: { included: start },
 			end: end === undefined ? undefined : { excluded: end },
@@ -515,31 +520,31 @@ class Reader implements ResumeSource {
 	 * resume point, which a lowered floor newly covers. The copies that cached them may be gone,
 	 * and that copy never asked for them, so a bounded copy of the same route asks for just those.
 	 */
-	#backfill(start: number, passed: number): void {
+	#backfill(start: bigint, passed: bigint): void {
 		const newest = this.#copies.at(-1);
 		if (this.#closed || this.#ended || newest?.floor === undefined) return;
-		const end = Math.min(passed, newest.floor);
+		const end = min(passed, newest.floor);
 		// An ordered reader never goes back, nor does any reader past its budget.
 		if (this.#delivered.covers(start, end)) return;
 		// A floor lowered again asks once.
 		const closed = newest.source.from.closed;
 		const asks = (copy: Copy) =>
 			copy.source.from.closed === closed && copy.floor !== undefined && copy.floor <= start;
-		if (this.#copies.some((copy) => asks(copy) && (copyEnd(copy) ?? Number.POSITIVE_INFINITY) >= end)) return;
+		if (this.#copies.some((copy) => asks(copy) && (copyEnd(copy) ?? UNBOUNDED) >= end)) return;
 		// A later resume point widens the route's backfill rather than asking again, so flaps over
 		// a gap keep one per route. Waited for as long as a new one would be.
 		const widened = this.#copies
 			.slice(0, -1)
 			.find((copy) => copy.done === undefined && copy.until !== undefined && asks(copy));
 		if (widened) {
-			widened.until = end - 1;
+			widened.until = end - 1n;
 			widened.since = now();
 			this.#update(widened);
 			this.#bound(widened);
 			this.wake();
 			return;
 		}
-		const backfill = { floor: start, until: end - 1 };
+		const backfill = { floor: start, until: end - 1n };
 		this.#add(
 			{
 				generation: newest.generation,
@@ -584,7 +589,7 @@ class Reader implements ResumeSource {
 	}
 
 	/** The copies other than `except` whose track still holds group `sequence` unfailed, newest first. */
-	holding(sequence: number, except: Copy): Copy[] {
+	holding(sequence: bigint, except: Copy): Copy[] {
 		const holding: Copy[] = [];
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -593,7 +598,7 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
-	cachedGroup(sequence: number, from = 0): GroupConsumer | undefined {
+	cachedGroup(sequence: bigint, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			const group = hooks.cachedGroup(copy.sub, sequence, from);
@@ -609,19 +614,19 @@ class Reader implements ResumeSource {
 	 * it replays, already handed out, bounds nothing: the replaced copies may still hold the next.
 	 * Nor does a backfill of the serving route.
 	 */
-	#observe(copy: Copy, sequence: number): void {
+	#observe(copy: Copy, sequence: bigint): void {
 		if (copy.replaced || copy.generation !== this.#generation) return;
-		const bound = Math.max(this.#newest ?? -1, sequence - 1);
+		const bound = max(this.#newest ?? -1n, sequence - 1n);
 		for (const replaced of this.#copies) {
 			if (replaced === copy || !replaced.replaced || replaced.until !== undefined) continue;
-			replaced.until = bound < 0 ? null : bound;
+			replaced.until = bound < 0n ? null : bound;
 			replaced.since = now();
 			this.#update(replaced);
 			this.#bound(replaced);
 		}
 	}
 
-	#deliverable(copy: Copy, sequence: number, delivered: Delivered): boolean {
+	#deliverable(copy: Copy, sequence: bigint, delivered: Delivered): boolean {
 		const end = copyEnd(copy);
 		return (end === undefined || sequence < end) && !delivered.has(sequence);
 	}
@@ -643,18 +648,21 @@ class Reader implements ResumeSource {
 		// lower group that truly arrives later.
 		const next = this.#lowest(ordered, delivered);
 		if (next) {
-			const recv = take(next, ordered);
+			const recv = take(next, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 			if (recv.kind === "group") {
 				this.#observe(next, recv.group.sequence);
 				return { kind: "group", group: this.#handOut(next, recv.group) };
 			}
+			// The lowest buffered group keeps its place while its copy waits on a hole.
+			// A newer copy must not pass it and permanently discard it from sequence order.
+			if (ordered && recv.kind === "idle") return recv;
 		}
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const recv = take(copy, ordered);
+				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 				if (recv.kind === "group") {
 					if (!this.#deliverable(copy, recv.group.sequence, delivered)) {
 						recv.group.close();
@@ -677,6 +685,35 @@ class Reader implements ResumeSource {
 			if (dropped) return dropped;
 		}
 		return this.#end((copy) => copy.done);
+	}
+
+	/**
+	 * Whether the reader's bounded `window` has nothing left to deliver, once no replaced copy may
+	 * still deliver a group under its bound. The serving copy reads every group of the window from
+	 * its resume point, so it judges those, against what it and the reader (`delivered`) handed
+	 * out. What lies under its resume point was the copies' it replaced, each let go once it had
+	 * nothing more, though one there that the local floor or cap keeps out stays owed, as on one
+	 * cursor. A backfill still to ask is not judged yet, and a route between copies has nothing to
+	 * judge. Mirrors the Rust `Reader::exhausted`.
+	 */
+	exhausted(delivered: Delivered, window: Window): boolean {
+		this.sync();
+		if (this.#closed || this.#ended || this.#resumed) return false;
+		const serving = this.#copies.at(-1);
+		if (!serving || serving.replaced || serving.done !== undefined || serving.generation !== this.#generation) {
+			return false;
+		}
+		if (this.#letGo(delivered)) return false;
+		const end = window.end();
+		if (serving.floor !== undefined && end !== undefined) {
+			const cursor = this.#shell.cursor.peek();
+			for (const run of window.runs(window.floor() ?? 0n, min(serving.floor, end))) {
+				for (const gap of delivered.gaps(run.start, run.end)) {
+					if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
+				}
+			}
+		}
+		return hooks.exhaustedFor(serving.sub, delivered);
 	}
 
 	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
@@ -708,12 +745,12 @@ class Reader implements ResumeSource {
 		const feeding: Run[] = [];
 		for (const copy of this.#copies) {
 			if (copy === serving || !this.#feeds(copy)) continue;
-			const start = Math.max(cursor.start, copy.floor ?? 0);
-			insertRun(feeding, start, copyEnd(copy) ?? Number.POSITIVE_INFINITY);
+			const start = max(cursor.start, copy.floor ?? 0n);
+			insertRun(feeding, start, copyEnd(copy) ?? UNBOUNDED);
 		}
 		for (const run of this.#drops) {
-			const end = Math.min(run.end, cursor.end ?? run.end);
-			for (const gap of delivered.gaps(Math.max(run.start, cursor.start), end)) {
+			const end = min(run.end, cursor.end ?? run.end);
+			for (const gap of delivered.gaps(max(run.start, cursor.start), end)) {
 				const [open] = runGaps(feeding, gap.start, gap.end);
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
@@ -734,11 +771,15 @@ class Reader implements ResumeSource {
 	// The copy whose next group is the lowest deliverable one, dropping any it holds next that
 	// are not.
 	#lowest(ordered: boolean, delivered: Delivered): Copy | undefined {
-		let lowest: { copy: Copy; sequence: number } | undefined;
+		let lowest: { copy: Copy; sequence: bigint } | undefined;
 		for (const copy of this.#copies) {
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const sequence = hooks.peekGroup(copy.sub, ordered);
+				const sequence = hooks.peekGroup(
+					copy.sub,
+					ordered,
+					this.#newest === undefined ? undefined : this.#newest + 1n,
+				);
 				if (sequence === undefined) break;
 				if (this.#deliverable(copy, sequence, delivered)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
@@ -746,7 +787,7 @@ class Reader implements ResumeSource {
 					if (!lowest || sequence <= lowest.sequence) lowest = { copy, sequence };
 					break;
 				}
-				const recv = take(copy, ordered);
+				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 				if (recv.kind !== "group") break;
 				recv.group.close();
 			}
@@ -778,12 +819,12 @@ class Reader implements ResumeSource {
 					if (sequence === this.#datagram || this.#datagrams.has(sequence)) continue;
 					if (this.#datagram !== undefined) {
 						if (this.#datagrams.size === MAX_DATAGRAMS) {
-							this.#datagrams.delete(this.#datagrams.keys().next().value as number);
+							this.#datagrams.delete(this.#datagrams.keys().next().value as bigint);
 						}
 						this.#datagrams.set(this.#datagram, at);
 					}
 					this.#datagram = sequence;
-					this.#newestDatagram = Math.max(this.#newestDatagram ?? 0, sequence);
+					this.#newestDatagram = max(this.#newestDatagram ?? 0n, sequence);
 					return recv;
 				}
 				if (recv.kind === "done") copy.datagramsDone = copy.sub.closed.peek() ?? null;
@@ -873,7 +914,7 @@ class Reader implements ResumeSource {
 		this.#copies = this.#copies.filter((copy) => {
 			if (!copy.replaced) {
 				if (!this.#ended || copy.lease > 0) return true;
-				const start = Math.max(cursor.start, copy.floor ?? 0);
+				const start = max(cursor.start, copy.floor ?? 0n);
 				if (!hooks.spent(copy.sub, start, undefined, delivered)) return true;
 				// A group read from a copy it replaced may still continue from it.
 				if (this.#backs(copy, true, grace(this.#budget()))) return true;
@@ -893,7 +934,7 @@ class Reader implements ResumeSource {
 	 * land on it, `"keep"` while it holds one unread or backs a group handed out. `edge` is the
 	 * newest group the serving copy has.
 	 */
-	#retains(copy: Copy, delivered: Delivered, edge: number | undefined): "wait" | "keep" | undefined {
+	#retains(copy: Copy, delivered: Delivered, edge: bigint | undefined): "wait" | "keep" | undefined {
 		// Datagrams are ephemeral, so only groups keep a copy: a reader that only reads datagrams
 		// keeps none, whatever its budget.
 		if (!this.#groupsRead) return undefined;
@@ -909,7 +950,7 @@ class Reader implements ResumeSource {
 		if (copy.done === undefined && end !== undefined && !this.#expired(copy, budget)) {
 			const cursor = this.#shell.cursor.peek();
 			// From where it was asked to start, or else from what it first got.
-			const start = Math.max(cursor.start, copy.floor ?? 0);
+			const start = max(cursor.start, copy.floor ?? 0n);
 			const floor = copy.floor !== undefined;
 			// A group still to land is waited for once something superseded it, as a gap is.
 			const land = { start, end, floor, grace: wait, delivered };
@@ -932,7 +973,7 @@ class Reader implements ResumeSource {
 			// A group at or past where it was asked to start may land even before its first
 			// arrival; without a floor, only what follows its first arrival can.
 			const asked = copy.floor !== undefined && copy.floor <= sequence;
-			const land = { start: sequence, end: sequence + 1, floor: asked, grace: wait };
+			const land = { start: sequence, end: sequence + 1n, floor: asked, grace: wait };
 			if (lands && hooks.mayLand(copy.sub, land)) return true;
 		}
 		return false;
@@ -946,11 +987,11 @@ class Reader implements ResumeSource {
 		const declared = this.#declared;
 		const until =
 			declared !== undefined
-				? finalSequence(declared) - 1
-				: Math.max(this.#newest ?? -1, hooks.latestSequence(serving.sub) ?? -1);
+				? finalSequence(declared) - 1n
+				: max(this.#newest ?? -1n, hooks.latestSequence(serving.sub) ?? -1n);
 		for (const copy of this.#copies) {
 			if (!copy.replaced || copy.until !== undefined) continue;
-			copy.until = until < 0 ? null : until;
+			copy.until = until < 0n ? null : until;
 			copy.since = now();
 			this.#update(copy);
 			this.#bound(copy);
@@ -959,14 +1000,15 @@ class Reader implements ResumeSource {
 
 	/** The reader's budget: how far behind a group may fall before it is skipped. */
 	#budget(): Milli {
-		return this.#shell.subscription.peek()?.maxDelay ?? Milli.zero;
+		const subscription = this.#shell.subscription.peek();
+		return subscription ? maxDelayOf(subscription) : Milli.zero;
 	}
 
 	/**
 	 * Whether `within` passed since `copy` was superseded; see {@link Copy.since}. Arms a wakeup
 	 * for then, so a read waiting on the copy looks again.
 	 */
-	#expired(copy: Copy, within: Milli): boolean {
+	#expired(copy: Copy, within: number): boolean {
 		if (copy.since === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
 		const at = copy.since + within * 1_000_000;
@@ -998,7 +1040,7 @@ class Reader implements ResumeSource {
 	}
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
-		this.#newest = Math.max(this.#newest ?? 0, group.sequence);
+		this.#newest = max(this.#newest ?? 0n, group.sequence);
 		// Another copy holding the group, now or once it lands there, is where a failure continues
 		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a
 		// later route's copy may come to hold it.
@@ -1047,8 +1089,8 @@ class Reader implements ResumeSource {
 		if (newest) hooks.forgetPastBudget(newest.sub, delivered);
 	}
 
-	latest(): number | undefined {
-		let latest: number | undefined;
+	latest(): bigint | undefined {
+		let latest: bigint | undefined;
 		for (const copy of this.#copies) {
 			const sequence = hooks.latestSequence(copy.sub);
 			if (sequence !== undefined && (latest === undefined || sequence > latest)) latest = sequence;
@@ -1074,7 +1116,7 @@ class Reader implements ResumeSource {
 		const declared = this.#declared;
 		if (declared && !this.#closed) {
 			const final = finalSequence(declared);
-			const seen = (sequence: number | undefined) => sequence !== undefined && sequence >= final;
+			const seen = (sequence: bigint | undefined) => sequence !== undefined && sequence >= final;
 			if (
 				seen(this.#newest) ||
 				seen(this.#newestDatagram) ||
@@ -1114,7 +1156,7 @@ class Reader implements ResumeSource {
 		this.close(this.#refused);
 	}
 
-	start(): number | "pending" | undefined {
+	start(): bigint | "pending" | undefined {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.sourceStart(serving.sub);
@@ -1123,6 +1165,26 @@ class Reader implements ResumeSource {
 	end(): track.Position | undefined {
 		this.sync();
 		return this.#learnEnd();
+	}
+
+	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
+	starts(from: bigint): (bigint | undefined)[] | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingStarts(serving.sub, from);
+	}
+
+	// The reader's ranges resolve on the copies, which hold the groups their anchors name.
+	runs(start: bigint, end: bigint): Run[] | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingRuns(serving.sub, start, end);
+	}
+
+	servingEnd(): bigint | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingEnd(serving.sub);
 	}
 
 	/** The error the logical track's end carries, if it does not end cleanly. */
@@ -1257,7 +1319,7 @@ interface Fetch {
 function startFetch(
 	fetchGroup: NonNullable<BroadcastWire["fetchGroup"]>,
 	name: string,
-	sequence: number,
+	sequence: bigint,
 	generation: number,
 	signal: AbortSignal,
 ): Fetch {
@@ -1326,7 +1388,7 @@ function dropped(): Error {
 /** Carries a group across route changes; see the module docs. */
 class Recover implements GroupRecover {
 	#reader: Reader;
-	readonly sequence: number;
+	readonly sequence: bigint;
 	/** The copy being read, whose subscription this group keeps alive while it is read. */
 	#copy?: Copy;
 
@@ -1470,8 +1532,9 @@ class Recover implements GroupRecover {
 				// That route failing too waits for the next one, and a refusal is a verdict only for
 				// a copy that failed, once the serving subscription will not deliver the group either.
 				if (outcome && failed && !routeFailed(outcome.error) && !(serving.sub.closed.peek() instanceof Error)) {
-					const maxDelay = serving.sub.subscription.peek()?.maxDelay ?? Milli.zero;
-					const land = { start: this.sequence, end: this.sequence + 1, floor: true, grace: grace(maxDelay) };
+					const subscription = serving.sub.subscription.peek();
+					const maxDelay = subscription ? maxDelayOf(subscription) : Milli.zero;
+					const land = { start: this.sequence, end: this.sequence + 1n, floor: true, grace: grace(maxDelay) };
 					if (generation === current.generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
 					landing = new Promise<void>((resolve) => {
 						unwatch = hooks.groupChanged(serving.sub, resolve);
@@ -1508,7 +1571,7 @@ class Recover implements GroupRecover {
  * One broadcast served through one route at a time; see the module docs.
  *
  * Its {@link consumer} is the broadcast handed out: every track read through it follows the
- * front's route. The origin calls {@link serve} as routes of the same epoch take over, and
+ * front's route. The origin calls {@link serve} as routes of the same instance take over, and
  * {@link conclude} once none will: readers then follow the last copy to its end.
  */
 export class Front {
@@ -1516,8 +1579,11 @@ export class Front {
 	readonly consumer: broadcast.Consumer;
 	#source?: Source;
 	#routes = new Map<string, Route>();
-	/** Each track's properties as first committed, and the source that said so: every later copy must match. */
-	#info = new Map<string, { info: track.Info; source: Source }>();
+	/**
+	 * Each track's properties as first committed, and the {@link Source.id} of the source that said
+	 * so: every later copy must match. Kept for the front's lifetime, so it holds no route.
+	 */
+	#info = new Map<string, { info: track.Info; source: number }>();
 	/** Bumped whenever the source changes, so an answer from a replaced one is dropped. */
 	#changed = new Signal(0);
 	/** Aborted once the current source is replaced, retiring what was asked of it. */
@@ -1721,7 +1787,7 @@ export class Front {
 		const previous = route.served;
 		// The first copy of a track has nothing to match, and the source that said what it is
 		// matches itself.
-		if ((!recorded && !previous) || recorded?.source === source) {
+		if ((!recorded && !previous) || recorded?.source === source.id) {
 			route.serve(source);
 			return;
 		}
@@ -1787,7 +1853,7 @@ export class Front {
 	// never reads a copy a subscription would refuse.
 	async #verify(name: string, source: Source): Promise<void> {
 		const recorded = this.#info.get(name);
-		if (recorded?.source === source) return;
+		if (recorded?.source === source.id) return;
 		let verified = this.#verified.get(source);
 		if (verified?.has(name)) return;
 		const retired = this.#retire.signal;
@@ -1818,7 +1884,7 @@ export class Front {
 	}
 
 	#record(name: string, info: track.Info, source: Source): void {
-		if (!this.#info.has(name)) this.#info.set(name, { info, source });
+		if (!this.#info.has(name)) this.#info.set(name, { info, source: source.id });
 	}
 
 	subscribe(name: string, options?: track.Subscription): track.Subscriber {
@@ -1873,7 +1939,7 @@ export class Front {
 		return this.#source?.wire.largest(name);
 	}
 
-	async fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
+	async fetchGroup(name: string, sequence: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
 		const fetched = await this.#fetch(name, sequence, options);
 		let current = fetched.source;
 		// Too old and evicted judge a subscription's delivery, not whether the group exists, so
@@ -1921,7 +1987,7 @@ export class Front {
 	// fails, and never `avoid`. The source comes back retained for as long as the group is read.
 	async #fetch(
 		name: string,
-		sequence: number,
+		sequence: bigint,
 		options: track.FetchGroupOptions | undefined,
 		avoid?: Source,
 	): Promise<{ group: GroupConsumer; source: Source }> {

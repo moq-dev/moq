@@ -4,16 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Subscriptions take a `moq_delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`moq_subscription.max_delay_us` and `max_delay_present` are `moq_delay delay`. A zeroed `moq_subscription` is moq-net's defaults again, the same as `moq_subscription_defaults()` and a NULL pointer: set `delay.max_us` to the old `max_delay_us`, and `delay.max_unlimited` where `max_delay_present` was false.
+`moq_delay` gains `min_unstated`, after `max_unlimited`, which leaves the target latency unstated; the struct keeps its layout, and a zeroed one still states zero.
+
+### JSON window edits take an optional timestamp
+
+`moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
+`const moq_timestamp *timestamp`. Pass `NULL` to keep stamping the broadcast
+clock, or a pointer to the edit's capture time, converted to track milliseconds.
+Recompile callers against the regenerated `moq.h`.
+
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
+
 ### Media consumers take a `moq_delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `moq_consume_video` and `moq_consume_audio` take `const moq_delay *delay` in place of `uint64_t max_delay_us`; NULL is the default.
 `moq_video_decoder_output.max_delay_us` and `moq_audio_decoder_output.max_delay_us` are `moq_delay delay`, which changes both structs' layout.
 Set `delay.max_us` to the old `max_delay_us`, `delay.max_unlimited` for no limit, and `delay.min_us` to your playout delay, where a cold join starts. A zeroed `moq_delay` is zero for both.
-
-### A subscription without `max_delay_present` has no limit
-
-A `moq_subscription` with `max_delay_present` false sets no subscriber limit, leaving the publisher's max age alone to bound it, instead of moq-net's default of zero.
-Start from `moq_subscription_defaults()`, or set `max_delay_present`, where you relied on a zeroed struct; a NULL pointer still means the defaults.
 
 ### Compression moves to the track
 
@@ -116,7 +127,7 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 ### A claim answers by publishing (#5678)
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
-`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer under the epoch you pass: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under that epoch.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
 ### `moq_track_info` gains `compress` (#5928)

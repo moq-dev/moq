@@ -7,7 +7,9 @@ targets run only when something names them:
 - a cargo-fuzz target or a Cargo bench target, named by some reachable run;
 - a `just` recipe that runs tests, reachable from a workflow;
 - a standalone test script (`*.test.py`, `*.test.sh`, `*.browser.ts`, or a
-  `*.test.ts` outside a Bun package that runs `bun test`), reachable from one.
+  `*.test.ts` outside a Bun package that runs `bun test`), reachable from one;
+- a JS bench script under a `bench/` directory that no other source imports
+  or names, so it is an entry point rather than a module, reachable from one.
 
 Reachable means some workflow `run:` step leads to it through `just` recipes,
 their dependencies, and the scripts they name. The walk is static: a `just`
@@ -21,22 +23,25 @@ test-inventory.allow naming the quest that owns it.
 `--root DIR` checks another tree, for the tests.
 """
 
-from collections import Counter, defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass, field
 import fnmatch
 import itertools
 import json
-from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
-import tomllib
+from collections import Counter, defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 
+import tomllib
 import yaml
 
 SCRIPT = re.compile(r"[\w.$/{}-]*[\w-]\.(?:sh|py|ts|mts|js|mjs)\b")
+JS = (".ts", ".mts", ".js", ".mjs")
+# A relative module specifier in a static or dynamic import, or a re-export.
+IMPORT = re.compile(r"""\b(?:from|import)\s*\(?\s*["'](\.\.?/[^"']+)["']""")
 # Commands that run a test suite. Python sources spell them as argument lists,
 # so quotes and commas are dropped before matching.
 RUNNER = re.compile(
@@ -50,10 +55,37 @@ DISPATCH = re.compile(r'case "\$\{?1(?::-)?\}?" in')
 LABEL = re.compile(r"(\s+)([^()\s#][^()#]*)\)(.*)")
 # Options whose next word is their value, so it is not a test-name filter.
 VALUED = {
-    "-p", "--package", "-E", "--filterset", "--filter-expr", "-F", "--features", "--test", "--bench", "--bin",
-    "--example", "--run-ignored", "--cargo-profile", "--profile", "--success-output", "--failure-output",
-    "--test-threads", "-j", "--jobs", "--manifest-path", "--exclude", "--target", "--retries", "--partition",
-    "--message-format", "--status-level", "--final-status-level", "--color", "--target-dir", "-m", "--config",
+    "-p",
+    "--package",
+    "-E",
+    "--filterset",
+    "--filter-expr",
+    "-F",
+    "--features",
+    "--test",
+    "--bench",
+    "--bin",
+    "--example",
+    "--run-ignored",
+    "--cargo-profile",
+    "--profile",
+    "--success-output",
+    "--failure-output",
+    "--test-threads",
+    "-j",
+    "--jobs",
+    "--manifest-path",
+    "--exclude",
+    "--target",
+    "--retries",
+    "--partition",
+    "--message-format",
+    "--status-level",
+    "--final-status-level",
+    "--color",
+    "--target-dir",
+    "-m",
+    "--config",
 }
 
 
@@ -116,6 +148,12 @@ class Run:
     words: list[str]
     where: str
     cwd: Path
+    # Reached only through calls passing `--no-run`, so it compiles but runs nothing.
+    build: bool = False
+
+    @property
+    def builds_only(self) -> bool:
+        return self.build or "--no-run" in self.words
 
 
 def evaluate(expression, assignments: dict, directory: Path, root: Path) -> str:
@@ -138,15 +176,23 @@ def evaluate(expression, assignments: dict, directory: Path, root: Path) -> str:
             return str(directory)
         if name == "replace" and len(rest) == 3:
             return evaluate(rest[0], assignments, directory, root).replace(
-                evaluate(rest[1], assignments, directory, root), evaluate(rest[2], assignments, directory, root))
+                evaluate(rest[1], assignments, directory, root), evaluate(rest[2], assignments, directory, root)
+            )
         if name in ("quote", "absolute_path", "trim") and rest:
             return evaluate(rest[0], assignments, directory, root)
     return "{{}}"
 
 
 def load_justfile(root: Path, justfile: Path, name: str) -> Module:
-    dump = json.loads(subprocess.run(["just", "--justfile", str(justfile), "--dump", "--dump-format", "json"],
-                                     cwd=justfile.parent, check=True, capture_output=True, text=True).stdout)
+    dump = json.loads(
+        subprocess.run(
+            ["just", "--justfile", str(justfile), "--dump", "--dump-format", "json"],
+            cwd=justfile.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
 
     def walk(node, name: str, top: Module | None) -> Module:
         source = Path(node["source"])
@@ -156,20 +202,31 @@ def load_justfile(root: Path, justfile: Path, name: str) -> Module:
         assignments = {key: value["value"] for key, value in node["assignments"].items()}
         module = Module(name, source, top, first=node.get("first"))
         for key, recipe in node["recipes"].items():
+
             def render(bound: dict[str, str], body=recipe["body"], source=source, assignments=assignments) -> str:
                 scope = {**assignments, **bound}
-                return "\n".join("".join(part if isinstance(part, str) else
-                                          evaluate(part[0], scope, source.parent, root) for part in line)
-                                  for line in body)
+                return "\n".join(
+                    "".join(
+                        part if isinstance(part, str) else evaluate(part[0], scope, source.parent, root)
+                        for part in line
+                    )
+                    for line in body
+                )
 
             parameters = []
             for parameter in recipe["parameters"]:
                 if parameter["kind"] != "singular":
                     break
                 parameters.append(parameter["name"])
-            module.recipes[key] = Recipe(key, module, directory, render({}),
-                                         [dependency["recipe"] for dependency in recipe["dependencies"]],
-                                         parameters, render)
+            module.recipes[key] = Recipe(
+                key,
+                module,
+                directory,
+                render({}),
+                [dependency["recipe"] for dependency in recipe["dependencies"]],
+                parameters,
+                render,
+            )
         for key, alias in node["aliases"].items():
             target = alias["target"] if isinstance(alias["target"], str) else alias["target"]["name"]
             if target in module.recipes:
@@ -302,17 +359,20 @@ class Graph:
         self.justfiles = justfiles
         self.recipes = justfiles[root]
         self.reached: dict[str, Recipe] = {}
-        self.bindings: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
-        # Script files reached shell text names, whose own text is then walked.
+        self.bindings: set[tuple[str, tuple[tuple[str, str], ...], bool]] = set()
+        # Script files reached shell text names, whose own text is then walked, once as a
+        # build-only caller reaches it and once as any other does.
         self.files: set[Path] = set()
+        self.walked: set[tuple[Path, bool]] = set()
         # Files only another language names, like a test running a script under stubs or the
         # checker naming the runners it knows: reached, but nothing they call is.
         self.named: set[Path] = set()
         # Files a reached shell command runs, not merely names.
         self.executed: set[Path] = set()
-        self.branches: set[tuple[Path, int, int]] = set()
+        self.branches: set[tuple[Path, int, int, bool]] = set()
         self.runs: list[Run] = []
-        self.queue: list[tuple[str, str, Path, Path | None]] = []
+        # Text to walk: where it is from, its cwd, its file, and whether only build-only calls reach it.
+        self.queue: list[tuple[str, str, Path, Path | None, bool]] = []
 
     def context(self, cwd: Path) -> Module:
         """The justfile `just` finds from a directory."""
@@ -322,7 +382,9 @@ class Graph:
         return self.recipes
 
     def resolve(self, words: list[str], cwd: Path) -> list[Recipe]:
-        """The recipes a `just` call's words name, from its justfile and then, as `set fallback` does, its tree's root."""
+        """The recipes a `just` call's words name, from its justfile and then,
+        as `set fallback` does, its tree's root.
+        """
         return [recipe for recipe, _ in self.calls(words, cwd)]
 
     def calls(self, words: list[str], cwd: Path) -> list[tuple[Recipe, list[str]]]:
@@ -335,14 +397,16 @@ class Graph:
                 node = node.modules[words[index]]
                 index += 1
             if index < len(words) and words[index] in node.recipes:
-                return [(node.recipes[words[index]], words[index + 1:])]
+                return [(node.recipes[words[index]], words[index + 1 :])]
             if index == len(words) and index > 0 and node.first:
                 return [(node.recipes[node.first], [])]
         return []
 
-    def visit_recipe(self, recipe: Recipe, arguments: list[str] | None = None):
+    def visit_recipe(self, recipe: Recipe, arguments: list[str] | None = None, build: bool = False):
+        """Queue a recipe's text; build says its every caller passes `--no-run`. Its
+        dependencies run without the call's arguments, so they are never build-only."""
         bound = recipe.bind(arguments or [])
-        key = (recipe.path, tuple(sorted(bound.items())))
+        key = (recipe.path, tuple(sorted(bound.items())), build)
         if key in self.bindings:
             return
         self.bindings.add(key)
@@ -351,29 +415,36 @@ class Graph:
             if dependency in recipe.module.recipes:
                 self.visit_recipe(recipe.module.recipes[dependency])
         text = recipe.render(bound) if recipe.render and bound else recipe.text
-        self.queue.append((text, f"recipe {recipe.path}", recipe.cwd, None))
+        self.queue.append((text, f"recipe {recipe.path}", recipe.cwd, None, build))
 
-    def visit_file(self, path: Path, cwd: Path, arguments: list[list[str]] | None):
-        """Queue a script's text, once, and the branches of its `case "$1"` dispatch that the
-        calls' arguments select. A call whose first argument is unknown selects every branch."""
+    def visit_file(self, path: Path, cwd: Path, arguments: list[list[str]] | None, build: bool = False):
+        """Queue a script's text, once per build, and the branches of its `case "$1"` dispatch
+        that the calls' arguments select. A call whose first argument is unknown selects every branch."""
         text = path.read_text(errors="replace")
         rest, blocks = dispatch(text) if shell(text, path) else (text, [])
         where = str(path.relative_to(self.root))
-        if path not in self.files:
-            self.files.add(path)
-            self.queue.append((rest, where, cwd, path))
+        self.files.add(path)
+        if (path, build) not in self.walked:
+            self.walked.add((path, build))
+            self.queue.append((rest, where, cwd, path, build))
         for first in [call[0] if call else "" for call in arguments] if arguments is not None else [None]:
             for block, branches in enumerate(blocks):
                 if first is None or not literal(first):
                     chosen = range(len(branches))
                 else:
                     # The first matching pattern wins, as in the shell.
-                    chosen = next(([index] for index, (patterns, _) in enumerate(branches)
-                                   if any(fnmatch.fnmatchcase(first, pattern) for pattern in patterns)), [])
+                    chosen = next(
+                        (
+                            [index]
+                            for index, (patterns, _) in enumerate(branches)
+                            if any(fnmatch.fnmatchcase(first, pattern) for pattern in patterns)
+                        ),
+                        [],
+                    )
                 for index in chosen:
-                    if (path, block, index) not in self.branches:
-                        self.branches.add((path, block, index))
-                        self.queue.append((branches[index][1], where, cwd, path))
+                    if (path, block, index, build) not in self.branches:
+                        self.branches.add((path, block, index, build))
+                        self.queue.append((branches[index][1], where, cwd, path, build))
 
     def execute(self, path: Path):
         """Record that a reached command runs path, following what only a run implies."""
@@ -382,11 +453,10 @@ class Graph:
         self.executed.add(path)
         # The module dispatch passes its own names: `just <module> check` and the like.
         if path == self.root / "sh/dispatch.sh":
-            for line in re.findall(r"modules=\(([^)]*)\)", path.read_text(errors="replace")):
-                for name in line.split():
-                    for verb in ("check", "fix"):
-                        for recipe in self.resolve([name, verb], self.root):
-                            self.visit_recipe(recipe)
+            for name in re.findall(r"^module (\w+) ", path.read_text(errors="replace"), re.M):
+                for verb in ("check", "fix"):
+                    for recipe in self.resolve([name, verb], self.root):
+                        self.visit_recipe(recipe)
 
     def bases(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
         """The directories a script path in text may be relative to."""
@@ -416,29 +486,35 @@ class Graph:
 
     def walk(self, entries: list[tuple[str, str, Path]]):
         for text, where, cwd in entries:
-            self.queue.append((text, where, cwd, None))
+            self.queue.append((text, where, cwd, None, False))
         while self.queue:
-            text, where, cwd, file = self.queue.pop()
-            # The arguments each command that runs a script passes it.
-            arguments: dict[Path, list[list[str]]] = defaultdict(list)
+            text, where, cwd, file, build = self.queue.pop()
+            # The arguments each command that runs a script passes it, and whether it builds only.
+            arguments: dict[Path, list[tuple[list[str], bool]]] = defaultdict(list)
             bases = self.bases(text, cwd, file)
             runs = shell(text, file)
             for words in commands(text) if runs else []:
-                self.runs.append(Run(words, where, cwd))
+                self.runs.append(Run(words, where, cwd, build))
                 for index, word in enumerate(words):
+                    # A wrapper passes `--no-run` on to the cargo command it ends in.
+                    passed = build or "--no-run" in words[index + 1 :]
                     if word == "just":
-                        for recipe, rest in self.calls(words[index + 1:], cwd):
-                            self.visit_recipe(recipe, rest)
+                        for recipe, rest in self.calls(words[index + 1 :], cwd):
+                            self.visit_recipe(recipe, rest, passed)
                     elif SCRIPT.fullmatch(word) and (path := self.script(word, bases)):
-                        arguments[path].append(words[index + 1:])
+                        arguments[path].append((words[index + 1 :], passed))
                         self.execute(path)
             mentions = Counter(self.scripts(text, cwd, file))
             for path, count in mentions.items():
+                calls = arguments[path]
                 # A shell mention that is not a command may pass any argument.
                 if not runs:
                     self.named.add(path)
+                elif len(calls) != count:
+                    self.visit_file(path, cwd, None, build)
                 else:
-                    self.visit_file(path, cwd, arguments[path] if len(arguments[path]) == count else None)
+                    for passed in {passed for _, passed in calls}:
+                        self.visit_file(path, cwd, [call for call, flag in calls if flag == passed], passed)
 
     def reaches(self, path: Path) -> bool:
         return path in self.files or path in self.named
@@ -473,7 +549,7 @@ def matrix_values(job) -> dict[str, list[str]]:
 
 
 def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
-    """Every `run:` step under .github and its directory, with `${{ matrix.* }}` expanded to the job's values."""
+    """Every command a step runs under .github and its directory, with `${{ matrix.* }}` expanded per job."""
     entries = []
     for path in sorted([*root.glob(".github/workflows/*.y*ml"), *root.glob(".github/actions/*/action.y*ml")]):
         document = yaml.safe_load(path.read_text()) or {}
@@ -485,8 +561,10 @@ def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
             matrix = matrix_values(job)
             directory = ((job.get("defaults") or {}).get("run") or {}).get("working-directory", defaults)
             for step in job.get("steps") or []:
-                # An action that runs a command takes it as `with: run:`, like CodSpeed's.
-                run = step.get("run") or (step.get("with") or {}).get("run")
+                # An action that runs a command takes it as `with: run:`, like
+                # CodSpeed's, or `with: script:`, like android-emulator-runner's.
+                inputs = step.get("with") or {}
+                run = step.get("run") or inputs.get("run") or inputs.get("script")
                 if not isinstance(run, str):
                     continue
                 cwd = (root / step.get("working-directory", directory)).resolve()
@@ -511,8 +589,13 @@ class Package:
 
 
 def tracked(root: Path, *patterns: str) -> list[Path]:
-    output = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *patterns],
-                            cwd=root, check=True, capture_output=True, text=True).stdout
+    output = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *patterns],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
     return [root / name for name in output.split("\0") if name]
 
 
@@ -534,8 +617,10 @@ def packages(root: Path) -> list[Package]:
             ("test", "tests", []),
             ("bench", "benches", []),
         ):
-            explicit = {entry["name"]: directory / entry.get("path", f"{auto}/{entry['name']}.rs")
-                        for entry in manifest.get(kind, [])}
+            explicit = {
+                entry["name"]: directory / entry.get("path", f"{auto}/{entry['name']}.rs")
+                for entry in manifest.get(kind, [])
+            }
             if kind == "bin" and (directory / "src/main.rs").is_file():
                 explicit.setdefault(package.name, directory / "src/main.rs")
             if package_settings.get(f"auto{kind}s" if kind != "test" else "autotests", True):
@@ -647,7 +732,12 @@ def selection(words: list[str], manifests: dict[Path, str], cwd: Path) -> Select
     passthrough = False
     # Parse from the last `just` or `cargo`, so a wrapper's own options stay out.
     heads = [position for position, word in enumerate(words) if word in ("just", "cargo")]
-    words = words[heads[-1]:] if heads else words
+    words = words[heads[-1] :] if heads else words
+    # `cargo ndk` takes its own options ahead of the cargo subcommand it wraps.
+    if words[:2] == ["cargo", "ndk"]:
+        wrapped = next((position for position, word in enumerate(words) if word in ("test", "nextest", "bench")), None)
+        if wrapped is not None:
+            words = ["cargo", *words[wrapped:]]
     index = 0
     while index < len(words):
         word = words[index]
@@ -687,7 +777,7 @@ def selection(words: list[str], manifests: dict[Path, str], cwd: Path) -> Select
         elif word.startswith("-") or "$" in word or "{{" in word or value is not None:
             continue
         # The recipe or subcommand names come before the first option.
-        elif passthrough or any(earlier.startswith("-") for earlier in words[:index - 1]):
+        elif passthrough or any(earlier.startswith("-") for earlier in words[: index - 1]):
             filters.append(word)
     if every or not packages:
         packages = None
@@ -760,19 +850,20 @@ class Filterset:
             end = self.position + 1
             while end < len(self.text) and self.text[end] != "/":
                 end += 2 if self.text[end] == "\\" else 1
-            argument = self.text[self.position:end + 1]
+            argument = self.text[self.position : end + 1]
             self.position = end + 1
             self.space()
         else:
             end = self.text.index(")", self.position)
-            argument = self.text[self.position:end].strip()
+            argument = self.text[self.position : end].strip()
             self.position = end
         if not self.take(")"):
             raise ValueError(f"unterminated {name}() in {self.text!r}")
         target = self.test.target
         binary = target.name.replace("-", "_") if target.kind == "lib" else target.name
         binary_id = {"lib": target.package, "test": f"{target.package}::{target.name}"}.get(
-            target.kind, f"{target.package}::{target.kind}/{target.name}")
+            target.kind, f"{target.package}::{target.kind}/{target.name}"
+        )
         subjects = {
             "test": (self.test.path, "contains"),
             "package": (target.package, "glob"),
@@ -811,8 +902,7 @@ def selects(chosen: Selection, test: Ignored) -> bool:
     target = test.target
     if chosen.packages is not None and target.package not in chosen.packages:
         return False
-    if chosen.targets and not any(kind == target.kind and name in (None, target.name)
-                                  for kind, name in chosen.targets):
+    if chosen.targets and not any(kind == target.kind and name in (None, target.name) for kind, name in chosen.targets):
         return False
     if chosen.filters and not any(word in test.path for word in chosen.filters):
         return False
@@ -851,10 +941,11 @@ def recipe_line(root: Path, recipe: Recipe) -> str:
     return str(source.relative_to(root))
 
 
-def runs_tests(graph: Graph, recipe: Recipe, found: set[Path]) -> bool:
+def runs_tests(graph: Graph, recipe: Recipe, found: set[Path], benches: set[Path]) -> bool:
     """A recipe runs tests when its body runs a suite, or names a script no workflow reaches
-    that runs one, is a test script, or drives a browser. A wrapper around a reached script,
-    or a bare `bun test` in a directory a reached run already tests, adds no test of its own."""
+    that runs one, is a test script or a bench entry point, or drives a browser. A wrapper
+    around a reached script, or a bare `bun test` in a directory a reached run already tests,
+    adds no test of its own."""
     text = recipe.text
     if any(recipe.cwd.is_relative_to(directory) for directory in found):
         text = re.sub(r"(?m)^\s*bun test\s*$", "", text)
@@ -869,7 +960,7 @@ def runs_tests(graph: Graph, recipe: Recipe, found: set[Path]) -> bool:
                 continue
             seen.add(path)
             relative = str(path.relative_to(graph.root))
-            if is_test_script(relative) or drives_browser(path, relative):
+            if is_test_script(relative) or path in benches or drives_browser(path):
                 return True
             texts.append((path.read_text(errors="replace"), path))
     return False
@@ -879,11 +970,46 @@ def is_test_script(relative: str) -> bool:
     return bool(re.search(r"\.test\.(?:py|sh|ts|js|mjs)$|\.browser\.ts$", relative))
 
 
-def drives_browser(path: Path, relative: str) -> bool:
-    """A script that launches a browser is a check, unless it is a benchmark."""
-    if "/bench/" in f"/{relative}" or path.suffix not in (".ts", ".js", ".mjs"):
+def drives_browser(path: Path) -> bool:
+    """A script that launches a browser is a check."""
+    if path.suffix not in JS:
         return False
     return re.search(r"""from ["']playwright["']""", path.read_text(errors="replace")) is not None
+
+
+def bench_entries(root: Path, graph: Graph) -> set[Path]:
+    """The JS bench scripts no other source imports or names: the ones something runs.
+    A module, or a page a bench bundles, is named by its importer; a test importing the
+    script it tests does not make that script a module."""
+    sources = [
+        path
+        for path in tracked(root, *(f"*{suffix}" for suffix in JS))
+        if not is_test_script(str(path.relative_to(root)))
+    ]
+    named = set()
+    for source in sources:
+        # Block comments go first, since a doc comment may name the script that loads this one;
+        # then line comments, so a commented-out import does not make its target a module.
+        text = re.sub(r"(?s)(?:^|(?<=\s))/\*.*?\*/", "", source.read_text(errors="replace"))
+        text = re.sub(r"(?m)(?:^|\s)//.*$", "", text)
+        named.update(path for path in graph.scripts(text, source.parent, source) if path != source.resolve())
+        for specifier in IMPORT.findall(text):
+            base = (source.parent / specifier).resolve()
+            named.update(
+                path
+                for path in (
+                    base,
+                    *(base.with_name(base.name + suffix) for suffix in JS),
+                    *(base.with_suffix(suffix) for suffix in JS),
+                    *(base / f"index{suffix}" for suffix in JS),
+                )
+                if path.is_file()
+            )
+    return {
+        path.resolve()
+        for path in sources
+        if "/bench/" in f"/{path.relative_to(root)}" and not path.name.endswith(".d.ts") and path.resolve() not in named
+    }
 
 
 def discovered(root: Path, graph: Graph) -> set[Path]:
@@ -921,8 +1047,10 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
     errors: list[str] = []
     selections = []
     for run in graph.runs:
-        if any(word in ("--run-ignored", "--ignored", "--include-ignored", "--bench", "--benches", "bench")
-               for word in run.words):
+        if any(
+            word in ("--run-ignored", "--ignored", "--include-ignored", "--bench", "--benches", "bench")
+            for word in run.words
+        ):
             selections.append((selection(run.words, manifests, run.cwd), run))
 
     # #[ignore] tests.
@@ -932,7 +1060,9 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                 continue
             for test in ignored_tests(root, target, entry):
                 try:
-                    hit = any(chosen.ignored and selects(chosen, test) for chosen, _ in selections)
+                    hit = any(
+                        chosen.ignored and not run.builds_only and selects(chosen, test) for chosen, run in selections
+                    )
                 except ValueError as error:
                     errors.append(str(error))
                     continue
@@ -940,17 +1070,23 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                     orphans.append((f"ignore {target.package}::{test.path}", test.where))
 
     # Bench and fuzz targets.
-    fuzz_runners = {path for path, recipe in graph.reached.items()
-                    if re.search(r"\bcargo (?:\+\S+ )?fuzz\b", text_closure(graph, recipe))}
+    fuzz_runners = {
+        path
+        for path, recipe in graph.reached.items()
+        if re.search(r"\bcargo (?:\+\S+ )?fuzz\b", text_closure(graph, recipe))
+    }
     fuzz_words = set()
     for run in graph.runs:
         for index, word in enumerate(run.words):
-            if word == "just" and any(r.path in fuzz_runners for r in graph.resolve(run.words[index + 1:], run.cwd)):
-                fuzz_words.update(run.words[index + 1:])
+            if word == "just" and any(r.path in fuzz_runners for r in graph.resolve(run.words[index + 1 :], run.cwd)):
+                fuzz_words.update(run.words[index + 1 :])
             if word == "fuzz" and index and run.words[index - 1] == "cargo":
-                fuzz_words.update(run.words[index + 1:])
-    codspeed = any(run.words[index:index + 3] == ["cargo", "codspeed", "run"]
-                   for run in graph.runs for index in range(len(run.words)))
+                fuzz_words.update(run.words[index + 1 :])
+    codspeed = any(
+        run.words[index : index + 3] == ["cargo", "codspeed", "run"]
+        for run in graph.runs
+        for index in range(len(run.words))
+    )
     for package in cargo:
         fuzz = package.manifest.get("package", {}).get("metadata", {}).get("cargo-fuzz", False)
         for target, _ in package.targets:
@@ -963,20 +1099,30 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                     orphans.append((f"bench {target.package}::{target.name}", where))
 
     found = discovered(root, graph)
+    benches = bench_entries(root, graph)
 
     # Recipes that run tests.
     recipes = {recipe.path: recipe for module in justfiles.values() for recipe in module.recipes.values()}
     for _, recipe in sorted(recipes.items()):
-        if recipe.path not in graph.reached and runs_tests(graph, recipe, found):
+        if recipe.path not in graph.reached and runs_tests(graph, recipe, found, benches):
             orphans.append((f"recipe {recipe.path}", recipe_line(root, recipe)))
 
     # Standalone test scripts.
     for path in tracked(root, "*.test.py", "*.test.sh", "*.test.ts", "*.test.js", "*.browser.ts"):
         relative = str(path.relative_to(root))
-        if path.suffix in (".ts", ".js") and not path.name.endswith(".browser.ts") and any(
-                path.resolve().is_relative_to(directory) for directory in found):
+        if (
+            path.suffix in (".ts", ".js")
+            and not path.name.endswith(".browser.ts")
+            and any(path.resolve().is_relative_to(directory) for directory in found)
+        ):
             continue
         if not graph.reaches(path.resolve()):
+            orphans.append((f"script {relative}", relative))
+
+    # Bench entry points.
+    for path in sorted(benches):
+        if not graph.reaches(path):
+            relative = str(path.relative_to(root))
             orphans.append((f"script {relative}", relative))
     return orphans, errors
 
@@ -1000,8 +1146,8 @@ def benched(chosen: Selection, run: Run, target: Target, codspeed: bool) -> bool
     if chosen.packages is not None and target.package not in chosen.packages:
         return False
     heads = [index for index, word in enumerate(run.words) if word == "cargo"]
-    command = [word for word in run.words[heads[-1] + 1:] if not word.startswith("+")][:2] if heads else []
-    if "--no-run" in run.words or command[:1] in (["build"], ["check"], ["clippy"], ["doc"]):
+    command = [word for word in run.words[heads[-1] + 1 :] if not word.startswith("+")][:2] if heads else []
+    if run.builds_only or command[:1] in (["build"], ["check"], ["clippy"], ["doc"]):
         return False
     if command == ["codspeed", "build"] and not codspeed:
         return False
@@ -1009,13 +1155,14 @@ def benched(chosen: Selection, run: Run, target: Target, codspeed: bool) -> bool
         return "*" in chosen.benches or target.name in chosen.benches
     # `cargo bench` with no --bench runs each of its packages' benches.
     words = run.words
-    return any(words[i] == "cargo" and words[i + 1] == "bench" for i in range(len(words) - 1)) and \
-        chosen.packages is not None
+    return (
+        any(words[i] == "cargo" and words[i + 1] == "bench" for i in range(len(words) - 1))
+        and chosen.packages is not None
+    )
 
 
 def main(argv: list[str]) -> int:
-    root = Path(argv[argv.index("--root") + 1]).resolve() if "--root" in argv else \
-        Path(__file__).resolve().parents[2]
+    root = Path(argv[argv.index("--root") + 1]).resolve() if "--root" in argv else Path(__file__).resolve().parents[2]
     allowed, errors = allowlist(root, root / "sh/gh/test-inventory.allow")
     orphans, problems = inventory(root)
     errors += problems
@@ -1027,8 +1174,11 @@ def main(argv: list[str]) -> int:
         if key not in keys:
             errors.append(f"{where}: {key} is not an orphan; drop the entry")
     if errors:
-        print("Every opt-in test target needs a CI caller, or an entry in sh/gh/test-inventory.allow"
-              " naming the quest that owns it:", file=sys.stderr)
+        print(
+            "Every opt-in test target needs a CI caller, or an entry in sh/gh/test-inventory.allow"
+            " naming the quest that owns it:",
+            file=sys.stderr,
+        )
         for error in errors:
             print(f"  {error}", file=sys.stderr)
         return 1
