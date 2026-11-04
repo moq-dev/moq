@@ -233,6 +233,7 @@ impl sealed::Open for TcpStream {
 			track: Some(track),
 			ours,
 			subscriber: Some(subscriber),
+			received: false,
 			remote: None,
 			local_handle: local.handle(),
 			local: Some(local),
@@ -948,7 +949,9 @@ struct Pump {
 	ours: Option<group::Demand>,
 	/// The peer's half, watched for its one group, and for a second.
 	subscriber: Option<track::Subscriber>,
-	/// The peer's group, once it arrived.
+	/// Whether the peer's group arrived.
+	received: bool,
+	/// The peer's group, from its arrival until it ends.
 	remote: Option<group::Consumer>,
 	/// The application's copy of the peer's group, until it ends.
 	local: Option<group::Producer>,
@@ -994,6 +997,46 @@ impl Pump {
 			}
 		}
 
+		// The peer's half holds one group: a second is a protocol error, even after the
+		// first finished, for as long as either half is open.
+		if !self.received
+			&& let Some(subscriber) = &mut self.subscriber
+		{
+			match subscriber.poll_recv_group(waiter) {
+				Poll::Pending => {}
+				Poll::Ready(Ok(Some(group))) => {
+					if group.sequence != 0 {
+						tracing::debug!(sequence = group.sequence, "a second group on a tcp session");
+						return Err(Error::ProtocolViolation);
+					}
+					self.received = true;
+					self.remote = Some(group);
+				}
+				Poll::Ready(Ok(None)) => self.subscriber = None,
+				// Ended short of its group: the peer's reset.
+				Poll::Ready(Err(err)) => return Err(err),
+			}
+		}
+		if self.received
+			&& let Some(subscriber) = &mut self.subscriber
+		{
+			// Not `poll_recv_group`: polled on every wake while reading the group it handed
+			// out, it stalled that group's delivery.
+			while let Poll::Ready(largest) = subscriber.poll_largest(waiter) {
+				match largest {
+					Some(largest) if largest.group > 0 => {
+						tracing::debug!(sequence = largest.group, "a second group on a tcp session");
+						return Err(Error::ProtocolViolation);
+					}
+					Some(_) => {}
+					None => {
+						self.subscriber = None;
+						break;
+					}
+				}
+			}
+		}
+
 		if self.local.is_none() {
 			return Ok(());
 		}
@@ -1002,45 +1045,10 @@ impl Pump {
 			return Err(Error::Cancel);
 		}
 
-		// The peer's half holds one group: a second is a protocol error.
-		if let Some(subscriber) = &mut self.subscriber {
-			if self.remote.is_none() {
-				match subscriber.poll_recv_group(waiter) {
-					Poll::Pending => {}
-					Poll::Ready(Ok(Some(group))) => {
-						if group.sequence != 0 {
-							tracing::debug!(sequence = group.sequence, "a second group on a tcp session");
-							return Err(Error::ProtocolViolation);
-						}
-						self.remote = Some(group);
-					}
-					Poll::Ready(Ok(None)) => self.subscriber = None,
-					// Ended short of its group: the peer's reset.
-					Poll::Ready(Err(err)) => return Err(err),
-				}
-			}
-			if self.remote.is_some()
-				&& let Some(subscriber) = &mut self.subscriber
-			{
-				while let Poll::Ready(largest) = subscriber.poll_largest(waiter) {
-					match largest {
-						Some(largest) if largest.group > 0 => {
-							tracing::debug!(sequence = largest.group, "a second group on a tcp session");
-							return Err(Error::ProtocolViolation);
-						}
-						Some(_) => {}
-						None => {
-							self.subscriber = None;
-							break;
-						}
-					}
-				}
-			}
-		}
-
 		let Some(remote) = &mut self.remote else {
 			// Finished without a group: an empty half.
-			if self.subscriber.is_none()
+			if !self.received
+				&& self.subscriber.is_none()
 				&& let Some(mut local) = self.local.take()
 			{
 				let _ = local.finish();

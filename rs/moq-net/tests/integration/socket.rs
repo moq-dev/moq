@@ -267,13 +267,19 @@ async fn a_slow_tcp_reader_paces_the_writer() {
 		.expect("session timeout");
 }
 
-/// A peer that writes a second group in a `tcp` session breaks the protocol: the session
-/// is reset, both halves.
-#[kio::test]
-async fn a_second_tcp_group_resets_the_session() {
-	let mut fixture = Fixture::new();
-	let bob = fixture.endpoint(LITE, "bob").await;
-	// Carol dials by hand, as a nonconforming implementation would.
+/// A `tcp` session carol dialed by hand, as a nonconforming implementation would.
+struct ByHand {
+	/// Bob's end.
+	accepted: TcpStream,
+	/// Carol's half, which she writes groups to as she likes.
+	half: track::Producer,
+	_dialed: track::Subscriber,
+	_endpoint: origin::Publication,
+	_carol: origin::Producer,
+}
+
+/// Dial bob by hand from carol in a `tcp` session.
+async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 	let carol = fixture.client(LITE).await;
 	let endpoint = carol.create_broadcast("room/.socket/carol").unwrap();
 	endpoint.announce(Default::default()).unwrap();
@@ -297,14 +303,34 @@ async fn a_second_tcp_group_resets_the_session() {
 	let (accepted, half, dialed) = kio::clock::timeout(TIMEOUT, async { futures::join!(accept, answer, dial) })
 		.await
 		.expect("connect timeout");
-	let mut accepted = accepted.expect("accept");
-	let _dialed = dialed.expect("bob's half");
-
-	for sequence in [0, 1] {
-		let mut group = half.create_group(group::Info { sequence }).unwrap();
-		group.write_frame(None, &b"data"[..]).unwrap();
-		group.finish().unwrap();
+	ByHand {
+		accepted: accepted.expect("accept"),
+		half,
+		_dialed: dialed.expect("bob's half"),
+		_endpoint: endpoint,
+		_carol: carol,
 	}
+}
+
+/// Write `sequence` as a finished group of one write.
+fn write_group(half: &track::Producer, sequence: u64) {
+	let mut group = half.create_group(group::Info { sequence }).unwrap();
+	group.write_frame(None, &b"data"[..]).unwrap();
+	group.finish().unwrap();
+}
+
+/// A peer that writes a second group in a `tcp` session breaks the protocol: the session
+/// is reset, both halves.
+#[kio::test]
+async fn a_second_tcp_group_resets_the_session() {
+	let mut fixture = Fixture::new();
+	let bob = fixture.endpoint(LITE, "bob").await;
+	// Bound whole, so carol's endpoint and read stay open to the end.
+	let mut session = dial_by_hand(&mut fixture, &bob).await;
+	let (accepted, half) = (&mut session.accepted, &session.half);
+
+	write_group(half, 0);
+	write_group(half, 1);
 	// Bob reads at most the first group's write, then the reset.
 	let mut reads = 0;
 	loop {
@@ -316,6 +342,26 @@ async fn a_second_tcp_group_resets_the_session() {
 		assert!(reads <= 1, "read past the first group");
 	}
 	// And bob's own half was reset with it.
+	kio::clock::sleep(SETTLE).await;
+	assert!(accepted.producer.write_frame(None, &b"late"[..]).is_err());
+}
+
+/// A second group after the first one finished, and was read to its end, still resets
+/// the half that remains open.
+#[kio::test]
+async fn a_second_tcp_group_after_fin_resets_the_session() {
+	let mut fixture = Fixture::new();
+	let bob = fixture.endpoint(LITE, "bob").await;
+	// Bound whole, so carol's endpoint and read stay open to the end.
+	let mut session = dial_by_hand(&mut fixture, &bob).await;
+	let (accepted, half) = (&mut session.accepted, &session.half);
+
+	write_group(half, 0);
+	assert_eq!(read(&mut accepted.consumer).await.unwrap().unwrap(), b"data");
+	assert_eq!(read(&mut accepted.consumer).await.unwrap(), None);
+	accepted.producer.write_frame(None, &b"still open"[..]).unwrap();
+
+	write_group(half, 1);
 	kio::clock::sleep(SETTLE).await;
 	assert!(accepted.producer.write_frame(None, &b"late"[..]).is_err());
 }
