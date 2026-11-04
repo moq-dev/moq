@@ -18,6 +18,10 @@
 //! [`web::Session`] as the one transport type covering both.
 //!
 //! moq-quic is the sans-IO QUIC stack underneath the worker.
+//!
+//! Session waits take `&self` and a caller-owned `&kio::Waiter`; stream reads and writes
+//! take `&mut self`. Dropping the waiter cancels its registrations. Async helpers own their
+//! waiter, while `Future` and runtime I/O traits bridge their `Context` through `kio::Park`.
 
 pub mod client;
 pub mod endpoint;

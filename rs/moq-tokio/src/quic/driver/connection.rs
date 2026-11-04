@@ -366,7 +366,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no datagrams were consumed.
-	pub fn read_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + '_ {
+	pub fn recv_datagram(&self) -> impl Future<Output = Result<Bytes, Error>> + '_ {
 		kio::wait(|waiter| self.poll_recv_datagram(waiter))
 	}
 
@@ -490,7 +490,7 @@ impl Connection {
 
 	/// The peer's UDP address
 	///
-	/// If `ServerConfig::migration` is `true`, clients may change addresses at will, e.g. when
+	/// If [`server::Config::migration`] is `true`, clients may change addresses at will, e.g. when
 	/// switching to a cellular internet connection.
 	pub fn remote_address(&self) -> SocketAddr {
 		self.0.state.lock().inner.remote_address()

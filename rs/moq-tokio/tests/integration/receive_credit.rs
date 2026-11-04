@@ -527,7 +527,7 @@ impl Reversed {
 				// The credit an eviction frees can reach the writer before the stop does, letting
 				// the whole write queue, so only the stop itself proves the stream was stopped.
 				let _ = send.write_all(&bytes[..]).await;
-				if let Ok(Some(_)) = send.stopped().await {
+				if let Ok(Some(_)) = send.closed().await {
 					let _ = tx.send(());
 				}
 			});

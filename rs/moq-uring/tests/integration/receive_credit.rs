@@ -257,7 +257,7 @@ fn javascript_partial_frame_gives_way() {
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
-	let endpoint = quic::Endpoint::new(sock, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+	let endpoint = quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), sock).expect("endpoint");
 
 	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
 	let mut child = std::process::Command::new("bun")
