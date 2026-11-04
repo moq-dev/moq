@@ -20,8 +20,15 @@ subscriptions, not a wire extension. It uses no instances and no track
 listings, and relays carry it unchanged. It needs moq-lite-07 or
 moq-transport on every hop: an endpoint's broadcast is
 [hidden](/concept/moq-lite#hidden-broadcasts), and an older moq-lite hop
-never carries hidden broadcasts, so a dial across one never finds its peer. This page is the convention, enough to implement it in any
-language.
+never carries hidden broadcasts, so a dial across one would never find its
+peer. Clustered relays carry hidden broadcasts to each other on every version,
+so the hop that decides is each endpoint's own session: while an endpoint's
+client session is moq-lite before 07, its dials and accepts fail with
+`Unsupported` instead of waiting, unless that session's publish half opts into
+hidden broadcasts. A dialer can't tell a peer behind such a hop from one not
+online yet, so its dial waits as for any absent peer, while the peer's own
+accepts fail. This page is the convention, enough to
+implement it in any language.
 [`moq_net::socket`](https://docs.rs/moq-net/latest/moq_net/socket/) implements
 it in Rust.
 

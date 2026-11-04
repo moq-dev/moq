@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 moq.socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
+### Separate datagram tracks
+
+Replace stream-track `append_datagram` / `insert_datagram` / `recv_datagram` with `broadcast.create_datagrams(name, info)` and `broadcast.consume().datagrams(name)`. The returned `DatagramProducer` uses `append(payload, timestamp=...)` and `insert(Datagram(...))`; `DatagramConsumer` supports `recv()` and async iteration. `DatagramInfo` contains priority and optional timescale. Demand is `priority()` / `await priority_changed(last)`; on-demand handlers come from `broadcast.requests().datagrams()`. Stream tracks of the same name are independent.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `TrackInfo.max_age` defaults to `timedelta(0)`, like `Delay.max`, so a bare `TrackInfo()` and an omitted one now advertise a zero max age, serving only the live edge, instead of no publisher limit. `None` still means no limit: pass `max_age=None` where you relied on the default.

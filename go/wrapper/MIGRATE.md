@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 moq.dev/moq/socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
+### Separate datagram tracks
+
+Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `BroadcastProducer.CreateDatagrams(name, info)` and `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)` assigns a sequence and `Insert(Datagram)` preserves one. `DatagramConsumer.Recv(ctx)` and `All(ctx)` read its independent cursor. `DatagramInfo` carries priority and optional timescale. Watch `Priority()` / `PriorityChanged(ctx, last)` and serve on-demand tracks through `BroadcastRequests.Datagrams()` / `DatagramRequests.Requested(ctx)`.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 `TrackInfo.MaxAge` is a `time.Duration` instead of a `*time.Duration`, like `Delay.Max`: the zero value, and a nil `*TrackInfo`, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Assign the duration directly, and set the new `MaxAgeUnlimited`, which ignores `MaxAge`, where you relied on nil meaning no limit. A received track's `Info()` sets it when its publisher advertised no limit.

@@ -658,7 +658,7 @@ impl<T> Polled<T> {
 		}
 	}
 
-	/// End every call with the owner's failure, as [`Task::supervised`] does.
+	/// End every call with the owner's failure.
 	pub fn supervised(mut self, driver: Background) -> Self {
 		self.driver = driver;
 		self
@@ -819,6 +819,7 @@ impl<T: Send + 'static> Task<T> {
 		}
 	}
 
+	#[cfg(any(feature = "audio", feature = "video"))]
 	pub fn supervised(mut self, driver: Background) -> Self {
 		self.driver = driver;
 		self

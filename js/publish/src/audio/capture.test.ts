@@ -23,7 +23,7 @@ function installFakeWebAudio() {
 	// Never resolves during the test, so the spawned worklet load stays pending until teardown.
 	const addModule = () => new Promise<void>(() => {});
 	let audioWorkletNodes = 0;
-	const requestedRates: (number | undefined)[] = [];
+	const requested: (AudioContextOptions & { sinkId?: unknown })[] = [];
 
 	// Already running, as after a gesture, so only the pending module load holds the worklet back.
 	class FakeAudioContext extends EventTarget {
@@ -31,7 +31,7 @@ function installFakeWebAudio() {
 		audioWorklet = { addModule };
 		constructor(options?: AudioContextOptions) {
 			super();
-			requestedRates.push(options?.sampleRate);
+			requested.push(options ?? {});
 		}
 		resume(): Promise<void> {
 			return Promise.resolve();
@@ -77,8 +77,8 @@ function installFakeWebAudio() {
 		get audioWorkletNodes() {
 			return audioWorkletNodes;
 		},
-		get requestedRates() {
-			return requestedRates;
+		get requested() {
+			return requested;
 		},
 		[Symbol.dispose]() {
 			for (const [name, original] of originals) {
@@ -136,7 +136,7 @@ async function requestedRate(sampleRate: number | undefined, override?: number) 
 	capture.close();
 	await settle();
 
-	return webaudio.requestedRates.at(-1);
+	return webaudio.requested.at(-1)?.sampleRate;
 }
 
 test("snaps a rate Opus can't decode up to full band", async () => {
@@ -161,6 +161,22 @@ test("honors an explicit rate override", async () => {
 	expect(await requestedRate(48_000, 16_000)).toBe(16_000);
 });
 
+// A device's render callback can be 43 ms long, which bursts the frames handed to the encoder. The
+// capture graph is never audible, so it renders to no device, which Chromium paces every 10 ms.
+test("renders the capture graph to no output device", async () => {
+	using webaudio = installFakeWebAudio();
+
+	const capture = new Capture({
+		enabled: true,
+		source: new Signal(fakeSource()) as never,
+	});
+	await settle();
+	capture.close();
+	await settle();
+
+	expect(webaudio.requested.at(-1)?.sinkId).toEqual({ type: "none" });
+});
+
 // Regression: tweaking an encoder knob must not tear down the microphone. The capture used to take
 // the codec as an input, so it rebuilt the AudioContext on a codec change, dropping the worklet and
 // closing the track being published. Now the capture is codec-independent, which it has to be:
@@ -175,12 +191,12 @@ test("never rebuilds the capture graph for encoder settings", async () => {
 		sampleRate: rate,
 	});
 	await settle();
-	expect(webaudio.requestedRates.length).toBe(1);
+	expect(webaudio.requested.length).toBe(1);
 
 	// Only something that changes the capture itself may rebuild it.
 	rate.set(16_000);
 	await settle();
-	expect(webaudio.requestedRates.length).toBe(2);
+	expect(webaudio.requested.length).toBe(2);
 
 	capture.close();
 	await settle();

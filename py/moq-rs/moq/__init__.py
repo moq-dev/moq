@@ -12,6 +12,7 @@ from . import json as json
 from . import socket as socket
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
+from .datagram import DatagramConsumer, DatagramProducer, DatagramRequest, DatagramRequests
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
@@ -70,6 +71,7 @@ from .types import (
     ConnectionState,
     ConnectionStats,
     Datagram,
+    DatagramInfo,
     Delay,
     ErrorScope,
     FetchGroupOptions,
@@ -124,6 +126,11 @@ __all__ = [
     "ConnectionPhase",
     "ConnectionState",
     "Datagram",
+    "DatagramInfo",
+    "DatagramConsumer",
+    "DatagramProducer",
+    "DatagramRequest",
+    "DatagramRequests",
     "Delay",
     "Error",
     "ErrorScope",
