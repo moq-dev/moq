@@ -8743,7 +8743,7 @@ pub(super) mod test {
 				let super::Stream::Aac(stream) = &import.streams[&pid] else {
 					panic!("an AAC stream");
 				};
-				assert_eq!(stream.tail_pts, Some(Timestamp::from_micros(1_000_000)));
+				assert_eq!(stream.tail_pts, Some(Timestamp::from_micros(1_000_000).unwrap()));
 				assert_eq!(stream.tail, [0xde, 0xad]);
 			} else {
 				assert!(!import.pending.contains_key(&pid));
