@@ -10060,7 +10060,7 @@ mod serve_tests {
 	/// including all of it once a narrowing retired the live stream.
 	#[kio::test]
 	async fn widening_with_a_fill_streams_the_current_group_once() {
-		let open = Filter::Unfiltered;
+		let open = Filter::Relative(1);
 		// The live stream stops after object 1, which the widening lifts.
 		let capped = Filter::Absolute {
 			start: Location { group: 1, object: 0 },
