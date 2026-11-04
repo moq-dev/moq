@@ -109,6 +109,9 @@ jobs:
         include:
           - name: Rust benchmark tests
             recipe: gh nightly rust-test
+            artifact: bench-rust-test
+            artifact-path: target/bench/nightly/rust-test
+            benchmark: true
           - name: Binding benchmark runners
             recipe: gh nightly bindings
           - name: Rust bench targets
@@ -244,7 +247,7 @@ jobs:
   # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
   benchmark-site:
     name: Benchmark site
-    needs: nightly
+    needs: [nightly, sizes]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -340,6 +343,7 @@ jobs:
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
+        # `rs hls-conformance` probes every segment moq-hls serves with ffprobe, against its playlists and manifest.
         # `gate` runs the queue's Check over every package, catching what a
         # diff-scoped queue run let into main.
         # `rs send-depth` proves moq-net's futures Send at the default recursion
@@ -351,7 +355,7 @@ jobs:
         # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
-        recipe: ["gate", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        recipe: ["gate", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe; too slow for the merge gate.
           - recipe: rs miri
@@ -540,7 +544,6 @@ jobs:
     uses: ./.github/workflows/release-kt-lib.yml
     permissions:
       contents: read
-      actions: read
 
   release-py-ffi:
     name: Release Py FFI
@@ -671,6 +674,21 @@ jobs:
             size-report/js/*.metafile.json
           retention-days: 45
           if-no-files-found: error
+      # The benchmark table records tonight's sizes even when the comparison fails on growth.
+      - name: Convert sizes for the benchmark table
+        id: size-table
+        if: ${{ !cancelled() && hashFiles('size-report/sizes.json') != '' }}
+        run: nix develop --command just gh benchmark-report size size-report target/bench/size/report.json
+      - name: Record benchmark outcome
+        if: ${{ !cancelled() }}
+        run: nix develop --command just gh benchmark-report status "${{ steps.size-table.outcome }}" target/bench/size
+      - name: Preserve benchmark report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-size
+          path: target/bench/size
+          retention-days: 45
 
   fuzz:
     name: Fuzz (${{ matrix.target }})
@@ -679,7 +697,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, ingest, request, packet, params, streamid, streams, frame, connection]
+        target: [lite, announce, ietf, varint, path, pattern, ingest, request, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

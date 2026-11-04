@@ -52,9 +52,9 @@ type DecoderOutput struct {
 	SampleRate *uint32
 	Channels   *uint32
 	// Delay.Min is the jitter buffer to hold ahead of the playhead, and where a cold join starts;
-	// Delay.Max bounds how stale a group may get before it is skipped, and adds no buffering. nil
-	// is zero for both.
-	Delay *media.Delay
+	// Delay.Max bounds how stale a group may get before it is skipped, and adds no buffering. The
+	// zero Delay is zero for both.
+	Delay moq.Delay
 	// Estimate measures the playout delay from arrival timing, never below Delay.Min; false holds
 	// exactly Delay.Min. nil estimates.
 	Estimate *bool
@@ -64,7 +64,8 @@ type DecoderOutput struct {
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
-	if err := delay(o.Delay, "audio"); err != nil {
+	delay, err := bridge.Delay(o.Delay)
+	if err != nil {
 		return ffi.MoqAudioDecoderOutput{}, err
 	}
 	// Go's zero value is the native null: the oldest group.
@@ -73,18 +74,7 @@ func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
 		start = &o.Start
 	}
 	estimate := o.Estimate == nil || *o.Estimate
-	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, Delay: o.Delay, Estimate: estimate, Start: start}, nil
-}
-
-// delay refuses a negative bound, which the FFI cannot carry.
-func delay(d *media.Delay, kind string) error {
-	if d == nil {
-		return nil
-	}
-	if err := bridge.NonNegative(&d.Min, kind+" min delay"); err != nil {
-		return err
-	}
-	return bridge.NonNegative(d.Max, kind+" max delay")
+	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, Delay: &delay, Estimate: estimate, Start: start}, nil
 }
 
 // Frame is interleaved PCM with its presentation timestamp.

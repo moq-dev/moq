@@ -27,8 +27,8 @@ private func assertTimeOverflow<T>(
 
 final class SmokeTests: XCTestCase {
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
-        XCTAssertEqual(Subscription.default.maxDelay, 0)
-        XCTAssertNil(Subscription(maxDelay: nil).maxDelay)
+        XCTAssertEqual(Subscription.default.delay.min, 0)
+        XCTAssertEqual(Subscription.default.delay.max, 0)
     }
 
     func testContainerTimebaseBelongsToOneBroadcast() throws {
@@ -71,7 +71,7 @@ final class SmokeTests: XCTestCase {
         }
         let consumer = try track.consume(
             subscription: Subscription(
-                maxDelay: 10,
+                delay: Delay(min: 0, max: 10),
                 ranges: [Subscription.Range(start: .relative(groups: 2))],
                 order: .ascending
             ))
@@ -297,26 +297,28 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(update.captures, ["alice"])
     }
 
-    func testAnnouncedEpochRestarts() async throws {
+    func testAnnouncedInstanceRestarts() async throws {
         let origin = OriginProducer()
         let announced = try origin.consume().announced(prefix: "")
-        let publication = try origin.createBroadcast(path: "epoch")
+        let publication = try origin.createBroadcast(path: "instance")
 
-        let first = mintEpoch()
-        try publication.announce(route: AnnounceRoute(epoch: first))
+        try publication.announce(route: AnnounceRoute())
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertEqual(start.route.epoch, first)
+        XCTAssertFalse(start.route.instance.isEmpty)
 
-        let second = mintEpoch()
-        try publication.announce(route: AnnounceRoute(epoch: second))
+        try publication.announce(route: AnnounceRoute(instance: "camera", epoch: 1))
         guard case .restart(let restart) = try await nextRoute(announced) else {
             return XCTFail("expected a restart")
         }
-        XCTAssertEqual(restart.route.epoch, second)
+        XCTAssertEqual(restart.route.instance, "camera")
 
-        XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(epoch: "not-an-epoch")))
+        XCTAssertThrowsError(try publication.announce(route: AnnounceRoute(instance: ""))) { error in
+            guard case MoqError.InvalidInstance = error else {
+                return XCTFail("expected InvalidInstance, got \(error)")
+            }
+        }
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
@@ -327,7 +329,7 @@ final class SmokeTests: XCTestCase {
         }
         let request = try await dynamic.requestedBroadcast()
         XCTAssertEqual(try request.path, "live/cam")
-        let prepared = try request.prepare(epoch: mintEpoch())
+        let prepared = try request.prepare()
         let served = try prepared.publish()
         XCTAssertTrue(served.broadcast === prepared.broadcast)
         _ = try await pending.value
@@ -457,14 +459,15 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.StreamProducer<Event>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
+            broadcast: broadcast,
+            track: try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000)))
         let consumer = try Json.StreamConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "events"))
 
         for n in 0..<3 {
-            try producer.append(Event(n: n))
+            try producer.append(Event(n: n), timestamp: micros(UInt64(n) * 1000))
             let record = try await consumer.next()
-            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestamp: nil))
+            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestamp: micros(UInt64(n) * 1000)))
         }
 
         consumer.cancel()
@@ -511,10 +514,11 @@ final class SmokeTests: XCTestCase {
 
     func testJsonProducersReportDemand() async throws {
         let broadcast = try BroadcastProducer()
+        let timed = TrackInfo(timescale: 1_000_000)
         let snapshot = try Json.SnapshotProducer<[String: Int]>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"))
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "status", info: timed))
         let stream = try Json.StreamProducer<[String: Int]>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events", info: timed))
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")
@@ -722,7 +726,7 @@ final class SmokeTests: XCTestCase {
 
         let fixed = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,
-            output: AudioDecoderOutput(format: .f32, delay: Media.Delay(min: 0.08, max: 0), estimate: false)
+            output: AudioDecoderOutput(format: .f32, delay: Delay(min: 0.08, max: 0), estimate: false)
         )
         let estimated = try await Audio.Consumer.subscribe(
             broadcast: consumer, id: "mic", rendition: rendition,

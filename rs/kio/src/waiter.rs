@@ -42,7 +42,8 @@ pub struct Waiter {
 	// unrecorded and a later registration there would stack a duplicate.
 	lost: AtomicBool,
 
-	// Made by `noop`, so a channel parks it nowhere: nothing would ever see its wake.
+	// Made by [`Self::noop`]: nothing would ever see its wake, so it registers nothing and a
+	// channel parks it nowhere.
 	noop: bool,
 }
 
@@ -169,9 +170,9 @@ impl Waiter {
 	/// the task until `poll` returns, and drops it if `poll` polled the set since.
 	/// Otherwise the executor polls the task again for a wake its own poll took.
 	///
-	/// Use it once, around a task's outermost poll. Only the innermost batch holds
-	/// wakes, so one nested inside (around a [`Tasks`](crate::Tasks) child, say)
-	/// lets its siblings' wakes of the owner through, and costs polls.
+	/// Use it around a task's outermost poll. Batches nest: a child task polled
+	/// inside may open its own, and a wake of this waiter's sets from inside the
+	/// child's batch is still held for this one.
 	pub fn batch<R>(&self, poll: impl FnOnce() -> R) -> R {
 		crate::task::Polling::run(&self.waker, poll)
 	}
@@ -256,7 +257,8 @@ impl WaiterList {
 		}
 	}
 
-	/// Register a waiter, a no-op while this list still holds it.
+	/// Register a waiter, a no-op while this list still holds it, or for a
+	/// [`Waiter::noop`].
 	///
 	/// The list's tag changes on every drain and the waiter records the tag it
 	/// joined under, so a matching record proves the entry is still here and a
@@ -267,6 +269,10 @@ impl WaiterList {
 	/// window covers the list over time. A list about to grow sweeps every
 	/// dead slot first.
 	pub fn register(&mut self, waiter: &Waiter) {
+		// Registering would only allocate a handle nothing can wake, leaving a dead slot once it drops.
+		if waiter.noop {
+			return;
+		}
 		if self.tag == 0 {
 			self.tag = serial();
 		}
@@ -579,7 +585,7 @@ mod tests {
 	fn abandoned_waiters_do_not_grow_the_list() {
 		let mut list = WaiterList::new();
 		for _ in 0..1_000 {
-			Waiter::noop().register(&mut list);
+			Waiter::new(Waker::noop().clone()).register(&mut list);
 		}
 		assert!(list.entries.len() <= 2);
 	}
@@ -588,11 +594,22 @@ mod tests {
 	fn a_list_is_empty_once_its_waiters_drop() {
 		let mut list = WaiterList::new();
 		assert!(list.is_empty());
-		let waiter = Waiter::noop();
+		let waiter = Waiter::new(Waker::noop().clone());
 		waiter.register(&mut list);
 		assert!(!list.is_empty());
 		drop(waiter);
 		assert!(list.is_empty());
+	}
+
+	/// A peek through a no-op waiter allocates no handle and takes no slot, clone or not.
+	#[test]
+	fn a_noop_waiter_registers_nothing() {
+		let mut list = WaiterList::new();
+		let waiter = Waiter::noop();
+		waiter.register(&mut list);
+		assert!(waiter.shared.get().is_none(), "a no-op registration allocated a handle");
+		waiter.clone().register(&mut list);
+		assert!(list.entries.is_empty());
 	}
 
 	/// Tasks parked on one list are retired and re-register in whatever order they
@@ -602,7 +619,7 @@ mod tests {
 	fn retired_live_waiters_do_not_grow_the_list() {
 		const LIVE: usize = 64;
 		let mut list = WaiterList::new();
-		let mut waiters: Vec<Waiter> = (0..LIVE).map(|_| Waiter::noop()).collect();
+		let mut waiters: Vec<Waiter> = (0..LIVE).map(|_| Waiter::new(Waker::noop().clone())).collect();
 		for waiter in &waiters {
 			waiter.register(&mut list);
 		}
@@ -614,7 +631,7 @@ mod tests {
 		for _ in 0..rounds {
 			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
 			let i = (seed >> 33) as usize % LIVE;
-			waiters[i] = Waiter::noop();
+			waiters[i] = Waiter::new(Waker::noop().clone());
 			waiters[i].register(&mut list);
 		}
 
@@ -639,7 +656,7 @@ mod tests {
 	/// after one of them drains, while an unrecorded list appends on every call.
 	#[test]
 	fn overflow_keeps_recorded_lists_idempotent() {
-		let waiter = Waiter::noop();
+		let waiter = Waiter::new(Waker::noop().clone());
 		let mut lists: Vec<_> = (0..=PARKED).map(|_| WaiterList::new()).collect();
 		for _ in 0..3 {
 			for list in &mut lists {

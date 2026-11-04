@@ -4,6 +4,25 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC waits have caller-owned poll forms ([#7707](https://github.com/moq-dev/moq/pull/7707))
+
+The QUIC driver connection's stream opens, accepts, datagram receive and close waits,
+the endpoint's accept, and both send handles' close waits now expose `poll_*` methods
+taking `&self, &kio::Waiter`. Existing async methods keep their behavior and wrap the
+polls. `send::Finished` also implements `Future`, with the same result as `stopped()`:
+`None` for acknowledged data and FIN or a local reset, `Some(code)` for a peer stop,
+and an error if the connection ends first.
+
+### `peer_chain` is `peer_identity` ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+`quic::driver::Connection::peer_chain()` is now `peer_identity()` and returns `Option<Vec<CertificateDer<'static>>>`, mirroring moq-tokio.
+Use `cert.to_vec()` for raw DER.
+
+### Smaller default windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`quic::transport::Config::default()` takes a 4 MiB connection window, a 1 MiB stream window, and 4 MiB of unacknowledged outgoing data, down from 128 MiB, 4 MiB, and 16 MiB, matching moq-tokio's `[quic]` defaults. Set `limits` explicitly to keep the old windows.
+`quic::driver::recv::Stream::received_reset`, and so `quic::web::RecvStream::poll_reset`, fail with `Error::Evicted` for a stream evicted to free a stuck window.
+
 ### QUIC early data is disabled
 
 The shared moq-quic core no longer sends or accepts early data, including with caller-supplied rustls server configs.

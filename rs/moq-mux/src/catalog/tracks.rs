@@ -71,12 +71,14 @@ use super::hang::{Catalog, CatalogExt};
 /// #     broadcast: &mut moq_net::broadcast::Producer,
 /// #     catalog: &moq_mux::catalog::Producer<Ext>,
 /// # ) -> moq_mux::Result<()> {
-/// let info = moq_net::track::Info::default().with_compress(true);
+/// let info = moq_net::track::Info::default()
+///     .with_timescale(moq_net::Timescale::MILLI)
+///     .with_compress(true);
 /// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
 /// let mut telemetry = catalog.json_stream::<serde_json::Value>(track, entry)?;
-/// telemetry.append(&serde_json::json!({ "heartbeat": 1 }))?;
+/// telemetry.append(&serde_json::json!({ "heartbeat": 1 }), catalog.clock().now())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -384,6 +386,23 @@ fn quantize(published: Option<Duration>, measured: Option<Duration>, period: Dur
 	}
 }
 
+/// Write `config` under `name`, refusing it before any change if it redefines the rendition's
+/// identity or won't serialize, so the reserved snapshot never retains a bad edit.
+///
+/// The entry is checked in a catalog holding only it and the extension: the media and data sections
+/// serialize each entry on its own, and the rest was checked when it was written, so cloning or
+/// serializing them would make declaring N renditions cost N². The extension is kept whole because
+/// its serializer may depend on its combined entries.
+fn write<E: CatalogExt, C: RenditionConfig<E>>(catalog: &mut Catalog<E>, name: &str, config: C) -> crate::Result<()> {
+	let mut alone = Catalog::default();
+	alone.ext = catalog.ext.clone();
+	config.clone().insert(&mut alone, name);
+	check_identity(catalog, &alone, name)?;
+	serde_json::to_writer(std::io::sink(), &alone).map_err(moq_json::Error::from)?;
+	config.insert(catalog, name);
+	Ok(())
+}
+
 /// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
 /// decoder identity changed publishes under a new name instead.
 fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
@@ -652,20 +671,25 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// the rendition existed (a dirty start or a B-frame reorder). Only the authoritative ones reach
 	/// the MSF catalog. A caller who wants to pre-empt detection sets the field on the config, or (for
 	/// a config an importer builds out of the bitstream) hands the importer a hint like [`VideoHint`].
+	/// Unset jitter and delay keep the published floor across reconfiguration.
 	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
-		let resolved = Self::resolved(&supplied, &self.detected);
-		self.check_decrease(&resolved)?;
+		let mut resolved = Self::resolved(&supplied, &self.detected);
+		if self.present {
+			let published = self.config()?.estimate();
+			if supplied.jitter.is_none() {
+				resolved.jitter = resolved.jitter.max(published.jitter);
+			}
+			if supplied.delay.is_none() {
+				resolved.delay = resolved.delay.max(published.delay);
+			}
+			Self::check_decrease(&published, &resolved)?;
+		}
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
-			let mut next = (*guard).clone();
-			config.insert(&mut next, &self.name);
-			check_identity(&guard, &next, &self.name)?;
-			// Serialization must succeed before the reserved snapshot retains the edit.
-			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
+			write(&mut guard, &self.name, config)?;
 			self.present = true;
-			*guard = next;
 			guard.list::<C>(&self.name);
 			if C::detects() {
 				guard.hint::<C>(&self.name, supplied.clone());
@@ -758,11 +782,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	}
 
 	/// Refuse a config that lowers the jitter or delay already advertised to subscribers.
-	fn check_decrease(&self, next: &Estimate) -> crate::Result<()> {
-		if !self.present {
-			return Ok(());
-		}
-		let previous = self.config()?.estimate();
+	fn check_decrease(previous: &Estimate, next: &Estimate) -> crate::Result<()> {
 		if next.jitter < previous.jitter {
 			return Err(crate::Error::JitterDecreased);
 		}
@@ -808,13 +828,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
-		self.check_decrease(&config.estimate())?;
+		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
 		let mut guard = self.catalog.modify()?;
-		let mut next = (*guard).clone();
-		config.insert(&mut next, &self.name);
-		check_identity(&guard, &next, &self.name)?;
-		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
-		*guard = next;
+		write(&mut guard, &self.name, config)?;
 		Ok(guard)
 	}
 }
@@ -1009,6 +1025,72 @@ mod tests {
 	}
 
 	#[test]
+	fn reconfigure_floors_only_unsupplied_fields() {
+		let ms = Duration::from_millis;
+		for supplied_jitter in [false, true] {
+			for supplied_delay in [false, true] {
+				let (_broadcast, catalog, mut rendition) = video_track();
+				rendition.set(config(None, None)).unwrap();
+				rendition
+					.estimate(Estimate::default().with_jitter(ms(100)).with_delay(ms(200)))
+					.unwrap();
+				// The most recent reading can be below what was already advertised.
+				rendition
+					.estimate(Estimate::default().with_jitter(ms(50)).with_delay(ms(100)))
+					.unwrap();
+				let mut next = config(Some(500_000), supplied_jitter.then_some(ms(150)));
+				next.delay = supplied_delay.then_some(ms(250));
+				next.coded_width = Some(1920);
+				next.coded_height = Some(1080);
+				next.framerate = Some(30.0);
+				rendition.set(next.clone()).unwrap();
+				let expected_jitter = Some(ms(if supplied_jitter { 150 } else { 100 }));
+				let expected_delay = Some(ms(if supplied_delay { 250 } else { 200 }));
+				next.jitter = expected_jitter;
+				next.delay = expected_delay;
+				assert_eq!(catalog.snapshot().video.renditions["v"], next);
+
+				// A floor does not turn an unsupplied field into a supplied hint.
+				rendition
+					.estimate(Estimate::default().with_jitter(ms(300)).with_delay(ms(400)))
+					.unwrap();
+				let current = rendition.config().unwrap();
+				assert_eq!(
+					current.jitter,
+					if supplied_jitter {
+						expected_jitter
+					} else {
+						Some(ms(300))
+					}
+				);
+				assert_eq!(
+					current.delay,
+					if supplied_delay { expected_delay } else { Some(ms(400)) }
+				);
+			}
+		}
+	}
+
+	/// A supplied zero delay is a statement, not a gap: measurement never replaces it, and the
+	/// catalog omits it on the wire, hang and MSF alike.
+	#[test]
+	fn a_supplied_zero_delay_is_never_measured() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		let mut supplied = config(None, None);
+		supplied.delay = Some(Duration::ZERO);
+		rendition.set(supplied).unwrap();
+		rendition
+			.estimate(Estimate::default().with_delay(Duration::from_millis(200)))
+			.unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["v"].delay, Some(Duration::ZERO));
+
+		let json = catalog.snapshot().to_json().unwrap();
+		assert!(!json.contains("delay"), "{json}");
+		let rendered = super::super::producer::to_msf(&catalog.snapshot(), &moq_net::Path::default());
+		assert!(rendered.tracks.iter().all(|track| track.delay.is_none()));
+	}
+
+	#[test]
 	fn published_delay_never_decreases() {
 		let (_broadcast, catalog, mut rendition) = video_track();
 		let delayed = |delay| {
@@ -1017,16 +1099,17 @@ mod tests {
 			config
 		};
 		rendition.set(delayed(Some(Duration::from_millis(200)))).unwrap();
+		assert!(matches!(
+			rendition.set(delayed(Some(Duration::from_millis(100)))),
+			Err(crate::Error::DelayDecreased)
+		));
 		for smaller in [Some(Duration::from_millis(100)), None] {
-			assert!(matches!(
-				rendition.set(delayed(smaller)),
-				Err(crate::Error::DelayDecreased)
-			));
 			assert!(matches!(
 				rendition.replace(delayed(smaller)),
 				Err(crate::Error::DelayDecreased)
 			));
 		}
+		rendition.set(delayed(None)).unwrap();
 		assert_eq!(
 			catalog.snapshot().video.renditions["v"].delay,
 			Some(Duration::from_millis(200))
@@ -1088,12 +1171,11 @@ mod tests {
 			config
 		};
 		rendition.set(text(Some(Duration::from_millis(100)))).unwrap();
-		for smaller in [Some(Duration::from_millis(50)), None] {
-			assert!(matches!(
-				rendition.set(text(smaller)),
-				Err(crate::Error::JitterDecreased)
-			));
-		}
+		assert!(matches!(
+			rendition.set(text(Some(Duration::from_millis(50)))),
+			Err(crate::Error::JitterDecreased)
+		));
+		rendition.set(text(None)).unwrap();
 		assert_eq!(
 			catalog.snapshot().text.renditions["t"].jitter,
 			Some(Duration::from_millis(100))
@@ -1412,6 +1494,17 @@ mod tests {
 			exploding: BTreeMap<String, Exploding>,
 			#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 			stubborn: BTreeMap<String, Stubborn>,
+			#[serde(default, skip_serializing_if = "BTreeMap::is_empty", serialize_with = "at_most_one")]
+			solo: BTreeMap<String, Solo>,
+		}
+
+		/// Serialize a section that refuses to hold more than one entry, so whether it serializes
+		/// depends on every entry, not just the one being written.
+		fn at_most_one<S: serde::Serializer>(solo: &BTreeMap<String, Solo>, serializer: S) -> Result<S::Ok, S::Error> {
+			if solo.len() > 1 {
+				return Err(serde::ser::Error::custom("only one solo entry"));
+			}
+			solo.serialize(serializer)
 		}
 
 		impl CatalogExt for TelemetryExt {}
@@ -1566,6 +1659,42 @@ mod tests {
 			reserved
 				.init::<Exploding>("gps")
 				.expect("a stranded entry would refuse this forever");
+		}
+
+		/// A config whose section serializes only while it holds a single entry.
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		struct Solo;
+
+		impl RenditionConfig<TelemetryExt> for Solo {
+			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.ext.solo.insert(name.to_string(), self);
+			}
+			fn get_mut<'a>(catalog: &'a mut Catalog<TelemetryExt>, name: &str) -> Option<&'a mut Self> {
+				catalog.ext.solo.get_mut(name)
+			}
+			fn remove(catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.ext.solo.remove(name);
+			}
+		}
+
+		/// An entry that serializes alone but not beside the extension's other entries is refused
+		/// before the catalog retains it.
+		#[test]
+		fn an_entry_that_breaks_the_extension_is_refused() {
+			let (_broadcast, catalog) = produce();
+			let reserved = catalog.reserve();
+			let mut first = reserved.init::<Solo>("a").unwrap();
+			let mut second = reserved.init::<Solo>("b").unwrap();
+
+			first.set(Solo).unwrap();
+			assert!(
+				matches!(second.set(Solo), Err(crate::Error::Json(_))),
+				"the second entry makes the extension unserializable"
+			);
+
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.ext.solo.keys().collect::<Vec<_>>(), ["a"]);
+			serde_json::to_string(&snapshot).expect("the refused edit left the catalog serializable");
 		}
 
 		/// A custom kind gets the same detection and drop-removal as video/audio.

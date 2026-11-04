@@ -198,6 +198,8 @@ function ceiling(max: number): number {
 class Divider {
 	#estimate: Getter<number | undefined> | undefined;
 	readonly entries = new Signal<Entry[]>([]);
+	/** Whether a live claim reads the estimate; see {@link reserved}. */
+	readonly reserved = new Signal(false);
 	#alive = new Signal(true);
 	#nextId = 0;
 	#signals = new Effect();
@@ -218,15 +220,23 @@ class Divider {
 		this.#signals.run((effect) => {
 			if (!effect.get(this.#alive)) return;
 			const entries = effect.get(this.entries);
+			let reserved = false;
+			for (const entry of entries) {
+				// A claim without a demand always reads its slice.
+				if (!entry.demand) {
+					reserved = true;
+					continue;
+				}
+				effect.get(entry.demand.wanted);
+				effect.get(hooks.demandReleased(entry.demand));
+				// The same test shareOf applies: a closed demand reads no slice.
+				if (effect.get(entry.demand.closed) === undefined) reserved = true;
+			}
+			this.reserved.set(reserved);
 			// Observe the estimate only while something claims it: reading a session's
 			// receive estimate is what requests PROBE, so an empty registry asks for nothing.
 			if (entries.length === 0) return;
 			if (this.#estimate) effect.get(this.#estimate);
-			for (const entry of entries) {
-				if (!entry.demand) continue;
-				effect.get(entry.demand.wanted);
-				effect.get(hooks.demandReleased(entry.demand));
-			}
 			this.#publish();
 		});
 	}
@@ -253,6 +263,7 @@ class Divider {
 	close(): void {
 		if (!this.#alive.peek()) return;
 		this.#alive.set(false);
+		this.reserved.set(false);
 		for (const entry of this.entries.peek()) {
 			entry.rate.set(undefined);
 		}
@@ -350,6 +361,20 @@ export interface Handle {
 	reserve(track: Demand, max: number): Reservation;
 }
 
+// Assigned by Allocator's static block, which runs before any instance exists.
+let reservedOf: (allocator: Allocator) => Getter<boolean>;
+
+/**
+ * Whether `allocator` holds a reservation that reads the estimate.
+ *
+ * The estimate's source can stop sampling while this is false: nothing reads it.
+ *
+ * @internal
+ */
+export function reserved(allocator: Allocator): Getter<boolean> {
+	return reservedOf(allocator);
+}
+
 /**
  * Divides one connection's bandwidth estimate among the tracks sharing it.
  *
@@ -375,6 +400,10 @@ export class Allocator implements Handle {
 	 */
 	constructor(estimate?: Getter<number | undefined>) {
 		this.#divider = new Divider(estimate);
+	}
+
+	static {
+		reservedOf = (allocator) => allocator.#divider.reserved;
 	}
 
 	/**

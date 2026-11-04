@@ -85,7 +85,15 @@ export namespace Audio {
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
+		arrival?: {
+			timestamp: Clock.Milli;
+			wall: Clock.Wall;
+		};
 		bytesReceived: number;
+		errors: number;
+		late: number;
+		stalled: Clock.Milli;
+		stalls: number;
 		underruns: number;
 	}
 	export type Supported = (config: Hang.Catalog.Audio.AudioConfig) => Promise<boolean>;
@@ -108,7 +116,7 @@ export type BroadcastInput = {
 	enabled: Signals.Getter<boolean>;
 	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
-	origin: Signals.Getter<Pick<Net.Origin.Consumer, "closed" | "discovery" | "request" | "follow" | "announced"> | undefined>;
+	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 };
 
 export type BroadcastOutput = {
@@ -162,7 +170,7 @@ export type PlayerInput = {
 	enabled: Signals.Getter<boolean>;
 	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
-	origin: BroadcastInput["origin"];
+	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
 	probe: Signals.Getter<Net.Connection.Probe | undefined>;
 	text: {
@@ -311,8 +319,16 @@ export namespace Video {
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
+		arrival?: {
+			timestamp: Clock.Milli;
+			wall: Clock.Wall;
+		};
 		bytesReceived: number;
+		errors: number;
 		frameCount: number;
+		late: number;
+		stalled: Clock.Milli;
+		stalls: number;
 	}
 	export type Supported = (config: Hang.Catalog.Video.VideoConfig) => Promise<boolean>;
 	export type Target = {

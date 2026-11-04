@@ -22,11 +22,12 @@ default:
 # No package reads `import.meta.env`, so no app environment variable can reach a
 # bundle through one: a bare reference makes Vite inline every `VITE_*` value.
 
-# Lint, type-check, format, and build all packages.
+# Lint the repository, type-check, and build all packages.
 check:
+    just --justfile ../justfile biome
     python3 ../sh/js/workspace.py check --all
 
-# Check changed workspace packages and their transitive dependents.
+# Type-check and build changed workspace packages and their transitive dependents.
 check-changed list:
     python3 ../sh/js/workspace.py check '{{ list }}'
 
@@ -38,11 +39,14 @@ workers:
 audit:
     bash ../sh/js/audit.sh
 
-# Auto-fix lint and formatting issues in workspaces, harnesses, docs and demos, then rebuild
-# the changed packages (or `--all`) to regenerate their committed API reports.
-fix list="--all":
+# Fix repository lint and rebuild all packages to update their API reports.
+fix:
+    just --justfile ../justfile biome-fix
+    just fix-changed --all
+
+# Rebuild changed workspace packages (or `--all`) to update their API reports.
+fix-changed list:
     bun install
-    bun biome check --write . ../bench/browser ../test ../doc ../demo
     MOQ_API_REPORT=update python3 ../sh/js/workspace.py build '{{ list }}'
 
 # Run all unit tests.
@@ -118,6 +122,12 @@ arrivals-bench:
     bun install --frozen-lockfile
     bun watch/bench/arrivals.ts
 
+# Reduce and compare the worst known peer grant shapes, swept over AUTH_OK size.
+pattern-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project pattern/bench/tsconfig.json
+    bun pattern/bench/algebra.ts
+
 # Sweep manual-clock armed timers x due timers, with independent and shared abort scopes.
 clock-bench:
     bun install --frozen-lockfile
@@ -146,6 +156,11 @@ slow-group-bench:
     bun install --frozen-lockfile
     bun hang/bench/slow-group.ts
 
+# Sweep a hang consumer's buffered groups, frames per group, publishers and players across arrival orders.
+buffered-bench:
+    bun install --frozen-lockfile
+    bun hang/bench/buffered.ts
+
 # Sweep the audio jitter estimator's held history against in-order and reordered frames.
 jitter-bench:
     bun install --frozen-lockfile
@@ -155,6 +170,11 @@ jitter-bench:
 ring-bench:
     bun install --frozen-lockfile
     bun watch/bench/ring.ts
+
+# Sweep audio rendition count against repeated mute/unmute catalog updates.
+audio-support-bench:
+    bun install --frozen-lockfile
+    bun watch/bench/support.ts
 
 # Sweep decoder count against PCM callback size during audio warmup.
 audio-warmup-bench:
@@ -169,7 +189,7 @@ p2p-bench:
 # Sweep E2EE frame size against writes in flight through the WebCrypto pump.
 e2ee-bench:
     bun install --frozen-lockfile
-    bun e2ee/bench/pump.ts
+    bun crypto/bench/pump.ts
 
 # Sweep audio renditions x raw retention through native WebCodecs in Chromium.
 raw-audio-bench:

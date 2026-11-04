@@ -96,7 +96,7 @@ async function sendLiteGoaway(server: WebTransport): Promise<void> {
 /**
  * After GOAWAY the old session keeps opening subscribe, fetch, and announce-interest streams
  * while it is the only route, at the drain cost. Once a replacement answers, it outranks the
- * old session and new requests open there instead. These wires carry no epoch, so the
+ * old session and new requests open there instead. These wires carry no instance, so the
  * replacement is another instance: the request already open stays on the draining session.
  */
 async function handover(kind: "lite" | "ietf"): Promise<void> {
@@ -180,7 +180,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(await later.readString()).toBe("from-draining");
 
 		// A fresh consumer caches nothing, so the publisher's answer proves the FETCH reached the wire.
-		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0);
+		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0n);
 		if (kind === "lite") expect(await (await fetched).readString()).toBe("one");
 		else await expect(fetched).rejects.toThrow(/not supported/);
 

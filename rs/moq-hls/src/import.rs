@@ -680,7 +680,12 @@ impl TrackState {
 				rendition: self.label.clone(),
 				source: err,
 			},
-			err => err.into(),
+			err => {
+				// A decode error is terminal. Retire this generation now instead of fetching
+				// another segment for an importer that cannot read it.
+				self.evict();
+				err.into()
+			}
 		})?;
 
 		self.media_range = range;
@@ -2099,6 +2104,45 @@ mod tests {
 		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
 	}
 
+	/// A decode refusal retires its importer at once, rather than after
+	/// [`MAX_RENDITION_FAILURES`] consecutive failures, so the next pass rebuilds it under fresh
+	/// track names and can import a repaired source. The refusal is not settled, so `run` still
+	/// retries the step within its backoff budget.
+	#[tokio::test]
+	async fn a_refused_segment_recovers_through_a_new_importer() {
+		for passthrough in [false, true] {
+			let dir = temp_dir();
+			write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
+			let playlist =
+				"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"videoinit.mp4\"\n#EXTINF:1,\nvideo0.m4s\n";
+			std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut cfg = Config::new(Url::from_file_path(dir.join("media.m3u8")).unwrap());
+			cfg.passthrough = passthrough;
+			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+			import.init().await.unwrap();
+			let previous = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+
+			let segment = std::fs::read(dir.join("video1.m4s")).unwrap();
+			// An mdat without a moof is refused at its header.
+			std::fs::write(dir.join("video1.m4s"), b"\0\0\0\x0cmdatdata").unwrap();
+			std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_some());
+			assert!(import.video[0].importer.is_none());
+			std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_none());
+			assert_eq!(step.wrote_segments, 2);
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.video.renditions.len(), 1);
+			assert_ne!(*snapshot.video.renditions.keys().next().unwrap(), previous);
+			import.finish().unwrap();
+			std::fs::remove_dir_all(dir).unwrap();
+		}
+	}
+
 	/// An ended rendition is never fetched again, so losing its playlist while its siblings
 	/// are still running cannot evict the finished rendition.
 	#[tokio::test]
@@ -2310,7 +2354,8 @@ mod tests {
 			.clone()
 		};
 		let before_name = name(&catalog.snapshot());
-		let replay = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 		let mut old = consumer
 			.track(&before_name)
 			.unwrap()
@@ -2476,7 +2521,8 @@ mod tests {
 
 	/// Every frame timestamp `name` carries so far, in microseconds.
 	async fn stamps(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u128> {
-		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
 		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
 		let wait = std::time::Duration::from_millis(100);
 		let mut out = Vec::new();

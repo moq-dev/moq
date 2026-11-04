@@ -9,8 +9,11 @@ import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError, TimestampMis
 import { Compression, encodable, stored } from "./flate/group.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
+import { rescale } from "./rescale.ts";
 import type { Timestamp } from "./time.ts";
+import type { Info as TrackInfo } from "./track.ts";
 import { MAX_FRAME_BYTES, SEGMENT_BYTES } from "./util/limits.ts";
+import { checkSequence } from "./util/sequence.ts";
 
 // A live tail budget, including a conservative charge for each frame's object and queue slot.
 const TAIL_BYTES = 32 * 1024 * 1024;
@@ -191,12 +194,12 @@ export interface ReadOptions {
 /** Immutable group metadata. */
 export interface Info {
 	/** Sequence number of this group within its track. */
-	sequence: number;
+	sequence: bigint;
 }
 
 /** Reactive backing state shared by the group producer and one consumer. */
 class GroupState {
-	readonly sequence: number;
+	readonly sequence: bigint;
 	frames = new Signal(new Queue<Frame>());
 	closed = new Once<Error | null>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
@@ -210,9 +213,10 @@ class GroupState {
 	cacheBytes = 0;
 	compressed?: boolean;
 	flate?: Compression;
-	// Whether the owning track has a timescale, so every frame must carry a timestamp (true)
-	// or none may (false). Undefined for a group no track has claimed yet, which takes either.
-	timed?: boolean;
+	// The owning track's info, which every frame's timestamp must `rescale` to: a timed track's frames
+	// carry a timestamp its scale holds, an untimed track's carry none. Undefined for a group
+	// no track has claimed yet, which takes either.
+	track?: TrackInfo;
 	// The first frame's timestamp, retained after reads. Media time only: an untimed group
 	// never has one, so it says nothing about whether a frame was written.
 	timestamp?: Timestamp;
@@ -230,7 +234,7 @@ class GroupState {
 	progress = new Set<(total: number) => void>();
 	shedRead?: () => void;
 
-	constructor(sequence: number) {
+	constructor(sequence: bigint) {
 		this.sequence = sequence;
 	}
 }
@@ -252,9 +256,9 @@ class Landed implements Frame {
 	}
 }
 
-// Refuse a frame whose timedness disagrees with the track's.
-function checkTimed(timed: boolean | undefined, frame: Frame) {
-	if (timed !== undefined && timed !== (frame.timestamp !== undefined)) throw new TimestampMismatch();
+// Refuse a frame whose timestamp the track's timeline refuses.
+function checkTimed(track: TrackInfo | undefined, frame: Frame) {
+	if (track) rescale(track, frame.timestamp);
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
@@ -271,7 +275,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	for (const fn of state.progress) fn(state.total.peek());
 }
 
-let makeDemand: (sequence: number, wanted: Getter<boolean>, state: GroupState) => Demand;
+let makeDemand: (sequence: bigint, wanted: Getter<boolean>, state: GroupState) => Demand;
 
 /**
  * A watch-only view of a group's mirror readers, including coalesced fetches.
@@ -280,11 +284,11 @@ let makeDemand: (sequence: number, wanted: Getter<boolean>, state: GroupState) =
  */
 export class Demand {
 	/** The group sequence this handle watches. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 	#wanted: Getter<boolean>;
 	#state: GroupState;
 
-	private constructor(sequence: number, wanted: Getter<boolean>, state: GroupState) {
+	private constructor(sequence: bigint, wanted: Getter<boolean>, state: GroupState) {
 		this.sequence = sequence;
 		this.#wanted = wanted;
 		this.#state = state;
@@ -312,7 +316,7 @@ export class Demand {
  */
 export class Producer {
 	/** Sequence number of this group within its track. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 
 	#state: GroupState;
 	#mirrors?: Set<GroupState>;
@@ -338,7 +342,8 @@ export class Producer {
 	// timestamp against its neighbors' starts.
 	#admits?: ((start: Timestamp) => () => void)[];
 
-	constructor(sequence: number) {
+	constructor(sequence: bigint) {
+		checkSequence(sequence);
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
 		this.#demand = makeDemand(sequence, this.#wanted, this.#state);
@@ -391,13 +396,14 @@ export class Producer {
 			state.progress.add(fn);
 			return () => state.progress.delete(fn);
 		};
-		hooks.bindGroupTimed = (group, timed) => {
+		hooks.bindGroupTimed = (group, track) => {
 			const state = group.#state;
-			if (state.timed === timed) return;
+			const timed = track.timescale != null;
+			if (state.track !== undefined && (state.track.timescale != null) === timed) return;
 			// Another track already holds it to the opposite timedness, empty or not.
-			if (state.timed !== undefined) throw new TimestampMismatch();
-			for (const frame of state.frames.peek()) checkTimed(timed, frame);
-			state.timed = timed;
+			if (state.track !== undefined) throw new TimestampMismatch();
+			for (const frame of state.frames.peek()) checkTimed(track, frame);
+			state.track = track;
 		};
 		hooks.admitGroupStart = (group, admit) => {
 			group.#admits ??= [];
@@ -601,7 +607,7 @@ export class Producer {
 		if (this.#open) throw new Error("a frame is still being written");
 		if (this.#state.total.peek() === Number.MAX_SAFE_INTEGER)
 			throw new ProtocolViolation("group frame index exceeds the safe integer range");
-		checkTimed(this.#state.timed, frame);
+		checkTimed(this.#state.track, frame);
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
 		}
@@ -1061,7 +1067,7 @@ class CombinedClosed implements GetPromise<Error | null> {
  */
 export class Consumer {
 	/** Sequence number of this group within its track. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 
 	#state: GroupState;
 	// The copy it was mirrored from, which that copy's cache evicts.
@@ -1120,7 +1126,7 @@ export class Consumer {
 	}
 
 	/**
-	 * Settles with a `StreamError` of code `Old` once the subscription's `maxDelay` gives up
+	 * Settles with a `StreamError` of code `Old` once the subscription's `delay.max` gives up
 	 * on this group, even after every frame was read or the group closed: a publisher still
 	 * writing or draining it races its writes against this, and against {@link closed}
 	 * settling with an error, and abandons the stream once either does. Peek it synchronously

@@ -368,7 +368,7 @@ fn fingerprint_pins(scheme: &str) -> bool {
 /// Unknown schemes rank lowest, so a forgotten classification is refused.
 fn scheme_tier(scheme: &str) -> u8 {
 	match scheme {
-		"https" | "moqt" | "moql" | "wss" | "iroh" | "tls" => 2,
+		"https" | "moqt" | "moql" | "wss" | "tls" => 2,
 		"tcp" | "ws" | "http" => 1,
 		// `unix` lands here deliberately: local IPC is not an upgrade over a
 		// network transport, it is a different reachability class (see `is_local`).
@@ -1066,8 +1066,8 @@ impl Connection {
 	/// still finishing after a GOAWAY) after draining its queued data.
 	/// Tokens stay presented until both sessions finish draining.
 	///
-	/// See [`moq_net::Session::close`]: explicit lite-07-wip waits for the subscriber
-	/// to receive finished tracks' tails; older Lite versions and IETF wait only for
+	/// See [`moq_net::Session::close`]: lite-05 and newer wait for the subscriber to
+	/// receive finished tracks' tails; older Lite versions and IETF wait only for
 	/// transport ACKs. Announcements are withdrawn first, bounded by a one second deadline
 	/// (or a predecessor's remaining handover window, if sooner). Call this before
 	/// [`Client::close`], which closes the transport without waiting. Returns `Ok`
@@ -1162,7 +1162,7 @@ impl Connection {
 					// won't go, so redialing the old address or a fallback would ignore it.
 					let assigned = match &ended {
 						// A fingerprint only checked the dial that installed the Rustls
-						// verifier. tcp, unix, iroh, and plaintext WebSocket never consult it.
+						// verifier. tcp, unix, and plaintext WebSocket never consult it.
 						Ended::Goaway(msg) => {
 							goaway
 								.redirect
@@ -2153,7 +2153,7 @@ mod tests {
 	/// forgot to add is refused rather than trusted.
 	#[test]
 	fn scheme_tiers_rank_encrypted_above_plaintext() {
-		for scheme in ["https", "moqt", "moql", "wss", "iroh", "tls"] {
+		for scheme in ["https", "moqt", "moql", "wss", "tls"] {
 			assert_eq!(scheme_tier(scheme), 2, "{scheme} is encrypted");
 		}
 		for scheme in ["tcp", "ws", "http"] {
@@ -2307,7 +2307,7 @@ mod tests {
 		for scheme in ["https", "wss", "moqt", "moql", "tls"] {
 			assert!(fingerprint_pins(scheme), "{scheme}");
 		}
-		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+		for scheme in ["http", "ws", "tcp", "unix"] {
 			assert!(!fingerprint_pins(scheme), "{scheme}");
 		}
 	}

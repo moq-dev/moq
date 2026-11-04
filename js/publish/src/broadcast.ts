@@ -1,4 +1,5 @@
-import { Milli } from "@moq/clock";
+import { Milli, Nano } from "@moq/clock";
+import { Report, Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Hls from "@moq/hang/hls";
@@ -9,7 +10,7 @@ import { CatalogProducer } from "./catalog";
 import { wanted } from "./internal";
 import { Order } from "./order";
 import { type Identity, identity, type Listing, Publication, type Slot } from "./publication";
-import type { Kind, Rendition } from "./rendition";
+import type { Kind, Rendition, RenditionStats } from "./rendition";
 import { makeRendition } from "./rendition-internal";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
@@ -62,6 +63,27 @@ export type BroadcastInput = {
 	maxAge: Getter<Milli | undefined>;
 
 	/**
+	 * Whether to publish a stats track and name it in the catalog's `stats` section. Defaults to
+	 * false. The track reports each rendition's {@link Rendition.stats} under its ID, plus the
+	 * connection's PROBE round-trip time, about once a second while someone subscribes.
+	 */
+	stats: Getter<boolean>;
+
+	/**
+	 * The connection's PROBE estimates, whose round-trip time the stats track reports. Observed only
+	 * while the stats track has a subscriber, since observing it asks the peer for PROBE updates.
+	 */
+	probe: Getter<Moq.Connection.Probe | undefined>;
+
+	/**
+	 * Where viewers may publish feedback, relative to the broadcast as a rendition's `broadcast`
+	 * reference is: from `room/live`, `viewers` is `room/viewers`. Sets the catalog's `echo` section,
+	 * which solicits it; undefined (the default) solicits none. A path that walks above the root from
+	 * the broadcast name is left out of the catalog with a warning, since every viewer would refuse it.
+	 */
+	echo: Getter<Moq.Path.Relative | undefined>;
+
+	/**
 	 * Override when renditions encode. Omitted: audio retains raw PCM until subscribed, while
 	 * video encodes continuously. False encodes both continuously; true gates video too, losing
 	 * its past. Unless false, audio keeps raw history up to `maxAge`. Capture stays open.
@@ -88,6 +110,9 @@ export type BroadcastInput = {
 export class Broadcast {
 	/** The catalog track name served to subscribers. */
 	static readonly CATALOG_TRACK = Catalog.TRACK;
+
+	/** The stats track name, named in the catalog's `stats` section while {@link BroadcastInput.stats} is set. */
+	static readonly STATS_TRACK = "stats.json";
 
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
@@ -152,11 +177,15 @@ export class Broadcast {
 			flip: getter(props?.flip ?? false),
 			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
+			stats: getter(props?.stats ?? false),
+			probe: getter(props?.probe),
+			echo: getter(props?.echo),
 			onDemand: getter(props?.onDemand),
 			hls: getter(props?.hls ?? true),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runEcho.bind(this));
 		this.#signals.run(this.#run.bind(this));
 	}
 
@@ -319,6 +348,63 @@ export class Broadcast {
 		if (publication) for (const [rendition, track, media] of served) publication.commit(rendition, track, media);
 	}
 
+	// Solicit feedback in the catalog's `echo` section. A path above the root names no broadcast, and a
+	// viewer refuses the whole catalog for it, so it is left out instead.
+	#runEcho(effect: Effect) {
+		const path = effect.get(this.in.echo);
+		if (path === undefined) return;
+		const name = effect.get(this.in.name);
+		if (Moq.Path.tryResolve(name, path) === undefined) {
+			console.warn(
+				`not soliciting feedback: echo path ${JSON.stringify(path)} walks above the root from ${name}`,
+			);
+			return;
+		}
+		this.catalog.mutate((catalog) => {
+			catalog.echo = { path };
+		});
+		effect.cleanup(() =>
+			this.catalog.mutate((catalog) => {
+				delete catalog.echo;
+			}),
+		);
+	}
+
+	// Name the stats track in the catalog and write a report every interval while someone subscribes.
+	// The track lives as long as the network broadcast, so disabling stats only stops reporting.
+	#runStats(effect: Effect, report: () => Report.Writer<Stats.Snapshot>) {
+		if (!effect.get(this.in.stats)) return;
+		const writer = report();
+
+		this.catalog.mutate((catalog) => {
+			catalog.stats = { track: Broadcast.STATS_TRACK };
+		});
+		effect.cleanup(() =>
+			this.catalog.mutate((catalog) => {
+				delete catalog.stats;
+			}),
+		);
+
+		// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
+		const watched = effect.computed((demand) => demand.get(writer.track.demand().wanted) !== undefined);
+		effect.run((demand) => {
+			if (demand.get(watched)) demand.get(this.in.probe);
+		});
+
+		effect.interval(() => writer.update(this.#stats() as Stats.Snapshot), Nano.fromMilli(Milli(Report.INTERVAL)));
+	}
+
+	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.
+	#stats(): { transport?: { rtt: number }; renditions: Record<string, RenditionStats> } {
+		const renditions: Record<string, RenditionStats> = {};
+		for (const rendition of Object.values(this.#renditions.peek())) {
+			const stats = rendition.stats.peek();
+			if (stats && rendition.config.peek() !== undefined) renditions[rendition.name] = stats;
+		}
+		const rtt = this.in.probe.peek()?.rtt;
+		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt) }, renditions };
+	}
+
 	// The names outside a publication's own that a replacement must avoid: every registered ID, and
 	// every ID and track name in the catalog, including an application's own sections.
 	#reserved(): Set<string> {
@@ -359,10 +445,9 @@ export class Broadcast {
 		// broadcast and new subscriptions land on the same producer.
 		const broadcastPublication = origin.createBroadcast(name);
 		const broadcast = broadcastPublication.broadcast;
+		// The publication mints one instance, kept across unannounce and announce, so a restart
+		// is a new stream rather than a resume into the old one.
 		effect.cleanup(() => broadcast.close());
-		// One publisher instance per broadcast, kept across unannounce and announce, so a
-		// restart is a new broadcast rather than a resume into the old one.
-		const epoch = Moq.Epoch.mint();
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
 		this.#net.set(broadcast);
@@ -372,9 +457,9 @@ export class Broadcast {
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
 		// so a re-announce or a rendition change keeps writing to it instead of restarting its
-		// group sequence under the same epoch. The publication keeps rendition tracks by catalog ID,
-		// so registering an ID again finds its track; the catalog's stay out of reach of a colliding
-		// rendition.
+		// group sequence under the same instance. The publication keeps rendition tracks by catalog
+		// ID, so registering an ID again finds its track; the catalog's stay out of reach of a
+		// colliding rendition.
 		this.#records.set({});
 		const publication = new Publication(this.#listed, () => this.#reserved());
 		this.#publication.set(publication);
@@ -382,6 +467,15 @@ export class Broadcast {
 			publication.close();
 			if (this.#publication.peek() === publication) this.#publication.set(undefined);
 		});
+
+		// Created on first use and kept with the broadcast, like a rendition's track.
+		let stats: Report.Writer<Stats.Snapshot> | undefined;
+		const report = () => {
+			stats ??= new Report.Writer(broadcast, Broadcast.STATS_TRACK, Stats.SnapshotSchema);
+			return stats;
+		};
+		effect.cleanup(() => stats?.finish());
+		effect.run((inner) => this.#runStats(inner, report));
 
 		let serving = false;
 		effect.run((inner) => {
@@ -413,7 +507,7 @@ export class Broadcast {
 				this.catalog.serve(track, effect);
 			}
 
-			broadcastPublication.announce({ epoch });
+			broadcastPublication.announce();
 		});
 
 		// Static tracks fan out to every subscriber. The encoder-facing handle stays set while the

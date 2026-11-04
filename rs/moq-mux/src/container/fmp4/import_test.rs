@@ -12,7 +12,7 @@ const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(
 
 /// A replay window with that budget, for a test asserting every group is delivered.
 fn replay() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY)
+	moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
 }
 
 /// Drain every group currently buffered on the consumer without waiting for new ones.
@@ -623,6 +623,47 @@ fn dropping_import_retires_catalog_renditions() {
 	let snapshot = catalog.snapshot();
 	assert!(snapshot.video.renditions.is_empty());
 	assert!(snapshot.audio.renditions.is_empty());
+}
+
+/// A source that re-initializes (an HLS rendition switching `EXT-X-MAP`) replaces its importer on
+/// the same catalog each time. Every dropped generation retires its HLS records along with its
+/// renditions, finished or not, so the catalog holds only the live generation's state.
+#[test]
+fn repeated_reinit_keeps_flat_state() {
+	// The init segment and its complete fragments; the fixture ends on a truncated one.
+	let data = &include_bytes!("test_data/bbb.mp4")[..2035];
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		for generation in 0..50 {
+			let label = format!("passthrough={passthrough} generation={generation}");
+			let mut fmp4 =
+				crate::container::fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_passthrough(passthrough);
+			fmp4.decode(&bytes::BytesMut::from(data)).unwrap();
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
+			assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
+			assert_eq!(
+				catalog.hls_tracks(),
+				2,
+				"{label}: only the live generation keeps records"
+			);
+			// A finished generation's records are kept for a re-enrollment until its drop retires them.
+			if generation % 2 == 1 {
+				fmp4.finish().unwrap();
+				assert_eq!(catalog.hls_tracks(), 2, "{label}");
+			}
+			drop(fmp4);
+			let snapshot = catalog.snapshot();
+			assert!(snapshot.video.renditions.is_empty(), "{label}");
+			assert!(snapshot.audio.renditions.is_empty(), "{label}");
+			assert_eq!(
+				catalog.hls_tracks(),
+				0,
+				"{label}: a replaced generation retires its records"
+			);
+		}
+	}
 }
 
 #[test]
@@ -2407,7 +2448,7 @@ fn non_advancing_fragment_decode_time_is_rejected() {
 }
 
 #[test]
-fn rejected_fragment_preserves_decode_time() {
+fn rejected_fragment_keeps_the_first_error() {
 	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
 	let mut init = Vec::new();
 	ftyp.encode(&mut init).unwrap();
@@ -2417,14 +2458,13 @@ fn rejected_fragment_preserves_decode_time() {
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 	fmp4.decode(&audio_fragment(4096, 1024, 327)).unwrap();
-	assert!(fmp4.decode(&audio_fragment(3000, 1024, 327)).is_err());
-	assert!(matches!(
-		fmp4.decode(&audio_fragment(3500, 1024, 327)),
-		Err(crate::Error::Cmaf(
-			crate::container::fmp4::Error::NonMonotonicDecodeTime { decode_time, previous, .. }
-		)) if previous == moq_net::Timestamp::from_scale(4096, 44100).unwrap()
-			&& decode_time == moq_net::Timestamp::from_scale(3500, 44100).unwrap()
-	));
+	let err = fmp4.decode(&audio_fragment(3000, 1024, 327)).unwrap_err();
+	for time in [3500, 5120] {
+		assert_eq!(
+			fmp4.decode(&audio_fragment(time, 1024, 327)).unwrap_err().to_string(),
+			err.to_string()
+		);
+	}
 }
 
 /// Like [`audio_fragment`] but carrying `samples` samples, the shape a real segmenter emits.
@@ -2707,7 +2747,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 				.json_stream::<serde_json::Value>(track, crate::json::Config::default())
 				.unwrap();
 			stream
-				.append(moq_net::Timed::from(&serde_json::json!("before")).at(catalog.clock().now()))
+				.append(&serde_json::json!("before"), catalog.clock().now())
 				.unwrap();
 			Some(stream)
 		}
@@ -2724,7 +2764,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	let after = clock.now().as_micros();
 	if let Some(stream) = data.as_mut() {
 		stream
-			.append(moq_net::Timed::from(&serde_json::json!("after")).at(catalog.clock().now()))
+			.append(&serde_json::json!("after"), catalog.clock().now())
 			.unwrap();
 	}
 	fmp4.finish().unwrap();
@@ -2829,28 +2869,30 @@ async fn seek_keeps_the_decode_time_until_a_discontinuity() {
 
 async fn seek_keeps_the_decode_time_until_a_discontinuity_in(passthrough: bool) {
 	let (init, _, _) = bbb_init();
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
-	fmp4.decode(&init).unwrap();
-	fmp4.decode(&live_session(5_000_000, 5)).unwrap();
-
-	fmp4.seek(100).unwrap();
-	let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
-	assert!(
-		matches!(
-			err,
-			crate::Error::Cmaf(crate::container::fmp4::Error::NonMonotonicDecodeTime { .. })
-		),
-		"{err:?}"
-	);
-
-	fmp4.discontinuity().unwrap();
-	fmp4.seek(200).unwrap();
-	let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
-	// Passthrough writes its groups by hand, so it refuses the rewound group itself, the way the
-	// media producer refuses an unwrapped track's rewound keyframe.
-	assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
+	for discontinuity in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+		fmp4.decode(&init).unwrap();
+		fmp4.decode(&live_session(5_000_000, 5)).unwrap();
+		if discontinuity {
+			fmp4.discontinuity().unwrap();
+		}
+		fmp4.seek(100).unwrap();
+		let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
+		if discontinuity {
+			// Passthrough and unwrapped tracks both refuse a rewound group themselves.
+			assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
+		} else {
+			assert!(
+				matches!(
+					err,
+					crate::Error::Cmaf(crate::container::fmp4::Error::NonMonotonicDecodeTime { .. })
+				),
+				"{err:?}"
+			);
+		}
+	}
 }
 
 /// The catalog is first published at the first fragment, carrying the clock that fragment
@@ -3221,7 +3263,7 @@ fn empty_and_multiple_webvtt_cues_are_supported() {
 }
 
 /// A text sample is staged whole before it is rewritten, so one past the bound is refused before
-/// any of its bytes arrive, and the rest of its mdat is discarded.
+/// any of its bytes arrive, and later input stays refused.
 #[test]
 fn oversized_text_sample_is_refused_before_staging() {
 	let size = super::MAX_HELD_BYTES + 1;
@@ -3265,15 +3307,15 @@ fn oversized_text_sample_is_refused_before_staging() {
 		matches!(err, crate::Error::Cmaf(super::Error::TextSampleTooLarge(refused)) if refused == size),
 		"{err:?}"
 	);
-	let chunk = vec![0xA5; 1 << 20];
-	let mut remaining = size;
-	while remaining > 0 {
-		let count = remaining.min(chunk.len());
-		importer.decode(&chunk[..count]).unwrap();
-		remaining -= count;
-	}
+	assert_eq!(importer.decode(&[0xA5; 1024]).unwrap_err().to_string(), err.to_string());
 	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
-	importer.decode(&webvtt_fragment(0, &[cue], 1000)).unwrap();
+	assert_eq!(
+		importer
+			.decode(&webvtt_fragment(0, &[cue], 1000))
+			.unwrap_err()
+			.to_string(),
+		err.to_string()
+	);
 	importer.finish().unwrap();
 	assert_eq!(catalog.snapshot().text.renditions.len(), 1);
 }

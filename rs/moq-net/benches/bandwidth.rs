@@ -523,12 +523,20 @@ fn counts(iterations: usize, case: Option<&str>) {
 
 criterion_group!(benches, bench_update, bench_viewers, bench_grants);
 
+// Let each harness initialize and finalize its own Criterion implementation.
+mod harness {
+	criterion::criterion_main!(super::benches);
+
+	pub(super) fn run() {
+		main();
+	}
+}
+
 fn main() {
 	if let Ok(iterations) = std::env::var("BANDWIDTH_COUNTS") {
 		let iterations = iterations.parse().expect("BANDWIDTH_COUNTS is an iteration count");
 		counts(iterations, std::env::var("BANDWIDTH_CASE").ok().as_deref());
 		return;
 	}
-	benches();
-	Criterion::default().configure_from_args().final_summary();
+	harness::run();
 }

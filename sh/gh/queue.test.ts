@@ -9,9 +9,20 @@ const platform = await workflow("platform");
 const dart = await workflow("release-dart-ffi");
 const nightly = await workflow("nightly");
 
-function condition(expression: string, event: string, base: string, selected = true, action = "opened", draft = false): unknown {
+function condition(
+	expression: string,
+	event: string,
+	base: string,
+	selected = true,
+	action = "opened",
+	draft = false,
+): unknown {
 	const source = expression.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
-	const github = { event_name: event, base_ref: base, event: { action, pull_request: { draft, base: { sha: "base-sha" } } } };
+	const github = {
+		event_name: event,
+		base_ref: base,
+		event: { action, pull_request: { draft, base: { sha: "base-sha" } } },
+	};
 	const outputs = Object.fromEntries(
 		["needed", "rs", "swift", "cpp", "obs", "moq_sh"].map((key) => [key, String(selected)]),
 	);
@@ -23,7 +34,15 @@ function condition(expression: string, event: string, base: string, selected = t
 assert.equal(check.on.merge_group, undefined);
 assert.equal(check.on.pull_request.paths, undefined, "Check must select through the dispatcher");
 assert.equal(check.on.pull_request.branches, undefined, "release PRs must report the required Check");
-for (const action of ["opened", "synchronize", "reopened", "edited", "ready_for_review", "converted_to_draft", "closed"]) {
+for (const action of [
+	"opened",
+	"synchronize",
+	"reopened",
+	"edited",
+	"ready_for_review",
+	"converted_to_draft",
+	"closed",
+]) {
 	assert.ok(check.on.pull_request.types.includes(action), `${action} must trigger Check or cancel its previous run`);
 	for (const base of ["main", "release", "other"]) {
 		for (const draft of [false, true]) {
@@ -47,12 +66,18 @@ assert.equal(check.concurrency["cancel-in-progress"], true);
 assert.deepEqual(check.permissions, { contents: "read" });
 assert.equal(check.jobs.check.permissions, undefined);
 assert.equal(check.jobs.check.environment, undefined, "PRs must not enter a write-credential Environment");
-const checkCheckout = check.jobs.check.steps.find((step: { uses?: string }) => step.uses?.startsWith("actions/checkout@"));
+const checkCheckout = check.jobs.check.steps.find((step: { uses?: string }) =>
+	step.uses?.startsWith("actions/checkout@"),
+);
 assert.equal(checkCheckout.with["persist-credentials"], false);
 assert.equal(checkCheckout.with["fetch-depth"], 0, "the dispatcher needs the PR base history");
 
 // No workflow lands around the merge queue.
-assert.equal(await Bun.file(".github/workflows/land.yml").exists(), false, "no workflow may land around the merge queue");
+assert.equal(
+	await Bun.file(".github/workflows/land.yml").exists(),
+	false,
+	"no workflow may land around the merge queue",
+);
 
 // Queue is the one merge group build: main's ruleset requires its context, so
 // it reports (skipped) on main PRs and runs only in the merge queue, on the
@@ -63,8 +88,12 @@ assert.deepEqual(queue.on.merge_group, { types: ["checks_requested"] });
 assert.ok(queue.on.workflow_dispatch.inputs.sha.required);
 assert.equal(queue.jobs.report.if, "github.event_name == 'workflow_dispatch'");
 assert.deepEqual(queue.jobs.report.permissions, { checks: "write" });
-// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
-assert.equal(queue.concurrency.group, "queue-${{ github.ref }}-${{ inputs.sha }}", "dispatches for different heads must not cancel each other");
+assert.equal(
+	queue.concurrency.group,
+	// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
+	"queue-${{ github.ref }}-${{ inputs.sha }}",
+	"dispatches for different heads must not cancel each other",
+);
 assert.equal(queue.jobs.report.steps.length, 1, "the report job checks nothing out and runs no code from a PR");
 assert.deepEqual(queue.on.pull_request.branches, ["main"]);
 assert.ok(queue.on.pull_request.types.includes("edited"), "retargeting to main must report the context");

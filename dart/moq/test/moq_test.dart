@@ -68,8 +68,13 @@ void main() {
   });
 
   test('a default subscription skips superseded groups at once', () {
-    expect(defaultSubscription().maxDelay, Duration.zero);
-    expect(Subscription().maxDelay, isNull);
+    for (final subscription in [defaultSubscription(), Subscription()]) {
+      expect(subscription.delay.min, Duration.zero);
+      expect(subscription.delay.max, Duration.zero);
+    }
+    final unset = Delay(min: null, max: null);
+    expect(unset.min, isNull);
+    expect(unset.max, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -77,7 +82,9 @@ void main() {
     final track = broadcast.publishTrack(name: 'negative', info: null);
     expect(
       () => track.consume(
-        subscription: Subscription(maxDelay: const Duration(microseconds: -1)),
+        subscription: Subscription(
+          delay: Delay(max: const Duration(microseconds: -1)),
+        ),
       ),
       throwsArgumentError,
     );
@@ -105,7 +112,7 @@ void main() {
 
       final consumer = track.consume(
         subscription: Subscription(
-          maxDelay: const Duration(seconds: 10),
+          delay: Delay(max: const Duration(seconds: 10)),
           ranges: [Range(start: RelativeMoqAnchor(2))],
           order: Order.ascending,
         ),
@@ -527,24 +534,22 @@ void main() {
     replacement.broadcast().close();
   });
 
-  test('a new epoch restarts announce consumers', () async {
+  test('a new instance restarts announce consumers', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(config: MoqAnnounceConfig());
-    final publication = origin.createBroadcast(path: 'epoch');
+    final publication = origin.createBroadcast(path: 'instance');
 
-    final first = mintEpoch();
-    publication.announce(route: AnnounceRoute(epoch: first));
+    publication.announce(route: AnnounceRoute());
     final start = await nextRoute(announced) as AnnounceEventStart;
-    expect(start.announce.route.epoch, first);
+    expect(start.announce.route.instance, isNotEmpty);
 
-    final second = mintEpoch();
-    publication.announce(route: AnnounceRoute(epoch: second));
+    publication.announce(route: AnnounceRoute(instance: 'camera', epoch: 1));
     final restart = await nextRoute(announced) as AnnounceEventRestart;
-    expect(restart.announce.route.epoch, second);
+    expect(restart.announce.route.instance, 'camera');
 
     expect(
-      () => publication.announce(route: AnnounceRoute(epoch: 'not-an-epoch')),
-      throwsA(isA<MoqException>()),
+      () => publication.announce(route: AnnounceRoute(instance: '')),
+      throwsA(isA<InvalidInstanceMoqException>()),
     );
     announced.cancel();
     announced.dispose();
@@ -569,7 +574,7 @@ void main() {
     final pending = origin.consume().request(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
-    final prepared = request.prepare(epoch: mintEpoch());
+    final prepared = request.prepare();
     final served = prepared.publish();
     await pending.timeout(timeout);
     // The publication controls the prepared fill: closing that ends its announcement.
@@ -772,10 +777,7 @@ void main() {
 
     final fixedOutput = moq_audio.DecoderOutput(
       format: moq_audio.SampleFormat.f32,
-      delay: moq_media.Delay(
-        min: Duration(milliseconds: 80),
-        max: Duration.zero,
-      ),
+      delay: Delay(min: Duration(milliseconds: 80)),
       estimate: false,
     );
     final fixed = await moq_audio.Consumer.subscribe(

@@ -63,9 +63,9 @@ window.runRecovery = async (packets) => {
 	const track = producer.createTrack("video", { timescale: Moq.Time.Timescale.MICRO });
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
-		if (group?.sequence !== packet.group) {
+		if (group?.sequence !== BigInt(packet.group)) {
 			group?.finish();
-			group = track.createGroup(packet.group);
+			group = track.createGroup(BigInt(packet.group));
 		}
 		const timestamp = Micro(packet.timestamp);
 		const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));
@@ -86,6 +86,7 @@ window.runRecovery = async (packets) => {
 	});
 	const catalog = new Signal<Catalog.Root>({ video: { renditions: { video: config } } });
 	const broadcast = new Signal<Broadcast | undefined>({
+		in: { name: new Signal(Moq.Path.from("open-gop")) },
 		out: { catalog, active: new Signal(media) },
 		relativeBroadcast: () => media,
 	} as unknown as Broadcast);

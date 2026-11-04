@@ -2,6 +2,7 @@
 """Exercise pre-setup selection with real diffs and no development toolchain."""
 
 import os
+import select
 import shutil
 import statistics
 import subprocess
@@ -26,6 +27,8 @@ class QueryTests(unittest.TestCase):
         (self.repo / "sh").mkdir(parents=True)
         for script in ("dispatch.sh", "changed.sh", "local.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
+        # The stub belongs in the base so it does not widen every test's diff.
+        (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 0\n")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep", "cat", "sed", "tr", "xargs", "sleep"):
@@ -81,6 +84,15 @@ class QueryTests(unittest.TestCase):
         self.change("quest/m1/example.md")
         self.expect(True, rust=False)
 
+    def test_biome_checks_files_outside_the_js_impact_map(self):
+        for path in ("cpp/obs/buildspec.json", "sh/gh/setup.test.ts", ".github/ci-selection-audit.json"):
+            with self.subTest(path=path):
+                self.change(path)
+                calls = self.run_ci()
+                self.assertIn("biome", calls)
+                self.assertFalse(any(call.startswith("js check-changed ") for call in calls), calls)
+                (self.repo / path).unlink()
+
     def test_rust_cache_follows_modules_that_compile_rust(self):
         for path, rust in (
             ("rs/moq-net/src/lib.rs", True),
@@ -106,6 +118,13 @@ class QueryTests(unittest.TestCase):
                 self.assertTrue(any(call.startswith("rs test-changed ") for call in calls), calls)
                 (self.repo / path).unlink()
 
+    def test_generator_pin_checks_the_bindings_it_renders(self):
+        self.change("rs/uniffi-bindgen/Cargo.toml")
+        calls = self.run_ci()
+        for module in ("py", "kt", "swift"):
+            self.assertIn(f"{module} check", calls)
+        self.assertNotIn("go check", calls)
+
     def test_nixpkgs_updates_check_browser_pins(self):
         self.change("flake.lock")
         self.expect(True)
@@ -127,9 +146,12 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
 
     def test_orchestration_and_all_select_work(self):
-        self.expect(True, base="--all")
+        self.expect(True, base="--all", rust=True)
         self.change("justfile")
-        self.expect(True)
+        self.expect(True, rust=True)
+        (self.repo / "justfile").unlink()
+        self.change("sh/kvm.sh")
+        self.expect(True, rust=True)
 
     def test_working_tree_changes_and_deletions_count(self):
         self.change("rs/moq-net/src/lib.rs")
@@ -216,6 +238,7 @@ class QueryTests(unittest.TestCase):
             "bun",
             "python3",
             "cargo",
+            "release-plz",
             "jq",
             "shellcheck",
             "shfmt",
@@ -260,7 +283,7 @@ class QueryTests(unittest.TestCase):
         nix.chmod(0o755)
         self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
-        for script in ("markdown.sh", "shell.sh", "large-files.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -272,6 +295,28 @@ class QueryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
+
+    def test_check_and_ci_reject_em_dashes_outside_the_diff(self):
+        self.stub_ci()
+        shutil.copy(ROOT / "sh/text.sh", self.repo / "sh/text.sh")
+        self.change("doc/unchanged.md")
+        (self.repo / "doc/unchanged.md").write_text("old text \u2014 still checked\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "existing text")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.change("quest/m1/example.md")
+        for action in ("check", "ci"):
+            with self.subTest(action=action):
+                result = subprocess.run(
+                    ["bash", "sh/dispatch.sh", action, "origin/main"],
+                    cwd=self.repo,
+                    env=self.env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("doc/unchanged.md:1:", result.stdout)
+                self.assertIn(f"{action}: check text failed", result.stderr)
 
     def test_ci_requires_its_tool_stubs_even_when_the_host_has_them(self):
         host = self.root / "host"
@@ -484,7 +529,32 @@ class QueryTests(unittest.TestCase):
         self.assertNotIn("nix flake check --print-build-logs", calls)
         self.assertIn("gh test", calls)
 
-    def test_strict_ci_runs_the_full_flake_without_a_probe(self):
+    @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
+    def test_missing_kvm_refuses_flake_without_skipping_or_cancelling_other_modules(self):
+        for strict in (False, True):
+            with self.subTest(strict=strict):
+                self.stub_ci()
+                self.change("flake.nix")
+                (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 1\n")
+                env = dict(self.env)
+                if not strict:
+                    env.pop("CI_STRICT")
+                result = subprocess.run(
+                    ["bash", "sh/dispatch.sh", "ci" if strict else "check", "origin/main"],
+                    cwd=self.repo,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("/dev/kvm is missing", result.stdout + result.stderr)
+                self.assertRegex(result.stderr, r"\d+  check flake \(failed\)")
+                self.assertNotIn("(skipped)", result.stderr)
+                calls = (self.root / "calls").read_text().splitlines()
+                self.assertNotIn("nix flake check --print-build-logs", calls)
+                self.assertIn("gh test", calls)
+
+    def test_strict_ci_runs_the_full_flake_without_a_namespace_probe(self):
         self.change("flake.nix")
         calls = self.run_ci()
         self.assertIn("nix flake check --print-build-logs", calls)
@@ -519,13 +589,19 @@ esac
                 started.read_text()
                 # A job timeout can kill the run without a signal it traps, so
                 # a buffered lane names its running phase before the phase ends.
-                os.set_blocking(run.stderr.fileno(), False)
-                live = (run.stderr.read() or b"").decode()
-                if jobs != "1":
-                    self.assertIn("ci: check rs started", live)
-                run.terminate()
-                os.set_blocking(run.stderr.fileno(), True)
-                stderr = live + run.communicate(timeout=60)[1].decode()
+                live = b""
+                try:
+                    if jobs != "1":
+                        deadline = time.monotonic() + 60
+                        while b"ci: check rs started\n" not in live:
+                            readable, _, _ = select.select([run.stderr], [], [], max(0, deadline - time.monotonic()))
+                            self.assertTrue(readable, live.decode(errors="replace"))
+                            chunk = os.read(run.stderr.fileno(), 4096)
+                            self.assertTrue(chunk, live.decode(errors="replace"))
+                            live += chunk
+                finally:
+                    run.terminate()
+                    stderr = (live + run.communicate(timeout=60)[1]).decode()
                 self.assertEqual(run.returncode, 143, stderr)
                 self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
                 with self.assertRaises(ProcessLookupError):

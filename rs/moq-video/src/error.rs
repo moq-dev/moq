@@ -2,13 +2,20 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A [`decode::Consumer`](crate::decode::Consumer) refused the rendition before
+	/// subscribing: its codec, codec parameters, or description is
+	/// [unsupported](Self::UnsupportedCodec). Backend faults keep their own variants.
+	#[error("unsupported video configuration: {0}")]
+	UnsupportedConfig(String),
+
 	/// No encoder matching the requested codec / hardware preference could be
 	/// opened (none compiled in, or none available on this machine).
 	#[error("no usable video encoder found (tried: {0})")]
 	NoEncoder(String),
 
-	/// No decoder matching the requested codec / hardware preference could be
-	/// opened (none compiled in, or none available on this machine).
+	/// Every decoder this build has for the requested codec and hardware preference
+	/// failed to open on this machine: missing drivers, no device, or a library
+	/// fault. A codec this build has no decoder for is [`UnsupportedCodec`](Self::UnsupportedCodec).
 	#[error("no usable video decoder found (tried: {0})")]
 	NoDecoder(String),
 
@@ -38,7 +45,8 @@ pub enum Error {
 		available: String,
 	},
 
-	/// A track's codec is not supported by the native decoders.
+	/// A track's codec, codec parameters, or description is not supported by the
+	/// native decoders this build has.
 	#[error("unsupported codec for native decode: {0}")]
 	UnsupportedCodec(String),
 

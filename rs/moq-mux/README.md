@@ -9,7 +9,7 @@
 # moq-mux
 
 Media muxers and demuxers for [Media over QUIC](https://moq.dev). Takes
-containerized or raw-codec media in, produces a [hang](https://github.com/moq-dev/moq/tree/main/rs/hang) broadcast — or the other way around.
+containerized or raw-codec media in, produces a [hang](https://github.com/moq-dev/moq/tree/main/rs/hang) broadcast - or the other way around.
 
 **Containers:** fMP4 / CMAF, MKV / WebM, MPEG-TS, FLV, LOC, hang Legacy.
 **Codecs:** H.264, H.265, AV1, AAC, Opus.

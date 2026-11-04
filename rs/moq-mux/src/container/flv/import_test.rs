@@ -170,7 +170,10 @@ async fn import_emits_frames() {
 	let track = consumer
 		.track(&video_name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -547,7 +550,10 @@ async fn config_churn_keeps_flat_state() {
 	let replaced = consumer
 		.track(&replaced)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 
@@ -562,7 +568,10 @@ async fn config_churn_keeps_flat_state() {
 	let live = consumer
 		.track(snap.video.renditions.keys().next().unwrap())
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	drop(importer);
@@ -609,7 +618,10 @@ async fn import_enhanced_av1() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -743,7 +755,10 @@ async fn import_reports_negative_pts_and_can_resume() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -783,7 +798,10 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(

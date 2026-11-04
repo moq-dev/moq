@@ -10,9 +10,9 @@ package versions, and the release-triggered publication jobs complete.
 Follow CONTRIBUTING.md's release procedure: merge release into main first,
 then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Right after merging release into main, set
-every eligible package to the next shared minor with the recipe from
-[one minor version](/quest/m1/shared-version.md) (`0.22.0` for this cut, then
-one minor up per cut), including packages that did not change. Rust
+every eligible package with `just version 0.22.0` for this cut, then one
+minor up per cut, following [Versions](/CONTRIBUTING.md#versions), including
+packages that did not change. Rust
 publication remains owned by release-plz. This supersedes keeping `moq-rs` at
 its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify
@@ -47,6 +47,14 @@ From the 2026-10-25 pre-cut run:
 - Raise each wrapper's moq-ffi version floor (for example Kotlin's
   `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
   [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
+
+From [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702), which
+merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
+
+- Publish `main`'s code-free `rs/moq-e2ee` stub, whose README points at
+  moq-crypto, as moq-e2ee's final release. It must take a version above
+  crates.io's current `max_version` (0.0.20 on 2026-11-02); check with
+  `curl -s https://crates.io/api/v1/crates/moq-e2ee`.
 
 The [2026-10-22 release audit](https://github.com/moq-dev/moq/pull/7176)
 closed with its fixes rechecked together. At source candidate
