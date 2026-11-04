@@ -24,7 +24,7 @@ import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Producer, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
 import * as Varint from "../varint.ts";
@@ -37,8 +37,7 @@ import { StreamId } from "./stream.ts";
 import {
 	encodeSubscribeResponse,
 	Subscribe,
-	SubscribeDrop,
-	SubscribeEnd,
+	SubscribeFinish,
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeStart,
@@ -1876,7 +1875,7 @@ test.each([
 			await respond(
 				subscribe,
 				version,
-				[{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(0n) }],
+				[{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(0n) }],
 				true,
 			);
 			expect(await track.closed).toBeNull();
@@ -2203,7 +2202,7 @@ function drainReactions(): Promise<void> {
 	});
 }
 
-test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
+test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const responseTask = Promise.withResolvers<void>();
@@ -2452,7 +2451,7 @@ test("a lite-07 rewind is refused", async () => {
 	}
 });
 
-test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
+test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscription", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2463,7 +2462,7 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 		await (await opened(1)).reading;
 		streams[1].inbound.close();
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
-		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
+		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_FINISH");
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
 	} finally {
@@ -2519,98 +2518,6 @@ test("an empty START remains resolved when its range widens", async () => {
 	}
 });
 
-// A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
-// which is no protocol violation. Covering a range is not ending the track, so the copy stays for
-// its readers, as the Rust copy does: they park, and widening the range asks again on the same
-// track. Decided 2026-10-31 (maintainer).
-test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(
-			writer,
-			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
-			version,
-		);
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-		expect(track.closed.peek()).toBeUndefined();
-		expect(streams).toHaveLength(2);
-
-		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
-		const reopened = await opened(2);
-		await reopened.reading;
-		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
-		expect(await reader.u53()).toBe(StreamId.Subscribe);
-		const msg = await Subscribe.decode(reader, version);
-		expect(msg.ranges).toEqual([{ start: { absolute: 0n }, end: { absolute: 3n } }]);
-		expect(track.closed.peek()).toBeUndefined();
-		expect(closes).toEqual([]);
-	} finally {
-		track.close();
-		broadcast.close();
-		subscriber.close();
-	}
-});
-
-// A widening reopens a covered copy, and its readers leaving while the publisher never takes the
-// new SUBSCRIBE gives the setup up: its stream is reset and the copy released, not held forever.
-test("a reopened lite-07 subscription ends once its readers leave", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession([], [2]);
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
-	let next: TrackSubscriber | undefined;
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(
-			writer,
-			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
-			version,
-		);
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-
-		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
-		await (await opened(2)).writing;
-		track.close();
-		await drainReactions();
-		// A reader arriving now asks afresh, rather than join a copy held by the stalled setup.
-		next = broadcast.track("video").subscribe();
-		await opened(3);
-	} finally {
-		next?.close();
-		track.close();
-		broadcast.close();
-		subscriber.close();
-	}
-});
-
 // Before lite-05 the publisher FINs the subscribe stream only once the track is over, so that FIN
 // finishes the track once the tail settles, rather than releasing it for another route.
 test.each(
@@ -2649,7 +2556,7 @@ test.each(
 
 // A session that dies once the publisher ended the track, but before the tail settled, cuts it
 // off: the track ends with the session's error unless the declared end settled first. That end
-// is SUBSCRIBE_END on lite-05+, and the FIN before it.
+// is SUBSCRIBE_FINISH on lite-05+, and the FIN before it.
 test.each([
 	["lite-03 ends clean with its last group finished", Version.DRAFT_03, true],
 	["lite-03 aborts with its last group still open", Version.DRAFT_03, false],
@@ -2672,7 +2579,7 @@ test.each([
 		await subscribe.reading;
 		const responses: SubscribeResponse[] = legacy
 			? [{ ok: new SubscribeOk({}) }]
-			: [{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(1n) }];
+			: [{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(1n) }];
 		await respond(subscribe, version, responses, true);
 		if (settled) {
 			const group = new ReadableStream<Uint8Array>({
@@ -2694,74 +2601,6 @@ test.each([
 
 		subscriber.close(died);
 		expect(await track.closed).toBe(settled ? null : died);
-	} finally {
-		track.close();
-		broadcast.close();
-		subscriber.close();
-		installed.close();
-	}
-});
-
-// The FIN may answer the bounded range before the publisher read an update that widened it, so
-// the copy asks again for the demand rather than end clean short of it or fail its readers.
-test.each([
-	["an open widening after SUBSCRIBE_START", { start: { absolute: 0n } }, true, false],
-	["a bounded widening without SUBSCRIBE_START", { start: { absolute: 0n }, end: { absolute: 5n } }, false, false],
-	["a widening the publisher stopped reading", { start: { absolute: 0n }, end: { absolute: 5n } }, false, true],
-] as const)("a lite-07 FIN short of %s subscribes again on the same track", async (_, range, start, stopped) => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened, closes } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast
-		.track("video")
-		.subscribe({ delay: { max: Milli.zero }, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const refused = stopped
-			? stream.stop(
-					Object.assign(new Error("The stream was aborted by the remote server"), {
-						source: "stream",
-						streamErrorCode: StreamCode.Cancel,
-					}),
-				)
-			: undefined;
-		track.update({ delay: { max: Milli.zero }, ranges: [range] });
-		await refused;
-		await drainReactions();
-
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		if (start) {
-			await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-			await encodeSubscribeResponse(
-				writer,
-				{ drop: new SubscribeDrop({ start: 0n, end: 0n, error: StreamCode.NotFound }) },
-				version,
-			);
-		}
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		stream.inbound.close();
-		await drainReactions();
-
-		await clock.advance(Nano.fromMilli(GRACE));
-		const reopened = await opened(2);
-		await reopened.reading;
-		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
-		expect(await reader.u53()).toBe(StreamId.Subscribe);
-		const msg = await Subscribe.decode(reader, version);
-		expect(msg.id).toBe(1n);
-		expect(msg.ranges).toEqual([range]);
-		expect(track.closed.peek()).toBeUndefined();
-		expect(closes).toEqual([]);
 	} finally {
 		track.close();
 		broadcast.close();
@@ -2804,7 +2643,7 @@ test.each([
 				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 				version,
 			);
-			await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
+			await encodeSubscribeResponse(writer, { finish: new SubscribeFinish(0n) }, version);
 			for (const chunk of chunks) stream.inbound.enqueue(chunk);
 			stream.inbound.close();
 			expect(await track.closed).toBeNull();
@@ -2853,7 +2692,7 @@ test("an unknown subscribe response type closes the session", async () => {
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await (await opened(1)).reading;
 		// An unassigned response type is a session protocol violation.
-		streams[1].inbound.enqueue(new Uint8Array([3, 0]));
+		streams[1].inbound.enqueue(new Uint8Array([4, 0]));
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);

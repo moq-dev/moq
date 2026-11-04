@@ -3602,6 +3602,64 @@ mod tests {
 		);
 	}
 
+	/// A lite-07 range an update adds owes nothing known until SUBSCRIBE_STARTED says where it
+	/// starts, and then owes from there; one retired since owes nothing.
+	#[kio::test]
+	#[expect(
+		clippy::single_range_in_vec_init,
+		reason = "the owed groups are a list of runs, often one"
+	)]
+	async fn a_lite07_added_range_is_owed_from_its_reported_start() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite07)
+			.await
+			.unwrap();
+		let first = lite::Range::span(Some(4), 0, None, None);
+		let mut sub = SubStream {
+			order: crate::track::Order::Descending,
+			stream,
+			id: 0,
+			max_delay: Duration::ZERO,
+			min_delay: None,
+			start: Some(4),
+			priority: 0,
+			requested: Some(4),
+			live: lite::LiveRanges::new(Version::Lite07, &[first]),
+			tail: Default::default(),
+			served: Some(4),
+			started: true,
+			starts: [(0, Some(4))].into(),
+			end: Some(lite::SubscribeFinish { group: 10, error: None }),
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+		assert_eq!(sub.owed(None), Some(vec![4..10]));
+
+		// Two groups back from the latest, which only the publisher can resolve.
+		let back = lite::Range {
+			start: Some(lite::Anchor::Relative(2)),
+			end: None,
+		};
+		let (edit, changed) = sub.edit(&[first, back]).unwrap();
+		assert!(changed);
+		assert_eq!(
+			edit,
+			lite::RangeEdit::Edit {
+				remove: vec![],
+				add: vec![back]
+			}
+		);
+		assert_eq!(sub.owed(None), None, "nothing says yet where it starts");
+		sub.starts.insert(1, Some(1));
+		assert_eq!(sub.owed(None), Some(vec![4..10, 1..10]));
+
+		// Retiring the first range forgets its start.
+		sub.edit(&[back]).unwrap();
+		assert_eq!(sub.starts.keys().copied().collect::<Vec<_>>(), [1]);
+		assert_eq!(sub.owed(Some(8)), Some(vec![1..8]));
+	}
+
 	async fn receive_padding(version: Version, bytes: Vec<u8>) {
 		let session = crate::lite::test_transport::ScriptedSession::new(bytes);
 		let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)

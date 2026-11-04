@@ -678,11 +678,16 @@ export class Window {
 	}
 
 	/**
-	 * Each range resolved, in the order given: undefined for one that is empty or whose start
-	 * still waits. An unsettled time end is reported open, never at its cap.
+	 * Each range resolved, in the order given: undefined for one whose start still waits. One
+	 * empty as given, or that only resolves empty, ends at or below its start. An unsettled time
+	 * end is reported open, never at its cap. Mirrors the Rust `Window::resolved`.
 	 */
 	resolved(): (Resolved | undefined)[] {
-		const resolved: (Resolved | undefined)[] = this.ranges.map(() => undefined);
+		const resolved: (Resolved | undefined)[] = this.ranges.map((range) => {
+			if (!isEmpty(range)) return undefined;
+			const end = absolute(range.end) ?? 0n;
+			return { start: (range.start && absolute(range.start)) ?? end, end };
+		});
 		for (const span of this.#spans) {
 			resolved[span.index] = {
 				start: span.start,

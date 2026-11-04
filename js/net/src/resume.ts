@@ -73,7 +73,7 @@ import { grace } from "./ledger.ts";
 import type { Lister, Tracks, TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/sequence.ts";
-import { clamped, type Window } from "./window.ts";
+import { clamped, type Resolved, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing to deliver rather than judging what it carried:
@@ -1169,6 +1169,13 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.servingStarts(serving.sub, from);
+	}
+
+	// Each copy resolves the reader's ranges in turn, clamped to its floor and replacement.
+	resolved(): (Resolved | undefined)[] | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingResolved(serving.sub);
 	}
 
 	// The reader's ranges resolve on the copies, which hold the groups their anchors name.

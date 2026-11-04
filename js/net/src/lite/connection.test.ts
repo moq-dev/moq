@@ -20,7 +20,7 @@ import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
 	Subscribe,
-	SubscribeEnd,
+	SubscribeFinish,
 	SubscribeStart,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
@@ -539,9 +539,9 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 	producer.finish();
 	producer.close();
-	// SUBSCRIBE_END, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
+	// SUBSCRIBE_FINISH, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
 	if (keepsSubscribeOpen(version)) {
-		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+		while (!("finish" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 	} else await subscriber.reader.readAll();
 
 	let closed = false;
@@ -561,7 +561,7 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 }
 
 // The publisher's FIN says nothing about whether the subscriber read the tail, and a receiver
-// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_END lets the subscriber settle
+// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_FINISH lets the subscriber settle
 // its tail at once, the subscriber's FIN says so, and close waits for it.
 for (const [alpn, version] of [
 	[ALPN_05, Version.DRAFT_05],
@@ -718,8 +718,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 		producer.finish();
 		producer.close();
-		// SUBSCRIBE_END; lite-07 keeps the stream open past it.
-		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+		// SUBSCRIBE_FINISH; lite-07 keeps the stream open past it.
+		while (!("finish" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 
 		// The withdrawal completes, but the subscription still waits for the subscriber's FIN.
 		fin.release();
@@ -902,7 +902,7 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 					// A received tail uses its wire position even without a locally retained prefix.
 					group = new GroupMessage({ subscribe: 0n, sequence: 0n, frameStart: 5 });
 				} else {
-					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2n) }, version);
+					await encodeSubscribeResponse(sub.writer, { finish: new SubscribeFinish(2n) }, version);
 					group = new GroupMessage({ subscribe: 0n, sequence: 2n });
 				}
 				const writer = await Writer.open(pair.server, { version });

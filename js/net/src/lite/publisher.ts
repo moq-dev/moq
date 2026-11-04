@@ -33,6 +33,7 @@ import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
 import { max, min } from "../util/sequence.ts";
+import type { Resolved } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -42,14 +43,19 @@ import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
+	entriesOf,
 	hasWireTime,
+	LiveRanges,
+	type RangeEntry,
 	requestedRanges,
 	type Subscribe,
 	SubscribeDrop,
-	SubscribeEnd,
+	SubscribeFinish,
 	SubscribeOk,
 	SubscribeStart,
+	SubscribeStarted,
 	SubscribeUpdate,
+	spanOf,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
 import { encodeTracksEvent, type Tracks as TracksMessage } from "./tracks.ts";
@@ -240,8 +246,11 @@ type ServeFetch = Omit<ServeGroup, "sub">;
 
 /** What the serving loop takes from the subscribe stream instead of serving a group. */
 type Control =
-	/** The peer re-stated the subscription: priority, ordering, latency, and both ranges. */
-	| { kind: "update"; update: SubscribeUpdate }
+	/**
+	 * The peer re-stated the subscription: priority, ordering, latency, and its ranges, with the
+	 * Range ID of each on lite-07.
+	 */
+	| { kind: "update"; update: SubscribeUpdate; ids: bigint[] }
 	/** The peer FIN'd, or our own half went away. Either way there is nobody left to serve. */
 	| { kind: "done" }
 	/** The stream failed; the subscription goes down with it. */
@@ -252,7 +261,10 @@ type SubscriptionControlOptions = {
 	reader: Reader;
 	writer: Writer;
 	version: Version;
-	apply: (update: SubscribeUpdate) => void;
+	/** The SUBSCRIBE's ranges, which each lite-07 update edits. */
+	live: LiveRanges;
+	/** Apply an update, with every live range by Range ID on lite-07. */
+	apply: (update: SubscribeUpdate, live: { id: bigint; entry: RangeEntry }[]) => void;
 };
 
 /**
@@ -270,7 +282,7 @@ type SubscriptionControlOptions = {
  */
 class SubscriptionControls {
 	#writer: Writer;
-	#update?: SubscribeUpdate;
+	#update?: { update: SubscribeUpdate; ids: bigint[] };
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
 	#ended: Promise<Error | null>;
@@ -300,7 +312,7 @@ class SubscriptionControls {
 		const update = this.#update;
 		this.#update = undefined;
 		// An update decoded before the stream ended still applies before the sticky end.
-		if (update) return { kind: "update", update };
+		if (update) return { kind: "update", ...update };
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
 	}
@@ -349,15 +361,18 @@ class SubscriptionControls {
 		this.#changed.update((value) => value + 1);
 	}
 
-	async #decode({ reader, version, apply, quic }: SubscriptionControlOptions) {
+	async #decode({ reader, version, live, apply, quic }: SubscriptionControlOptions) {
 		try {
 			// Runs until the peer's half ends, even past our own FIN: a lite-05+ publisher waits
 			// for that end, and every other teardown stops the reader.
 			for (;;) {
 				const update = await SubscribeUpdate.decodeMaybe(reader, version);
 				if (!update) break;
-				apply(update);
-				this.#update = update;
+				// Each lite-07 update edits the live ranges, which only the stream's history names.
+				const ranges = live.apply(update);
+				apply(update, ranges);
+				// Resolved in full, so the latest one replaces any the loop has yet to take.
+				this.#update = { update, ids: ranges.map(({ id }) => id) };
 				this.#changed.update((value) => value + 1);
 			}
 		} catch (err: unknown) {
@@ -367,6 +382,23 @@ class SubscriptionControls {
 		}
 		this.#finish(null);
 	}
+}
+
+// `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
+// an update that leaves it live never counts its relative anchors back from a newer latest group.
+function pin(entry: RangeEntry, resolved: Resolved | undefined): RangeEntry {
+	if (!resolved) return entry;
+	const range = { ...entry.range };
+	let { from, to } = entry;
+	if (range.start?.relative !== undefined) {
+		range.start = { absolute: resolved.start };
+		from = [resolved.start, 0];
+	}
+	if (range.end?.relative !== undefined && resolved.end !== undefined) {
+		range.end = { absolute: resolved.end };
+		to = [resolved.end, 0];
+	}
+	return { range, from, to };
 }
 
 // Where each range of `track` starts once delivery starts at `from`, undefined for one with no
@@ -1004,7 +1036,7 @@ export class Publisher {
 			if (hasTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
 				// properties live in TRACK_INFO), and the resolved range arrives as
-				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
+				// SUBSCRIBE_START / SUBSCRIBE_FINISH emitted from #runTrack.
 				//
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
@@ -1030,12 +1062,25 @@ export class Publisher {
 				datagrams = this.#runDatagrams(track, { sub: msg.id, stamp, served, bounds: datagramBounds });
 			}
 
+			// The SUBSCRIBE's ranges, and the Range ID of each range the model holds, in its order.
+			const asked = entriesOf(msg);
+			let ids = asked.map((_, index) => BigInt(index));
 			controls = new SubscriptionControls({
 				quic: this.#quic,
 				reader: stream.reader,
 				writer: stream.writer,
 				version: this.version,
-				apply: (update) => {
+				live: new LiveRanges(this.version, asked),
+				apply: (update, live) => {
+					if (hasRanges(this.version)) {
+						const resolved = hooks.servingResolved(track);
+						const entries = live.map(({ id, entry }) => {
+							const index = ids.indexOf(id);
+							return index < 0 ? entry : pin(entry, resolved[index]);
+						});
+						Object.assign(update, spanOf(this.version, entries));
+						ids = live.map(({ id }) => id);
+					}
 					Object.assign(datagramBounds, {
 						startGroup: update.startGroup,
 						startFrame: update.startFrame,
@@ -1067,6 +1112,7 @@ export class Publisher {
 				served,
 				floor,
 				bounds,
+				initial: BigInt(asked.length),
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1234,9 +1280,11 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: bigint;
 			bounds: FrameBounds;
+			// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports.
+			initial: bigint;
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
+		const { sub, broadcast, stamp, publisher, compress, served, bounds, initial } = serving;
 		// The read cursor's floor; the subscription's ranges cap it.
 		let floor = serving.floor;
 		const moveCursor = () => track.withRange({ start: { included: floor } });
@@ -1247,7 +1295,7 @@ export class Publisher {
 			moveCursor();
 		};
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
-		// first group is known, SUBSCRIBE_END when the track finishes.
+		// first group is known, SUBSCRIBE_FINISH when the track finishes.
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Dispositions before START refine its boundary; later ones must be named as drops.
@@ -1258,6 +1306,35 @@ export class Publisher {
 		// resolves where its feed starts.
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
 		let endSent = false;
+		// The Range ID of each requested range, in the order the model holds them, and those an
+		// update added whose start no SUBSCRIBE_STARTED reported yet. Lite-07 only.
+		let ids = Array.from({ length: Number(initial) }, (_, index) => BigInt(index));
+		let unstarted: bigint[] = [];
+
+		// Report where each range an update added starts, once it resolves, or with no start once
+		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
+		const reportStarted = async (finished: boolean): Promise<boolean> => {
+			if (startSequence === undefined || unstarted.length === 0) return true;
+			const resolved = hooks.servingResolved(track);
+			const waiting: bigint[] = [];
+			for (const id of unstarted) {
+				const range = resolved[ids.indexOf(id)];
+				if (!range && !finished) {
+					waiting.push(id);
+					continue;
+				}
+				let start: bigint | undefined;
+				if (range) {
+					start = max(range.start, startSequence);
+					if (range.end !== undefined && range.end <= start) start = undefined;
+				}
+				const started = new SubscribeStarted(id, start);
+				if (!(await controls.response(encodeSubscribeResponse(stream, { started }, this.version))))
+					return false;
+			}
+			unstarted = waiting;
+			return true;
+		};
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
 		// yet, given up with `err`.
@@ -1272,7 +1349,7 @@ export class Publisher {
 			return true;
 		};
 
-		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
+		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_FINISH
 		// straight into finish_at, so it must name the track's boundary (which counts
 		// datagram sequences too), not the delivered range: a subscription cap can hold
 		// produced groups back. The latest() fallback covers a subscription torn down
@@ -1292,7 +1369,7 @@ export class Publisher {
 			const endError = hooks.subscriberEndError(track);
 			const code = endError && hasEndError(this.version) ? toStreamCode(endError) : undefined;
 			return controls.response(
-				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary(), code) }, this.version),
+				encodeSubscribeResponse(stream, { finish: new SubscribeFinish(boundary(), code) }, this.version),
 			);
 		};
 
@@ -1305,7 +1382,7 @@ export class Publisher {
 			if (end instanceof Error) throw end;
 			return end === done;
 		};
-		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
+		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_FINISH sent
 		// early could let the subscriber settle before the reset arrives. A subscription capped
 		// short of the end is owed no error, so its boundary goes out.
 		const declareEarly = () =>
@@ -1348,6 +1425,7 @@ export class Publisher {
 							return false;
 					}
 				}
+				if (!(await reportStarted(false))) return false;
 				// Control before data, matching the Rust publisher: every control decoded while
 				// the loop was parked applies to the next pop, never to one already made. This
 				// drain is synchronous, so nothing the decoder holds can land between the pop
@@ -1367,6 +1445,13 @@ export class Publisher {
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
+							if (hasRanges(this.version)) {
+								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
+								unstarted = unstarted.filter((id) => control.ids.includes(id));
+								for (const id of control.ids)
+									if (id >= initial && !ids.includes(id)) unstarted.push(id);
+								ids = control.ids;
+							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
 							// group, so an update that drops a named floor re-pins there too. On
@@ -1528,6 +1613,8 @@ export class Publisher {
 								return false;
 							continue;
 						}
+						// Nothing arrives to resolve a range still waiting on the live feed.
+						if (!(await reportStarted(true))) return false;
 						// Name every sequence from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startSequence !== undefined) {

@@ -387,7 +387,7 @@ export function hasHidden(version: Version): boolean {
 /**
  * Whether a served SUBSCRIBE completes only once the subscriber FINs or resets its half of the
  * Subscribe Stream. A subscriber FINs once its tail accounting settles, since a transport ACK
- * does not say the application read the tail. SUBSCRIBE_END says which groups are owed, so that
+ * does not say the application read the tail. SUBSCRIBE_FINISH says which groups are owed, so that
  * is prompt from lite-05; before it, only the subscriber's grace settles the tail.
  */
 export function waitsForSubscriberFin(version: Version): boolean {
@@ -591,7 +591,7 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
- * Whether SUBSCRIBE_END carries the error the track ended with, so an errored end keeps its
+ * Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end keeps its
  * history across a hop. Added in lite-07; earlier versions can only reset.
  */
 export function hasEndError(version: Version): boolean {
