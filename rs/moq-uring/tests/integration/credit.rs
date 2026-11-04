@@ -115,7 +115,7 @@ fn endpoints(
 fn write(handle: &moq_uring::Handle, mut send: quic::send::Stream, len: usize) {
 	handle.spawn(async move {
 		if send.write_all(Bytes::from(vec![7u8; len])).await.is_ok() {
-			let _ = send.finish().stopped().await;
+			let _ = send.finish().await;
 		}
 	});
 }
@@ -277,7 +277,7 @@ fn chunked_writes_stop_at_the_window() {
 
 			handle.spawn(async move {
 				send.write_all(buf).await.expect("write");
-				let _ = send.finish().stopped().await;
+				let _ = send.finish().await;
 			});
 
 			let mut recv = within(&handle, "the stream", accepted.accept_uni())

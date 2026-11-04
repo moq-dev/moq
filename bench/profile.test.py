@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import signal
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +16,117 @@ spec.loader.exec_module(profile)
 spec = importlib.util.spec_from_file_location("runtime", Path(__file__).with_name("runtime.py"))
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
+
+spec = importlib.util.spec_from_file_location("instructions", Path(__file__).with_name("instructions.py"))
+instructions = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(instructions)
+
+
+class Instructions(unittest.TestCase):
+    def setUp(self):
+        self.window = dict(start_ms=[1250, 1252], end_ms=[2250, 2252], events=["instructions", "cycles"])
+        self.stats = [
+            {"event": event, "counter-value": count, "pcnt-running": 100}
+            for event, count in [("instructions", 20000), ("cycles", 10000), ("task-clock", 10)]
+        ]
+        self.load = [dict(timestamp_ms=t, frames_recv=t * 2) for t in [1000, 1500, 2000, 2500]]
+
+    def test_frames_match_the_acknowledged_counter_window(self):
+        result = instructions.reduce(self.window, self.stats, self.load)
+        self.assertEqual(result["delivered_frames"], 2000)
+        self.assertEqual(result["instructions_per_frame"], 10)
+        self.assertEqual(result["window_start_ms"], 1251)
+        self.assertEqual(result["boundary_uncertainty_ms"], [2, 2])
+        with self.assertRaisesRegex(ValueError, "bracket"):
+            instructions.reduce(self.window, self.stats, self.load[:-1])
+        self.load[2]["frames_recv"] = 0
+        with self.assertRaisesRegex(ValueError, "backwards"):
+            instructions.reduce(self.window, self.stats, self.load)
+
+    def test_partial_or_multiplexed_counts_are_refused(self):
+        for value in ["<not counted>", "nan", "0"]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                instructions.reduce(
+                    self.window, [dict(self.stats[0], **{"counter-value": value}), *self.stats[1:]], self.load
+                )
+        with self.assertRaisesRegex(ValueError, "multiplexed"):
+            instructions.reduce(self.window, [dict(self.stats[0], **{"pcnt-running": 99}), *self.stats[1:]], self.load)
+        with self.assertRaisesRegex(ValueError, "missing"):
+            instructions.reduce(self.window, self.stats[1:], self.load)
+
+    def test_identical_cumulative_snapshots_remain_interpolatable(self):
+        self.load.insert(2, dict(self.load[1]))
+        result = instructions.reduce(self.window, self.stats, self.load)
+        self.assertEqual(result["delivered_frames"], 2000)
+        self.load[2]["frames_recv"] += 1
+        with self.assertRaisesRegex(ValueError, "same timestamp"):
+            instructions.reduce(self.window, self.stats, self.load)
+
+    def test_cpu_sets_cannot_overlap_or_escape_the_allowed_set(self):
+        with patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}, create=True):
+            for relay, generator in [("0-1", "1-2"), ("4", "0"), ("0", ""), ("0-1", "3-2")]:
+                with (
+                    self.subTest(relay=relay, generator=generator),
+                    patch.dict(os.environ, BENCH_RELAY_CPUS=relay, BENCH_GENERATOR_CPUS=generator),
+                    self.assertRaises(ValueError),
+                ):
+                    instructions.settings("1")
+
+    def test_summary_reports_each_revision_across_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            for label, workers, values in [
+                ("base-0123", 4, [12, 10, 11]),
+                ("base-0123", 16, [40]),
+                ("current", 4, [20, 21]),
+            ]:
+                for round, value in enumerate(values, 1):
+                    cell = run / "relay" / label / f"round-{round}" / f"instructions-{workers}" / "chat"
+                    (cell / "instructions").mkdir(parents=True)
+                    (cell / "instructions" / "instructions.json").write_text(
+                        json.dumps(
+                            dict(
+                                instructions_per_frame=value,
+                                cycles_per_frame=value * 2,
+                                recv_fps=1000,
+                                window_start_ms=1250,
+                                window_end_ms=2250,
+                                host_load_1m=[round, 0.5],
+                            )
+                        )
+                    )
+                    rows = [dict(timestamp_ms=t, groups_lost=lost) for t, lost in [(1000, 1), (1500, 2), (2500, round)]]
+                    (cell / "load.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            with patch("builtins.print"):
+                instructions.summarize(run, ["base-0123", "current"])
+            summary = json.loads((run / "instructions-summary.json").read_text())
+            # Each worker count is its own configuration, not part of one revision-wide range.
+            self.assertEqual(list(summary["base-0123"]), ["4", "16"])
+            self.assertEqual(summary["base-0123"]["4"]["instructions_per_frame"], dict(median=11, min=10, max=12))
+            self.assertEqual(summary["base-0123"]["16"]["instructions_per_frame"], dict(median=40, min=40, max=40))
+            self.assertEqual(summary["current"]["4"]["instructions_per_frame"]["median"], 20.5)
+            # Loss counts between the reports bracketing the window, not over the lifetime.
+            self.assertEqual([cell["groups_lost"] for cell in summary["base-0123"]["4"]["cells"]], [0, 1, 2])
+            self.assertEqual(summary["base-0123"]["4"]["host_load_1m"], dict(median=2, min=1, max=3))
+            with self.assertRaisesRegex(ValueError, "no instruction cells"):
+                instructions.summarize(run, ["missing"])
+
+    def test_lost_or_throttled_samples_refuse_attribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "perf.data"
+            for kind in [2, 5, 13, 9]:
+                header = bytearray(56)
+                header[:8] = b"PERFILE2"
+                struct.pack_into("<QQ", header, 40, 56, 8)
+                path.write_bytes(header + struct.pack("<IHH", kind, 0, 8))
+                if kind == 9:
+                    instructions.validate_data(path)
+                else:
+                    with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "lost or throttled"):
+                        instructions.validate_data(path)
+            path.write_bytes(header)
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                instructions.validate_data(path)
 
 
 class Runtime(unittest.TestCase):

@@ -445,7 +445,7 @@ jobs:
       # `cargo build` through it; without mise, setup only reports where the
       # shim lives, so put that directory first on PATH (as moq's dev shell
       # does). `--status` exits non-zero when there is no shim.
-      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+      - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
           version: 1.17.0
           github-cache-mode: objects
@@ -489,7 +489,7 @@ jobs:
       # `cargo build` through it; without mise, setup only reports where the
       # shim lives, so put that directory first on PATH (as moq's dev shell
       # does). `--status` exits non-zero when there is no shim.
-      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+      - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
           version: 1.17.0
           github-cache-mode: objects

@@ -207,7 +207,7 @@ Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are
 Every later request for a path, siblings included, stays on the broadcast first held there and fails once it ends, so build a new `Source` to follow a new instance.
 
 ```rust
-let broadcast = origin.request_broadcast(path, None).await?;
+let broadcast = origin.request(path, None).await?;
 let source = Source::new(origin, broadcast);
 ```
 
