@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`track::Info::default()` sets `max_age` to `Some(Duration::ZERO)` instead of `None`: a superseded group is stale as soon as its successor arrives, so readers get only the live edge; the newest group never goes stale.
+A track that relied on unlimited history requests it explicitly before it is created, with `with_max_age(None)`, or sets a window, such as `hang::container::MAX_AGE` for media.
+A relay or cache bounds what it keeps with its own pool, not the publisher's default.
+Readers asking for history still set a sufficient `Delay::max` and range.
+Received metadata is unchanged: a track that arrives without a max age keeps `None`, and the wire is unchanged.
+
+```rust
+// Before: no publisher limit
+track::Info::default();
+// After: the same, stated explicitly
+track::Info::default().with_max_age(None);
+```
+
 ### A zero `Allocator::set_target` leaves the peer's PROBE target ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 A session with a sender now probes to the larger of its allocator's target and the PROBE target its peer sends, so `Allocator::set_target(Some(Rate::ZERO))` stops probing for this side's reservations only. A peer that advertises a target still raises the probe; a reservation's `Consumer::probed` stays `false`, since nothing probes for it.

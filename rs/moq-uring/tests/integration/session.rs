@@ -95,10 +95,7 @@ fn lite_session_over_the_worker() {
 			.with_publisher(&pub_origin)
 			.accept(
 				moq_net::time::Instant::now(),
-				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-					quic::web::Session::raw(conn),
-					moq_net::transport::Address::Setup,
-				)),
+				moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 			)
 			.await
 			.expect("accept");
@@ -119,10 +116,7 @@ fn lite_session_over_the_worker() {
 				.with_subscriber(sub.clone())
 				.connect(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						quic::web::Session::raw(conn),
-						moq_net::transport::Address::Setup,
-					)),
+					moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 				)
 				.await
 				.expect("connect");
@@ -232,10 +226,7 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_publisher(&pub_origin)
 					.accept(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Address::Setup,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("accept");
@@ -263,10 +254,7 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_subscriber(sub.clone())
 					.connect(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Address::Setup,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("connect");

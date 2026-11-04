@@ -42,7 +42,9 @@ const BUDGET: Duration = Duration::from_secs(3600);
 const LIVE: u64 = 1 << 32;
 
 fn timed() -> track::Info {
-	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	track::Info::default()
+		.with_max_age(None)
+		.with_timescale(moq_net::Timescale::MILLI)
 }
 
 fn millis(millis: u64) -> Timestamp {

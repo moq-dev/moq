@@ -15,7 +15,7 @@
 //! catalog rendition through their container producer.
 //!
 //! A single-codec importer takes a track the caller mints, typically
-//! `broadcast.unique_track(suffix, catalog.track_info())`, so the retention the catalog
+//! `broadcast.unique_track(suffix, catalog.track_info())`, so the max age the catalog
 //! declares reaches the track.
 
 mod container;

@@ -799,7 +799,10 @@ pub(crate) async fn accept(
 				.await
 				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
-			let identity = request.conn().peer_identity().map(crate::tls::PeerIdentity::from_chain);
+			let identity = request
+				.connection()
+				.peer_identity()
+				.map(crate::tls::PeerIdentity::from_chain);
 			// The authority the client put in its CONNECT URL.
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
@@ -1219,11 +1222,17 @@ mod tests {
 				.await
 				.expect("connect failed");
 
-			// web::Session derefs to the driver connection.
-			assert!(session.congestion_state().probes(), "client controller cannot probe");
+			// Inspect the driver through the explicit connection accessor.
+			assert!(
+				session.connection().congestion_state().probes(),
+				"client controller cannot probe"
+			);
 			// BBRv3 can probe, so moq-net gets a target to write.
 			#[cfg(feature = "net")]
-			assert!(session.probe().is_some(), "BBRv3 connection has no probe target");
+			assert!(
+				session.connection().probe().is_some(),
+				"BBRv3 connection has no probe target"
+			);
 			assert!(
 				accepted.await.expect("server task panicked"),
 				"server controller cannot probe"
@@ -1308,7 +1317,7 @@ mod tests {
 				.expect("connect failed");
 
 			assert!(
-				session.congestion_state().probes(),
+				session.connection().congestion_state().probes(),
 				"client connection is not running its own controller"
 			);
 			assert!(

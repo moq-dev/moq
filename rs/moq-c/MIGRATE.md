@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit.
+`max_age_present` is gone and `max_age_us` always applies: drop the assignment where you set it to true, and set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on it being false for no limit.
+Recompile against the new header, since an old binary's `max_age_present` byte now reads as `max_age_unlimited`, and zero-initialize the struct (`moq_track_info info = {0};`) or assign every member, since an indeterminate member is undefined behavior.
+
 ### Datagrams are a track of their own
 
 A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
