@@ -64,9 +64,9 @@ nix develop --command env SESSION_ALLOCS=1 cargo bench --locked -p moq-net --fea
 
 Throughput counts delivered datagrams. Every one must arrive with its sequence
 and payload; the memory transport loses none at these cadences, so a drop fails
-instead of looking cheaper. `SESSION_ALLOCS=1` prints allocations, allocated
-bytes and, where Linux perf counters are readable, user instructions per
-delivered datagram or viewer-group. All three exclude the cache tick. Bytes sum
+instead of looking cheaper. `SESSION_ALLOCS=1` prints the group consumer size,
+allocations, allocated bytes and, where Linux perf counters are readable, user instructions per
+delivered datagram or viewer-group. The counts exclude the cache tick. Bytes sum
 requested allocation and reallocation sizes, including growth in place; they
 measure neither live memory nor bytes copied. A multiplexed instruction counter
 fails the run instead of reporting an undercount. Every task runs on the bench's

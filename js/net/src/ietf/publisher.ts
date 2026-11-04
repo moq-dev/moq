@@ -2232,7 +2232,8 @@ export class Publisher {
 
 	/**
 	 * Handles an incoming FETCH on a bidi stream: a range of the named track, or a joining
-	 * FETCH's head of its subscription's group, answered from the cache.
+	 * FETCH's head of its subscription's group. A named range missing from the cache asks
+	 * the producer's request handler; a joining head must already be cached.
 	 *
 	 * @internal
 	 */
@@ -2242,7 +2243,8 @@ export class Publisher {
 	}
 
 	async #runFetch(msg: Fetch, request: RequestStream) {
-		// FILL_TIMEOUT is accepted and ignored: a one-group read ends with the group.
+		// FILL_TIMEOUT does not truncate a group or time out its application fill. Both remain
+		// wanted until answered, refused, or cancelled by the requester or its grant.
 		const version = this.#session.version;
 		const type = msg.type;
 		const named = type.kind === "standalone" || type.kind === "filtered" ? type : undefined;
@@ -2341,8 +2343,8 @@ export class Publisher {
 	}
 
 	/**
-	 * Resolve a standalone or draft-22 FETCH to its group reader and end metadata,
-	 * or the refusal to answer with.
+	 * Resolve a standalone or draft-22 FETCH to its group reader and end metadata, filling
+	 * uncached history through the producer's request handler, or the refusal to answer with.
 	 *
 	 * A whole-group request waits for the group to finish, so a downstream cache never
 	 * mistakes a prefix for a complete group.
@@ -2386,9 +2388,8 @@ export class Publisher {
 
 		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
-		const cache = broadcast
-			.track(named.trackName)
-			.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
+		const track = broadcast.track(named.trackName);
+		const cache = track.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
 		let answer: FetchAnswer | undefined;
 		try {
 			const info = await untilAborted(cache.info(), signal);
@@ -2420,8 +2421,10 @@ export class Publisher {
 			}
 
 			const selected = range.start.group;
-			const group = hooks.cachedGroup(cache, selected);
-			if (!group) return { condition: "does_not_exist", reasonPhrase: `group ${range.start.group}` };
+			// A relayed track may hold the group even when its upstream cannot FETCH. Only a
+			// cache miss asks the producer's handler or fetches the group from its serving route.
+			const group =
+				hooks.cachedGroup(cache, selected) ?? (await track.fetchGroup(selected, { priority, signal }));
 			const slice = fetchSlice(range, selected);
 			// Wait for the selected headers or the group's end, through this reader's recovery
 			// and verdict. The reader holds only the normal tail, not a copied slice.

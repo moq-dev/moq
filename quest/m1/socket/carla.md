@@ -29,6 +29,12 @@ See the [epic](/quest/m1/socket/README.md) for the layout and the reply split.
   because publish and subscribe are granted separately; say so in
   `demo/carla/README.md`.
 - Update `demo/carla/README.md` (paths, lease) and `doc/bin/demo.md`.
+- Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): [moq-dev/moq#7678](https://github.com/moq-dev/moq/pull/7678) keys carla's
+  Python driver lease on a local run counter, because moq-ffi's
+  `MoqBroadcastConsumer` exposes no instance. If the move to sockets doesn't
+  make that counter moot, add a `MoqBroadcastConsumer::instance()` accessor
+  (and its Python wrapper) and key the lease on the real instance. Options
+  shown: m0; ✅ m1, in this quest; m2.
 
 ## Required
 

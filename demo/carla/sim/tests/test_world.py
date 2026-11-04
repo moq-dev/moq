@@ -362,6 +362,25 @@ def test_resting_claim_preserves_autonomy_until_driver_input() -> None:
     assert controls[-1].throttle == 0.2
 
 
+@pytest.mark.parametrize("gear", [Gear.FORWARD, Gear.REVERSE])
+def test_braking_takeover_disengages_autonomy_with_steering_and_gear_intact(gear: Gear) -> None:
+    autopilot = []
+    controls = []
+    vehicle = fake_vehicle(
+        set_autopilot=lambda enabled, port: autopilot.append((enabled, port)),
+        apply_control=controls.append,
+    )
+    truck = Truck("truck1", vehicle, [], fake_sensor(), 8000, road_map=SimpleNamespace())
+
+    truck.actuate(Accepted(state=DriveState(steering=-0.3, gear=gear)), has_driver=True)
+
+    assert not truck.autonomous
+    assert autopilot == [(True, 8000), (False, 8000)]
+    assert len(controls) == 1
+    assert (controls[0].steer, controls[0].throttle, controls[0].brake) == (-0.3, 0.0, 1.0)
+    assert controls[0].reverse == (gear is Gear.REVERSE)
+
+
 def test_released_truck_merges_onto_its_lane_before_autonomy_resumes() -> None:
     autopilot = []
     controls = []

@@ -81,6 +81,7 @@ mod tracks;
 mod tracks_ietf;
 mod unannounce_release;
 mod untimed;
+mod viewer_target;
 mod warm_backfill;
 mod wide_hop;
 mod wide_sequence;
