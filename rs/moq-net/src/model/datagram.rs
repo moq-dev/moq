@@ -19,7 +19,13 @@
 //! Moq-lite 07 asks for a datagram track on a request of its own. Moq-lite 05 and 06 carry a
 //! name's groups and datagrams on one subscription, as moq-transport does: a session serves
 //! an old subscription with both of the name's tracks, and a subscriber keeps only the kind
-//! it asked for, sharing one subscription with any reader of the other kind.
+//! it asked for, sharing one subscription with any reader of the other kind. Two limits
+//! follow on those versions:
+//!
+//! - A subscription carries the datagram track that exists when it starts, so create a
+//!   name's datagram track before, or with, its stream track.
+//! - The wire never says a name has no datagram track, so a datagram reader of a name with
+//!   only a stream track receives nothing until that track ends.
 
 use std::{
 	collections::VecDeque,
@@ -162,12 +168,19 @@ impl State {
 		}
 		// A finish leaves what is buffered for the consumers already reading; an error
 		// ends the track at once, so nobody reads what is left.
-		if end.is_err() {
-			self.offset += self.buffer.len() as u64;
-			self.buffer.clear();
-			self.bytes = 0;
-		}
+		let unread = end.is_err() || self.priorities.is_empty();
 		self.end = Some(end);
+		if unread {
+			self.release();
+		}
+	}
+
+	/// Drop what is buffered: nobody can read it any more. A consumer joining later starts
+	/// past it, so this holds for an ended track once its last consumer leaves.
+	fn release(&mut self) {
+		self.offset += self.buffer.len() as u64;
+		self.buffer.clear();
+		self.bytes = 0;
 	}
 
 	/// Whether a consumer at `cursor` has a datagram to read: past what was dropped, it reads
@@ -591,6 +604,10 @@ impl Drop for Consumer {
 			if state.priorities.is_empty() && state.info.is_none() {
 				state.end(Err(Error::Cancel));
 			}
+			// The last reader of a finished track leaves what it never read.
+			if state.priorities.is_empty() && state.end.is_some() {
+				state.release();
+			}
 		}
 	}
 }
@@ -739,6 +756,21 @@ mod tests {
 		producer.clone().finish();
 		let mut late = producer.consume();
 		assert!(matches!(recv(&mut late), Poll::Ready(Ok(None))));
+
+		// Nobody left to read them, they go: on a finish with no consumer, or with the last
+		// consumer of a finished track.
+		let mut producer = Info::default().produce("dg");
+		producer.append(None, "a").unwrap();
+		producer.clone().finish();
+		assert!(producer.state.read().buffer.is_empty());
+		let mut producer = Info::default().produce("dg");
+		let reading = producer.consume();
+		producer.append(None, "a").unwrap();
+		producer.clone().finish();
+		assert_eq!(producer.state.read().buffer.len(), 1);
+		drop(reading);
+		assert!(producer.state.read().buffer.is_empty());
+		assert_eq!(producer.state.read().bytes, 0);
 
 		// An abort drops them.
 		let mut producer = Info::default().produce("dg");

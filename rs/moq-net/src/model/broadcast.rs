@@ -403,6 +403,10 @@ impl Producer {
 	/// Datagram tracks are a namespace apart from stream tracks, so this never conflicts with
 	/// [`Self::create_track`]. Fails with [`Error::Duplicate`] while a live datagram track
 	/// holds the name.
+	///
+	/// Moq-lite 05 and 06 carry it on its name's stream track subscriptions, but only those
+	/// that start once it exists: create it before, or with, a stream track of the same name.
+	/// See [`datagram`](crate::datagram).
 	pub fn create_datagrams(
 		&self,
 		name: impl Into<Arc<str>>,
