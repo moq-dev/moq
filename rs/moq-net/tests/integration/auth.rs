@@ -1297,6 +1297,75 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 	.expect("timed out");
 }
 
+/// Losing a grant cancels a datagram track the peer publishes to us, and leaves the session up.
+#[kio::test]
+async fn lite_07_a_revoked_grant_cancels_its_datagram_subscriptions() {
+	within(async {
+		let server_origin = produce_origin(1);
+		let down = server_origin.create_broadcast("room/x").unwrap();
+		let mut audio = down
+			.create_datagrams(
+				"audio",
+				moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		down.announce(Default::default()).unwrap();
+
+		let received = produce_origin(3);
+		let mut pair = connect(Options {
+			version: Some(LITE_07),
+			client_publish: Some(produce_origin(2)),
+			client_subscribe: Some(received.clone()),
+			server_publish: Some(server_origin.clone()),
+			server_subscribe: Some(server_origin.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| {
+			token.is_empty().then(|| grant(&["up"], &["room"]))
+		});
+		let (_, setup) = issued.next().await.unwrap();
+
+		let remote = received
+			.consume()
+			.follow("room/x", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
+		let mut reader = remote.datagrams("audio").unwrap();
+		reader.info().await.unwrap();
+		// Sent until one arrives: a datagram is best-effort.
+		let first = loop {
+			audio
+				.append(moq_net::Timestamp::from_millis(0).unwrap(), b"x".as_ref())
+				.unwrap();
+			if let Some(Ok(datagram)) = futures::FutureExt::now_or_never(reader.recv()) {
+				break datagram;
+			}
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		};
+		assert!(first.is_some());
+
+		setup.revoke(SessionError::Unauthorized, "expired");
+		let err = loop {
+			match reader.recv().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("datagram subscription finished instead of ending"),
+				Err(err) => break err,
+			}
+		};
+		assert!(
+			matches!(err, Error::Unauthorized | Error::Stream(StreamError::Unauthorized)),
+			"{err:?}"
+		);
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A grant that fits no single AUTH_OK is withheld, never trimmed: the presenter is told
 /// it is unsupported, nothing of the message reaches the wire, and the session and the
 /// token that did fit are untouched.

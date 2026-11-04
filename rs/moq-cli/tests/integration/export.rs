@@ -566,7 +566,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
 	let old = relay.origin.request("demo", None).await.unwrap();
 	assert_eq!(old.info().instance.as_ref(), Some(&instance));
-	let clock = catalog.snapshot().clock;
+	let clock = catalog.snapshot().media.clock;
 	connection.abort(moq_net::Error::Cancel);
 	connection.closed().await.unwrap();
 	kio::clock::timeout(TIMEOUT, old.closed())
@@ -584,7 +584,11 @@ async fn the_same_instance_within_the_follow_continues() {
 		pace.tick().await;
 		import.decode(chunk).unwrap();
 	}
-	assert_eq!(catalog.snapshot().clock, clock, "the capture keeps its catalog clock");
+	assert_eq!(
+		catalog.snapshot().media.clock,
+		clock,
+		"the capture keeps its catalog clock"
+	);
 	import.finish().unwrap();
 	catalog.finish().unwrap();
 	export.output_past(mark).await;
