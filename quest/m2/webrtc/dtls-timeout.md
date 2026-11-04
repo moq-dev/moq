@@ -4,7 +4,7 @@
 
 A DTLS handshake that times out after ICE connects surfaces as its own error
 variant in `moq-ice` and `moq-rtc` (or `moq-webrtc`, after the
-[rename](/quest/m2/webrtc/rename.md)), so callers match it instead of the text
+[rename](/quest/m1/webrtc-rename.md)), so callers match it instead of the text
 `rtc error: DTLS error: timeout: handshake` inside `Error::Rtc(String)`.
 Session-end handling and logging treat it like an ICE timeout: `session::end`
 logs it at debug as abandoned-session churn, not as a warning.
@@ -18,7 +18,7 @@ dimpl's typed `Error::Timeout(TimeoutError::Handshake)` into
 before moq-ice sees it.
 
 - Classify it once at the str0m boundary in moq-ice, the only place that sees
-  str0m's error. Until the [vendored stack](/quest/m2/webrtc/vendor.md) lands,
+  str0m's error. Until the [vendored stack](/quest/m1/webrtc-vendor.md) lands,
   that is a text match there, pinned by a test against the crate's real
   message. If the vendoring lands first, carry dimpl's variant through the
   vendored `dtls.rs` typed instead, and add no text match. Otherwise the
@@ -35,5 +35,5 @@ Public API: additive variants on non-exhaustive error enums. Wire: none.
 
 ## Related
 
-- [Vendor and trim the WebRTC stack](/quest/m2/webrtc/vendor.md) - replaces this quest's text match with dimpl's typed timeout
+- [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - replaces this quest's text match with dimpl's typed timeout
 - [DTLS waits for ICE](/quest/m2/webrtc/dtls-after-ice.md) - after it, every DTLS handshake timeout comes after nomination, which is the case this types

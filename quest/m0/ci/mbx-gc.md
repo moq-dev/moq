@@ -44,4 +44,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - disk policy for the queue host, configured in kixelated/nixos
+- The queue host keeps the queue's disk - disk policy for the queue host, configured in kixelated/nixos

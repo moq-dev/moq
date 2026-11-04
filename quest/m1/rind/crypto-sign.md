@@ -9,7 +9,7 @@ aws-lc-rs at all. Keys and signatures already written stay byte-identical.
 ## Plan
 
 Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
-[moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702)): milestone m2,
+[moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702)): milestone m1,
 a child of the rind epic. The epic had no child for signing, and its final
 step (removing aws-lc-rs) can't land until this one does.
 
