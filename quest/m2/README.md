@@ -127,6 +127,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
+- [WebCodecs audio priming](/quest/m2/webcodecs-priming.md) - `@moq/publish` measures each browser's `AudioEncoder` priming and corrects AAC timestamps and Opus pre-skip, so audio decodes at its capture timestamp
+- [macOS browser lane](/quest/m2/macos-browser-lane.md) - nightly CI runs the priming browser test in Chrome and Safari, which have the AAC encoders Linux lacks
 - [fMP4 ambisonic layout](/quest/m2/mux-vr-ambisonic-fmp4.md) - fMP4 Opus import fills `ambisonic` from the `dOps` mapping table
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
