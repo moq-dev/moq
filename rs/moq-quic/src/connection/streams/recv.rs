@@ -412,11 +412,9 @@ impl Recv {
 /// Chunks returned from [`Stream::read()`].
 ///
 /// ### Note: Finalization Needed
-/// Bytes read from the stream are not released from the congestion window until
-/// either [`Self::finalize()`] is called, or this type is dropped.
-///
-/// It is recommended that you call [`Self::finalize()`] because it returns a flag
-/// telling you whether reading from the stream has resulted in the need to transmit a packet.
+/// Bytes read from the stream are not released from the receive window until
+/// either [`Self::finalize()`] is called, or this type is dropped. Returning credit wakes
+/// the connection's transmit waiter when the peer needs an update.
 ///
 /// If this type is leaked, the stream will remain blocked on the remote peer until
 /// another read from the stream is done.
@@ -455,7 +453,8 @@ impl<'a> Chunks<'a> {
 
 	/// The next contiguous chunk of at most `max_length` bytes, or `None` once the stream finished
 	///
-	/// Fails with [`Error::Blocked`] until more arrives, or [`Error::Reset`]. Call
+	/// Fails with [`Error::Blocked`] until more arrives, or [`Error::Reset`]. A finished stream
+	/// whose leased bytes are not all read stays blocked rather than finish without them. Call
 	/// [`Self::finalize()`] when done.
 	pub fn next(&mut self, max_length: usize) -> Result<Option<Chunk>, Error> {
 		let rs = match &mut self.state {
@@ -490,7 +489,9 @@ impl<'a> Chunks<'a> {
 				Err(Error::Reset(error_code))
 			}
 			RecvState::Recv { size } => {
-				if size == Some(rs.end) && rs.assembler.bytes_read() == rs.end {
+				// Leased bytes left the assembler unread, so the end is not reached until they
+				// are read: freeing the stream now would discard them.
+				if size == Some(rs.end) && rs.assembler.bytes_read() == rs.end && !rs.lease.has_unread() {
 					let state = mem::replace(&mut self.state, ChunksState::Finished);
 					// At this point if we have `rs` self.state must be `ChunksState::Readable`
 					let recv = match state {
@@ -528,7 +529,7 @@ impl<'a> Chunks<'a> {
 
 	/// Mark the read data as consumed from the stream.
 	///
-	/// The number of read bytes will be released from the congestion window,
+	/// The number of read bytes will be released from the receive window,
 	/// allowing the remote peer to send more data if it was previously blocked.
 	///
 	pub fn finalize(mut self) {

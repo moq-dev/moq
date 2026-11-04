@@ -132,13 +132,13 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
 
-	/// A rendition's HLS records failed, so its listings refuse rather than read as a finished
+	/// A rendition's media track failed, so its listings refuse rather than read as a finished
 	/// recording.
-	#[error("hls records {track} failed: {source}")]
-	RecordsFailed {
-		/// The record track's name.
+	#[error("media track {track} failed: {source}")]
+	MediaFailed {
+		/// The media track's name.
 		track: String,
-		/// Why the records failed.
+		/// Why the track failed.
 		source: Box<Error>,
 	},
 

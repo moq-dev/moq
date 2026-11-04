@@ -96,7 +96,7 @@ like any other broadcast; it does not look in object storage on a cache miss.
 
 Each track starts live at its newest stored sequence and serves older groups
 from storage when requested by group position. It advertises no max age, so the
-source's live retention cannot expire archived history. A growing recording is
+source's live max age cannot make archived history stale. A growing recording is
 periodically listed for new tracks and objects. Once `.end` appears, refreshing
 stops and tracks end as recorded; without it, including when a recorder stopped
 early, the archive stays live. Empty or unrecognized prefixes are refused.
@@ -106,8 +106,8 @@ resolve against the served track's cache, not the archive's stored keys, so they
 cannot reliably seek old stored content. There is no automatic switch from a
 live broadcast to its archive at the original path.
 
-The archived catalog is an ordinary track. [HLS](/bin/hls) can serve a recording
-whose renditions include their `hls` record tracks, just as it serves a live
-broadcast; a rendition without those records gets no playlist. The catalog's
-per-rendition [`hls`](/concept/hang#catalog) field describes HLS segmentation,
-not archive discovery. Protected broadcasts are outside this archive workflow.
+The archived catalog is an ordinary track. [HLS](/bin/hls) serves a recording
+from its media tracks, numbered on the catalog's `media.join.interval`, just as
+it serves a live broadcast; a recording whose catalog declares no interval gets
+no playlists. The [join interval](/concept/hang#catalog) describes HLS
+segmentation, not archive discovery. Protected broadcasts are outside this archive workflow.

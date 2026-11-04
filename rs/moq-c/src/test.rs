@@ -1732,7 +1732,7 @@ fn publish_track_invalid_broadcast() {
 	let info = moq_track_info {
 		priority: 1,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -1767,7 +1767,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: true,
 		refresh: 0,
@@ -1777,6 +1777,41 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+/// A zeroed struct serves only the live edge, and the unlimited flag wins over a stated age,
+/// like `moq_delay.max_unlimited`.
+#[test]
+fn track_info_max_age() {
+	let zeroed = || moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
+
+	assert_eq!(max_age(zeroed()), Some(Duration::ZERO));
+	let stated = moq_track_info {
+		max_age_us: 5_000_000,
+		..zeroed()
+	};
+	assert_eq!(max_age(stated), Some(Duration::from_secs(5)));
+	let unlimited = moq_track_info {
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(unlimited), None);
+	let both = moq_track_info {
+		max_age_us: 5_000_000,
+		max_age_unlimited: true,
+		..zeroed()
+	};
+	assert_eq!(max_age(both), None);
 }
 
 /// Raw frames, datagrams, and JSON values read back exactly the timestamp written: a 90 kHz
@@ -2288,7 +2323,7 @@ fn raw_track_subscription_options_and_update() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2423,7 +2458,7 @@ fn raw_track_time_anchor() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
+		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -3367,7 +3402,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -4115,7 +4150,7 @@ fn track_demand_reports_the_wanted_group() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
+		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -4523,8 +4558,18 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"track-dynamic-narrowed");
 	let name = b"data";
-	let track =
-		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	// No publisher age limit, so the requested groups behind the live one stay fresh.
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: true,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let group_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
@@ -7144,6 +7189,55 @@ fn bandwidth_reservations_split_the_estimate() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Two viewers split a 3 Mbps receive estimate max-min fair by ceiling, and closing
+/// one hands its share back.
+#[test]
+fn viewers_split_the_receive_estimate() {
+	let estimate = moq_net::bandwidth::Producer::new();
+	let viewers = {
+		let mut state = State::lock();
+		let viewers = moq_net::bandwidth::Viewers::new(estimate.weak());
+		id(i32::from(state.bandwidth.insert_viewers(viewers).unwrap()))
+	};
+	let viewer_rate = |viewer: u32| {
+		let mut bps = 0;
+		let mut present = false;
+		assert_eq!(unsafe { moq_viewer_rate(viewer, &mut bps, &mut present) }, 0);
+		present.then_some(bps)
+	};
+
+	let first = id(moq_viewers_watch(viewers, 4_000_000));
+	let second = id(moq_viewers_watch(viewers, 1_000_000));
+	assert_eq!(viewer_rate(first), None);
+
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(viewer_rate(first), Some(2_000_000));
+	assert_eq!(viewer_rate(second), Some(1_000_000));
+
+	assert_eq!(moq_viewer_update(second, 4_000_000), 0);
+	assert_eq!(viewer_rate(first), Some(1_500_000));
+	assert_eq!(moq_viewers_set_target(viewers, 0, true), 0);
+	assert_eq!(moq_viewers_set_target(viewers, 0, false), 0);
+
+	// Past what a PROBE target carries: refused, and nothing changes.
+	let max = moq_net::bandwidth::Viewers::MAX_TARGET.as_bps();
+	assert_eq!(moq_viewers_watch(viewers, max), crate::MOQ_ERROR_OUT_OF_RANGE);
+	assert_eq!(moq_viewer_update(second, max), crate::MOQ_ERROR_OUT_OF_RANGE);
+	assert_eq!(
+		moq_viewers_set_target(viewers, max + 1, true),
+		crate::MOQ_ERROR_OUT_OF_RANGE
+	);
+	assert_eq!(viewer_rate(first), Some(1_500_000));
+
+	assert_eq!(moq_viewer_close(second), 0);
+	assert_eq!(viewer_rate(first), Some(3_000_000));
+	assert_eq!(moq_viewer_close(first), 0);
+	assert!(moq_viewer_close(first) < 0);
+	assert_eq!(moq_viewers_close(viewers), 0);
+}
+
 /// Two allocator handles share one registry.
 #[test]
 fn bandwidth_handles_share_the_registry() {
@@ -7971,37 +8065,6 @@ fn zeroed_audio_hint_measures() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A video group duration hint declares the HLS duration up front, as the smallest multiple of the
-/// hint at or above the grid.
-#[test]
-fn video_group_duration_hint_declares_hls() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"video-group-duration");
-	let init = h264_init();
-	let config = moq_video_init {
-		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
-		init: init.as_ptr(),
-		init_len: init.len(),
-		label: std::ptr::null(),
-		label_len: 0,
-		hint: moq_video_hint {
-			group_duration_us: 3_000_000,
-			has_group_duration: true,
-			..moq_video_hint::default()
-		},
-	};
-	let media = id(unsafe { moq_publish_video(broadcast, &config) });
-
-	let catalog = published_catalog(broadcast);
-	let rendition = catalog.video.renditions.values().next().expect("rendition listed");
-	let hls = rendition.hls.clone().expect("records listed before any frame");
-	assert_eq!(hls.duration, std::time::Duration::from_secs(6));
-
-	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
 /// Hints reach a track published for a request, as for moq_publish_audio and moq_publish_video.
 #[test]
 fn track_request_media_carries_hints() {
@@ -8053,16 +8116,8 @@ fn track_request_media_carries_hints() {
 	let catalog = published_catalog(broadcast);
 	let audio_rendition = catalog.audio.renditions.values().next().expect("audio listed");
 	assert_eq!(audio_rendition.bitrate, Some(96_000));
-	assert_eq!(
-		audio_rendition.hls.as_ref().map(|hls| hls.duration),
-		Some(std::time::Duration::from_secs(4))
-	);
 	let video_rendition = catalog.video.renditions.values().next().expect("video listed");
 	assert_eq!(video_rendition.bitrate, Some(2_000_000));
-	assert_eq!(
-		video_rendition.hls.as_ref().map(|hls| hls.duration),
-		Some(std::time::Duration::from_secs(6))
-	);
 
 	assert_eq!(moq_consume_track_cancel(audio_consumer), 0);
 	assert_eq!(audio_cb.recv_terminal(), 0);
@@ -8157,32 +8212,13 @@ fn invalid_hints_are_refused() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A group duration hint lists the track's HLS records in the first catalog, so the first group
-/// doesn't republish it; without one they arrive once a group has been written.
+/// A group duration hint is the track's join interval, declared once its first window closes,
+/// rather than the shorter groups it measured.
 #[test]
-fn group_duration_hint_lists_hls_up_front() {
+fn group_duration_hint_declares_the_join_interval() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"group-duration");
 	let init = opus_head();
-
-	let free = id(publish_audio(
-		broadcast,
-		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
-		&init,
-		None,
-	));
-	let free_name = published_catalog(broadcast)
-		.audio
-		.renditions
-		.keys()
-		.next()
-		.unwrap()
-		.clone();
-	assert!(
-		audio_rendition(broadcast, &free_name).hls.is_none(),
-		"unhinted: no records yet"
-	);
-
 	let config = moq_audio_init {
 		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
 		init: init.as_ptr(),
@@ -8190,24 +8226,23 @@ fn group_duration_hint_lists_hls_up_front() {
 		label: std::ptr::null(),
 		label_len: 0,
 		hint: moq_audio_hint {
-			group_duration_us: 100_000,
+			group_duration_us: 500_000,
 			has_group_duration: true,
 			..moq_audio_hint::default()
 		},
 	};
 	let hinted = id(unsafe { moq_publish_audio(broadcast, &config) });
-	let name = (published_catalog(broadcast).audio.renditions.keys())
-		.find(|name| **name != free_name)
-		.expect("hinted rendition listed")
-		.clone();
-	let listed = audio_rendition(broadcast, &name);
-	let hls = listed.hls.clone().expect("hinted: records listed before any frame");
-	// The smallest multiple of the 100 ms hint at or above the 4 s grid.
-	assert_eq!(hls.duration, std::time::Duration::from_secs(4));
 
-	// 100 ms groups of five 20 ms packets.
+	// 100 ms groups of five 20 ms packets, for longer than the second a window lasts.
 	let payload = [0u8; 100];
-	for i in 0..20u64 {
+	for i in 0..60u64 {
+		if i == 50 {
+			assert_eq!(
+				published_catalog(broadcast).media.join,
+				None,
+				"no window has closed yet"
+			);
+		}
 		assert_eq!(
 			unsafe { moq_publish_media_frame(hinted, payload.as_ptr(), payload.len(), micros(i * 20_000)) },
 			0
@@ -8217,13 +8252,12 @@ fn group_duration_hint_lists_hls_up_front() {
 		}
 	}
 	assert_eq!(
-		audio_rendition(broadcast, &name).hls,
-		listed.hls,
-		"the first groups don't change the listed records"
+		published_catalog(broadcast).media.interval(),
+		Some(std::time::Duration::from_millis(500)),
+		"the hint, not the 100 ms groups measured"
 	);
 
 	assert_eq!(moq_publish_media_finish(hinted), 0);
-	assert_eq!(moq_publish_media_finish(free), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

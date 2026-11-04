@@ -119,8 +119,7 @@ async fn setup_through(
 	let (endpoint, conn) = dial(version, addr, transport).await;
 
 	let subscriber = moq_tokio::origin::spawn();
-	let session =
-		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Address::Setup);
+	let session = web::Session::raw(conn.clone());
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_subscriber(subscriber.clone())
@@ -292,10 +291,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut low_sub).await, &b"after"[..], "{version}");
 	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
-	let session = moq_tokio::transport::Session::new(
-		web::Session::raw(setup.conn.clone()),
-		moq_net::transport::Address::Setup,
-	);
+	let session = web::Session::raw(setup.conn.clone());
 	assert_eq!(
 		moq_net::transport::Metrics::streams_evicted(&moq_net::transport::poll::Session::metrics(&session)),
 		Some(1),
@@ -471,9 +467,7 @@ async fn reversed(version: &str) -> Reversed {
 	let broadcast = publisher.create_broadcast("room").expect("broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let subscriber = moq_tokio::origin::spawn();
-	let session = |conn: driver::connection::Connection| {
-		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup)
-	};
+	let session = |conn: driver::connection::Connection| web::Session::raw(conn);
 	// A moq-lite client's driver sends its half of the handshake, so it runs meanwhile.
 	let client_session = tokio::spawn({
 		let session = session(conn.clone());
@@ -533,7 +527,7 @@ impl Reversed {
 				// The credit an eviction frees can reach the writer before the stop does, letting
 				// the whole write queue, so only the stop itself proves the stream was stopped.
 				let _ = send.write_all(&bytes[..]).await;
-				if let Ok(Some(_)) = send.stopped().await {
+				if let Ok(Some(_)) = send.closed().await {
 					let _ = tx.send(());
 				}
 			});
@@ -743,8 +737,8 @@ async fn ietf_largest_unit_completes_under_pressure() {
 }
 
 /// Drive the Bun sender through its commands against a subscriber of `origin` whose
-/// connection window is `window`: a low-priority frame twice the window gives way to a
-/// high-priority one, and the low track then keeps delivering. Waits for the sender to exit.
+/// connection window is `window`: an unsealed low-priority prefix gives way to a high-priority
+/// frame, and the low track then keeps delivering. Waits for the sender to exit.
 async fn javascript_exhausts(
 	version: moq_net::Version,
 	window: usize,
@@ -756,7 +750,7 @@ async fn javascript_exhausts(
 	let mut low = subscribe(&remote, "low", 1).await;
 	let mut high = subscribe(&remote, "high", 100).await;
 
-	// Wait until three quarters of the window holds a frame that can never complete.
+	// The sender holds back the rest, so no segment can seal and return this credit.
 	commands.write_all(&b"low\n"[..]).await.unwrap();
 	let mut partial = partial_frame(&mut low).await;
 	read_partial(&mut partial, window * 3 / 4).await;
@@ -764,16 +758,11 @@ async fn javascript_exhausts(
 	// Half the window, which only fits once the low frame lets go.
 	commands.write_all(&b"high\n"[..]).await.unwrap();
 	assert_eq!(next_frame(&mut high).await, vec![2u8; window / 2], "{version}");
-	loop {
-		let chunk = kio::clock::timeout(TIMEOUT, partial.read_chunk())
-			.await
-			.expect("stop timed out");
-		match chunk {
-			Ok(Some(_)) => {}
-			Ok(None) => panic!("{version}: a frame larger than the window completed"),
-			Err(_) => break,
-		}
-	}
+	let err = kio::clock::timeout(TIMEOUT, partial.read_chunk())
+		.await
+		.expect("stop timed out")
+		.expect_err("the partial frame must be evicted");
+	assert!(matches!(err, moq_net::Error::Evicted), "{version}: {err}");
 
 	// The session survives, and the low track keeps delivering what fits.
 	commands.write_all(&b"after\n"[..]).await.unwrap();
@@ -788,8 +777,9 @@ async fn javascript_exhausts(
 }
 
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport server whose
-/// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
-/// receiver stops it, a high-priority frame completes, and a later low group arrives.
+/// connection window is [`WINDOW`] and holds an unsealed low-priority prefix in a frame
+/// declared twice that size. The receiver evicts it, a high-priority frame completes, and a
+/// later low group arrives.
 async fn javascript_partial_frame_gives_way(version: &str) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
@@ -814,7 +804,6 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	)
 	.expect("endpoint");
 	let port = endpoint.local_addr().port();
-	let mut server = web::Server::new(endpoint);
 
 	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
 	let child = tokio::process::Command::new("bun")
@@ -830,10 +819,14 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.spawn()
 		.expect("spawn bun");
 
-	let request = kio::clock::timeout(TIMEOUT, server.accept())
-		.await
-		.expect("connect timeout")
-		.expect("request");
+	let request = kio::clock::timeout(TIMEOUT, async {
+		let incoming = endpoint.accept().await.expect("incoming connection");
+		let connection = incoming.accept().expect("accept QUIC").await.expect("QUIC handshake");
+		web::Request::accept(connection).await
+	})
+	.await
+	.expect("connect timeout")
+	.expect("request");
 	let session = request
 		.respond(web::proto::ConnectResponse::OK.with_protocol(version.alpn()))
 		.await
@@ -842,10 +835,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	let (session, driver) = moq_net::Server::new()
 		.with_versions(version.into())
 		.with_subscriber(origin.clone())
-		.accept(
-			moq_net::time::Instant::now(),
-			moq_tokio::transport::Session::new(session, moq_net::transport::Address::Uri),
-		)
+		.accept(moq_net::time::Instant::now(), session)
 		.await
 		.expect("server handshake");
 	tokio::spawn(moq_net::time::run(driver));

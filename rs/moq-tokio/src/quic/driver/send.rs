@@ -65,7 +65,7 @@ enum HalfState {
 	Reset,
 }
 
-/// The stream's ID, shared by its [`Half`] and the `stopped` futures, which may outlive it
+/// The stream's ID, shared by its [`Half`] and the `closed` futures, which may outlive it
 ///
 /// moq-quic forgets how a stream ended once its ID is released, so the last of them to drop
 /// releases it.
@@ -73,7 +73,7 @@ enum HalfState {
 struct StreamRef {
 	conn: ConnectionRef,
 	id: stream::Id,
-	/// What a local reset settled for `stopped`: the peer's code if its stop arrived first, or
+	/// What a local reset settled for `closed`: the peer's code if its stop arrived first, or
 	/// `None`. moq-quic still records a stop that arrives after the reset, which no longer counts.
 	reset: OnceLock<Option<VarInt>>,
 }
@@ -107,6 +107,12 @@ impl Stream {
 		kio::wait(|waiter| self.half.poll_write(waiter, buf)).await
 	}
 
+	/// Poll a write without retaining or copying the caller's buffer.
+	#[cfg(feature = "quic")]
+	pub(crate) fn poll_write_buf(&mut self, waiter: &kio::Waiter, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		self.half.poll_write(waiter, buf)
+	}
+
 	/// Write all of `buf` into this stream
 	///
 	/// # Cancel safety
@@ -122,7 +128,7 @@ impl Stream {
 
 	/// Notify the peer that no more data will ever be written to this stream
 	///
-	/// [`Finished::stopped()`] waits for the peer to receive all of it, or learns that it
+	/// [`Finished::closed()`] waits for the peer to receive all of it, or learns that it
 	/// stopped the stream first.
 	pub fn finish(mut self) -> Finished {
 		self.half.finish();
@@ -200,15 +206,15 @@ impl Stream {
 
 	/// Completes when the peer stops the stream, or the stream ends otherwise
 	///
-	/// See [`Finished::stopped()`]. A stream reset or dropped before the peer stopped it
+	/// See [`Finished::closed()`]. A stream reset or dropped before the peer stopped it
 	/// resolves with `None`.
-	pub fn stopped(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
-		self.half.stopped()
+	pub fn closed(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
+		self.half.closed()
 	}
 
-	/// Wait for the stream to end, retaining the peer's stop code; see [`Finished::stopped`].
+	/// Wait for the stream to end, retaining the peer's stop code; see [`Finished::closed`].
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
-		self.half.stream.poll_stopped(waiter)
+		self.half.stream.poll_closed(waiter)
 	}
 
 	/// The identity of this stream
@@ -258,15 +264,15 @@ impl Finished {
 	/// if it arrives after.
 	///
 	/// For a variety of reasons, the peer may not send acknowledgements immediately upon receiving
-	/// data. As such, relying on `stopped` to know when the peer has read a stream to completion
+	/// data. As such, relying on `closed` to know when the peer has read a stream to completion
 	/// may introduce more latency than using an application-level response of some sort.
-	pub fn stopped(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
-		self.half.stopped()
+	pub fn closed(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
+		self.half.closed()
 	}
 
-	/// Wait for the stream to end, retaining the peer's stop code; see [`Finished::stopped`].
+	/// Wait for the stream to end, retaining the peer's stop code; see [`Finished::closed`].
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
-		self.half.stream.poll_stopped(waiter)
+		self.half.stream.poll_closed(waiter)
 	}
 
 	/// The identity of this stream
@@ -280,7 +286,7 @@ impl Future for Finished {
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.get_mut();
-		this.half.stream.poll_stopped(this.park.hold(cx))
+		this.half.stream.poll_closed(this.park.hold(cx))
 	}
 }
 
@@ -315,7 +321,7 @@ impl Half {
 
 	fn finish(&mut self) {
 		let mut conn = self.stream.conn.state.lock();
-		// A STOP_SENDING may have beaten us here, which `stopped` reports.
+		// A STOP_SENDING may have beaten us here, which `closed` reports.
 		let _ = conn.inner.send_stream(self.stream.id).finish();
 		self.state = HalfState::Finished;
 	}
@@ -357,16 +363,16 @@ impl Half {
 		let _ = conn.inner.send_stream(self.stream.id).set_group(group);
 	}
 
-	fn stopped(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
+	fn closed(&self) -> impl Future<Output = Result<Option<VarInt>, Error>> + Send + Sync + 'static {
 		// Holding the stream keeps its ID, and so how it ended, until this future drops.
 		let stream = self.stream.clone();
-		kio::wait(move |waiter| stream.poll_stopped(waiter))
+		kio::wait(move |waiter| stream.poll_closed(waiter))
 	}
 }
 
 impl StreamRef {
 	/// Wait for the peer to stop the stream, or for it to end otherwise
-	fn poll_stopped(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		let mut conn = self.conn.state.lock();
 		if let Some(&stopped) = self.reset.get() {
 			return Poll::Ready(Ok(stopped));
@@ -416,7 +422,7 @@ impl Drop for Half {
 		if reset.is_some_and(|reset| reset.is_ok()) {
 			let _ = self.stream.reset.set(stopped);
 		}
-		// `stream` releases the ID once this and every `stopped` future dropped it, after the
+		// `stream` releases the ID once this and every `closed` future dropped it, after the
 		// lock here is let go.
 	}
 }

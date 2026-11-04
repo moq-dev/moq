@@ -158,6 +158,10 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
+# Lint media tests without the device features the gate's test build enables.
+media-defaults:
+    bash sh/local.sh cargo clippy --locked -p moq-audio -p moq-video --tests -- -D warnings
+
 # The capture and playback tests drive synthetic devices, so they need no hardware.
 
 # Test the capture and playback features, which the default test pass skips.
@@ -337,7 +341,7 @@ play *args:
 doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
-# Needs nightly with the miri component; executes only in Nightly. See sh/rs/miri.sh
+# Needs nightly with miri and rust-src; executes only in Nightly. See sh/rs/miri.sh
 # for what runs and why it splits in two.
 
 # Run kio's and moq-net's hand-written in-memory unsafe under Miri.

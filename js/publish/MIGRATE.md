@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `maxAge: null` is unlimited, and the catalog takes the zero default ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Broadcast`'s `maxAge` input accepts `null` for no publisher limit on its media tracks; omitted is still 30 seconds (`Container.MAX_AGE` from `@moq/hang`). With `null`, on-demand audio keeps 30 seconds of raw PCM, since raw history needs a finite bound.
+The catalog track now advertises `@moq/net`'s zero default instead of `Number.MAX_SAFE_INTEGER`, as Rust's catalog does. A late viewer still reads an unchanged catalog, since only a superseded group goes stale.
+Tracks an application creates on `broadcast.net` follow `@moq/net` and default to a zero max age; pass `maxAge: null` (or a window) where readers reach back for history.
+
+### The catalog declares `media.join.interval` and moves `clock` to `media.clock` ([#7652](https://github.com/moq-dev/moq/pull/7652))
+
+`Broadcast.catalog` advertises the page's wall-clock mapping as `media.clock` instead of the root `clock`; read `catalog.media?.clock` in a `mutate` callback.
+When the catalog first lists a video or audio rendition, the broadcast also declares the longest group among its renditions as `media.join.interval`, which an HLS or DASH export cuts its segments on, and keeps it for the network broadcast.
+The video encoder offers its `keyframeInterval` (2000 ms by default) and the audio encoder its `groupDuration`.
+A custom producer that wants its rendition exported sets `rendition.joinInterval` to its longest group before its config lists it.
+
 ### `muted` and `invisible` keep capture open
 
 `<moq-publish muted>` and `invisible` now stop only the encoder, so the microphone and camera stay open and the browser's capture indicators stay lit.

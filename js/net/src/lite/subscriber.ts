@@ -25,7 +25,6 @@ import * as Instance from "../instance.ts";
 import { hiddenBelow, hooks, maxDelayOf, minDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
-import { receiveFrame } from "../payload.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -50,7 +49,7 @@ import {
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
-import { frameDecoder, type Group as GroupMessage, readFrames, type WireFrame } from "./group.ts";
+import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -1302,7 +1301,8 @@ export class Subscriber {
 		if (!hasTrackStream(this.version)) {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
 			const framing = { compress: false, timescale: 0, scale: undefined };
-			const entry = this.#register(id, msg, ranges, request.accept(), framing, state);
+			// Nor a max age: no publisher limit, not the authored default.
+			const entry = this.#register(id, msg, ranges, request.accept({ maxAge: null }), framing, state);
 			const stream = await this.#sendSubscribe(state, msg, deadline);
 			// The first response MUST be a SUBSCRIBE_OK (older drafts only).
 			const resp = await decodeSubscribeResponse(stream.reader, this.version);
@@ -1346,7 +1346,8 @@ export class Subscriber {
 			// accept it again.
 			state.cancel.signal.throwIfAborted();
 			const model = this.#toModelInfo(answered.info);
-			const producer = request.accept(model);
+			// A TRACK_INFO without a max age sets no publisher limit, not the authored default.
+			const producer = request.accept({ ...model, maxAge: model.maxAge ?? null });
 			const framing = {
 				compress: answered.info.compress,
 				timescale: answered.info.timescale ?? 0,
@@ -1400,7 +1401,7 @@ export class Subscriber {
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
-			// for a late group anyway, and no longer than the publisher keeps one.
+			// for a late group anyway, and no longer than the publisher keeps one fresh.
 			tail: new Tail({
 				grace: () => hooks.tailGrace(producer),
 			}),
@@ -1699,49 +1700,12 @@ export class Subscriber {
 	// the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, info: TrackInfo): Promise<void> {
 		try {
-			const decode = frameDecoder({
-				scale: info.timescale ?? 0,
-				compress: info.compress,
-			});
-
-			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
-			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
-			// demand, not by the stream ending. `idling` is watched across frames as one stable
-			// promise; the check is level-triggered, so a coalesced fetch that arrives before we
-			// cancel re-arms and resumes.
-			const idle: unique symbol = Symbol("idle");
-			let idling = groupUnwanted(group).then((): typeof idle => idle);
-			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
-			// kept and awaited again rather than abandoned with its frame.
-			let pending: Promise<WireFrame | undefined> | undefined;
-			for (;;) {
-				// Buffered frames are written without an await, as in a group stream.
-				let frame = pending === undefined ? stream.reader.tryDecode(decode) : undefined;
-				if (!frame) {
-					pending ??= stream.reader.decodeMaybe(decode);
-					const next = await race([pending, group.closed, idling]);
-					if (next === idle) {
-						if (group.isClosed) break;
-						if (group.demand().wanted.peek()) {
-							idling = groupUnwanted(group).then((): typeof idle => idle);
-							continue;
-						}
-						// Abandoned mid-group: the truncated group must never end clean.
-						throw new StreamError(StreamCode.Cancel, { message: "cancel" });
-					}
-					pending = undefined;
-					// Reset the stream with the group's error, such as Unauthorized on revocation.
-					if (next instanceof Error) throw next;
-					if (!next) break;
-					frame = next;
-				}
-				if (frame.payload) hooks.writeGroupFrame(group, frame as netGroup.Frame, frame.inflated);
-				else if (!(await receiveFrame(stream.reader, group, frame))) {
-					const closed = group.closed.peek();
-					if (closed instanceof Error) throw closed;
-					break;
-				}
-			}
+			// One guard covers both header waits and a stalled payload. Abandonment aborts
+			// the group before resetting the stream, releasing the shared frame pump too.
+			await untilAbandoned(
+				group,
+				readFrames(stream.reader, group, { scale: info.timescale ?? 0, compress: info.compress }),
+			);
 
 			group.finish();
 			stream.close();
@@ -2202,7 +2166,7 @@ export class Subscriber {
 		return setup.probe;
 	}
 
-	async runProbe(signal?: AbortSignal): Promise<void> {
+	async runProbe(signal?: AbortSignal, target?: Getter<number>): Promise<void> {
 		if (!this.#probe) return;
 		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
 		const scope = new Effect();
@@ -2215,9 +2179,12 @@ export class Subscriber {
 		// input ends the session. Drop the estimates so consumers know they're stale.
 		try {
 			// Lite-05+ gates PROBE on the peer advertising Probe >= Report in its SETUP.
+			// Only a peer that probes up to a target is sent one; a Report-level peer ignores it.
+			let increase = false;
 			if (hasSetupStream(this.version) && this.#peerSetup) {
 				const level = await this.#peerProbeLevel(this.#peerSetup, scope);
 				if (level === undefined || level < ProbeLevel.Report) return;
+				increase = level >= ProbeLevel.Increase;
 			}
 			if (this.#goingAway() || abort.aborted) return;
 			const opening = Stream.open(this.#quic, { version: this.version });
@@ -2229,6 +2196,7 @@ export class Subscriber {
 			}
 			scope.cleanup(() => stream.close());
 			await scope.race(stream.writer.u53(StreamId.Probe));
+			if (target && increase) this.#sendTarget(stream, target, scope);
 			for (;;) {
 				const probe = await scope.race(Probe.decodeMaybe(stream.reader, this.version));
 				if (!probe) break;
@@ -2251,6 +2219,43 @@ export class Subscriber {
 			abort.removeEventListener("abort", stop);
 			this.#probe.set({});
 		}
+	}
+
+	// Send `target` on the PROBE stream whenever it changes, in order, while `scope` lives.
+	// Nothing is sent while it is zero, until it retracts a target already sent. One write is
+	// in flight at a time, and the next sends the latest target, so a peer that stops reading
+	// holds one target however often it changes.
+	#sendTarget(stream: Stream, target: Getter<number>, scope: Effect): void {
+		let sent = 0;
+		let writing = false;
+		const write = async () => {
+			writing = true;
+			try {
+				for (;;) {
+					// The wire carries whole bits per second.
+					const next = Math.floor(target.peek());
+					if (next === sent) return;
+					sent = next;
+					// Zero reads as unknown on the wire, which retracts the last target.
+					await new Probe({ bitrate: next > 0 ? next : undefined }).encode(stream.writer, this.version);
+				}
+			} catch {
+				// The writer and reader are independent, so a failed write does not end the
+				// reads: end the probe here, which also closes the stream.
+				scope.close();
+			} finally {
+				writing = false;
+			}
+		};
+		scope.run((effect) => {
+			effect.get(target);
+			if (!writing) void write();
+		});
+		// A close queues behind a write the peer is not reading, which would hold the stream
+		// open past the probe; a reset rejects that write and frees the stream.
+		scope.cleanup(() => {
+			if (writing) stream.abort(new StreamError(StreamCode.Cancel, { message: "probe ended" }));
+		});
 	}
 
 	/**

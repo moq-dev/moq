@@ -100,19 +100,12 @@ test.each(["video", "canvas"] as const)(
 		try {
 			const page = await browser.newPage({ viewport: { width: 960, height: 720 } });
 			await page.goto(server.resolvedUrls?.local[0] ?? "");
-			await page.getByRole("button", { name: "Settings", exact: true }).click();
-			await page
-				.getByRole("tabpanel", { name: "Source" })
-				.getByRole("button", { name: "Camera", exact: true })
-				.click();
-			await page.waitForFunction(() => {
-				const publish = document.querySelector<MoqPublish>("moq-publish");
-				return !!publish?.sources.video.peek()?.out.source.peek();
-			});
+			await page.getByRole("button", { name: "Settings", exact: true }).waitFor();
 			await page.evaluate((tag) => {
 				const publish = document.querySelector<MoqPublish>("moq-publish");
 				if (!publish) throw new Error("missing publish element");
 				publish.backend = "2d";
+				publish.capture = "hold";
 				const preview = document.createElement(tag);
 				preview.style.width = "100%";
 				preview.style.height = "auto";
@@ -122,46 +115,208 @@ test.each(["video", "canvas"] as const)(
 				}
 				publish.append(preview);
 			}, tag);
-			// Both preview types must size the box before we hide and remove them.
-			await page.waitForFunction((tag) => {
+			const publication = await page.evaluateHandle(() => {
 				const publish = document.querySelector<MoqPublish>("moq-publish");
-				const preview = publish?.querySelector(tag);
-				const player = publish?.parentElement?.shadowRoot?.querySelector(".player");
-				const display = publish?.video.in.capture.peek()?.out.display.peek();
-				return (
-					preview &&
-					player &&
-					(preview instanceof HTMLVideoElement
-						? preview.videoWidth > 0
-						: display && preview.width === display.width && preview.height === display.height) &&
-					Math.abs(player.getBoundingClientRect().height - preview.getBoundingClientRect().height) < 0.5
-				);
-			}, tag);
+				if (!publish) throw new Error("missing publish element");
+				return { publish };
+			});
 			const player = page.locator("moq-publish-ui .player");
+			const preview = page.locator(`moq-publish ${tag}`);
+			const empty = (expected: boolean) =>
+				page.waitForFunction((expected) => {
+					const player = document.querySelector("moq-publish-ui")?.shadowRoot?.querySelector(".player");
+					return !!player && player.classList.contains("player--empty") === expected;
+				}, expected);
+			const hidden = async () => {
+				await page.waitForFunction((tag) => {
+					const publish = document.querySelector("moq-publish");
+					const preview = publish?.querySelector(tag);
+					return preview && getComputedStyle(preview).display === "none";
+				}, tag);
+				await empty(true);
+				expect(await preview.boundingBox()).toBeNull();
+				expect((await page.locator("moq-publish").boundingBox())?.height).toBe(0);
+				if (tag === "video")
+					expect(await preview.evaluate((preview) => (preview as HTMLVideoElement).srcObject)).toBeNull();
+			};
+			// Idle preview elements must not contribute their default 300x150 size.
+			await hidden();
+			const idle = await player.boundingBox();
+			expect(idle?.height).toBeCloseTo(((idle?.width ?? 0) * 9) / 16, 0);
+			if (tag === "canvas")
+				await preview.evaluate((preview) => {
+					(preview as HTMLElement).style.display = "none";
+				});
+			await page.getByRole("button", { name: "Settings", exact: true }).click();
+			await page
+				.getByRole("tabpanel", { name: "Source" })
+				.getByRole("button", { name: "Camera", exact: true })
+				.click();
+			// Both preview types must recover and size the box from real captured frames.
+			const shown = async () => {
+				await page.waitForFunction((tag) => {
+					const publish = document.querySelector<MoqPublish>("moq-publish");
+					const preview = publish?.querySelector(tag);
+					const player = publish?.parentElement?.shadowRoot?.querySelector(".player");
+					const display = publish?.video.in.capture.peek()?.out.display.peek();
+					return (
+						preview &&
+						player &&
+						preview.getBoundingClientRect().height > 0 &&
+						!player.classList.contains("player--empty") &&
+						(preview instanceof HTMLVideoElement
+							? preview.videoWidth > 0
+							: display && preview.width === display.width && preview.height === display.height) &&
+						Math.abs(player.getBoundingClientRect().height - preview.getBoundingClientRect().height) < 0.5
+					);
+				}, tag);
+				// These cases hide a settled preview. A layout read can precede ResizeObserver delivery,
+				// so let the UI observe the displayed size before hiding it.
+				await publication.evaluate(
+					({ publish }) =>
+						new Promise<void>((resolve) => {
+							const resize = new ResizeObserver(() => {
+								resize.disconnect();
+								resolve();
+							});
+							resize.observe(publish);
+						}),
+				);
+			};
+			if (tag === "canvas") {
+				await page.waitForFunction(
+					({ publish }) => !!publish.video.in.capture.peek()?.out.display.peek(),
+					publication,
+				);
+				await hidden();
+				expect(await preview.evaluate((preview) => (preview as HTMLElement).style.display)).toBe("none");
+				await preview.evaluate((preview) => {
+					(preview as HTMLElement).style.display = "";
+				});
+			}
+			await shown();
+			await empty(false);
 			const visible = await player.boundingBox();
 			expect(visible?.height).toBeGreaterThan(0);
-			const empty = (expected: boolean) =>
-				page.waitForFunction(
-					(expected) =>
-						!!document.querySelector("moq-publish-ui")?.shadowRoot?.querySelector(".player--empty") ===
-						expected,
-					expected,
-				);
-			const preview = page.locator(`moq-publish ${tag}`);
+			await page.waitForFunction(
+				({ publish }) => publish.video.settled.peek() && publish.audio.settled.peek(),
+				publication,
+			);
+			const opened = await captured(publication);
+			// Hiding a held camera or just its preview must not reopen either capture device.
+			for (const control of ["invisible", "preview"] as const) {
+				await publication.evaluate(({ publish }, control) => {
+					if (control === "invisible") publish.invisible = true;
+					else publish.preview = "none";
+				}, control);
+				await hidden();
+				expect((await player.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
+				expect(await opened.evaluate((tracks) => tracks.map((track) => track?.readyState))).toEqual([
+					"live",
+					"live",
+				]);
+				await publication.evaluate(({ publish }, control) => {
+					if (control === "invisible") publish.invisible = false;
+					else publish.preview = "source";
+				}, control);
+				await shown();
+				expect((await preview.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
+				const resumed = await captured(publication);
+				expect(
+					await page.evaluate(
+						([opened, resumed]) => opened.every((track, i) => track && track === resumed[i]),
+						[opened, resumed] as const,
+					),
+				).toBe(true);
+			}
+			await publication.evaluate(({ publish }) => {
+				publish.source = undefined;
+			});
+			await hidden();
+			await page.waitForFunction((tracks) => tracks.every((track) => track?.readyState === "ended"), opened);
+			await publication.evaluate(({ publish }) => {
+				publish.source = "camera";
+			});
+			await empty(false);
+			await page.waitForFunction(
+				({ publish }) => publish.video.settled.peek() && publish.audio.settled.peek(),
+				publication,
+			);
+			await shown();
+			const reopened = await captured(publication);
+			expect(await reopened.evaluate((tracks) => tracks.map((track) => track?.readyState))).toEqual([
+				"live",
+				"live",
+			]);
+			await publication.evaluate(({ publish }) => publish.remove());
+			await page.waitForFunction((tracks) => tracks.every((track) => track?.readyState === "ended"), reopened);
+			expect(
+				await publication.evaluate(
+					({ publish }, tag) => publish.querySelector<HTMLElement>(tag)?.style.display,
+					tag,
+				),
+			).toBe(tag === "canvas" ? "" : "none");
+			if (tag === "video")
+				expect(
+					await publication.evaluate(({ publish }) => publish.querySelector("video")?.srcObject),
+				).toBeNull();
+			await publication.evaluate(({ publish }) => {
+				const ui = document.querySelector("moq-publish-ui");
+				if (!ui) throw new Error("missing publish controls");
+				ui.append(publish);
+			});
+			await shown();
 			await preview.evaluate((preview) => {
 				(preview as HTMLElement).style.display = "none";
 			});
 			await empty(true);
 			expect((await player.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
+			if (tag === "canvas") {
+				// The page owns display even across control changes and while the component hides it.
+				for (const control of ["invisible", "preview", "source"] as const) {
+					await publication.evaluate(({ publish }, control) => {
+						if (control === "invisible") publish.invisible = true;
+						else if (control === "preview") publish.preview = "none";
+						else publish.source = undefined;
+					}, control);
+					await hidden();
+					await publication.evaluate(({ publish }, control) => {
+						if (control === "invisible") publish.invisible = false;
+						else if (control === "preview") publish.preview = "source";
+						else publish.source = "camera";
+					}, control);
+					await page.waitForFunction(
+						({ publish }) =>
+							publish.video.settled.peek() && !!publish.video.in.capture.peek()?.out.display.peek(),
+						publication,
+					);
+					await hidden();
+					expect(await preview.evaluate((preview) => (preview as HTMLElement).style.display)).toBe("none");
+				}
+				await publication.evaluate(({ publish }) => {
+					publish.preview = "none";
+				});
+				await hidden();
+				await preview.evaluate((preview) => {
+					(preview as HTMLElement).style.display = "inline-block";
+				});
+				await hidden();
+				await publication.evaluate(({ publish }) => {
+					publish.preview = "source";
+				});
+				await shown();
+				expect(await preview.evaluate((preview) => getComputedStyle(preview).display)).toBe("inline-block");
+			}
 			// Removing a visible preview must also fall back to the reserved size.
 			await preview.evaluate((preview) => {
 				(preview as HTMLElement).style.display = "";
 			});
-			await empty(false);
+			await shown();
 			await preview.evaluate((preview) => preview.remove());
 			await empty(true);
 			expect(await page.locator("moq-publish video, moq-publish canvas").count()).toBe(0);
 			expect((await player.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
+			await player.hover();
 			await page.getByRole("button", { name: "Hide video", exact: true }).click();
 			await page.getByRole("button", { name: "Mute microphone", exact: true }).click();
 			expect(await state(page)).toEqual({ source: "camera", muted: true, invisible: true });
@@ -172,6 +327,157 @@ test.each(["video", "canvas"] as const)(
 	},
 	30_000,
 );
+
+test("canvas previews wait for dimensions and paint fresh frames under a strict style policy", async () => {
+	const server = await createServer({
+		configFile: false,
+		root: `${import.meta.dir}/publish-ui`,
+		plugins: [
+			worklet(),
+			{
+				name: "standalone-publish",
+				transformIndexHtml: () =>
+					'<!doctype html><html><body><moq-publish><canvas></canvas></moq-publish><script type="module" src="/main.ts"></script></body></html>',
+			},
+		],
+		server: { host: "127.0.0.1", port: 0, headers: { "Content-Security-Policy": "style-src 'self'" } },
+	});
+	await server.listen();
+	const browser = await launch(["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]);
+	try {
+		const page = await browser.newPage();
+		const errors: string[] = [];
+		page.on("pageerror", (error) => errors.push(error.message));
+		await page.goto(server.resolvedUrls?.local[0] ?? "");
+		const fixture = await page.evaluateHandle(async () => {
+			await customElements.whenDefined("moq-publish");
+			const publish = document.querySelector<MoqPublish>("moq-publish");
+			const preview = publish?.querySelector("canvas");
+			if (!publish || !preview) throw new Error("missing preview");
+			publish.backend = "2d";
+			publish.capture = "hold";
+			publish.muted = true;
+			publish.style.display = "block";
+			preview.style.width = "320px";
+			preview.style.height = "auto";
+			const fixture = {
+				publish,
+				preview,
+				writer: undefined as WritableStreamDefaultWriter<VideoFrame> | undefined,
+				violations: [] as string[],
+			};
+			document.addEventListener("securitypolicyviolation", (event) => {
+				fixture.violations.push(event.effectiveDirective);
+			});
+			const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+			const { MediaStreamTrackGenerator } = globalThis as unknown as {
+				MediaStreamTrackGenerator: new (init: {
+					kind: "video";
+				}) => MediaStreamTrack & {
+					writable: WritableStream<VideoFrame>;
+				};
+			};
+			navigator.mediaDevices.getUserMedia = async (constraints) => {
+				if (!constraints?.video) return original(constraints);
+				const track = new MediaStreamTrackGenerator({ kind: "video" });
+				fixture.writer = track.writable.getWriter();
+				return new MediaStream([track]);
+			};
+			return fixture;
+		});
+		const hidden = async () => {
+			await page.waitForFunction(({ preview }) => getComputedStyle(preview).display === "none", fixture);
+			expect(await fixture.evaluate(({ preview }) => preview.getBoundingClientRect().height)).toBe(0);
+		};
+		const frame = async (color: "red" | "blue", width = 64, height = 36) => {
+			await fixture.evaluate(
+				async (fixture, { color, width, height }) => {
+					if (!fixture.writer) throw new Error("missing video writer");
+					const canvas = new OffscreenCanvas(width, height);
+					const context = canvas.getContext("2d");
+					if (!context) throw new Error("missing frame context");
+					context.fillStyle = color;
+					context.fillRect(0, 0, width, height);
+					// Live capture timestamps advance with real time, including time spent hidden.
+					const frame = new VideoFrame(canvas, { timestamp: Math.round(performance.now() * 1000) });
+					try {
+						await fixture.writer.write(frame);
+					} finally {
+						frame.close();
+					}
+				},
+				{ color, width, height },
+			);
+			await page.waitForFunction(
+				({ preview, color, width, height }) => {
+					const pixel = preview.getContext("2d")?.getImageData(0, 0, 1, 1).data;
+					return (
+						getComputedStyle(preview).display !== "none" &&
+						preview.width === width &&
+						preview.height === height &&
+						pixel &&
+						pixel[color === "red" ? 0 : 2] > 200 &&
+						pixel[color === "red" ? 2 : 0] < 30
+					);
+				},
+				{ preview: await fixture.getProperty("preview"), color, width, height },
+			);
+		};
+		await hidden();
+		await fixture.evaluate(({ publish }) => {
+			publish.source = "camera";
+		});
+		await page.waitForFunction(({ publish }) => !!publish.video.in.capture.peek()?.in.source.peek(), fixture);
+		// Acquisition alone must not expose the default 300x150 canvas before any frame arrives.
+		await hidden();
+		await frame("red");
+		for (const control of ["invisible", "preview"] as const) {
+			await fixture.evaluate(({ publish }, control) => {
+				if (control === "invisible") publish.invisible = true;
+				else publish.preview = "none";
+			}, control);
+			await hidden();
+			await fixture.evaluate(({ publish }, control) => {
+				if (control === "invisible") publish.invisible = false;
+				else publish.preview = "source";
+			}, control);
+			// A different picture proves recovery draws new content, not merely a retained bitmap.
+			await frame("blue");
+			await frame("red");
+		}
+		await fixture.evaluate(({ publish }) => {
+			publish.source = undefined;
+		});
+		await hidden();
+		await fixture.evaluate(({ publish }) => {
+			publish.source = "camera";
+		});
+		await page.waitForFunction(({ publish }) => !!publish.video.in.capture.peek()?.in.source.peek(), fixture);
+		await hidden();
+		await frame("blue", 128, 96);
+		// A move to a shadow tree must attach the hiding rule to the new styling root.
+		await fixture.evaluate(({ publish }) => {
+			const host = document.createElement("div");
+			document.body.append(host);
+			host.attachShadow({ mode: "open" }).append(publish);
+			publish.preview = "none";
+		});
+		await hidden();
+		// Constructed stylesheets belong to their document, including after adoption into an iframe.
+		await fixture.evaluate(({ publish }) => {
+			const frame = document.createElement("iframe");
+			document.body.append(frame);
+			if (!frame.contentDocument) throw new Error("missing frame document");
+			frame.contentDocument.body.append(publish);
+		});
+		await hidden();
+		expect(await fixture.evaluate(({ violations }) => violations)).toEqual([]);
+		expect(errors).toEqual([]);
+	} finally {
+		await browser.close();
+		await server.close();
+	}
+}, 30_000);
 
 test("a selected camera stays announced while real capture is reopening", async () => {
 	const server = await createServer({
