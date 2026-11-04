@@ -7,6 +7,7 @@ mod backend;
 mod broadcast;
 mod close_code;
 mod datagram_delivery;
+mod fresh_port;
 mod keylog;
 mod max_age;
 mod migrate;

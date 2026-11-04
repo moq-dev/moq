@@ -433,87 +433,97 @@ mod tests {
 		}
 	}
 
-	/// A source like [`source_broadcast`], but the groups arrive over (paused)
-	/// time instead of all at once, so several rungs can attach to the shared
-	/// live feed before the first group exists. Returns the broadcast plus the
-	/// producing task's handle (the track producer lives inside it).
-	fn source_broadcast_live(groups: u64, frames: u64) -> (Source, tokio::task::JoinHandle<()>) {
-		let mut broadcast = moq_net::broadcast::Info::default().produce();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+	/// Drive the real ladder's live handlers one source group at a time. Native
+	/// codec threads don't participate in tokio's paused-clock idle detection, so
+	/// only the test may advance time or publish the next group.
+	async fn live_groups(config: Config, names: &[&str]) {
+		let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
+		let source = source_catalog(320, 240);
+		let rendition = source.catalog.snapshot().video.renditions["video"].clone();
+		let decoders = catalog::Decoders::new(config.feed_decoder());
+		let mut ladder = pipeline::Pipeline::new(
+			source.broadcast.consume(),
+			config,
+			active::Producer::default(),
+			decoders,
+			"video".into(),
+			rendition,
+		)
+		.await
+		.unwrap();
 
-		let mut video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
-			inline: true,
-			profile: 0x42,
-			constraints: 0,
-			level: 30,
-		});
-		video.coded_width = Some(320);
-		video.coded_height = Some(240);
-		video.bitrate = Some(1_000_000);
-		video.framerate = Some(30.0);
-		catalog.modify().unwrap().video.insert("video", video).unwrap();
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let mut requests = output.requests();
+		let mut tasks = tokio::task::JoinSet::new();
+		let mut subscribers = Vec::new();
+		for &name in names {
+			let track = consumer.track(name).unwrap();
+			let mut subscribing = std::pin::pin!(track.subscribe(None));
+			assert!(futures::poll!(&mut subscribing).is_pending());
+			let request = requests.requested_track().await.unwrap();
+			assert_eq!(request.name(), name);
+			let mut serving = Box::pin(rung::serve(ladder.rung(name).unwrap(), request));
+			subscribers.push((name, subscribing.await.unwrap().ordered()));
+			// With demand present and no source group, this poll attaches the rung
+			// to the shared feed before parking. No startup sleep can guarantee that.
+			assert!(futures::poll!(&mut serving).is_pending());
+			tasks.spawn(serving);
+		}
 
-		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
-		let track = broadcast.create_track("video", info).unwrap();
-
-		let source = Source {
-			broadcast,
-			catalog,
-			// The producing task owns the real track producer; park a clone so
-			// the struct shape matches `source_broadcast`.
-			_track: track.clone(),
-			size: (320, 240),
-		};
-
-		let task = tokio::spawn(async move {
-			let mut encoder = moq_video::encode::Sink::open(&{
-				let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-				config.kind = moq_video::encode::Kind::Software;
-				config
-			})
-			.await
-			.unwrap();
-			let gray = vec![0x80u8; 320 * 240 * 4];
-
-			for sequence in 0..groups {
-				// Paces the source: a real sleep, since the rungs encode off the
-				// executor and cannot be sequenced by paused-time idle detection.
-				// Also the window the subscribers attach in, before group 0.
-				kio::clock::sleep(std::time::Duration::from_millis(100)).await;
-				let mut group = track.create_group(sequence.into()).unwrap();
-				for index in 0..frames {
-					let timestamp = (sequence * frames + index) * 33_333;
-					if index == 0 {
-						encoder.cut().await.unwrap();
+		let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
+			config.kind = moq_video::encode::Kind::Software;
+			config
+		})
+		.unwrap();
+		let gray = vec![0x80u8; 320 * 240 * 4];
+		for sequence in 0..3 {
+			let mut group = source._track.create_group(sequence.into()).unwrap();
+			encoder.cut().unwrap();
+			let timestamps: Vec<_> = (0..5).map(|index| (sequence * 5 + index) * 33_333).collect();
+			for &timestamp in &timestamps {
+				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+					hang::container::Frame {
+						timestamp: encoded.timestamp,
+						payload: encoded.payload,
 					}
-					for encoded in encoder.encode(gray_frame(&gray, timestamp)).await.unwrap() {
-						let frame = hang::container::Frame {
-							timestamp: encoded.timestamp,
-							payload: encoded.payload,
-						};
-						frame.write_to(&mut group).unwrap();
-					}
+					.write_to(&mut group)
+					.unwrap();
 				}
-				group.finish().unwrap();
 			}
-			// Keep the track open until aborted, like a live source.
-			std::future::pending::<()>().await;
-		});
+			group.finish().unwrap();
 
-		(source, task)
+			for (name, subscriber) in &mut subscribers {
+				let mut group = subscriber.next_group().await.unwrap().unwrap();
+				assert_eq!(group.sequence, sequence, "{name} changed the group sequence");
+				let mut received = Vec::new();
+				while let Some(payload) = group.read_frame().await.unwrap() {
+					let frame = hang::container::Frame::decode(payload.payload).unwrap();
+					assert!(
+						frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
+						"{name} output is not Annex-B"
+					);
+					received.push(frame.timestamp.as_micros() as u64);
+				}
+				assert_eq!(group.frame_count(), 5, "{name} dropped frames");
+				assert_eq!(received, timestamps, "{name} changed frame timestamps");
+			}
+			// Both rungs reached FIN. A newer group may now supersede this one
+			// without invalidating a read or overrunning the bounded live feed.
+			clock.advance(std::time::Duration::from_micros(5 * 33_333)).unwrap();
+		}
+
+		tasks.abort_all();
+		while let Some(result) = tasks.join_next().await {
+			assert!(result.unwrap_err().is_cancelled());
+		}
 	}
 
 	/// Two rungs subscribed at once ride one shared live decode (the feed):
 	/// both must produce complete groups mirroring the source sequences.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn live_multi_rung() {
-		// Real time on purpose, unlike most timed tests here. The rungs encode on
-		// their own threads (`encode::Sink`), so a rung waiting on one looks idle
-		// to tokio and `pause()` auto-advances the source's sleep while the encode
-		// is still in flight. The source then outruns the feed's bounded broadcast
-		// and every rung sees `Lagged` instead of its frames. Real sleeps pace the
-		// source against the encoders the way a live source does.
-		let (source, producer_task) = source_broadcast_live(3, 5);
 		let config = Config {
 			ladder: Ladder::new([
 				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
@@ -525,40 +535,7 @@ mod tests {
 			source: None,
 			..Default::default()
 		};
-
-		let output = moq_net::broadcast::Info::default().produce();
-		let consumer = output.consume();
-		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
-
-		// Attach both rungs before the first source group exists (paused time:
-		// the producer's sleep only fires once every rung is parked on the feed).
-		let mut subscribers = Vec::new();
-		for name in ["video/120p", "video/60p"] {
-			let track = loop {
-				match consumer.track(name) {
-					Ok(track) => break track,
-					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
-					Err(err) => panic!("rung track {name}: {err}"),
-				}
-			};
-			subscribers.push((name, track.subscribe(None).await.unwrap().ordered()));
-		}
-
-		// Every rung receives a complete group with all 5 source frames.
-		for (name, subscriber) in &mut subscribers {
-			let mut group = subscriber.next_group().await.unwrap().unwrap();
-			let payload = group.read_frame().await.unwrap().unwrap();
-			let frame = hang::container::Frame::decode(payload.payload).unwrap();
-			assert!(
-				frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
-				"{name} output is not Annex-B"
-			);
-			while group.read_frame().await.unwrap().is_some() {}
-			assert_eq!(group.frame_count(), 5, "{name} dropped frames");
-		}
-
-		producer_task.abort();
-		transcoder.abort();
+		live_groups(config, &["video/120p", "video/60p"]).await;
 	}
 
 	/// The multi-rung live path on real hardware: one shared NVDEC session
@@ -568,19 +545,12 @@ mod tests {
 		target_os = "windows",
 		ignore = "explicit live-DXVA GPU probe; VideoProcessorBlt can hang on affected drivers"
 	)]
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn live_multi_rung_hardware() {
 		if !hardware_available() {
 			eprintln!("skipping: no hardware decoder + encoder available");
 			return;
 		}
-		// Real time on purpose, unlike most timed tests here. The rungs encode on
-		// their own threads (`encode::Sink`), so a rung waiting on one looks idle
-		// to tokio and `pause()` auto-advances the source's sleep while the encode
-		// is still in flight. The source then outruns the feed's bounded broadcast
-		// and every rung sees `Lagged` instead of its frames. Real sleeps pace the
-		// source against the encoders the way a live source does.
-		let (source, producer_task) = source_broadcast_live(3, 5);
 		// 180p and 120p: NVENC rejects tiny frames (80x60 is below its minimum
 		// encode resolution), so the hardware ladder stays a bit larger than the
 		// software test's.
@@ -595,37 +565,7 @@ mod tests {
 			source: None,
 			..Default::default()
 		};
-
-		let output = moq_net::broadcast::Info::default().produce();
-		let consumer = output.consume();
-		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
-
-		let mut subscribers = Vec::new();
-		for name in ["video/180p", "video/120p"] {
-			let track = loop {
-				match consumer.track(name) {
-					Ok(track) => break track,
-					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
-					Err(err) => panic!("rung track {name}: {err}"),
-				}
-			};
-			subscribers.push((name, track.subscribe(None).await.unwrap().ordered()));
-		}
-
-		for (name, subscriber) in &mut subscribers {
-			let mut group = subscriber.next_group().await.unwrap().unwrap();
-			let payload = group.read_frame().await.unwrap().unwrap();
-			let frame = hang::container::Frame::decode(payload.payload).unwrap();
-			assert!(
-				frame.payload.starts_with(&[0, 0, 0, 1]) || frame.payload.starts_with(&[0, 0, 1]),
-				"{name} output is not Annex-B"
-			);
-			while group.read_frame().await.unwrap().is_some() {}
-			assert_eq!(group.frame_count(), 5, "{name} dropped frames");
-		}
-
-		producer_task.abort();
-		transcoder.abort();
+		live_groups(config, &["video/180p", "video/120p"]).await;
 	}
 
 	/// Whether a hardware decoder AND encoder are usable here (e.g. a Linux box
@@ -705,14 +645,13 @@ mod tests {
 	/// A live group drains VAAPI before its end marker, so its buffered tail does
 	/// not move past the boundary into the next group.
 	#[cfg(feature = "vaapi")]
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn vaapi_live_keeps_the_buffered_tail_in_its_group() {
 		if !vaapi_decoder_available() {
 			eprintln!("skipping: no VA-API H.264 decoder");
 			return;
 		}
 
-		let (source, producer_task) = source_broadcast_live(1, 5);
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
@@ -720,29 +659,7 @@ mod tests {
 			source: None,
 			..Default::default()
 		};
-
-		let output = moq_net::broadcast::Info::default().produce();
-		let consumer = output.consume();
-		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
-
-		let track = loop {
-			match consumer.track("video/120p") {
-				Ok(track) => break track,
-				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
-				Err(err) => panic!("rung track: {err}"),
-			}
-		};
-		let mut subscriber = track.subscribe(None).await.unwrap();
-		let mut group = subscriber.recv_group().await.unwrap().unwrap();
-		while group.read_frame().await.unwrap().is_some() {}
-		assert_eq!(
-			group.frame_count(),
-			5,
-			"VAAPI moved the live group's buffered tail past its end"
-		);
-
-		producer_task.abort();
-		transcoder.abort();
+		live_groups(config, &["video/120p"]).await;
 	}
 
 	/// The GPU pipeline end to end: hardware decode (NVDEC, scaling in the
