@@ -408,6 +408,114 @@ async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expect
 	}
 }
 
+/// Lite-05/06 serve a name from a datagram handler's answer without waiting for the stream
+/// handler, which may leave a name it doesn't serve unanswered.
+#[kio::test]
+async fn lite05_and_lite06_answer_a_datagram_request_beside_a_silent_stream_handler() {
+	for version in ["moq-lite-05", "moq-lite-06"] {
+		let chain = Chain::new(&[version]).await;
+		// Never polled: a stream lookup of the name waits on it for good.
+		let requests = chain.publication.requests();
+		let mut handler = requests.datagrams();
+		let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
+		let request = kio::clock::timeout(TIMEOUT, handler.requested())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the request never reached the handler"))
+			.unwrap();
+		assert_eq!(request.name(), TRACK, "{version}");
+		let mut producer = request.accept(timed());
+		kio::clock::timeout(TIMEOUT, consumer.info())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the answer never arrived"))
+			.unwrap();
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(0)))
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the subscription never reached the publisher"));
+
+		producer.append(millis(1), &b"requested"[..]).unwrap();
+		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
+		assert_eq!(&datagram.payload[..], b"requested", "{version}");
+		assert_eq!(datagram.timestamp, Some(millis(1)), "{version}");
+	}
+}
+
+/// A datagram handler that registers while a lite-06 name's stream lookup is pending is
+/// still asked for the name once the stream track is not found.
+#[kio::test]
+async fn lite06_asks_a_late_datagram_handler_once_the_stream_track_is_not_found() {
+	let chain = Chain::new(&["moq-lite-06"]).await;
+	let mut requests = chain.publication.requests();
+	let mut consumer = chain.remote().await.datagrams(TRACK).unwrap();
+	let stream = kio::clock::timeout(TIMEOUT, requests.requested_track())
+		.await
+		.expect("the stream lookup never reached the publisher")
+		.unwrap();
+	let mut handler = requests.datagrams();
+	stream.reject(Error::NotFound);
+	let request = kio::clock::timeout(TIMEOUT, handler.requested())
+		.await
+		.expect("the datagram handler was never asked")
+		.unwrap();
+	let mut producer = request.accept(timed());
+	kio::clock::timeout(TIMEOUT, consumer.info())
+		.await
+		.expect("info timeout")
+		.expect("the handler answered");
+	kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(0)))
+		.await
+		.expect("the subscription never reached the publisher");
+	producer.append(millis(2), &b"late"[..]).unwrap();
+	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
+	assert_eq!(&datagram.payload[..], b"late");
+}
+
+/// A relay serving an old subscriber asks its upstream session for a name's datagram track
+/// once the stream track is not found there, as one asks a lite-07 upstream.
+#[kio::test]
+async fn an_old_subscriber_reaches_a_datagram_track_through_a_lite07_relay() {
+	let chain = Chain::new(&["moq-lite-07-wip", "moq-lite-06"]).await;
+	let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let mut consumer = chain.consume(&producer, 2).await;
+	producer.append(millis(4), &b"relayed"[..]).unwrap();
+	let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
+	assert_eq!(&datagram.payload[..], b"relayed");
+	assert_eq!(datagram.timestamp, Some(millis(4)));
+}
+
+/// An old hop answers a datagram lookup for every stream track it carries, so a relay serving
+/// an old subscriber keeps a stream track's name a stream track, though that relayed answer
+/// may arrive before the stream track's.
+#[kio::test]
+async fn an_old_subscriber_keeps_a_stream_track_across_mixed_hops() {
+	for hops in [
+		&["moq-lite-06", "moq-lite-07-wip", "moq-lite-06"][..],
+		&["moq-lite-06", "moq-lite-06"],
+	] {
+		let chain = Chain::new(hops).await;
+		let mut track = chain
+			.publication
+			.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
+			.unwrap();
+		let remote = chain.remote().await;
+		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
+			.await
+			.expect("subscribe timeout")
+			.unwrap_or_else(|err| panic!("{hops:?}: {err:?}"));
+		support::harness::subscribed(&track).await;
+		track.write_frame(millis(1), &b"frame"[..]).unwrap();
+		let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("a group");
+		assert_eq!(
+			&group.read_frame().await.unwrap().expect("a frame").payload[..],
+			b"frame",
+			"{hops:?}"
+		);
+	}
+}
+
 /// A datagram track can't be asked for over a version or transport without datagrams.
 #[kio::test]
 async fn a_datagram_track_needs_datagrams() {

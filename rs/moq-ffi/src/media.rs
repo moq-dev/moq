@@ -264,19 +264,16 @@ pub struct MoqMediaFrame {
 	pub keyframe: bool,
 }
 
-/// A best-effort raw track datagram, as received.
-///
-/// Send one with [`append_datagram`](crate::producer::MoqTrackProducer::append_datagram), which
-/// takes a [`MoqFrame`] and assigns the sequence number for you.
+/// A datagram payload with its own sequence and optional timestamp.
 #[derive(uniffi::Record)]
 pub struct MoqDatagram {
-	/// The datagram's sequence number, counted apart from the track's groups.
+	/// The datagram track's own sequence number.
 	#[uniffi(default = 0)]
 	pub sequence: u64,
 	/// Presentation timestamp, or null on an untimed track, on both publish and receive.
 	#[uniffi(default = None)]
 	pub timestamp: Option<MoqTimestamp>,
-	/// Datagram payload, capped at 1200 bytes.
+	/// Datagram payload; keep it well below the path MTU so each hop can carry it.
 	pub payload: Vec<u8>,
 }
 

@@ -31,7 +31,3 @@ Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
   and `nix develop --command` keeps its own toolchain.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Agents use quest's worktree hooks](/quest/m0/quest-worktree-hooks.md) - the Claude-side worktree hooks

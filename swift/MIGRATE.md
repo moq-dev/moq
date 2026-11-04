@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `Media.Video` and `Media.Audio` gain `warmup`, the catalog's decoder warmup; it defaults to `nil`, so existing initializers still compile. `Media.TrackConsumer` and the audio and video consumers read it from the rendition and start that much earlier.
 
+### Separate datagram tracks
+
+Replace stream-track `appendDatagram` / `insertDatagram` / `recvDatagram` with `BroadcastProducer.createDatagrams(name:info:)` and `BroadcastConsumer.datagrams(name:)`. `DatagramProducer.append(_:timestamp:)` assigns a sequence; `insert(_:)` takes a `Datagram`. `DatagramConsumer.recv()` and `AsyncSequence` read its independent cursor. Use `priority()` / `priorityChanged(last:)` for demand, and `BroadcastRequests.datagrams()` / `DatagramRequests.requested()` for on-demand tracks. `DatagramInfo` has priority and optional timescale, without stream ranges or cache settings.
+
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
 A `nil` `TrackInfo.maxAge`, the default, and a `nil` info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited: true`, which ignores `maxAge`, where you relied on `nil` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.

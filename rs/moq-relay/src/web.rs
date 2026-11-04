@@ -492,7 +492,7 @@ impl Web {
 				WebAcceptor::plain(ws, rtmp.clone(), state.clone()),
 			)?;
 			server.http_builder().http2().max_concurrent_streams(streams);
-			Some(server.serve(app.clone()))
+			Some(Box::pin(server.serve(app.clone())))
 		} else {
 			None
 		};
@@ -526,11 +526,13 @@ impl Web {
 				),
 			)?;
 			server.http_builder().http2().max_concurrent_streams(streams);
-			Some(server.serve(app))
+			Some(Box::pin(server.serve(app)))
 		} else {
 			None
 		};
 
+		// Both servers are boxed, since a debug build copies each one into this poll's
+		// stack frame several times.
 		tokio::select! {
 			Some(res) = async move { Some(http?.await) } => res?,
 			Some(res) = async move { Some(https?.await) } => res?,
