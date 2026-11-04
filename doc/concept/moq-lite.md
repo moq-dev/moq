@@ -451,10 +451,9 @@ caches a datagram, and `FETCH` never returns one, so use a stream track for
 anything a late joiner needs.
 
 On moq-lite 07 a datagram track has its own request. Moq-lite 05 and 06 carry
-a name's groups and datagrams on one subscription, so a Rust peer subscribes
-to the name and keeps only the kind it asked for, and serves an old
-subscription from the name's datagram track only when no stream track has that
-name. Moq-lite before 05, moq-transport, and transports without datagrams
+a name's groups and datagrams on one subscription, as moq-transport does: a
+Rust peer serves an old subscription with both of the name's tracks, and
+subscribes to the name and keeps only the kind it asked for. Moq-lite before 05, moq-transport, and transports without datagrams
 (WebSocket, TCP) carry no datagram tracks from Rust yet. The JavaScript library
 still sends datagrams within a stream track.
 

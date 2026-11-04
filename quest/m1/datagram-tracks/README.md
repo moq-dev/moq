@@ -61,6 +61,22 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
   - Outbound, a datagram track sends only OBJECT_DATAGRAM with object ID 0.
 - **Archive.** ✅ moq-archive skips datagram tracks. A datagram track is
   live-only, and an archive's playback doesn't include it.
+- **Old versions carry both kinds.** ✅ Decided 2026-11-03 (maintainer, on
+  [moq-dev/moq#7752](https://github.com/moq-dev/moq/pull/7752)): "carry both
+  on old versions, like moq-transport. Ignore duplicates because in practice,
+  only one was being used anyway."
+  - A lite-05/06 SUBSCRIBE for a name carries its stream track's groups and
+    its datagram track's datagrams, as one moq-transport subscription does. A
+    name with only a datagram track is served from it alone.
+  - A subscriber keeps the kind it asked for. A datagram request is a
+    subscription to the name's stream track, sharing the one upstream
+    SUBSCRIBE with any stream reader, so a relay between old peers carries
+    datagrams without a second subscription.
+  - No dedup: a name using both kinds can deliver a datagram to an old
+    subscriber that also holds a group of the same sequence.
+  - Reason: lite-05/06 are the default connections, and moq-ffi/moq-c publish
+    every raw track's datagrams beside it, so serving a name only one kind
+    stopped their datagrams on the default path.
 - **Version.** ✅ lite-07, before it is finalized.
   [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) requires this epic.
   lite-01..06 keep today's group datagrams.
@@ -83,12 +99,6 @@ not the maintainer, so open to revisiting:
   Until that model lands, Rust's datagram writes take `Option<Timestamp>` like
   frame writes do (`None` on an untimed track), and the model quest converts
   both.
-- **Old-version outbound.** An old-version SUBSCRIBE or TRACK for a name is
-  served from its datagram track only once the stream track's lookup fails
-  with NOT_FOUND, which through an origin resolves later, not at once. A
-  consequence: lite-05/06 datagrams between two old peers do not cross a new
-  relay, whose inbound stream-track subscription drops them. One side on
-  lite-07 carries them.
 
 This README owns the work no child owns: the Rust-JS interop test of a
 datagram track on lite-07, direct and through a relay.

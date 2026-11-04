@@ -6200,6 +6200,81 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 	}
 }
 
+/// A raw track's datagrams reach a remote reader over a default connection, which negotiates
+/// lite-06: its subscription to the track carries the track's datagrams too.
+#[tokio::test]
+async fn raw_track_datagrams_cross_a_default_connection() {
+	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = kio::clock::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accepting.accept().await.unwrap().expect("a session");
+		request.accept(None, None).await.expect("handshake failed")
+	});
+
+	let broadcast = create_announced(&server_origin, "sensor");
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+
+	let viewer = MoqOriginProducer::new(MoqOriginConfig::default());
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(viewer.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let session = kio::clock::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let _server_session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+
+	let followed = viewer.consume().follow("sensor".into(), None).unwrap();
+	let remote = kio::clock::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out waiting for the broadcast")
+		.unwrap();
+	let consumer = remote.subscribe_track("events".into(), None).await.unwrap();
+
+	// The reader joins the datagrams on its first read, which lands a moment later, and a
+	// datagram sent before then is gone: resend until one arrives.
+	let read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+	let send = async {
+		loop {
+			track
+				.append_datagram(MoqFrame {
+					payload: b"reading".to_vec(),
+					timestamp: Some(us(5_000)),
+				})
+				.unwrap();
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		}
+	};
+	let datagram = tokio::select! {
+		read = kio::clock::timeout(TIMEOUT, read) => read.expect("timed out waiting for a datagram"),
+		_ = send => unreachable!(),
+	}
+	.expect("datagram read panicked")
+	.unwrap()
+	.expect("expected a datagram");
+	assert_eq!(datagram.payload, b"reading");
+	assert_eq!(datagram.timestamp.map(micros), Some(5_000));
+	assert_eq!(session.state().version.as_deref(), Some("moq-lite-06"));
+}
+
 /// A replacement session from the same publisher re-announces every route while the old one
 /// is still open, as a GOAWAY drain does. Under another instance that is another instance: the
 /// next `available()` hands it out, and reading it carries on past the old session's close.

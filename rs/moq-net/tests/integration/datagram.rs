@@ -289,6 +289,49 @@ async fn lite05_and_lite06_map_a_datagram_track_onto_a_subscription() {
 	}
 }
 
+/// Lite-05/06 carry a name's stream track and datagram track on one subscription, as
+/// moq-transport does, so a name with both delivers each to its own reader, directly and
+/// through a relay whose hops are both old.
+#[kio::test]
+async fn lite05_and_lite06_carry_both_kinds_of_a_name() {
+	for hops in [&["moq-lite-05"][..], &["moq-lite-06"], &["moq-lite-06", "moq-lite-06"]] {
+		let chain = Chain::new(hops).await;
+		let mut track = chain
+			.publication
+			.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
+			.unwrap();
+		let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+		let remote = chain.remote().await;
+		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
+			.await
+			.expect("subscribe timeout")
+			.unwrap_or_else(|err| panic!("{hops:?}: {err:?}"));
+		let mut consumer = chain.consume(&producer, 2).await;
+
+		producer.append(millis(1), &b"datagram"[..]).unwrap();
+		let datagram = recv(&mut consumer).await.unwrap().expect("a datagram");
+		assert_eq!(&datagram.payload[..], b"datagram", "{hops:?}");
+		assert_eq!(datagram.timestamp, Some(millis(1)), "{hops:?}");
+
+		track.write_frame(millis(2), &b"frame"[..]).unwrap();
+		let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("a group");
+		assert_eq!(
+			&group.read_frame().await.unwrap().expect("a frame").payload[..],
+			b"frame",
+			"{hops:?}"
+		);
+
+		consumer.set_priority(6);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(6)))
+			.await
+			.unwrap_or_else(|_| panic!("{hops:?}: the priority never arrived"));
+	}
+}
+
 /// A lite-05/06 subscriber reads a name as a stream track, as one predating datagram tracks
 /// does, so the datagram fallback ends with SUBSCRIBE_FINISH ahead of its FIN: a FIN alone
 /// is a protocol violation there.

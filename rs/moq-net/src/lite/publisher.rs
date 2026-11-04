@@ -2344,17 +2344,36 @@ impl Request for SubscribeServe {
 					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
+					run.datagrams = LegacyDatagrams::join(legacy, msg.id, msg.priority);
 					if let Some(update) = update {
 						run.update(update);
 					}
 					*self = Self::Run(Box::new(run));
 				}
 				Self::Run(run) => {
+					// One datagram a step, beside the groups.
+					let sent = match &mut run.datagrams {
+						Some(datagrams) => match datagrams.poll_send(shared, waiter) {
+							Poll::Ready(true) => true,
+							Poll::Ready(false) => {
+								run.datagrams = None;
+								false
+							}
+							Poll::Pending => false,
+						},
+						None => false,
+					};
 					// The live edge reached the boundary, so SUBSCRIBE_FINISH was already sent (or
 					// the version predates the track stream). Drain the in-flight group
 					// machines, then FIN. Lite-07 never gets here: the subscriber's FIN ends it.
-					if ready!(run.poll_step(writer, waiter))?.is_continue() {
-						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					match run.poll_step(writer, waiter) {
+						Poll::Ready(Ok(ControlFlow::Continue(()))) => {
+							return Poll::Ready(Ok(ControlFlow::Continue(())));
+						}
+						Poll::Ready(Ok(ControlFlow::Break(()))) => {}
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Poll::Pending if sent => return Poll::Ready(Ok(ControlFlow::Continue(()))),
+						Poll::Pending => return Poll::Pending,
 					}
 					let Self::Run(run) = std::mem::replace(
 						self,
@@ -2409,8 +2428,9 @@ impl Request for SubscribeServe {
 	}
 }
 
-/// Lite-05/06 carry a name's stream track and datagram track on one subscription, so a
-/// name no stream track has is served from its datagram track. The stream track's lookup
+/// Lite-05/06 carry a name's stream track and datagram track on one subscription: a name
+/// with a stream track carries its datagram track beside it (see [`LegacyDatagrams`]), and
+/// one with none is served from its datagram track alone. The stream track's lookup
 /// resolves later through an origin, so the request keeps this until it does.
 struct Legacy {
 	broadcast: crate::broadcast::Consumer,
@@ -2438,6 +2458,60 @@ impl Legacy {
 			return Err(err);
 		}
 		legacy.broadcast.datagrams(&legacy.name).map_err(|_| err)
+	}
+}
+
+/// Lite-05/06: a name's datagram track carried on the subscription of its stream track, as
+/// one subscription carries both kinds there. A subscriber keeps the kind it asked for.
+struct LegacyDatagrams {
+	consumer: datagram::Consumer,
+	id: u64,
+	priority: i8,
+	/// Set once the track's info is known.
+	send: Option<DatagramSend>,
+}
+
+impl LegacyDatagrams {
+	/// The datagram track of the name `legacy` serves, for subscription `id` at `priority`,
+	/// or `None` when the version has no fallback or nothing would serve one.
+	fn join(legacy: Option<Box<Legacy>>, id: u64, priority: i8) -> Option<Self> {
+		let legacy = legacy?;
+		let mut consumer = legacy.broadcast.datagrams(&legacy.name).ok()?;
+		consumer.set_priority(priority);
+		Some(Self {
+			consumer,
+			id,
+			priority,
+			send: None,
+		})
+	}
+
+	/// Move the datagrams to the subscriber's new `priority`.
+	fn steer(&mut self, priority: i8) {
+		self.priority = priority;
+		self.consumer.set_priority(priority);
+		if let Some(send) = &mut self.send {
+			send.steer(priority);
+		}
+	}
+
+	/// Send the next datagram: `true` once one went, `false` once none will come, such as a
+	/// name with no datagram track. The subscription goes on either way.
+	fn poll_send(&mut self, shared: &Shared, waiter: &kio::Waiter) -> Poll<bool> {
+		if self.send.is_none() {
+			let Ok(info) = ready!(self.consumer.poll_info(waiter)) else {
+				return Poll::Ready(false);
+			};
+			self.send = Some(DatagramSend::new(shared, self.id, info, self.priority));
+		}
+		let send = self.send.as_ref().expect("set above");
+		match ready!(self.consumer.poll_recv(waiter)) {
+			Ok(Some(datagram)) => {
+				send.send(datagram);
+				Poll::Ready(true)
+			}
+			Ok(None) | Err(_) => Poll::Ready(false),
+		}
 	}
 }
 
@@ -4350,6 +4424,8 @@ struct TrackRun {
 	children: kio::Tasks<GroupServe>,
 	/// The track side's last poll, if it parked; see [`Self::poll_step`].
 	idle: Option<Box<Idle>>,
+	/// Lite-05/06: the name's datagram track, which the subscription carries too.
+	datagrams: Option<LegacyDatagrams>,
 }
 
 impl TrackRun {
@@ -4391,6 +4467,7 @@ impl TrackRun {
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
+			datagrams: None,
 		}
 	}
 
@@ -4408,6 +4485,9 @@ impl TrackRun {
 	/// what lets relays pause an upstream subscription across consumer churn without
 	/// tearing it down. Lite-07 keeps every subscription open until the subscriber FINs.
 	fn update(&mut self, upd: lite::SubscribeUpdate) {
+		if let Some(datagrams) = &mut self.datagrams {
+			datagrams.steer(upd.priority);
+		}
 		// The update moves the cursor and the bounds the track side judges against, which
 		// notifies nothing it parked on.
 		Idle::disarm(&mut self.idle);
