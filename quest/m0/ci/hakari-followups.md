@@ -23,6 +23,19 @@ third-party recursive compilation identities both before and after. The JSON
 build loses 30 units; video retains 501 total units. Four media identities
 change. These are graph identities, not mbx hit rates or CPU measurements.
 
+Additional Linux x86_64 unit graphs at the merged main baseline
+`ac0f04e5dcca9a9a07d15135dc2e904215c494f3` compare `moq-video --features vaapi`
+and `moq-video --features pipewire`, each with `--tests`. VAAPI-only drops from
+478 to 456 total units; PipeWire stays at 491. Recursive third-party identities
+shared by those builds drop from 453 to 428, and their union grows from 483 to
+486. Excluding `clang-sys` lets VAAPI's bindgen 0.70 request `clang_6_0`, while
+PipeWire's bindgen 0.72 requests `clang_11_0`; the library and its two build-script
+units split into three extra compilation identities. The earlier three-build
+sample does not cover this cost. Record this VAAPI/PipeWire split when interpreting
+the scheduled cache results. These graphs measure compilation identities, not
+CPU cost or cache hit rates; the post-merge measurements still decide whether
+the tradeoff is material.
+
 Use the same scheduled Linux job before and after this PR's merge, beginning
 with `Nightly (Rust benchmark tests)`, and retain its mbx cache summaries and
 available compiler-time fields. Compare the last scheduled `main` run before
