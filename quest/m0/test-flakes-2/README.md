@@ -95,8 +95,6 @@ Public API: none. Wire: none.
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
 - [moq-transcode's live multi-rung test survives load](/quest/m0/test-flakes-2/transcode-multi-rung.md) - `live_multi_rung` stops failing queue batches with a cancelled rung group
-- [The scheduled macOS WebSocket version test completes reliably](/quest/m0/test-flakes-2/macos-websocket.md) - fix the scheduled timeout while preserving newest-version negotiation assertions
 - [@moq/net's lite subscribe tests wait for the whole request](/quest/m0/test-flakes-2/js-subscribe-fixture.md) - the three lite subscribe-with-track cases pass under forced yields
 - [@moq/net's uni-stream flood test survives reruns](/quest/m0/test-flakes-2/js-stream-flood.md) - "a flood of uni streams yields" passes under `--rerun-each` and load
-- [The JS receive-credit qmux test never completes an oversized frame](/quest/m0/test-flakes-2/receive-credit-qmux.md) - `javascript_partial_frame_gives_way_qmux` stops completing a frame larger than the window on moq-transport-18
 - [The draft-22 wider-fill refusal test is deterministic](/quest/m0/test-flakes-2/ietf-wider-fill.md) - fix its intermittent live-group reset and re-enable both ordering cases without weakening their assertions
