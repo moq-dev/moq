@@ -1825,7 +1825,9 @@ export class Subscriber {
 			cancel.abort();
 		}
 		try {
-			await untilClosed(
+			// Once no reader holds the group or waits to pick it up, cancel upstream and abort the
+			// truncated group rather than cache it whole, as the Rust fetch's ingest does.
+			await untilAbandoned(
 				group,
 				readFrames(stream.reader, group, { scale: framing.timescale, compress: framing.compress }),
 			);

@@ -2,15 +2,16 @@
 // lite subscriber's `FillServeRun` does: below where the copy's feed started, by the copy's start
 // rule, and inside the copy, once it evicted what it received.
 import { expect, test } from "bun:test";
-import { Elapsed, Manual, Milli, Nano, timeout } from "@moq/clock";
+import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
+import { hooks } from "../internal.ts";
 import { CACHE_EXPIRY } from "../ledger.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type { Producer, Subscriber, Subscription } from "../track.ts";
+import type { Fill, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import * as Lite from "./index.ts";
 
@@ -221,3 +222,66 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		}
 	},
 );
+
+test("copy fill: a filled group nobody holds any more stops downloading", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client }),
+		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
+	]);
+	const publication = origin.createBroadcast(Path.from("room"));
+	publication.announce();
+	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	write(track.createGroup(1n), 1n, "live");
+	// The archive answers group 0 with one frame and never finishes it.
+	const requests = track.requests();
+	const fills: Fill[] = [];
+	const archived = (async () => {
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		fills.push(fill);
+		const group = fill.accept(0n);
+		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
+		return group;
+	})();
+	const remote = wireOf(client).consume(Path.from("room"));
+	try {
+		// A live reader keeps the copy up. It reads in order, so it lets go of what it passes.
+		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0 } }] });
+		const live = reader.ordered();
+		expect((await live.nextGroup())?.sequence).toBe(1n);
+		const history = remote
+			.track("video")
+			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+		const group = await history.recvGroup();
+		expect(group?.sequence).toBe(0n);
+		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
+		const source = await archived;
+		expect(source.demand().wanted.peek()).toBeTruthy();
+
+		// The history reader leaves mid-group, and the live one reads past it: nobody holds the
+		// group any more, so the copy cancels its FETCH and aborts the truncated group rather
+		// than keep downloading it.
+		group?.close();
+		history.close();
+		write(track.createGroup(2n), 2n, "live");
+		expect((await live.nextGroup())?.sequence).toBe(2n);
+		await timeout(
+			Nano.fromMilli(Milli(2000)),
+			(async () => {
+				while (hooks.holdsGroup(reader, 0n)) await sleep(Nano.fromMilli(Milli(10)));
+			})(),
+		);
+		source.abort(new Error("done"));
+		live.close();
+	} finally {
+		for (const fill of fills) fill.close();
+		remote.close();
+		requests.close();
+		publication.broadcast.close();
+		client.abort();
+		server.abort();
+		origin.close();
+	}
+});
