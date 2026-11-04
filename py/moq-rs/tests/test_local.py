@@ -118,18 +118,23 @@ async def test_fetch_of_a_dropped_group_is_not_found():
     await task
 
 
-async def test_insert_datagram_keeps_its_sequence_apart_from_groups():
+async def test_datagram_tracks_have_independent_sequences_and_priority():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("events")
+    stream = broadcast.publish_track("events")
+    track = broadcast.create_datagrams("events")
     consumer = track.consume()
-
-    track.insert_datagram(7, b"seven")
-    datagram = await asyncio.wait_for(consumer.recv_datagram(), 5)
+    consumer.set_priority(7)
+    assert track.priority() == 7
+    assert stream.demand().wanted() is None
+    track.insert(moq.Datagram(sequence=7, payload=b"seven", timestamp=None))
+    datagram = await asyncio.wait_for(consumer.recv(), 5)
     assert datagram is not None
     assert (datagram.sequence, datagram.payload) == (7, b"seven")
-    assert track.append_datagram(b"next") == 8
+    assert track.append(b"next") == 8
     # Datagrams are numbered apart from groups, so they never move `largest`.
-    assert track.largest() is None
+    assert stream.largest() is None
+    consumer.cancel()
+    assert await track.priority_changed(7) is None
 
 
 async def test_broadcast_consumer_closed_resolves_on_close():
@@ -1842,3 +1847,21 @@ def test_container_timebase_belongs_to_one_broadcast():
     with pytest.raises(moq.Error.Closed):
         moq.media.Timebase(owner)
     other.close()
+
+
+async def test_datagram_only_request_reaches_its_handler():
+    broadcast = moq.BroadcastProducer()
+    requests = broadcast.requests().datagrams()
+    consumer = broadcast.consume().datagrams("events")
+    request = await requests.requested()
+    assert request.name == "events"
+    track = request.accept()
+    assert (await consumer.info()).timescale is None
+    track.append(b"payload")
+    datagram = await consumer.recv()
+    assert datagram is not None
+    assert datagram.payload == b"payload"
+    track.finish()
+    assert await consumer.recv() is None
+    requests.cancel()
+    broadcast.close()

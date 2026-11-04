@@ -94,7 +94,27 @@ pub struct Endpoint {
 	pub(crate) inner: EndpointRef,
 }
 
+/// Observe an endpoint without keeping its socket or driver alive.
+#[cfg(feature = "quic")]
+pub(crate) struct WeakEndpoint(std::sync::Weak<EndpointInner>);
+
+#[cfg(feature = "quic")]
+impl WeakEndpoint {
+	pub(crate) fn upgrade(&self) -> Option<Endpoint> {
+		let inner = self.0.upgrade()?;
+		inner.ref_count.fetch_add(1, Ordering::Relaxed);
+		Some(Endpoint {
+			inner: EndpointRef(inner),
+		})
+	}
+}
+
 impl Endpoint {
+	#[cfg(feature = "quic")]
+	pub(crate) fn downgrade(&self) -> WeakEndpoint {
+		WeakEndpoint(Arc::downgrade(&self.inner.0))
+	}
+
 	/// Run an endpoint on `socket`, serving incoming connections if [`Config::server`] is set
 	///
 	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback. With
