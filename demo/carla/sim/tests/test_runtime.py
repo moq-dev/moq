@@ -64,7 +64,6 @@ def test_takeover_preserves_steering_and_gear_but_resets_pedals(gear: Gear) -> N
         session._truck = SimpleNamespace(
             name="truck1",
             autonomous=True,
-            telemetry=lambda: SimpleNamespace(measured=measured),
         )
         session._drive = Drive()
         session._commands = commands

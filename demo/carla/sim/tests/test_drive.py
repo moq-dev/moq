@@ -158,20 +158,6 @@ def test_axes_are_clamped_into_range() -> None:
     assert accepted.gear is Gear.NEUTRAL
 
 
-def test_unclaimed_gate_can_synchronize_with_vehicle_feedback() -> None:
-    state = Drive()
-    measured = DriveState(steering=-0.4, throttle=0.6, brake=0.2, gear=Gear.REVERSE)
-    takeover = DriveState(steering=-0.4, throttle=0.0, brake=1.0, gear=Gear.REVERSE)
-
-    assert state.synchronize(measured)
-    assert state.state == takeover
-    assert state.apply(Command(kind="drive", driver_id="driver", sequence=1, state=measured))
-    assert state.state == takeover
-
-    assert not state.synchronize(DriveState.stopped())
-    assert state.state == takeover
-
-
 @pytest.mark.parametrize("gear", list(Gear))
 def test_every_new_lease_resets_pedals_without_changing_steering_or_gear(gear: Gear) -> None:
     state = Drive()
@@ -181,7 +167,6 @@ def test_every_new_lease_resets_pedals_without_changing_steering_or_gear(gear: G
         sequence=1,
         state=DriveState(steering=0.3, throttle=1.0, brake=0.0, gear=gear),
     )
-    assert state.synchronize(DriveState(steering=0.3, throttle=0.85, brake=0.0, gear=gear))
     assert state.apply(command)
     assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
 
@@ -198,7 +183,6 @@ def test_every_new_lease_resets_pedals_without_changing_steering_or_gear(gear: G
     assert state.state == command.state
 
     assert state.apply(Command(kind="watchdog_expired"))
-    assert state.synchronize(DriveState(steering=0.3, throttle=0.85, brake=0.0, gear=gear))
     assert state.apply(command)
     assert state.state == DriveState(steering=0.3, throttle=0.0, brake=1.0, gear=gear)
 

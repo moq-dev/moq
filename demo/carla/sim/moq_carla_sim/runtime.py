@@ -177,10 +177,6 @@ class TruckSession:
                 self._hold_clock()
                 self._publish()
                 continue
-            if command.kind == "drive" and self._drive.driver is None and self._truck.autonomous:
-                # Prime the unclaimed gate from local steering and gear feedback;
-                # Drive resets pedal demand before any manual command can act.
-                self._drive.synchronize(self._truck.telemetry().measured)
             accepted = self._drive.apply(command)
             changed = accepted
             self._hold_clock()

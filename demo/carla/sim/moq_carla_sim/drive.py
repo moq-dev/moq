@@ -159,13 +159,6 @@ class Drive:
     def accepted(self) -> Accepted:
         return Accepted(state=self._state, estopped=self._estopped)
 
-    def synchronize(self, state: DriveState) -> bool:
-        """Adopt live steering and gear before an unclaimed manual handoff."""
-        if self._driver is not None or self._estopped:
-            return False
-        self._state = DriveState(steering=state.sanitized().steering, gear=state.gear)
-        return True
-
     def apply(self, command: Command) -> bool:
         """Apply a command, returning whether it changed or refreshed state."""
         if command.kind == "drive":
