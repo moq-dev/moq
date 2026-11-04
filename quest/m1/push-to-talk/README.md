@@ -94,7 +94,6 @@ catches this. A complete set of runs finishes this epic.
 
 ## Required
 
-- [Pick how the browser publisher suppresses silence](/quest/m1/push-to-talk/dtx-route.md) - measures the DTX routes
 - [Push-to-talk suppresses silence instead of toggling the catalog](/quest/m1/push-to-talk/dtx.md) - replaces hold with DTX
 
 ## Closes
