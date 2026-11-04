@@ -163,7 +163,7 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 		.udp(UdpSocket::bind("0.0.0.0:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint =
-		quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+		quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), socket).expect("endpoint");
 	let addr = SocketAddr::new(SECOND_V4.into(), endpoint.local_addr().port());
 	let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 

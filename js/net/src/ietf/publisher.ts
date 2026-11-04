@@ -31,6 +31,7 @@ import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Groups, Info, Range, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { toNumber } from "../util/bigint.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { GivenUp } from "../util/given_up.ts";
@@ -1146,7 +1147,7 @@ export class Publisher {
 			const header = new GroupMessage({
 				trackAlias: requestId,
 				groupId: group.sequence,
-				subGroupId: 0,
+				subGroupId: 0n,
 				publisherPriority,
 				flags: {
 					// The object properties carry the timestamp, so there is nothing to write
@@ -1337,7 +1338,7 @@ export class Publisher {
 			const header = new GroupMessage({
 				trackAlias: requestId,
 				groupId: final.group,
-				subGroupId: 0,
+				subGroupId: 0n,
 				publisherPriority,
 				flags: {
 					hasExtensions: false,
@@ -1376,7 +1377,7 @@ export class Publisher {
 
 			// A fill we cannot serve is reset right after its header, so it needs no rank.
 			const sequence = fill.kind === "group" ? fill.start.group : undefined;
-			const object = fill.kind === "group" ? Number(fill.start.object) : 0;
+			const object = fill.kind === "group" ? frameBound(fill.start.object) : 0;
 			stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version,
@@ -1879,7 +1880,7 @@ export class Publisher {
 	#refusal(err: RequestError): Answer {
 		return err.retryInterval === 0n
 			? "never"
-			: Instant.add(now(), Nano.fromMilli(Milli(Number(err.retryInterval))));
+			: Instant.add(now(), Nano.fromMilli(Milli(toNumber(err.retryInterval))));
 	}
 
 	/**
@@ -2232,7 +2233,8 @@ export class Publisher {
 
 	/**
 	 * Handles an incoming FETCH on a bidi stream: a range of the named track, or a joining
-	 * FETCH's head of its subscription's group, answered from the cache.
+	 * FETCH's head of its subscription's group. A named range missing from the cache asks
+	 * the producer's request handler; a joining head must already be cached.
 	 *
 	 * @internal
 	 */
@@ -2242,7 +2244,8 @@ export class Publisher {
 	}
 
 	async #runFetch(msg: Fetch, request: RequestStream) {
-		// FILL_TIMEOUT is accepted and ignored: a one-group read ends with the group.
+		// FILL_TIMEOUT does not truncate a group or time out its application fill. Both remain
+		// wanted until answered, refused, or cancelled by the requester or its grant.
 		const version = this.#session.version;
 		const type = msg.type;
 		const named = type.kind === "standalone" || type.kind === "filtered" ? type : undefined;
@@ -2341,8 +2344,8 @@ export class Publisher {
 	}
 
 	/**
-	 * Resolve a standalone or draft-22 FETCH to its group reader and end metadata,
-	 * or the refusal to answer with.
+	 * Resolve a standalone or draft-22 FETCH to its group reader and end metadata, filling
+	 * uncached history through the producer's request handler, or the refusal to answer with.
 	 *
 	 * A whole-group request waits for the group to finish, so a downstream cache never
 	 * mistakes a prefix for a complete group.
@@ -2386,9 +2389,8 @@ export class Publisher {
 
 		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
-		const cache = broadcast
-			.track(named.trackName)
-			.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
+		const track = broadcast.track(named.trackName);
+		const cache = track.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
 		let answer: FetchAnswer | undefined;
 		try {
 			const info = await untilAborted(cache.info(), signal);
@@ -2420,8 +2422,10 @@ export class Publisher {
 			}
 
 			const selected = range.start.group;
-			const group = hooks.cachedGroup(cache, selected);
-			if (!group) return { condition: "does_not_exist", reasonPhrase: `group ${range.start.group}` };
+			// A relayed track may hold the group even when its upstream cannot FETCH. Only a
+			// cache miss asks the producer's handler or fetches the group from its serving route.
+			const group =
+				hooks.cachedGroup(cache, selected) ?? (await track.fetchGroup(selected, { priority, signal }));
 			const slice = fetchSlice(range, selected);
 			// Wait for the selected headers or the group's end, through this reader's recovery
 			// and verdict. The reader holds only the normal tail, not a copied slice.
@@ -2541,7 +2545,7 @@ export class Publisher {
 		if (!group) return unavailable;
 		// The saved Largest Object proves this prefix's headers exist. Do not read their
 		// payloads ahead: eviction after FETCH_OK fails the stream, as for a live subgroup.
-		if (hooks.groupFate(group)() || hooks.groupIndex(group) !== 0 || group.frameCount < Number(end.object)) {
+		if (hooks.groupFate(group)() || hooks.groupIndex(group) !== 0 || group.frameCount < frameBound(end.object)) {
 			group.close();
 			return unavailable;
 		}
@@ -2550,7 +2554,7 @@ export class Publisher {
 			owned: false,
 			range: { start: { group: end.group, object: 0n }, end },
 			group,
-			slice: { skip: 0, until: Number(end.object) },
+			slice: { skip: 0, until: frameBound(end.object) },
 			// Where the subscription starts, never the end of the track.
 			ok: new FetchOk({ endOfTrack: false, endLocation: end, properties: join.properties }),
 			timescale: join.timescale,
@@ -2583,7 +2587,7 @@ export class Publisher {
 			});
 			stream = await Writer.tryOpen(this.#quic, { version, sendOrder: answer.sendOrder, cancel: stopped });
 			if (!stream) throw stop.reason ?? new Error("fetch stream failed to open");
-			ranking?.add(stream, range.start.group, safe(range.start.object));
+			ranking?.add(stream, range.start.group, frameBound(range.start.object));
 			await untilAborted(new FetchHeader({ requestId: msg.requestId }).encode(stream, version), stop);
 
 			const out = new FetchWriter({ stream, version, timescale, priority: publisherPriority });
@@ -2735,8 +2739,10 @@ interface FetchAnswer {
 	ranking?: Priority;
 }
 
-/** A wire object ID as a model frame index, saturating past what the model can name. */
-function safe(object: bigint): number {
+// A filter keeps its peer-chosen Object IDs as bigint. Its derived frame selection
+// bound can stop at the model's count ceiling: no object exists at or above it,
+// so clamping either a skip or an exclusive end selects exactly the same frames.
+function frameBound(object: bigint): number {
 	return object > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(object);
 }
 
@@ -2762,8 +2768,8 @@ function fetchStart(filter: Filter.Filter, largest: Location): Location {
 /** The slice of one group a {@link FetchRange} selects. */
 function fetchSlice(range: FetchRange, sequence: bigint): GroupSlice {
 	return {
-		skip: range.start.group === sequence ? safe(range.start.object) : 0,
-		until: range.end.group === sequence && range.end.object > 0n ? safe(range.end.object) : undefined,
+		skip: range.start.group === sequence ? frameBound(range.start.object) : 0,
+		until: range.end.group === sequence && range.end.object > 0n ? frameBound(range.end.object) : undefined,
 	};
 }
 
@@ -2987,9 +2993,11 @@ function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
  */
 function groupSlice(range: ServeRange, sequence: bigint): GroupSlice {
 	return {
-		skip: range.start?.group === sequence ? Number(range.start.object) : 0,
+		skip: range.start?.group === sequence ? frameBound(range.start.object) : 0,
 		until:
-			range.end?.group === sequence && range.end.object !== undefined ? Number(range.end.object) + 1 : undefined,
+			range.end?.group === sequence && range.end.object !== undefined
+				? frameBound(range.end.object + 1n)
+				: undefined,
 	};
 }
 

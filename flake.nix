@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/36d0429cce0d540ad90f6c1a006a9ca1659b0696";
+      url = "github:moq-dev/quest/4be350816f2a5c1157f799773ee1594f199fd9a7";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -188,6 +188,8 @@
             pkgs.alsa-plugins
             # A private clocked null device for native playback tests.
             (pkgs.lib.getBin pkgs.pulseaudio)
+            # A shared session bus for the concurrent private audio server test.
+            pkgs.dbus
             # moq-video's `pipewire` screen-capture feature: the pipewire crate
             # links libpipewire-0.3 via pkg-config and generates bindings at build
             # time (bindgenHook above provides libclang). Linux-only; macOS uses

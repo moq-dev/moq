@@ -119,8 +119,7 @@ async fn setup_through(
 	let (endpoint, conn) = dial(version, addr, transport).await;
 
 	let subscriber = moq_tokio::origin::spawn();
-	let session =
-		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Address::Setup);
+	let session = web::Session::raw(conn.clone());
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_subscriber(subscriber.clone())
@@ -292,10 +291,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut low_sub).await, &b"after"[..], "{version}");
 	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
-	let session = moq_tokio::transport::Session::new(
-		web::Session::raw(setup.conn.clone()),
-		moq_net::transport::Address::Setup,
-	);
+	let session = web::Session::raw(setup.conn.clone());
 	assert_eq!(
 		moq_net::transport::Metrics::streams_evicted(&moq_net::transport::poll::Session::metrics(&session)),
 		Some(1),
@@ -471,9 +467,7 @@ async fn reversed(version: &str) -> Reversed {
 	let broadcast = publisher.create_broadcast("room").expect("broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let subscriber = moq_tokio::origin::spawn();
-	let session = |conn: driver::connection::Connection| {
-		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup)
-	};
+	let session = |conn: driver::connection::Connection| web::Session::raw(conn);
 	// A moq-lite client's driver sends its half of the handshake, so it runs meanwhile.
 	let client_session = tokio::spawn({
 		let session = session(conn.clone());
@@ -533,7 +527,7 @@ impl Reversed {
 				// The credit an eviction frees can reach the writer before the stop does, letting
 				// the whole write queue, so only the stop itself proves the stream was stopped.
 				let _ = send.write_all(&bytes[..]).await;
-				if let Ok(Some(_)) = send.stopped().await {
+				if let Ok(Some(_)) = send.closed().await {
 					let _ = tx.send(());
 				}
 			});
@@ -814,7 +808,6 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	)
 	.expect("endpoint");
 	let port = endpoint.local_addr().port();
-	let mut server = web::Server::new(endpoint);
 
 	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/receive-credit/sender.ts");
 	let child = tokio::process::Command::new("bun")
@@ -830,10 +823,14 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.spawn()
 		.expect("spawn bun");
 
-	let request = kio::clock::timeout(TIMEOUT, server.accept())
-		.await
-		.expect("connect timeout")
-		.expect("request");
+	let request = kio::clock::timeout(TIMEOUT, async {
+		let incoming = endpoint.accept().await.expect("incoming connection");
+		let connection = incoming.accept().expect("accept QUIC").await.expect("QUIC handshake");
+		web::Request::accept(connection).await
+	})
+	.await
+	.expect("connect timeout")
+	.expect("request");
 	let session = request
 		.respond(web::proto::ConnectResponse::OK.with_protocol(version.alpn()))
 		.await
@@ -842,10 +839,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	let (session, driver) = moq_net::Server::new()
 		.with_versions(version.into())
 		.with_subscriber(origin.clone())
-		.accept(
-			moq_net::time::Instant::now(),
-			moq_tokio::transport::Session::new(session, moq_net::transport::Address::Uri),
-		)
+		.accept(moq_net::time::Instant::now(), session)
 		.await
 		.expect("server handshake");
 	tokio::spawn(moq_net::time::run(driver));
