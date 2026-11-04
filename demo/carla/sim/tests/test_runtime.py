@@ -52,9 +52,10 @@ def test_latency_breakdown_survives_any_finite_timestamps() -> None:
     assert [stage["ms"] for stage in latency_breakdown(stages)] == [MAX_STAGE_MS, 0]
 
 
-def test_takeover_synchronizes_gate_with_current_vehicle_controls() -> None:
+@pytest.mark.parametrize("gear", [Gear.FORWARD, Gear.REVERSE])
+def test_takeover_preserves_steering_and_gear_but_resets_pedals(gear: Gear) -> None:
     async def scenario() -> None:
-        measured = DriveState(steering=-0.3, throttle=0.7, brake=0.0, gear=Gear.FORWARD)
+        measured = DriveState(steering=-0.3, throttle=0.85, brake=0.0, gear=gear)
         commands = asyncio.Queue()
         commands.put_nowait(Command(kind="drive", driver_id="driver", sequence=1, state=measured))
 
@@ -63,27 +64,29 @@ def test_takeover_synchronizes_gate_with_current_vehicle_controls() -> None:
         session._truck = SimpleNamespace(
             name="truck1",
             autonomous=True,
-            telemetry=lambda: SimpleNamespace(measured=measured),
         )
         session._drive = Drive()
         session._commands = commands
         session._deadline = None
         session._media_pipeline = {}
-        session._actuate = lambda: None
-        session._publish = lambda: None
+        actuated = []
+        published = asyncio.Event()
+        session._truck.actuate = lambda accepted, *, has_driver: actuated.append((accepted, has_driver))
+        session._publish = published.set
 
         task = asyncio.create_task(session._loop())
+        published_waiter = asyncio.create_task(published.wait())
         try:
-            for _ in range(10):
-                if session._drive.driver is not None:
-                    break
-                await asyncio.sleep(0)
+            await asyncio.wait({task, published_waiter}, return_when=asyncio.FIRST_COMPLETED)
+            if task.done():
+                await task
             assert session._drive.driver == "driver"
-            assert session._drive.state == measured
+            assert session._drive.state == DriveState(steering=-0.3, throttle=0.0, brake=1.0, gear=gear)
+            assert actuated == [(session._drive.accepted(), True)]
         finally:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            published_waiter.cancel()
+            await asyncio.gather(task, published_waiter, return_exceptions=True)
 
     asyncio.run(scenario())
 

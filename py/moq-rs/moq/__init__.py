@@ -49,6 +49,8 @@ from .session import (
     Reservation,
     Session,
     Tokens,
+    Viewer,
+    Viewers,
 )
 from .subscribe import (
     BroadcastConsumer,
@@ -165,6 +167,8 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "Viewer",
+    "Viewers",
     "WebSocketConfig",
     "connect",
     "is_auth",

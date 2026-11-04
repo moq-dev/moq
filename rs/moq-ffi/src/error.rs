@@ -407,6 +407,13 @@ pub enum MoqError {
 		/// A diagnostic message describing the refusal.
 		reason: String,
 	},
+	/// A number was outside the range the call accepts, such as viewer ceilings summing
+	/// above what a PROBE target carries.
+	#[error("out of range: {reason}")]
+	OutOfRange {
+		/// A diagnostic message describing the refusal.
+		reason: String,
+	},
 }
 
 impl From<moq_net::Error> for MoqError {

@@ -47,6 +47,7 @@ import { rescale } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
+	bounded,
 	type Holdings,
 	hasTime,
 	isWire,
@@ -653,6 +654,8 @@ class TrackState {
 	dropsAnchors = new Signal(false);
 	// Frames wake the sequence cursor only while an owed hole holds it.
 	waitingOrdered = false;
+	// One-shot group reads need FETCH, even when metadata has not reported a live edge.
+	fetch = false;
 	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
 	// publisher holding its first group for that answer wakes.
 	startChanged = new Signal(0);
@@ -761,7 +764,9 @@ let reofferCached: (
 let reofferSequences: (producer: Producer, sink: TrackState, sequences: readonly bigint[]) => void;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
+let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: number }>;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
+let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
 // The producer's checked group starts, sorted by sequence; assigned in its static block.
 let startsOf: (producer: Producer) => readonly Start[];
@@ -869,6 +874,7 @@ export class Producer {
 	// One past the highest group or datagram this producer received, like the Rust
 	// `max_sequence`, and where the next append lands.
 	#received = 0n;
+	#subscribing = new Signal(false);
 
 	// Recently written source groups, retained for replay to late subscribers and
 	// pruned once idle for longer than the cache window. Each entry tracks the mirror
@@ -951,6 +957,27 @@ export class Producer {
 	}
 
 	static {
+		hooks.subscribing = (producer) => producer.#subscribing;
+		hooks.cacheTrack = (producer) => {
+			producer.#subscribed = false;
+			producer.#served = undefined;
+			producer.#tailPending = false;
+			for (const state of [producer.#state, ...producer.#sinks]) state.owed.set(false);
+			producer.#settle();
+		};
+		hooks.refuseLive = (producer, edge, error) => {
+			for (const sink of producer.#sinks) {
+				if (sink.fetch) continue;
+				const ranges = sink.update.peek()?.ranges ?? [{}];
+				const span = wireSpan(ranges);
+				if (bounded(ranges) && span.end !== undefined && span.end <= edge) continue;
+				closeTrackState(sink, error);
+			}
+		};
+		fillEdge = (producer) =>
+			!producer.#subscribed && producer.#state.info.peek()?.ietf !== undefined
+				? producer.#state.largest.peek()?.group
+				: undefined;
 		hooks.receiveTrack = (producer) => {
 			producer.#subscribed = true;
 		};
@@ -1019,27 +1046,38 @@ export class Producer {
 			}
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
-		owedGroup = (producer, start, end) => {
-			if (!producer.#subscribed) return undefined;
+		owedRuns = (producer, start, end) => {
+			if (!producer.#subscribed) return [];
 			const feed = producer.#feedStart();
 			const floor = feed === "pending" ? producer.#served?.requested : feed;
-			return producer.#landable({
+			return producer.#landing({
 				start: max(start, floor ?? 0n),
 				end,
 				floor: floor !== undefined,
 				grace: producer.#grace(),
 			});
 		};
+		owedGroup = (producer, start, end) => {
+			for (const run of owedRuns(producer, start, end)) return { sequence: run.start, folds: run.folds };
+			return undefined;
+		};
 	}
 
 	// The first group that may still land from the live feed, by the rule a pending tail is judged
 	// by; see {@link Land}. Mirrors the Rust `TrackState::may_land`.
 	#landable(land: Land): { sequence: bigint; folds?: number } | undefined {
-		if (this.#state.closed.peek() !== undefined) return undefined;
+		for (const run of this.#landing(land)) {
+			if (!land.delivered?.covers(run.start, run.end)) return { sequence: run.start, folds: run.folds };
+		}
+		return undefined;
+	}
+
+	*#landing(land: Land): Generator<Run & { folds?: number }> {
+		if (this.#state.closed.peek() !== undefined) return;
 		let start = land.start;
 		if (!land.floor) {
 			const first = this.#arrivals.first();
-			if (first === undefined) return undefined;
+			if (first === undefined) return;
 			start = max(start, first);
 		}
 		start = max(start, this.#served?.start ?? 0n);
@@ -1052,10 +1090,9 @@ export class Producer {
 			const folds = gap.since === undefined ? undefined : gap.since + limit;
 			if (folds !== undefined && at >= folds) continue;
 			for (const open of runGaps(drops, gap.start, gap.end)) {
-				if (!land.delivered?.covers(open.start, open.end)) return { sequence: open.start, folds };
+				yield { ...open, folds };
 			}
 		}
-		return undefined;
 	}
 
 	// Record `[start, end)` given up with `error`. An upstream drop (`open`) also ends the
@@ -1300,6 +1337,7 @@ export class Producer {
 	// applies its own, as each reader's budget does, so the demand asked upstream is the same
 	// before and after the info lands.
 	#updateSubscription(): void {
+		this.#subscribing.set([...this.#sinks].some((sink) => !sink.fetch && sink.closed.peek() === undefined));
 		const combined = combineSubscriptions(this.#sinks);
 		this.#settle();
 		this.#state.update.set(combined);
@@ -2581,8 +2619,16 @@ export class Subscriber {
 			// the Rust judge skips its track's datagram buffer; the Rust fetch names it
 			// `NotFetchable`.
 			const gone = [...this.#state.drops.peek()];
+			// Reordered streams still owed by the live feed are not cache misses.
+			for (const run of owedRuns(producer, start, end)) {
+				insertRun(gone, run.start, run.end);
+				if (run.folds !== undefined) this.#wakeAt(run.folds);
+			}
 			for (const sequence of heldDatagrams(producer)) insertRun(gone, sequence, sequence + 1n);
-			for (const run of this.#wants(start, min(end, this.#state.received.peek()))) {
+			for (const run of this.#wants(
+				start,
+				min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n)),
+			)) {
 				for (const open of runGaps(gone, run.start, run.end)) {
 					let next = open.start;
 					for (let i = timelineIndex(timeline, open.start); i < timeline.length; i++) {
@@ -2710,9 +2756,9 @@ export class Subscriber {
 		// A fill still owes a group it reads.
 		if (this.#askFills(this.#window.floor() ?? 0n, end) !== undefined) return false;
 		const held = this.#state.groups.peek();
-		const received = this.#state.received.peek();
-		const drops = this.#state.drops.peek();
 		const producer = this.#state.producer;
+		const received = max(this.#state.received.peek(), ((producer && fillEdge(producer)) ?? -1n) + 1n);
+		const drops = this.#state.drops.peek();
 		for (const run of this.#window.runs(this.#window.floor() ?? 0n, end)) {
 			let gaps = [run];
 			for (const delivered of taken) gaps = gaps.flatMap((gap) => delivered.gaps(gap.start, gap.end));
@@ -2925,6 +2971,9 @@ export class Subscriber {
 		hooks.askFetch = (subscriber, sequence) => subscriber.#askFetch(sequence);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
 			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
+			subscriber.#state.fetch = true;
+			const update = subscriber.#state.update.peek();
+			if (update) subscriber.#state.update.set(update, true);
 		};
 		// The sequence cursor lives here (it shares the buffer and the drift anchor with
 		// the arrival cursor); `Ordered` is the handle that reaches it.
