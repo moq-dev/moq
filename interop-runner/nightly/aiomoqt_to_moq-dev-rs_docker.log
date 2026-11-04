@@ -4,34 +4,33 @@ Running interop tests...
   Relay:  moq-interop-relay:local
   Client: ghcr.io/gmarzot/aiomoqt:latest
   URL:    https://relay:4443
-time="2026-11-03T16:13:27Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-03T16:13:27Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-03T16:13:27Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-03T16:13:27Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-03T16:13:27Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T23:56:49Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T23:56:49Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T23:56:49Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T23:56:49Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-03T23:56:49Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-test-client-1  Recreate
  Container runner-upstream-test-client-1  Recreated
 Attaching to relay-1, test-client-1
-relay-1        | [2m2026-11-03T16:13:27.525344Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-relay-1        | [2m2026-11-03T16:13:27.525361Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-relay-1        | [2m2026-11-03T16:13:27.525588Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m6214148490594834 [3mconfigured[0m[2m=[0mfalse
-relay-1        | [2m2026-11-03T16:13:27.525649Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m listening [3maddr[0m[2m=[0m[::]:4443 [3mkind[0m[2m=[0m"quic"
-relay-1        | [2m2026-11-03T16:13:27.525792Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-relay-1        | [2m2026-11-03T16:13:33.916629Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:49539 [3msession[0m[2m=[0m"73c8d349105adc82a19038cc0d33f30f" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:33.916785Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:49539 [3msession[0m[2m=[0m"73c8d349105adc82a19038cc0d33f30f" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:33.917826Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:49539 [3msession[0m[2m=[0m"73c8d349105adc82a19038cc0d33f30f" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:33.917921Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:49539 [3msession[0m[2m=[0m"73c8d349105adc82a19038cc0d33f30f" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m0 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:50.120368Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+relay-1        | [2m2026-11-03T23:56:50.120388Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+relay-1        | [2m2026-11-03T23:56:50.120620Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m8412711351291643 [3mconfigured[0m[2m=[0mfalse
+relay-1        | [2m2026-11-03T23:56:50.120682Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m listening [3maddr[0m[2m=[0m[::]:4443 [3mkind[0m[2m=[0m"quic"
+relay-1        | [2m2026-11-03T23:56:50.120910Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+relay-1        | [2m2026-11-03T23:56:56.925751Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:53074 [3msession[0m[2m=[0m"21f30bbefe865eab402c9697d0d7e359" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:56.925913Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:53074 [3msession[0m[2m=[0m"21f30bbefe865eab402c9697d0d7e359" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:56.926957Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:53074 [3msession[0m[2m=[0m"21f30bbefe865eab402c9697d0d7e359" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:56.927060Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:53074 [3msession[0m[2m=[0m"21f30bbefe865eab402c9697d0d7e359" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m0 [3merr[0m[2m=[0mcancelled
 test-client-1  | TAP version 14
-test-client-1  | # date: 2026-11-03T16:13:33Z
+test-client-1  | # date: 2026-11-03T23:56:56Z
 test-client-1  | # target: https://relay:4443
 test-client-1  | # version: aiomoqt/0.14.0
 test-client-1  | # note: preference probe pinned draft-22
 test-client-1  | 1..12
-relay-1        | [2m2026-11-03T16:13:33.920803Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58889 [3msession[0m[2m=[0m"23d4e3f6c3ff579d5de1f88469a52d4b" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:33.920843Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58889 [3msession[0m[2m=[0m"23d4e3f6c3ff579d5de1f88469a52d4b" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:33.921684Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58889 [3msession[0m[2m=[0m"23d4e3f6c3ff579d5de1f88469a52d4b" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:33.921746Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58889 [3msession[0m[2m=[0m"23d4e3f6c3ff579d5de1f88469a52d4b" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m1 [3merr[0m[2m=[0mcancelled
-test-client-1  |   [PASS] setup-only: SERVER_SETUP received with compatible version
+relay-1        | [2m2026-11-03T23:56:56.930093Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:55655 [3msession[0m[2m=[0m"ab702913407eea370e94d4d756e352e4" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:56.930145Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:55655 [3msession[0m[2m=[0m"ab702913407eea370e94d4d756e352e4" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:56.930906Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:55655 [3msession[0m[2m=[0m"ab702913407eea370e94d4d756e352e4" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:56.930965Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:55655 [3msession[0m[2m=[0m"ab702913407eea370e94d4d756e352e4" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m1 [3merr[0m[2m=[0mcancelled
 test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
 test-client-1  |   duration_ms: 4
@@ -42,16 +41,18 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "6119ec74a2e87a74"
+test-client-1  |       quic_initial_destination_connection_id: "23afc65a68ff1110"
 test-client-1  |   message: "SERVER_SETUP received with compatible version"
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T16:13:33.924699Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:46362 [3msession[0m[2m=[0m"d53e3cb400291cb065d397cce6702fb3" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:33.924748Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:46362 [3msession[0m[2m=[0m"d53e3cb400291cb065d397cce6702fb3" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:33.926051Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:46362 [3msession[0m[2m=[0m"d53e3cb400291cb065d397cce6702fb3" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:33.926161Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:46362 [3msession[0m[2m=[0m"d53e3cb400291cb065d397cce6702fb3" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m2 [3merr[0m[2m=[0mcancelled
+test-client-1  |   [PASS] setup-only: SERVER_SETUP received with compatible version
+relay-1        | [2m2026-11-03T23:56:56.933913Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:38577 [3msession[0m[2m=[0m"06c8ec84d28d6235310e53f9c1e65dff" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:56.933957Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:38577 [3msession[0m[2m=[0m"06c8ec84d28d6235310e53f9c1e65dff" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:56.946674Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:38577 [3msession[0m[2m=[0m"06c8ec84d28d6235310e53f9c1e65dff" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:56.946829Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:38577 [3msession[0m[2m=[0m"06c8ec84d28d6235310e53f9c1e65dff" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m2 [3merr[0m[2m=[0mcancelled
+test-client-1  |   [PASS] announce-only: PUBLISH_NAMESPACE_OK received
 test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 4
+test-client-1  |   duration_ms: 16
 test-client-1  |   implementation_version: "0.14.0"
 test-client-1  |   sessions:
 test-client-1  |     publisher:
@@ -59,14 +60,13 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "cbd69eba01fd93ef"
+test-client-1  |       quic_initial_destination_connection_id: "5a4b128583965b29"
 test-client-1  |   message: "PUBLISH_NAMESPACE_OK received"
 test-client-1  |   ...
-test-client-1  |   [PASS] announce-only: PUBLISH_NAMESPACE_OK received
-relay-1        | [2m2026-11-03T16:13:33.929150Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:52969 [3msession[0m[2m=[0m"c55c1cb897df36aed401df837f41fefa" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:33.929202Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:52969 [3msession[0m[2m=[0m"c55c1cb897df36aed401df837f41fefa" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.031585Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:52969 [3msession[0m[2m=[0m"c55c1cb897df36aed401df837f41fefa" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.031758Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:52969 [3msession[0m[2m=[0m"c55c1cb897df36aed401df837f41fefa" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m3 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:56.949990Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56345 [3msession[0m[2m=[0m"c7407483bdffc5836e366b11819ea5a0" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:56.950065Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56345 [3msession[0m[2m=[0m"c7407483bdffc5836e366b11819ea5a0" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.052822Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56345 [3msession[0m[2m=[0m"c7407483bdffc5836e366b11819ea5a0" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.052997Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56345 [3msession[0m[2m=[0m"c7407483bdffc5836e366b11819ea5a0" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m3 [3merr[0m[2m=[0mcancelled
 test-client-1  | ok 3 - publish-namespace-done
 test-client-1  |   ---
 test-client-1  |   duration_ms: 106
@@ -77,14 +77,15 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "bbcb8dce2d6f930d"
+test-client-1  |       quic_initial_destination_connection_id: "7b89f08d91fd9b32"
 test-client-1  |   message: "PUBLISH_NAMESPACE_OK received, announce stream reset"
 test-client-1  |   ...
 test-client-1  |   [PASS] publish-namespace-done: PUBLISH_NAMESPACE_OK received, announce stream reset
-relay-1        | [2m2026-11-03T16:13:34.035572Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m4 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48795 [3msession[0m[2m=[0m"05e88e36ec69e28aecfccc1ea54ae67e" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.035638Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m4 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48795 [3msession[0m[2m=[0m"05e88e36ec69e28aecfccc1ea54ae67e" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.037414Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m4 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48795 [3msession[0m[2m=[0m"05e88e36ec69e28aecfccc1ea54ae67e" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.037488Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m4 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48795 [3msession[0m[2m=[0m"05e88e36ec69e28aecfccc1ea54ae67e" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m4 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.056509Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m4 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:37798 [3msession[0m[2m=[0m"f5cb43e3f8eb0e69401057854b6d0c36" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.056579Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m4 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:37798 [3msession[0m[2m=[0m"f5cb43e3f8eb0e69401057854b6d0c36" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.058097Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m4 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:37798 [3msession[0m[2m=[0m"f5cb43e3f8eb0e69401057854b6d0c36" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.058169Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m4 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:37798 [3msession[0m[2m=[0m"f5cb43e3f8eb0e69401057854b6d0c36" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m4 [3merr[0m[2m=[0mcancelled
+test-client-1  |   [PASS] subscribe-error: Error received (expected): code=16
 test-client-1  | ok 4 - subscribe-error
 test-client-1  |   ---
 test-client-1  |   duration_ms: 5
@@ -95,19 +96,18 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "f30a481ec782226f"
+test-client-1  |       quic_initial_destination_connection_id: "bcefaf18ac8a350a"
 test-client-1  |   message: "Error received (expected): code=16"
 test-client-1  |   expected: "SUBSCRIBE_ERROR code=TRACK_DOES_NOT_EXIST"
 test-client-1  |   ...
-test-client-1  |   [PASS] subscribe-error: Error received (expected): code=16
-relay-1        | [2m2026-11-03T16:13:34.040815Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m5 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:57317 [3msession[0m[2m=[0m"6dda3157eec5051ff041380f0d37e345" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.040868Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m5 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:57317 [3msession[0m[2m=[0m"6dda3157eec5051ff041380f0d37e345" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.042345Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m5 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:57317 [3msession[0m[2m=[0m"6dda3157eec5051ff041380f0d37e345" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.042413Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m5 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:57317 [3msession[0m[2m=[0m"6dda3157eec5051ff041380f0d37e345" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m5 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.061303Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m5 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44234 [3msession[0m[2m=[0m"ab02a1ed3486376db4ccef71dc680764" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.061355Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m5 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44234 [3msession[0m[2m=[0m"ab02a1ed3486376db4ccef71dc680764" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.062616Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m5 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44234 [3msession[0m[2m=[0m"ab02a1ed3486376db4ccef71dc680764" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.062686Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m5 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44234 [3msession[0m[2m=[0m"ab02a1ed3486376db4ccef71dc680764" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m5 [3merr[0m[2m=[0mcancelled
 test-client-1  |   [PASS] rendezvous-timeout: REQUEST_ERROR TIMEOUT received
 test-client-1  | ok 5 - rendezvous-timeout
 test-client-1  |   ---
-test-client-1  |   duration_ms: 5
+test-client-1  |   duration_ms: 4
 test-client-1  |   implementation_version: "0.14.0"
 test-client-1  |   sessions:
 test-client-1  |     subscriber:
@@ -115,22 +115,24 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "0723ac1ddc106ebd"
+test-client-1  |       quic_initial_destination_connection_id: "34920d4a7b46721e"
 test-client-1  |   message: "REQUEST_ERROR TIMEOUT received"
 test-client-1  |   expected: "REQUEST_ERROR TIMEOUT"
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T16:13:34.044839Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:57796 [3msession[0m[2m=[0m"53369f6b1ee2505d8a5ee18ab87a57bd" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.044887Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:57796 [3msession[0m[2m=[0m"53369f6b1ee2505d8a5ee18ab87a57bd" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.048046Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m7 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:41616 [3msession[0m[2m=[0m"2d50ea719a21eab95d1854a0d2ce0296" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.048169Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m7 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:41616 [3msession[0m[2m=[0m"2d50ea719a21eab95d1854a0d2ce0296" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.050783Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m7 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:41616 [3msession[0m[2m=[0m"2d50ea719a21eab95d1854a0d2ce0296" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.050884Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m7 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:41616 [3msession[0m[2m=[0m"2d50ea719a21eab95d1854a0d2ce0296" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m7 [3merr[0m[2m=[0mcancelled
-relay-1        | [2m2026-11-03T16:13:34.051345Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:57796 [3msession[0m[2m=[0m"53369f6b1ee2505d8a5ee18ab87a57bd" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.051524Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:57796 [3msession[0m[2m=[0m"53369f6b1ee2505d8a5ee18ab87a57bd" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m6 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.065000Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36969 [3msession[0m[2m=[0m"f9a09c18e2e1f58b2c352f277bd5cb56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.065052Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36969 [3msession[0m[2m=[0m"f9a09c18e2e1f58b2c352f277bd5cb56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.067974Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m7 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:39987 [3msession[0m[2m=[0m"9663ff2349b92fb8c7cc9f12a1ef6128" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.068063Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m7 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:39987 [3msession[0m[2m=[0m"9663ff2349b92fb8c7cc9f12a1ef6128" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.070408Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m7 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:39987 [3msession[0m[2m=[0m"9663ff2349b92fb8c7cc9f12a1ef6128" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.070516Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m7 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:39987 [3msession[0m[2m=[0m"9663ff2349b92fb8c7cc9f12a1ef6128" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m7 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.070879Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36969 [3msession[0m[2m=[0m"f9a09c18e2e1f58b2c352f277bd5cb56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.070953Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36969 [3msession[0m[2m=[0m"f9a09c18e2e1f58b2c352f277bd5cb56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtrack-74c8
+relay-1        | [2m2026-11-03T23:56:57.071035Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m6 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36969 [3msession[0m[2m=[0m"f9a09c18e2e1f58b2c352f277bd5cb56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m6 [3merr[0m[2m=[0mcancelled
+test-client-1  | 2026-11-03 23:56:57.070 WARNING: QUIC event: stream data after close: stream 5 (rate-limited to once per stream)
 test-client-1  |   [PASS] announce-subscribe: SUBSCRIBE_OK received — relay routed subscription
 test-client-1  | ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 9
+test-client-1  |   duration_ms: 8
 test-client-1  |   implementation_version: "0.14.0"
 test-client-1  |   sessions:
 test-client-1  |     publisher:
@@ -138,23 +140,23 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "12aa4e1bef53c6ce"
+test-client-1  |       quic_initial_destination_connection_id: "06ebf6ba3f9760b2"
 test-client-1  |     subscriber:
 test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "1bd4f7dcff5e1896"
+test-client-1  |       quic_initial_destination_connection_id: "2ceef208dfb3b74d"
 test-client-1  |   message: "SUBSCRIBE_OK received — relay routed subscription"
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T16:13:34.053952Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m8 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:55420 [3msession[0m[2m=[0m"c7653a1da0a7403734b46f45f3d9cd56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.053991Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m8 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:55420 [3msession[0m[2m=[0m"c7653a1da0a7403734b46f45f3d9cd56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.558082Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m9 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:54523 [3msession[0m[2m=[0m"14909c81d62d13778da6632a5de4075b" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.558191Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m9 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:54523 [3msession[0m[2m=[0m"14909c81d62d13778da6632a5de4075b" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.559786Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m9 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:54523 [3msession[0m[2m=[0m"14909c81d62d13778da6632a5de4075b" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.559943Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m9 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:54523 [3msession[0m[2m=[0m"14909c81d62d13778da6632a5de4075b" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m9 [3merr[0m[2m=[0mcancelled
-relay-1        | [2m2026-11-03T16:13:34.560511Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m8 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:55420 [3msession[0m[2m=[0m"c7653a1da0a7403734b46f45f3d9cd56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.560585Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m8 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:55420 [3msession[0m[2m=[0m"c7653a1da0a7403734b46f45f3d9cd56" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m8 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.073471Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m8 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:43852 [3msession[0m[2m=[0m"6be538cf0d675d03b19fc29a53bb3f45" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.073526Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m8 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:43852 [3msession[0m[2m=[0m"6be538cf0d675d03b19fc29a53bb3f45" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.577958Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m9 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56950 [3msession[0m[2m=[0m"42a2f444724830b8d144c672dbb5d9bf" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.578029Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m9 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56950 [3msession[0m[2m=[0m"42a2f444724830b8d144c672dbb5d9bf" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.579529Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m9 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56950 [3msession[0m[2m=[0m"42a2f444724830b8d144c672dbb5d9bf" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.579681Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m9 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56950 [3msession[0m[2m=[0m"42a2f444724830b8d144c672dbb5d9bf" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m9 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.579987Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m8 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:43852 [3msession[0m[2m=[0m"6be538cf0d675d03b19fc29a53bb3f45" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.580056Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m8 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:43852 [3msession[0m[2m=[0m"6be538cf0d675d03b19fc29a53bb3f45" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m8 [3merr[0m[2m=[0mcancelled
 test-client-1  |   [PASS] subscribe-before-announce: Error received (valid: relay didn't buffer): code=16
 test-client-1  | ok 7 - subscribe-before-announce
 test-client-1  |   ---
@@ -166,27 +168,27 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "0c7c4dd88ce73247"
+test-client-1  |       quic_initial_destination_connection_id: "f75690beeda40f59"
 test-client-1  |     publisher:
 test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "e470c4ba2301e90c"
+test-client-1  |       quic_initial_destination_connection_id: "2d3dc7b3da011cd1"
 test-client-1  |   message: "Error received (valid: relay didn't buffer): code=16"
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T16:13:34.565000Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m10 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48188 [3msession[0m[2m=[0m"c0f55fa58fdcd8bfdd63e853ecfffd03" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.565064Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m10 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48188 [3msession[0m[2m=[0m"c0f55fa58fdcd8bfdd63e853ecfffd03" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.569519Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m11 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56494 [3msession[0m[2m=[0m"c57573e7beeac8e484f48e7c4558a0ef" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.569630Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m11 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56494 [3msession[0m[2m=[0m"c57573e7beeac8e484f48e7c4558a0ef" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.610735Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m11 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56494 [3msession[0m[2m=[0m"c57573e7beeac8e484f48e7c4558a0ef" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.610836Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m11 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56494 [3msession[0m[2m=[0m"c57573e7beeac8e484f48e7c4558a0ef" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m11 [3merr[0m[2m=[0mcancelled
-relay-1        | [2m2026-11-03T16:13:34.611236Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m10 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48188 [3msession[0m[2m=[0m"c0f55fa58fdcd8bfdd63e853ecfffd03" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.611381Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m10 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48188 [3msession[0m[2m=[0m"c0f55fa58fdcd8bfdd63e853ecfffd03" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m10 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.583023Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m10 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:45248 [3msession[0m[2m=[0m"cd71fe61f11b7106ef86c573daa7b73d" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.583079Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m10 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:45248 [3msession[0m[2m=[0m"cd71fe61f11b7106ef86c573daa7b73d" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.585894Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m11 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35237 [3msession[0m[2m=[0m"07366f24b5d936cfead0cc499d08c24d" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.585941Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m11 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35237 [3msession[0m[2m=[0m"07366f24b5d936cfead0cc499d08c24d" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.623431Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m11 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35237 [3msession[0m[2m=[0m"07366f24b5d936cfead0cc499d08c24d" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.623541Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m11 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35237 [3msession[0m[2m=[0m"07366f24b5d936cfead0cc499d08c24d" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m11 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.623847Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m10 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:45248 [3msession[0m[2m=[0m"cd71fe61f11b7106ef86c573daa7b73d" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.623976Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m10 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:45248 [3msession[0m[2m=[0m"cd71fe61f11b7106ef86c573daa7b73d" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m10 [3merr[0m[2m=[0mcancelled
 test-client-1  |   [PASS] data-subgroup-basic: 15 objects received; Stream Count upstream 3, downstream 4
 test-client-1  | ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 51
+test-client-1  |   duration_ms: 44
 test-client-1  |   implementation_version: "0.14.0"
 test-client-1  |   test_spec_revision: 2
 test-client-1  |   sessions:
@@ -195,27 +197,26 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "e7c3f83aa28d3740"
+test-client-1  |       quic_initial_destination_connection_id: "fd5dcfe200dbe296"
 test-client-1  |     subscriber:
 test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "cd8f1f76bb6212dd"
+test-client-1  |       quic_initial_destination_connection_id: "fb9978b22638f025"
 test-client-1  |   message: "15 objects received; Stream Count upstream 3, downstream 4"
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T16:13:34.614212Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m12 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36698 [3msession[0m[2m=[0m"7f28ebda31100f68d1a87cf7cb4632df" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.614270Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m12 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36698 [3msession[0m[2m=[0m"7f28ebda31100f68d1a87cf7cb4632df" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.617625Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m13 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44779 [3msession[0m[2m=[0m"081e8befd188c2ca8cf1f16fe803db58" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.617670Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m13 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44779 [3msession[0m[2m=[0m"081e8befd188c2ca8cf1f16fe803db58" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.619803Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m13 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44779 [3msession[0m[2m=[0m"081e8befd188c2ca8cf1f16fe803db58" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.619866Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m13 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44779 [3msession[0m[2m=[0m"081e8befd188c2ca8cf1f16fe803db58" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m13 [3merr[0m[2m=[0mcancelled
-relay-1        | [2m2026-11-03T16:13:34.620334Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m12 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36698 [3msession[0m[2m=[0m"7f28ebda31100f68d1a87cf7cb4632df" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.620416Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m12 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:36698 [3msession[0m[2m=[0m"7f28ebda31100f68d1a87cf7cb4632df" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m12 [3merr[0m[2m=[0mcancelled
-test-client-1  |   [PASS] subscribe-namespace-lifecycle: NAMESPACE then NAMESPACE_DONE received
+relay-1        | [2m2026-11-03T23:56:57.626659Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m12 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44522 [3msession[0m[2m=[0m"17ff28663586a3e99dae498afab20ede" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.626723Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m12 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44522 [3msession[0m[2m=[0m"17ff28663586a3e99dae498afab20ede" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.629635Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m13 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:60152 [3msession[0m[2m=[0m"73c740f810c3cc1d8cb5bf78597e02a8" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.629689Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m13 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:60152 [3msession[0m[2m=[0m"73c740f810c3cc1d8cb5bf78597e02a8" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.631481Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m13 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:60152 [3msession[0m[2m=[0m"73c740f810c3cc1d8cb5bf78597e02a8" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.631553Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m13 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:60152 [3msession[0m[2m=[0m"73c740f810c3cc1d8cb5bf78597e02a8" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m13 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.631861Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m12 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44522 [3msession[0m[2m=[0m"17ff28663586a3e99dae498afab20ede" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.631929Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m12 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:44522 [3msession[0m[2m=[0m"17ff28663586a3e99dae498afab20ede" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m12 [3merr[0m[2m=[0mcancelled
 test-client-1  | ok 9 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 9
+test-client-1  |   duration_ms: 8
 test-client-1  |   implementation_version: "0.14.0"
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   sessions:
@@ -224,27 +225,27 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "2594f3b0498914db"
+test-client-1  |       quic_initial_destination_connection_id: "20bd2f7b40c2f77b"
 test-client-1  |     publisher:
 test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "6d261660625aaeed"
+test-client-1  |       quic_initial_destination_connection_id: "82656216e6b5cd97"
 test-client-1  |   message: "NAMESPACE then NAMESPACE_DONE received"
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T16:13:34.623412Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m14 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58554 [3msession[0m[2m=[0m"f3280f886e5128bb6dca4d5bb85276c0" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.623457Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m14 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58554 [3msession[0m[2m=[0m"f3280f886e5128bb6dca4d5bb85276c0" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.627390Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m15 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48711 [3msession[0m[2m=[0m"47b9be196a26bcd9f4d687a76238c613" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.627430Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m15 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48711 [3msession[0m[2m=[0m"47b9be196a26bcd9f4d687a76238c613" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.630978Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m15 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48711 [3msession[0m[2m=[0m"47b9be196a26bcd9f4d687a76238c613" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.631059Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m15 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48711 [3msession[0m[2m=[0m"47b9be196a26bcd9f4d687a76238c613" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m15 [3merr[0m[2m=[0mcancelled
-relay-1        | [2m2026-11-03T16:13:34.631403Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m14 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58554 [3msession[0m[2m=[0m"f3280f886e5128bb6dca4d5bb85276c0" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.631480Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m14 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58554 [3msession[0m[2m=[0m"f3280f886e5128bb6dca4d5bb85276c0" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m14 [3merr[0m[2m=[0mcancelled
-test-client-1  |   [PASS] namespace-discovery: PUBLISH refused NOT_SUPPORTED: PUBLISH is not supported
+test-client-1  |   [PASS] subscribe-namespace-lifecycle: NAMESPACE then NAMESPACE_DONE received
+relay-1        | [2m2026-11-03T23:56:57.634559Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m14 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:53458 [3msession[0m[2m=[0m"0116c567010cb5f803f38e614bbf8784" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.634602Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m14 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:53458 [3msession[0m[2m=[0m"0116c567010cb5f803f38e614bbf8784" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.638217Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m15 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58844 [3msession[0m[2m=[0m"32eab1a606aecb3050f705af56f6b603" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.638264Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m15 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58844 [3msession[0m[2m=[0m"32eab1a606aecb3050f705af56f6b603" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.641432Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m15 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58844 [3msession[0m[2m=[0m"32eab1a606aecb3050f705af56f6b603" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.641520Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m15 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:58844 [3msession[0m[2m=[0m"32eab1a606aecb3050f705af56f6b603" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m15 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.641885Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m14 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:53458 [3msession[0m[2m=[0m"0116c567010cb5f803f38e614bbf8784" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.641965Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m14 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:53458 [3msession[0m[2m=[0m"0116c567010cb5f803f38e614bbf8784" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m14 [3merr[0m[2m=[0mcancelled
 test-client-1  | ok 10 - namespace-discovery # SKIP relay does not support PUBLISH
 test-client-1  |   ---
-test-client-1  |   duration_ms: 11
+test-client-1  |   duration_ms: 10
 test-client-1  |   implementation_version: "0.14.0"
 test-client-1  |   sessions:
 test-client-1  |     publisher:
@@ -252,24 +253,25 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "48305b6e071cb6c4"
+test-client-1  |       quic_initial_destination_connection_id: "64506c0cd44adace"
 test-client-1  |     subscriber:
 test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "f380cda3a2b6a2fe"
+test-client-1  |       quic_initial_destination_connection_id: "8ebb258e49bca9c3"
 test-client-1  |   message: "PUBLISH refused NOT_SUPPORTED: PUBLISH is not supported"
-test-client-1  |   expected: "PUBLISH announcing 'track-82d'"
+test-client-1  |   expected: "PUBLISH announcing 'track-74c8'"
 test-client-1  |   received: "MOQTRequestError: request error: code=3 reason=SUBSCRIBE_TRACKS is not supported"
 test-client-1  |   ...
-relay-1        | [2m2026-11-03T16:13:34.633911Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m16 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:34645 [3msession[0m[2m=[0m"79e9ad0cb03617747eeb1a0378682787" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.633956Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m16 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:34645 [3msession[0m[2m=[0m"79e9ad0cb03617747eeb1a0378682787" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.635324Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m16 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:34645 [3msession[0m[2m=[0m"79e9ad0cb03617747eeb1a0378682787" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.635396Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m16 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:34645 [3msession[0m[2m=[0m"79e9ad0cb03617747eeb1a0378682787" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m16 [3merr[0m[2m=[0mcancelled
+test-client-1  |   [PASS] namespace-discovery: PUBLISH refused NOT_SUPPORTED: PUBLISH is not supported
+relay-1        | [2m2026-11-03T23:56:57.644279Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m16 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56794 [3msession[0m[2m=[0m"5d7aa656483f056ff0d8a2c97da717fe" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.644328Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m16 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56794 [3msession[0m[2m=[0m"5d7aa656483f056ff0d8a2c97da717fe" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.645385Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m16 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56794 [3msession[0m[2m=[0m"5d7aa656483f056ff0d8a2c97da717fe" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.645452Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m16 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:56794 [3msession[0m[2m=[0m"5d7aa656483f056ff0d8a2c97da717fe" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m16 [3merr[0m[2m=[0mcancelled
 test-client-1  | ok 11 - publish-track-only # SKIP relay does not support PUBLISH
 test-client-1  |   ---
-test-client-1  |   duration_ms: 4
+test-client-1  |   duration_ms: 3
 test-client-1  |   implementation_version: "0.14.0"
 test-client-1  |   sessions:
 test-client-1  |     publisher:
@@ -277,23 +279,23 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "74d8f0d0cdbdc25a"
+test-client-1  |       quic_initial_destination_connection_id: "7d9d3c521fd659cb"
 test-client-1  |   message: "PUBLISH refused NOT_SUPPORTED: PUBLISH is not supported"
 test-client-1  |   expected: "PUBLISH_OK"
 test-client-1  |   received: "MOQTRequestError: request error: code=3 reason=PUBLISH is not supported"
 test-client-1  |   ...
 test-client-1  |   [PASS] publish-track-only: PUBLISH refused NOT_SUPPORTED: PUBLISH is not supported
-relay-1        | [2m2026-11-03T16:13:34.637716Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m17 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:40879 [3msession[0m[2m=[0m"51219513fdf1fec922ad624eb8c0e1d2" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.637756Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m17 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:40879 [3msession[0m[2m=[0m"51219513fdf1fec922ad624eb8c0e1d2" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.641010Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m18 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:39522 [3msession[0m[2m=[0m"6fee392daf684291e1f45e6ec534e3b2" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
-relay-1        | [2m2026-11-03T16:13:34.641067Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m18 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:39522 [3msession[0m[2m=[0m"6fee392daf684291e1f45e6ec534e3b2" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-03T16:13:34.653503Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m18 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:39522 [3msession[0m[2m=[0m"6fee392daf684291e1f45e6ec534e3b2" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.653567Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m18 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:39522 [3msession[0m[2m=[0m"6fee392daf684291e1f45e6ec534e3b2" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m18 [3merr[0m[2m=[0mcancelled
-relay-1        | [2m2026-11-03T16:13:34.653959Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m17 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:40879 [3msession[0m[2m=[0m"51219513fdf1fec922ad624eb8c0e1d2" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-03T16:13:34.654021Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m17 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:40879 [3msession[0m[2m=[0m"51219513fdf1fec922ad624eb8c0e1d2" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m17 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.647596Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m17 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:47458 [3msession[0m[2m=[0m"bf962aa70c506b35c42c54d27a03e5e1" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.647648Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m17 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:47458 [3msession[0m[2m=[0m"bf962aa70c506b35c42c54d27a03e5e1" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.650522Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m18 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:45543 [3msession[0m[2m=[0m"3ab4ae1b3f511c7e9f86a0f7b78ebef3" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Patterns([Pattern("**")])) [3msubscribe[0m[2m=[0mSome(Patterns([Pattern("**")]))
+relay-1        | [2m2026-11-03T23:56:57.650593Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m18 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:45543 [3msession[0m[2m=[0m"3ab4ae1b3f511c7e9f86a0f7b78ebef3" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-03T23:56:57.651766Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m18 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:45543 [3msession[0m[2m=[0m"3ab4ae1b3f511c7e9f86a0f7b78ebef3" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.651855Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m18 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:45543 [3msession[0m[2m=[0m"3ab4ae1b3f511c7e9f86a0f7b78ebef3" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m18 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-03T23:56:57.652137Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m17 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:47458 [3msession[0m[2m=[0m"bf962aa70c506b35c42c54d27a03e5e1" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-03T23:56:57.652205Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m17 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:47458 [3msession[0m[2m=[0m"bf962aa70c506b35c42c54d27a03e5e1" [3mimplementation[0m[2m=[0m"aiomoqt/0.14.0"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m17 [3merr[0m[2m=[0mcancelled
 test-client-1  | ok 12 - publish-track-subscribe # SKIP relay does not support PUBLISH
 test-client-1  |   ---
-test-client-1  |   duration_ms: 19
+test-client-1  |   duration_ms: 7
 test-client-1  |   implementation_version: "0.14.0"
 test-client-1  |   sessions:
 test-client-1  |     publisher:
@@ -301,19 +303,19 @@ test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "bfc28b3d4a957543"
+test-client-1  |       quic_initial_destination_connection_id: "e03754a5407879c7"
 test-client-1  |     subscriber:
 test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       alpn: "h3"
 test-client-1  |       webtransport_protocol: "moqt-22"
-test-client-1  |       quic_initial_destination_connection_id: "78fec00e23de2977"
+test-client-1  |       quic_initial_destination_connection_id: "eb30e75c7ac51c95"
 test-client-1  |   message: "PUBLISH refused NOT_SUPPORTED: PUBLISH is not supported"
 test-client-1  |   expected: "SUBSCRIBE_OK and 5 objects"
 test-client-1  |   received: "MOQTRequestError: request error: code=16 reason=unroutable"
 test-client-1  |   ...
 test-client-1  |   [PASS] publish-track-subscribe: PUBLISH refused NOT_SUPPORTED: PUBLISH is not supported
-test-client-1  | # ended: 2026-11-03T16:13:34Z
+test-client-1  | # ended: 2026-11-03T23:56:57Z
 [Ktest-client-1 exited with code 0
 Aborting on container exit...
  Container runner-upstream-test-client-1  Stopping
