@@ -30,7 +30,7 @@ import {
 	type View,
 	viewBox,
 } from "./map.ts";
-import { loadRoadMap } from "./maps/index.ts";
+import { loadRoadMap, preloadAerials } from "./maps/index.ts";
 import { CAMERAS, parseCamera } from "./paths.ts";
 import template from "./player.html?raw";
 import { presence } from "./presence.ts";
@@ -59,6 +59,7 @@ export const PREVIEW = import.meta.env.DEV && new URLSearchParams(location.searc
  */
 export function mount(root: ShadowRoot, connection: Moq.Connection): () => void {
 	root.innerHTML = `<style>${style}</style>${template}`;
+	preloadAerials();
 
 	const interaction = new Interaction(focusFromHash(window.location.hash));
 	const { driving, focused, hovered } = interaction;
@@ -184,6 +185,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 	let roadMap: RoadMap | undefined;
 	let wantedMap: string | undefined;
 	let unreadableMap: string | undefined;
+	let unbakedMap: string | undefined;
 	let fitted: View | undefined;
 	let fittedFleet = "";
 	let view: View | undefined;
@@ -212,7 +214,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			// Deliberately no retry. Status arrives at 10 Hz, so releasing the name
 			// here would turn telemetry into a tight retry timer, and would re-clear
 			// `fitted` on every tick. A reload is the supervisor that can actually
-			// re-establish this, so say the chunk failed rather than reporting a town
+			// re-establish this, so say the map failed rather than reporting a town
 			// that IS baked as if it were not.
 			console.warn(`failed to load the road map for ${name}:`, err);
 			if (wantedMap === name) unreadableMap = name;
@@ -225,6 +227,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		// Another town won the race while this one loaded: it owns the map now.
 		if (wantedMap !== name) return;
 		useRoads(loaded);
+		unbakedMap = loaded ? undefined : name;
 	}
 
 	/**
@@ -238,6 +241,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 	function useRoads(map: RoadMap | undefined) {
 		roadMap = map;
 		unreadableMap = undefined;
+		unbakedMap = undefined;
 		fitted = undefined;
 		els.roads.querySelector("#lane-geometry")?.setAttribute("d", map ? pathData(map) : "");
 		const image = required<SVGImageElement>("#aerial-image");
@@ -296,7 +300,8 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		// once one nears an edge, or the map slides under the driver at 10 Hz.
 		const fleet = [...poses.keys()].filter(onShownMap).sort().join(" ");
 		if (roadMap) {
-			fitted = mapView(roadMap, 0.06);
+			// An aerial carries its own surroundings; bare roads need room for the markers.
+			fitted = mapView(roadMap, roadMap.aerial ? 0 : 0.06);
 		} else if (fleet !== fittedFleet || needsRefit(fitted, points)) {
 			fitted = fitPoints(points);
 		}
@@ -345,8 +350,8 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				? ""
 				: unreadableMap
 					? `unreadable:${unreadableMap}`
-					: wantedMap
-						? `unbaked:${wantedMap}`
+					: unbakedMap
+						? `unbaked:${unbakedMap}`
 						: "";
 		if (key !== note) {
 			note = key;
@@ -361,7 +366,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			} else if (key.startsWith("unbaked:")) {
 				els.note.replaceChildren(
 					"Road imagery unavailable for ",
-					code(wantedMap ?? ""),
+					code(unbakedMap ?? ""),
 					". Showing truck positions only.",
 				);
 			}
@@ -450,7 +455,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		const id = focused.peek();
 		const open = hasTruck(id);
 		els.backdrop.hidden = !open;
-		for (const el of root.querySelectorAll<HTMLElement>("header, main, footer")) el.inert = open;
+		for (const el of root.querySelectorAll<HTMLElement>("main, footer")) el.inert = open;
 		if (id !== previousFocus) {
 			const last = previousFocus;
 			previousFocus = id;
@@ -731,7 +736,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		finishCalibration();
 	});
 
-	/** Reflect the connected wheel in the header chip. */
+	/** Reflect the connected wheel in the map chip. */
 	function refreshWheel() {
 		const id = wheel.id;
 		if (!id) {
