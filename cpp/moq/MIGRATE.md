@@ -10,7 +10,7 @@
 - `Publication::announce(route)` is `announce()`, and re-pricing is `set_cost(cost)`; `unannounce()` is `withdraw()`.
 - `OriginRequests::requested_broadcast()` is `requested()`, which resolves to `nullptr` once the origin closes.
 - `BroadcastRequest::prepare()` then `BroadcastPrepared::publish()` is `BroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
-- `instance()` is the stream's instance, kept across `withdraw()` and `announce()`.
+- `instance_id()` is the stream's instance, kept across `withdraw()` and `announce()`.
 
 `moq::AnnounceRoute` is `moq::RouteOptions{hidden, cost, instance, epoch}`, given at creation. A route is visible at once unless `hidden`; set it and call `announce()` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: `cancel()` or releasing its last handle retracts it, and closing its broadcast ends both. `moq::Route`, the record on `moq::Announce::route`, is `moq::RouteInfo`.
 
