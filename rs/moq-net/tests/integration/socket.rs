@@ -889,6 +889,25 @@ async fn an_older_hop_fails_dials_and_accepts() {
 	}
 }
 
+/// A dial to a peer behind an older moq-lite hop can't tell it from a peer not announced
+/// yet, so it waits, while the peer's own accepts fail.
+#[kio::test]
+async fn a_peer_behind_an_older_hop_fails_its_accepts() {
+	for older in OLDER {
+		let mut fixture = Fixture::new();
+		let alice = fixture.endpoint(LITE, "alice").await;
+		let bob = fixture.endpoint(older, "bob").await;
+
+		let accepted = kio::clock::timeout(SETTLE, bob.accept_tcp()).await;
+		assert!(matches!(accepted, Ok(Err(Error::Unsupported))), "{older} accept");
+		let mut dial = alice.dial_tcp("bob").unwrap();
+		assert!(
+			kio::clock::timeout(SETTLE, &mut dial).await.is_err(),
+			"{older}: a dial behind an older hop resolved"
+		);
+	}
+}
+
 /// A dial already waiting fails once its origin gains an older moq-lite session, as an
 /// endpoint whose client reconnects does.
 #[kio::test]

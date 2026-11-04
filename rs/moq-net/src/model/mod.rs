@@ -53,6 +53,9 @@ pub use timed::Timed;
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
 	pub use super::follow::Following;
+	pub(crate) use super::origin_impl::HiddenWithheld;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::HiddenWithholding;
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
@@ -60,7 +63,6 @@ pub mod origin {
 		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
 		Requesting, Requests, Route, Source,
 	};
-	pub(crate) use super::origin_impl::{HiddenWithheld, HiddenWithholding};
 }
 
 /// Subscribing to route (un)announcements from an origin.

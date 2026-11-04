@@ -8,11 +8,12 @@
 //! A session speaks one of two protocols:
 //!
 //! - `tcp`: one reliable, ordered byte pipe each way, as TCP gives. Each half is a single
-//!   group. Dial with [`Endpoint::dial_tcp`], accept with [`Endpoint::accept_tcp`], and
-//!   read and write a [`TcpStream`].
+//!   group. Dial with [`Endpoint::dial_tcp`], accept with `accept_tcp` or
+//!   [`Endpoint::poll_accept_tcp`], and read and write a [`TcpStream`].
 //! - `track`: each half is a whole track, so messages are groups, with the track's own
 //!   priority, delay budget and order. Dial with [`Endpoint::dial_track`], accept with
-//!   [`Endpoint::accept_track`], and read and write a [`TrackStream`].
+//!   `accept_track` or [`Endpoint::poll_accept_track`], and read and write a
+//!   [`TrackStream`].
 //!
 //! A dialer `A` picks a random session id `S` and subscribes to `<prefix>/.socket/<B>` for
 //! the track `<protocol>/A/B/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial
@@ -573,7 +574,10 @@ impl Shared {
 /// Every hop between two endpoints must carry hidden broadcasts: moq-lite-07 or
 /// moq-transport. While the origin has a moq-lite client session before 07, whose peer
 /// never hears the endpoint's broadcast, dials and accepts fail with
-/// [`Error::Unsupported`].
+/// [`Error::Unsupported`]; a session whose publish half opts into hidden broadcasts
+/// ([`origin::Consumer::with_hidden`]) carries it and doesn't count. Nothing tells a
+/// dialer that the peer sits behind such a hop, so a dial to it waits as for a peer not
+/// announced yet, while the peer's own accepts fail.
 ///
 /// `tcp` sessions run a task on the origin's driver, which must keep running.
 pub struct Endpoint {
@@ -730,7 +734,8 @@ impl Drop for Endpoint {
 	}
 }
 
-/// A dial from a peer, from [`Endpoint::accept_tcp`] or [`Endpoint::accept_track`]: accept
+/// A dial from a peer, from [`Endpoint::poll_accept_tcp`] or
+/// [`Endpoint::poll_accept_track`] (or their async `accept_tcp` and `accept_track`): accept
 /// or reject it.
 ///
 /// Dropping it rejects it with [`Error::Cancel`].
