@@ -27,8 +27,7 @@ doc = false
 test-support = []
 # The optional public STUN Binding listener (`--stun-bind`).
 stun = ["dep:stun-types"]
-default = ["acme", "cluster-lan", "quic", "websocket", "uds"]
-acme = ["dep:rustls-acme"]
+default = ["cluster-lan", "quic", "websocket", "uds"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
 jemalloc = ["moq-tokio/jemalloc"]
@@ -85,7 +84,6 @@ rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 reqwest-middleware = "0.5"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
-rustls-acme = { version = "0.15.4", optional = true, default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
@@ -100,7 +98,6 @@ tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 web-transport-trait = { workspace = true }
-x509-parser = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 moq-sock = { workspace = true, optional = true }
@@ -121,12 +118,11 @@ moq-congestion = { path = "../moq-congestion" }
 moq-net = { path = "../moq-net", features = ["fuzz"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
-rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
+rcgen = { workspace = true, features = ["pem", "ring"] }
 stun-types = { workspace = true }
 tempfile = { workspace = true }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }
-time = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }

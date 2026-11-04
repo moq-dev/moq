@@ -67,4 +67,3 @@ The epic's own work, once every child has merged:
 
 - [Transport on rind](/quest/m1/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
 - [moq-rtc on rind](/quest/m1/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
-- [moq-relay drops ACME for now](/quest/m1/rind/acme-remove.md) - the `acme` feature and rustls-acme go until ACME returns on rind
