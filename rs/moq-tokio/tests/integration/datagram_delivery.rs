@@ -45,8 +45,8 @@ fn bufferbloat() -> moq_shaper::Profile {
 	}
 }
 
-fn timed() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+fn timed() -> moq_net::datagram::Info {
+	moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
 /// One offered load.
@@ -79,7 +79,7 @@ fn decode(payload: &[u8]) -> u64 {
 /// A viewer's session to the server, `through` a shaper or direct.
 struct Viewer {
 	name: &'static str,
-	track: moq_net::track::Subscriber,
+	datagrams: moq_net::datagram::Consumer,
 	conn: driver::connection::Connection,
 	_session: moq_net::Session,
 	_endpoint: driver::endpoint::Endpoint,
@@ -105,32 +105,19 @@ impl Viewer {
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
-		let track = kio::clock::timeout(TIMEOUT, broadcast.track("audio").unwrap().subscribe(None))
+		let datagrams = broadcast.datagrams("audio").expect("datagram track");
+		// Answered once the publisher's session reads the track, so what it sends next arrives.
+		kio::clock::timeout(TIMEOUT, datagrams.info())
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
 		Self {
 			name,
-			track,
+			datagrams,
 			conn,
 			_session: session,
 			_endpoint: endpoint,
 		}
-	}
-
-	/// Read the priming group, which binds a moq-transport subscription's alias before any
-	/// datagram needs it.
-	async fn primed(&mut self) {
-		let mut group = kio::clock::timeout(TIMEOUT, self.track.recv_group())
-			.await
-			.expect("group timed out")
-			.expect("group")
-			.expect("track ended");
-		kio::clock::timeout(TIMEOUT, group.read_frame())
-			.await
-			.expect("frame timed out")
-			.expect("frame")
-			.expect("group ended");
 	}
 
 	/// Every datagram until [`QUIET`] passes without one after `done` is set: each one's
@@ -141,7 +128,7 @@ impl Viewer {
 		tokio::pin!(finished);
 		let mut stopping = false;
 		loop {
-			let next = self.track.recv_datagram();
+			let next = self.datagrams.recv();
 			let datagram = if stopping {
 				match kio::clock::timeout(QUIET, next).await {
 					Ok(datagram) => datagram,
@@ -213,7 +200,7 @@ async fn measure(version: &str, cell: Cell) {
 
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("room").expect("broadcast");
-	let mut track = broadcast.create_track("audio", timed()).unwrap();
+	let mut datagrams = broadcast.create_datagrams("audio", timed()).unwrap();
 	broadcast.announce(Default::default()).expect("announce");
 
 	let mut config = moq_tokio::listen::Config::default();
@@ -246,16 +233,10 @@ async fn measure(version: &str, cell: Cell) {
 		}
 	});
 
-	let mut viewers = [
+	let viewers = [
 		Viewer::connect("loopback", version, server_addr).await,
 		Viewer::connect("bufferbloat", version, shaper.addr()).await,
 	];
-	track
-		.write_frame(Timestamp::ZERO, &b"prime"[..])
-		.expect("priming group");
-	for viewer in &mut viewers {
-		viewer.primed().await;
-	}
 
 	let done = Arc::new(tokio::sync::Notify::new());
 	let receivers: Vec<_> = viewers
@@ -269,8 +250,8 @@ async fn measure(version: &str, cell: Cell) {
 	for index in 0..offered {
 		ticks.tick().await;
 		sent.push(kio::clock::now());
-		track
-			.append_datagram(Timestamp::from_millis(index).unwrap(), payload(index))
+		datagrams
+			.append(Timestamp::from_millis(index).unwrap(), payload(index))
 			.expect("append datagram");
 	}
 	done.notify_waiters();
@@ -339,7 +320,8 @@ async fn benchmark_datagram_delivery() {
 	println!(
 		"version,cell,viewer,offered,lost_packets,overflowed_packets,undelivered_frame_packets,reordered_packets,p50_ms,p99_ms,max_ms"
 	);
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	// moq-transport has no datagram tracks.
+	for version in ["moq-lite-06", "moq-lite-07-wip"] {
 		for cell in cells {
 			measure(version, cell).await;
 		}
