@@ -52,6 +52,8 @@ esac
 target_dir="$WORKSPACE_DIR/target"
 if [[ "$profile" == debug ]]; then
     target_dir="$target_dir/dart"
+else
+    target_dir=$(cd "$WORKSPACE_DIR" && cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
 fi
 case "$host" in
     *-apple-*) library="$target_dir/$profile/libmoq_ffi.dylib" ;;

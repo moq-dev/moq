@@ -1,5 +1,6 @@
 """Dart checks build dev test libraries while benchmarks pin optimized libraries."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -18,12 +19,15 @@ class BuildTest(unittest.TestCase):
                 scratch = Path(directory)
                 calls = scratch / "calls"
                 compiler_env = scratch / "compiler-env"
+                target = scratch / "external output"
+                metadata = json.dumps({"target_directory": str(target)})
+                library = target / "release/libmoq_ffi.so" if release else ROOT / "target/dart/debug/libmoq_ffi.so"
                 for name, source in {
-                    "cargo": f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\n'
+                    "cargo": f'#!/bin/sh\nif [ "$1" = metadata ]; then echo \'{metadata}\'; exit; fi\nprintf "%s\\n" "$*" >> "{calls}"\n'
                     f'printf "%s" "${{CC:-unset}}" > "{compiler_env}"\n',
                     "rustc": '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n',
                     "dart": "#!/bin/sh\nexit 0\n",
-                    "uniffi_bindgen_dart": '#!/bin/sh\nwhile [ "$1" != --out-dir ]; do shift; done\n'
+                    "uniffi_bindgen_dart": f'#!/bin/sh\ntest "$2" = "{library}" || exit 2\nwhile [ "$1" != --out-dir ]; do shift; done\n'
                     'mkdir -p "$2"\nfor name in moq.dart uniffi_runtime.dart; do '
                     'echo "// ignore_for_file: unused_import" > "$2/$name"; done\n',
                 }.items():
@@ -68,11 +72,14 @@ class BuildTest(unittest.TestCase):
             manifest.write_text("name: fixture\n")
             tools = root / "tools"
             tools.mkdir()
+            target = root / "external output"
+            metadata = json.dumps({"target_directory": str(target)})
             for name, source in {
+                "cargo": f"#!/bin/sh\necho '{metadata}'\n",
                 "git": f'#!/bin/sh\necho "{root}"\n',
                 "rustc": '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n',
                 "dart": '#!/bin/sh\nif [ "$1" = run ]; then '
-                'grep -q "release/libmoq_ffi.so" pubspec.yaml || exit 2; exit 7; fi\n',
+                f"grep -Fq '{target}/release/libmoq_ffi.so' pubspec.yaml || exit 2; exit 7; fi\n",
             }.items():
                 tool = tools / name
                 tool.write_text(source)
