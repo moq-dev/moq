@@ -8356,7 +8356,7 @@ mod tests {
 		use crate::bandwidth::Rate;
 		let version = Version::Lite06;
 		let session = ScriptedSession::new(Vec::new());
-		let mut transport = crate::driver::Transport::new(session.clone());
+		let transport = crate::driver::Transport::new(session.clone());
 		let stream = Stream::open(&transport, version).await.unwrap();
 		let estimate = kio::Producer::default();
 		let old = probe_server(crate::driver::Transport::new(session), stream, version, &estimate);

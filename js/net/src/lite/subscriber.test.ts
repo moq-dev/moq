@@ -1200,28 +1200,26 @@ test.each([
 	await stuck.aborted;
 });
 
-// A setup that outlived its deadline is over: its TRACK stream is reset, even one still waiting for a
-// slot, along with the SUBSCRIBE sent beside it, and the subscription is not registered again.
+// A setup that outlived its deadline is over: its TRACK stream is reset, along with the SUBSCRIBE
+// sent beside it, and the subscription is not registered again.
 test.each([
-	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05, false],
-	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06, false],
-	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07, false],
-	["lite-05 subscribe waiting on a stream slot for the TRACK", Version.DRAFT_05, true],
-] as const)("a %s that times out leaves nothing behind", async (_, version, parked) => {
+	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05],
+	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06],
+	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07],
+] as const)("a %s that times out leaves nothing behind", async (_, version) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	const { quic, streams, opened } = fakeSession(parked ? [0] : []);
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await opened(0);
-		if (!parked) await streams[0].reading;
+		await streams[0].reading;
 
 		await clock.advance(Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS)));
 		await track.closed;
 
-		if (parked) streams[0].release();
 		await streams[0].aborted;
 		await streams[1].aborted;
 		expect(streams.length).toBe(2);
@@ -1243,8 +1241,9 @@ test.each([
 	}
 });
 
-// The SUBSCRIBE stream can open after the deadline too; it is reset without carrying a SUBSCRIBE.
-test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE sends nothing on it", async () => {
+// Waiting for a stream slot is waiting its turn: the SUBSCRIBE goes out once credit returns,
+// however long that takes.
+test("a lite subscribe waiting on a stream slot for the SUBSCRIBE outlasts the deadline", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -1260,12 +1259,12 @@ test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE
 		await answerTrackInfo(streams[0]);
 		await opened(1);
 
-		await clock.advance(Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS / 2)));
-		await track.closed;
+		await clock.advance(Nano.fromMilli(Milli(3 * SUBSCRIBE_SETUP_TIMEOUT_MS)));
+		expect(track.closed.peek()).toBeUndefined();
 
 		streams[1].release();
-		await streams[1].aborted;
-		expect(streams[1].written).toEqual([]);
+		await streams[1].reading;
+		expect(streams[1].written).not.toEqual([]);
 	} finally {
 		subscriber.close();
 		warn.mockRestore();
@@ -2983,6 +2982,8 @@ test("announce init is the initial set", async () => {
 	subscriber.close();
 });
 
+// The FETCH shares the TRACK's deadline, which only runs while neither stream waits to open:
+// waiting for credit is waiting its turn, so only an unanswered request fails.
 test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while waiting for %s", async (stage) => {
 	const clock = new Manual();
 	const installed = clock.install();
@@ -2998,18 +2999,19 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 		await clock.advance(Nano.fromMilli(Milli(5_000)));
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await opened(1);
-		if (stage === "answer") await streams[1].reading;
-		await clock.advance(Nano.fromMilli(Milli(4_999)));
+		if (stage === "credit") {
+			await clock.advance(Nano.fromMilli(Milli(30_000)));
+			expect(failure).toBeUndefined();
+			streams[1].release();
+		}
+		await streams[1].reading;
+		// Opened alongside the TRACK, the FETCH shares its budget; one that waited for credit
+		// gets a whole budget from its open.
+		await clock.advance(Nano.fromMilli(Milli(stage === "credit" ? 9_999 : 4_999)));
 		expect(failure).toBeUndefined();
 		await clock.advance(Nano.fromMilli(Milli(1)));
 		await fetch;
-		if (stage === "answer") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
-		else {
-			expect((failure as Error).name).toBe("NoStreamCredit");
-			streams[1].release();
-			await streams[1].aborted;
-			expect(streams[1].written).toEqual([]);
-		}
+		expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
 	} finally {
 		subscriber.close();
 		installed.close();
