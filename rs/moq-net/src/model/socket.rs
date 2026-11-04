@@ -130,37 +130,41 @@ struct Shared {
 }
 
 impl Shared {
-	/// Queue every dial on hand, registering `waiter` for the next, and fail with the
-	/// endpoint's end once it stopped.
-	fn drain(&self, state: &mut State, waiter: &kio::Waiter) -> Result<(), Error> {
+	/// Queue every dial on hand and take the next, registering `waiter` for more, and
+	/// fail with the endpoint's end once it stopped.
+	///
+	/// A dial of this endpoint's reserves its own track, so a request reaching the handler
+	/// under this endpoint's id names a session it never dialed, or one it gave up, such
+	/// as an accept of a dial forged in this endpoint's name: it is reset, which fails
+	/// that accept. Resets go out after the lock is released, since they wake readers.
+	fn poll_dial(&self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
+		let mut resets = Vec::new();
+		let mut state = self.state.lock();
 		while state.end.is_none() {
 			let requests = state.requests.get_or_insert_with(|| self.publication.requests());
 			match requests.poll_requested_track(waiter) {
 				Poll::Pending => break,
-				Poll::Ready(Ok(request)) => self.sort(state, request),
+				Poll::Ready(Ok(request)) => match parse(request.name()) {
+					Some((dialer, _)) if dialer != &*self.id => state.incoming.push_back(request),
+					_ => resets.push(request),
+				},
 				Poll::Ready(Err(err)) => state.end = Some(err),
 			}
 		}
-		match &state.end {
-			Some(err) => Err(err.clone()),
-			None => Ok(()),
+		let next = match &state.end {
+			Some(err) => Poll::Ready(Err(err.clone())),
+			None => match state.incoming.pop_front() {
+				Some(request) => Poll::Ready(Ok(request)),
+				None => Poll::Pending,
+			},
+		};
+		drop(state);
+		for request in resets {
+			// Not the name: a session's name is its secret.
+			tracing::debug!("reset a request for no session");
+			request.reject(Error::NotFound);
 		}
-	}
-
-	/// Queue a peer's dial, or reset a request outside the scheme.
-	///
-	/// A dial of this endpoint's reserves its own track, so a request reaching the handler
-	/// under this endpoint's id names a session it never dialed, or one it gave up: such
-	/// as an accept of a dial forged in this endpoint's name, which this reset fails.
-	fn sort(&self, state: &mut State, request: track::Request) {
-		match parse(request.name()) {
-			Some((dialer, _)) if dialer != &*self.id => state.incoming.push_back(request),
-			_ => {
-				// Not the name: a session's name is its secret.
-				tracing::debug!("reset a request for no session");
-				request.reject(Error::NotFound);
-			}
-		}
+		next
 	}
 
 	/// Poll for the endpoint's end, registering `waiter` for it.
@@ -284,12 +288,7 @@ impl Endpoint {
 	/// keep accepting, and accept or reject each one.
 	pub fn poll_accept(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming, Error>> {
 		let shared = &self.shared;
-		let mut state = shared.state.lock();
-		shared.drain(&mut state, waiter)?;
-		let Some(request) = state.incoming.pop_front() else {
-			return Poll::Pending;
-		};
-		drop(state);
+		let request = ready!(shared.poll_dial(waiter))?;
 		let (peer, session) = parse(request.name()).expect("sorted as a dial");
 		Poll::Ready(Ok(Incoming {
 			shared: shared.clone(),
@@ -504,8 +503,11 @@ impl Dialing {
 		};
 
 		let mut state = shared.state.lock();
-		if let Some(err) = &state.end {
-			return Poll::Ready(Err(err.clone()));
+		if let Some(err) = state.end.clone() {
+			// Aborted outside the lock.
+			drop(state);
+			let _ = producer.abort(err.clone());
+			return Poll::Ready(Err(err));
 		}
 		state.hold(&producer);
 		drop(state);
@@ -559,12 +561,15 @@ impl Accepting {
 		let track = track_name(&self.peer, &self.session);
 		ready!(self.step.poll(waiter, &track))?;
 
-		let mut state = shared.state.lock();
-		if let Some(err) = &state.end {
-			return Poll::Ready(Err(err.clone()));
-		}
+		// Accepted outside the lock, since it wakes the dialer.
 		let request = self.request.take().ok_or(Error::Closed)?;
 		let producer = request.accept(self.info.take());
+		let mut state = shared.state.lock();
+		if let Some(err) = state.end.clone() {
+			drop(state);
+			let _ = producer.abort(err.clone());
+			return Poll::Ready(Err(err));
+		}
 		state.hold(&producer);
 		drop(state);
 		Poll::Ready(Ok(Stream {
