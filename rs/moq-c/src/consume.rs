@@ -841,15 +841,27 @@ impl Consume {
 			.as_ref()
 			.map(|origin| origin.driver.clone())
 			.unwrap_or_default();
-		// Live from this call, which the task reports a failure of like any other.
-		let track = context.broadcast.datagrams(name);
+		let broadcast = context.broadcast.clone();
+		let name = name.to_string();
 
+		// The datagrams ride a datagram track of the track's name. Subscribing to the track
+		// first keeps what a datagram reader always was to its publisher: demand on the track,
+		// and a request a dynamic publisher creates both from. `subscribe` blocks on the
+		// publisher's answer, so run it inside the task.
 		self.datagram_task.spawn(
 			on_datagram,
 			|state| &mut state.consume.datagram_task,
-			|close| async move {
+			|mut close| async move {
 				driver
-					.watch(async move { Self::run_datagrams(on_datagram, track?, close).await })
+					.watch(async move {
+						let Some(track) =
+							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
+						else {
+							return Ok(());
+						};
+						let datagrams = broadcast.datagrams(&name)?;
+						Self::run_datagrams(on_datagram, datagrams, track, close).await
+					})
 					.await
 			},
 		)
@@ -858,6 +870,8 @@ impl Consume {
 	async fn run_datagrams(
 		callback: OnStatus,
 		mut track: moq_net::datagram::Consumer,
+		// Held for its demand only; its groups go unread.
+		_subscriber: moq_net::track::Subscriber,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {

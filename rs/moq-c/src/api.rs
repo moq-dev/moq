@@ -3175,7 +3175,8 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 /// Takes `payload` then `timestamp`, matching [moq_publish_track_frame]. The payload must
 /// be at most 1200 bytes. On success the datagram's sequence number, counted apart from the
 /// track's groups, is written to `out_sequence` when it is non-NULL. A subscriber receives the
-/// datagrams sent after its [moq_consume_datagrams] call. Datagrams are delivered only on
+/// datagrams sent once its [moq_consume_datagrams] subscription is answered, and counts toward
+/// the track's demand. Datagrams are delivered only on
 /// transports and wire versions with a datagram channel; there is no group fallback.
 ///
 /// Returns a zero on success, or a negative code on failure.
@@ -4302,7 +4303,7 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 /// Subscribe to a raw track's best-effort datagrams by name.
 ///
 /// The datagram counterpart to [moq_consume_track], on its own subscription, delivering the
-/// datagrams sent from this call on. `on_datagram`
+/// datagrams sent once the publisher answered it. `on_datagram`
 /// is called with a positive datagram ID for each datagram in arrival order, then exactly
 /// once more with a terminal code: `0` (closed cleanly) or a negative error. After the
 /// terminal (`<= 0`) callback, `on_datagram` is never called again and `user_data` is never

@@ -2137,6 +2137,8 @@ enum SubscribeServe {
 		priority: i8,
 		/// Set once the track's info is known.
 		send: Option<DatagramSend>,
+		/// One past the highest sequence served, which SUBSCRIBE_FINISH declares as the end.
+		end: u64,
 	},
 	/// The track finished: draining the in-flight group streams before the FIN.
 	Drain {
@@ -2378,6 +2380,7 @@ impl Request for SubscribeServe {
 					id,
 					priority,
 					send,
+					end,
 				} => {
 					if send.is_none() {
 						let info = ready!(consumer.poll_info(waiter))?;
@@ -2386,10 +2389,19 @@ impl Request for SubscribeServe {
 					let send = send.as_ref().expect("set above");
 					return match ready!(consumer.poll_recv(waiter))? {
 						Some(datagram) => {
+							*end = (*end).max(datagram.sequence.saturating_add(1));
 							send.send(datagram);
 							Poll::Ready(Ok(ControlFlow::Continue(())))
 						}
-						None => Poll::Ready(Ok(ControlFlow::Break(()))),
+						None => {
+							// A lite-05/06 subscriber reads a FIN as the end only after
+							// SUBSCRIBE_FINISH declared it, as a stream track's does.
+							writer.buffer(&lite::SubscribeResponse::Finish(lite::SubscribeFinish {
+								group: *end,
+								error: None,
+							}))?;
+							Poll::Ready(Ok(ControlFlow::Break(())))
+						}
 					};
 				}
 			}
@@ -2633,6 +2645,7 @@ impl SubscribeServe {
 			id: msg.id,
 			priority,
 			send: None,
+			end: 0,
 		}
 	}
 }

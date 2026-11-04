@@ -819,6 +819,12 @@ impl Publish {
 		self.tracks.get_mut(track).map(|raw| &mut raw.inner.track)
 	}
 
+	/// A raw track's datagram producer, for tests that send a datagram once a reader listens.
+	#[cfg(test)]
+	pub(crate) fn datagram_producer(&self, track: Id) -> Option<moq_net::datagram::Producer> {
+		self.tracks.get(track).map(|raw| raw.inner.datagrams.clone())
+	}
+
 	/// A watch-only handle to a raw track's subscriber demand.
 	pub fn track_demand(&self, track: Id) -> Result<moq_net::track::Demand, Error> {
 		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.track.demand())

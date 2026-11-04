@@ -440,8 +440,9 @@ datagram that doesn't fit isn't delivered.
 Datagram tracks have a namespace apart from stream tracks, so `audio` as
 datagrams and `audio` as streams are two independent tracks. Nothing on the
 wire says which kind a name is: the application knows from its catalog or by
-convention. In Rust, `broadcast.create_datagrams(name, info)` publishes one
-and `broadcast.datagrams(name)` reads it.
+convention, so a broadcast's track listing never includes a datagram track. In
+Rust, `broadcast.create_datagrams(name, info)` publishes one and
+`broadcast.datagrams(name)` reads it.
 
 A datagram subscription is live from when it starts: it has no ranges, order,
 or max delay, only a priority, which a subscriber can change. A datagram still

@@ -559,7 +559,7 @@ The publisher replies with listing events, then FINs the stream once the Broadca
 - [TRACKS_FINISH](#tracks-finish): a listed Track no longer is because it finished.
 - [SYNCED](#synced): every Track this hop listed when the stream opened, and still lists, has been sent.
 
-A Broadcast lists the Tracks its publisher produces.
+A Broadcast lists the Tracks its publisher produces, except datagram Tracks, which are never listed: TRACK_INFO does not say which kind a Track is, so a subscriber could not tell whether to SUBSCRIBE or send DATAGRAMS.
 A Track the publisher serves only on request, such as any name a transcoder answers for, is never listed, and listing never creates one.
 A removal, either TRACKS_REMOVE or TRACKS_FINISH, promises only that the Track is no longer listed; a SUBSCRIBE for its name MAY still succeed.
 TRACKS_FINISH says the Track's publisher declared its end, so its Groups are all the Track will hold; TRACKS_REMOVE says it left unfinished, such as a publisher that went away or a route that was withdrawn, so it may go on elsewhere.

@@ -9,7 +9,7 @@ How to update your code for each breaking change, newest first.
 A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
 
 - `moq_publish_track_datagram` numbers datagrams on their own, apart from groups, and `moq_datagram.sequence` is that number. Don't compare it with group sequences.
-- `moq_consume_datagrams` receives only datagrams sent after the call, and joins at once instead of waiting for a subscription. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
+- `moq_consume_datagrams` receives only the datagrams sent once its subscription is answered. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
 - moq-transport carries no datagrams.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))

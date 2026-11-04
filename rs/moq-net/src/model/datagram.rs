@@ -139,12 +139,22 @@ impl State {
 	}
 
 	fn end(&mut self, end: Result<()>) {
-		if self.end.is_none() {
-			self.end = Some(end);
-			// Nobody reads what is left: an ended track keeps no payloads.
+		if self.end.is_some() {
+			return;
+		}
+		// A finish leaves what is buffered for the consumers already reading; an error
+		// ends the track at once, so nobody reads what is left.
+		if end.is_err() {
 			self.offset += self.buffer.len() as u64;
 			self.buffer.clear();
 		}
+		self.end = Some(end);
+	}
+
+	/// Whether a consumer at `cursor` has a datagram to read: past what was dropped, it reads
+	/// the oldest one still held.
+	fn has_next(&self, cursor: u64) -> bool {
+		!self.buffer.is_empty() && self.offset + (self.buffer.len() as u64) > cursor
 	}
 
 	fn priority(&self) -> Option<i8> {
@@ -478,20 +488,23 @@ impl Consumer {
 		}
 	}
 
-	/// The next datagram, or `None` once the track finished.
+	/// The next datagram, or `None` once the track finished and this consumer read what it
+	/// buffered. An aborted track errors at once.
 	///
 	/// A consumer that fell behind skips the datagrams the track no longer holds.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
 		let cursor = self.cursor;
 		let state = ready!(self.state.poll(waiter, |state| {
-			match state.end.is_some() || state.offset + (state.buffer.len() as u64) > cursor {
+			match state.end.is_some() || state.has_next(cursor) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
 		}));
-		if let Some(end) = &state.end {
-			return Poll::Ready(end.clone().map(|()| None));
+		// Buffered datagrams first: a finished track still delivers them.
+		if !state.has_next(cursor) {
+			let end = state.end.clone().expect("ready only once ended or buffered");
+			return Poll::Ready(end.map(|()| None));
 		}
 		let index = self.cursor.max(state.offset);
 		let datagram = state.buffer[(index - state.offset) as usize].clone();
@@ -637,6 +650,25 @@ mod tests {
 		let mut dropped = producer.consume();
 		drop(producer);
 		assert!(matches!(recv(&mut dropped), Poll::Ready(Err(Error::Dropped))));
+	}
+
+	#[test]
+	fn a_finish_delivers_what_is_buffered() {
+		let mut producer = Info::default().produce("dg");
+		let mut consumer = producer.consume();
+		producer.append(None, "a").unwrap();
+		producer.append(None, "b").unwrap();
+		producer.finish();
+		assert_eq!(sequence(&mut consumer), 0);
+		assert_eq!(sequence(&mut consumer), 1);
+		assert!(matches!(recv(&mut consumer), Poll::Ready(Ok(None))));
+
+		// An abort drops them.
+		let mut producer = Info::default().produce("dg");
+		let mut consumer = producer.consume();
+		producer.append(None, "a").unwrap();
+		producer.abort(Error::Cancel);
+		assert!(matches!(recv(&mut consumer), Poll::Ready(Err(Error::Cancel))));
 	}
 
 	#[test]

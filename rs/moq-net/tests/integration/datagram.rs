@@ -289,6 +289,39 @@ async fn lite05_and_lite06_map_a_datagram_track_onto_a_subscription() {
 	}
 }
 
+/// A lite-05/06 subscriber reads a name as a stream track, as one predating datagram tracks
+/// does, so the datagram fallback ends with SUBSCRIBE_FINISH ahead of its FIN: a FIN alone
+/// is a protocol violation there.
+#[kio::test]
+async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expects() {
+	for version in ["moq-lite-05", "moq-lite-06"] {
+		let chain = Chain::new(&[version]).await;
+		let mut producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+		let remote = chain.remote().await;
+		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
+			.await
+			.expect("subscribe timeout")
+			.unwrap_or_else(|err| panic!("{version}: {err:?}"));
+		// Only the SUBSCRIBE carries an update, so the publisher seeing it serves the
+		// subscription from the datagram track.
+		let subscription = subscriber.subscription().with_priority(5);
+		subscriber.update(subscription).unwrap();
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(5)))
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the subscription never reached the publisher"));
+		producer.append(millis(1), &b"datagram"[..]).unwrap();
+		producer.finish();
+		let end = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
+			.await
+			.expect("end timeout");
+		match end {
+			Ok(None) => {}
+			Ok(Some(group)) => panic!("{version}: a group {}", group.sequence),
+			Err(err) => panic!("{version}: {err:?}"),
+		}
+	}
+}
+
 /// A datagram track can't be asked for over a version or transport without datagrams.
 #[kio::test]
 async fn a_datagram_track_needs_datagrams() {
