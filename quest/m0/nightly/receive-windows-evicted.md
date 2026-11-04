@@ -80,20 +80,24 @@ group, so its in-flight permit never returns, the track's writer stalls,
 and the reader times out. The 4 MiB-frame cell hits this on every run;
 the 256-stream cell intermittently.
 
-Public API: none so far. Wire: none.
+Silent loss, decided 2026-11-04 (maintainer):
+
+- ✅ Fix it at the source. Overcommitted cells wait on the m1 quest
+  `quest/m1/group-drops.md`, planned in
+  [moq-dev/moq#7890](https://github.com/moq-dev/moq/pull/7890). There, the wire always names an abandoned group, and
+  `track::Subscriber`'s drop signal becomes public. Once it lands, each
+  track's reader returns a dropped group's in-flight permit and counts the
+  group as lost, so overcommitted cells finish at the load they offer.
+- Not chosen: a benchmark give-up timeout that declares outstanding
+  groups lost, or publisher-paced sending that returns in-flight credit
+  once a group is sent.
+
+Public API: none. Wire: none.
 
 ## Waiting
 
-- Maintainer: decide how the benchmark accounts for a group the
-  subscriber silently gives up on, so overcommitted cells finish at
-  their offered load. Options are in the PR's `## Decisions needed`.
-  (1) Recommended: moq-net surfaces the loss. `recv_group` hands out a
-  given-up group whose reads fail `Evicted`, or the subscriber counts
-  given-up groups. This is a public behavior change. Production readers
-  then learn of a loss as they already do for an identified evicted
-  group. (2) Benchmark-only: declare a track's outstanding group lost
-  after the subscriber's give-up interval. This is time-based, and the
-  wait inflates elapsed time, deflating throughput. (3) Benchmark-only: release
-  in-flight credit once the publisher finishes sending a group, not once
-  the reader resolves it. This changes the offered-load model. Check
-  this wait by recording the pick here and in the PR.
+- Outside condition: the m1 quest `quest/m1/group-drops.md` (planned in
+  [moq-dev/moq#7890](https://github.com/moq-dev/moq/pull/7890)) finishes,
+  so `track::Subscriber`'s drop signal is public on `main`. Check it this
+  way: #7890 has merged, and that quest file has since been deleted from
+  `main`.
