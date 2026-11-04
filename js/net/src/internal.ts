@@ -16,7 +16,18 @@ import { isAnonymous, type Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import type {
+	Delay,
+	Demand,
+	Groups,
+	Info,
+	InfoInit,
+	Position,
+	Producer,
+	Request,
+	Subscriber,
+	Subscription,
+} from "./track.ts";
 import { max, min } from "./util/sequence.ts";
 import * as Varint from "./varint.ts";
 import type { Window } from "./window.ts";
@@ -495,7 +506,7 @@ export const hooks: {
 	 * Take a request's producer without resolving its subscribers, so content written before
 	 * {@link StagedTrack.commit} is there when the first reader looks; assigned by `track.ts`.
 	 */
-	stageRequest: (request: Request, info: Partial<Info>) => StagedTrack;
+	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */

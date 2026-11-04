@@ -790,15 +790,15 @@ pub struct Import {
 	#[usage(long = "name", hide = true)]
 	name: Option<String>,
 
-	/// How long relays keep a non-latest group of the published media tracks fetchable,
-	/// e.g. "30s" or "5s". Defaults to hang's 30s.
+	/// How long a superseded group of the published media tracks stays fresh, e.g. "30s" or
+	/// "5s". Defaults to 30s.
 	///
-	/// A RETENTION budget, not a delivery one: it never makes a subscriber play further behind
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further behind
 	/// live, it caps how far back a FETCH can still reach (and how long a subscriber may ask to
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
-	/// advertise segments that are still fetchable; lower it when nothing reads history and the
-	/// memory matters. Media tracks only -- the catalog and HLS records are read at the live
-	/// edge, which is retained unconditionally.
+	/// advertise segments that are still fetchable; lower it when nothing reads history. Media
+	/// tracks only -- the catalog and HLS records keep moq-net's zero default, since they are read at the
+	/// live edge, which never goes stale.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,
 
@@ -2551,10 +2551,10 @@ mod tests {
 		assert!(err.to_string().contains("--latency-max -> --delay"), "{}", err);
 	}
 
-	/// A publisher's retention is `--max-age` on `import`; a subscriber's staleness budget is
+	/// A publisher's freshness bound is `--max-age` on `import`; a subscriber's staleness budget is
 	/// `--max-delay` for immediate exports and `--delay` for buffered exports.
 	#[test]
-	fn export_staleness_is_max_delay_and_import_retention_is_max_age() {
+	fn export_staleness_is_max_delay_and_import_freshness_is_max_age() {
 		let export = |args: &[&str]| {
 			let mut argv = vec!["moq", "export", "--broadcast", "b"];
 			argv.extend_from_slice(args);
