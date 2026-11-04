@@ -1,12 +1,12 @@
-publishing smoke-js-web-4811-11087.hang (fake camera, vite) to https://moqt.nokiaresearch.com:4443/moq
+publishing smoke-js-web-4856-6407.hang (fake camera, vite) to https://moqt.nokiaresearch.com:4443/moq
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=2
+[page] announced: broadcast=video active=true
 [page] announced: broadcast=simulcast active=true
 [page] announced: broadcast=demo active=true
-[page] announced: broadcast=video active=true
-[page] publish ok: broadcast=smoke-js-web-4811-11087.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4811-11087.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4811-11087.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4811-11087.hang track=video
-[page] publish ok: broadcast=smoke-js-web-4811-11087.hang track=video
-[page] publish ok: broadcast=smoke-js-web-4811-11087.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4856-6407.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4856-6407.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4856-6407.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4856-6407.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4856-6407.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4856-6407.hang track=video

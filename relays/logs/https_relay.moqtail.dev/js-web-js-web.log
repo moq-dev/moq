@@ -11,8 +11,8 @@
 [page] announced: broadcast=moqtail/ch04 active=true
 [page] announced: broadcast=moqtail/ch05 active=true
 [page] announced: broadcast=moqtail/ch02 active=true
-[page] announced: broadcast=smoke-js-web-4811-13928.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4811-13928.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4811-13928.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4811-13928.hang track=catalog.json
-decoded 0 frames from smoke-js-web-4811-13928.hang (vite)
+[page] announced: broadcast=smoke-js-web-4856-943.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4856-943.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4856-943.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4856-943.hang track=catalog.json
+decoded 0 frames from smoke-js-web-4856-943.hang (vite)

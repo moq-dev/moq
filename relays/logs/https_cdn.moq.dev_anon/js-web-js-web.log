@@ -1,15 +1,16 @@
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
 [page] announce: prefix=
-[page] announced: broadcast=smoke-js-web-4811-6114.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-js-web-4811-6114.hang track=catalog.json
-[page] announced: broadcast=vs-529c3f7f7e7a77d13c0fb25eb9bba7b4 active=true
-[page] subscribe ok: id=0 broadcast=smoke-js-web-4811-6114.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4811-6114.hang {video: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-js-web-4811-6114.hang track=video
-[page] subscribe ok: id=1 broadcast=smoke-js-web-4811-6114.hang track=video
-[page] subscribe update: id=1 broadcast=smoke-js-web-4811-6114.hang track=video
-[page] received catalog hang smoke-js-web-4811-6114.hang {video: Object, clock: Object}
-[page] subscribe update: id=1 broadcast=smoke-js-web-4811-6114.hang track=video
-[page] subscribe update: id=1 broadcast=smoke-js-web-4811-6114.hang track=video
-decoded 4 frames from smoke-js-web-4811-6114.hang (vite)
+[page] announced: broadcast=alluno/comms/8afe57cd-9e40-4f0f-946e-dbca939eb524/3f957309-865b-4ec1-92e7-275d1959fc02/~vku316h8msmd active=true
+[page] announced: broadcast=alluno/host/8afe57cd-9e40-4f0f-946e-dbca939eb524 active=true
+[page] announced: broadcast=alluno/input/8afe57cd-9e40-4f0f-946e-dbca939eb524/3f957309-865b-4ec1-92e7-275d1959fc02 active=true
+[page] announced: broadcast=iori-dev active=true
+[page] announced: broadcast=smoke-js-web-4856-24700.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-js-web-4856-24700.hang track=catalog.json
+[page] subscribe ok: id=0 broadcast=smoke-js-web-4856-24700.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4856-24700.hang {video: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-js-web-4856-24700.hang track=video
+[page] subscribe ok: id=1 broadcast=smoke-js-web-4856-24700.hang track=video
+[page] subscribe update: id=1 broadcast=smoke-js-web-4856-24700.hang track=video
+decoded 3 frames from smoke-js-web-4856-24700.hang (vite)
+[page] subscribe update: id=1 broadcast=smoke-js-web-4856-24700.hang track=video
