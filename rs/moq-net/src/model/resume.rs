@@ -450,6 +450,12 @@ impl Consumer {
 /// copy may fix it. Anything else would repeat on every copy. Mirrors `routeFailed` in
 /// `js/net/src/resume.ts`.
 pub(super) fn route_failed(err: &Error) -> bool {
+	matches!(err, Error::Unroutable | Error::Stream(StreamError::Unroutable)) || retryable(err)
+}
+
+/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
+/// route instead: asking it again can replace the withdrawal's cause with a refusal.
+pub(super) fn retryable(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Transport(_)
@@ -460,14 +466,12 @@ pub(super) fn route_failed(err: &Error) -> bool {
 			| Error::Dropped
 			| Error::Closed
 			| Error::Cancel
-			| Error::Unroutable
 			| Error::Stream(
 				StreamError::Session(_)
 					| StreamError::Internal
 					| StreamError::Cancel
 					| StreamError::GoingAway
 					| StreamError::ControlTimeout
-					| StreamError::Unroutable
 			)
 	)
 }
