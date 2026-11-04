@@ -62,10 +62,6 @@ weighs.
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.
 
-## Required
-
-- [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the adapter's per-operation boxing, which would otherwise dominate the profile
-
 ## Related
 
 - [Relay egress profile](/quest/m2/quic-egress-profile.md) - the transmit side of the same path

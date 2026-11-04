@@ -47,7 +47,3 @@ removal is [native WebTransport](/quest/m1/quic-api/native-web.md), so the
 relay's QUIC profile waits on it.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the QUIC path's per-stream session clone and boxed future, so the profile is retaken after it
