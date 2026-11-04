@@ -161,7 +161,6 @@ per-frame CPU growth since #5926.
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - consumers hold a disabled rendition, and an unmute encodes at once with the mic still open
 - [Buffered audio survives a capture stop and a disable](/quest/m1/audio-across-stop.md) - audio retained by buffered capture is still served, or expires on its own `max_age`, after capture stops or the input is disabled
-- [moq-audio routes sources into several mixes](/quest/m1/audio-mix-router.md) - several mixes with routing, mix-minus, and per-source sync offsets, for the studio's audio mixes
 - [moq-mux presents a broadcast on the publisher's timestamps](/quest/m1/presentation-timeline.md) - `moq play`'s audio-anchored playout timing as a moq-mux API the studio's broadcast sources share
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
@@ -176,7 +175,6 @@ per-frame CPU growth since #5926.
 - [Authored tracks default to a 30 s max-age](/quest/m1/max-age-defaults.md) - raw and media tracks advertise 30 s unless their author chooses otherwise, with explicit unlimited in every binding
 - [HLS export lists a same-codec reconfigure's first group under the new init](/quest/m1/hls-reinit-same-codec.md) - the hand-over pick, whichever of the catalog and the records arrives first, after the catalog `hls` removal is planned
 - [A cancelled MoqTrackDemand wait never loses the next change](/quest/m1/demand-cancel-race.md) - cancelling a `MoqTrackDemand::wanted_changed` call, from any binding, never consumes a demand change
-- [A live keyframe interval change never outruns the declared HLS duration](/quest/m1/js-hls-keyframe-duration.md) - raising a live keyframe interval, even to infinite, never pushes a segment past the declared HLS target duration, and the browser interop cell asserts the catalog `hls` field
 - [One Ed25519 public key type with one z-base-32 codec](/quest/m1/mesh-key-codec.md) - `moq_auth::mesh::EndpointId` is merged into `moq_crypto::sign::PublicKey`
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves

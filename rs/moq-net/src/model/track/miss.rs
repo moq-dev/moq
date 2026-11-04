@@ -263,6 +263,12 @@ impl Misses {
 		self.release(lost);
 	}
 
+	/// Whether no fill can answer this reader and no gap is timed: nothing joined, nothing
+	/// deferred. Its probe then has nothing to resolve.
+	pub fn is_idle(&self) -> bool {
+		self.joins.is_empty() && self.deferred.runs.is_empty()
+	}
+
 	/// Whether a fill still owes this reader a group.
 	pub fn is_waiting(&self) -> bool {
 		!self.wanted.is_empty()
@@ -630,6 +636,10 @@ impl Misses {
 			return asks;
 		}
 		let grace = state.miss_grace();
+		if self.judge_arrivals(state, key, at, view, &mut target, taken, drift, grace, ended) {
+			self.ledger_revision = ledger.revision();
+			return asks;
+		}
 		let unchanged = unchanged && self.grace == Some(grace);
 		let deadline = self.deferred.deadline();
 		if unchanged && deadline.is_none() {
@@ -782,7 +792,7 @@ impl Misses {
 				.register(inbox.clone());
 			inbox
 		});
-		let evicted = inbox.judge(state.cached, low, top);
+		let evicted = inbox.judge(state.cached, inbox_floor(low, taken), top);
 		self.evictions = state.evictions;
 		let mut refills = RangeSet::new();
 		let mut again = RangeSet::new();
@@ -931,6 +941,99 @@ impl Misses {
 			self.give_up(run, given_up);
 		}
 		asks
+	}
+
+	/// Judge what changed when only the feed's newest group moved up, and the reader's floor
+	/// with it, returning whether that was all. Each group arriving live changes nothing else,
+	/// so a reader that takes them as they come judges every one here.
+	///
+	/// With nothing deferred or refused, the arrival ledger's changes touch nothing this
+	/// reader holds, and with no eviction counted, its inbox holds none. A new group the
+	/// arrival walk serves is then neither a hole nor backfill: judged, with nothing to ask.
+	/// Anything else, a group not walked included, is left to [`Self::judge`] whole.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "the judgement's inputs, as Self::judge takes them"
+	)]
+	fn judge_arrivals(
+		&mut self,
+		state: &TrackState,
+		key: (u64, u64, Option<u64>),
+		at: JudgedAt,
+		view: Option<&Layered>,
+		target: &mut impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
+		taken: &Delivered,
+		drift: &Drift,
+		grace: Duration,
+		ended: bool,
+	) -> bool {
+		let Some(previous) = self.at else {
+			return false;
+		};
+		let (Some(judged_to), Some(newest)) = (previous.3, at.3) else {
+			return false;
+		};
+		let only_arrivals = previous.0 <= at.0
+			&& judged_to <= newest
+			&& (previous.1, previous.2, previous.4, previous.5, previous.6) == (at.1, at.2, at.4, at.5, at.6);
+		if !only_arrivals
+			|| !self.deferred.runs.is_empty()
+			|| !self.refused.is_empty()
+			|| self.budget != Some(drift.budget)
+			|| self.grace != Some(grace)
+			|| self.ended != ended
+			|| self.drops_revision != state.drops_changes.revision()
+			|| self.evictions != state.evictions
+			|| self.view.as_ref() != view
+		{
+			return false;
+		}
+		let Some(inbox) = &self.inbox else {
+			return false;
+		};
+		// The reader's floor, as the whole judgement takes it: a resumed copy's live floor
+		// can sit above history the reader still reads.
+		let low = key.0;
+		let top = newest.min(u64::MAX - 1);
+		let first = judged_to.saturating_add(1).max(low);
+		let mut fresh = RangeSet::new();
+		if first <= top {
+			for run in target(first..=top).iter() {
+				for gap in self.judged.gaps(&(*run.start()..*run.end() + 1)) {
+					fresh.insert(gap);
+				}
+			}
+		}
+		let walked = fresh.iter().all(|run| {
+			let mut next = run.start;
+			for (&sequence, slot) in state.lookup.range(run.clone()) {
+				if sequence != next || !slot.is_walked() {
+					return false;
+				}
+				next = sequence + 1;
+			}
+			next == run.end
+		});
+		if !walked {
+			return false;
+		}
+		if low > 0 {
+			for set in [
+				&mut self.judged,
+				&mut self.refused,
+				&mut self.given_up,
+				&mut self.refilled,
+			] {
+				set.remove(0..low);
+			}
+		}
+		let evicted = inbox.judge(state.cached, inbox_floor(low, taken), top);
+		debug_assert!(evicted.is_empty(), "an eviction landed without counting");
+		for run in fresh.iter() {
+			self.judged.insert(run.clone());
+		}
+		self.at = Some(at);
+		true
 	}
 
 	/// Give up what a fill still owes this reader once it is stale under the reader's budget,
@@ -1281,6 +1384,14 @@ impl TrackState {
 }
 
 /// The runs of `run` the cache holds as backfill: servable, but out of the arrival walk.
+/// Where a reader's inbox starts taking evictions: no lower than what it handed out every
+/// group below, since an evicted group it took is never a miss again. A live reader that
+/// reads by arrival never raises its floor, so without this every old group the cache
+/// evicts would land with it and count as an eviction to judge again.
+fn inbox_floor(low: u64, taken: &Delivered) -> u64 {
+	low.max(taken.floor().unwrap_or(u64::MAX))
+}
+
 fn backfill(state: &TrackState, run: ops::Range<u64>) -> RangeSet<u64> {
 	state
 		.lookup
