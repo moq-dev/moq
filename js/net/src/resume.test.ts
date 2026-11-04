@@ -3383,3 +3383,34 @@ test("a resumed reader takes back its stale reports", () => {
 	front.consumer.close();
 	a.close();
 });
+
+// A stale run one route reported is still taken back once another serves: the update reopened it
+// downstream, and the new route's copy knows nothing of it, so the groups it delivers there
+// afterwards are owed rather than kept reported. Mirrors Rust.
+test("a resumed reader takes back a replaced route's stale reports", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Milli(60_000) } });
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	hooks.dropTrackGroups(ta.producer, 1n, 3n, staleHole(60_000));
+	expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 3n, stale: 60_000 });
+
+	front.serve(b.consume());
+	await settle();
+	expect(hooks.tryDrop(sub)).toBeUndefined();
+	// Reopened, though the new route never reported it.
+	expect(hooks.reofferStale(sub)).toEqual([{ start: 1n, end: 3n }]);
+	expect(hooks.reofferStale(sub)).toEqual([]);
+	tb.write(1n);
+	tb.write(2n);
+	expect(drain(sub)).toEqual([1n, 2n]);
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});

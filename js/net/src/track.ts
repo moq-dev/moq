@@ -978,7 +978,7 @@ export class Producer {
 				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
 				return this.#createGroup(sequence, 0);
 			},
-			drop: (start, end, error) => this.#drop(start, end, error),
+			drop: (start, end, error) => this.#drop(start, end, { error }),
 			holds: (sequence) => cachedHolds(this, sequence),
 			closed: () => this.#state.closed.peek() !== undefined,
 			released: this.#state.closed,
@@ -1720,8 +1720,8 @@ export class Producer {
 	 * This and {@link appendGroup} are the only sources of a skip: a gap between created groups
 	 * says nothing, since groups may be created out of order, so only the producer knows a
 	 * sequence will never exist. A skip is final: creating a group at a skipped sequence throws
-	 * {@link Skipped}. A sequence already produced or given up keeps what it is.
-	 * Mirrors the Rust `skip_groups`.
+	 * {@link Skipped}. A sequence already produced or given up for good keeps what it is; a stale
+	 * drop, which new terms may supersede, is replaced. Mirrors the Rust `skip_groups`.
 	 */
 	skipGroups(start: bigint, end: bigint): void {
 		if (this.#state.closed.peek() !== undefined) return;
@@ -1732,10 +1732,12 @@ export class Producer {
 		this.#skipGaps(cached, start, end);
 	}
 
-	// Skip what of `[start, end)` neither `kept` nor a drop already names.
+	// Skip what of `[start, end)` neither `kept` nor a final drop already names. A stale drop is
+	// replaced: new terms would supersede it, leaving the sequence owed, while a skip is final.
 	#skipGaps(kept: readonly Run[], start: bigint, end: bigint): void {
+		const settled = this.#state.drops.peek().filter((run) => run.stale === undefined);
 		for (const gap of runGaps(kept, start, end)) {
-			for (const open of runGaps(this.#state.drops.peek(), gap.start, gap.end)) {
+			for (const open of runGaps(settled, gap.start, gap.end)) {
 				this.#drop(open.start, open.end, skipHole());
 			}
 		}
@@ -1748,8 +1750,8 @@ export class Producer {
 	}
 
 	// Settle an append at `sequence`: skip every sequence below it this track's own publisher
-	// never produced and did not give up, from the lowest it produced since its last append,
-	// since appending says it will not go back. A reason already given stands.
+	// never produced and did not give up for good, from the lowest it produced since its last
+	// append, since appending says it will not go back. A final reason already given stands.
 	#settleAppend(sequence: bigint): void {
 		const from = this.#appended ?? this.#produced[0]?.start;
 		if (from !== undefined) this.#skipGaps(this.#produced, from, sequence);
@@ -2751,7 +2753,7 @@ export class Subscriber {
 			priority: () => this.#state.update.peek()?.priority ?? 0,
 			maxDelay: () => this.#drift().budget,
 			order: () => this.#state.update.peek()?.order ?? "descending",
-			refuse: (start, end, error) => this.#state.drops.update((drops) => insertDrop(drops, start, end, error)),
+			refuse: (start, end, error) => this.#state.drops.update((drops) => insertDrop(drops, start, end, { error })),
 		};
 		return this.#state.asker;
 	}

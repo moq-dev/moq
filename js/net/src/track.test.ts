@@ -4914,7 +4914,8 @@ test("a late local group reaches a reader, since creating out of order skips not
 });
 
 // A skip is final: creating at a sequence an append or skipGroups skipped throws, while a dropped
-// sequence may be created again. skipGroups leaves cached and given-up sequences alone. Mirrors Rust.
+// sequence may be created again. skipGroups leaves cached sequences and final drops alone, and
+// replaces a stale drop, which new terms would otherwise supersede. Mirrors Rust.
 test("creating a skipped sequence throws Skipped", () => {
 	const producer = new TrackProducer("test");
 	producer.accept({});
@@ -4936,7 +4937,9 @@ test("creating a skipped sequence throws Skipped", () => {
 	const reader = other.subscribe({ delay: { max: null } });
 	other.createGroup(1n).finish();
 	hooks.dropTrackGroups(other, 3n, 4n, { error: DROPPED });
+	hooks.dropTrackGroups(other, 4n, 5n, staleHole(1000));
 	other.skipGroups(0n, 5n);
+	hooks.supersedeStale(other, undefined);
 	const drops: unknown[] = [];
 	for (let next = hooks.tryRecvGroup(reader, true); next.kind !== "idle"; next = hooks.tryRecvGroup(reader, true)) {
 		if (next.kind === "drop") drops.push([next.start, next.end, next.skip === true]);

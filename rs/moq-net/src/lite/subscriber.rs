@@ -4144,13 +4144,11 @@ mod tests {
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
 	}
 
-	/// On lite-07 an OLD drop is a stale verdict judged under the budget this subscriber sent
-	/// with the update it names. Any SUBSCRIBE_UPDATE reopens every stale run in the tail,
-	/// whether or not it widens the budget, and an OLD drop naming a superseded update is no
-	/// verdict: still owed, and given up on no reader. Any other drop is final, whatever update
-	/// it names.
-	#[kio::test]
-	async fn an_update_reopens_every_stale_drop_and_supersedes_the_rest() {
+	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under update 0 and the
+	/// max age `budget`, its broadcast, and the tail it accounts on.
+	async fn lite07_serving(
+		budget: Duration,
+	) -> (TrackServe, ServeLoop, kio::Producer<Tail>, crate::broadcast::Producer) {
 		let version = Version::Lite07;
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let subscriber = Subscriber::new(SubscriberConfig {
@@ -4176,7 +4174,6 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
 		let mut serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
-		let budget = Duration::from_millis(500);
 		let tail = kio::Producer::new(Tail::default());
 		serving.sub = Sub::Active(SubStream {
 			order: crate::track::Order::Descending,
@@ -4202,6 +4199,19 @@ mod tests {
 			update: 0,
 			stale: RangeSet::new(),
 		});
+		(serve, serving, tail, broadcast)
+	}
+
+	/// On lite-07 an OLD drop is a stale verdict judged under the budget this subscriber sent
+	/// with the update it names. Any SUBSCRIBE_UPDATE reopens every stale run in the tail,
+	/// whether or not it widens the budget, and an OLD drop naming a superseded update is no
+	/// verdict: still owed, and given up on no reader. Any other drop is final, whatever update
+	/// it names.
+	#[kio::test]
+	async fn an_update_reopens_every_stale_drop_and_supersedes_the_rest() {
+		let version = Version::Lite07;
+		let budget = Duration::from_millis(500);
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
 		let mut reader = serving.serving.subscribe(
 			crate::track::Subscription::default()
 				.with_delay(crate::track::Delay::default().with_max(budget))
@@ -4265,6 +4275,68 @@ mod tests {
 		assert_eq!(
 			reader.poll_drop(&waiter),
 			Poll::Ready((6..7, track::Hole::stale(budget)))
+		);
+	}
+
+	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an
+	/// update reopens only stale verdicts, so the groups stay accounted for, and the skip
+	/// stays final rather than being superseded with the OLD drop. An empty range names
+	/// nothing.
+	#[kio::test]
+	async fn a_skip_or_final_drop_replaces_an_earlier_stale_one() {
+		let version = Version::Lite07;
+		let budget = Duration::from_millis(500);
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
+		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
+			&version,
+			&crate::StreamError::Old,
+		));
+		let old = |start, end| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start,
+				end,
+				error: code,
+				update: 0,
+			})
+		};
+		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
+
+		serving.apply_response(&serve, old(1, 2)).unwrap();
+		serving.apply_response(&serve, old(4, 4)).unwrap();
+		serving
+			.apply_response(&serve, lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 1, end: 2 }))
+			.unwrap();
+		serving
+			.apply_response(
+				&serve,
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(
+					4..=4,
+					&crate::StreamError::App(5),
+					0,
+					version,
+				)),
+			)
+			.unwrap();
+		// Empty ranges.
+		serving.apply_response(&serve, old(6, 5)).unwrap();
+		serving
+			.apply_response(&serve, lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 6, end: 5 }))
+			.unwrap();
+
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			buffer_update(active, &serving.serving, serve.subscriber.runtime.now()).unwrap();
+		}
+		assert!(covers(1..3), "the skip is final");
+		assert!(covers(4..5), "the drop is final");
+		assert!(
+			matches!(
+				serving.serving.create_group(crate::group::Info { sequence: 1 }),
+				Err(Error::Skipped)
+			),
+			"still skipped after the update"
 		);
 	}
 
@@ -9609,6 +9681,10 @@ impl ServeLoop {
 			// one still arriving ends with the drop's error now.
 			lite::SubscribeResponse::Drop(dropped) => {
 				let groups = dropped.start..dropped.end.saturating_add(1);
+				// An empty range (Group Start = Group End + 1) names nothing.
+				if groups.is_empty() {
+					return Ok(());
+				}
 				let error = dropped.error(serve.subscriber.version);
 				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every
 				// other drop is final, whatever update it names.
@@ -9626,17 +9702,27 @@ impl ServeLoop {
 							active.stale.insert(groups.clone());
 							track::Hole::stale(active.max_delay)
 						}
-						false => track::Hole::drop(error),
+						// Final, so no update reopens it, even where it replaces a stale drop.
+						false => {
+							active.stale.remove(groups.clone());
+							track::Hole::drop(error)
+						}
 					};
 					self.serving.give_up(groups, hole);
 				}
 			}
-			// Never produced, so nothing is waited for and no reader ends.
+			// Never produced, so nothing is waited for and no reader ends. A skip is final: it
+			// replaces a stale drop of the same groups, which an update would otherwise reopen.
 			lite::SubscribeResponse::Skip(skipped) => {
 				let groups = skipped.start..skipped.end.saturating_add(1);
+				// An empty range (Group Start = Group End + 1) names nothing.
+				if groups.is_empty() {
+					return Ok(());
+				}
 				if let Ok(mut tail) = active.tail.write() {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
+				active.stale.remove(groups.clone());
 				self.serving.skip_groups(groups);
 			}
 			// OK just resolves the range (the producer already orders

@@ -342,6 +342,11 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
 	#drops: DropRun[] = [];
+	/**
+	 * The stale runs reported since the last {@link reofferStale}, whichever copy gave them up: an
+	 * update reopens each, and the copy that reported it may no longer serve.
+	 */
+	#reportedStale: Run[] = [];
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
 	#groupsRead = false;
 	/** The groups handed out and still read, which other copies may back; see {@link #backs}. */
@@ -608,12 +613,16 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Take back every stale run: those queued here, and those the serving copy reported, which
-	 * its cursor owes again. Only the serving copy's verdicts count, so a replaced copy's are left
-	 * alone. Mirrors the Rust `Reader::reoffer_stale`.
+	 * Take back every stale run: those queued here, those this reader reported, and those the
+	 * serving copy reported, which its cursor owes again. What this reader reported counts
+	 * whichever copy gave it up, since a route change since leaves the serving copy knowing
+	 * nothing of it, though the update reopened it. Only the serving copy is judged again: a
+	 * replaced copy may no longer deliver, so what it gave up is the new route's to deliver or
+	 * give up. Mirrors the Rust `Reader::reoffer_stale`.
 	 */
 	reofferStale(): Run[] {
-		const taken: Run[] = [];
+		const taken = this.#reportedStale;
+		this.#reportedStale = [];
 		for (const run of this.#drops) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
 		this.#drops = this.#drops.filter((run) => run.stale === undefined);
 		const serving = this.#serving();
@@ -789,6 +798,7 @@ class Reader implements ResumeSource {
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);
+					if (run.stale !== undefined) insertRun(this.#reportedStale, open.start, open.end);
 					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 				}
 			}

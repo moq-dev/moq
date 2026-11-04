@@ -97,8 +97,8 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
   sequence will never exist. moq-archive's replay is the in-tree consumer of
   `skip_groups`, for the sequences up to a recorded end it holds nothing
   for; a producer that numbers sparsely would call it too. moq-mux's live
-  encoders use `append_group`. The relay forwards received SKIPs through the
-  crate-internal `give_up`.
+  encoders use `append_group`. The relay records a received SKIP with
+  `skip_groups` (below).
 - ✅ **Both inferences are removed:** the eager skip of the gap in
   `create_group`, and the automatic SKIP at finish for never-arrived
   sequences below the final one (`TrackState::missed` and the publisher's
@@ -107,6 +107,16 @@ decision above and the PR's `## Waiting` item on out-of-order creation:
 - ✅ **SKIP is final:** creating a group (or appending a group or datagram)
   at a skipped sequence is refused with `Error::Skipped` (JS `Skipped`).
   Re-creating a dropped or aborted sequence still works.
+- **A SKIP replaces a stale (OLD) drop, but not a final one** (decided in
+  `/quest-iterate` from review, 2026-11-04). OLD is the only verdict an
+  update reopens: a SKIP that left an earlier OLD in place let the next
+  update supersede it, so a relay waited on or refilled a sequence its
+  upstream had declared never produced. A final DROP already settles every
+  reader and no update reopens it, so the first final verdict stands. The
+  rule lives in the model, so `skip_groups` and `append_group`'s implicit
+  skip follow it too. A received SKIP or final DROP also takes its groups
+  out of the subscriber's stale record, so the next update doesn't owe them
+  again.
 - ✅ **`append_group` is an implicit skip** (refinement, same session): it
   means "the next group", so the producer declares it won't go back, and it
   skips every sequence below it that never arrived and wasn't already given

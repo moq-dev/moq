@@ -30,10 +30,10 @@ import {
 	insertDrop,
 	maxDelayOf,
 	minDelayOf,
+	removeRun,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
-	skipHole,
 	staleHole,
 } from "../internal.ts";
 import type { Lister } from "../listing.ts";
@@ -1882,12 +1882,18 @@ export class Subscriber {
 				entry.tail.account(start, end + 1n);
 				// Judged under the budget this subscriber sent with that update.
 				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
-				if (stale) entry.stale = insertDrop(entry.stale ?? [], start, end + 1n, hole);
+				// A final drop is never reopened, even where it replaces a stale one.
+				entry.stale = stale
+					? insertDrop(entry.stale ?? [], start, end + 1n, hole)
+					: removeRun(entry.stale ?? [], start, end + 1n);
 				hooks.dropTrackGroups(entry.track, start, end + 1n, hole);
 			} else if ("skip" in resp) {
-				// Never produced, so nothing is waited for and no reader ends.
-				entry.tail.account(resp.skip.start, resp.skip.end + 1n);
-				hooks.dropTrackGroups(entry.track, resp.skip.start, resp.skip.end + 1n, skipHole());
+				// Never produced, so nothing is waited for and no reader ends. A skip is final: it
+				// replaces a stale drop of the same groups, which an update would otherwise reopen.
+				const { start, end } = resp.skip;
+				entry.tail.account(start, end + 1n);
+				entry.stale = removeRun(entry.stale ?? [], start, end + 1n);
+				entry.track.skipGroups(start, end + 1n);
 			}
 		}
 	}

@@ -701,7 +701,7 @@ test("fill: a group the track gives up elsewhere answers the fill", async () => 
 
 	// An upstream SUBSCRIBE_DROP, say: the handler is no longer asked for it.
 	const cut = new StreamError(StreamCode.Cancel, { message: "cut upstream" });
-	hooks.dropTrackGroups(track, 2n, 3n, cut);
+	hooks.dropTrackGroups(track, 2n, 3n, { error: cut });
 	expect(fill.wanted()).toBeUndefined();
 	await expect(fetching).rejects.toBe(cut);
 

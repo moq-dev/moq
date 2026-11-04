@@ -1166,12 +1166,27 @@ impl TrackState {
 		self.drops.get(&sequence).is_some_and(|hole| *hole == Hole::Skip)
 	}
 
-	/// Skip what of `groups` is neither cached nor given up; see [`Producer::skip_groups`].
-	fn skip_groups(&mut self, groups: ops::Range<u64>) {
+	/// What of `groups` no final verdict names: a gap, or a stale drop, which new terms may
+	/// supersede and so says nothing for good.
+	fn unsettled(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
 		let mut left = RangeSet::new();
-		for gap in self.drops.gaps(&groups) {
-			left.insert(gap);
+		if groups.is_empty() {
+			return left;
 		}
+		left.insert(groups.clone());
+		for (run, hole) in self.drops.overlapping(&groups) {
+			if hole.stale_budget().is_none() {
+				left.remove(run.clone());
+			}
+		}
+		left
+	}
+
+	/// Skip what of `groups` is neither cached nor given up for good, replacing a stale drop:
+	/// a skip is final, and an update would otherwise supersede that drop and leave the
+	/// sequence owed. See [`Producer::skip_groups`].
+	fn skip_groups(&mut self, groups: ops::Range<u64>) {
+		let mut left = self.unsettled(groups.clone());
 		for (sequence, slot) in self.lookup.range(groups) {
 			if slot.visible
 				&& let Some(end) = sequence.checked_add(1)
@@ -1185,14 +1200,12 @@ impl TrackState {
 	}
 
 	/// Settle an append at `sequence`: skip every sequence below it that this track's own
-	/// publisher never produced and did not give up, from the lowest it produced since its
-	/// last append, since appending says it will not go back. A reason already given stands.
+	/// publisher never produced and did not give up for good, from the lowest it produced
+	/// since its last append, since appending says it will not go back. A final reason
+	/// already given stands.
 	fn appended(&mut self, sequence: u64) {
 		if let Some(from) = self.appended.or(self.produced.iter().next().map(|run| run.start)) {
-			let mut left = RangeSet::new();
-			for gap in self.drops.gaps(&(from..sequence)) {
-				left.insert(gap);
-			}
+			let mut left = self.unsettled(from..sequence);
 			for run in self.produced.iter() {
 				left.remove(run.clone());
 			}
@@ -3872,7 +3885,7 @@ impl Producer {
 	/// groups says nothing, since groups may be created out of order, so only the producer
 	/// knows a sequence will never exist. A skip is final: creating a group at a skipped
 	/// sequence is refused with [`Error::Skipped`]. A sequence already produced or given up
-	/// keeps what it is.
+	/// for good keeps what it is; a stale drop, which new terms may supersede, is replaced.
 	pub fn skip_groups(&self, groups: ops::Range<u64>) {
 		if let Ok(mut state) = self.modify() {
 			state.skip_groups(groups);
@@ -23701,14 +23714,17 @@ mod test {
 		assert_eq!(read.last(), Some(&1));
 	}
 
-	/// `skip_groups` leaves a cached group and a reason already given alone.
+	/// `skip_groups` leaves a cached group and a final reason already given alone, and
+	/// replaces a stale drop, which new terms would otherwise supersede: the skip is final.
 	#[test]
 	#[cfg(feature = "async")]
 	fn skipping_leaves_produced_and_given_up_sequences() {
 		let producer = track_producer("test", Info::timed());
 		write_group(&producer, 1);
 		producer.give_up(3..4, Hole::drop(StreamError::Cancel));
+		producer.give_up(4..5, Hole::stale(Duration::from_secs(1)));
 		producer.skip_groups(0..5);
+		producer.supersede_stale(None);
 		let drops: Vec<_> = producer
 			.state
 			.read()

@@ -1598,7 +1598,7 @@ A stale drop whose `Update` a later update has replaced is no verdict, since the
 The next SUBSCRIBE_UPDATE reopens every stale drop the subscriber accounted for, which it owes again until the publisher serves the group or drops it again under the new `Update`, as described in [SUBSCRIBE_UPDATE](#subscribe-update).
 A relay that received a stale drop settles with it only a reader whose own budget is no wider than the one the relay sent with that update and whose Ranges cover the relay's own, which the verdict was judged against.
 
-A drop with any other Error Code is final, whatever its `Update`.
+A drop with any other Error Code is final, whatever its `Update`, and replaces a stale drop of the same sequences, so no update reopens them.
 
 A Group Stream for a sequence the subscriber already saw dropped, as after such a re-offer, wins over the drop: the subscriber delivers it.
 
@@ -1629,6 +1629,7 @@ SUBSCRIBE_SKIP Message {
 A skip names only sequences the original publisher declared it will never produce, and it is final: no Group will ever exist at those sequences, whatever the terms.
 A publisher MUST NOT later create a Group at a sequence it skipped, and a subscriber MUST NOT deliver a Group Stream for one.
 It carries no error and ends no reader, since there is nothing to read; a subscriber stops waiting for those sequences.
+A skip replaces a stale (OLD) drop of the same sequences, so no update reopens them; a sequence already named in a final drop keeps it.
 
 A gap in the sequence numbers says nothing on its own: a publisher may create Groups out of order, or create again a sequence whose Group it aborted, so it never skips a sequence merely because a higher Group exists or the Track ended without it.
 Only the application producing the Track knows a sequence will never exist, for example when it numbers Groups sparsely, or when it moves on to the next Group and so declares that it will not go back to fill the sequences below.

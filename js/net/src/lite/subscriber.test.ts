@@ -11,6 +11,7 @@ import {
 	reason,
 	SessionCode,
 	SessionError,
+	Skipped,
 	StreamCode,
 	StreamError,
 	TimestampMismatch,
@@ -37,6 +38,7 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
+	SubscribeSkip,
 	SubscribeStart,
 } from "./subscribe.ts";
 import { Minted, SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
@@ -2557,6 +2559,67 @@ test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", asyn
 		expect(track.closed.peek()).toBeUndefined();
 		expect(closes).toEqual([]);
 	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an update
+// reopens only stale verdicts, so the groups stay accounted for, and the skip stays final rather
+// than being superseded with the OLD drop. An empty range names nothing. Mirrors Rust.
+test("a skip or final drop replaces an earlier stale one on lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	let entry: { track: Producer; tail: { covers(start: bigint, end: bigint): boolean } } | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: NonNullable<typeof entry>) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ delay: { max: Milli(500) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		const old = (start: bigint, end: bigint): SubscribeResponse => ({
+			drop: new SubscribeDrop({ start, end, error: StreamCode.Old }),
+		});
+		for (const resp of [
+			{ start: new SubscribeStart([0n]) },
+			old(1n, 2n),
+			old(4n, 4n),
+			{ skip: new SubscribeSkip({ start: 1n, end: 2n }) },
+			{ drop: new SubscribeDrop({ start: 4n, end: 4n, error: StreamCode.NotFound }) },
+			// Empty ranges.
+			old(6n, 5n),
+			{ skip: new SubscribeSkip({ start: 6n, end: 5n }) },
+		] satisfies SubscribeResponse[]) {
+			await encodeSubscribeResponse(writer, resp, version);
+		}
+		for (const chunk of chunks) stream.inbound.enqueue(chunk);
+		await drainReactions();
+		if (!entry) throw new Error("no subscription");
+
+		track.update({ priority: 1, delay: { max: Milli(500) } });
+		await drainReactions();
+		expect(entry.tail.covers(1n, 3n)).toBe(true);
+		expect(entry.tail.covers(4n, 5n)).toBe(true);
+		// Still skipped after the update.
+		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
+	} finally {
+		responses.mockRestore();
 		track.close();
 		broadcast.close();
 		subscriber.close();
