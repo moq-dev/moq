@@ -373,13 +373,7 @@ impl Allocator {
 	/// Claim up to `max` of `estimate`, active whenever `demand` is, or always without one.
 	///
 	/// Errors without claiming when the ceilings would sum above the registry's limit.
-	fn claim(
-		&self,
-		estimate: Consumer,
-		demand: Option<track::Demand>,
-		priority: i8,
-		max: Rate,
-	) -> Result<Reservation> {
+	fn claim(&self, estimate: Consumer, demand: Option<track::Demand>, priority: i8, max: Rate) -> Result<Reservation> {
 		let (id, grants) = {
 			// Nothing ever closes this channel: the allocator holds the only producer
 			// and never aborts it, so it's open for as long as `self` is.

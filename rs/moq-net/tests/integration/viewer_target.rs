@@ -96,7 +96,10 @@ async fn a_local_override_leaves_the_peers_target() {
 
 		let viewer = pair.client.viewers().watch(mbps(2)).unwrap();
 		probes_to(&pair.server_transport, mbps(2)).await;
-		assert!(!reserved.consume().probed(), "{version}: nothing probes for the reservation");
+		assert!(
+			!reserved.consume().probed(),
+			"{version}: nothing probes for the reservation"
+		);
 		drop(viewer);
 		probes_to(&pair.server_transport, Rate::ZERO).await;
 	}

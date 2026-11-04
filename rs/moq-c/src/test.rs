@@ -7077,7 +7077,10 @@ fn viewers_split_the_receive_estimate() {
 	let max = moq_net::bandwidth::Viewers::MAX_TARGET.as_bps();
 	assert_eq!(moq_viewers_watch(viewers, max), crate::MOQ_ERROR_OUT_OF_RANGE);
 	assert_eq!(moq_viewer_update(second, max), crate::MOQ_ERROR_OUT_OF_RANGE);
-	assert_eq!(moq_viewers_set_target(viewers, max + 1, true), crate::MOQ_ERROR_OUT_OF_RANGE);
+	assert_eq!(
+		moq_viewers_set_target(viewers, max + 1, true),
+		crate::MOQ_ERROR_OUT_OF_RANGE
+	);
 	assert_eq!(viewer_rate(first), Some(1_500_000));
 
 	assert_eq!(moq_viewer_close(second), 0);
