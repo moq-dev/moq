@@ -46,6 +46,54 @@ async function settle() {
 	await yieldNow();
 }
 
+for (const via of ["direct", "request", "follow"] as const) {
+	test.each([new Error("publisher aborted"), new StreamError(StreamCode.FrameTooLarge)])(
+		`a ${via} group's pending frame read receives its track's abort: %s`,
+		async (cause) => {
+			const origin = new Producer();
+			const path = Path.from("live");
+			const broadcast = publish(origin, path);
+			const track = broadcast.createTrack("video", { maxAge: null });
+			const request = via === "direct" ? undefined : origin.consume()[via](path);
+			await settle();
+			const consumed = request ? request.active.peek() : broadcast.consume();
+			if (!consumed) throw new Error("expected a broadcast");
+			const sub = consumed.track("video").subscribe();
+			const history = track.createGroup(0n);
+			history.writeFrame({ payload: new Uint8Array([1]) });
+			history.finish();
+			const finished = await sub.recvGroup();
+			const live = track.createGroup(1n);
+			live.writeFrame({ payload: new Uint8Array([2]) });
+			const group = await sub.recvGroup();
+			if (!finished || !group) throw new Error("expected both groups");
+			try {
+				expect((await group.readFrame())?.payload).toEqual(new Uint8Array([2]));
+				let outcome: unknown = "pending";
+				const read = group.readFrame().then(
+					(frame) => (outcome = frame),
+					(error) => (outcome = error),
+				);
+				await settle();
+				expect(outcome).toBe("pending");
+				track.abort(cause);
+				await settle();
+				expect(outcome).toBe(cause);
+				await read;
+				expect((await finished.readFrame())?.payload).toEqual(new Uint8Array([1]));
+				expect(await finished.readFrame()).toBeUndefined();
+				await expect(sub.finished()).rejects.toBe(cause);
+				await expect(sub.recvGroup()).rejects.toBe(cause);
+			} finally {
+				sub.close();
+				request?.close();
+				if (!request) consumed.close();
+				origin.close();
+			}
+		},
+	);
+}
+
 /**
  * The table's route for `path` as a handle of the caller's own, or undefined when nothing
  * routes it.
