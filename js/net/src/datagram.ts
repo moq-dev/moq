@@ -82,7 +82,9 @@ async function info(state: State, local?: GetPromise<Error | null>): Promise<Inf
 		if (left !== undefined) throw left ?? new StreamError(StreamCode.Cancel);
 		const closed = state.closed.peek();
 		if (closed !== undefined) throw closed ?? new Error("datagram track closed before its info");
-		await (local !== undefined ? Signal.race(state.info, state.closed, local) : Signal.race(state.info, state.closed));
+		await (local !== undefined
+			? Signal.race(state.info, state.closed, local)
+			: Signal.race(state.info, state.closed));
 	}
 }
 
