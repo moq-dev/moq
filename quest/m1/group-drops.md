@@ -72,4 +72,4 @@ Wire: possibly lite-07 (SUBSCRIBE_DROP for a stopped group), decided here.
 ## Related
 
 - [Drop set](/quest/m1/drop-set.md) - owns the per-cursor drop runs this reports
-- [The receive-windows benchmark](/quest/m0/nightly/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)
+- [The receive-windows benchmark](/quest/m1/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)

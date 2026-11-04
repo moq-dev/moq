@@ -17,8 +17,15 @@ alongside throughput and latency, instead of failing.
 
 ## Plan
 
-Decided 2026-11-03 (maintainer): m0, as a child of
-[Nightly passes on main](/quest/m0/nightly/README.md).
+Moved to m1 2026-11-04 with the maintainer, after
+[moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) landed the
+fitting cells: what remains waits on
+[group-drops](/quest/m1/group-drops.md), an m1 quest, and with the
+overcommitted cells skipped the benchmark no longer fails Nightly, so this
+no longer holds the m0
+[Nightly passes on main](/quest/m0/nightly/README.md) epic open. It replaces
+the 2026-11-03 decision (maintainer) that placed it in m0 as that epic's
+child.
 
 Overload policy, decided 2026-11-04 (maintainer):
 
@@ -90,10 +97,6 @@ connection-wide admission semaphore are recorded in
 
 Public API: none. Wire: none.
 
-## Waiting
+## Required
 
-- Outside condition: `quest/m1/group-drops.md`, planned in
-  [moq-dev/moq#7890](https://github.com/moq-dev/moq/pull/7890), finishes,
-  making `track::Subscriber`'s drop signal public on `main`. Check that
-  [moq-dev/moq#7890](https://github.com/moq-dev/moq/pull/7890) has
-  merged and that the quest file has since been deleted from `main`.
+- [A group a subscriber gives up on is always reported](/quest/m1/group-drops.md) - the public drop signal the reader needs to return a dropped group's permit
