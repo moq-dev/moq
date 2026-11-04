@@ -26,10 +26,8 @@ choice of a batched gate:
 - ✅ `merge_group` builds run on the self-hosted runner on nixos (warm caches,
   no GitHub minutes), with build concurrency 1. Try 2 only with measured data.
 - ✅ Host-gate work is frozen apart from what this switch needs.
-- The watcher (re-enqueue at the back of the queue, unlimited attempts while
-  each fix makes progress, flaky re-enqueues, fixing a pick GitHub refuses to
-  enqueue) is planned in moq-dev/quest's m0 queue-watcher epic; moq waits on
-  it before the cutover.
+- The watcher and fixer are implemented in moq-dev/quest. Historical
+  cutover evidence and the remaining verification are below.
 - Superseded designs are in git history: the 2026-10-26 three-phase
   `land.yml` and the 2026-10-30 host daemon (`quest land serve`).
 
@@ -64,28 +62,104 @@ Baselines:
 
 - The host gate, measured 2026-11-01: about 4-6 merged PRs per hour at a 23%
   per-PR failure rate, with batches shrinking to one PR and 10-17 minute
-  checks (moq-dev/quest#376's measurements).
+  checks ([moq-dev/quest#376](https://github.com/moq-dev/quest/pull/376)).
 
-Remaining:
+Cutover recheck, 2026-11-03 (read-only):
 
-- **Ruleset.** `main` requires the `Queue` context, which
-  `.github/workflows/queue.yml` reports from its `merge_group` build on
-  `[self-hosted, moq-queue]` (skipped on pull requests, so a PR can enter
-  the queue), and the merge queue (squash, build concurrency 1, merge limit
-  1). It drops the unreported `quest land` requirement and keeps only the
-  administrator bypass.
-- **Host.** At the cutover the host's moq daemon switches from
-  `quest land serve` to the watcher
-  (`services.quest-land.repositories.moq.watch = true` in kixelated/nixos,
-  same user and state), and the fixer keeps serving moq.
-- **Open PRs.** A PR opened before `queue.yml` reports `Queue` only after
-  its next push, reopen, or edit; until then GitHub refuses to enqueue it,
-  and `quest merge --land` says so.
-- Open since 2026-10-29: `APP_CLIENT_ID` and `APP_PRIVATE_KEY` are moq-dev
-  organization secrets visible to this repository, so any workflow on a
-  pushed branch can read the moq-bot key. The maintainer deletes the
-  organization copies; `bot` and `publish` already hold the key.
-- **Live evidence.** After the cutover, measure a busy day's merged PRs per
-  hour and enqueue-to-merged latency against both baselines.
+- **Ruleset verified.** REST `GET /repos/moq-dev/moq/rulesets/2420853`
+  reports active enforcement, only `Queue` required (GitHub Actions
+  integration 15368), and a `SQUASH` merge queue with
+  `max_entries_to_build=1` and `max_entries_to_merge=1`. Only the
+  administrator role bypass remains; `quest land` is no longer required.
+  [Live ruleset](https://github.com/moq-dev/moq/rules/2420853).
+- **Runner and watcher evidence.** The repository runner metadata reports
+  `nixos-moq-ci` online with `self-hosted` and `moq-queue` labels. The
+  [first successful Queue job](https://github.com/moq-dev/moq/actions/runs/41404569287)
+  ran there on 2026-11-02, 07:10-07:19 UTC. The host source at
+  [kixelated/nixos@a788bea](https://github.com/kixelated/nixos/blob/a788bea07f456d55cd3bbd8bfd60145fdac5256d/hosts/nixos/default.nix#L35)
+  enables moq's watcher; its module selects `watch` instead of `serve`,
+  retaining the user, state and fixer. Historical activity confirms more
+  than configuration intent: the watcher
+  [published a fixed head and armed auto-merge](https://github.com/moq-dev/moq/pull/7222#issuecomment-6590060984),
+  and [resolved a conflict and armed auto-merge](https://github.com/moq-dev/moq/pull/7501#issuecomment-6597514578)
+  at 2026-11-03 07:01 UTC; the latter PR merged at 07:57:56 UTC.
+- **Fixer permissions.** A
+  [historical workflow re-enqueue refusal](https://github.com/moq-dev/moq/pull/7431#issuecomment-6594966849)
+  at 2026-11-03 03:49 UTC must not be mistaken for a current installation
+  permission check. Organization installation metadata now lists moq-bot's
+  `workflows`, `contents` and `merge_queues` permissions as `write`. The
+  deployed watcher mints installation tokens from that App (1039466), so
+  workflow-touching fixes and re-enqueues have the scope they need.
+- **Organization secrets verified absent.** Paginated
+  `GET /orgs/moq-dev/actions/secrets?per_page=100` returned one page,
+  `total_count=1`, and one name, neither `APP_CLIENT_ID` nor
+  `APP_PRIVATE_KEY`; page 1 had no next link and an explicit page 2 was
+  empty with the same total. The organization-copy removal condition is
+  satisfied at this observation; no secret values were read. Repository
+  copies are also absent (18 repository names, no next page); `bot` and
+  `publish` each list both names. Other CI credentials remain tracked by
+  [read-only CI](/quest/m0/ci/read-only-secrets.md).
+- **Open PRs.** `queue.yml` now also offers a dispatch that reports the
+  skipped `Queue` context on an old PR head. A pre-workflow PR can still
+  need that report; see its workflow comments. No PR was enqueued and no
+  workflow dispatched for this recheck.
+
+Host check, 2026-11-03 about 23:14 UTC (read-only SSH to `nixos`, no secret
+values read):
+
+- ✅ Recorded as verified (maintainer, 2026-11-03): the deployed watcher
+  matches the configuration above, and no moq `serve` gate remains.
+- `quest-land-moq.service` ("moq-dev/moq merge queue watcher") is active.
+  Its main process started 2026-11-02 06:48:41 PST, and
+  `NeedDaemonReload=no`, so it runs the deployed unit file. The system
+  generation is `nixos-system-nixos-26.11.20261014.55bfb4d`, switched
+  2026-11-03 09:54 PST.
+- It runs `quest land watch --app-id 1039466 --fixer <quest-land-moq-fixer>`
+  from quest 0.1.0 under bun, as user `quest-land-moq`, with the App key
+  passed by `LoadCredential=github-app-key:...`.
+- Retained state is in `/var/lib/quest-land-moq` (mode 0700): `checkout/`
+  and the live `moq-dev-moq/`.
+- `quest-land-fixer.socket` is listening, and an ephemeral
+  `quest-land-fixer@` container was running during the check.
+- The only remaining host gate unit is `quest-land-moq-pro.service`, for
+  moq.pro. moq-dev/moq has only the watcher. Watchers for quest, rind and
+  rust2 are also active.
+- Housekeeping, not a separate quest: the state directory still holds
+  `codex-repro-*` and `fixer-verified-*` directories left from 2026-10-30,
+  which can be deleted.
+
+Completed busy-day measurement: **2026-11-02 08:00 UTC to 2026-11-03 08:00
+UTC**, a full 24-hour window following the first successful merge-group build.
+
+| Measure | Completed day | Earlier baseline |
+| --- | --- | --- |
+| Merged PRs / hour | 139 / 24 = **5.79** | Queue: 5.5 overall; host: about 4-6 |
+| Final enqueue to merge, median | **46.6 min** | Queue: 87 min |
+| Final enqueue to merge, p90 | **84.2 min** | Queue: 162 min |
+
+Method: paginate REST search for `repo:moq-dev/moq is:pr is:merged base:main
+merged:2026-11-02..2026-11-03` (188 results at this recheck, no incomplete
+results), then
+paginate every result's `GET /repos/moq-dev/moq/issues/{number}/timeline`.
+Select merges in the half-open 24-hour window above, and subtract each
+PR's last `added_to_merge_queue` before its `merged` event. All 139 have an
+enqueue event; use the median and nearest-rank p90. Examples at the window's
+ends are [moq-dev/moq#7457](https://github.com/moq-dev/moq/pull/7457) and
+[moq-dev/moq#7501](https://github.com/moq-dev/moq/pull/7501).
+
+Final-enqueue latency excludes earlier failed attempts, fixer time before
+re-enqueue, and PRs that never merged, as in the queue baseline. No host
+latency baseline was recorded.
+
+Performance acceptance (maintainer, 2026-11-03):
+
+- ✅ Keep performance verification open; 5.79 PRs/hour for this day does
+  not by itself meet the goal.
+- Accept this day as meeting the approximate host range of 4-6 PRs/hour.
+
+Remaining work: reconstruct complete queue occupancy, including removed and
+unmerged PRs, and compare the median merges in never-empty hours with the
+queue baseline's 6.0. A 24-hour rate is not that statistic. Keep
+concurrency 1 while gathering this evidence.
 
 Public API: none. Wire: none.

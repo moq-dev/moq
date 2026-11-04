@@ -2,7 +2,7 @@ import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.t
 import { decodePayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
 import { concat, encodeVarint, Writer } from "../stream.ts";
-import { type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -41,10 +41,10 @@ export function encodeObjectExtensions(
 	// The units come from the track's TIMESCALE property, not from here: repeating the
 	// timescale on every object would cost bytes per frame to restate something fixed for
 	// the track's lifetime. The timestamp is converted into the track's units so the value
-	// on the wire matches what the track declared. The shared conversion is exact at the same
-	// scale, and refused before anything is written when the result leaves the range a
-	// Timestamp, and so the receiver, can hold.
-	const value = Math.round(timestamp.as(timescale));
+	// on the wire matches what the track declared, rounded down exactly as Rust does, and
+	// refused before anything is written when the result leaves the range a Timestamp, and so
+	// the receiver, can hold.
+	const value = floorAt(timestamp, timescale);
 	// The only property, so its type's delta from the previous one is from zero.
 	return concat([encodeVarint(PROP_TIMESTAMP, version), encodeVarint(value, version)]);
 }

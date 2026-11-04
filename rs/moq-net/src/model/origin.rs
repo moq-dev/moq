@@ -562,7 +562,7 @@ impl Route {
 	/// The highest epoch wins over every older one of the instance, cheaper or not.
 	///
 	/// Do not start a named instance with `~`: that marks one a relay minted
-	/// ([`Instance::is_minted`]), which moq-sign refuses to bind and a catalog's instance
+	/// ([`Instance::is_minted`]), which moq-crypto's signing refuses to bind and a catalog's instance
 	/// check skips. The mark is not refused, since a relay forwarding a route keeps the
 	/// instance it received.
 	pub fn with_instance(mut self, instance: Instance, epoch: u64) -> Self {
@@ -13050,7 +13050,7 @@ mod tests {
 	/// The publisher finishes a track, then its broadcast. A subscription already in
 	/// flight must conclude normally: the track's last group, then the end. moq-lite,
 	/// ANNOUNCE_END: "Retraction does not disturb subscriptions already in flight,
-	/// which conclude normally with SUBSCRIBE_END."
+	/// which conclude normally with SUBSCRIBE_FINISH."
 	///
 	/// The runtime is single-threaded and the publisher's whole ending has no await in
 	/// it, so the outcome does not depend on timing.
@@ -13096,7 +13096,7 @@ mod tests {
 	/// last group and end are still on their way. The subscription already in flight
 	/// must still conclude normally. moq-lite, ANNOUNCE_END: "Retraction does not
 	/// disturb subscriptions already in flight, which conclude normally with
-	/// SUBSCRIBE_END."
+	/// SUBSCRIBE_FINISH."
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_retracted_route_concludes_in_flight_subscriptions() {

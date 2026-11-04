@@ -631,7 +631,7 @@ pub(super) fn poll_read(
 	let poll = chunks
 		.poll_next(waiter, usize::MAX)
 		.map(|r| r.map(|chunk| chunk.map(|c| c.bytes)));
-	let _ = chunks.finalize();
+	chunks.finalize();
 	poll
 }
 

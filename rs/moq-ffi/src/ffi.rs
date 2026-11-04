@@ -1,7 +1,8 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Poll, ready};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker, ready};
 
 use crate::error::MoqError;
 
@@ -19,6 +20,8 @@ static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 /// The worker runtime and the owner thread that joins it on shutdown.
 pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
+	/// Work submitted by local handles, closed and drained with the root.
+	pending: kio::Shared<Option<Vec<Child>>>,
 	/// The clock a test drives, when the runtime started with one.
 	#[cfg(feature = "testing")]
 	clock: Option<kio::clock::Installed>,
@@ -97,13 +100,33 @@ impl Runtime {
 		#[cfg(feature = "testing")]
 		let clock = test_clock.then(|| kio::clock::Manual::new().install(&handle));
 		let (stop, stopped) = tokio::sync::oneshot::channel();
+		let pending = kio::Shared::new(Some(Vec::new()));
+		let mut root = Root {
+			pending: pending.clone(),
+			children: kio::Tasks::new(),
+		};
+		// The only FFI background task: each operation is a child polled by this owner.
+		let driver = runtime.spawn(async move {
+			if moq_tokio::panic::isolate(kio::wait(move |waiter| root.poll(waiter)))
+				.await
+				.is_none()
+			{
+				// Individual children contain their failures. Losing the owner itself would
+				// leave every handle looking healthy while no background work progresses.
+				std::process::abort();
+			}
+		});
 
 		let join = std::thread::Builder::new()
 			.name("moq-ffi".into())
 			.spawn(move || {
 				// `Err` when the sender is dropped, which the shutdown never does; either way the
 				// runtime is torn down here, joining the threads that ran its tasks.
-				let _ = runtime.block_on(stopped);
+				runtime.block_on(async move {
+					let _ = stopped.await;
+					driver.abort();
+					let _ = driver.await;
+				});
 				// Join every worker and blocking task before the host can unload callbacks.
 				drop(runtime);
 			})
@@ -111,6 +134,7 @@ impl Runtime {
 
 		Runtime {
 			handle,
+			pending,
 			#[cfg(feature = "testing")]
 			clock,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
@@ -190,6 +214,230 @@ pub(crate) fn enter() -> tokio::runtime::EnterGuard<'static> {
 	runtime().enter()
 }
 
+type ChildFuture = Pin<Box<dyn Future<Output = moq_tokio::Result<()>> + Send>>;
+
+/// One background operation, with panic isolation shared by every kind of child.
+struct Child {
+	future: Option<ChildFuture>,
+	result: kio::Producer<Option<moq_tokio::Result<()>>>,
+}
+
+impl Child {
+	/// Teardown may call user code too. One child's destructor must not stop its siblings.
+	fn release(&mut self) -> moq_tokio::Result<()> {
+		let future = self.future.take();
+		std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future))).map_err(|payload| {
+			tracing::error!(
+				panic = moq_tokio::panic::message(payload.as_ref()),
+				"owned task teardown panicked"
+			);
+			moq_tokio::Error::Panic
+		})
+	}
+
+	fn complete(&self, completed: moq_tokio::Result<()>) {
+		*self
+			.result
+			.write()
+			.unwrap_or_else(|_| unreachable!("only the child closes its completion")) = Some(completed);
+	}
+}
+
+impl kio::Task for Child {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let completed = {
+			// Isolate polling without consuming the stored future; release it separately
+			// so a destructor panic cannot escape the child.
+			let mut isolated = std::pin::pin!(moq_tokio::panic::isolate(
+				self.future.as_mut().expect("polled before completion").as_mut()
+			));
+			ready!(waiter.poll_future(isolated.as_mut())).unwrap_or(Err(moq_tokio::Error::Panic))
+		};
+		// The remaining captures may wake readers when dropped. Publish the failure before
+		// releasing them; drivers also protect captures from the async state's unwind.
+		if matches!(&completed, Err(moq_tokio::Error::Panic)) {
+			self.complete(completed.clone());
+		}
+		let released = self.release();
+		self.complete(released.and(completed));
+		Poll::Ready(())
+	}
+}
+
+impl Drop for Child {
+	fn drop(&mut self) {
+		if let Err(err) = self.release() {
+			self.complete(Err(err));
+		}
+	}
+}
+
+/// Owns every background child, including operations whose host discarded its completion.
+struct Root {
+	pending: kio::Shared<Option<Vec<Child>>>,
+	children: kio::Tasks<Child>,
+}
+
+impl Root {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let _root = InRoot::enter();
+		waiter.batch(|| {
+			if let Poll::Ready(mut pending) = self.pending.poll(waiter, |pending| {
+				if pending.as_ref().is_some_and(|pending| !pending.is_empty()) {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			}) {
+				let incoming = std::mem::take(pending.as_mut().expect("open until root drops"));
+				drop(pending);
+				for child in incoming {
+					self.children.push(child);
+				}
+				// Re-arm the inbox next turn, including work submitted by a child's poll.
+				waiter.waker().wake_by_ref();
+			}
+			let _ = self.children.poll(waiter);
+			// An empty set is idle, not finished: later local handles can submit more work.
+			Poll::Pending
+		})
+	}
+}
+
+impl Drop for Root {
+	fn drop(&mut self) {
+		// Refuse submissions atomically with taking the last batch, then drop outside the
+		// lock: cleanup can itself submit work. Each Child contains its teardown panic.
+		let _root = InRoot::enter();
+		let pending = self.pending.lock().take();
+		drop(pending);
+		// Here rather than after this returns, so their teardown wakes still see the root.
+		drop(std::mem::take(&mut self.children));
+	}
+}
+
+thread_local! {
+	/// Set while this thread polls or releases the root's children.
+	static ROOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks this thread as inside the root until dropped.
+struct InRoot(bool);
+
+impl InRoot {
+	fn enter() -> Self {
+		Self(ROOT.replace(true))
+	}
+}
+
+impl Drop for InRoot {
+	fn drop(&mut self) {
+		ROOT.set(self.0);
+	}
+}
+
+/// A host call's waker, which keeps the host's continuation out of the root.
+///
+/// UniFFI resumes the foreign continuation on the waking thread, and a binding may run it there
+/// to its next suspension, host code included (Kotlin's `Dispatchers.Unconfined` does). Woken
+/// inside the root's poll, that would hold every background child until the host returns, so
+/// the wake moves to the runtime's blocking pool instead: a thread per continuation in flight,
+/// owning no state and polling nothing but the host's waker. Woken anywhere else, it wakes the
+/// host directly, as before.
+struct Dispatch {
+	host: Waker,
+	/// A dispatched wake not delivered yet, so repeated wakes before it lands send one.
+	queued: AtomicBool,
+}
+
+impl std::task::Wake for Dispatch {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		if !ROOT.get() {
+			self.host.wake_by_ref();
+			return;
+		}
+		if self.queued.swap(true, Ordering::AcqRel) {
+			return;
+		}
+		let deferred = Deferred(self.clone());
+		match tokio::runtime::Handle::try_current() {
+			// A runtime already shutting down drops the closure unrun, which still delivers it.
+			Ok(handle) => drop(handle.spawn_blocking(move || drop(deferred))),
+			Err(_) => drop(deferred),
+		}
+	}
+}
+
+/// Delivers a dispatched wake when dropped, whether the blocking pool ran it or refused it.
+struct Deferred(Arc<Dispatch>);
+
+impl Drop for Deferred {
+	fn drop(&mut self) {
+		// Before waking, so a wake raised while the host polls dispatches again.
+		self.0.queued.store(false, Ordering::Release);
+		self.0.host.wake_by_ref();
+	}
+}
+
+/// Poll a host call with a [`Dispatch`] waker, so the root cannot run its continuation.
+///
+/// Every primitive a binding call parks in goes through this: [`run`], [`Polled::wait`], and
+/// [`Background::finished`] and [`Background::watch`]. Nesting is harmless: every wake chain
+/// ends at the outermost host waker, and any one dispatch moves it off the root.
+pub(crate) async fn host<F: Future>(future: F) -> F::Output {
+	let mut future = std::pin::pin!(future);
+	// Reused while the host keeps its waker, which UniFFI's call future does.
+	let mut dispatch: Option<(Arc<Dispatch>, Waker)> = None;
+	std::future::poll_fn(|cx| {
+		// Polled by the root itself, the waker is the root's own, not a host's.
+		if ROOT.get() {
+			return future.as_mut().poll(cx);
+		}
+		if !dispatch
+			.as_ref()
+			.is_some_and(|(current, _)| current.host.will_wake(cx.waker()))
+		{
+			let current = Arc::new(Dispatch {
+				host: cx.waker().clone(),
+				queued: AtomicBool::new(false),
+			});
+			dispatch = Some((current.clone(), Waker::from(current)));
+		}
+		let (_, waker) = dispatch.as_ref().expect("set above");
+		future.as_mut().poll(&mut Context::from_waker(waker))
+	})
+	.await
+}
+
+impl Runtime {
+	fn background(&self, future: impl Future<Output = moq_tokio::Result<()>> + Send + 'static) -> Background {
+		let result = kio::Producer::new(None);
+		self.submit(Child {
+			future: Some(Box::pin(future)),
+			result,
+		})
+	}
+
+	fn submit(&self, child: Child) -> Background {
+		let receiver = child.result.consume();
+		let mut pending = self.pending.lock();
+		if let Some(pending) = pending.as_mut() {
+			pending.push(child);
+		} else {
+			// Shutdown joined the root. A late handle must release its work immediately.
+			drop(pending);
+			drop(child);
+		}
+		Background { result: Some(receiver) }
+	}
+}
+
 /// Completion of an owned operation, retained by the object's host calls.
 #[derive(Clone, Default)]
 pub(crate) struct Background {
@@ -198,53 +446,38 @@ pub(crate) struct Background {
 
 impl Background {
 	pub fn new(future: impl Future<Output = moq_tokio::Result<()>> + Send + 'static) -> Self {
-		let result = kio::Producer::new(None);
-		let receiver = result.consume();
-		runtime().spawn(async move {
-			let completed = moq_tokio::panic::isolate(future)
-				.await
-				.unwrap_or(Err(moq_tokio::Error::Panic));
-			*result
-				.write()
-				.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed);
-		});
-		Self { result: Some(receiver) }
+		runtime().background(future)
 	}
 
 	pub fn driver(mut driver: impl moq_net::time::Driver + Send + 'static) -> Self {
 		let result = kio::Producer::new(None);
-		let receiver = result.consume();
-		runtime().spawn(async move {
-			// Keep channel teardown outside the unwind and after panic publication.
-			let completed = moq_tokio::panic::isolate(async {
-				match moq_net::time::run(Borrowed(&mut driver)).await {
-					moq_net::Error::Closed => Ok(()),
-					error => Err(error.into()),
+		let failed = result.clone();
+		runtime().submit(Child {
+			result,
+			future: Some(Box::pin(async move {
+				// Keep the driver outside the unwinding future: its teardown wakes the host.
+				let completed = moq_tokio::panic::isolate(async {
+					match moq_net::time::run(Borrowed(&mut driver)).await {
+						moq_net::Error::Closed => Ok(()),
+						error => Err(error.into()),
+					}
+				})
+				.await
+				.unwrap_or(Err(moq_tokio::Error::Panic));
+				if matches!(&completed, Err(moq_tokio::Error::Panic)) {
+					*failed
+						.write()
+						.unwrap_or_else(|_| unreachable!("only the child closes its completion")) = Some(completed.clone());
 				}
-			})
-			.await
-			.unwrap_or(Err(moq_tokio::Error::Panic));
-			if matches!(&completed, Err(moq_tokio::Error::Panic)) {
-				*result
-					.write()
-					.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed.clone());
-			}
-			let completed = moq_tokio::panic::isolate(async move {
 				drop(driver);
 				completed
-			})
-			.await
-			.unwrap_or(Err(moq_tokio::Error::Panic));
-			*result
-				.write()
-				.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed);
-		});
-		Self { result: Some(receiver) }
+			})),
+		})
 	}
 
 	pub async fn finished(&self) -> Result<(), MoqError> {
 		let Some(result) = &self.result else { return Ok(()) };
-		let completed = kio::wait(|waiter| {
+		let completed = host(kio::wait(|waiter| {
 			match std::task::ready!(result.poll(waiter, |state| {
 				match &**state {
 					Some(completed) => std::task::Poll::Ready(completed.clone()),
@@ -254,7 +487,7 @@ impl Background {
 				Ok(completed) => std::task::Poll::Ready(completed),
 				Err(_) => std::task::Poll::Ready(Err(moq_net::Error::Cancel.into())),
 			}
-		})
+		}))
 		.await;
 		completed.map_err(crate::session::map_closed_error)
 	}
@@ -291,16 +524,19 @@ impl Background {
 
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
 		self.check()?;
-		let result = if self.result.is_some() {
-			tokio::pin!(future);
-			tokio::select! {
-				biased;
-				result = self.finished() => { result?; future.await }
-				result = &mut future => result,
+		let result = host(async {
+			if self.result.is_some() {
+				tokio::pin!(future);
+				tokio::select! {
+					biased;
+					result = self.finished() => { result?; future.await }
+					result = &mut future => result,
+				}
+			} else {
+				future.await
 			}
-		} else {
-			future.await
-		};
+		})
+		.await;
 		self.check()?;
 		result
 	}
@@ -346,7 +582,7 @@ impl<D: moq_net::time::Driver> moq_net::time::Driver for Borrowed<'_, D> {
 	}
 }
 
-/// Spawn an owned background future on the runtime.
+/// Submit an owned background future to the runtime's root driver.
 pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> Background {
 	Background::new(async move {
 		future.await;
@@ -354,35 +590,31 @@ pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> Backg
 	})
 }
 
-/// Aborts a spawned task when the future awaiting it is dropped.
+/// Poll a binding call in place, inside the runtime context and shutdown accounting.
 ///
-/// Aborting one that already finished is a no-op, so this is inert on the happy path.
-struct AbortOnDrop(tokio::task::AbortHandle);
-
-impl Drop for AbortOnDrop {
-	fn drop(&mut self) {
-		self.0.abort();
-	}
-}
-
-/// Run a future to completion off the caller's thread, mapping its error into [`MoqError`].
-pub(crate) async fn detached<F, T, E>(future: F) -> Result<T, MoqError>
+/// A foreign cancel stops polling immediately. Freeing the call drops its future; nothing
+/// keeps running independently to consume an event in the meantime.
+pub(crate) fn run<F, T, E>(future: F) -> impl Future<Output = Result<T, MoqError>>
 where
-	F: Future<Output = Result<T, E>> + Send + 'static,
-	T: Send + 'static,
-	E: Into<MoqError> + Send + 'static,
+	F: Future<Output = Result<T, E>>,
+	E: Into<MoqError>,
 {
-	let task = runtime().spawn(async move {
-		moq_tokio::panic::isolate(async move { future.await.map_err(Into::into) })
-			.await
-			.unwrap_or_else(|| Err(crate::session::map_closed_error(moq_tokio::Error::Panic)))
-	});
-	let _abort = AbortOnDrop(task.abort_handle());
-	match task.await {
-		Ok(result) => result,
-		Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
-		Err(e) => Err(e.into()),
-	}
+	let mut call = Box::pin(moq_tokio::panic::isolate(async move {
+		tokio::select! {
+			biased;
+			_ = stopped() => Err(MoqError::Cancelled),
+			result = future => result.map_err(Into::into),
+		}
+	}));
+	host(std::future::poll_fn(move |cx| {
+		let Some(_polling) = Polling::start() else {
+			return Poll::Ready(Err(MoqError::Cancelled));
+		};
+		let _runtime = enter();
+		call.as_mut().poll(cx).map(|completed| {
+			completed.unwrap_or_else(|| Err(crate::session::map_closed_error(moq_tokio::Error::Panic)))
+		})
+	}))
 }
 
 /// A handle's state for async calls that only poll it, which UniFFI's `RustFuture` polls directly.
@@ -453,7 +685,7 @@ impl<T> Polled<T> {
 		let _call = Call(&self.calls);
 		// The waiter this call polls the state with, on the bridge's waker.
 		let mut park = kio::Park::default();
-		kio::wait(|waiter| self.poll(waiter, &mut park, &mut poll)).await
+		host(kio::wait(|waiter| self.poll(waiter, &mut park, &mut poll))).await
 	}
 
 	fn poll<R>(
@@ -642,26 +874,10 @@ impl<T: Send + 'static> Task<T> {
 		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
 			cleanup.check()?;
 		}
-		let result = {
-			let drive = self
-				.driver
-				.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f));
-			let mut run = std::pin::pin!(async {
-				tokio::select! {
-					biased;
-					_ = stopped() => Err(MoqError::Cancelled),
-					result = drive => result,
-				}
-			});
-			std::future::poll_fn(|cx| {
-				let Some(_polling) = Polling::start() else {
-					return std::task::Poll::Ready(Err(MoqError::Cancelled));
-				};
-				let _runtime = enter();
-				run.as_mut().poll(cx)
-			})
-			.await
-		};
+		let result = run(self
+			.driver
+			.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f)))
+		.await;
 		// A foreign future may stop polling while holding the state, so cancellation cannot
 		// wait for cleanup. Its next call still reports a completed cleanup panic.
 		self.driver.check()?;
@@ -731,6 +947,79 @@ impl<T: Send + 'static> Drop for Task<T> {
 #[cfg(test)]
 mod tests {
 
+	/// Teardown includes pending submissions and children that never reached their first
+	/// poll. One panicking destructor must not prevent the rest from being released.
+	#[tokio::test]
+	async fn root_shutdown_releases_every_child_and_refuses_late_work() {
+		struct Tracked {
+			dropped: Arc<AtomicUsize>,
+			panics: bool,
+		}
+		impl Drop for Tracked {
+			fn drop(&mut self) {
+				self.dropped.fetch_add(1, Ordering::SeqCst);
+				assert!(!self.panics, "injected child teardown panic");
+			}
+		}
+		let dropped = Arc::new(AtomicUsize::new(0));
+		let mut root = Root {
+			pending: kio::Shared::new(Some(Vec::new())),
+			children: kio::Tasks::new(),
+		};
+		let mut completions = Vec::new();
+		for panics in [true, false, false] {
+			let state = Tracked {
+				dropped: dropped.clone(),
+				panics,
+			};
+			let result = kio::Producer::new(None);
+			completions.push(Background {
+				result: Some(result.consume()),
+			});
+			root.pending.lock().as_mut().unwrap().push(Child {
+				future: Some(Box::pin(async move {
+					let _state = state;
+					std::future::pending().await
+				})),
+				result,
+			});
+		}
+		assert!(root.poll(&kio::Waiter::noop()).is_pending());
+		// A submission not yet enrolled in the child set must be released too.
+		let state = Tracked {
+			dropped: dropped.clone(),
+			panics: false,
+		};
+		root.pending.lock().as_mut().unwrap().push(Child {
+			future: Some(Box::pin(async move {
+				drop(state);
+				Ok(())
+			})),
+			result: kio::Producer::new(None),
+		});
+		let pending = root.pending.clone();
+		drop(root);
+		assert_eq!(dropped.load(Ordering::SeqCst), 4);
+		assert!(pending.read().is_none());
+		assert!(matches!(completions[0].finished().await, Err(MoqError::Task { .. })));
+		for completion in &completions[1..] {
+			assert!(matches!(completion.finished().await, Err(MoqError::Cancelled)));
+		}
+
+		let runtime = Runtime::new(false);
+		runtime.shutdown();
+		let state = Tracked {
+			dropped: dropped.clone(),
+			panics: false,
+		};
+		let late = runtime.background(async move {
+			drop(state);
+			Ok(())
+		});
+		assert_eq!(dropped.load(Ordering::SeqCst), 5);
+		assert!(matches!(late.finished().await, Err(MoqError::Cancelled)));
+	}
+
 	#[tokio::test]
 	async fn a_driver_teardown_panic_reaches_its_owner() {
 		struct Driver;
@@ -782,10 +1071,11 @@ mod tests {
 		let (release, released) = std::sync::mpsc::channel();
 		let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
 		let callback = finished.clone();
-		runtime.spawn(async move {
+		runtime.background(async move {
 			entered.send(()).unwrap();
 			released.recv().unwrap();
 			callback.store(true, std::sync::atomic::Ordering::SeqCst);
+			Ok(())
 		});
 		entering.recv().unwrap();
 
@@ -822,6 +1112,114 @@ mod tests {
 			"a concurrent shutdown returned with a callback in flight"
 		);
 		runtime.shutdown();
+	}
+
+	/// A host continuation that blocks once woken from a root child, as one resumed inline by
+	/// Kotlin's `Dispatchers.Unconfined` can, holds neither the root nor its other children.
+	#[test]
+	fn a_blocking_host_continuation_does_not_hold_the_root() {
+		/// The host side of a call: woken, it reports entering and blocks until released.
+		struct Continuation {
+			entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
+			release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+		}
+		impl std::task::Wake for Continuation {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				if let Some(entered) = self.entered.lock().unwrap().take() {
+					entered.send(std::thread::current().id()).unwrap();
+					let _ = self.release.lock().unwrap().recv();
+				}
+			}
+		}
+
+		let runtime = Runtime::new(false);
+		let ready = kio::Producer::new(false);
+		let consumer = ready.consume();
+		let mut call = Box::pin(host(kio::wait(|waiter| {
+			consumer.poll(waiter, |ready| if **ready { Poll::Ready(()) } else { Poll::Pending })
+		})));
+		let (entered, entering) = std::sync::mpsc::channel();
+		let (release, released) = std::sync::mpsc::channel();
+		let waker = Waker::from(Arc::new(Continuation {
+			entered: std::sync::Mutex::new(Some(entered)),
+			release: std::sync::Mutex::new(released),
+		}));
+		assert!(call.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+
+		// A root child wakes the parked call; its continuation enters and stays.
+		let (root, rooted) = std::sync::mpsc::channel();
+		runtime.background(async move {
+			root.send(std::thread::current().id()).unwrap();
+			*ready.write().ok().unwrap() = true;
+			std::future::pending().await
+		});
+		let root = rooted
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the root polls its child");
+		let continuation = entering
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the continuation is woken");
+		assert_ne!(continuation, root, "the continuation ran inside the root");
+
+		// Another child still runs to completion while the continuation blocks.
+		let sibling = runtime.background(async { Ok(()) });
+		tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap()
+			.block_on(soon(sibling.finished()))
+			.unwrap();
+
+		release.send(()).unwrap();
+		runtime.shutdown();
+	}
+
+	/// Children released by the root's teardown wake host calls off the root too.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn root_teardown_wakes_host_calls_off_the_root() {
+		struct Record(std::sync::Mutex<std::sync::mpsc::Sender<std::thread::ThreadId>>);
+		impl std::task::Wake for Record {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let _ = self.0.lock().unwrap().send(std::thread::current().id());
+			}
+		}
+
+		let mut root = Root {
+			pending: kio::Shared::new(Some(Vec::new())),
+			children: kio::Tasks::new(),
+		};
+		let held = kio::Producer::new(());
+		let consumer = held.consume();
+		root.pending.lock().as_mut().unwrap().push(Child {
+			future: Some(Box::pin(async move {
+				let _held = held;
+				std::future::pending().await
+			})),
+			result: kio::Producer::new(None),
+		});
+		// Enroll the child, so the teardown below releases it from the child set.
+		assert!(root.poll(&kio::Waiter::noop()).is_pending());
+
+		let mut call = Box::pin(host(kio::wait(|waiter| consumer.poll(waiter, |_| Poll::<()>::Pending))));
+		let (woke, woken) = std::sync::mpsc::channel();
+		let waker = Waker::from(Arc::new(Record(std::sync::Mutex::new(woke))));
+		assert!(call.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+
+		drop(root);
+		let woken = woken
+			.recv_timeout(Duration::from_secs(5))
+			.expect("teardown wakes the call");
+		assert_ne!(
+			woken,
+			std::thread::current().id(),
+			"the continuation ran inside the root"
+		);
 	}
 
 	/// A state that reports its own drop, which is what a terminal cancel has to trigger.
