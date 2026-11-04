@@ -63,6 +63,7 @@ mod session_panic;
 mod settled_end_survives_abort;
 mod setup_negotiation;
 mod slow_joiner;
+mod socket;
 mod source_errors;
 mod stream_credit;
 mod subscribe_priority;

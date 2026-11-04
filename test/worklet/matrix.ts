@@ -5,7 +5,9 @@
 // uses blob: URLs with no CSP, and hosted mode serves the copied assets under a strict CSP. A control
 // run of blob: URLs under that CSP must fail, proving the CSP applies. The bundlers are pinned in this
 // package's manifest, so the lockfile decides their versions.
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
@@ -44,6 +46,28 @@ try {
 		plugins: [worklet()],
 		build: { outDir: lib, lib: { entry: join(root, "lib.js"), formats: ["es"], fileName: "index" } },
 	});
+	// Check the completed Vite build before consumer bundlers or Chromium can spawn children.
+	const children = spawnSync("pgrep", ["-l", "-P", String(process.pid)], { encoding: "utf8" });
+	assert.equal(children.status, 1, children.error?.message ?? (children.stdout || children.stderr));
+	assert.deepEqual(readdirSync(join(lib, "assets")).sort(), [
+		"capture-worker.js",
+		"capture-worklet.js",
+		"render-worklet.js",
+	]);
+	const chunks = readdirSync(lib)
+		.filter((name) => name.endsWith(".js"))
+		.map((name) => ({ name, code: readFileSync(join(lib, name), "utf8") }));
+	for (const { code } of chunks) assert.ok(!code.includes("import.meta.url"));
+	const blobs = chunks.filter(({ code }) => code.includes("createObjectURL"));
+	assert.equal(blobs.length, 3);
+	const entry = chunks
+		.filter((chunk) => !blobs.includes(chunk))
+		.map(({ code }) => code)
+		.join("\n");
+	for (const { name } of blobs) assert.ok(entry.includes(`import("./${name}")`));
+	for (const name of ["render-worklet", "capture-worklet", "capture-worker"])
+		assert.ok(entry.includes(`new URL("${name}.js", `));
+	console.log("library build: lazy blobs, hosted assets, no child process");
 	writeFileSync(
 		join(lib, "package.json"),
 		JSON.stringify({ name: "worklet-lib", type: "module", exports: "./index.js" }),
