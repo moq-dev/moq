@@ -141,13 +141,13 @@ async function attach() {
 			records.errors.push("missing output clock");
 			return;
 		}
-		// The render onset on the page clock is its projected output less the context's declared
-		// output path, so a late port message moves neither boundary.
-		const at = stamp.performanceTime + (data - stamp.contextTime) * 1000;
+		// Map the onset's render time through the render clock read at this instant, so a late port
+		// message moves neither the render onset nor its projected output.
+		const received = performance.now();
 		records.audible.push({
-			at,
-			rendered: at - (context.baseLatency + context.outputLatency) * 1000,
-			received: performance.now(),
+			at: stamp.performanceTime + (data - stamp.contextTime) * 1000,
+			rendered: received - (context.currentTime - data) * 1000,
+			received,
 		});
 	};
 	tapped = root;
