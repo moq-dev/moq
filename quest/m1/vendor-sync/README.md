@@ -56,48 +56,15 @@ kixelated/cros-codecs, kixelated/openh264-rs, kixelated/fflate) and the
 Public API: none expected; a ported fix that changes one says so. Wire: QUIC
 behavior follows quinn's fixes.
 
-Completed VAAPI cycle (2026-11-04): source fix and read-only CI merged in
-[moq-dev/vaapi#5](https://github.com/moq-dev/vaapi/pull/5) and
-[moq-dev/vaapi#6](https://github.com/moq-dev/vaapi/pull/6). MoQ adopts crates.io
-`moq-vaapi 0.1.1` (tag `v0.1.1`, source `af121c75ccd63d98205e50e4561f88cce8bdf82b`);
-the published manifest no longer enables `log/release_max_level_debug`.
-Carry the following baseline and dispositions into the next cycle.
-
-moq-vaapi vendors Discord's forks: cros-libva tag `discord-0.0.13`
-([`896a248e`](https://github.com/discord/cros-libva/commit/896a248e003caae7a7120812f7eaa423c93a920d),
-2026-03-13) and cros-codecs tag `discord-0.0.5`
-([`9cdecb19`](https://github.com/discord/cros-codecs/commit/9cdecb192ee3682950d02bd80a7f106163531b76),
-2026-06-15). Track the ChromeOS default branches against these diverged fork
-baselines, without undoing Discord's additions.
-
-Checked 2026-10-31:
-
-- cros-libva
-  [`59384456ac2ae78c0c3e5515f41ef1efd9b802cf`](https://github.com/chromeos/cros-libva/commit/59384456ac2ae78c0c3e5515f41ef1efd9b802cf):
-  all five commits absent from the vendor baseline inspected. Explicit image
-  lifetimes and packed headers are already present. The retained VP9 wrapper
-  already zero-fills the libva 2.23 fields with `..Default::default()`; there
-  is no VP9 codec driver needing segmentation control. Protected-content
-  headers have no consumer. Borrowed input buffers are an optional optimization,
-  not a correctness fix; retain the existing owned-buffer API.
-- cros-codecs
-  [`a050c6cde530e563197ee9e3e72ab01f48a0c41f`](https://github.com/chromeos/cros-codecs/commit/a050c6cde530e563197ee9e3e72ab01f48a0c41f):
-  the only commit absent from the vendor baseline removes
-  `log/release_max_level_debug`, which conflicts with a downstream application's
-  release log level. Ported in
-  [`6d38f3d0`](https://github.com/moq-dev/vaapi/commit/6d38f3d02e2709962789ad73698a27b548fd582e),
-  with a feature-unification compilation check in `just ci`. That check failed
-  before the fix and passes after it. VA-API's README records every disposition
-  and both full checked heads.
-- GitHub's published advisory endpoints for both ChromeOS repositories and
-  both Discord forks returned empty lists, as did the global Rust advisory
-  queries for `cros-libva` and `cros-codecs`. This does not cover undisclosed
-  vulnerabilities.
-
-Rechecked 2026-11-02: both ChromeOS default-branch heads above are unchanged,
-so no new commits need porting. The four repository advisory endpoints and
-both global Rust advisory queries remain empty. The completed audit and its
-dispositions still apply.
+VAAPI's completed cycle adopted crates.io `moq-vaapi 0.1.1` after
+[the source fix](https://github.com/moq-dev/vaapi/pull/5) and
+[read-only CI](https://github.com/moq-dev/vaapi/pull/6) merged. When re-creating
+the next cycle, always include moq-dev/vaapi even though it is a crates.io
+dependency outside this tree. Restore its Goal of auditing both ChromeOS
+upstreams and publishing/adopting any needed fixes. Carry checked heads and
+dispositions from [VAAPI's Upstream audit](https://github.com/moq-dev/vaapi/blob/v0.1.1/README.md#upstream-audit),
+which records cros-libva `59384456ac2ae78c0c3e5515f41ef1efd9b802cf` and
+cros-codecs `a050c6cde530e563197ee9e3e72ab01f48a0c41f`.
 
 ## Required
 
