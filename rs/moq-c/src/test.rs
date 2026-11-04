@@ -1861,7 +1861,8 @@ fn timestamps_round_trip_exactly() {
 		assert_eq!(read_timestamp(frame.timestamp), written, "{name} frame");
 		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-		// The datagram subscription is live once the frame arrived on the same track.
+		// The datagram consumer is live once its subscription is answered.
+		wait_datagram_reader(track);
 		assert_eq!(
 			unsafe {
 				moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), timestamp, std::ptr::null_mut())
@@ -2053,6 +2054,135 @@ fn raw_track_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Wait until a raw track's datagram track has a reader, which a datagram consumer becomes
+/// once its subscription is answered.
+fn wait_datagram_reader(track: u32) {
+	let datagrams = State::lock()
+		.publish
+		.datagram_producer(Id::try_from(track).unwrap())
+		.expect("a raw track");
+	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
+		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
+		_ => std::task::Poll::Pending,
+	});
+	crate::ffi::RUNTIME
+		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
+		.expect("no datagram reader arrived");
+}
+
+/// A datagram reader subscribes to its track, as before datagrams had a track of their own:
+/// the publisher sees it as demand, and a dynamic publisher learns of the track from it.
+#[test]
+fn a_datagram_reader_is_demand_and_requests_its_track() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"datagram-demand");
+	let request_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+	let consume = consume_local(broadcast);
+
+	// Nothing publishes the track yet: the reader's request reaches the handler.
+	let name = b"events";
+	let dg_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_datagrams(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			Some(channel_callback),
+			dg_cb.ptr,
+		)
+	});
+	let request = id(request_cb.recv());
+	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
+
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
+
+	wait_datagram_reader(track);
+	let payload = b"on demand";
+	assert_eq!(
+		unsafe { moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), &micros(7), std::ptr::null_mut()) },
+		0
+	);
+	let dg_id = id(dg_cb.recv());
+	let mut datagram = moq_datagram {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp: std::ptr::null(),
+		sequence: u64::MAX,
+	};
+	assert_eq!(unsafe { moq_consume_datagram(dg_id, &mut datagram) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(datagram.payload, datagram.payload_size) },
+		payload
+	);
+	assert_eq!(datagram.sequence, 0);
+	assert_eq!(moq_consume_datagram_free(dg_id), 0);
+
+	// The reader leaving is the demand leaving.
+	assert_eq!(moq_consume_datagrams_cancel(consumer), 0);
+	assert_eq!(dg_cb.recv_terminal(), 0);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(demand_cb.recv_terminal(), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A name with only a datagram track, as a moq-net publisher makes one, is read without a
+/// stream track.
+#[test]
+fn a_datagram_only_track_is_read() {
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let mut datagrams = broadcast
+		.create_datagrams("events", moq_net::datagram::Info::default())
+		.unwrap();
+	let consume = i32::from(State::lock().consume.start(broadcast.consume(), None).unwrap()) as u32;
+
+	let name = b"events";
+	let dg_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_datagrams(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			Some(channel_callback),
+			dg_cb.ptr,
+		)
+	});
+	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
+		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
+		_ => std::task::Poll::Pending,
+	});
+	crate::ffi::RUNTIME
+		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
+		.expect("no datagram reader arrived");
+
+	assert_eq!(datagrams.append(None, &b"only"[..]).unwrap(), 0);
+	let dg_id = id(dg_cb.recv());
+	let mut datagram = moq_datagram {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp: std::ptr::null(),
+		sequence: u64::MAX,
+	};
+	assert_eq!(unsafe { moq_consume_datagram(dg_id, &mut datagram) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(datagram.payload, datagram.payload_size) },
+		b"only"
+	);
+	assert_eq!(moq_consume_datagram_free(dg_id), 0);
+
+	assert_eq!(moq_consume_datagrams_cancel(consumer), 0);
+	assert_eq!(dg_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+}
+
 #[test]
 fn raw_track_datagram_publish_consume() {
 	let origin = id(moq_origin_create());
@@ -2082,6 +2212,7 @@ fn raw_track_datagram_publish_consume() {
 		)
 	});
 
+	wait_datagram_reader(track);
 	let payload = b"hello datagram";
 	let mut sequence: u64 = u64::MAX;
 	assert_eq!(
@@ -3030,6 +3161,19 @@ type NamedConsumer = (
 
 const NAMED_CONSUMERS: [NamedConsumer; 5] = [
 	(
+		b"datagrams",
+		|consume, name, user_data| unsafe {
+			moq_consume_datagrams(
+				consume,
+				name.as_ptr() as *const c_char,
+				name.len(),
+				Some(channel_callback),
+				user_data,
+			)
+		},
+		moq_consume_datagrams_cancel,
+	),
+	(
 		b"raw",
 		|consume, name, user_data| unsafe {
 			moq_consume_track(
@@ -3042,19 +3186,6 @@ const NAMED_CONSUMERS: [NamedConsumer; 5] = [
 			)
 		},
 		moq_consume_track_cancel,
-	),
-	(
-		b"datagrams",
-		|consume, name, user_data| unsafe {
-			moq_consume_datagrams(
-				consume,
-				name.as_ptr() as *const c_char,
-				name.len(),
-				Some(channel_callback),
-				user_data,
-			)
-		},
-		moq_consume_datagrams_cancel,
 	),
 	(
 		b"snapshot",

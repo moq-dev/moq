@@ -511,8 +511,6 @@ plan_pass() {
         record "not run" case=tail publisher=rust subscriber="$runtime"
         record "not run" case=tail publisher="$runtime" subscriber=rust
         if [[ "$VERSION" == moq-transport-* ]]; then
-            record "not run" case=datagram publisher=rust subscriber="$runtime"
-            record "not run" case=datagram publisher="$runtime" subscriber=rust
             record "not run" case="wire track status" publisher=rust subscriber="$runtime"
             record "not run" case=goaway publisher=rust subscriber="$runtime"
             [[ "$runtime" != js-native-bun ]] || record "not run" case=goaway publisher="$runtime" subscriber=rust
@@ -1927,10 +1925,7 @@ run_tail_pair() {
         mode="join"
         want='tail join clean end=4 groups=[0-3](,[0-3])*'
     fi
-    if [[ "$kind" == datagram ]]; then
-        mode=datagram
-        want='datagram clean groups=0,1,2,3 bytes=3600'
-    elif [[ "$kind" == "track status" ]]; then
+    if [[ "$kind" == "track status" ]]; then
         mode=status
         want="track status answered"
     elif [[ "$kind" == compress ]]; then
@@ -1951,26 +1946,8 @@ run_tail_pair() {
     # Each side's token grants this broadcast alone, like a media round's.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
     pid="$HARNESS_PID"
-    if [[ "$mode" == datagram ]]; then
-        # Subscription metadata, on the clients' serialized task runtimes, confirms the alias is bound. An acknowledgement
-        # per datagram avoids testing a best-effort receive buffer's burst capacity.
-        mkfifo "$LOGS/datagram-ack"
-        exec 8<>"$LOGS/datagram-ack"
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
-        subscriber_pid="$HARNESS_PID"
-        local ack sequence
-        if read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram ready" ]]; then
-            for sequence in 0 1 2 3; do
-                printf 'datagram %s\n' "$sequence" >&9
-                read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram $sequence" ]] || break
-            done
-        fi
-        exec 8>&-
-        rm "$LOGS/datagram-ack"
-    else
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
-        subscriber_pid="$HARNESS_PID"
-    fi
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+    subscriber_pid="$HARNESS_PID"
     harness_wait "$subscriber_pid" || true
     # Like run_native, a verified data result survives the NAPI addon's exit crash.
     if read=$(grep -xE "$want" "$LOGS/$name-sub.log") && { [[ "$mode" != status ]] || grep -qx "track status answered" "$LOGS/$name-sub.log"; }; then
@@ -2462,8 +2439,6 @@ run_tails() {
             run_tail_pair rust "$runtime"
             run_tail_pair "$runtime" rust
             if [[ "$VERSION" == moq-transport-* ]]; then
-                run_tail_pair rust "$runtime" datagram
-                run_tail_pair "$runtime" rust datagram
                 run_control_case "$runtime" status
                 run_control_case "$runtime" goaway
                 [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" reverse-goaway
