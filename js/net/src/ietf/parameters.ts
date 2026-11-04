@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { toNumber } from "../util/bigint.ts";
 import * as Filter from "./filter.ts";
 import * as Namespace from "./namespace.ts";
 import { AUTHORIZATION_TOKEN, type Token, tokenFromRequest, unique } from "./token.ts";
@@ -392,13 +393,12 @@ export class Parameters {
 	}
 
 	/**
-	 * FILL_TIMEOUT: the total wait in milliseconds for objects not yet available. A value past
-	 * what a number holds exactly saturates, since no wait lasts that long anyway.
+	 * FILL_TIMEOUT: the total wait in safe numeric milliseconds for objects not yet available.
 	 */
 	get fillTimeout(): Milli | undefined {
 		const v = this.vars.get(MSG_PARAM_FILL_TIMEOUT);
 		if (v === undefined) return undefined;
-		return Milli(v > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(v));
+		return Milli(toNumber(v));
 	}
 
 	set fillTimeout(v: Milli | undefined) {
