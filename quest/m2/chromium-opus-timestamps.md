@@ -8,8 +8,9 @@ in input timestamps. Check by running the repro attached to
 [chromium#581458361](https://issues.chromium.org/issues/581458361) in a released
 Chrome: scenario A ends near 13.98 s with steps across
 suppressed spans, and scenario C follows the +1 s jump. Delete this quest once a stable Chrome
-passes. Nothing of ours waits on it: the publisher gates silence before the
-encoder and stamps chunks from its own inputs ([Push-to-talk suppresses
+passes. Nothing in moq depends on it, so this quest only tracks the upstream
+report: the publisher gates silence before the encoder and stamps chunks from
+its own inputs ([Push-to-talk suppresses
 silence](/quest/m1/push-to-talk/dtx.md)), and Safari ignores `usedtx`.
 
 ## Plan

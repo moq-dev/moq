@@ -40,8 +40,9 @@ and the maintainer would rather fix DTX and avoid the catalog entirely.
   and the head within 5 ms of unsuppressed.
 - Silence then sends nothing, where libopus DTX still sends comfort-noise
   updates (2.9 packets/s, 1.3 kbps); the listener makes its own comfort noise
-  (below). Rejected: WASM libopus (117 KB gzip for the encoder, 1.5 to 2.2x the
-  native encode time) and native `usedtx` (Chrome drifts 7.3 s over 19 s,
+  (below). Rejected: WASM libopus (the encoder is 117 KB gzip at `-Oz`; the
+  151 KB `-O2` build took 1.5 to 2.2x the native encode time) and native
+  `usedtx` (Chrome drifts 7.3 s over 19 s,
   Safari ignores it; see [Chromium's Opus encoder stamps chunks from their
   input](/quest/m2/chromium-opus-timestamps.md)).
 - **Hold retires when this lands ✅**, not before, so push-to-talk keeps
