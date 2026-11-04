@@ -77,7 +77,7 @@ impl Sink {
 
 	/// The latency and compression controls the backend applied, like the
 	/// encoder's own report.
-	pub(crate) fn applied(&self) -> Applied {
+	pub fn applied(&self) -> Applied {
 		self.0.applied()
 	}
 
