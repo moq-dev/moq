@@ -432,7 +432,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="refuse a capture this host cannot take")
-    check.add_argument("mode", choices=["lock", "cpu", "heap"])
+    check.add_argument("mode", choices=["lock", "cpu", "heap", "instructions"])
     for name, help in [
         ("lock", "record worker off-CPU stacks of PID into DIRECTORY"),
         ("cpu", "sample CPU stacks of every PID thread into DIRECTORY"),
