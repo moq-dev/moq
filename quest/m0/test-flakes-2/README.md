@@ -98,5 +98,4 @@ Public API: none. Wire: none.
 - [The scheduled macOS WebSocket version test completes reliably](/quest/m0/test-flakes-2/macos-websocket.md) - fix the scheduled timeout while preserving newest-version negotiation assertions
 - [@moq/net's lite subscribe tests wait for the whole request](/quest/m0/test-flakes-2/js-subscribe-fixture.md) - the three lite subscribe-with-track cases pass under forced yields
 - [Concurrent PulseAudio harness runs don't share a D-Bus name](/quest/m0/test-flakes-2/pulse-dbus.md) - parallel media runs no longer collide on `org.PulseAudio1`
-- [@moq/net's uni-stream flood test survives reruns](/quest/m0/test-flakes-2/js-stream-flood.md) - "a flood of uni streams yields" passes under `--rerun-each` and load
 - [The JS receive-credit qmux test never completes an oversized frame](/quest/m0/test-flakes-2/receive-credit-qmux.md) - `javascript_partial_frame_gives_way_qmux` stops completing a frame larger than the window on moq-transport-18
