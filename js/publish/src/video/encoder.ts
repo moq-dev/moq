@@ -882,6 +882,8 @@ export class Encoder {
 				bitrate: ceiling(codec, dimensions, target),
 				latencyMode: "realtime",
 				hardwareAcceleration,
+				// Annex B keeps the parameter sets in band, so the catalog carries no description and a
+				// keyframe can change the size. The probe refuses an encoder that ignores this.
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
 				// @ts-expect-error TypeScript's DOM lib lacks the HEVC codec registration's `hevc` config.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
@@ -890,9 +892,9 @@ export class Encoder {
 			const { supported } = await VideoEncoder.isConfigSupported(config);
 			if (!supported) continue;
 
-			const reported = await reportedCodec(config);
-			if (reported !== undefined) return { config, reported };
-			console.warn(`moq-publish: skipping ${codec}: its encoder reorders frames despite realtime latency`);
+			const probed = await probeEncoder(config);
+			if ("reported" in probed) return { config, reported: probed.reported };
+			console.warn(`moq-publish: skipping ${codec}: ${probed.refused}`);
 		}
 
 		throw new Error("no supported codec");
@@ -1005,17 +1007,29 @@ const PROBE_FRAMES = 4;
 // claim the first keyframe would contradict. It closes before the config resolves, so it never
 // overlaps the first real encoder; only a re-probe while serving briefly holds two sessions.
 //
-// Returns undefined when the encoder reorders its output. The catalog declares none, but Firefox's
-// software H.264 still emits B-frames for High and Main under realtime latency.
-async function reportedCodec(config: VideoEncoderConfig): Promise<string | undefined> {
+// Refuses an encoder whose output the track can't carry, so the caller moves on to the next codec:
+// - Output that reorders. The catalog declares none, but Firefox's software H.264 still emits
+//   B-frames for High and Main under realtime latency.
+// - H.264 or HEVC that isn't Annex B. Safari 26 accepts `hevc: { format: "annexb" }` but emits
+//   length-prefixed NAL units with an hvcC description, which no subscriber can decode. A
+//   description means length-prefixed output (per the AVC and HEVC WebCodecs registrations), which
+//   also catches a four-byte length that happens to read as a start code, such as `00 00 01 2c`.
+async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: string } | { refused: string }> {
 	let reported: string | undefined;
 	let reordered = false;
 	let last: number | undefined;
+	let first: Uint8Array | undefined;
+	let described = false;
 	const encoder = new VideoEncoder({
 		output: (chunk, metadata) => {
 			reported ??= metadata?.decoderConfig?.codec;
 			if (last !== undefined && chunk.timestamp <= last) reordered = true;
 			last = chunk.timestamp;
+			if (metadata?.decoderConfig?.description) described = true;
+			if (!first) {
+				first = new Uint8Array(chunk.byteLength);
+				chunk.copyTo(first);
+			}
 		},
 		// flush() rejects with the same error.
 		error: () => {},
@@ -1047,7 +1061,22 @@ async function reportedCodec(config: VideoEncoderConfig): Promise<string | undef
 	}
 
 	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);
-	return reordered ? undefined : reported;
+	if (reordered) return { refused: "its encoder reorders frames despite realtime latency" };
+	if (requestsAnnexB(config.codec) && (described || !(first && startsWithStartCode(first)))) {
+		return { refused: "its encoder ignored the requested Annex B format" };
+	}
+	return { reported };
+}
+
+// The codecs the probe configures for Annex B output.
+function requestsAnnexB(codec: string): boolean {
+	return codec.startsWith("avc1") || codec.startsWith("hev1");
+}
+
+// Whether `data` opens with an Annex B start code: 00 00 01, with an optional leading zero byte.
+function startsWithStartCode(data: Uint8Array): boolean {
+	if (data[0] !== 0 || data[1] !== 0) return false;
+	return data[2] === 1 || (data[2] === 0 && data[3] === 1);
 }
 
 // Scale the bitrate for more efficient codecs, relative to H.264.

@@ -4188,6 +4188,88 @@ test("draft-22: cancellation releases a fill parked on flow control", async () =
 	}
 });
 
+// A fill reads the cache through forks of its own, ranked at the converted subscriber
+// priority. Copied unconverted, wire 100 would raise the track's aggregate from 27 to 100,
+// and wire 191 is outside the model's -128..=127, so the fork throws and the fill never runs.
+test("draft-22: a SUBSCRIBE's fill reads the cache at the converted subscriber priority", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 2);
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 191,
+			filter: { kind: "absolute", startGroup: 10n, startObject: 0n },
+			fill: { filter: { kind: "unfiltered" }, rangeFilters: false },
+		}),
+	);
+	try {
+		expect(track.subscription.peek()?.priority).toBe(-64);
+		const stream = await nextUni(fx.uni);
+		if (!stream) throw new Error("missing fill stream");
+		const served = await readFill(new Reader(stream, undefined, V22), "ascending");
+		expect(served.reset).toBeUndefined();
+		expect(served.objects).toEqual([0, 1].map((id) => ({ group: 0, id, payload: `0.${id}` })));
+	} finally {
+		client.close();
+		track.finish();
+		track.close();
+		fx.close();
+	}
+});
+
+test("draft-22: an update's fill reads the cache at the converted subscriber priority", async () => {
+	for (const [wire, model] of [
+		[100, 27],
+		[191, -64],
+	]) {
+		const fx = fixture();
+		const parked = Promise.withResolvers<void>();
+		const stalled = new WritableStream<Uint8Array>({
+			write() {
+				parked.resolve();
+				return new Promise<void>(() => {});
+			},
+		});
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		writeGroup(track, 1);
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: wire,
+				filter: { kind: "absolute", startGroup: 10n, startObject: 0n },
+			}),
+		);
+		try {
+			expect(track.subscription.peek()?.priority).toBe(model);
+			spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+			const parameters = new Parameters();
+			parameters.fillParameters = Filter.encodeFill(
+				{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
+				fx.version,
+			);
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(client.reader, fx.version);
+			// The fill is parked writing its header, so the fork it reads through is still live.
+			await parked.promise;
+			expect(track.subscription.peek()?.priority, `wire ${wire}`).toBe(model);
+		} finally {
+			client.close();
+			track.finish();
+			track.close();
+			fx.close();
+		}
+	}
+});
+
 test("draft-22: narrowing gives up an excluded group's open stream", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });

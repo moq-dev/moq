@@ -7,6 +7,9 @@ import { Fanout } from "../fanout";
 import { Estimator, Order } from "../order";
 import { Encoder } from "./encoder";
 
+// A probe chunk's bytes: an Annex B start code, which the probe requires of H.264 and HEVC.
+const ANNEX_B = { byteLength: 4, copyTo: (dest: Uint8Array) => dest.set([0, 0, 0, 1]) };
+
 // Model an encoder that cannot accept more work until the test completes its pending input.
 // The codec probe completes immediately, independently of the live encoder's service rate.
 class SlowEncoder {
@@ -55,7 +58,7 @@ class SlowEncoder {
 
 	async flush() {
 		this.output(
-			{ type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} } as never,
+			{ type: "key", timestamp: 0, ...ANNEX_B } as never,
 			{ decoderConfig: { codec: this.codec } } as never,
 		);
 	}

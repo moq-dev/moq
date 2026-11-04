@@ -10,6 +10,9 @@ import { Estimator, Order } from "../order";
 import { Slot } from "../publication";
 import { type Config, Encoder } from "./encoder";
 
+// A probe chunk's bytes: an Annex B start code, which the probe requires of H.264 and HEVC.
+const ANNEX_B = { byteLength: 4, copyTo: (dest: Uint8Array) => dest.set([0, 0, 0, 1]) };
+
 // How long a fake hardware probe takes on the installed clock.
 const PROBE = Nano.fromMilli(Milli(5));
 
@@ -36,6 +39,11 @@ class FakeVideoEncoder {
 	// Whether the encoder emits a configured codec's chunks out of presentation order, as Firefox's
 	// software H.264 does for High and Main.
 	static reorders: (codec: string) => boolean = () => false;
+
+	// The first NAL unit's size when the encoder ignores a configured codec's requested Annex B
+	// format and emits length-prefixed NAL units with a description instead, as Safari 26's HEVC
+	// encoder does. Undefined for Annex B.
+	static lengthPrefixed: (codec: string) => number | undefined = () => undefined;
 
 	state: CodecState = "unconfigured";
 	#output: VideoEncoderInit["output"];
@@ -74,8 +82,21 @@ class FakeVideoEncoder {
 	// Only the probe flushes, so only it sees an output; the live encoder holds every frame.
 	async flush(): Promise<void> {
 		const codec = this.#codec && FakeVideoEncoder.report(this.#codec);
-		const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
-		this.#output(chunk as never, (codec ? { decoderConfig: { codec } } : {}) as never);
+		// A slice NAL unit behind an Annex B start code, or behind Safari's four-byte big-endian length.
+		const size = this.#codec ? FakeVideoEncoder.lengthPrefixed(this.#codec) : undefined;
+		const data = size === undefined ? new Uint8Array([0, 0, 0, 1, 0x26, 0x01]) : new Uint8Array(4 + size);
+		if (size !== undefined) {
+			new DataView(data.buffer).setUint32(0, size);
+			data.set([0x26, 0x01], 4);
+		}
+		const description = size === undefined ? undefined : new Uint8Array([1]);
+		const chunk = {
+			type: "key",
+			timestamp: 0,
+			byteLength: data.byteLength,
+			copyTo: (dest: Uint8Array) => dest.set(data),
+		};
+		this.#output(chunk as never, (codec ? { decoderConfig: { codec, description } } : {}) as never);
 		if (this.#codec && FakeVideoEncoder.reorders(this.#codec)) {
 			for (const timestamp of [66_666, 33_333])
 				this.#output({ ...chunk, type: "delta", timestamp } as never, {} as never);
@@ -107,6 +128,7 @@ function installFakeVideoEncoder() {
 		[Symbol.dispose]() {
 			FakeVideoEncoder.report = (codec) => codec;
 			FakeVideoEncoder.reorders = () => false;
+			FakeVideoEncoder.lengthPrefixed = () => undefined;
 			if (original) {
 				Object.defineProperty(globalThis, "VideoEncoder", original);
 			} else {
@@ -446,6 +468,83 @@ test("an encoder that reorders frames is skipped for the next codec", async () =
 	}
 });
 
+test("an encoder that ignores the requested Annex B format is skipped for the next codec", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	// Safari 26: HEVC is supported, but its chunks come out length-prefixed (a 59-byte first NAL in the
+	// recorded sample). H.264 honors Annex B.
+	FakeVideoEncoder.lengthPrefixed = (codec) => (codec.startsWith("hev1") ? 59 : undefined);
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.codec.startsWith("hev1") || config.codec === "vp8",
+	}));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+	try {
+		await settle();
+		expect(probe.mock.calls.some(([config]) => config.codec.startsWith("hev1"))).toBe(true);
+		expect(encoder.out.resolved.peek()?.codec).toBe("vp8");
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("Annex B"));
+	} finally {
+		encoder.close();
+		probe.mockRestore();
+		warn.mockRestore();
+	}
+});
+
+// A 256-511 byte first NAL has a length prefix of `00 00 01 xx`, which reads as an Annex B start code.
+// The description still marks the output as length-prefixed.
+test("a length prefix that reads as a start code is still refused", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	FakeVideoEncoder.lengthPrefixed = (codec) => (codec.startsWith("hev1") ? 300 : undefined);
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.codec.startsWith("hev1") || config.codec === "vp8",
+	}));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+	try {
+		await settle();
+		expect(probe.mock.calls.some(([config]) => config.codec.startsWith("hev1"))).toBe(true);
+		expect(encoder.out.resolved.peek()?.codec).toBe("vp8");
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("Annex B"));
+	} finally {
+		encoder.close();
+		probe.mockRestore();
+		warn.mockRestore();
+	}
+});
+
+test("an HEVC-only encoder that ignores Annex B leaves no codec rather than falling back at runtime", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	FakeVideoEncoder.lengthPrefixed = (codec) => (codec.startsWith("hev1") ? 59 : undefined);
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.codec.startsWith("hev1"),
+	}));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never, config: { codec: "hev1" } });
+	try {
+		await settle();
+		expect(encoder.out.resolved.peek()).toBeUndefined();
+		expect(encoder.settled.peek()).toBe(true);
+	} finally {
+		encoder.close();
+		probe.mockRestore();
+		warn.mockRestore();
+		error.mockRestore();
+	}
+});
+
 test("software-only AV1 is refused even when explicitly requested", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
@@ -634,7 +733,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 
 		// Emits the newest frame, and reports the configured codec as Chrome does.
 		async flush(): Promise<void> {
-			const chunk = { type: "key", timestamp: this.#last, byteLength: 1, copyTo: () => {} };
+			const chunk = { type: "key", timestamp: this.#last, ...ANNEX_B };
 			this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
 		}
 
@@ -992,7 +1091,7 @@ class RecordingVideoEncoder {
 
 	// Only the probe flushes; report the configured codec, as Chrome does.
 	async flush(): Promise<void> {
-		const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+		const chunk = { type: "key", timestamp: 0, ...ANNEX_B };
 		this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
 	}
 
@@ -1533,7 +1632,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 
 		// Only the probe flushes; report the configured codec, as Chrome does.
 		async flush(): Promise<void> {
-			const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+			const chunk = { type: "key", timestamp: 0, ...ANNEX_B };
 			this.#output(chunk as never, { decoderConfig: { codec: this.#config?.codec } } as never);
 		}
 
