@@ -28,8 +28,7 @@ Decided with the maintainer on 2026-10-26; see the
 - reqwest and axum-server switch to their no-provider features wherever these
   crates enable them. Decided 2026-10-31 (maintainer): this includes
   moq-relay's own reqwest, axum-server, and rustls `aws-lc-rs` features, which
-  no other area owns; rustls-acme leaves with
-  [ACME](/quest/m1/rind/acme-remove.md).
+  no other area owns. Built-in ACME and rustls-acme were removed separately.
 - The roughly 100 test call sites that install aws-lc's provider install
   rind's.
 - The startup check runs where moq-tokio's crypto is first configured, and its

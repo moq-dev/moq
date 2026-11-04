@@ -22,8 +22,7 @@ maintainer on 2026-10-25 in place of an m2 runtime trait:
 - **Blocking work is out of scope.** OS threads for blocking capture, encode,
   or file I/O are not async tasks and stay.
 
-Spawns no-spawn kept for this audit to convert or list: `Critical`'s ACME
-renewal (`rs/moq-relay/src/relay.rs`) and web certificate reload
+Spawns no-spawn kept for this audit to convert or list: `Critical`'s web certificate reload
 (`rs/moq-relay/src/web.rs`), the io_uring handoff in
 `rs/moq-relay/src/connection.rs`, and moq-relay's web, shutdown, and uring
 spawns. Each UniFFI call's task on the bindings' runtime stays: that is the

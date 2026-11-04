@@ -14,7 +14,7 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 
 use super::Shared;
-use super::ordered::{Item, Ordered};
+use super::ordered::Ordered;
 use super::resume::Stored;
 use crate::layout::{self, End, Entry, Frame, Object};
 use crate::{Error, Info, Result};
@@ -71,7 +71,7 @@ struct Building {
 
 enum Event {
 	Frame(u64, moq_net::Result<Option<moq_net::frame::Frame>>),
-	Next(Option<(u64, Item)>),
+	Next(Option<Box<group::Consumer>>),
 	Timer,
 }
 
@@ -156,7 +156,7 @@ impl<S: ObjectStore> Track<S> {
 		Ok(())
 	}
 
-	/// Record one subscription until both its groups and its datagrams end, returning how.
+	/// Record one subscription until its groups end, returning how.
 	async fn run(&mut self, info: &moq_net::track::Info) -> Result<End> {
 		let shared = self.shared.clone();
 		let config = &shared.config;
@@ -227,15 +227,8 @@ impl<S: ObjectStore> Track<S> {
 			let now = kio::clock::now();
 			match event {
 				Event::Frame(index, read) => self.frame(&mut current, index, read, now)?,
-				Event::Next(Some((sequence, Item::Datagram(datagram)))) => {
-					let frame = Frame {
-						timestamp: self.stamp(datagram.timestamp)?,
-						payload: datagram.payload,
-					};
-					self.push(sequence, 0, frame, true, now)?;
-					self.next = Some(Position::group(sequence + 1));
-				}
-				Event::Next(Some((sequence, Item::Group(group)))) => {
+				Event::Next(Some(group)) => {
+					let sequence = group.sequence;
 					// A resumed group continues after its stored frames. The clamp also starts a
 					// group whose head is held elsewhere at its first frame, rather than lagging
 					// behind it.
@@ -280,7 +273,7 @@ impl<S: ObjectStore> Track<S> {
 					timestamp: self.stamp(frame.timestamp)?,
 					payload: frame.payload,
 				};
-				self.push(sequence, index, frame, false, now)?;
+				self.push(sequence, index, frame, now)?;
 				self.next = Some(Position {
 					group: sequence,
 					frame: index + 1,
@@ -308,11 +301,11 @@ impl<S: ObjectStore> Track<S> {
 		}
 	}
 
-	/// Append one frame of `sequence`, or a datagram, cutting the object before it when due.
-	fn push(&mut self, sequence: u64, index: u64, frame: Frame, datagram: bool, now: Instant) -> Result<()> {
+	/// Append one frame of `sequence`, cutting the object before it when due.
+	fn push(&mut self, sequence: u64, index: u64, frame: Frame, now: Instant) -> Result<()> {
 		let config = &self.shared.config;
 		if let Some(building) = &self.object {
-			let last = building.object.entries.last().map(Entry::sequence);
+			let last = building.object.entries.last().map(|entry| entry.sequence);
 			let boundary = last != Some(sequence);
 			// Only an object's first entry carries a frame start, so a group starting past frame 0
 			// opens its own object.
@@ -352,16 +345,13 @@ impl<S: ObjectStore> Track<S> {
 		});
 		let pts = frame.timestamp.unwrap_or(0);
 		match building.object.entries.last_mut() {
-			Some(Entry::Group { sequence: last, frames }) if *last == sequence && !datagram => frames.push(frame),
+			Some(last) if last.sequence == sequence => last.frames.push(frame),
 			_ => {
 				building.run_pts = pts;
 				building.run_at = now;
-				building.object.entries.push(match datagram {
-					true => Entry::Datagram { sequence, frame },
-					false => Entry::Group {
-						sequence,
-						frames: vec![frame],
-					},
+				building.object.entries.push(Entry {
+					sequence,
+					frames: vec![frame],
 				});
 			}
 		}
