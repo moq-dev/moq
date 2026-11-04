@@ -2,14 +2,8 @@
 # Admit a local suite once; cheap selection runs before calling this launcher.
 set -euo pipefail
 
-gate=()
-if [[ "${1:-}" == --quick ]]; then
-    gate+=(--quick)
-    shift
-fi
-
 if [[ $# == 0 ]]; then
-    echo 'usage: sh/local.sh [--quick] COMMAND [ARGS...]' >&2
+    echo 'usage: sh/local.sh COMMAND [ARGS...]' >&2
     exit 2
 fi
 if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
@@ -22,4 +16,4 @@ fi
 if [[ "${QUEST_GATE_ADMITTED:-}" == 1 ]]; then
     exec bun --no-orphans "${BASH_SOURCE[0]%/*}/local.ts" "$@"
 fi
-exec quest gate "${gate[@]}" bun --no-orphans "${BASH_SOURCE[0]%/*}/local.ts" "$@"
+exec quest gate bun --no-orphans "${BASH_SOURCE[0]%/*}/local.ts" "$@"
