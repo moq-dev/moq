@@ -23,8 +23,11 @@ request so no listing names them; an unknown or unaccepted protocol is reset
 as unsupported. JS reads without fastest-reader pacing until
 [JS fastest-reader pacing](/quest/m2/js-fastest-reader.md), so a JS `tcp`
 reader that falls a group tail behind fails with an eviction error; say so in
-the docs. Add the Rust/JS pairs to `just test interop`, and document the
-export in `doc/lib/js/net.md`.
+the docs. As in Rust, dials and accepts fail as unsupported while the
+endpoint's connection is moq-lite before 07, which never carries its hidden
+broadcast, instead of waiting forever; test it against a lite-06 connection.
+Add the Rust/JS pairs to `just test interop`, and document the export in
+`doc/lib/js/net.md`.
 
 The JS implementation, documentation, relay lanes, and endpoint/session benchmark
 are present. Every new session subscribes from absolute group 0. The controlled
@@ -45,14 +48,22 @@ uses one rejection independently of late requests for completed halves. Each
 subsequent incoming is verified once; canceled claims are declined before the
 next valid dial, as required by the unverified Incoming contract.
 
-Socket request budgets now use the established `.socket/<id>` namespace to wait
-until caller cancellation or session closure. Controlled one-hour virtual waits
-cover both protocols on lite-07 and IETF18/20/22. Ordinary request budgets are
-unchanged. The independent JS IETF subscriber deadline constructors overlap one
-file owned by the shared adapter PR; its absolute-start correction stays there.
+Decisions:
+
+- ✅ 2026-11-04 (maintainer): JS request-setup budgets use general lifecycle
+  bounds, like Rust. Every on-request track request (subscribe, track info,
+  fetch) waits for its answer until demand ends, the caller cancels, stream
+  credit fails fast, or the session closes; no fixed application-answer budget
+  and no `.socket/<id>` namespace exemption. Not chosen: transport-only phase
+  budgets.
+- ✅ 2026-11-04 (maintainer): [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883)'s
+  generic adapter default preserves filterless live joins. Not chosen:
+  canonical from-zero. #7883 is reworked separately to do that; socket
+  absolute group 0/frame 0 stays explicit.
 
 ## Waiting
 
-- Maintainer: choose the JS request-setup budget policy exposed by socket acceptance. Local Claude review found that selecting unlimited setup by `.socket/<id>` couples the adapters to endpoint naming and leaves ordinary on-request tracks subject to the same fixed answer budget. Recommendation: replace fixed application-answer budgets with demand, cancellation, fail-fast stream credit and session closure for all on-request tracks, matching Rust, and remove the namespace exception. Alternatively retain transport-only setup budgets with an explicit internal phase distinction that excludes application-held answers. This changes ordinary request behavior beyond the settled socket port, so it needs a maintainer choice; fix and validate the selected policy in this PR, without a separate follow-up quest. No broader budget investigation or production change was made during closeout.
-- Maintainer: choose the generic adapter default in [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883). Its owner recommends canonical unrestricted/from-zero semantics, explicitly accepting retained-history replay for third-party filterless/no-fill subscriptions. Alternatively preserve filterless live joins, distinguish omitted filters from explicit absolute zero in both adapters, and settle draft20's encoding/presence rule. This JS socket port leaves that choice open; explicit socket absolute group0/frame0 remains settled.
-- moq-dev/moq: merge the generic IETF absolute-start correction from [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883), then verify all eight early-answer cases and the relay matrix pass on the JS PR's actual head. Absolute group 0 alone does not preserve early bursts on the current adapters; no new socket API or wire fields are needed.
+- moq-dev/moq: land [moq-dev/moq#7883](https://github.com/moq-dev/moq/pull/7883)
+  (generic IETF absolute-start correction and Rust socket start), then merge main
+  here and verify all eight early-answer cases and the relay matrix pass on the
+  JS PR's actual head. Check with `gh pr view 7883 --json mergedAt`.

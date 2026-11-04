@@ -919,6 +919,13 @@ const BENCH_BLOAT: (u64, usize) = (200_000_000, 16 << 20);
 /// trip. Deeper pipelines of large frames evict: newest-first delivery starves a track's older
 /// groups while newer ones arrive, until their remainders fill the window.
 const INFLIGHT: usize = 1 << 20;
+/// The receiver's storage segment (`moq_net`'s crate-private `frame::SEGMENT`): a frame within
+/// one keeps its credit until it completes, and a larger one returns each segment's as it seals.
+const SEGMENT: usize = 1 << 20;
+/// Why cells whose incomplete units overcommit the window are skipped: the quest that makes
+/// `track::Subscriber` report each group it abandons, which their readers need to return its
+/// in-flight credit.
+const OVERCOMMITTED: &str = "waits on quest/m1/group-drops.md";
 
 /// One benchmark configuration.
 #[derive(Clone, Copy)]
@@ -935,21 +942,35 @@ struct Cell {
 	follow: bool,
 }
 
+impl Cell {
+	/// Whether every track's incomplete unit fits the connection window at once. Equal-priority
+	/// tracks interleave by packet, so each can hold a whole frame, or one storage segment of a
+	/// larger frame, before any completes. A cell whose units fit must evict nothing; one whose
+	/// units overcommit the window is measured as offered, and its evictions are reported.
+	fn fits(&self) -> bool {
+		(self.streams * self.frame.min(SEGMENT)) as u64 <= self.window
+	}
+}
+
 /// What one benchmark run measured.
 struct Measured {
 	/// The most credit the peer had spent at once: leased or not yet read.
 	peak: u64,
 	/// Payload bytes delivered per second.
 	throughput: f64,
-	/// How long frames took from the write to the receiver completing them, sorted.
+	/// How long each delivered frame took from the write to the receiver completing it, sorted.
 	latency: Vec<Duration>,
+	/// Streams the stuck receive window evicted, each losing its group's frame.
+	evicted: u64,
 	/// Datagrams the bottleneck's full queue dropped.
 	overflowed: u64,
 }
 
-/// Deliver `bytes` over `cell.streams` tracks of one-frame groups, each track keeping
-/// [`INFLIGHT`] bytes outstanding. Every incomplete frame fits the window alongside the
-/// others, so nothing may be evicted, through `profile` or not.
+/// Offer `bytes` over `cell.streams` tracks of one-frame groups, each track keeping
+/// [`INFLIGHT`] bytes outstanding, through `profile` or not. A group whose stream the stuck
+/// window evicts counts as lost rather than failing the run, so an overcommitted cell is
+/// measured at the load it offers; a cell whose incomplete units [fit](Cell::fits) must lose
+/// nothing.
 async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize) -> Measured {
 	let mut transport = transport(cell.window);
 	transport.limits.max_streams = std::num::NonZeroU64::new(moq_tokio::quic::DEFAULT_MAX_STREAMS);
@@ -960,7 +981,12 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 	let mut tracks = Vec::with_capacity(cell.streams);
 	for index in 0..cell.streams {
 		let name = index.to_string();
-		let track = setup.broadcast.create_track(name.as_str(), timed()).unwrap();
+		// A track keeps several groups in flight, so a superseded one must stay readable rather
+		// than expire at the publisher's default zero max age.
+		let track = setup
+			.broadcast
+			.create_track(name.as_str(), timed().with_max_age(None))
+			.unwrap();
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.
 		let subscription = Subscription::default().with_delay(Delay::default().with_max(TIMEOUT));
 		let sub = kio::clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
@@ -996,14 +1022,19 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 				let mut latency = Vec::with_capacity(rounds);
 				for _ in 0..rounds {
 					let mut group = next_group(&mut sub).await;
-					let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
+					let read = kio::clock::timeout(TIMEOUT, group.read_frame())
 						.await
-						.expect("frame timed out")
-						.expect("frame")
-						.expect("group ended");
-					assert_eq!(frame.payload.len(), payload.len());
+						.expect("frame timed out");
 					let sent = sent.lock().unwrap().remove(&group.sequence).expect("written");
-					latency.push(sent.elapsed());
+					match read {
+						Ok(Some(frame)) => {
+							assert_eq!(frame.payload.len(), payload.len());
+							latency.push(sent.elapsed());
+						}
+						// The stuck window evicted the group's stream, and it is not fetched again.
+						Err(moq_net::Error::Evicted) => {}
+						other => panic!("group {} ended with {other:?}", group.sequence),
+					}
 					inflight.add_permits(1);
 				}
 				// Keep the track open until every group is read.
@@ -1019,11 +1050,19 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 	let elapsed = start.elapsed();
 	latency.sort();
 	let credit = setup.conn.stats().credit;
-	assert_eq!(credit.evicted, 0, "pacing evicted a stream");
+	if cell.fits() {
+		assert_eq!(
+			credit.evicted, 0,
+			"evicted a stream whose incomplete units fit the window"
+		);
+		assert_eq!(latency.len(), rounds * cell.streams, "lost a frame without an eviction");
+	}
+	assert!(!latency.is_empty(), "eviction starved every frame");
 	Measured {
 		peak: credit.peak_spent,
 		throughput: (latency.len() * cell.frame) as f64 / elapsed.as_secs_f64(),
 		latency,
+		evicted: credit.evicted,
 		overflowed: setup
 			.verify()
 			.map_or(0, |stats| stats.down.overflowed + stats.up.overflowed),
@@ -1037,10 +1076,16 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 /// size, so a cost that grows with either shows up as a slope; the connection window, which
 /// trades memory for throughput once it nears the path's bandwidth-delay product; and a
 /// stream window that follows the connection window. Reports the peak credit the peer had
-/// spent (leased plus unread), throughput of delivered frames, their completion latency, the
-/// bottleneck's queue drops, each the median of the runs, and fails if any run evicted a stream. The
-/// publisher is a stock server, so its send window bounds what is in flight as it would in
-/// production. Run by nightly.
+/// spent (leased plus unread), throughput of delivered frames, their completion latency, how
+/// many frames were delivered and streams evicted, and the bottleneck's queue drops, each the
+/// median of the runs. Any cell whose incomplete units [fit](Cell::fits) fails if a run
+/// evicted a stream. The publisher is a stock server, so its send window bounds what is in
+/// flight as it would in production. Run by nightly.
+///
+/// Cells whose units overcommit the window are skipped, each printed with [`OVERCOMMITTED`]
+/// as the reason. They should keep their offered load and report what eviction cost them, but
+/// the subscriber can abandon a group without handing it out, so its in-flight credit never
+/// returns and the track's writer stalls.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "release benchmark, run by nightly"]
 async fn benchmark_receive_windows() {
@@ -1074,12 +1119,28 @@ async fn benchmark_receive_windows() {
 			follow: true,
 			..default
 		}));
+	let (cells, skipped): (Vec<_>, Vec<_>) = cells.partition(Cell::fits);
+	for cell in skipped {
+		// Not stdout: the nightly report reads every line after the table's header as a row.
+		eprintln!(
+			"skipped {} cell, {} streams of {} B frames over a {} MiB window: {OVERCOMMITTED}",
+			cell.axis,
+			cell.streams,
+			cell.frame,
+			cell.window >> 20,
+		);
+	}
 	let paths = [
 		("loopback", None, BENCH_BYTES),
 		("bufferbloat", Some(bufferbloat(BENCH_BLOAT.0)), BENCH_BLOAT.1),
 	];
-	println!("path,axis,streams,frame,window_mib,stream_window,peak_bytes,mib_per_s,p50_ms,p99_ms,overflowed_packets");
-	for (cell, (path, profile, bytes)) in cells.flat_map(|cell| paths.clone().map(|path| (cell, path))) {
+	println!(
+		"path,axis,streams,frame,window_mib,stream_window,peak_bytes,mib_per_s,p50_ms,p99_ms,delivered_frames,evicted_streams,overflowed_packets"
+	);
+	for (cell, (path, profile, bytes)) in cells
+		.into_iter()
+		.flat_map(|cell| paths.clone().map(|path| (cell, path)))
+	{
 		let mut runs = Vec::with_capacity(RUNS);
 		for _ in 0..RUNS {
 			runs.push(measure(cell, profile.clone(), bytes).await);
@@ -1097,9 +1158,11 @@ async fn benchmark_receive_windows() {
 		};
 		let peak = median(runs.iter().map(|run| run.peak as f64).collect());
 		let throughput = median(runs.iter().map(|run| run.throughput).collect());
+		let delivered = median(runs.iter().map(|run| run.latency.len() as f64).collect());
+		let evicted = median(runs.iter().map(|run| run.evicted as f64).collect());
 		let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
 		println!(
-			"{path},{},{},{},{},{},{peak:.0},{:.0},{:.2},{:.2},{overflowed}",
+			"{path},{},{},{},{},{},{peak:.0},{:.0},{:.2},{:.2},{delivered},{evicted},{overflowed}",
 			cell.axis,
 			cell.streams,
 			cell.frame,

@@ -433,6 +433,24 @@ export interface StagedTrack {
 	commit(): Producer;
 }
 
+/**
+ * How a received copy's start bounds the fills its readers ask below it. Mirrors the Rust
+ * `TrackState::start_resolved` and `fills_from_start`.
+ *
+ * Below a start the publisher resolved from the budget (`resolvesStart`), a reader fills the
+ * history its own budget reaches: an update can cross the response, so nobody knows which
+ * budget picked that start. On a wire whose fills and timestamps cannot judge an older group
+ * against that budget (`fillsFromStart`, lite-06), readers fill nothing below the start, and a
+ * widened budget reaches lower groups through the feed's re-offer. Anywhere else, a reader fills
+ * below the start only the groups its ranges name.
+ */
+export interface FillStarts {
+	/** The wire's start is resolved from the subscriber's budget: lite SUBSCRIBE_START from lite-06. */
+	resolvesStart?: boolean;
+	/** Readers ask no fills below the start at all. */
+	fillsFromStart?: boolean;
+}
+
 /** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
 export const MAX_DATAGRAMS = 64;
 
@@ -474,8 +492,11 @@ export const hooks: {
 	 * the drop. Mirrors the Rust `drop_groups`; assigned by `track.ts`.
 	 */
 	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, error: Error) => void;
-	/** Mark a track as fed by a wire subscription, which owes missing groups. Assigned by `track.ts`. */
-	receiveTrack: (producer: Producer) => void;
+	/**
+	 * Mark a track as fed by a wire subscription, which owes missing groups. `starts` says how
+	 * that wire's start bounds the fills its readers ask below it. Assigned by `track.ts`.
+	 */
+	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
 	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number }) => GroupProducer;
 	/** The producer's largest reported location and its subsequent changes. */

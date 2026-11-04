@@ -24,6 +24,7 @@ import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type DropRun,
 	dropAt,
+	type FillStarts,
 	finalSequence,
 	groupBounds,
 	hooks,
@@ -817,6 +818,8 @@ let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run &
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
+// The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
+let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The producer's checked group starts, sorted by sequence; assigned in its static block.
 let startsOf: (producer: Producer) => readonly Start[];
 // The exclusive end of the run of sequences from `sequence` the producer's feed can no longer
@@ -977,6 +980,8 @@ export class Producer {
 	#served?: { start?: bigint | null; requested?: bigint };
 	// Only copies fed by a wire subscription owe missing groups.
 	#subscribed = false;
+	// How the subscription's start bounds the fills readers ask below it.
+	#starts: FillStarts = {};
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The sequences of the newest datagrams, as many as a reader buffers: the track's own record
@@ -1030,12 +1035,14 @@ export class Producer {
 			!producer.#subscribed && producer.#state.info.peek()?.ietf !== undefined
 				? producer.#state.largest.peek()?.group
 				: undefined;
-		hooks.receiveTrack = (producer) => {
+		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#subscribed = true;
+			producer.#starts = starts;
 		};
 		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
 		hooks.writeDatagram = (producer, datagram, inflated) => producer.#insertDatagram(datagram, inflated);
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
+		fillFloor = (producer, named) => producer.#fillFloor(named);
 		startsOf = (producer) => producer.#bounds;
 		goneAt = (producer, sequence) => {
 			// Without a declared start, the first arrival stands in for it, as the tail's does.
@@ -1954,6 +1961,28 @@ export class Producer {
 		return this.#state.closed.peek() === undefined ? "pending" : requested;
 	}
 
+	// The lowest group a reader whose ranges name `named` (undefined for one reaching back to
+	// the oldest group) asks a fill for, or undefined for no bound. Below a start resolved from
+	// the budget, each reader fills what its own budget reaches; otherwise only what its ranges
+	// name; and never on a wire whose fills cannot judge a group by that budget. Mirrors the
+	// Rust `Misses::judge`. Fetches are never bounded by it.
+	#fillFloor(named: bigint | undefined): bigint | undefined {
+		if (!this.#subscribed) return undefined;
+		const feed = this.#feedStart();
+		const start = feed === "pending" ? this.#served?.requested : feed;
+		if (start === undefined || start === 0n) return undefined;
+		if (this.#starts.fillsFromStart) return start;
+		// The START applies only while the demand keeps the floor it answered, as `#feedStart`.
+		const ranges = this.#state.update.peek()?.ranges;
+		const served = this.#served;
+		const resolved =
+			this.#starts.resolvesStart === true &&
+			typeof served?.start === "bigint" &&
+			served.requested === (ranges && wireSpan(ranges).start);
+		if (resolved) return undefined;
+		return named === undefined || named >= start ? start : undefined;
+	}
+
 	#owes(final: bigint): boolean {
 		if (!this.#tailPending) return false;
 		const feed = this.#feedStart();
@@ -2681,8 +2710,10 @@ export class Subscriber {
 				if (run.folds !== undefined) this.#wakeAt(run.folds);
 			}
 			for (const sequence of heldDatagrams(producer)) insertRun(gone, sequence, sequence + 1n);
+			// Below where the feed starts, only the history the copy's start rule leaves fillable.
+			const floor = fillFloor(producer, this.#window.start());
 			for (const run of this.#wants(
-				start,
+				floor === undefined ? start : max(start, floor),
 				min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n)),
 			)) {
 				for (const open of runGaps(gone, run.start, run.end)) {
