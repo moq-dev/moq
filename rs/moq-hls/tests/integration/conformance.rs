@@ -2,8 +2,9 @@
 //! served as ffprobe decodes it.
 //!
 //! ffmpeg encodes a ladder whose renditions disagree on keyframes: `video0` has a 2s GOP with
-//! B-frames, `video1` a 3s one that overruns the declared 2s duration and changes resolution
-//! halfway (a reconfigure, so a new rendition instance), and AAC audio packs into the grid. The
+//! B-frames, `video1` a 3s one that overruns the declared 2s join interval and changes resolution
+//! halfway (a reconfigure, so a new rendition instance), and AAC audio packs into the grid. Every
+//! rendition numbers its segments on the one grid while cutting at its own keyframes. The
 //! transport stream is imported and served across a moq-net session while every playlist and the
 //! manifest are polled. Each segment is fetched while listed, until a short window evicts it, and
 //! refetched on later reloads, one right after a catalog estimate update; the segment cursors
@@ -30,14 +31,15 @@ const RECONFIGURE: u32 = 12;
 /// The ladder's renditions: two video, one audio.
 const RENDITIONS: usize = 3;
 
-/// The declared segment duration, which `video1`'s 3s GOPs overrun.
+/// The declared join interval, which `video1`'s 3s GOPs overrun.
 const DURATION: Duration = Duration::from_secs(2);
 
 /// The playlist window, short enough to evict most of a run's segments.
 const WINDOW: Duration = Duration::from_secs(6);
 
 /// How far a decoded start or duration may sit from what a playlist or manifest advertises: the
-/// records carry milliseconds, so one for each end of a span, plus ffprobe's microsecond rounding.
+/// DASH timeline carries milliseconds, so one for each end of a span, plus ffprobe's microsecond
+/// rounding.
 const TOLERANCE: f64 = 0.0025;
 
 /// How many pieces the transport stream is imported in, polling after each.
@@ -62,11 +64,10 @@ async fn segments_match_their_manifests() {
 		.route("live", moq_net::origin::RouteOptions::default())
 		.expect("publish");
 	let mut broadcast = publication.broadcast().clone();
-	let hls = moq_mux::hls::Config::default()
-		.with_duration(DURATION)
-		.with_duration_hint(DURATION);
+	let mut seeded = moq_mux::catalog::hang::Catalog::<()>::default();
+	seeded.media.join = hang::catalog::Join::new(DURATION);
 	let mut catalog =
-		moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default().with_hls(hls))
+		moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default().with_catalog(seeded))
 			.expect("catalog");
 	let init = moq_mux::import::ContainerInit::new(moq_mux::import::ContainerFormat::Ts, Bytes::new());
 	let mut import = moq_mux::import::Container::new(broadcast, catalog.reserve(), &init).expect("import");
@@ -251,12 +252,13 @@ impl Recorder {
 								}
 							};
 							let mut recorded = recorded.lock().unwrap();
-							// Where content stops, a zero-duration gap ends the segment before it.
+							// A gap is a grid slot an overrunning GOP covered, never longer than one
+							// interval.
 							let Some(media) = segment.media else {
-								if !segment.duration.is_zero() {
+								if segment.duration > DURATION {
 									recorded
 										.failures
-										.push(format!("{name} recorded {} as a gap", segment.segment));
+										.push(format!("{name} recorded {} as a long gap", segment.segment));
 								}
 								continue;
 							};
@@ -458,11 +460,10 @@ impl Seen {
 					discontinuity: std::mem::take(&mut discontinuity),
 					gap: std::mem::take(&mut gap),
 				};
-				// Every segment of an unaligned ladder has media. Only where content stops does a
-				// zero-duration gap end the segment before it.
+				// A gap is a grid slot an overrunning GOP covered, never longer than one interval.
 				assert!(
-					!segment.gap || segment.duration == 0.0,
-					"{uri} lists segment {number} as a gap:\n{body}"
+					!segment.gap || segment.duration <= DURATION.as_secs_f64() + TOLERANCE,
+					"{uri} lists segment {number} as a gap longer than the interval:\n{body}"
 				);
 				listed.push((number, segment));
 				number += 1;
@@ -577,15 +578,40 @@ impl Seen {
 		newest
 	}
 
-	/// The segments of `name` that end a rendition instance a reconfigure retired: the last
-	/// listed under each init but the newest.
+	/// The segments of `name` the DASH manifest may never list: the trailing ones of an instance a
+	/// reconfigure retired, after the last of its segments a timeline did list. The manifest lists
+	/// only the current instance, and a retired one keeps listing what it had read before the
+	/// reconfigure reached the export (/quest/m2/dash-reconfigure.md).
 	fn retired(&self, name: &str) -> BTreeSet<u64> {
-		let playlists = self.playlists.iter().filter(|(uri, _)| self.names[*uri] == name);
-		playlists
-			.flat_map(|(_, playlist)| playlist.iter().zip(playlist.values().skip(1)))
-			.filter(|((_, segment), next)| segment.init != next.init)
-			.map(|((number, _), _)| *number)
-			.collect()
+		let timed: Vec<&Bytes> = self
+			.timelines
+			.iter()
+			.filter(|(id, _)| id.split_once('/').is_some_and(|(_, id)| id == name))
+			.flat_map(|(_, timeline)| timeline.values())
+			.filter_map(|segment| self.bodies.get(&segment.uri))
+			.collect();
+		let mut retired = BTreeSet::new();
+		for (uri, playlist) in &self.playlists {
+			if self.names[uri] != name {
+				continue;
+			}
+			let media: Vec<_> = playlist.iter().filter(|(_, segment)| !segment.gap).collect();
+			let Some((_, current)) = media.last() else {
+				continue;
+			};
+			let mut trailing = Vec::new();
+			for &(number, segment) in &media {
+				if segment.init == current.init {
+					break;
+				}
+				match self.bodies.get(&segment.uri).is_some_and(|body| timed.contains(&body)) {
+					true => trailing.clear(),
+					false => trailing.push(*number),
+				}
+			}
+			retired.extend(trailing);
+		}
+		retired
 	}
 
 	/// Probe everything fetched, and compare it with what was advertised and recorded.
@@ -600,22 +626,39 @@ impl Seen {
 		let mut probes = Probes::default();
 		let mut overran = false;
 		let mut reconfigured = false;
+		let grid = DURATION.as_secs_f64();
+		// Each segment number's decoded start, per rendition, to compare across the ladder.
+		let mut starts: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
 		for (uri, playlist) in &self.playlists {
 			let name = &self.names[uri];
-			let mut previous: Option<(f64, &Listed)> = None;
 			let numbers: Vec<u64> = playlist.keys().copied().collect();
 			if numbers.windows(2).any(|pair| pair[1] != pair[0] + 1) {
 				fail(format!("{uri} skipped a number: {numbers:?}"));
 			}
-			for (number, segment) in playlist.iter().filter(|(_, segment)| !segment.gap) {
+			// Where the playlist timeline says the next segment starts: gaps advance it too.
+			let mut timeline: Option<f64> = None;
+			let segments: Vec<(&u64, &Listed)> = playlist.iter().collect();
+			for (index, &(number, segment)) in segments.iter().enumerate() {
+				if segment.discontinuity {
+					timeline = None;
+				}
+				if segment.gap {
+					timeline = timeline.map(|time| time + segment.duration);
+					continue;
+				}
 				let Some(probe) = probes.get(&self.bodies, &segment.init, &segment.uri, &mut fail).await else {
+					timeline = None;
 					continue;
 				};
 				let at = format!("{uri} segment {number}");
 				// Every segment opens on a keyframe, advertised or not: the export doesn't emit
 				// `EXT-X-INDEPENDENT-SEGMENTS`, but players switch renditions at any boundary.
 				probe.check_sync(&at, &mut fail);
-				if (probe.duration() - segment.duration).abs() > TOLERANCE {
+				// A segment followed by media lasts exactly until it; one an overrun leaves gaps
+				// after is listed at its first line, so its EXTINF understates its media.
+				let overrun = segments.get(index + 1).is_some_and(|(_, next)| next.gap);
+				let short = probe.duration() - segment.duration;
+				if short.abs() > TOLERANCE && !(overrun && short > 0.0) {
 					fail(format!(
 						"{at}: EXTINF {} but decodes {:.6}",
 						segment.duration,
@@ -623,20 +666,33 @@ impl Seen {
 					));
 				}
 				// The scenario, not the playlist's EXT-X-TARGETDURATION: a GOP longer than declared.
-				overran |= segment.duration > DURATION.as_secs_f64() + TOLERANCE;
-				if let Some((start, previous)) = previous
-					&& !segment.discontinuity
+				overran |= probe.duration() > grid + TOLERANCE;
+				if let Some(expected) = timeline
+					&& (probe.start - expected).abs() > TOLERANCE
 				{
-					let expected = start + previous.duration;
-					if (probe.start - expected).abs() > TOLERANCE {
-						fail(format!(
-							"{at}: decodes from {:.6} but the segment before it ends at {expected:.6}",
-							probe.start
-						));
-					}
+					fail(format!(
+						"{at}: decodes from {:.6} but the playlist timeline reaches it at {expected:.6}",
+						probe.start
+					));
 				}
-				reconfigured |= previous.is_some_and(|(_, previous)| previous.init != segment.init);
-				previous = Some((probe.start, segment));
+				// Segment N starts at the group containing N times the interval, or, containing
+				// none, one starting after that line and before the next.
+				let line = *number as f64 * grid;
+				if probe.start > line + grid + TOLERANCE || probe.start + probe.duration() < line - TOLERANCE {
+					fail(format!(
+						"{at}: decodes {:.6} to {:.6}, off grid line {line}",
+						probe.start,
+						probe.start + probe.duration()
+					));
+				}
+				starts.entry(*number).or_default().push(probe.start);
+				reconfigured |= index > 0
+					&& segments[..index]
+						.iter()
+						.rev()
+						.find(|(_, previous)| !previous.gap)
+						.is_some_and(|(_, previous)| previous.init != segment.init);
+				timeline = Some(probe.start + segment.duration);
 
 				let recording = recorded.segments.get(name).and_then(|segments| segments.get(number));
 				if recording != self.bodies.get(&segment.uri) {
@@ -654,8 +710,18 @@ impl Seen {
 				fail(format!("{name}: recorded {recording:?} but listed {listed:?}"));
 			}
 		}
+		// The renditions share segment numbers, but each cuts at its own keyframes: some number
+		// starts at different times across the unaligned ladder.
+		let unaligned = starts.values().any(|starts| {
+			starts
+				.iter()
+				.any(|start| starts.iter().any(|other| (start - other).abs() > TOLERANCE))
+		});
+		if !unaligned {
+			fail("every rendition cut every shared segment number at the same time".to_string());
+		}
 		if !overran {
-			fail("no segment overran the declared duration".to_string());
+			fail("no segment overran the declared interval".to_string());
 		}
 		if !reconfigured {
 			fail("no rendition was reconfigured".to_string());
@@ -700,7 +766,11 @@ impl Seen {
 						segment.start, probe.start
 					));
 				}
-				if (probe.duration() - segment.duration).abs() > TOLERANCE {
+				// As in the playlist, an overrunning segment's duration runs only to the next line.
+				let short = probe.duration() - segment.duration;
+				let next = timeline.range(t + 1..).next().map(|(_, next)| next.start);
+				let overrun = next.is_some_and(|next| next > segment.start + segment.duration + TOLERANCE);
+				if short.abs() > TOLERANCE && !(overrun && short > 0.0) {
 					fail(format!(
 						"{at}: S@d is {} but decodes {:.6}",
 						segment.duration,

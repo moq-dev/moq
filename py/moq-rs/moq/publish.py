@@ -139,7 +139,7 @@ class TrackProducer:
         self._inner.insert_datagram(sequence, Frame(payload, timestamp)._ffi())
 
     def largest(self) -> Position | None:
-        """The newest group or datagram written, at its newest frame; ``None`` before any."""
+        """The newest group written, at its newest frame; ``None`` before any. Datagrams never move it."""
         return self._inner.largest()
 
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:

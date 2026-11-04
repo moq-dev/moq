@@ -4,7 +4,7 @@ pub mod harness;
 pub mod mock;
 
 use futures::channel::mpsc;
-use moq_net::{announce, goaway, origin, track};
+use moq_net::{announce, datagram, goaway, origin, track};
 
 /// Wait until anyone wants the track, returning the group they want.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
@@ -21,6 +21,16 @@ pub async fn wanted(mut demand: track::Demand) -> moq_net::Result<u64> {
 pub async fn unwanted(mut demand: track::Demand) -> moq_net::Result<()> {
 	while demand.wanted_changed().await?.is_some() {}
 	Ok(())
+}
+
+/// Wait until a datagram track's highest subscriber priority is `want`, where `None` means
+/// nobody reads it.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub async fn datagram_priority(producer: &datagram::Producer, want: Option<i8>) {
+	let mut priority = producer.priority();
+	while priority != want {
+		priority = moq_net::kio::wait(|waiter| producer.poll_priority(waiter, priority)).await;
+	}
 }
 
 /// Wait until `consumer` sees a route announced at exactly `path`, and return it.

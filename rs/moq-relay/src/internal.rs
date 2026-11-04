@@ -729,7 +729,7 @@ impl Scrape {
 			("moq_relay_groups", "Media groups transferred.", |c| c.groups),
 			(
 				"moq_relay_datagrams",
-				"Single-frame groups carried over unreliable QUIC datagrams; a subset of groups.",
+				"Datagrams of datagram tracks transferred, disjoint from groups.",
 				|c| c.datagrams,
 			),
 			(
@@ -751,11 +751,6 @@ impl Scrape {
 				"moq_relay_stale_groups",
 				"Media groups skipped after drifting beyond a subscriber's latency budget.",
 				|c| c.stale.groups,
-			),
-			(
-				"moq_relay_stale_datagrams",
-				"Media datagrams skipped after drifting beyond a subscriber's latency budget.",
-				|c| c.stale.datagrams,
 			),
 			("moq_relay_fetches", "One-shot group fetches requested.", |c| c.fetches),
 			("moq_relay_announces_started", "Broadcast announces started.", |c| {
@@ -1910,10 +1905,6 @@ mod tests {
 			"stale egress groups:\n{body}"
 		);
 		assert!(
-			body.contains("moq_relay_stale_datagrams_total{tier=\"\",role=\"publisher\"} 0"),
-			"stale egress datagrams:\n{body}"
-		);
-		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),
 			"session presence:\n{body}"
 		);
@@ -2096,7 +2087,6 @@ mod tests {
 # TYPE moq_relay_sessions_opened_total counter
 # TYPE moq_relay_sessions_refused_total counter
 # TYPE moq_relay_stale_bytes_total counter
-# TYPE moq_relay_stale_datagrams_total counter
 # TYPE moq_relay_stale_frames_total counter
 # TYPE moq_relay_stale_groups_total counter
 # TYPE moq_relay_stun_dropped_total counter
@@ -2142,8 +2132,6 @@ counter moq_relay_sessions_refused_total{reason="request"} 0
 counter moq_relay_sessions_refused_total{reason="unavailable"} 1
 counter moq_relay_stale_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_bytes_total{role="subscriber",tier="edge"} 0
-counter moq_relay_stale_datagrams_total{role="publisher",tier="edge"} 0
-counter moq_relay_stale_datagrams_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stale_frames_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_frames_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stale_groups_total{role="publisher",tier="edge"} 0

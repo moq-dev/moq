@@ -77,16 +77,9 @@ fn frame(timed: bool, sequence: u64, index: u64) -> Frame {
 
 /// Group `sequence`'s frames `frames`.
 fn frames(timed: bool, sequence: u64, frames: std::ops::Range<u64>) -> Entry {
-	Entry::Group {
+	Entry {
 		sequence,
 		frames: frames.map(|index| frame(timed, sequence, index)).collect(),
-	}
-}
-
-fn datagram(timed: bool, sequence: u64) -> Entry {
-	Entry::Datagram {
-		sequence,
-		frame: frame(timed, sequence, 0),
 	}
 }
 
@@ -185,7 +178,7 @@ async fn a_recording_round_trips() {
 		.with_priority(3)
 		.with_max_age(Duration::from_secs(1));
 	let video = source.create_track("video", timed).unwrap();
-	let mut log = source
+	let log = source
 		.create_track("log", track::Info::default().with_priority(9))
 		.unwrap();
 	let config = crate::producer::Config::default()
@@ -209,8 +202,6 @@ async fn a_recording_round_trips() {
 	let mut group = log.create_group(group::Info { sequence: 0 }).unwrap();
 	group.write_frame(None, "a").unwrap();
 	group.finish().unwrap();
-	sleep(Duration::from_millis(10)).await;
-	log.insert_datagram(1, None, "b").unwrap();
 	sleep(Duration::from_millis(10)).await;
 	video.finish().unwrap();
 	log.finish().unwrap();
@@ -239,14 +230,9 @@ async fn a_recording_round_trips() {
 	assert!(reader.next_group().await.unwrap().is_none());
 	assert_eq!(reader.finished().await.unwrap(), Position::group(6));
 
-	// The untimed track keeps its datagram a datagram.
 	let info = broadcast.consume().track("log").unwrap().info().await.unwrap();
 	assert_eq!((info.priority, info.timescale), (9, None));
 	assert_eq!(fetch(&broadcast, "log", 0).await.unwrap(), ["a"]);
-	assert!(matches!(
-		fetch(&broadcast, "log", 1).await,
-		Err(moq_net::Error::NotFetchable | moq_net::Error::NotFound)
-	));
 }
 
 /// History older than the source's max age relative to the newest group is still served.
@@ -604,55 +590,6 @@ async fn markers_end_a_followed_archive() {
 	assert!(next(&mut reader).await.is_none());
 }
 
-/// Groups and datagrams sharing one sequence space replay in their recorded forms.
-#[tokio::test(start_paused = true)]
-async fn groups_and_datagrams_keep_their_forms() {
-	let archive = Archive::new();
-	archive.track("mixed", 0, false).await;
-	archive
-		.object(
-			"mixed",
-			0,
-			vec![frames(false, 0, 0..1), datagram(false, 1), frames(false, 2, 0..1)],
-		)
-		.await;
-
-	let (broadcast, _run) = serve(&archive.store).await;
-	let track = broadcast.consume().track("mixed").unwrap();
-	let subscription = Subscription::default()
-		.with_range(0..)
-		.with_order(Order::Ascending)
-		.with_delay(Delay::default().with_max(None));
-	let mut reader = track.subscribe(subscription).await.unwrap();
-
-	archive
-		.object("mixed", 0, vec![datagram(false, 3), frames(false, 4, 0..1)])
-		.await;
-	let datagram = timeout(10 * REFRESH, reader.recv_datagram())
-		.await
-		.expect("the datagram arrives")
-		.unwrap()
-		.unwrap();
-	assert_eq!((datagram.sequence, &datagram.payload[..]), (3, &b"3/0"[..]));
-
-	// A stored datagram is never fetched as a group.
-	assert!(fetch(&broadcast, "mixed", 1).await.is_err());
-	assert_eq!(fetch(&broadcast, "mixed", 0).await.unwrap(), ["0/0"]);
-	assert_eq!(fetch(&broadcast, "mixed", 2).await.unwrap(), ["2/0"]);
-
-	// The newest stored group arrives live as a group, still open.
-	let mut sequences = Vec::new();
-	while sequences.last() != Some(&4) {
-		let group = timeout(10 * REFRESH, reader.recv_group())
-			.await
-			.unwrap()
-			.unwrap()
-			.unwrap();
-		sequences.push(group.sequence);
-	}
-	assert!(!sequences.contains(&1) && !sequences.contains(&3), "{sequences:?}");
-}
-
 /// A track removed and re-added under its name replays both runs in sequence.
 #[tokio::test(start_paused = true)]
 async fn a_re_added_track_replays_both_runs() {
@@ -902,7 +839,7 @@ async fn a_continuation_does_not_bound_a_group_start() {
 		.object(
 			"video",
 			0,
-			vec![Entry::Group {
+			vec![Entry {
 				sequence: 0,
 				frames: vec![frame(0, 0, 0)],
 			}],
@@ -913,11 +850,11 @@ async fn a_continuation_does_not_bound_a_group_start() {
 			"video",
 			1,
 			vec![
-				Entry::Group {
+				Entry {
 					sequence: 0,
 					frames: vec![frame(0, 1, 1_000)],
 				},
-				Entry::Group {
+				Entry {
 					sequence: 1,
 					frames: vec![frame(1, 0, 500)],
 				},

@@ -40,7 +40,7 @@ async fn finish(order: Order) {
 			publisher.finish();
 			// The served playlist ends while the broadcast is still announced.
 			let playlist = listed(&app, &media, "#EXT-X-ENDLIST").await;
-			assert_eq!(numbers(&playlist), [0, 1, 2, 3, 4], "{playlist}");
+			assert_eq!(numbers(&playlist), [0, 1, 2, 3], "{playlist}");
 			publisher.route.broadcast().close();
 		}
 		Order::EndBeforeEof => {
@@ -52,18 +52,15 @@ async fn finish(order: Order) {
 				assert!(kio::clock::now() < deadline, "End never reached the export");
 				kio::clock::sleep(Duration::from_millis(50)).await;
 			}
-			// `End` alone confirms nothing: the recording stays open until the catalog's EOF.
-			let playlist = rendition.media_playlist(None).expect("live").expect("listed");
-			assert!(!playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
+			// The media's clean finish already ended the recording, whatever the catalog does.
 			publisher.catalog.finish().expect("finish catalog");
 		}
 	}
 
-	// The final GOP is the last segment, the finish a trailing gap, and the recording reads to
-	// its end.
+	// The final GOP is the last segment, and the recording reads to its end.
 	let (read, end) = drain(&mut cursor).await;
 	end.unwrap_or_else(|err| panic!("{order:?}: {err}"));
-	assert_eq!(read, [1, 2, 3, 4], "{order:?}");
+	assert_eq!(read, [1, 2, 3], "{order:?}");
 	let again = kio::clock::timeout(TIMEOUT, cursor.next())
 		.await
 		.expect("the cursor stalled");
@@ -71,7 +68,7 @@ async fn finish(order: Order) {
 
 	let playlist = rendition.media_playlist(None).expect("finished").expect("listed");
 	assert!(playlist.ends_with("#EXT-X-ENDLIST\n"), "{order:?}: {playlist}");
-	assert_eq!(numbers(&playlist), [0, 1, 2, 3, 4], "{order:?}");
+	assert_eq!(numbers(&playlist), [0, 1, 2, 3], "{order:?}");
 }
 
 #[tokio::test(start_paused = true)]

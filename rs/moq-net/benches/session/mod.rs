@@ -29,9 +29,10 @@
 //! `session_delivery_prefixes` holds silent broadcasts open on one viewer session beside the
 //! one it watches, against a fixed route table. Each is an announce request the session
 //! keeps, so a per-group cost that grows with them shows as a slope over `follow`.
-//! `session_delivery_datagram` writes datagrams instead of groups: one per track per round
-//! across publisher and viewer axes, then larger payloads and cadences. Throughput counts
-//! delivered datagrams, each checked for its sequence and payload, so a lost one fails.
+//! `session_delivery_datagram` writes to a datagram track per broadcast instead of groups:
+//! one datagram per track per round across publisher and viewer axes, then larger payloads
+//! and cadences, on the lite versions (moq-transport carries no datagram tracks). Throughput
+//! counts delivered datagrams, each checked for its sequence and payload, so a lost one fails.
 //! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
 //! written plus charged cache bytes every 10s during long profiling runs. Each round
 //! advances the cache clock by a second, so the expiry window spans 30 rounds.
@@ -90,7 +91,7 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 pub(crate) use harness::MockConnectOptions;
 use harness::{MockPair, connect_mock};
 use mock::{MockSession, MockStats};
-use moq_net::{Hop, Timestamp, Version, broadcast, cache, group, origin, track};
+use moq_net::{Hop, Timestamp, Version, broadcast, cache, datagram, group, origin, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
@@ -108,6 +109,10 @@ const FRAMES: usize = 4;
 const DATAGRAM_PAYLOADS: usize = 16;
 
 const TRACK: &str = "video";
+
+/// The datagram track's name. Lite-05/06 carry a name's stream and datagram tracks on one
+/// subscription, so a name of its own keeps the stream rounds from carrying datagrams.
+const DATAGRAMS: &str = "audio";
 
 /// Lite 06 is what the dash session and cluster peers negotiate today.
 const DASH_VERSIONS: [&str; 2] = ["moq-lite-06", "moq-transport-22"];
@@ -157,8 +162,8 @@ struct Shape {
 	compress: bool,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
-	/// Deliver each round as `burst` datagrams of `frame` bytes per watched track instead of
-	/// groups.
+	/// Deliver each round as `burst` datagrams of `frame` bytes per watched broadcast's
+	/// datagram track instead of groups.
 	datagrams: bool,
 }
 
@@ -199,6 +204,11 @@ impl Shape {
 	/// Datagrams every viewer reads in one datagram round.
 	fn objects(&self) -> usize {
 		self.viewers * self.watch * self.burst
+	}
+
+	/// Whether `version` carries this shape: moq-transport has no datagram tracks.
+	fn runs_on(&self, version: &str) -> bool {
+		!self.datagrams || version.parse::<Version>().unwrap().is_lite()
 	}
 
 	/// The broadcasts viewer `viewer` watches: a contiguous window starting at
@@ -577,6 +587,8 @@ struct Cluster<B: Backend> {
 	relays: Vec<B::Relay>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
+	/// One datagram track per broadcast, indexed like [`path`], for datagram shapes only.
+	datagrams: Vec<datagram::Producer>,
 	_broadcasts: Vec<origin::Route>,
 	_origins: Vec<origin::Producer>,
 	_pairs: Vec<Pair>,
@@ -595,6 +607,7 @@ impl<B: Backend> Cluster<B> {
 			discovers_all: shape.follow == 0,
 			relays: Vec::new(),
 			tracks: Vec::new(),
+			datagrams: Vec::new(),
 			_broadcasts: Vec::new(),
 			_origins: Vec::new(),
 			_pairs: Vec::new(),
@@ -644,6 +657,11 @@ impl<B: Backend> Cluster<B> {
 						.create_track(TRACK, timed().with_compress(shape.compress))
 						.unwrap(),
 				);
+				if shape.datagrams {
+					let info = datagram::Info::default().with_timescale(moq_net::Timescale::MILLI);
+					this.datagrams
+						.push(broadcast.broadcast().create_datagrams(DATAGRAMS, info).unwrap());
+				}
 				this._broadcasts.push(broadcast);
 			}
 
@@ -681,6 +699,7 @@ impl<B: Backend> Cluster<B> {
 		Viewer {
 			following: Vec::new(),
 			subscribers: Vec::new(),
+			datagrams: Vec::new(),
 			fetches: Vec::new(),
 			blocked: 0,
 			_pair: pair,
@@ -694,6 +713,8 @@ struct Viewer {
 	/// Announcements watched without a subscription, one announce request each.
 	following: Vec<moq_net::announce::Consumer>,
 	subscribers: Vec<track::Subscriber>,
+	/// Datagram track consumers, in the order of the broadcasts watched.
+	datagrams: Vec<datagram::Consumer>,
 	fetches: Vec<(usize, track::Consumer)>,
 	blocked: usize,
 	_pair: Pair,
@@ -713,6 +734,21 @@ impl Viewer {
 		let event = announced.next().await.expect("announced");
 		assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
 		self.following.push(announced);
+	}
+
+	/// Resolve `path` and consume its datagram track, once its publisher answers.
+	async fn watch_datagrams(&mut self, path: &str) {
+		let broadcast = self
+			.origin
+			.consume()
+			.follow(path, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
+		let consumer = broadcast.datagrams(DATAGRAMS).unwrap();
+		consumer.info().await.unwrap();
+		self.datagrams.push(consumer);
 	}
 
 	/// Resolve `path` and subscribe to each of its `tracks`.
@@ -786,7 +822,9 @@ impl<B: Backend> Room<B> {
 			// publisher it watches whenever there is more than one.
 			let mut viewer = cluster.join((viewer_index + 1) % shape.relays, false).await;
 			for broadcast in broadcasts {
-				if shape.fetch {
+				if shape.datagrams {
+					viewer.watch_datagrams(&path(broadcast)).await;
+				} else if shape.fetch {
 					let source = viewer
 						.origin
 						.consume()
@@ -851,9 +889,7 @@ impl<B: Backend> Room<B> {
 			.map(|viewer| viewer._pair.server_transport.blocked_writes())
 			.sum();
 		if shape.datagrams {
-			// A group first: moq-transport binds a subscription's alias with it and drops a
-			// datagram that lands before then.
-			room.group_round().await;
+			room.sync_datagrams().await;
 		}
 		// Warm every path so the timed rounds skip first-group setup.
 		for _ in 0..shape.group_frames / shape.frames() {
@@ -987,27 +1023,78 @@ impl<B: Backend> Room<B> {
 		}
 	}
 
+	/// Write the next datagram into every watched track.
+	fn write_datagrams(&mut self) {
+		for &broadcast in &self.watched {
+			let sequence = self.next[broadcast];
+			let payload = self.payloads[sequence as usize % DATAGRAM_PAYLOADS].clone();
+			let track = &mut self.cluster.datagrams[broadcast];
+			assert_eq!(track.append(Timestamp::ZERO, payload).unwrap(), sequence);
+			self.next[broadcast] = sequence + 1;
+		}
+	}
+
+	/// Line every viewer up on the same next sequence before the strict rounds.
+	///
+	/// A consumer is live once its track's info arrives, but on lite-05/06 the SUBSCRIBE
+	/// that carries the datagrams follows that answer, so a datagram may still miss it. Write
+	/// until every viewer has read one, then a last one each viewer reads through: the memory
+	/// transport keeps a subscription's datagrams in order, so nothing earlier arrives after.
+	async fn sync_datagrams(&mut self) {
+		let waiter = kio::Waiter::noop();
+		let mut reached = vec![false; self.shape.viewers * self.shape.watch];
+		for attempt in 0.. {
+			if !reached.contains(&false) {
+				break;
+			}
+			// Fail rather than spin: a viewer the datagrams never reach is a broken path.
+			assert!(attempt < 1024, "datagrams never reached every viewer");
+			self.write_datagrams();
+			tokio::task::yield_now().await;
+			let consumers = self.viewers.iter_mut().flat_map(|viewer| &mut viewer.datagrams);
+			for (consumer, reached) in consumers.zip(&mut reached) {
+				while let std::task::Poll::Ready(Ok(Some(_))) = consumer.poll_recv(&waiter) {
+					*reached = true;
+				}
+			}
+		}
+		self.write_datagrams();
+		for (index, viewer) in self.viewers.iter_mut().enumerate() {
+			for (consumer, broadcast) in viewer.datagrams.iter_mut().zip(self.shape.watching(index)) {
+				let last = self.next[broadcast] - 1;
+				// Bounded as above: a last datagram that never arrives fails the run.
+				let mut attempts = 0;
+				loop {
+					match consumer.poll_recv(&waiter) {
+						std::task::Poll::Ready(Ok(Some(datagram))) if datagram.sequence == last => break,
+						std::task::Poll::Ready(Ok(Some(_))) => continue,
+						std::task::Poll::Ready(end) => panic!("the datagram track ended: {end:?}"),
+						std::task::Poll::Pending => {
+							attempts += 1;
+							assert!(attempts < 1024, "the last datagram never reached a viewer");
+							tokio::task::yield_now().await;
+						}
+					}
+				}
+			}
+		}
+	}
+
 	/// `burst` datagrams into every watched track, then every one out to each viewer
 	/// watching it. The memory transport loses none below its queue bound, so each must
 	/// arrive in order with its payload: a dropped datagram fails rather than looking
 	/// cheaper.
 	async fn datagram_round(&mut self) {
-		for &broadcast in &self.watched {
-			let track = &mut self.cluster.tracks[broadcast];
-			for _ in 0..self.shape.burst {
-				let sequence = self.next[broadcast];
-				let payload = self.payloads[sequence as usize % DATAGRAM_PAYLOADS].clone();
-				assert_eq!(track.append_datagram(Timestamp::ZERO, payload).unwrap(), sequence);
-				self.next[broadcast] = sequence + 1;
-			}
+		for _ in 0..self.shape.burst {
+			self.write_datagrams();
 		}
 		let burst = self.shape.burst as u64;
 		let mut delivered = 0;
 		for (index, viewer) in self.viewers.iter_mut().enumerate() {
-			for (subscriber, broadcast) in viewer.subscribers.iter_mut().zip(self.shape.watching(index)) {
+			for (consumer, broadcast) in viewer.datagrams.iter_mut().zip(self.shape.watching(index)) {
 				let first = self.next[broadcast] - burst;
 				for sequence in first..first + burst {
-					let datagram = subscriber.recv_datagram().await.unwrap().expect("track ended");
+					let datagram = consumer.recv().await.unwrap().expect("track ended");
 					assert_eq!(datagram.sequence, sequence, "datagram lost or reordered");
 					assert_eq!(
 						datagram.payload,
@@ -1102,7 +1189,7 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 	};
 	let mut group = c.benchmark_group(format!("{}session_delivery_{name}{cpu}", B::PREFIX));
 	for version in VERSIONS {
-		for shape in &shapes {
+		for shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
 			// Built on first call: Criterion only calls a routine its filter
 			// selects, and calls it again for every sample.
 			let mut room = None;
@@ -1143,7 +1230,7 @@ pub(crate) fn group_cost<B: Backend>(c: &mut Criterion) {
 
 /// Datagram delivery over independent publisher and viewer axes at a small payload and one
 /// datagram per track per round, then payload size and cadence at 16 publishers and 16
-/// viewers. 64 per round fills a track's datagram send buffer exactly.
+/// viewers. 64 per round fills what a datagram track holds for an unread consumer exactly.
 fn datagram_shapes() -> impl Iterator<Item = Shape> {
 	let base = Shape {
 		datagrams: true,
@@ -1507,7 +1594,7 @@ fn allocations<B: Backend>() {
 		.flat_map(|shape| [false, true].map(|paced| Shape { paced, ..shape }));
 	let shapes: Vec<_> = groups.chain(datagram_shapes()).collect();
 	for version in VERSIONS {
-		for &shape in &shapes {
+		for &shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
 			let mut room = rt.block_on(Room::<B>::new(version, shape));
 			room.instructions = Instructions::open();
 			ALLOCATIONS.store(0, Ordering::Relaxed);

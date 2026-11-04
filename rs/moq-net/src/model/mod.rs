@@ -1,6 +1,7 @@
 pub mod bandwidth;
 pub mod broadcast;
 pub mod cache;
+pub mod datagram;
 pub mod frame;
 pub mod group;
 pub mod track;
@@ -19,7 +20,6 @@ mod front;
 mod aborts;
 mod bytes;
 mod clock;
-pub(crate) mod datagram;
 mod delivered;
 mod expiry;
 // The early exit a read nothing woke takes.
@@ -44,9 +44,8 @@ use request_queue::RequestQueue;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-// Datagram stays flat at the crate root (a small track-adjacent wire type),
-// not under a role module.
-pub use datagram::*;
+// The payload type stays flat at the crate root beside `Timestamp`.
+pub use datagram::Datagram;
 pub use time::*;
 pub use timed::Timed;
 

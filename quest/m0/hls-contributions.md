@@ -90,10 +90,6 @@ Update `doc/bin/hls.md` and the hang draft's Contributions section.
 Public API: additive in moq-hls (the new URL routes). Wire: none; the draft
 gains the HLS listing rule and the on-demand publisher's catalog answer.
 
-## Required
-
-- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the export reads media tracks on `media.join.interval`, which both the shared segment numbering and the lazy media subscription build on
-
 ## Related
 
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - also changes how the server resolves a path

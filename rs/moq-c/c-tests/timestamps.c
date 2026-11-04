@@ -120,8 +120,21 @@ int main(void) {
     WAIT_FOR(&c, c.frame_count == 1);
     CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), &tick) == 0);
     WAIT_FOR(&c, c.frame_count == 2);
-    CHECK(moq_publish_track_datagram((uint32_t)track, payload, sizeof(payload), &tick, NULL) == 0);
-    WAIT_FOR(&c, c.datagram);
+    // The datagram reader joins once its subscription is answered, and a datagram sent
+    // before then is gone, so resend until one lands.
+    for (int sent = 0;; sent++) {
+        CHECK(sent < 1000);
+        CHECK(moq_publish_track_datagram((uint32_t)track, payload, sizeof(payload), &tick, NULL) == 0);
+        struct timespec deadline;
+        CHECK(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+        deadline.tv_nsec += 10 * 1000 * 1000;
+        if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
+        pthread_mutex_lock(&c.mutex);
+        while (!c.datagram && pthread_cond_timedwait(&c.changed, &c.mutex, &deadline) == 0) {}
+        int landed = c.datagram != 0;
+        pthread_mutex_unlock(&c.mutex);
+        if (landed) break;
+    }
     // JSON tracks moq-c creates count milliseconds.
     const moq_timestamp stamped = {1500, 1000};
     CHECK(moq_publish_json_stream_append((uint32_t)json, doc, strlen(doc), &stamped) == 0);

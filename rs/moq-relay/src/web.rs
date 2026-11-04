@@ -1143,16 +1143,12 @@ async fn serve_fetch(
 		};
 		let group = match async { crate::fetch_group(&broadcast.track(&track)?, sequence).await }.await {
 			Ok(group) => group,
-			// A miss upstream arrives as the stream reset that refused the FETCH. A datagram
-			// group is never cached, and a group past the track's max age is gone, so both
-			// are misses too.
+			// A miss upstream arrives as the stream reset that refused the FETCH. A group past
+			// the track's max age is gone, so it is a miss too.
 			Err(
 				moq_net::Error::NotFound
-				| moq_net::Error::NotFetchable
 				| moq_net::Error::Old
-				| moq_net::Error::Stream(
-					moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable | moq_net::StreamError::Old,
-				),
+				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::Old),
 			) => {
 				return Err(StatusCode::NOT_FOUND);
 			}
