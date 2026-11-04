@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media setup refusals are typed
+
+Audio and video subscribe setup now reports `MoqException.UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
+
 ### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 
 `json.SnapshotProducer.update(value, timestamp)`, `json.StreamProducer.append(value, timestamp)`, and `json.WindowProducer.push(value, timestamp)` / `pop(count, timestamp)` require a `Timestamp` on the broadcast clock instead of defaulting to null, for both the typed and the `String` overloads. Read it with `media.CatalogProducer(broadcast).now()`. Their track needs a timescale, such as `TrackInfo(timescale = 1_000uL)`; one without is refused.
@@ -108,11 +112,16 @@ Publish the track with a `refresh` ratio so a joiner gets the value restated in 
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+On `OriginConsumer` and `Moq`, rename `requestBroadcast(path)` to `request(path)` and `announcedBroadcast(path)` to `follow(path)`; the `AnnouncedBroadcast` typealias is `Following`.
+Both take an optional `instance` to refuse every other publisher instance.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
-`requestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
-Resolve the path with `announcedBroadcast()`, or hold `announced()` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()`, `request()`, or `follow()`, instead of under its whole scope at connect.
+`request()` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `ContainerFormat.FMP4` unwraps to Legacy (#6250)
@@ -193,7 +202,7 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and `cancel()` it to stop.
 Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.rate()`.
 
-### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
+### `Following.available()` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
