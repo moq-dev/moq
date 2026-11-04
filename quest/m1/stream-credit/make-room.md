@@ -22,9 +22,11 @@ Decided 2026-11-04 (maintainer):
   idle ones. One reset in flight per waiting open, because credit returns
   only when the peer's MAX_STREAMS arrives, at least a round trip later.
 - **When.** Rust acts as soon as its QUIC stack reports it is blocked. JS
-  acts once an open has waited about one round trip (from WebTransport's
-  `getStats()` RTT), not a fixed time: a fixed 100 ms is too long on a LAN
-  and too short on mobile.
+  acts once an open has waited about one round trip, not a fixed time: a
+  fixed 100 ms is too long on a LAN and too short on mobile. The RTT comes
+  from WebTransport's `getStats()` when it reports one, else moq's own probe
+  (`Probe.rtt`, as `js/net/src/connection/stats.ts` already falls back), and
+  before any sample exists the maintainer's original 100 ms.
 - **Wire.** Takeover needs lite-07 to let a group stream end one group and
   start another. Add it to `drafts/draft-lcurley-moq-lite.md` before lite-07
   finalizes; moq-transport and older lite versions only cancel.
