@@ -53,8 +53,17 @@ impl Pair {
 		let mut transport = transport::Config::default();
 		transport.limits = limits;
 
-		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("certificate");
-		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+		let cert = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.expect("certificate");
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+			cert.signing_key.to_pkcs8().secret_pkcs8_der().to_vec(),
+		));
 		let mut server_config =
 			server::Config::with_single_cert(vec![cert.cert.der().clone()], key).expect("server config");
 		server_config.transport = transport.clone();

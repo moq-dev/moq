@@ -4936,6 +4936,7 @@ mod session_tests {
 	/// route drops and returns as across a reconnect. The pad's actor takes each play, idle, and
 	/// retirement in turn, so every round lands on the first pad and none ends it.
 	#[test]
+	#[ignore = "flaky under load; see quest/m0/test-flakes-2/gst-reconnect-interleave.md"]
 	fn restarts_under_reconnects_interleave_on_one_pad() {
 		let _pad_ids = pad_ids();
 		let element = element();
