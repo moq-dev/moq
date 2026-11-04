@@ -149,7 +149,7 @@ ok(publication->announce({})); // each broadcast mints a fresh instance
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded video track takes `lower` in its `VideoInit` too, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `set_enabled(false)` after a `discontinuity()`, and `set_enabled(true)` on the keyframe that resumes it.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded video track takes `lower` in its `VideoInit` too, as a `moq::MediaProducer::kTrack` or `kStream`, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `set_enabled(false)` after a `discontinuity()`, and `set_enabled(true)` on the keyframe that resumes it. A `MediaTrackStreamProducer` finds its own frames: `set_enabled(false)` drops what is written to it, and after `set_enabled(true)` it resumes at the stream's next keyframe.
 
 ## Futures
 
@@ -212,6 +212,21 @@ A rendition with `enabled: false` has no frames coming until its publisher re-en
 ## Bandwidth estimates
 
 Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rate_changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+
+## Viewers
+
+`session->viewers()` divides the receive estimate among the broadcasts you watch, max-min fair by each one's ceiling. `watch(max_bps)` returns a `Viewer` claiming up to a ceiling, the bitrate of the largest rendition you would switch to; its `rate()` reads that viewer's share in bits per second, `std::nullopt` while there is no estimate (keep the current rendition), and `update(max_bps)` changes the ceiling. Holding a viewer requests the estimate like `recv_bandwidth()`, and releasing it releases the claim. The session sends the summed ceilings as its PROBE target; `set_target(bps)` overrides that, `0` sends none, and `std::nullopt` follows the viewers again. `watch`, `update`, and `set_target` return `moq::Error::kOutOfRange` when the ceilings or the target would pass 2^53 - 1 bps, the most a PROBE target carries. Client viewers survive reconnects and read `std::nullopt` while disconnected.
+
+```cpp
+auto viewers = session->viewers();
+auto camera = ok(viewers->watch(4'000'000));   // what its largest rendition needs
+auto screen = ok(viewers->watch(1'000'000));
+if (auto bps = camera->rate()) {
+    // Switch to the largest rendition that fits in *bps.
+}
+ok(camera->update(2'500'000));   // the catalog disabled the top rendition
+screen.reset();              // stopped watching: its share returns to camera
+```
 
 ## Compressed tracks
 

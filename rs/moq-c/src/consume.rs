@@ -16,6 +16,11 @@ use crate::{
 	moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config, moq_video_properties,
 };
 
+struct DatagramTaskEntry {
+	task: Task,
+	track: crate::state::Shared<moq_net::datagram::Consumer>,
+}
+
 struct ConsumeCatalog {
 	broadcast: moq_net::broadcast::Consumer,
 
@@ -236,8 +241,8 @@ pub struct Consume {
 	/// Buffered raw frames ready for consumption.
 	raw_frame: NonZeroSlab<Timed<bytes::Bytes>>,
 
-	/// Raw track datagram consumer tasks (best-effort, parallel to `raw_task`).
-	datagram_task: NonZeroSlab<Task>,
+	/// Live datagram consumer tasks, independent of stream-track readers.
+	datagram_task: NonZeroSlab<DatagramTaskEntry>,
 
 	/// Buffered datagrams ready for consumption.
 	datagram: NonZeroSlab<Timed<moq_net::Datagram>>,
@@ -829,12 +834,18 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Subscribe to a raw track's best-effort datagrams by name.
+	/// Subscribe to a live datagram track by name.
 	///
 	/// Parallel to [`Self::raw_track`], but delivers datagrams instead of frames.
 	/// `on_datagram` is called with a datagram ID for each datagram in arrival order;
 	/// each must be released with [`Self::datagram_close`].
-	pub fn datagram_track(&mut self, broadcast: Id, name: &str, on_datagram: OnStatus) -> Result<Id, Error> {
+	pub fn datagram_track(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		priority: i8,
+		on_datagram: OnStatus,
+	) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let driver = context
 			.origin
@@ -844,28 +855,28 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
-		self.datagram_task.spawn(
-			on_datagram,
-			|state| &mut state.consume.datagram_task,
-			|mut close| async move {
-				driver
-					.watch(async move {
-						let Some(track) =
-							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
-						else {
-							return Ok(());
-						};
-						Self::run_datagrams(on_datagram, track, close).await
-					})
-					.await
-			},
-		)
+		let mut datagrams = broadcast.datagrams(&name)?;
+		datagrams.set_priority(priority);
+		let track = crate::state::Shared::new(datagrams);
+		let (task, close) = Task::new(on_datagram);
+		let id = self.datagram_task.insert(DatagramTaskEntry {
+			task,
+			track: track.clone(),
+		})?;
+		tokio::spawn(async move {
+			let res = crate::ffi::run(driver.watch(Self::run_datagrams(on_datagram, track, close))).await;
+			let entry = State::lock().consume.datagram_task.remove(id);
+			if let Some(DatagramTaskEntry { task, track }) = entry {
+				drop(track);
+				task.callback.call(res);
+			}
+		});
+		Ok(id)
 	}
 
 	async fn run_datagrams(
 		callback: OnStatus,
-		mut track: moq_net::track::Subscriber,
+		track: crate::state::Shared<moq_net::datagram::Consumer>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
@@ -873,7 +884,13 @@ impl Consume {
 			let datagram = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				datagram = track.recv_datagram() => match datagram? {
+				datagram = kio::wait(|waiter| {
+					let mut guard = track.lock();
+					match guard.as_mut() {
+						Some(track) => track.poll_recv(waiter),
+						None => Poll::Ready(Err(moq_net::Error::Closed)),
+					}
+				}) => match datagram? {
 					Some(datagram) => datagram,
 					None => return Ok(()),
 				},
@@ -887,7 +904,32 @@ impl Consume {
 	}
 
 	pub fn datagram_track_close(&mut self, track: Id) -> Result<(), Error> {
-		self.datagram_task.close(track, Error::TrackNotFound)
+		self.datagram_task
+			.get_mut(track)
+			.ok_or(Error::TrackNotFound)?
+			.task
+			.close(Error::TrackNotFound)
+	}
+
+	pub fn datagram_track_priority(&mut self, id: Id, priority: i8) -> Result<(), Error> {
+		let entry = self.datagram_task.get(id).ok_or(Error::TrackNotFound)?;
+		entry
+			.track
+			.lock()
+			.as_mut()
+			.ok_or(Error::TrackNotFound)?
+			.set_priority(priority);
+		Ok(())
+	}
+
+	pub fn datagram_track_info(&self, id: Id) -> Result<Option<moq_net::datagram::Info>, Error> {
+		let entry = self.datagram_task.get(id).ok_or(Error::TrackNotFound)?;
+		let guard = entry.track.lock();
+		let track = guard.as_ref().ok_or(Error::TrackNotFound)?;
+		match track.poll_info(&kio::Waiter::noop()) {
+			Poll::Ready(info) => Ok(Some(info?)),
+			Poll::Pending => Ok(None),
+		}
 	}
 
 	/// Fill `dst` with a datagram's payload, timestamp, and sequence. The pointer is

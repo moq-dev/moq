@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Separate datagram tracks
+
+Replace stream-track `append_datagram` / `insert_datagram` / `recv_datagram` with `broadcast.create_datagrams(name, info)` and `broadcast.consume().datagrams(name)`. The returned `DatagramProducer` uses `append(payload, timestamp=...)` and `insert(Datagram(...))`; `DatagramConsumer` supports `recv()` and async iteration. `DatagramInfo` contains priority and optional timescale. Demand is `priority()` / `await priority_changed(last)`; on-demand handlers come from `broadcast.requests().datagrams()`. Stream tracks of the same name are independent.
+
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`TrackInfo.max_age` defaults to `timedelta(0)`, like `Delay.max`, so a bare `TrackInfo()` and an omitted one now advertise a zero max age, serving only the live edge, instead of no publisher limit. `None` still means no limit: pass `max_age=None` where you relied on the default.
+
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `moq.Error.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch` and `set_target` and `Viewer.update` raise it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
+### `VideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+The `lower=` argument of `TrackProducer.video` and `TrackStreamProducer.video` accepts either producer and needs no change. Code that sets the raw `VideoInit.lower` field wraps the handle as `MoqMediaProducer.TRACK(producer=...)` or `MoqMediaProducer.STREAM(producer=...)`.
+
 ### Media setup refusals are typed
 
 Audio and video subscribe setup now reports `UnsupportedConfig` when the decoder refuses a codec, layout, or description. Handle this variant to try another rendition instead of inspecting an audio/video error message or `Unsupported`. Decoder faults, such as a backend that fails to open, and later peer and decode failures keep their existing errors. Regenerate bindings and rebuild the matching native library together.
@@ -109,11 +125,16 @@ Publish the track with a `refresh` ratio so a joiner gets the value restated in 
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+
+On `OriginConsumer` and `Client`, rename `request_broadcast(path)` to `request(path)` and `announced_broadcast(path)` to `follow(path)`; `moq.AnnouncedBroadcast` is `moq.Following`.
+Both take a keyword-only `instance=` to refuse every other publisher instance.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+
 ### A client asks only about what it watches (#6165)
 
-On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.
-`OriginConsumer.request_broadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
-Resolve the path with `announced_broadcast()`, or hold `announced()` over its prefix while requesting.
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()`, `request()`, or `follow()`, instead of under its whole scope at connect.
+`OriginConsumer.request()` owns the discovery of its path, so it finds a broadcast the relay serves with nothing else watching first; no announcement stream is needed beside it.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
 ### `ContainerFormat.FMP4` unwraps to Legacy (#6250)
@@ -197,7 +218,7 @@ bandwidth = session.recv_bandwidth()
 rate = bandwidth.rate() if bandwidth else None
 ```
 
-### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
+### `Following.available()` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.

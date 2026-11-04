@@ -438,7 +438,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 
 test("two subscribers to one inserted track each get a full copy", async () => {
 	const broadcast = new BroadcastProducer();
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const a = broadcast
 		.track("video")
@@ -475,7 +475,7 @@ test("a late subscriber replays the cached window", async () => {
 
 test("a read throws Evicted at a shed front, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const sub = broadcast
 		.track("video")
 		.subscribe({ delay: { max: Milli(5000) } })
@@ -620,9 +620,11 @@ test("close rejects a still-pending track request so its subscriber unblocks", a
 // A fetch parks for a group that has yet to be published, which is what the consuming wire
 // layer's coalescing relies on. The publisher's fill deliberately does not use this path: it
 // wants a group that already exists, and waiting for one that is gone would never return.
-test("a fetch waits for a group still to come", async () => {
+test("a fetch of a group still to come asks the request handler, and the write answers it", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// As in Rust, the miss goes to the handler at once; without one it would be NotFound.
+	const requests = track.requests();
 
 	const pending = wireOf(broadcast).fetchGroup("video", 1n);
 
@@ -638,6 +640,7 @@ test("a fetch waits for a group still to come", async () => {
 	expect(group.sequence).toBe(1n);
 	expect(await group.readString()).toBe("1");
 
+	requests.close();
 	broadcast.close();
 });
 
@@ -664,7 +667,9 @@ test("fetch maxDelay tightens the publisher's maxAge without changing omission",
 
 test("aborting a fetch rejects with the signal's reason", async () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// A request handler keeps the miss pending until the abort.
+	const requests = track.requests();
 
 	const early = new Error("early");
 	await expect(wireOf(broadcast).fetchGroup("video", 0n, { signal: AbortSignal.abort(early) })).rejects.toBe(early);
@@ -675,6 +680,7 @@ test("aborting a fetch rejects with the signal's reason", async () => {
 	controller.abort(late);
 	await expect(pending).rejects.toBe(late);
 
+	requests.close();
 	broadcast.close();
 });
 

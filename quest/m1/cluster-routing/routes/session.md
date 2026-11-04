@@ -35,12 +35,12 @@ changes the contract decided ship with it.
   loop-free (RFC 8966 s2.7): a ring of same-epoch origins whose relays
   prioritize different links, and nested wildcards where a relay has not
   heard the specific claim, both cycle past requester exclusion; joining
-  another relay's subscription by path or epoch deadlocks; and without an
-  epoch a later hop splices another publisher under the requester's
+  another relay's subscription by path or instance deadlocks; and without an
+  instance a later hop splices another publisher under the requester's
   announcement with no Restart (`local_priorities_loop_path_only_requests`,
   `overlapping_wildcards_loop_where_specific_claims_are_unheard`,
   `aggregation_cycles_starve_without_a_forwarding_constraint`,
-  `epochless_reselection_splices_another_publisher`,
+  `reselection_without_an_instance_splices_another_publisher`,
   `sweep_forwarding_progress`). A relay therefore joins a forwarded request
   only to a subscription following its route to the same identity. When that
   identity becomes unreachable the forwarded request ends, and the first hop

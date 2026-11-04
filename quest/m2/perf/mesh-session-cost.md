@@ -24,3 +24,14 @@ instructions per reader per group (1 to 16 readers per track). Part of it is
 copying the large `group::Consumer` value, inside
 `Poll<Result<Option<group::Consumer>>>`, through each layer that returns it;
 consider boxing parts of `group::Consumer`, and measure it on the same read.
+
+Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs): the route layer's floor-only batches belong here too. In
+[moq-dev/moq#7676](https://github.com/moq-dev/moq/pull/7676)'s route layer,
+any floor change sends a batch on each route stream, even when no announce
+changed.
+Measure that floor-only batch cost against session count, and batch or
+coalesce floor changes if it grows with sessions. Options shown:
+
+- m0
+- m1
+- ✅ m2, in this quest

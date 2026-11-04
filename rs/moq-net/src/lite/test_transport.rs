@@ -982,7 +982,6 @@ pub struct ScriptedSession {
 	unacked_fin: bool,
 	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
 	unacked_unis: Arc<AtomicUsize>,
-	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
 	/// Set by [`Self::with_send_window`].
@@ -1004,11 +1003,6 @@ impl ScriptedSession {
 		self
 	}
 
-	pub fn with_datagrams(mut self, max_size: usize) -> Self {
-		self.datagram_size = max_size;
-		self
-	}
-
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
@@ -1024,7 +1018,6 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			unacked_unis: Default::default(),
-			datagram_size: 0,
 			groups: false,
 			send_window: None,
 		}
@@ -1288,7 +1281,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		self.datagram_size
+		0
 	}
 
 	fn address(&self) -> crate::transport::Address {

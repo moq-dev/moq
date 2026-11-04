@@ -186,7 +186,7 @@ pub struct MoqFetchGroupOptions {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age behind the live edge; null uses publisher retention alone.
+	/// Maximum age behind the live edge; null uses the publisher's max age alone.
 	#[uniffi(default = None)]
 	pub max_delay: Option<Duration>,
 }
@@ -391,7 +391,7 @@ impl MoqBroadcastConsumer {
 
 pub(crate) fn map_fetch_error(err: moq_net::Error) -> MoqError {
 	match err {
-		moq_net::Error::NotFound | moq_net::Error::NotFetchable => MoqError::NotFound,
+		moq_net::Error::NotFound => MoqError::NotFound,
 		moq_net::Error::Unsupported | moq_net::Error::Version => MoqError::Unsupported,
 		err => err.into(),
 	}
@@ -405,7 +405,6 @@ pub(crate) fn map_fetch_error(err: moq_net::Error) -> MoqError {
 /// binding can't express in its type system, so the handle commits on the first group
 /// read instead: whichever group cursor a caller reaches for first is the one this
 /// track keeps, and reaching for the other afterwards is [`MoqError::AlreadyCommitted`].
-/// Datagrams are a separate cursor on either handle, so reading them never commits.
 enum Cursor {
 	/// No group read has happened yet; the track can still commit either way.
 	Uncommitted(moq_net::track::Subscriber),
@@ -525,35 +524,12 @@ impl TrackInner {
 			}
 		}
 	}
-
-	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<MoqDatagram>, MoqError>> {
-		// Datagrams are unordered on either handle; reading them never commits the
-		// group cursor.
-		let poll = match &mut self.track {
-			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.poll_recv_datagram(waiter),
-			Cursor::Ordered(ordered) => ordered.track.poll_recv_datagram(waiter),
-			// Poisoned mid-conversion; see `arrival`. Datagrams never commit a cursor,
-			// so this is the only way they can fail on a live handle.
-			Cursor::Converting => return Poll::Ready(Err(MoqError::Closed)),
-		};
-		let datagram = match ready!(poll) {
-			Ok(Some(datagram)) => datagram,
-			Ok(None) => return Poll::Ready(Ok(None)),
-			Err(err) => return Poll::Ready(Err(err.into())),
-		};
-		Poll::Ready(Ok(Some(MoqDatagram {
-			sequence: datagram.sequence,
-			timestamp: datagram.timestamp.map(Into::into),
-			payload: datagram.payload.to_vec(),
-		})))
-	}
 }
 
-/// A subscribed track whose groups, frames, or datagrams can be read.
+/// A subscribed stream track whose groups and frames can be read.
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
-	/// Every read polls this; none holds it across a wait, so a datagram read progresses while
-	/// a group read is parked, and vice versa.
+	/// Reads poll in place without holding a lock across a wait.
 	reads: Polled<TrackInner>,
 	control: moq_net::track::Control,
 	info: moq_net::track::Info,
@@ -579,7 +555,7 @@ impl MoqTrackConsumer {
 	/// Hand the subscription to a typed reader (a JSON consumer, say), closing this handle.
 	///
 	/// Errors with [`MoqError::AlreadyCommitted`] once a group read has started, since the reader
-	/// would miss whatever that read consumed. A datagram read still parked resolves `Cancelled`.
+	/// would miss whatever that read consumed.
 	pub(crate) fn take(&self) -> Result<(moq_net::track::Subscriber, Background), MoqError> {
 		let inner = self
 			.reads
@@ -647,17 +623,6 @@ impl MoqTrackConsumer {
 		Ok(frame.map(raw_frame))
 	}
 
-	/// Receive the next best-effort datagram in arrival order.
-	///
-	/// Returns `None` when the track ends. Datagram delivery is unavailable over
-	/// pre-lite-05 moq-lite and stream-only transports.
-	/// Datagrams are a separate cursor from groups, so this works alongside either
-	/// group order, never commits the track to one, and progresses while a group
-	/// read is pending.
-	pub async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
-		self.reads.wait(|inner, waiter| inner.poll_recv_datagram(waiter)).await
-	}
-
 	/// Return the publisher-side track properties learned during subscription.
 	pub fn info(&self) -> MoqTrackInfo {
 		MoqTrackInfo::from(&self.info)
@@ -669,10 +634,12 @@ impl MoqTrackConsumer {
 	/// that point. Errors on a time anchor the track can't serve, leaving the
 	/// preferences as they were.
 	pub fn update(&self, subscription: MoqSubscription) -> Result<(), MoqError> {
-		match self.control.update(subscription.try_into()?) {
-			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
-			Err(err) => Err(err.into()),
+		let subscription: moq_net::track::Subscription = subscription.try_into()?;
+		match self.control.update(subscription) {
+			Ok(()) | Err(moq_net::Error::Closed) => {}
+			Err(err) => return Err(err.into()),
 		}
+		Ok(())
 	}
 
 	/// Cancel all current and future reads.

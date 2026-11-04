@@ -10,6 +10,10 @@ description: Container import and export
 
 Turns existing container formats into [hang](/concept/hang) broadcasts and
 back. This is what `moq import` / `export` and the gateways are built on.
+Native players also use its `timeline` to present a broadcast's audio and video
+on one clock: audio drives the anchor while it plays, and video follows it.
+The caller supplies the jitter target, decoders, and output devices; a presenter
+can select the newest due picture without waiting and repeat it during a stall.
 
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
@@ -24,8 +28,7 @@ publish the source's own timestamps, mapped to the wall time the first frame
 arrived. The catalog clock never moves once something uses it: an importer that
 starts after a data track, a capture, another importer, or a pinned clock
 shifts its timestamps onto that clock instead, landing its first frame at now.
-The media, the hang and MSF catalog groups, and the HLS records are all stamped
-on that one clock. It keeps reading the clock the broadcast was created under,
+The media and the hang and MSF catalog groups are all stamped on that one clock. It keeps reading the clock the broadcast was created under,
 even when a write comes from another runtime or thread. A `catalog::Timebase`
 gives renditions on one timestamp base one shared shift. A stream whose decoder
 identity changes, such as an SPS with a new profile or level or an audio header

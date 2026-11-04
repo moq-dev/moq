@@ -212,7 +212,7 @@ impl moq_audio_hint {
 		Ok(())
 	}
 
-	/// The supplied group duration, for the track's HLS records.
+	/// The supplied group duration, for the broadcast's join interval.
 	fn group_duration(&self) -> Result<Option<std::time::Duration>, Error> {
 		group_duration(self.has_group_duration, self.group_duration_us)
 	}
@@ -330,7 +330,7 @@ impl moq_video_hint {
 		Ok(out)
 	}
 
-	/// The supplied group duration, for the track's HLS records.
+	/// The supplied group duration, for the broadcast's join interval.
 	fn group_duration(&self) -> Result<Option<std::time::Duration>, Error> {
 		group_duration(self.has_group_duration, self.group_duration_us)
 	}
@@ -624,10 +624,10 @@ pub struct moq_media_read {
 	pub end: moq_timestamp,
 }
 
-/// A best-effort raw track datagram delivered via [moq_consume_datagrams].
+/// A live datagram delivered via [moq_consume_datagrams].
 #[repr(C)]
 pub struct moq_datagram {
-	/// The payload of the datagram, or NULL/0 if the track has ended.
+	/// The datagram payload, valid until [moq_consume_datagram_free].
 	pub payload: *const u8,
 	/// The length in bytes of `payload`.
 	pub payload_size: usize,
@@ -636,25 +636,27 @@ pub struct moq_datagram {
 	/// long as `payload`.
 	pub timestamp: *const moq_timestamp,
 
-	/// Per-track sequence number, drawn from the same namespace as groups.
+	/// The datagram track's own sequence number.
 	pub sequence: u64,
 }
 
 /// Publisher-side raw track properties.
 ///
-/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, and so does a
-/// zero-initialized struct.
+/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, including a zero max
+/// age, and so does a zero-initialized struct.
 #[repr(C)]
 pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
 	/// Higher is more urgent; the default 0 is the midpoint.
 	pub priority: i8,
 
-	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
-	/// The publisher-side half of `moq_subscription.delay.max_us`.
+	/// How long a superseded group stays fresh, in microseconds. Zero, the default, serves only
+	/// the live edge. The publisher-side half of `moq_subscription.delay.max_us`. Ignored when
+	/// `max_age_unlimited` is set.
 	pub max_age_us: u64,
-	/// Whether `max_age_us` is set. When false, the publisher imposes no age limit.
-	pub max_age_present: bool,
+	/// No publisher age limit, leaving only the cache to bound how long a superseded group is
+	/// served.
+	pub max_age_unlimited: bool,
 
 	/// Per-frame timescale in ticks per second.
 	pub timescale: u64,
@@ -679,10 +681,8 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		// Raw tracks default to a microsecond timescale; an explicit one below overrides it.
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
-			.with_priority(info.priority);
-		if info.max_age_present {
-			out = out.with_max_age(std::time::Duration::from_micros(info.max_age_us));
-		}
+			.with_priority(info.priority)
+			.with_max_age((!info.max_age_unlimited).then(|| std::time::Duration::from_micros(info.max_age_us)));
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}
@@ -2565,8 +2565,8 @@ pub extern "C" fn moq_publish_catalog_finish(broadcast: u32) -> i32 {
 pub unsafe extern "C" fn moq_publish_audio(broadcast: u32, config: *const moq_audio_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let (audio, hls) = unsafe { parse_audio_init(config)? };
-		State::lock().publish.audio(broadcast, audio, hls)
+		let (audio, interval) = unsafe { parse_audio_init(config)? };
+		State::lock().publish.audio(broadcast, audio, interval)
 	})
 }
 
@@ -2600,8 +2600,8 @@ unsafe fn parse_audio_init(
 pub unsafe extern "C" fn moq_publish_video(broadcast: u32, config: *const moq_video_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let (video, hls) = unsafe { parse_video_init(config)? };
-		State::lock().publish.video(broadcast, video, hls)
+		let (video, interval) = unsafe { parse_video_init(config)? };
+		State::lock().publish.video(broadcast, video, interval)
 	})
 }
 
@@ -2649,7 +2649,7 @@ pub unsafe extern "C" fn moq_publish_container(broadcast: u32, config: *const mo
 /// For a codec track this ends the open group; the next frame written starts a new one. Audio has
 /// no boundary of its own (every packet is independently decodable), so this is the only thing
 /// that gives it groups: call it after every frame for one group (one QUIC stream) the relay
-/// forwards without waiting, or at a segment cadence to align with video for HLS/DASH. Video
+/// forwards without waiting, or less often to batch frames into fewer groups. Video
 /// groups at its own keyframes and needs this only to override that.
 ///
 /// A container has its own [moq_publish_container_cut], since it rolls a group on every track it
@@ -3170,22 +3170,15 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 	})
 }
 
-/// Send a best-effort datagram on a raw track created by [moq_publish_track].
+/// Append a datagram to a producer from [crate::moq_publish_datagrams], returning its sequence.
 ///
-/// Takes `payload` then `timestamp`, matching [moq_publish_track_frame]. The payload must
-/// be at most 1200 bytes. On success the datagram's per-track sequence number (shared with the
-/// group namespace) is written to `out_sequence` when it is non-NULL. Datagrams are
-/// delivered only on transports and wire versions with a datagram channel; there is no
-/// group fallback.
-///
-/// Returns a zero on success, or a negative code on failure.
+/// Keep the payload well below the path MTU. No stream fallback is available.
 ///
 /// # Safety
-/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
-/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
-/// - `out_sequence` must be NULL or a valid pointer to a `uint64_t`.
+/// `payload` must point to `payload_size` bytes, `timestamp` must be NULL or valid,
+/// and `out_sequence` must be NULL or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track_datagram(
+pub unsafe extern "C" fn moq_publish_datagrams_append(
 	track: u32,
 	payload: *const u8,
 	payload_size: usize,
@@ -3196,7 +3189,7 @@ pub unsafe extern "C" fn moq_publish_track_datagram(
 		let track = ffi::parse_id(track)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
 		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
-		let sequence = State::lock().publish.track_datagram(track, timestamp, payload)?;
+		let sequence = State::lock().publish.datagrams_append(track, timestamp, payload)?;
 		if let Some(out) = unsafe { out_sequence.as_mut() } {
 			*out = sequence;
 		}
@@ -3406,8 +3399,8 @@ pub unsafe extern "C" fn moq_track_request_accept(request: u32, info: *const moq
 pub unsafe extern "C" fn moq_track_request_audio(request: u32, config: *const moq_audio_init) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let (audio, hls) = unsafe { parse_audio_init(config)? };
-		State::lock().publish.track_request_audio(request, audio, hls)
+		let (audio, interval) = unsafe { parse_audio_init(config)? };
+		State::lock().publish.track_request_audio(request, audio, interval)
 	})
 }
 
@@ -3422,8 +3415,8 @@ pub unsafe extern "C" fn moq_track_request_audio(request: u32, config: *const mo
 pub unsafe extern "C" fn moq_track_request_video(request: u32, config: *const moq_video_init) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let (video, hls) = unsafe { parse_video_init(config)? };
-		State::lock().publish.track_request_video(request, video, hls)
+		let (video, interval) = unsafe { parse_video_init(config)? };
+		State::lock().publish.track_request_video(request, video, interval)
 	})
 }
 
@@ -4299,16 +4292,17 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 	})
 }
 
-/// Subscribe to a raw track's best-effort datagrams by name.
+/// Subscribe to a live datagram track by name, at the given subscriber priority.
 ///
-/// The datagram counterpart to [moq_consume_track], on its own subscription. `on_datagram`
+/// The datagram counterpart to [moq_consume_track], on its own subscription, delivering the
+/// datagrams sent once the publisher answered it. `on_datagram`
 /// is called with a positive datagram ID for each datagram in arrival order, then exactly
 /// once more with a terminal code: `0` (closed cleanly) or a negative error. After the
 /// terminal (`<= 0`) callback, `on_datagram` is never called again and `user_data` is never
 /// touched again, so release `user_data` there. The terminal callback fires even after
 /// [moq_consume_datagrams_cancel]. Read each datagram with [moq_consume_datagram] and release
 /// it with [moq_consume_datagram_free]. Datagrams arrive only over datagram-capable
-/// transports on moq-transport or lite-05 and newer moq-lite; there is no stream fallback.
+/// transports on lite-05 and newer moq-lite; there is no stream fallback.
 ///
 /// Returns a non-zero handle to the subscription on success, or a negative code on failure.
 ///
@@ -4320,6 +4314,7 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
+	priority: i8,
 	on_datagram: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
@@ -4327,7 +4322,9 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let on_datagram = unsafe { ffi::OnStatus::new(user_data, on_datagram)? };
-		State::lock().consume.datagram_track(broadcast, name, on_datagram)
+		State::lock()
+			.consume
+			.datagram_track(broadcast, name, priority, on_datagram)
 	})
 }
 

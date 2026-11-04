@@ -14,7 +14,7 @@
 //!
 //! [`quic`] stacks a sans-IO QUIC stack on that path: a [`quic::Endpoint`]
 //! serves many connections on one socket (demuxed by connection id, dials
-//! included), each a [`quic::Connection`] wrapped by [`transport::Session`]
+//! included), each a [`quic::Connection`] wrapped by [`quic::web::Session`]
 //! and [`transport::Local`], which meets moq-net's `Send` bound by checking the
 //! thread on every use, so `moq_net::Client::connect` and `Server::accept` run
 //! real MoQ sessions on the worker. The socket is the identity: whatever is
@@ -61,7 +61,7 @@ pub use timer::Timer;
 pub use worker::{Config, Handle, Worker};
 
 /// The `url` crate, re-exported because
-/// [`quic::web::Request::url`](crate::quic::web::Request::url) hands one back.
+/// [`quic::web::proto::ConnectRequest::url`](crate::quic::web::proto::ConnectRequest::url) hands one back.
 /// Naming that type otherwise means depending on a matching `url` version
 /// directly, so a major bump here is a breaking change for this crate.
 pub use url;

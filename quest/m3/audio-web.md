@@ -34,3 +34,7 @@ The encode and decode seams become asynchronous.
 ## Required
 
 - [moq-video in the browser](/quest/m3/video-web.md) - the restored wasm32 target and browser runtime this builds on
+
+## Related
+
+- [WebCodecs audio priming](/quest/m2/webcodecs-priming.md) - measures each browser `AudioEncoder`'s priming; the WebCodecs backend's `delay()` reuses it

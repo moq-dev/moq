@@ -1,11 +1,46 @@
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use rind::aead;
 
 use crate::e2ee::error::{Error, Result};
-use crate::e2ee::limits::{MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, TAG_LEN};
+use crate::e2ee::limits::{MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, TAG_LEN, check_u53};
 use crate::e2ee::protect::{nonce, open, protect};
+
+/// A semantic name's key in one domain and its next unallocated sequence; clones share their
+/// accounting.
+#[derive(Clone, Debug)]
+pub(crate) struct Claim {
+	pub key: Arc<Mutex<TrackKey>>,
+	// The high-water mark plus one, kept for the generation's life so no sequence repeats.
+	// Locked before the key.
+	pub next: Arc<Mutex<u64>>,
+}
+
+impl Claim {
+	pub(crate) fn new(key: TrackKey) -> Self {
+		Self {
+			key: Arc::new(Mutex::new(key)),
+			next: Arc::default(),
+		}
+	}
+
+	/// Allocate `sequence`, or the next one if `None`, refusing one already allocated or one
+	/// that cannot be represented. Locked across `body`, so a concurrent producer of this name
+	/// cannot take the sequence, and committed only if `body` succeeds.
+	pub(crate) fn allocate<T>(&self, sequence: Option<u64>, body: impl FnOnce(u64) -> Result<T>) -> Result<(u64, T)> {
+		let mut next = self.next.lock().expect("claim sequence");
+		let sequence = sequence.unwrap_or(*next);
+		if sequence < *next {
+			return Err(Error::Reuse);
+		}
+		check_u53(sequence)?;
+		let value = body(sequence)?;
+		*next = sequence + 1;
+		Ok((sequence, value))
+	}
+}
 
 /// Per-track, per-domain AES-128-GCM key with invocation and byte accounting.
 ///

@@ -587,18 +587,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio))?)
 	}
 
-	/// End a track this importer is done with, clearing its catalog rendition and retiring its HLS
-	/// records. Every track takes a fresh name, so a publisher changing its config holds only its live
-	/// tracks.
+	/// End a track this importer is done with, clearing its catalog rendition. Every track takes a
+	/// fresh name, so a publisher changing its config holds only its live tracks.
 	fn retire<R: Clone + Send + 'static>(
 		&self,
 		mut track: crate::container::Producer<crate::catalog::hang::Container, R>,
 	) -> anyhow::Result<()> {
-		let ended = track.end();
-		let name = track.name().to_string();
-		drop(track);
-		self.catalog.retire(&name)?;
-		Ok(ended?)
+		Ok(track.end()?)
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.

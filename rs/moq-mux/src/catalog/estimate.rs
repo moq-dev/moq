@@ -209,11 +209,39 @@ impl Estimator {
 		self.jitter.max = self.jitter.max.max(duration);
 	}
 
+	/// The longest group seen so far, closed window or not, the open one included up to the
+	/// furthest content end stated, else the whole span written to that end: what a track that ends
+	/// before its first window closes declares as its join interval.
+	pub(crate) fn partial_interval(&self) -> Option<Duration> {
+		let window = &self.window;
+		let end = window.high.map(|high| high.max(window.reach.unwrap_or_default()));
+		match window.interval.max(window.group) {
+			// Measured from the last cut, as every closed group is.
+			Some(closed) => Some(
+				closed.max(
+					window
+						.cut
+						.zip(end)
+						.and_then(|(cut, end)| elapsed(cut, end))
+						.unwrap_or_default(),
+				),
+			),
+			None => elapsed(window.start?, end?),
+		}
+	}
+
+	/// Note that written content reaches `end`, as a fragment or a frame with a duration says.
+	pub(crate) fn reach(&mut self, end: Timestamp) {
+		let end = nanos(end);
+		self.window.reach = Some(self.window.reach.map_or(end, |reach| reach.max(end)));
+	}
+
 	/// Everything measured so far, with what a catalog rendition needs to decide when to publish it.
 	pub(crate) fn reading(&self) -> Reading {
 		Reading {
 			estimate: self.estimate(),
 			period: self.window.shortest,
+			interval: self.window.interval,
 		}
 	}
 
@@ -238,11 +266,17 @@ pub(crate) struct Reading {
 	/// The shortest advance between frames, which a published `jitter` or `delay` rises in whole
 	/// steps of when no framerate says the frame duration.
 	pub period: Option<Duration>,
+	/// The longest group, once a window has closed: the track's measured join interval.
+	pub interval: Option<Duration>,
 }
 
 impl From<Estimate> for Reading {
 	fn from(estimate: Estimate) -> Self {
-		Self { estimate, period: None }
+		Self {
+			estimate,
+			period: None,
+			interval: None,
+		}
 	}
 }
 
@@ -342,6 +376,10 @@ impl Bitrate {
 /// per frame whatever the order. Sampled at cuts, so every window starts and ends at the same point
 /// of the group structure.
 ///
+/// The interval is the longest advance of the highest timestamp from one cut to the next, a group's
+/// span, reported once a window closes and the largest across windows. A window lasts a second or a
+/// group, whichever is longer, so even one group longer than a second is measured whole.
+///
 /// The delay is the least trail behind the other tracks within a window, and the largest of those
 /// across windows. A constant offset is in every window, so it shows; lateness only some frames
 /// have, such as B-frame reorder, has a frame trailing nothing in every window, so it never does.
@@ -364,6 +402,17 @@ struct Window {
 	/// The shortest advance of the highest timestamp: a frame's duration, or a reordered group's
 	/// span of them.
 	shortest: Option<Duration>,
+	/// The highest timestamp at the previous cut, which the next cut's group span is measured from.
+	cut: Option<u128>,
+	/// The longest group span since the window opened.
+	group: Option<Duration>,
+	/// The longest group span of any closed window.
+	interval: Option<Duration>,
+	/// The lowest timestamp written since the timeline last broke.
+	start: Option<u128>,
+	/// The furthest content end a write stated, past its own timestamp, since the timeline last
+	/// broke: a fragment's or a timed frame's.
+	reach: Option<u128>,
 }
 
 impl Window {
@@ -372,6 +421,7 @@ impl Window {
 			self.shortest = Some(self.shortest.map_or(advance, |shortest| shortest.min(advance)));
 		}
 		self.high = Some(self.high.map_or(ts, |high| high.max(ts)));
+		self.start = Some(self.start.map_or(ts, |start| start.min(ts)));
 		self.frames += 1;
 	}
 
@@ -386,6 +436,13 @@ impl Window {
 		let Some(high) = self.high else {
 			return;
 		};
+		// A cut with nothing written since the last one bounds no group.
+		if let Some(span) = self.cut.and_then(|cut| elapsed(cut, high)) {
+			self.group = self.group.max(Some(span));
+		}
+		if self.cut.is_none_or(|cut| high > cut) {
+			self.cut = Some(high);
+		}
 		// The first window opens at a cut too, not at the first frame, which may be a join that
 		// starts partway into the group structure.
 		let Some(open) = self.open else {
@@ -408,6 +465,7 @@ impl Window {
 			self.framerate = Some(framerate);
 		}
 		self.delay = self.delay.max(self.trail);
+		self.interval = self.interval.max(self.group);
 		self.reopen(high);
 	}
 
@@ -415,6 +473,7 @@ impl Window {
 		self.open = Some(high);
 		self.frames = 0;
 		self.trail = None;
+		self.group = None;
 	}
 
 	/// Time nothing across a break in the timeline.
@@ -423,6 +482,7 @@ impl Window {
 			framerate: self.framerate,
 			delay: self.delay,
 			shortest: self.shortest,
+			interval: self.interval,
 			..Self::default()
 		};
 	}
@@ -714,6 +774,78 @@ mod tests {
 			let expected = (i >= 200).then_some(ms(100));
 			assert_eq!(video.estimate().delay, expected, "frame {i}");
 		}
+	}
+
+	/// The join interval is the longest group of the first window, a second or a group, whichever
+	/// is longer: two-second GOPs report two seconds once the second GOP closes, and audio cut every
+	/// frame reports its frame.
+	#[test]
+	fn the_interval_is_the_longest_group_of_a_window() {
+		let [mut audio, mut video] = tracks();
+		for i in 0..250u64 {
+			send(&mut audio, i * 20);
+			if i % 100 == 0 {
+				video.cut(None);
+			}
+			video.write(micros(i * 20_000), 1);
+			let expected = (i >= 200).then_some(ms(2000));
+			assert_eq!(video.reading().interval, expected, "frame {i}");
+		}
+		assert_eq!(audio.reading().interval, Some(ms(20)));
+	}
+
+	/// A track ending before its first window closes declares the longest group it saw, else the
+	/// whole span it wrote, to the furthest end a fragment stated.
+	#[test]
+	fn a_partial_interval_covers_a_lone_fragment() {
+		let mut fragment = Estimator::new();
+		fragment.write(micros(0), 1);
+		assert_eq!(fragment.partial_interval(), None, "a lone timestamp spans nothing");
+		fragment.reach(micros(800_000));
+		assert_eq!(fragment.partial_interval(), Some(ms(800)));
+
+		let mut video = Estimator::new();
+		for (ms, cut) in [(0, false), (300, true), (600, false)] {
+			if cut {
+				video.cut(None);
+			}
+			video.write(micros(ms * 1_000), 1);
+		}
+		video.cut(None);
+		// The second group holds the frames at 300 and 600ms, so with 300ms frames it runs to 900ms.
+		assert_eq!(video.partial_interval(), Some(ms(600)));
+
+		// A final group still open when the track ends counts too, to the end its content states.
+		let mut video = Estimator::new();
+		for ms in [0, 300] {
+			video.write(micros(ms * 1_000), 1);
+			video.cut(None);
+		}
+		video.write(micros(600_000), 1);
+		video.reach(micros(3_000_000));
+		assert_eq!(
+			video.partial_interval(),
+			Some(ms(2700)),
+			"the open group outlasts the closed one"
+		);
+	}
+
+	/// A longer group in a later window raises the interval; a discontinuity keeps it.
+	#[test]
+	fn the_interval_keeps_the_longest_group() {
+		let mut video = Estimator::new();
+		let mut pts = 0;
+		for gop in [1000, 1000, 3000, 1000] {
+			video.cut(None);
+			for _ in 0..gop / 20 {
+				video.write(micros(pts * 1_000), 1);
+				pts += 20;
+			}
+		}
+		video.cut(None);
+		assert_eq!(video.reading().interval, Some(ms(3000)));
+		video.discontinuity();
+		assert_eq!(video.reading().interval, Some(ms(3000)));
 	}
 
 	/// Two renditions of one 50 fps source with two B-frames (I0 P60 B20 B40 P120 B80 B100 …) and

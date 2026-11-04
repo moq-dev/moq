@@ -33,7 +33,10 @@ support it. The TypeScript client is pickier than the browsers: it uses
 WebTransport on Firefox only from 153 (earlier releases allow too few incoming
 streams) and keeps Safari on the WebSocket fallback, since WebKit bugs stall
 long sessions even though Safari 26.4 ships the API. Native
-clients can use WebTransport too, but usually skip it.
+clients can use WebTransport too, but usually skip it. Both Rust runtime
+crates expose `quic::web` as a WebTransport library usable without MoQ;
+see [moq-tokio](https://docs.rs/moq-tokio/latest/moq_tokio/quic/web/) and
+[moq-uring](https://docs.rs/moq-uring/latest/moq_uring/quic/web/).
 
 ## WebSocket fallback
 
@@ -44,6 +47,10 @@ everywhere but cannot escape TCP head-of-line blocking, so priority and resets
 only help once bytes leave the TCP queue. The fallback is automatic in every
 client; the relay serves it on its `[web.http]` or `[web.https]` listener. A session that lands on
 WebSocket stays there until it ends; the next connect races again.
+
+Each side lets the other hold 10,000 streams open in each direction, as over
+QUIC, since MoQ holds one per subscription and per live group. Set it with
+`websocket.maxStreams` in `@moq/net` and `quic.max_streams` in `moq-tokio`.
 
 QUIC gets a head start in the race: 500 ms in `@moq/net` and 200 ms in
 `moq-tokio`. Once WebSocket wins against a server, identified by the host and

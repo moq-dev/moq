@@ -33,8 +33,9 @@ moq-archive, moq-audio, moq-auth, moq-boy, moq-cli, moq-ffi, moq-gst, moq-hls,
 moq-json, moq-loc, moq-msf, moq-mux, moq-native, moq-net, moq-nvenc,
 moq-pattern, moq-relay, moq-rtc, moq-rtmp, moq-sock, moq-srt, moq-stats,
 moq-tokio, moq-transcode, moq-uring, moq-v4l, moq-video, qmux. Not yet
-published (6), so their first publish needs the token and they get a trusted
-publisher after it: kio-macros, moq-c, moq-congestion, moq-ice, moq-quic,
-moq-rtsp. `CARGO_REGISTRY_TOKEN` is revoked only after all of them have one.
+published (7), so their first publish needs the token and they get a trusted
+publisher after it: kio-macros, moq-c, moq-congestion, moq-crypto, moq-ice,
+moq-quic, moq-rtsp. moq-crypto became publishable in
+[moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733). `CARGO_REGISTRY_TOKEN` is revoked only after all of them have one.
 Settings pages need a crates.io login, so the check is a `release-rs.yml` run
 publishing through OIDC.
