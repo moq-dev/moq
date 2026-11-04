@@ -379,7 +379,47 @@ pub struct MoqVideoInit {
 	/// it. This track then sits one priority below it, so a bandwidth allocator funds the
 	/// lower rendition first.
 	#[uniffi(default = None)]
-	pub lower: Option<Arc<MoqMediaTrackProducer>>,
+	pub lower: Option<MoqMediaProducer>,
+}
+
+/// A single-track media producer of either kind, such as a rendition's [`lower`](MoqVideoInit::lower).
+#[derive(Clone, uniffi::Enum)]
+pub enum MoqMediaProducer {
+	/// Imports complete encoded frames.
+	Track {
+		/// The frame producer.
+		producer: Arc<MoqMediaTrackProducer>,
+	},
+	/// Imports a byte stream.
+	Stream {
+		/// The byte-stream producer.
+		producer: Arc<MoqMediaTrackStreamProducer>,
+	},
+}
+
+impl MoqMediaProducer {
+	/// The priority of the video track this producer publishes.
+	fn video_priority(&self) -> Result<i8, MoqError> {
+		match self {
+			Self::Track { producer } => {
+				let guard = producer.inner.lock().unwrap();
+				guard
+					.as_ref()
+					.ok_or(MoqError::Closed)?
+					.video
+					.ok_or_else(|| MoqError::Codec {
+						reason: "the lower rendition is not a video track".into(),
+					})
+			}
+			Self::Stream { producer } => Ok(producer
+				.inner
+				.lock()
+				.unwrap()
+				.as_ref()
+				.ok_or(MoqError::Closed)?
+				.priority),
+		}
+	}
 }
 
 /// Shares one source's timestamp offset across containers without keeping its broadcast open.
@@ -550,12 +590,7 @@ impl MoqVideoInit {
 			out.hint = hint.into();
 		}
 		if let Some(lower) = self.lower {
-			let guard = lower.inner.lock().unwrap();
-			let below = guard.as_ref().ok_or(MoqError::Closed)?;
-			let priority = below.video.ok_or_else(|| MoqError::Codec {
-				reason: "the lower rendition is not a video track".into(),
-			})?;
-			out.priority = priority.saturating_sub(1);
+			out.priority = lower.video_priority()?.saturating_sub(1);
 		}
 		Ok(out)
 	}
@@ -870,6 +905,8 @@ struct ContainerProducer {
 /// A byte-stream importer for one codec track, where frame boundaries are inferred.
 struct MediaStreamProducer {
 	import: Box<moq_mux::import::TrackStream>,
+	/// The video track's priority, which a higher rung takes one below.
+	priority: i8,
 }
 
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
@@ -1044,6 +1081,7 @@ impl MoqMediaTrackStreamProducer {
 		let _guard = crate::ffi::enter();
 		let init = init.resolve()?;
 		broadcast.with_state(|state| {
+			let priority = init.priority;
 			let request = target.resolve(&state.broadcast, &init.format)?;
 
 			let import =
@@ -1056,6 +1094,7 @@ impl MoqMediaTrackStreamProducer {
 			state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
 				inner: std::sync::Mutex::new(Some(MediaStreamProducer {
 					import: Box::new(import),
+					priority,
 				})),
 				children: state.children.clone(),
 			}))
@@ -1298,6 +1337,23 @@ impl MoqMediaTrackStreamProducer {
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
 		media.import.decode(&payload).map_err(|err| MoqError::Codec {
 			reason: format!("decode failed: {err}"),
+		})?;
+		Ok(())
+	}
+
+	/// Stop or resume publishing this rendition, advertised as its catalog `enabled`.
+	///
+	/// Disable it when its sender stops for lack of bandwidth (a
+	/// [`MoqRateTarget::Disabled`](crate::bandwidth::MoqRateTarget::Disabled)): this marks a
+	/// discontinuity and drops every access unit written until it is enabled again, so the
+	/// stream may keep flowing. Enabled again, it resumes, and advertises itself enabled, at
+	/// the next keyframe in the stream.
+	pub fn set_enabled(&self, enabled: bool) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media.import.set_enabled(enabled).map_err(|err| MoqError::Codec {
+			reason: format!("set enabled failed: {err}"),
 		})?;
 		Ok(())
 	}
