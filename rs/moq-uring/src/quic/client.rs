@@ -50,8 +50,7 @@ impl Default for Config {
 /// Shorthand for a dial-only [`Endpoint`](super::Endpoint) and one
 /// [`connect`](super::Endpoint::connect) through it. The connection's driver
 /// runs as a task on the worker that adopted `socket`. Wrap the returned
-/// [`Connection`] with [`crate::transport::Session::new`] and
-/// [`moq_net::transport::Address::Setup`], then [`crate::transport::Local`], to
+/// [`Connection`] with [`super::web::Session::raw`], then [`crate::transport::Local`], to
 /// hand it to `moq_net::Client::connect`, or use the stream API directly.
 pub async fn connect(
 	socket: udp::Socket,
@@ -59,6 +58,6 @@ pub async fn connect(
 	remote: SocketAddr,
 	server_name: &str,
 ) -> Result<Connection, Error> {
-	let endpoint = super::Endpoint::new(socket, super::endpoint::Config::default())?;
+	let endpoint = super::Endpoint::new(super::endpoint::Config::default(), socket)?;
 	endpoint.connect(config, remote, server_name).await
 }

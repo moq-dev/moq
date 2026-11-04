@@ -95,10 +95,7 @@ fn lite_session_over_the_worker() {
 			.with_publisher(&pub_origin)
 			.accept(
 				moq_net::time::Instant::now(),
-				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-					quic::web::Session::raw(conn),
-					moq_net::transport::Address::Setup,
-				)),
+				moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 			)
 			.await
 			.expect("accept");
@@ -119,10 +116,7 @@ fn lite_session_over_the_worker() {
 				.with_subscriber(sub.clone())
 				.connect(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-						quic::web::Session::raw(conn),
-						moq_net::transport::Address::Setup,
-					)),
+					moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 				)
 				.await
 				.expect("connect");
@@ -215,8 +209,8 @@ fn two_lite_sessions_share_the_server_socket() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("server socket");
 	let endpoint = quic::Endpoint::new(
-		server_sock,
 		quic::endpoint::Config::default().with_server(server_config),
+		server_sock,
 	)
 	.expect("endpoint");
 	let server_addr = endpoint.local_addr();
@@ -232,10 +226,7 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_publisher(&pub_origin)
 					.accept(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Address::Setup,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("accept");
@@ -263,10 +254,7 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_subscriber(sub.clone())
 					.connect(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Address::Setup,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("connect");
@@ -391,8 +379,8 @@ fn required_client_auth_refuses_an_anonymous_client() {
 		.expect("client socket");
 
 	let endpoint = quic::Endpoint::new(
-		server_sock,
 		quic::endpoint::Config::default().with_server(server_config),
+		server_sock,
 	)
 	.expect("endpoint");
 	let server_addr = endpoint.local_addr();
