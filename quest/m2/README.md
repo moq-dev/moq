@@ -15,16 +15,24 @@ Dependencies on m1 remain explicit. An implementation that discovers a new
 necessary API break brings that decision to the maintainer before proceeding.
 
 The first follow-through is [release execution](/quest/m2/release/README.md).
+
+Decided 2026-11-03 (maintainer, Kixel's quest audit): [byte streams](/quest/m2/stream/README.md)
+and the [mesh libraries](/quest/m2/mesh/README.md) rank first in m2. Kixel's
+daemon builds on them from `main` through a git submodule
+([moq-dev/kixel.ai#12](https://github.com/moq-dev/kixel.ai/pull/12)), so it
+needs them merged, not released. They stay out of m1 so the cut does not
+wait on them; each starts as soon as its m1 prerequisites (sockets,
+fastest-reader pacing, outbound federation) land.
 Rate-grant work targets the next unpublished lite version after finalized
 lite-07; bitrate enforcement is not part of this release.
 
 ## Required
 
+- [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
+- [Mesh libraries](/quest/m2/mesh/README.md) - an `Endpoint` reaches any enrolled node by endpoint ID over relays or a sparse direct overlay, with address hints and a `.status` track; the mesh binary and UI live in Kixel
 - [Announce credit](/quest/m2/announce-credit.md) - a subscriber bounds an Announce Stream's routes with credit at the wire, so a path flood never closes a session
 - [JS announced coalescing](/quest/m2/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m2/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
-- [Mesh libraries](/quest/m2/mesh/README.md) - an `Endpoint` reaches any enrolled node by endpoint ID over relays or a sparse direct overlay, with address hints and a `.status` track; the mesh binary and UI live in Kixel
-- [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [One policy for oversized container metadata](/quest/m2/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
 - [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the cmsg walks in moq-sock and moq-uring have invariant fuzz targets, and the unsafe peer input reaches runs under Miri
