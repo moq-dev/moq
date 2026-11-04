@@ -527,7 +527,7 @@ impl Reversed {
 				// The credit an eviction frees can reach the writer before the stop does, letting
 				// the whole write queue, so only the stop itself proves the stream was stopped.
 				let _ = send.write_all(&bytes[..]).await;
-				if let Ok(Some(_)) = send.stopped().await {
+				if let Ok(Some(_)) = send.closed().await {
 					let _ = tx.send(());
 				}
 			});
@@ -737,8 +737,8 @@ async fn ietf_largest_unit_completes_under_pressure() {
 }
 
 /// Drive the Bun sender through its commands against a subscriber of `origin` whose
-/// connection window is `window`: a low-priority frame twice the window gives way to a
-/// high-priority one, and the low track then keeps delivering. Waits for the sender to exit.
+/// connection window is `window`: an unsealed low-priority prefix gives way to a high-priority
+/// frame, and the low track then keeps delivering. Waits for the sender to exit.
 async fn javascript_exhausts(
 	version: moq_net::Version,
 	window: usize,
@@ -750,7 +750,7 @@ async fn javascript_exhausts(
 	let mut low = subscribe(&remote, "low", 1).await;
 	let mut high = subscribe(&remote, "high", 100).await;
 
-	// Wait until three quarters of the window holds a frame that can never complete.
+	// The sender holds back the rest, so no segment can seal and return this credit.
 	commands.write_all(&b"low\n"[..]).await.unwrap();
 	let mut partial = partial_frame(&mut low).await;
 	read_partial(&mut partial, window * 3 / 4).await;
@@ -758,16 +758,11 @@ async fn javascript_exhausts(
 	// Half the window, which only fits once the low frame lets go.
 	commands.write_all(&b"high\n"[..]).await.unwrap();
 	assert_eq!(next_frame(&mut high).await, vec![2u8; window / 2], "{version}");
-	loop {
-		let chunk = kio::clock::timeout(TIMEOUT, partial.read_chunk())
-			.await
-			.expect("stop timed out");
-		match chunk {
-			Ok(Some(_)) => {}
-			Ok(None) => panic!("{version}: a frame larger than the window completed"),
-			Err(_) => break,
-		}
-	}
+	let err = kio::clock::timeout(TIMEOUT, partial.read_chunk())
+		.await
+		.expect("stop timed out")
+		.expect_err("the partial frame must be evicted");
+	assert!(matches!(err, moq_net::Error::Evicted), "{version}: {err}");
 
 	// The session survives, and the low track keeps delivering what fits.
 	commands.write_all(&b"after\n"[..]).await.unwrap();
@@ -782,8 +777,9 @@ async fn javascript_exhausts(
 }
 
 /// A Bun publisher (`test/receive-credit/sender.ts`) dials a WebTransport server whose
-/// connection window is [`WINDOW`] and sends a low-priority frame twice that size. The
-/// receiver stops it, a high-priority frame completes, and a later low group arrives.
+/// connection window is [`WINDOW`] and holds an unsealed low-priority prefix in a frame
+/// declared twice that size. The receiver evicts it, a high-priority frame completes, and a
+/// later low group arrives.
 async fn javascript_partial_frame_gives_way(version: &str) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let version: moq_net::Version = version.parse().expect("version");

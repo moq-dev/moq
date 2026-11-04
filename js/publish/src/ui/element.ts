@@ -102,7 +102,7 @@ export default class MoqPublishUi extends HTMLElement {
 
 		// Capture can be live without a preview, so size the box by what the slotted content renders,
 		// not by the capture alone. With nothing shown, reserve the last shown aspect ratio (initially
-		// 16:9) instead of snapping, and ignore an idle preview's placeholder size.
+		// 16:9) instead of snapping. Empty previews hide themselves and contribute no layout size.
 		let lastAspect = 16 / 9;
 		const rendered = new Signal<number | undefined>(undefined);
 		const resize = new ResizeObserver(([entry]) => {
@@ -113,11 +113,8 @@ export default class MoqPublishUi extends HTMLElement {
 		effect.cleanup(() => resize.disconnect());
 
 		effect.run((e) => {
-			// A hidden camera stays open but shows no preview, so it sizes the box like no video at all.
-			const capture = e.get(publish.controls.invisible) ? undefined : e.get(publish.video.in.capture);
-			const src = capture ? e.get(capture.in.source) : undefined;
 			const aspect = e.get(rendered);
-			if (src && aspect) {
+			if (aspect) {
 				lastAspect = aspect;
 				player.classList.remove("player--empty");
 				player.style.aspectRatio = "";

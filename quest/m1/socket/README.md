@@ -160,11 +160,10 @@ standing where the 2026-11-04 decisions above don't replace it:
 
 Decided 2026-11-02 (maintainer, Kixel planning): the whole epic moves from
 m2 to m1, so the next cut publishes sockets in `@moq/net` and moq.pro's
-relays carry them. Why: Kixel's T3 Code prototype
-([moq-dev/kixel.ai T3 epic](https://github.com/moq-dev/kixel.ai/blob/main/quest/m0/t3/README.md))
-sends T3's commands over sockets, one group per message, in place of byte
-streams. `@moq/net` publishes from `release`. Byte streams, fastest-reader
-pacing, and the mesh libraries keep their own milestones.
+relays carry them. Why: Kixel's T3 Code prototype (its T3 epic, in the
+private kixel.ai repo) sends T3's commands over sockets, one group per message,
+in place of byte streams. `@moq/net` publishes from `release`. Byte streams,
+fastest-reader pacing, and the mesh libraries keep their own milestones.
 
 Decided 2026-11-01 with the maintainer (planning interview from moq.pro's TCP
 replacement arc), still standing:

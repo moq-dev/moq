@@ -206,7 +206,7 @@ test("uni streams before SETUP are held until it lands", async () => {
 	await new Group({
 		trackAlias: 7n,
 		groupId: 0n,
-		subGroupId: 0,
+		subGroupId: 0n,
 		publisherPriority: 128,
 		flags: {
 			hasExtensions: false,
