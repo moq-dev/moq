@@ -328,7 +328,6 @@ itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 libspa = { version = "0.10", default-features = false, features = ["v0_3_33"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
-log = { version = "0.4", default-features = false, features = ["release_max_level_debug"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
@@ -364,7 +363,6 @@ itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 libspa = { version = "0.10", default-features = false, features = ["v0_3_33"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
-log = { version = "0.4", default-features = false, features = ["release_max_level_debug"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
@@ -432,7 +430,6 @@ itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 libspa = { version = "0.10", default-features = false, features = ["v0_3_33"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
-log = { version = "0.4", default-features = false, features = ["release_max_level_debug"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
@@ -468,7 +465,6 @@ itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 libspa = { version = "0.10", default-features = false, features = ["v0_3_33"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
-log = { version = "0.4", default-features = false, features = ["release_max_level_debug"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 pipewire = { version = "0.10", default-features = false, features = ["v0_3_53"] }
