@@ -1202,6 +1202,15 @@ impl Mesh {
 			#[cfg(feature = "cluster-lan")]
 			DialCommand::Lost(peer) => self.dialed.release(&peer, DialSource::Mdns, &mut dial),
 		}
+		// A replaced dial keeps its peer's `/nodes` history; a peer that left the
+		// dial set takes it along.
+		self.cluster.nodes.retain(|peer| self.dialed.contains(peer));
+	}
+}
+
+impl Drop for Mesh {
+	fn drop(&mut self) {
+		self.cluster.nodes.retain(|_| false);
 	}
 }
 
@@ -1210,9 +1219,11 @@ fn dialer<'a>(cluster: &'a Cluster, token: &'a str) -> impl FnMut(DialTarget) ->
 	move |target| {
 		// Logged by key, never by the target's URL, so an inline query stays out of the logs.
 		tracing::info!(peer = %target.key, lan = target.lan, "dialing cluster peer");
+		// Registered now, so `/nodes` lists the peer before its first attempt.
+		let dial = cluster.nodes.dial(&target.key);
 		Child::new(
 			"cluster dial",
-			cluster.clone().supervise_remote(target, token.to_string()),
+			cluster.clone().supervise_remote(target, token.to_string(), dial),
 		)
 	}
 }
@@ -2035,12 +2046,12 @@ impl Cluster {
 		let _ = commands.try_push(DialCommand::Api(desired));
 	}
 
-	async fn supervise_remote(self, target: DialTarget, token: String) {
+	async fn supervise_remote(self, target: DialTarget, token: String, dial: crate::nodes::Dial) {
 		let log_peer = target.key.clone();
 		let dialers = self.dialers.clone();
 		dialers
 			.supervise(async move {
-				if let Err(err) = self.run_remote(&target, token).await {
+				if let Err(err) = self.run_remote(&target, token, &dial).await {
 					tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
 				}
 			})
@@ -2048,7 +2059,7 @@ impl Cluster {
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(remote = %target.key))]
-	async fn run_remote(self, target: &DialTarget, token: String) -> anyhow::Result<()> {
+	async fn run_remote(self, target: &DialTarget, token: String, dial: &crate::nodes::Dial) -> anyhow::Result<()> {
 		let mut urls = target.addrs();
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (a per-peer inline token or object `token` wins; the
@@ -2070,12 +2081,11 @@ impl Cluster {
 		// turn into a tight reconnect loop.
 		let stable_threshold = std::time::Duration::from_secs(10);
 
-		let dial = self.nodes.dial(self.next_connection_id(), &target.key);
 		let mut redial = Redial::default();
 
 		loop {
 			let started = kio::clock::now();
-			let result = self.run_remote_once(&addrs, target, &dial).await;
+			let result = self.run_remote_once(&addrs, target, dial).await;
 			dial.disconnected();
 			let elapsed = started.elapsed();
 
@@ -3189,6 +3199,50 @@ mod tests {
 		assert_eq!(err.to_string(), "source stopped");
 	}
 
+	/// `/nodes` lists a peer from the moment it is configured, keeps its connect
+	/// history when a new cost or credential replaces its dial, and forgets it only
+	/// once the peer leaves the dial set.
+	#[tokio::test]
+	async fn mesh_keeps_peer_history_until_the_peer_is_removed() {
+		let (mut mesh, _commands) = test_mesh();
+		let api = |peer: &str| {
+			let target = DialTarget::parse(peer).unwrap();
+			DialCommand::Api(HashMap::from([(target.key.clone(), target)]))
+		};
+		let nodes = mesh.cluster.nodes.clone();
+
+		mesh.apply(api("https://peer.example/?cost=1"));
+		let snapshot = nodes.snapshot();
+		assert_eq!(snapshot.nodes.len(), 1, "listed before its first attempt");
+		assert!(snapshot.nodes[0].last_connected_seconds_ago.is_none());
+
+		// Stand in for the dial task's own session, which these unpolled tasks never open.
+		let session = nodes.dial("https://peer.example/");
+		session.observe(
+			0,
+			&moq_tokio::connection::Observation {
+				revision: 1,
+				phase: moq_tokio::connection::Phase::Connected,
+				connects: 1,
+				failure: None,
+				version: None,
+				last_connected: Some(kio::clock::now()),
+				transport: Some(moq_tokio::Transport::Quic),
+			},
+		);
+		drop(session);
+
+		mesh.apply(api("https://peer.example/?cost=2"));
+		assert_eq!(mesh.dialed.tasks.len(), 1, "the cost change replaced the dial");
+		assert!(
+			nodes.snapshot().nodes[0].last_connected_seconds_ago.is_some(),
+			"a replaced dial keeps its history"
+		);
+
+		mesh.apply(DialCommand::Api(HashMap::new()));
+		assert!(nodes.snapshot().nodes.is_empty(), "a removed peer takes its history");
+	}
+
 	/// A dial task's panic ends the mesh with it, rather than unwinding the task
 	/// polling the mesh.
 	#[tokio::test]
@@ -4095,7 +4149,8 @@ mod tests {
 					.with_connect(Default::default(), quic);
 				let broadcast = dialer.origin.create_broadcast("from-dialer").expect("create");
 				broadcast.announce(Default::default()).expect("announce");
-				tokio::spawn(dialer.clone().supervise_remote(target, String::new()));
+				let dial = dialer.nodes.dial(&target.key);
+				tokio::spawn(dialer.clone().supervise_remote(target, String::new(), dial));
 				(dialer, broadcast)
 			})
 			.await

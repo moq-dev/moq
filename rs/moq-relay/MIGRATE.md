@@ -5,6 +5,13 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `/nodes` lists peers that are down ([#7776](https://github.com/moq-dev/moq/pull/7776))
+
+The internal `/nodes` endpoint lists every configured outbound peer, not only those with a live session.
+A peer that is connecting, retrying, or has never connected has an empty `connections` array, so tooling that counts entries as live peers must count those with a nonempty `connections` instead.
+Each connection adds `transport`, and each peer adds `last_connected_seconds_ago`, null until its first successful connect.
+A LAN peer is named by its mDNS identity instead of the first address dialed, whose path carried its credential.
+
 ### The iroh transport is removed ([#7345](https://github.com/moq-dev/moq/pull/7345))
 
 The `iroh` feature, the `[iroh]` table, the `--iroh-*` flags, and `Cluster::with_iroh` are gone.
