@@ -188,9 +188,9 @@ export class Capture {
 
 		// The worklet delivers samples one render callback at a time, and a device's callback can be long:
 		// Chromium on PipeWire renders 2048 samples (43 ms) per callback even at "interactive", so 60 ms
-		// frames left 36-94 ms apart. Nothing here is audible, so render to no device, which Chromium paces
-		// every 10 ms; it already moves a silent graph like this onto that timer after 30 s, just at the
-		// device's callback size. A browser without `sinkId` ignores it and keeps the default device.
+		// frames left 36-94 ms apart. Nothing here is audible, so render to no device, which Chromium 155+
+		// paces every 10 ms. Older Chromium paces it at the default device's callback size, as before, and
+		// a browser without `sinkId` ignores it and keeps the default device.
 		// Don't lower latencyHint instead: at 128 samples, a busy host misses callbacks and the capture
 		// clock falls behind.
 		const options: AudioContextOptions & { sinkId: { type: "none" } } = {
