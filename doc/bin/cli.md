@@ -163,9 +163,12 @@ such as Shaka Packager's output, unchanged, and signals it in the catalog's
 license server with `--drm-license SYSTEM=URL`, and FairPlay's certificate with
 `--drm-certificate SYSTEM=URL`, once per system; SYSTEM is `widevine`,
 `playready`, `fairplay`, `clearkey`, or a system ID, and one the media carries
-no `pssh` for is refused. `SYSTEM:TYPE=URL` also gives the server's type, such
-as `widevine:EME-1.0=…` or `fairplay:application/pkcs7-mime=…`. Encrypted media without `--cmaf`, key rotation, and a clear lead are
-refused too.
+no `pssh` for is refused. A system ID may also be written as a
+`urn:uuid:` URN. `SYSTEM:TYPE=URL` also gives the server's type, such as
+`widevine:EME-1.0=…` or `fairplay:application/pkcs7-mime=…`. Encrypted media
+without `--cmaf`, key rotation, and a clear lead are refused too. An export
+leaves the protected renditions out, since nothing in `moq` decrypts them, and
+fails when every rendition is protected.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast movie.hang \

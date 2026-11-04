@@ -887,13 +887,15 @@ pub enum ImportSource {
 
 impl ImportSource {
 	/// The stdin container format, when this source is one of the container formats.
+	///
+	/// Call it only on an [`Invocation::validate`]d invocation, which refuses the flags it cannot
+	/// turn into a format.
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
 			Self::Fmp4(args) => PublishFormat::Fmp4 {
 				passthrough: args.passthrough,
-				// `Invocation::validate` refuses a system named twice.
-				drm: args.drm().unwrap_or_default(),
+				drm: (args.drm()).expect("Invocation::validate refuses a system named twice"),
 			},
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
@@ -1013,13 +1015,20 @@ impl std::str::FromStr for DrmServer {
 		let (system, url) = arg
 			.split_once('=')
 			.ok_or_else(|| format!("expected SYSTEM[:TYPE]=URL, got `{arg}`"))?;
-		// No system ID or name holds a colon, so the first one starts the type.
-		let (system, kind) = match system.split_once(':') {
+		// A system ID may be a `urn:uuid:` URN, as DASH writes them. Past that prefix no system ID
+		// or name holds a colon, so the first one starts the type.
+		const URN: &str = "urn:uuid:";
+		let (urn, rest) = match system.get(..URN.len()) {
+			Some(prefix) if prefix.eq_ignore_ascii_case(URN) => (true, &system[URN.len()..]),
+			_ => (false, system),
+		};
+		let (system, kind) = match rest.split_once(':') {
 			Some((_, "")) => return Err(format!("empty TYPE in `{arg}`")),
 			Some((system, kind)) => (system, Some(kind.to_string())),
-			None => (system, None),
+			None => (rest, None),
 		};
-		let system = hang::catalog::drm::system::named(system)
+		let named = (!urn).then(|| hang::catalog::drm::system::named(system)).flatten();
+		let system = named
 			.or_else(|| hang::catalog::drm::Uuid::try_parse(system).ok())
 			.ok_or_else(|| {
 				format!(
@@ -2094,15 +2103,26 @@ mod tests {
 			"FairPlay:application/pkcs7-mime=https://fps.example.com/cert",
 			"--drm-license",
 			"fairplay=https://fps.example.com/license",
+			"--drm-license",
+			"URN:UUID:9a04f079-9840-4286-ab92-e65be0885f95:EME-1.0=https://pr.example.com/",
+			"--drm-certificate",
+			"urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed=https://wv.example.com/cert",
 		]) else {
 			panic!("an fmp4 import");
 		};
-		assert_eq!(drm.len(), 3);
+		assert_eq!(drm.len(), 4);
+		let playready = drm[&drm::system::PLAYREADY].license.as_ref().unwrap();
+		assert_eq!(playready.kind.as_deref(), Some("EME-1.0"));
+		assert_eq!(playready.url.as_str(), "https://pr.example.com/");
+		assert_eq!(
+			drm[&drm::system::WIDEVINE].certificate.as_ref().unwrap().url.as_str(),
+			"https://wv.example.com/cert"
+		);
+		assert!(drm[&drm::system::WIDEVINE].certificate.as_ref().unwrap().kind.is_none());
 		assert_eq!(
 			drm[&drm::system::CLEARKEY].license.as_ref().unwrap().url.as_str(),
 			"https://license.example.com/clearkey"
 		);
-		assert!(drm[&drm::system::WIDEVINE].certificate.is_none());
 		assert!(drm[&drm::system::FAIRPLAY].license.is_some());
 		let certificate = drm[&drm::system::FAIRPLAY].certificate.as_ref().unwrap();
 		assert_eq!(certificate.kind.as_deref(), Some("application/pkcs7-mime"));
@@ -2128,6 +2148,10 @@ mod tests {
 			"needs --cmaf"
 		);
 		assert!(format(&["--cmaf", "--drm-license", "primetime=https://a.example/"]).is_none());
+		assert!(
+			format(&["--cmaf", "--drm-license", "urn:uuid:clearkey=https://a.example/"]).is_none(),
+			"a URN holds a system ID, not a name"
+		);
 		assert!(format(&["--cmaf", "--drm-license", "clearkey"]).is_none());
 		assert!(format(&["--cmaf", "--drm-license", "clearkey=not a url"]).is_none());
 	}
