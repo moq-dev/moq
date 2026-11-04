@@ -309,9 +309,13 @@ export default class MoqPublish extends HTMLElement {
 		setPreview();
 
 		this.signals.run((effect) => {
-			if (!effect.get(this.#enabled)) return;
 			const preview = effect.get(this.#preview);
 			if (!preview) return;
+			preview.style.display = "none";
+			if (!effect.get(this.#enabled)) return;
+			effect.cleanup(() => {
+				preview.style.display = "none";
+			});
 
 			// A <canvas> renders the decoded frames; a <video> shows the raw source via srcObject.
 			if (preview instanceof HTMLCanvasElement) {
@@ -327,6 +331,12 @@ export default class MoqPublish extends HTMLElement {
 					backend: this.controls.backend,
 				});
 				effect.cleanup(() => renderer.close());
+
+				// Keep the renderer while hidden, but let empty previews contribute no layout size.
+				effect.run((inner) => {
+					const source = inner.get(this.#videoEnabled) ? inner.get(this.#videoSource) : undefined;
+					preview.style.display = source && inner.get(this.controls.preview) !== "none" ? "block" : "none";
+				});
 
 				// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
 				// The observer above picks it up and this effect builds a renderer for it.
