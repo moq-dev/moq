@@ -523,8 +523,7 @@ impl Track {
 		self.release(name, jitter, false)
 	}
 
-	/// Count a frame that steps the track's timeline back with no marker as a marker of its own:
-	/// presented further below the highest PTS read on the timeline than the export's `delay`,
+	/// Count a frame that steps the track's timeline back with no marker as a marker of its own,
 	/// where a reorder bound proves no valid reordering explains it.
 	///
 	/// Audio presents in decode order, so any frame below one read before it is out of order.
@@ -538,17 +537,14 @@ impl Track {
 	/// and fail the export, and audio with slack left would decode before the frames ahead of it
 	/// on the same clock, which the output's buffers cannot carry. As a marker, the step restarts
 	/// the decode clock and opens a new generation, as one the source declared would. A placed
-	/// frame's timestamp is its arrival rather than its decode time, so it never steps. Without a
-	/// delay nothing is late, so a step costs nothing there.
-	fn steps_back(&mut self, pending: &mut Pending, delay: Duration) {
+	/// frame's timestamp is its arrival rather than its decode time, so it never steps.
+	fn steps_back(&mut self, pending: &mut Pending) {
 		if self.kind.placed() {
 			return;
 		}
 		let pts = pending.frame.timestamp;
 		let high = (self.high).and_then(|(restart, high)| (restart == pending.restart).then_some(high));
-		let delay = u64::try_from(delay.as_micros() * 90_000 / 1_000_000).unwrap_or(u64::MAX);
-		let below = delay > 0 && high.is_some_and(|high| to_ticks(pts).saturating_add(delay) < to_ticks(high));
-		let stepped = below
+		let stepped = high.is_some_and(|high| pts < high)
 			&& match self.kind {
 				Kind::Video(_) => (self.declared)
 					.as_ref()
@@ -605,7 +601,7 @@ impl Track {
 						arrived,
 						read: kio::clock::now(),
 					};
-					self.steps_back(&mut pending, input.jitter.delay());
+					self.steps_back(&mut pending);
 					// A new timeline must reach the reset before tune-in alignment can drop it.
 					if let Some(start) = input.video_start
 						&& aligned && pending.restart == self.restart
@@ -5077,7 +5073,7 @@ mod tests {
 				arrived,
 				read: arrived,
 			};
-			track.steps_back(&mut pending, Duration::from_millis(500));
+			track.steps_back(&mut pending);
 			if pending.restart != track.restart {
 				track.restart = pending.restart;
 				track.clock = DecodeClock::default();
@@ -5122,16 +5118,18 @@ mod tests {
 			0,
 			"in-bound reordering"
 		);
-		assert_eq!(
-			video_steps(Some(2), &pyramid(10_000, 560, 4)).await,
-			1,
-			"a step within a group"
-		);
-		assert_eq!(
-			video_steps(Some(2), &pyramid(10_000, 560, 0)).await,
-			1,
-			"a group stepped whole"
-		);
+		for step in [300, 560] {
+			assert_eq!(
+				video_steps(Some(2), &pyramid(10_000, step, 4)).await,
+				1,
+				"a {step} ms step within a group"
+			);
+			assert_eq!(
+				video_steps(Some(2), &pyramid(10_000, step, 0)).await,
+				1,
+				"a group stepped whole by {step} ms"
+			);
+		}
 		// Two frames back is within the declared depth, however far back they are presented.
 		let deep = [(10_000, true), (11_000, false), (11_040, false), (10_040, false)];
 		assert_eq!(
