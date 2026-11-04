@@ -33,6 +33,7 @@ export class Consumer<T> {
 
 	#group?: Moq.Group.Consumer;
 	#framesRead = 0;
+	#closed = false;
 
 	constructor(config: Consumer.Config<T>) {
 		this.#track = config.track
@@ -45,10 +46,11 @@ export class Consumer<T> {
 		this.#decoder = new Decoder(config);
 	}
 
-	/** End the consumer's subscription, closing any pending read. Idempotent. */
+	/** End the consumer's subscription; a pending or later read returns `undefined`. Idempotent. */
 	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
 		this.#group?.close();
-		this.#group = undefined;
 		this.#track.close();
 	}
 
@@ -78,6 +80,8 @@ export class Consumer<T> {
 
 	async #read(skip: boolean): Promise<Timed<T> | undefined> {
 		for (;;) {
+			// Checked again after every wait: a read that resumes after close ends, not reads on.
+			if (this.#closed) return undefined;
 			if (skip) {
 				// Jump to the newest group the reader already has; a newer one supersedes the rest.
 				// Taking groups, not the track's largest position, ignores datagrams (which share
@@ -93,33 +97,41 @@ export class Consumer<T> {
 
 			if (!this.#group) {
 				// Advance to the next group with a higher sequence number (skipping late arrivals).
-				this.#group = await this.#track.nextGroup();
-				if (!this.#group) return undefined;
+				const next = await this.#track.nextGroup();
+				if (this.#closed) {
+					next?.close();
+					return undefined;
+				}
+				if (!next) return undefined;
+				this.#group = next;
 				// The next frame is the new group's snapshot, which also restarts the decoder's window.
 				this.#framesRead = 0;
 			}
 
+			const group = this.#group;
 			let frame: Moq.Group.Frame | undefined;
 			try {
-				frame = await this.#group.readFrame();
+				frame = await group.readFrame();
 			} catch (err) {
+				if (this.#closed) return undefined;
 				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
 				// The group was reset or we fell behind its eviction window. Resync from the next
 				// group, which begins with a fresh snapshot (frame 0), so no partial state is presented.
-				this.#group = undefined;
+				if (this.#group === group) this.#group = undefined;
 				continue;
 			}
+			if (this.#closed) return undefined;
 
 			if (!frame) {
 				// The group is exhausted; advance to the next one.
-				this.#group = undefined;
+				if (this.#group === group) this.#group = undefined;
 				continue;
 			}
 
 			this.#apply(frame.payload);
 			if (skip) {
 				// Apply the rest of the backlog but yield only the head.
-				for (let more = this.#group.tryReadFrame(); more; more = this.#group.tryReadFrame()) {
+				for (let more = group.tryReadFrame(); more; more = group.tryReadFrame()) {
 					this.#apply(more.payload);
 					frame = more;
 				}

@@ -238,6 +238,23 @@ test("reads skip a group the subscription still owes", async () => {
 	}
 });
 
+// Closing the consumer ends a read already waiting, and every later one, without touching the
+// group it was reading.
+test("close ends a pending read", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track });
+	const consumer = new Consumer<Value>({ track });
+	producer.update({ value: { a: 1 } });
+	expect((await consumer.latest())?.value).toEqual({ a: 1 });
+
+	const pending = [consumer.latest(), consumer.next()];
+	producer.update({ value: { a: 2 } });
+	consumer.close();
+	expect(await Promise.all(pending)).toEqual([undefined, undefined]);
+	expect(await consumer.latest()).toBeUndefined();
+	producer.finish();
+});
+
 test("live consumer sees each update", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });
