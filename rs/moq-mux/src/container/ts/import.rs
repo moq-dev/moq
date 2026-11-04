@@ -486,6 +486,13 @@ impl<E: catalog::Catalog> Import<E> {
 	/// coalesces a junction's burst of sub-table commits into few groups instead of one per
 	/// commit.
 	pub(super) fn flush_batch(&mut self) -> anyhow::Result<()> {
+		self.flush_partial()?;
+		self.damage_log.flush(kio::clock::now());
+		self.si.flush(self.last_pts.unwrap_or(Timestamp::ZERO), false)
+	}
+
+	/// Parse available decoded units before their arrival clock advances.
+	fn flush_partial(&mut self) -> anyhow::Result<()> {
 		let mut partial = std::mem::take(&mut self.partial);
 		for pid in partial.drain(..) {
 			if !self.streams.get(&pid).is_some_and(Stream::salvages_partial_pes) {
@@ -505,8 +512,7 @@ impl<E: catalog::Catalog> Import<E> {
 			self.write_pending(pid, piece)?;
 		}
 		self.partial = partial;
-		self.damage_log.flush(kio::clock::now());
-		self.si.flush(self.last_pts.unwrap_or(Timestamp::ZERO), false)
+		Ok(())
 	}
 
 	/// The PIDs this program reads besides the PAT and the standalone SI PIDs: its PMTs, its
@@ -596,6 +602,9 @@ impl<E: catalog::Catalog> Import<E> {
 		// read: its adaptation field is as untrustworthy as its payload, and taking a bit
 		// out of it would break every track in the program on line noise.
 		if self.pcr_pid.is_some_and(|p| p.as_u16() == pid) && pkt[1] & 0x80 == 0 {
+			if pcr(pkt).is_some() {
+				self.flush_partial()?;
+			}
 			if discontinuity_indicator(pkt) {
 				// A PES this packet starts ends the one before it on its PID whole, on the old
 				// clock; only the other PIDs' are cut short by the break. An adaptation-only
@@ -8743,7 +8752,7 @@ pub(super) mod test {
 				let super::Stream::Aac(stream) = &import.streams[&pid] else {
 					panic!("an AAC stream");
 				};
-				assert_eq!(stream.tail_pts, Some(Timestamp::from_micros(1_000_000).unwrap()));
+				assert_eq!(stream.tail_pts, Some(Timestamp::from_scale(90_000, 90_000).unwrap()));
 				assert_eq!(stream.tail, [0xde, 0xad]);
 			} else {
 				assert!(!import.pending.contains_key(&pid));
