@@ -143,7 +143,6 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Vendored code has every upstream fix it needs](/quest/m1/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
-- [moq-tokio clients redial from a fresh source port](/quest/m1/tokio-client-fresh-port.md) - after N failed dials a client on an ephemeral port rebinds, so one dropped 5-tuple can't strand it
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
@@ -173,13 +172,13 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
+- [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 - [HLS export lists a same-codec reconfigure's first group under the new init](/quest/m1/hls-reinit-same-codec.md) - the hand-over pick, whichever of the catalog and the records arrives first, after the catalog `hls` removal is planned
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [The relay reports native sessions it force-closes at the drain deadline](/quest/m1/relay-drain-cuts.md) - the drain's public outcome and live tally separate sessions cut while open from sessions only finishing their end report, so an embedder's drain alert pages on real cuts
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The JS resume model passes seed 12345](/quest/m1/js-resume-model-12345.md) - a reader updated to no ranges keeps reading instead of ending cleanly
-- [Prototype-safe rendition names in JS](/quest/m1/proto-safe-names.md) - `js/msf`'s `ext` and `js/publish`'s rendition maps keep `__proto__` and `constructor` names, like Rust
 - [Every moq-mux consumer gets the catalog warmup from one entry point](/quest/m1/mux-warmup.md) - one moq-mux call widens the subscription and configures the consumer, adopted by moq-audio, moq-c, moq-ffi's raw consumer, and moqsrc
 - [Codex shells never load another checkout's dev environment](/quest/m1/codex-env-snapshot.md) - the Codex dev-shell snapshot is skipped when stale or inside `nix develop`
 - [Rename moq-rtc to moq-webrtc](/quest/m1/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
@@ -188,6 +187,7 @@ their end report, so an embedder's drain alert pages on real cuts.
 - [A hardware decoder's capability refusal is an unsupported config](/quest/m1/hw-decoder-refusal.md) - a GPU that can't decode a stream reports `UnsupportedConfig`, so callers fall back to another rendition
 - [A JS audio capture gap keeps the audio before it](/quest/m1/js-audio-gap-flush.md) - every capture gap flushes the `AudioEncoder` before restarting it, like a disable
 - [A draft-18 resume of a cached group under a finite max-age settles](/quest/m1/ietf18-resume-cached-start.md) - the read delivers the group or refuses at once, never hangs
+- [Bot reviewers don't re-review every push](/quest/m1/review-bot-waves.md) - CodeRabbit and Pullfrog review on ready and on request, so fixes stop drawing new thread waves
 
 ## Related
 
