@@ -21,10 +21,6 @@ serve instead of enumerating broadcasts. Serving the relay's ingested-only
 view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
 
-The [HLS grid](/quest/m0/hls-media-grid.md) quest is the one breaking change
-here (maintainer, 2026-11-02): it moved out of m1's time-addressing chain,
-since cutting segments from first-frame pts waits on nothing in m1.
-
 ## Required
 
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
@@ -37,6 +33,5 @@ since cutting segments from first-frame pts waits on nothing in m1.
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths, serves its HTTP routes with main's response hardening, and withdraws advertisements a peer starves of send credit; its auth client refuses redirects
 - [Release's MKV importer bounds what it buffers](/quest/m0/backport-mkv-buffer.md) - on `release`, an MKV input that declares a huge element and trickles its bytes no longer grows the importer's memory without limit
-- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the catalog's `hls` field and record tracks go away, and the export numbers segments on `media.join.interval` from media tracks
 - [quest init keeps moq's nix-wrapped worktree hooks](/quest/m0/quest-worktree-hooks.md) - quest pin bumps keep the hooks that run moq's pinned `quest`
 - [HLS lists contributions](/quest/m0/hls-contributions.md) - an HLS master lists each catalog contribution's renditions, and a contribution's media is subscribed only while players fetch it
