@@ -23,7 +23,7 @@ Decided with the maintainer on 2026-10-13:
   are private to the data channel transport today, so move them into
   `moq-ice` rather than export them from `moq-tokio`. Decided 2026-10-30 (maintainer): `moq-ice`,
   the data-channel transport, and a vendored `is` all move into
-  `moq-webrtc` ([rename](/quest/m2/webrtc/rename.md)); take them from there.
+  `moq-webrtc` ([rename](/quest/m1/webrtc-rename.md)); take them from there.
 - QUIC is `moq-quic`, fed datagrams from the nominated pair.
 - Authentication: each side generates a self-signed certificate and sends
   its SHA-256 fingerprint in its offer or answer, as DTLS fingerprints ride

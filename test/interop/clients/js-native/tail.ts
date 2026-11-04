@@ -1,7 +1,7 @@
 /**
  * Finite raw-track interop: publish until the harness acknowledges, or read through clean EOF.
  *
- * `drop` cuts group 1. `join` reads from whichever group the subscription starts at: a
+ * `fetch` reads one past group. `drop` cuts group 1. `join` reads from whichever group the subscription starts at: a
  * moq-transport subscription starts at the largest group rather than at the range asked for, so
  * it must read a contiguous run of groups through the last one. `compress` publishes a compressed
  * track with several frames, one empty, in each group. `cached` publishes every group before
@@ -49,7 +49,7 @@ if (
 
 /**
  * The frames of each group. A compressed track spans several frames, one empty, per window.
- * `cached`, `history`, and `late` give every frame its own bytes, so a FETCH or join that drops, repeats, or
+ * `cached`, `history`, `fetch`, and `late` give every frame its own bytes, so a FETCH or join that drops, repeats, or
  * reorders one fails.
  */
 function frames(sequence: number): Uint8Array[] {

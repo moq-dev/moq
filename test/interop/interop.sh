@@ -510,7 +510,12 @@ plan_pass() {
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         # run_tails skips it on moq-transport, so only plan it where it runs.
-        [[ "$VERSION" == moq-transport-* ]] || record "not run" case="CLI FETCH history" publisher="$runtime" subscriber=rust
+        if [[ "$VERSION" != moq-transport-* ]]; then
+            for sub in rust js-native-node js-native-bun; do
+                [[ "$sub" == rust ]] || needs "$sub" || continue
+                record "not run" case="CLI FETCH history" publisher="$runtime" subscriber="$sub"
+            done
+        fi
         record "not run" case="late join" publisher=rust subscriber="$runtime"
         record "not run" case="late join" publisher="$runtime" subscriber=rust
         record "not run" case=tail publisher=rust subscriber="$runtime"
@@ -2465,7 +2470,12 @@ run_tails() {
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         # A moq-transport FETCH is not served from the request handler yet.
-        [[ "$(pinned_version)" == moq-transport-* ]] || run_fetch_round "$runtime" rust history
+        if [[ "$(pinned_version)" != moq-transport-* ]]; then
+            for sub in rust js-native-node js-native-bun; do
+                [[ "$sub" == rust ]] || needs "$sub" || continue
+                run_fetch_round "$runtime" "$sub" history
+            done
+        fi
     done
     echo "=== late join ==="
     run_late_pair rust rust

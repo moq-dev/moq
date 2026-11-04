@@ -80,7 +80,10 @@ function fixture(version: IetfVersion) {
 			let previousGroup: bigint | undefined;
 			for (const group of groups) {
 				for (const [object, payload] of objects.entries())
-					await new FetchFrame({ payload: new TextEncoder().encode(`${payload && group}${payload}`) }).encode(
+					await new FetchFrame({
+						payload: new TextEncoder().encode(`${payload && group}${payload}`),
+						priority: 0,
+					}).encode(
 						writer,
 						{
 							group,
@@ -230,7 +233,7 @@ for (const version of VERSIONS) {
 		await fx.answer(stream, 1n);
 		const prefix = await Writer.collect(version, async (writer) => {
 			await writer.u62(request.requestId);
-			await new FetchFrame({ payload: new Uint8Array([42]) }).encode(
+			await new FetchFrame({ payload: new Uint8Array([42]), priority: 0 }).encode(
 				writer,
 				{ group: 1n, object: 0, first: true },
 				undefined,
@@ -324,7 +327,7 @@ for (const version of VERSIONS) {
 		const bytes = await Writer.collect(version, async (writer) => {
 			await writer.u62(request.requestId);
 			for (const [object, value] of [1, 2, 3].entries())
-				await new FetchFrame({ payload: new Uint8Array([value]) }).encode(
+				await new FetchFrame({ payload: new Uint8Array([value]), priority: 0 }).encode(
 					writer,
 					{ group: 1n, object, first: object === 0 },
 					undefined,

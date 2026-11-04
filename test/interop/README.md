@@ -54,7 +54,7 @@ native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` cov
 Node and Bun. The FETCH round crosses Rust and each selected native JS runtime as both
 publisher and subscriber. Each reader fetches group 1 of a finished track, requires exactly
 its three objects, each with its own bytes, and closes under the relay idle-out check. Each native JS runtime also serves
-that FETCH from history (`CLI FETCH history`): its publisher writes only group 3 live and answers
+that FETCH to all three subscribers from history (`CLI FETCH history`): its publisher writes only group 3 live and answers
 groups 0 through 2, which it never cached, from an in-memory responder on `track.requests()`. A
 moq-transport pass skips it, since JavaScript does not route an IETF FETCH to the responder yet.
 
