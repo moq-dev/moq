@@ -11,7 +11,7 @@ moq-tokio checks rind's CPU support at startup.
 ## Plan
 
 Decided with the maintainer on 2026-10-26; see the
-[epic](/quest/m2/rind/README.md).
+[epic](/quest/m1/rind/README.md).
 
 - moq-quic's direct calls move to rind's API: stateless reset HMAC-SHA256 and
   its HKDF-SHA256 key derivation, address-validation tokens (HKDF to
@@ -28,7 +28,8 @@ Decided with the maintainer on 2026-10-26; see the
 - reqwest and axum-server switch to their no-provider features wherever these
   crates enable them. Decided 2026-10-31 (maintainer): this includes
   moq-relay's own reqwest, axum-server, and rustls `aws-lc-rs` features, which
-  no other area owns; relay ACME still owns rustls-acme.
+  no other area owns; rustls-acme leaves with
+  [ACME](/quest/m1/rind/acme-remove.md).
 - The roughly 100 test call sites that install aws-lc's provider install
   rind's.
 - The startup check runs where moq-tokio's crypto is first configured, and its
