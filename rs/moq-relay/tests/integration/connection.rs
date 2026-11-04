@@ -289,7 +289,7 @@ async fn stats_count_admitted_and_refused_sessions() {
 		.expect("subscriber connects");
 	kio::clock::timeout(TIMEOUT, async {
 		while presence().active() != 1 {
-			kio::clock::sim::yield_now().await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 	})
 	.await
@@ -303,7 +303,7 @@ async fn stats_count_admitted_and_refused_sessions() {
 	drop(session);
 	kio::clock::timeout(TIMEOUT, async {
 		while presence().active() != 0 {
-			kio::clock::sim::yield_now().await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 	})
 	.await
