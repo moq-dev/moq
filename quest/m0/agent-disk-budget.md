@@ -36,13 +36,16 @@ What holds the space (measured 2026-11-04):
 - `docs/mbx.md` points quest repositories at `quest worktree` to reclaim
   finished checkouts. It already keeps a per-user disk budget (`quest worktree
   capacity`), runs commands supervised so it knows when a checkout's processes
-  stop, and removes a finished checkout without forcing. But it manages only
-  the checkouts it creates under `.worktrees/`; T3's and Claude Code's
-  checkouts don't go through it.
+  stop, and removes a finished checkout without forcing. It manages the
+  checkouts it creates under `.worktrees/`: T3's bypass it, while Claude
+  Code's already go through `.claude/settings.json`'s `WorktreeCreate` and
+  `WorktreeRemove` hooks. Trace where finished Claude Code checkouts (such
+  as the 139 under `~/work/moq/.claude/worktrees` on 2026-11-04) leave their
+  targets before adding another cleaner; T3's need a new path either way.
 
 The work lands mostly in [kixelated/dotfiles](https://github.com/kixelated/dotfiles)
 (cleaner scope, a schedule, mbx retention), and possibly in how T3 retires
-thread worktrees. Weigh routing agent checkouts through `quest worktree`
+thread worktrees. Weigh routing T3's checkouts through `quest worktree`
 against extending the dotfiles cleaner. Keep the retention guarantee `docs/mbx.md` gives: never
 reclaim a target whose owner is still using it. Find the signal that a T3 or
 Claude Code checkout is finished (its thread or task ended, its PR merged or
