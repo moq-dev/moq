@@ -813,9 +813,7 @@ impl LiveRanges {
 		let form: Form = self.version.into();
 		for range in ranges {
 			// One past the varint's reach can't come off the wire, and is refused below.
-			self.size = self
-				.size
-				.saturating_add(range_size(&range, form).unwrap_or(usize::MAX));
+			self.size = self.size.saturating_add(range_size(&range, form).unwrap_or(usize::MAX));
 			self.live.insert(self.next, range);
 			self.next += 1;
 		}
@@ -1553,7 +1551,12 @@ mod test {
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
 			.unwrap();
 		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
-		let resolved: Vec<_> = live.apply(got.ranges).unwrap().into_iter().map(|(_, range)| range).collect();
+		let resolved: Vec<_> = live
+			.apply(got.ranges)
+			.unwrap()
+			.into_iter()
+			.map(|(_, range)| range)
+			.collect();
 		assert_eq!(resolved, msg.ranges);
 	}
 
@@ -1590,8 +1593,8 @@ mod test {
 				order: crate::track::Order::Descending,
 			};
 			let buf = update.encode_bytes(version).unwrap();
-			let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
-				.unwrap();
+			let got =
+				crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v)).unwrap();
 			assert_eq!(live.apply(got.ranges).unwrap(), sent.numbered());
 		};
 
@@ -1604,7 +1607,10 @@ mod test {
 		step(&[c, c, a], edit(&[], &[c]));
 		step(&[b], edit(&[0, 2, 3], &[b]));
 		assert_eq!(live.numbered(), [(4, b)]);
-		assert!(live.initial(1) && !live.initial(2), "SUBSCRIBE_START reports only the SUBSCRIBE's");
+		assert!(
+			live.initial(1) && !live.initial(2),
+			"SUBSCRIBE_START reports only the SUBSCRIBE's"
+		);
 	}
 
 	/// An edit naming a Range ID never assigned or already retired, one leaving nothing
@@ -1614,10 +1620,19 @@ mod test {
 		let version = Version::Lite07;
 		let edit = |remove: Vec<u64>, add: Vec<Range>| RangeEdit::Edit { remove, add };
 		let fresh = || LiveRanges::new(version, &[Range::OLDEST]);
-		assert!(fresh().apply(edit(vec![1], vec![Range::OLDEST])).is_err(), "never assigned");
-		assert!(fresh().apply(edit(vec![0, 0], vec![Range::OLDEST])).is_err(), "retired twice");
+		assert!(
+			fresh().apply(edit(vec![1], vec![Range::OLDEST])).is_err(),
+			"never assigned"
+		);
+		assert!(
+			fresh().apply(edit(vec![0, 0], vec![Range::OLDEST])).is_err(),
+			"retired twice"
+		);
 		assert!(fresh().apply(edit(vec![0], vec![])).is_err(), "nothing left");
-		assert!(fresh().apply(RangeEdit::Replace(vec![Range::OLDEST])).is_err(), "not on lite-07");
+		assert!(
+			fresh().apply(RangeEdit::Replace(vec![Range::OLDEST])).is_err(),
+			"not on lite-07"
+		);
 
 		let mut live = fresh();
 		let one = Range {
@@ -1659,8 +1674,10 @@ mod test {
 			.encode(&mut w, Version::Lite07)
 			.unwrap();
 		assert!(
-			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite06, |r, v| SubscribeResponse::decode(r, v))
-				.is_err()
+			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite06, |r, v| SubscribeResponse::decode(
+				r, v
+			))
+			.is_err()
 		);
 	}
 

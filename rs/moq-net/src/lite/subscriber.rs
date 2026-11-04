@@ -20,6 +20,9 @@ use crate::tail::{self, Reading, Settle, Tail};
 
 use kio::Lock;
 
+mod fills;
+use fills::{FillAsk, RangeFills};
+
 pub(super) struct SubscriberConfig {
 	pub runtime: crate::time::Deadlines,
 	pub session: Transport,
@@ -2908,6 +2911,9 @@ mod tests {
 			priority: 0,
 			requested: None,
 			live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::OLDEST]),
+			demand: Some(Subscription::default()),
+			demand_ranges: vec![lite::Range::OLDEST],
+			fill_groups: Default::default(),
 			tail: tail.clone(),
 			served: None,
 			started: false,
@@ -3059,6 +3065,9 @@ mod tests {
 				priority: 0,
 				requested: Some(floor),
 				live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::span(Some(floor), 0, None, None)]),
+				demand: Some(Subscription::default()),
+				demand_ranges: vec![lite::Range::span(Some(floor), 0, None, None)],
+				fill_groups: Default::default(),
 				tail: Default::default(),
 				served: None,
 				started: false,
@@ -3074,7 +3083,9 @@ mod tests {
 					.await
 					.unwrap();
 			} else {
-				let begin = h.serve.begin_subscription(&mut track, &mut Sub::None, lowered, true);
+				let begin = h
+					.serve
+					.begin_subscription(&mut track, &mut Sub::None, lowered, &FillAsk::default(), true);
 				assert!(matches!(begin, Ok(Begin::Establish(_))));
 			}
 
@@ -3519,6 +3530,9 @@ mod tests {
 			priority: 0,
 			requested: Some(2),
 			live: lite::LiveRanges::new(VERSION, &[lite::Range::span(Some(2), 0, None, None)]),
+			demand: Some(Subscription::default()),
+			demand_ranges: vec![lite::Range::span(Some(2), 0, None, None)],
+			fill_groups: Default::default(),
 			tail: Default::default(),
 			served: None,
 			started: false,
@@ -3625,6 +3639,9 @@ mod tests {
 			priority: 0,
 			requested: Some(4),
 			live: lite::LiveRanges::new(Version::Lite07, &[first]),
+			demand: Some(Subscription::default()),
+			demand_ranges: vec![first],
+			fill_groups: Default::default(),
 			tail: Default::default(),
 			served: Some(4),
 			started: true,
@@ -5997,8 +6014,13 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("audio").unwrap();
 		let mut serving = ServeLoop::new(&serve, request, Default::default());
-		let establish =
-			serve.prepare_establish(&mut serving.serving, Subscription::default(), vec![lite::Range::OLDEST]);
+		let wire = Wire {
+			subscription: Subscription::default(),
+			demand: Some(Subscription::default()),
+			demand_ranges: vec![lite::Range::OLDEST],
+			ranges: vec![lite::Range::OLDEST],
+		};
+		let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
 		serving.mode = ServeMode::Establish(establish);
 		let gate_run = serve.gate();
 		let mut running = TrackServeRun {
@@ -7998,8 +8020,14 @@ struct SubStream {
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
 	start: Option<u64>,
-	/// The ranges on the wire by Range ID, never empty.
+	/// The ranges on the wire by Range ID, never empty: the demand's, then the fills'.
 	live: lite::LiveRanges,
+	/// The demand the ranges ask for, `None` when they ask only for fills.
+	demand: Option<Subscription>,
+	/// The demand's ranges on the wire, which alone set where the live feed is.
+	demand_ranges: Vec<lite::Range>,
+	/// The groups the ranges ask for fills.
+	fill_groups: rangemap::RangeSet<u64>,
 	priority: i8,
 	order: crate::track::Order,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
@@ -8117,6 +8145,18 @@ impl SubStream {
 			}
 		}
 		Some(owed)
+	}
+
+	/// The groups the live range `id` asks for a fill, `None` for one of the demand's.
+	fn fill_range(&self, id: u64) -> Option<std::ops::Range<u64>> {
+		let range = self.live.get(id)?;
+		if self.demand_ranges.contains(range) {
+			return None;
+		}
+		match (range.start, range.end) {
+			(Some(lite::Anchor::Absolute(start)), Some(lite::Anchor::Absolute(end))) => Some(start.group..end.group),
+			_ => None,
+		}
 	}
 
 	/// Edit the live ranges into `ranges`, forgetting the starts of those retired. Returns the
@@ -8525,20 +8565,60 @@ impl TrackServe {
 		producer: &mut track::Producer,
 		sub: &mut Sub,
 		pref: Option<Subscription>,
+		fills: &FillAsk,
 		supports_update: bool,
 	) -> Result<Begin, Error> {
 		let opening = matches!(sub, Sub::None);
+		// Lite-07 asks the held fills' groups through the same subscription. Demand leaving
+		// while they are out keeps what it asked until they are answered, rather than retire
+		// the live feed's ranges under a subscription that still runs.
+		let none = FillAsk::default();
+		let fills = match self.subscriber.version.has_ranges() {
+			true => fills,
+			false => &none,
+		};
+		let pref = match (pref, &*sub) {
+			(None, Sub::Active(active)) if !fills.is_empty() => active.demand.clone(),
+			(pref, _) => pref,
+		};
 		let request = self.wire_request(pref, opening, producer.idle_newest(), producer.info().timescale)?;
+		// What goes on the wire: the demand's ranges, then the fills', under the demand's
+		// parameters. The demand alone sets the floor.
+		let request = match request {
+			Some((demand, demand_ranges)) => {
+				let mut ranges = demand_ranges.clone();
+				ranges.extend(fills.wire());
+				Some(Wire {
+					subscription: fills.merge(demand.clone()),
+					demand: Some(demand),
+					demand_ranges,
+					ranges,
+				})
+			}
+			None if fills.is_empty() => None,
+			None => Some(Wire {
+				subscription: fills.subscription(),
+				demand: None,
+				demand_ranges: Vec::new(),
+				ranges: fills.wire().collect(),
+			}),
+		};
 
 		match request {
-			Some((subscription, ranges)) => {
+			Some(wire) => {
 				match sub {
 					// Open an upstream SUBSCRIBE for the first subscriber.
-					Sub::None => Ok(Begin::Establish(self.prepare_establish(producer, subscription, ranges))),
+					Sub::None => Ok(Begin::Establish(self.prepare_establish(producer, wire, &fills.groups))),
 					Sub::Active(active) => {
+						let Wire {
+							subscription,
+							demand,
+							demand_ranges,
+							ranges,
+						} = wire;
 						// Downstream preferences changed: forward them upstream as a
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
-						let start_moved = active.start != subscription.start();
+						let start_moved = demand.is_some() && active.start != subscription.start();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
 						active.max_delay = wire_max_delay(subscription.delay.max);
@@ -8554,14 +8634,25 @@ impl TrackServe {
 						// two: each gap they reach waits a fresh grace, which only delays giving up
 						// on one still owed.
 						let (edit, changed) = active.edit(&ranges)?;
-						let widened = changed.then(|| subscription.start().or(active.served).unwrap_or(0)..u64::MAX);
+						let widened = (changed && demand.is_some())
+							.then(|| subscription.start().or(active.served).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(producer.tail_grace(subscription.budget()));
 							let now = self.subscriber.runtime.now();
 							for groups in lowered.into_iter().chain(widened) {
 								tail.demand(groups, now);
 							}
+							// So do the groups a fill newly asks for.
+							for groups in fills.groups.iter() {
+								let asked = active.fill_groups.gaps(groups).collect::<Vec<_>>();
+								for groups in asked {
+									tail.demand(groups, now);
+								}
+							}
 						}
+						active.fill_groups = fills.groups.clone();
+						active.demand = demand;
+						active.demand_ranges = demand_ranges;
 						active.start = subscription.start();
 						if supports_update {
 							// The floor follows the requested start, in both directions:
@@ -8590,9 +8681,12 @@ impl TrackServe {
 					self.subscriber.remove_subscribe(active.id);
 					let _ = active.stream.writer.finish();
 					tracing::debug!(track = %self.name, "subscribe canceled (idle)");
+					// The copy is still held: what it cached goes stale from here, unless the
+					// subscription only filled it and never fed it live.
+					if active.demand.is_some() {
+						producer.set_idle();
+					}
 					*sub = Sub::None;
-					// The copy is still held: what it cached goes stale from here.
-					producer.set_idle();
 				}
 				Ok(Begin::None)
 			}
@@ -8668,19 +8762,32 @@ impl TrackServe {
 	fn prepare_establish(
 		&self,
 		producer: &mut track::Producer,
-		subscription: Subscription,
-		ranges: Vec<lite::Range>,
+		wire: Wire,
+		fills: &rangemap::RangeSet<u64>,
 	) -> Establish {
-		self.request_floor(producer, subscription.start());
+		let Wire {
+			subscription,
+			demand,
+			demand_ranges,
+			ranges,
+		} = wire;
+		// One asking only for fills is no live feed, so it leaves the floor alone.
+		if demand.is_some() {
+			self.request_floor(producer, subscription.start());
+		}
 		let framing = lite::Framing::new(producer.info(), self.subscriber.version);
-		self.register(
+		let mut establish = self.register(
 			subscription,
 			ranges,
 			Some(Accepted {
 				producer: producer.clone(),
 				framing,
 			}),
-		)
+		);
+		establish.demand = demand;
+		establish.demand_ranges = demand_ranges;
+		establish.fill_groups = fills.clone();
+		establish
 	}
 
 	/// The floor tracks the requested start until this subscription's own
@@ -8744,6 +8851,9 @@ impl TrackServe {
 			closed: session.clone(),
 			session,
 			id,
+			demand: Some(subscription.clone()),
+			demand_ranges: ranges.clone(),
+			fill_groups: Default::default(),
 			subscription,
 			ranges,
 			tail,
@@ -8764,7 +8874,13 @@ impl TrackServe {
 			false => wire_span(subscription),
 		};
 		let ranges = wire_ranges(&subscription, producer.info().timescale)?.expect("a non-empty subscription");
-		let mut est = Box::new(self.prepare_establish(producer, subscription, ranges));
+		let wire = Wire {
+			subscription: subscription.clone(),
+			demand: Some(subscription),
+			demand_ranges: ranges.clone(),
+			ranges,
+		};
+		let mut est = Box::new(self.prepare_establish(producer, wire, &Default::default()));
 		let id = est.id;
 		match kio::wait(move |waiter| est.poll(waiter)).await {
 			Ok(active) => {
@@ -8788,7 +8904,7 @@ impl TrackServe {
 		pref: Option<Subscription>,
 		supports_update: bool,
 	) -> Result<(), Error> {
-		match self.begin_subscription(producer, sub, pref, supports_update)? {
+		match self.begin_subscription(producer, sub, pref, &FillAsk::default(), supports_update)? {
 			Begin::Establish(est) => {
 				let mut est = Box::new(est);
 				let id = est.id;
@@ -8842,6 +8958,15 @@ fn buffer_update(active: &mut SubStream, ranges: lite::RangeEdit) -> Result<(), 
 	})
 }
 
+/// What a subscription puts on the wire: its parameters, the demand it asks for, and the
+/// ranges, the demand's first, then the held fills'.
+struct Wire {
+	subscription: Subscription,
+	demand: Option<Subscription>,
+	demand_ranges: Vec<lite::Range>,
+	ranges: Vec<lite::Range>,
+}
+
 /// Opens the upstream SUBSCRIBE control stream: send the request, then (pre
 /// lite-05) wait for the SUBSCRIBE_OK. Resolves with the live [`SubStream`];
 /// the caller deregisters the id on failure.
@@ -8852,8 +8977,15 @@ struct Establish {
 	// A dedicated close-watch handle for the SUBSCRIBE_OK wait.
 	closed: Transport,
 	id: u64,
+	/// The parameters the SUBSCRIBE carries.
 	subscription: Subscription,
-	/// The ranges the SUBSCRIBE carries for `subscription`.
+	/// The demand it asks for, `None` when it asks only for fills.
+	demand: Option<Subscription>,
+	/// The demand's ranges, which come first on the wire.
+	demand_ranges: Vec<lite::Range>,
+	/// The groups it asks for fills.
+	fill_groups: rangemap::RangeSet<u64>,
+	/// The ranges the SUBSCRIBE carries: the demand's, then the fills'.
 	ranges: Vec<lite::Range>,
 	tail: kio::Producer<Tail>,
 	/// Holds the session busy while the SUBSCRIBE opens.
@@ -8926,6 +9058,9 @@ impl Establish {
 			min_delay: self.subscription.delay.min,
 			start: self.subscription.start(),
 			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
+			demand: self.demand.clone(),
+			demand_ranges: self.demand_ranges.clone(),
+			fill_groups: self.fill_groups.clone(),
 			priority: self.subscription.priority,
 			order: self.subscription.order,
 			requested: self.subscription.start(),
@@ -9584,6 +9719,8 @@ struct ServeLoop {
 	fetches: kio::Tasks<FillServeRun>,
 	/// Fetches a pre-lite-05 upstream has no FETCH for, held for the live feed.
 	feed_fetches: FeedFetches,
+	/// Fills a lite-07 upstream serves through the subscription.
+	range_fills: RangeFills,
 	// A dedicated close-watch handle for the session-died arm.
 	closed: Transport,
 	// SUBSCRIBE_UPDATE only exists on Lite03+, so older peers can't carry a
@@ -9874,6 +10011,7 @@ impl ServeLoop {
 			sub: Sub::None,
 			fetches,
 			feed_fetches: FeedFetches::new(&serve.subscriber.runtime),
+			range_fills: RangeFills::default(),
 			closed: serve.subscriber.session.clone(),
 			supports_update: !matches!(serve.subscriber.version, Version::Lite01 | Version::Lite02),
 			supports_fetch: serve.subscriber.version.has_track_stream(),
@@ -9918,8 +10056,18 @@ impl ServeLoop {
 
 	/// Apply a demand change: open, update, or cancel the upstream subscription.
 	fn begin(&mut self, serve: &TrackServe, pref: Option<Subscription>) -> Result<(), Error> {
-		match serve.begin_subscription(&mut self.serving, &mut self.sub, pref, self.supports_update)? {
-			Begin::Establish(est) => self.mode = ServeMode::Establish(est),
+		match serve.begin_subscription(
+			&mut self.serving,
+			&mut self.sub,
+			pref,
+			&self.range_fills.ask,
+			self.supports_update,
+		)? {
+			Begin::Establish(est) => {
+				// A fresh subscription may deliver what the last one would not.
+				self.range_fills.forget_refused();
+				self.mode = ServeMode::Establish(est);
+			}
 			Begin::None => {}
 		}
 		// A finished track's tail waits a fresh grace for what an update newly asked for,
@@ -9992,17 +10140,38 @@ impl ServeLoop {
 					tracing::warn!(track = %serve.name, starts = start.starts.len(), ranges = active.live.initial_count(), "subscribe start resolves other ranges");
 					return Err(Error::ProtocolViolation);
 				}
-				// No range starting anywhere leaves nothing owed.
-				let served = start.starts.iter().flatten().min().copied();
-				active.served = served;
-				// An update may have retired some already, whose starts say nothing now.
+				// An update may have retired some already, whose starts say nothing now. A
+				// fill's range starting past where it asked skips groups it will not deliver.
+				let now = serve.subscriber.runtime.now();
+				let mut served: Option<u64> = None;
 				for (id, start) in (0..).zip(&start.starts) {
-					if active.live.get(id).is_some() {
-						active.starts.insert(id, *start);
+					if active.live.get(id).is_none() {
+						continue;
+					}
+					active.starts.insert(id, *start);
+					match active.fill_range(id) {
+						Some(groups) => {
+							let skipped = groups.start..start.unwrap_or(groups.end).clamp(groups.start, groups.end);
+							if let Ok(mut tail) = active.tail.write() {
+								tail.account(skipped.clone(), now);
+							}
+							self.range_fills.refuse(skipped, crate::StreamError::NotFound);
+						}
+						// Only the demand's ranges say where the live feed is served from. No range
+						// starting anywhere leaves nothing owed.
+						None => {
+							served = match (served, *start) {
+								(Some(served), Some(start)) => Some(served.min(start)),
+								(served, start) => served.or(start),
+							}
+						}
 					}
 				}
-				// Where the live feed is, on versions whose answer says.
-				if serve.subscriber.version.has_largest() {
+				active.served = served;
+				// One asking only for fills feeds nothing live.
+				if active.demand.is_none() {
+					active.started = true;
+				} else if serve.subscriber.version.has_largest() {
 					// A bounded feed that never delivers Largest goes live at the
 					// answer alone; one that does waits for it to show.
 					match active.never_serves(start.largest) {
@@ -10021,7 +10190,7 @@ impl ServeLoop {
 				// that moved the start makes it stale, and one that
 				// moved back restores it); elsewhere the
 				// request-tracked floor stands rather than a guess.
-				if active.start == active.requested {
+				if active.start == active.requested && active.demand.is_some() {
 					let _ = match (serve.subscriber.version.resolves_start(), served) {
 						(true, Some(served)) => self.serving.start_resolved(served),
 						_ => self.serving.start_at(served),
@@ -10052,9 +10221,18 @@ impl ServeLoop {
 				// One retired since is owed nothing.
 				if active.live.get(id).is_some() {
 					active.starts.insert(id, started.start);
+					let now = serve.subscriber.runtime.now();
+					// A fill's range starting past where it asked skips groups it will not deliver.
+					if let Some(groups) = active.fill_range(id) {
+						let skipped = groups.start..started.start.unwrap_or(groups.end).clamp(groups.start, groups.end);
+						if let Ok(mut tail) = active.tail.write() {
+							tail.account(skipped.clone(), now);
+						}
+						self.range_fills.refuse(skipped, crate::StreamError::NotFound);
+					}
 					// The tail judges what is owed again.
 					if let Ok(mut tail) = active.tail.write() {
-						tail.expire(serve.subscriber.runtime.now());
+						tail.expire(now);
 					}
 				}
 			}
@@ -10062,16 +10240,24 @@ impl ServeLoop {
 			// are accounted for without a stream, and a reader of
 			// one still arriving ends with the drop's error now.
 			lite::SubscribeResponse::Drop(dropped) => {
+				let groups = dropped.start..dropped.end.saturating_add(1);
+				let err = dropped.error(serve.subscriber.version);
 				if let Ok(mut tail) = active.tail.write() {
-					tail.account(
-						dropped.start..dropped.end.saturating_add(1),
-						serve.subscriber.runtime.now(),
-					);
+					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
-				self.serving.drop_groups(
-					dropped.start..dropped.end.saturating_add(1),
-					dropped.error(serve.subscriber.version),
-				);
+				// A group a fill asked for and the live budget dropped as stale is recovered on
+				// its own, so the copy does not record it given up meanwhile.
+				let mut given = rangemap::RangeSet::new();
+				given.insert(groups.clone());
+				if err == crate::StreamError::Old {
+					for asked in active.fill_groups.overlapping(&groups) {
+						given.remove(asked.clone());
+					}
+				}
+				for given in given.iter() {
+					self.serving.drop_groups(given.clone(), err.clone());
+				}
+				self.range_fills.refuse(groups, err);
 			}
 			// OK just resolves the range (the producer already orders
 			// groups).
@@ -10164,7 +10350,10 @@ impl ServeLoop {
 					if !drained {
 						// The groups are drained only for a reader: once nobody holds the
 						// copy, a stream the publisher never finishes must not hold it.
-						if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
+						if self.fetches.is_empty()
+							&& self.range_fills.is_empty()
+							&& crate::util::poll_unwanted(&mut self.demand, waiter).is_ready()
+						{
 							return Poll::Ready(ServeEnd::Idle);
 						}
 						return Poll::Pending;
@@ -10195,7 +10384,10 @@ impl ServeLoop {
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}
-					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
+					if self.fetches.is_empty()
+						&& self.range_fills.is_empty()
+						&& crate::util::poll_unwanted(&mut self.demand, waiter).is_ready()
+					{
 						return Poll::Ready(ServeEnd::Idle);
 					}
 					// The tail is still unsettled, so a session that dies now cuts the track
@@ -10251,7 +10443,16 @@ impl ServeLoop {
 					// subscription churn.
 					match self.dynamic.poll_requested_fill(waiter) {
 						Poll::Ready(Ok(fill)) => {
-							if self.supports_fetch {
+							// Lite-07 asks for more than one group through the subscription. One
+							// group, or a slice of one, is what FETCH carries, and a time lookup
+							// names no group yet.
+							let last = fill.end().saturating_sub(1);
+							let groups = fill.start().frame == 0
+								&& fill.time().is_none() && fill.start().group < last
+								&& fill.group(last).frame_end().is_none();
+							if serve.subscriber.version.has_ranges() && groups {
+								self.range_fills.push(fill);
+							} else if self.supports_fetch {
 								self.fetches.push(FillServeRun::new(
 									serve.clone(),
 									fill,
@@ -10308,6 +10509,17 @@ impl ServeLoop {
 					let _ = self.fetches.poll(waiter);
 					self.feed_fetches
 						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
+					// A fill asking for other groups changes the subscription.
+					let accounted = match &self.sub {
+						Sub::Active(active) => Some(active.tail.clone()),
+						Sub::None => None,
+					};
+					if self.range_fills.poll(serve, &self.serving, accounted.as_ref(), waiter) {
+						if let Err(err) = self.begin(serve, self.serving.subscription()) {
+							return Poll::Ready(ServeEnd::GiveBack(err));
+						}
+						continue;
+					}
 
 					// A lite-07 track the publisher finished ends once its tail settles.
 					if self.poll_finishing(waiter).is_ready() {
@@ -10318,7 +10530,10 @@ impl ServeLoop {
 					// went with the last subscriber, so it lingers, cache and all, for a
 					// reader or fetch that asks again soon, then is dropped. In-flight
 					// fetches keep it alive: work already accepted still gets finished.
-					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
+					if self.fetches.is_empty()
+						&& self.range_fills.is_empty()
+						&& crate::util::poll_unwanted(&mut self.demand, waiter).is_ready()
+					{
 						self.held = None;
 						if self.linger.deadline().is_none() {
 							let now = serve.subscriber.runtime.now();

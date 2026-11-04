@@ -401,12 +401,6 @@ function pin(entry: RangeEntry, resolved: Resolved | undefined): RangeEntry {
 	return { range, from, to };
 }
 
-// Where each range of `track` starts once delivery starts at `from`, undefined for one with no
-// group there. Before lite-07 there is one range, which starts there.
-function rangeStarts(version: Version, track: track.Subscriber, from: bigint): (bigint | undefined)[] {
-	return hasRanges(version) ? hooks.servingStarts(track, from) : [from];
-}
-
 // The later of two locations, either of which may be unknown.
 function newer(a: track.Position | undefined, b: track.Position | undefined): track.Position | undefined {
 	if (!a || !b) return a ?? b;
@@ -1311,6 +1305,18 @@ export class Publisher {
 		let ids = Array.from({ length: Number(initial) }, (_, index) => BigInt(index));
 		let unstarted: bigint[] = [];
 
+		// Where each of the SUBSCRIBE's ranges starts once delivery starts at `from`, by Range ID,
+		// undefined for one with no group there or an update retired: SUBSCRIBE_STARTED answers
+		// each one an update added. Before lite-07 there is one range, which starts there.
+		const rangeStarts = (from: bigint): (bigint | undefined)[] => {
+			if (!hasRanges(this.version)) return [from];
+			const starts = hooks.servingStarts(track, from);
+			return Array.from({ length: Number(initial) }, (_, id) => {
+				const index = ids.indexOf(BigInt(id));
+				return index < 0 ? undefined : starts[index];
+			});
+		};
+
 		// Report where each range an update added starts, once it resolves, or with no start once
 		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
@@ -1528,7 +1534,7 @@ export class Publisher {
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
 								const start = new SubscribeStart(
-									rangeStarts(this.version, track, bounds.startGroup),
+									rangeStarts(bounds.startGroup),
 									largest,
 								);
 								if (
@@ -1545,7 +1551,7 @@ export class Publisher {
 							if (end !== undefined && hooks.servingRuns(track, 0n, end).length === 0) {
 								startSent = true;
 								startSequence = end;
-								const start = new SubscribeStart(rangeStarts(this.version, track, end), largest);
+								const start = new SubscribeStart(rangeStarts(end), largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1573,7 +1579,7 @@ export class Publisher {
 								startSent = true;
 								startSequence = runs[0].start;
 								const start = new SubscribeStart(
-									rangeStarts(this.version, track, startSequence),
+									rangeStarts(startSequence),
 									largest,
 								);
 								if (
@@ -1608,7 +1614,7 @@ export class Publisher {
 						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
 							startSent = true;
 							startSequence = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
-							const start = new SubscribeStart(rangeStarts(this.version, track, startSequence), largest);
+							const start = new SubscribeStart(rangeStarts(startSequence), largest);
 							if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version))))
 								return false;
 							continue;
@@ -1684,7 +1690,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(rangeStarts(this.version, track, startSequence), largest) },
+								{ start: new SubscribeStart(rangeStarts(startSequence), largest) },
 								this.version,
 							),
 						))

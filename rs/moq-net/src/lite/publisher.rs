@@ -2855,11 +2855,7 @@ impl SubscribeServe {
 	}
 
 	/// Serve `msg` from the name's datagram track, at the priority of its latest `update`.
-	fn datagrams(
-		mut consumer: datagram::Consumer,
-		msg: &lite::Subscribe<'static>,
-		update: Option<LiveUpdate>,
-	) -> Self {
+	fn datagrams(mut consumer: datagram::Consumer, msg: &lite::Subscribe<'static>, update: Option<LiveUpdate>) -> Self {
 		let priority = update.map_or(msg.priority, |update| update.priority);
 		consumer.set_priority(priority);
 		Self::Datagrams {
@@ -4798,7 +4794,11 @@ impl TrackRun {
 		let mut waiting = Vec::new();
 		let mut reported = false;
 		for id in std::mem::take(&mut self.unstarted) {
-			let index = self.ids.iter().position(|held| *held == id).expect("unstarted ranges are live");
+			let index = self
+				.ids
+				.iter()
+				.position(|held| *held == id)
+				.expect("unstarted ranges are live");
 			let start = match resolved.get(index).copied().flatten() {
 				Some((start, end)) => {
 					let start = start.max(from);
@@ -5154,10 +5154,18 @@ impl TrackRun {
 	/// Where each requested range starts once delivery starts at `start`. Before lite-07
 	/// there is one range, which starts there.
 	fn starts(&mut self, start: u64) -> Vec<Option<u64>> {
-		match self.ctx.version.has_ranges() {
-			true => self.track.starts(start),
-			false => vec![Some(start)],
+		if !self.ctx.version.has_ranges() {
+			return vec![Some(start)];
 		}
+		// SUBSCRIBE_START answers the SUBSCRIBE's ranges, by Range ID: none for one an update
+		// retired already, and SUBSCRIBE_STARTED answers each one an update added.
+		let starts = self.track.starts(start);
+		(0..self.initial)
+			.map(|id| {
+				let index = self.ids.iter().position(|held| *held == id)?;
+				starts.get(index).copied().flatten()
+			})
+			.collect()
 	}
 
 	/// Send SUBSCRIBE_START for the first servable group, then serve it.
