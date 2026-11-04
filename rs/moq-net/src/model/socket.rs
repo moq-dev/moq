@@ -255,7 +255,7 @@ impl sealed::Open for TcpStream {
 			local: Some(local),
 			pending: None,
 		};
-		shared.tasks.push(kio::Pending::new(pump));
+		shared.tasks.push(pump);
 		Self {
 			producer,
 			consumer,

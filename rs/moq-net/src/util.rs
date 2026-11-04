@@ -43,7 +43,7 @@ pub(crate) fn err_only<E>(fut: impl Future<Output = Result<(), E>> + Send) -> im
 	})
 }
 
-/// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].
+/// Cloneable handle for submitting tasks to a driver-owned [`TaskSet`].
 #[derive(Clone)]
 pub(crate) struct Tasks {
 	state: kio::Shared<Submissions>,
@@ -63,7 +63,7 @@ pub(crate) struct Keepalive {
 /// The submission queue between [`Tasks`] handles and their [`TaskSet`].
 #[derive(Default)]
 struct Submissions {
-	queued: VecDeque<BoxFuture<'static, ()>>,
+	queued: VecDeque<BoxTask>,
 	/// The set dropped: submissions are discarded, as the driver that would
 	/// have polled them has torn down.
 	closed: bool,
@@ -78,7 +78,7 @@ impl Tasks {
 	pub fn push(&self, task: impl Future<Output = ()> + Send + 'static) {
 		let mut state = self.state.lock();
 		if !state.closed {
-			state.queued.push_back(Box::pin(task));
+			state.queued.push_back(future_task(Box::pin(task)));
 		}
 	}
 }
@@ -111,12 +111,14 @@ pub(crate) struct TasksWeak {
 }
 
 impl TasksWeak {
-	/// Queue a future for polling by the associated [`TaskSet`], dropped if the
+	/// Queue a task for polling by the associated [`TaskSet`], dropped if the
 	/// set (or every owning handle) is already gone.
-	pub fn push(&self, task: impl Future<Output = ()> + Send + 'static) {
+	pub fn push(&self, mut task: impl kio::Task<Output = ()> + Send + 'static) {
 		let mut state = self.state.lock();
 		if !state.closed && !self.alive.is_closed() {
-			state.queued.push_back(Box::pin(task));
+			state
+				.queued
+				.push_back(Box::new(move |waiter: &kio::Waiter| task.poll(waiter)));
 		}
 	}
 
@@ -194,7 +196,7 @@ impl TaskSet {
 				break;
 			};
 			while let Some(task) = state.queued.pop_front() {
-				self.active.push(future_task(task));
+				self.active.push(task);
 			}
 			// No handles left: nothing can ever submit again.
 			if orphaned {
