@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `TrackInfo.max_age` defaults to `timedelta(0)`, like `Delay.max`, so a bare `TrackInfo()` and an omitted one now advertise a zero max age, serving only the live edge, instead of no publisher limit. `None` still means no limit: pass `max_age=None` where you relied on the default.
 
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `moq.Error.OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch` and `set_target` and `Viewer.update` raise it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### `VideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 The `lower=` argument of `TrackProducer.video` and `TrackStreamProducer.video` accepts either producer and needs no change. Code that sets the raw `VideoInit.lower` field wraps the handle as `MoqMediaProducer.TRACK(producer=...)` or `MoqMediaProducer.STREAM(producer=...)`.

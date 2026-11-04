@@ -113,6 +113,27 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// A viewer on a session that has not connected reads no estimate.
+    func testViewerHoldsWithoutAnEstimate() async throws {
+        let client = try Client(bind: "127.0.0.1:0", tls: ClientTls(insecure: true), once: true)
+        defer { client.cancel() }
+        let session = try await client.connect(to: "https://127.0.0.1:1")
+        defer { session.cancel(code: 0) }
+
+        let viewers = session.viewers()
+        let viewer = try viewers.watch(maxBps: 1_000_000)
+        try viewer.update(maxBps: 2_000_000)
+        try viewers.setTarget(targetBps: 0)
+        try viewers.setTarget(targetBps: nil)
+        XCTAssertNil(viewer.rate())
+        // Past what a PROBE target carries: refused.
+        XCTAssertThrowsError(try viewers.watch(maxBps: 1 << 53)) { error in
+            guard case MoqError.OutOfRange = error else {
+                return XCTFail("expected OutOfRange, got \(error)")
+            }
+        }
+    }
+
     /// A value the native side cannot use throws from the constructor, not the dial.
     func testInvalidConfigThrowsConfig() {
         XCTAssertThrowsError(try Client(versions: ["moq-lite-99"])) { error in

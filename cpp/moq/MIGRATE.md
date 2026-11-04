@@ -6,6 +6,10 @@
 
 An unset `moq::TrackInfo::max_age`, and a `std::nullopt` info, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on `std::nullopt` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
 
+### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
+
+Viewer ceilings and PROBE target overrides are refused with the new `moq::Error::kOutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers::watch` and `set_target` and `Viewer::update` return a `moq::expected` carrying it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.
+
 ### `moq::VideoInit::lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `lower` is `std::optional<moq::MediaProducer>` instead of a `std::shared_ptr<moq::MediaTrackProducer>`. Assign `moq::MediaProducer(moq::MediaProducer::kTrack{producer})`, or `kStream` for a `moq::MediaTrackStreamProducer`.

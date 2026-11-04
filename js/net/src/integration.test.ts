@@ -1493,23 +1493,42 @@ test("integration: lite draft-07 fetch uses the republished track's timescale", 
 	server.abort();
 });
 
-test("integration: ietf fetch group is unsupported", async () => {
-	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
-	const origin = new OriginProducer();
-
-	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
-		accept(pair.server, url, { publish: origin.consume() }),
-	]);
-
-	const remote = wireOf(client).consume(Path.from("test"));
-	await expect(remote.track("video").fetchGroup(0n)).rejects.toThrow(
-		"fetch group is not supported by this session's version",
-	);
-
-	remote.close();
-	client.abort();
-	server.abort();
+test("integration: ietf fetches a past group of a finished track", async () => {
+	for (const protocol of [Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const publication = origin.createBroadcast(Path.from("test"));
+		publication.announce();
+		// No publisher limit, so the superseded group stays fresh to fetch, and no MAX_CACHE_DURATION.
+		const published = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		for (let sequence = 0; sequence < 3; sequence++) {
+			const group = published.appendGroup();
+			group.writeFrame({
+				payload: new Uint8Array([sequence]),
+				timestamp: new Timestamp(sequence * 1000, Timescale.MILLI),
+			});
+			group.finish();
+		}
+		published.finish();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const remote = wireOf(client).consume(Path.from("test"));
+		const group = await remote.track("video").fetchGroup(1n);
+		expect(group.sequence).toBe(1n);
+		const frame = await group.readFrame();
+		expect(frame?.payload).toEqual(new Uint8Array([1]));
+		expect(frame?.timestamp).toEqual(new Timestamp(1000, Timescale.MILLI));
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+		// The FETCH-only copy keeps the absent MAX_CACHE_DURATION as no limit, not the authored zero.
+		expect((await remote.track("video").info()).maxAge).toBeUndefined();
+		remote.close();
+		client.abort();
+		server.abort();
+		origin.close();
+	}
 });
 
 // We list no tracks by PUBLISH, so a SUBSCRIBE_TRACKS is refused NOT_SUPPORTED on its own stream, and

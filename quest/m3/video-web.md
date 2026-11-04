@@ -39,7 +39,3 @@ bump.
   rather than silently picking another.
 - **Out of scope:** replacing js/publish's or js/watch's internals with these
   backends.
-
-## Required
-
-- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn/README.md) - library work polled by its owner, with no runtime to spawn on

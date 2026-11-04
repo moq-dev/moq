@@ -1,7 +1,7 @@
 /**
  * Finite raw-track interop: publish until the harness acknowledges, or read through clean EOF.
  *
- * `drop` cuts group 1. `join` reads from whichever group the subscription starts at: a
+ * `fetch` reads one past group. `drop` cuts group 1. `join` reads from whichever group the subscription starts at: a
  * moq-transport subscription starts at the largest group rather than at the range asked for, so
  * it must read a contiguous run of groups through the last one. `compress` publishes a compressed
  * track with several frames, one empty, in each group. `cached` publishes every group before
@@ -34,26 +34,27 @@ const status = mode === "status";
 const cached = mode === "cached";
 const history = mode === "history";
 const late = mode === "late";
+const fetch = mode === "fetch";
 if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "status", "cached", "history", "late"].includes(mode)
+	![undefined, "drop", "join", "compress", "status", "cached", "history", "late", "fetch"].includes(mode)
 ) {
 	throw new Error(
-		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|status|cached|history|late]]",
+		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|status|cached|history|late|fetch]]",
 	);
 }
 
 /**
  * The frames of each group. A compressed track spans several frames, one empty, per window.
- * `cached`, `history`, and `late` give every frame its own bytes, so a FETCH or join that drops, repeats, or
+ * `cached`, `history`, `fetch`, and `late` give every frame its own bytes, so a FETCH or join that drops, repeats, or
  * reorders one fails.
  */
 function frames(sequence: number): Uint8Array[] {
 	if (compress)
 		return [new Uint8Array(BYTES / 2).fill(sequence), new Uint8Array(0), new Uint8Array(BYTES / 2).fill(sequence)];
-	if (cached || history || late)
+	if (cached || history || late || fetch)
 		return [0, 1, 2].map((index) => new Uint8Array(BYTES / 4).fill(sequence * 16 + index));
 	return [new Uint8Array(BYTES).fill(sequence)];
 }
@@ -164,52 +165,62 @@ try {
 				await request.active.changed();
 				broadcast = request.active.peek();
 			}
-			// `late` names no start, joining the latest group as a player does: group 0, whose
-			// head predates the subscription.
-			const track = broadcast.track("tail").subscribe({
-				delay: { max: Milli(drop ? 60_000 : 5000) },
-				...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
-			});
-			if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
-			const seen: number[] = [];
-			try {
-				if (late) {
-					for (let sequence = 0; sequence < LATE_GROUPS; sequence++) {
-						const group = await track.recvGroup();
-						assert(group, "missing group");
-						try {
-							assert.equal(group.sequence, BigInt(sequence), "joined the wrong group");
-							await read(group);
-						} finally {
-							group.close();
-						}
-					}
-					assert.equal(await track.recvGroup(), undefined, "extra group");
-					assert.deepEqual(await track.finished(), { group: BigInt(LATE_GROUPS), frame: 0 });
-					console.error("late join clean groups=0,1 frames=6");
-				} else {
-					for (;;) {
-						const group = await track.recvGroup();
-						if (!group) break;
-						try {
-							assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
-							await read(group);
-							seen.push(Number(group.sequence));
-						} finally {
-							group.close();
-						}
-					}
-					seen.sort((a, b) => a - b);
-					const first = join ? (seen[0] ?? 0) : 0;
-					const all = Array.from({ length: GROUPS - first }, (_, i) => first + i);
-					assert.deepEqual(seen, drop ? [0, 2, 3] : all);
-					assert.deepEqual(await track.finished(), { group: BigInt(GROUPS), frame: 0 });
-					if (join) console.error(`tail join clean end=4 groups=${seen.join(",")}`);
-					else if (drop) console.error("tail drop clean end=4 groups=0,2,3 bytes=786432");
-					else console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");
+			if (fetch) {
+				const group = await broadcast.track("tail").fetchGroup(1n);
+				try {
+					await read(group);
+				} finally {
+					group.close();
 				}
-			} finally {
-				track.close();
+				console.error("fetch clean group=1 frames=3 bytes=196608");
+			} else {
+				// `late` names no start, joining the latest group as a player does: group 0, whose
+				// head predates the subscription.
+				const track = broadcast.track("tail").subscribe({
+					delay: { max: Milli(drop ? 60_000 : 5000) },
+					...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
+				});
+				if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
+				const seen: number[] = [];
+				try {
+					if (late) {
+						for (let sequence = 0; sequence < LATE_GROUPS; sequence++) {
+							const group = await track.recvGroup();
+							assert(group, "missing group");
+							try {
+								assert.equal(group.sequence, BigInt(sequence), "joined the wrong group");
+								await read(group);
+							} finally {
+								group.close();
+							}
+						}
+						assert.equal(await track.recvGroup(), undefined, "extra group");
+						assert.deepEqual(await track.finished(), { group: BigInt(LATE_GROUPS), frame: 0 });
+						console.error("late join clean groups=0,1 frames=6");
+					} else {
+						for (;;) {
+							const group = await track.recvGroup();
+							if (!group) break;
+							try {
+								assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
+								await read(group);
+								seen.push(Number(group.sequence));
+							} finally {
+								group.close();
+							}
+						}
+						seen.sort((a, b) => a - b);
+						const first = join ? (seen[0] ?? 0) : 0;
+						const all = Array.from({ length: GROUPS - first }, (_, i) => first + i);
+						assert.deepEqual(seen, drop ? [0, 2, 3] : all);
+						assert.deepEqual(await track.finished(), { group: BigInt(GROUPS), frame: 0 });
+						if (join) console.error(`tail join clean end=4 groups=${seen.join(",")}`);
+						else if (drop) console.error("tail drop clean end=4 groups=0,2,3 bytes=786432");
+						else console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");
+					}
+				} finally {
+					track.close();
+				}
 			}
 		} finally {
 			request.close();

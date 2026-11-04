@@ -626,6 +626,12 @@ export const hooks: {
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
+	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
+	subscribing: (producer: Producer) => Getter<boolean>;
+	/** Leave a wire copy serving its cache and fills without a live feed. */
+	cacheTrack: (producer: Producer) => void;
+	/** Fail subscriptions reaching beyond `edge`, keeping history readers and one-shot fetches. */
+	refuseLive: (producer: Producer, edge: bigint, error: Error) => void;
 	/**
 	 * A fetch's group `sequence`, before it reads: `true` once it is cached or asked of a fill,
 	 * written yet or not, as the Rust `fetch_group` queues one; `false` with no handler to ask;
@@ -872,6 +878,15 @@ export const hooks: {
 	},
 	groupChanged: () => {
 		throw new Error("track.ts not loaded");
+	},
+	cacheTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	refuseLive: () => {
+		throw new Error("track.ts not loaded");
+	},
+	subscribing: () => {
+		throw new Error("track module not loaded");
 	},
 	fetchBudget: () => {
 		throw new Error("track.ts not loaded");
