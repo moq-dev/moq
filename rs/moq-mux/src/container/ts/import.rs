@@ -6625,7 +6625,13 @@ pub(super) mod test {
 			let (a, b, c, d) = (frame(0xaa), frame(0xbb), frame(0xcc), frame(0xdd));
 			// The first PES ends 40 bytes into `b`.
 			import
-				.decode(&audio_pes_open(PID, 0, 90_000, a.len() + 40, &[&a[..], &b[..20]].concat()))
+				.decode(&audio_pes_open(
+					PID,
+					0,
+					90_000,
+					a.len() + 40,
+					&[&a[..], &b[..20]].concat(),
+				))
 				.unwrap();
 			import.decode(&ts_continuation(PID, 1, &b[20..40])).unwrap();
 			// The next PES, half a second on, opens with 20 more bytes of `b`.
