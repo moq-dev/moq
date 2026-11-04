@@ -698,10 +698,10 @@ impl Drop for MoqTrackProducer {
 }
 
 impl MoqTrackProducer {
-	/// Wrap a socket's track without a broadcast family or datagram side channel.
+	/// Wrap a socket's track without a broadcast family.
 	pub(crate) fn from_socket(track: moq_net::track::Producer) -> Self {
 		Self {
-			inner: std::sync::Mutex::new(Some(Raw { track, datagrams: None })),
+			inner: std::sync::Mutex::new(Some(track)),
 			keep: std::sync::Mutex::new(None),
 		}
 	}

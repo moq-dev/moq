@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
-use crate::consumer::{Datagrams, MoqGroupConsumer, MoqTrackConsumer};
+use crate::consumer::{MoqGroupConsumer, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::{Background, Polled};
 use crate::origin::MoqOriginProducer;
@@ -246,7 +246,7 @@ impl MoqSocketTrackStream {
 		let session = inner.session().into();
 		Self {
 			producer: Arc::new(MoqTrackProducer::from_socket(inner.producer)),
-			consumer: Arc::new(MoqTrackConsumer::new(inner.consumer, Datagrams::Ended, driver)),
+			consumer: Arc::new(MoqTrackConsumer::new(inner.consumer, driver)),
 			peer,
 			session,
 		}
