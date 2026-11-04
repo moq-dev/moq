@@ -70,7 +70,7 @@ impl Trigger {
 			};
 			state.send_modify(|state| state.wait_ended = Some(ended));
 		};
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		if kio::clock::sim::is_running() {
 			drop(kio::clock::sim::spawn(wait));
 			return;

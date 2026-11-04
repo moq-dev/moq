@@ -23,10 +23,8 @@ path = "src/main.rs"
 doc = false
 
 [features]
-# A programmatic relay fixture with generated TLS and ephemeral ports.
-test-support = []
-# Run shutdown observation on the deterministic in-memory executor.
-sim = ["kio/sim", "moq-tokio/sim"]
+# A programmatic relay fixture with generated TLS, ephemeral ports, and simulated tasks.
+test-support = ["kio/sim", "moq-tokio/sim"]
 # The optional public STUN Binding listener (`--stun-bind`).
 stun = ["dep:stun-types"]
 default = ["cluster-lan", "quic", "websocket", "uds"]
@@ -115,7 +113,6 @@ moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-congestion = { path = "../moq-congestion" }
 # The shared session bench fills FETCH runs through the hidden `fuzz` module.
 moq-net = { path = "../moq-net", features = ["fuzz"] }
-moq-relay = { path = ".", default-features = false, features = ["sim"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem", "ring"] }

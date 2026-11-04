@@ -4957,7 +4957,6 @@ dependencies = [
  "moq-congestion",
  "moq-net",
  "moq-quic",
- "moq-relay",
  "moq-shaper",
  "moq-sock",
  "moq-stats",
