@@ -4920,11 +4920,14 @@ test("declared skips up to the end settle the track", async () => {
 	producer.accept({});
 	const reader = producer.subscribe({ delay: { max: null }, order: "ascending" });
 	producer.createGroup(0n).finish();
+	// Group 0's finish settles first, so only the skip can reach the end.
+	await yieldNow();
 	producer.finishAt({ group: 3n, frame: 0 });
+	expect(producer.closed.peek()).toBeUndefined();
 	producer.skipGroups(1n, 3n);
+	expect(producer.closed.peek()).toBeNull();
 	expect((await reader.recvGroup())?.sequence).toBe(0n);
 	expect(await reader.recvGroup()).toBeUndefined();
-	expect(await producer.closed).toBeNull();
 	reader.close();
 });
 

@@ -1138,6 +1138,8 @@ export class Producer {
 		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: new
 		// terms may supersede it, leaving those groups unknown again, as in Rust.
 		if (hole.stale === undefined) this.#arrive(start, end);
+		// Giving up the last sequences below the end reaches it, as writing them would.
+		this.#endLargest();
 	}
 
 	// A publisher may re-create a group it cut; the sequence is no longer given up.
