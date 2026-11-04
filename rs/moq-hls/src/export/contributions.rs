@@ -246,7 +246,13 @@ async fn follow_instances(mut instances: follow::Instances, current: kio::Produc
 			Ok(follow::Event::End) => Current::Offline,
 			Err(err) => Current::Failed(err.into()),
 		};
-		let failed = matches!(&next, Current::Failed(_));
+		let failed = match &next {
+			Current::Failed(err) => {
+				tracing::debug!(%err, "stopped following contribution");
+				true
+			}
+			_ => false,
+		};
 		let Ok(mut state) = current.write() else { return };
 		*state = next;
 		if failed {
