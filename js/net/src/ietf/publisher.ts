@@ -273,6 +273,9 @@ interface RunFill {
 	/** The subscriber's delivery priority, applied to the cache subscription the fill reads. */
 	priority: number;
 
+	/** The track's Publisher Priority on the wire, which the fill's first object states. */
+	publisherPriority: number;
+
 	/**
 	 * The subscription's ranking. The fill joins it as the group it fills, so backfill goes out
 	 * in the subscription's GROUP_ORDER rather than ahead of the live groups or behind them all.
@@ -747,6 +750,7 @@ export class Publisher {
 								namespace: name,
 								properties,
 								timescale,
+								publisherPriority,
 								ranking: ranked,
 							}
 						: { kind: "unsupported" },
@@ -796,6 +800,7 @@ export class Publisher {
 				filling = this.#runFill({
 					requestId,
 					priority: fromWire(msg.subscriberPriority),
+					publisherPriority,
 					ranking: ranked,
 					fill: selected,
 					cache: source,
@@ -1358,7 +1363,8 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, ranking, fill, cache, timescale, unsubscribed, cancelled, streams } = options;
+		const { requestId, ranking, fill, cache, timescale, publisherPriority, unsubscribed, cancelled, streams } =
+			options;
 		const version = this.#session.version;
 
 		// Everything is inside the try so the cache fork is released on every path out,
@@ -1388,7 +1394,7 @@ export class Publisher {
 				throw new Error("fill is not supported");
 			}
 
-			const out = new FetchWriter({ stream, version, timescale });
+			const out = new FetchWriter({ stream, version, timescale, priority: publisherPriority });
 			const group = hooks.cachedGroup(cache, fill.start.group);
 			if (!group) throw new NotFound("fill group unavailable");
 			try {
@@ -2445,6 +2451,7 @@ export class Publisher {
 				ok: new FetchOk({ endOfTrack, endLocation, properties: trackProperties(info, msg.propertiesWanted) }),
 				// A Timestamp goes out only when FETCH_OK actually carries TIMESCALE.
 				timescale: msg.propertiesWanted ? (info.timescale ?? undefined) : undefined,
+				publisherPriority: toWire(info.priority),
 				// Its own rank, so it competes with group streams by its priority alone.
 				sendOrder: sendOrder({ priority }),
 			};
@@ -2538,6 +2545,7 @@ export class Publisher {
 			// Where the subscription starts, never the end of the track.
 			ok: new FetchOk({ endOfTrack: false, endLocation: end, properties: join.properties }),
 			timescale: join.timescale,
+			publisherPriority: join.publisherPriority,
 			// Ranked as the group it heads, ahead of that group's live rest.
 			sendOrder: join.ranking.rank(sequence, 0),
 			ranking: join.ranking,
@@ -2550,7 +2558,7 @@ export class Publisher {
 	 */
 	async #answerFetch(msg: Fetch, request: RequestStream, answer: FetchAnswer, stop: AbortSignal) {
 		const version = this.#session.version;
-		const { range, last, timescale, ranking } = answer;
+		const { range, last, timescale, publisherPriority, ranking } = answer;
 
 		let stream: Writer | undefined;
 		try {
@@ -2566,7 +2574,7 @@ export class Publisher {
 			ranking?.add(stream, range.start.group, safe(range.start.object));
 			await untilAborted(new FetchHeader({ requestId: msg.requestId }).encode(stream, version), stop);
 
-			const out = new FetchWriter({ stream, version, timescale });
+			const out = new FetchWriter({ stream, version, timescale, priority: publisherPriority });
 			for (const frame of last.frames) await out.object(last.sequence, frame, stop);
 			stream.close();
 			// The request stream ends once the answer is delivered.
@@ -2676,6 +2684,8 @@ type Joinable =
 			properties: Properties.Properties;
 			/** The units the subscription stamps objects in, if any; see {@link RunGroup.timescale}. */
 			timescale?: Timescale;
+			/** The track's Publisher Priority on the wire, which the fetch's first object states. */
+			publisherPriority: number;
 			/** The subscription's ranking, which the fetch stream joins as the group it heads. */
 			ranking: Priority;
 	  };
@@ -2700,6 +2710,8 @@ interface FetchAnswer {
 	ok: FetchOk;
 	/** The units objects are stamped in, if any; see {@link RunGroup.timescale}. */
 	timescale?: Timescale;
+	/** The track's Publisher Priority on the wire, which the stream's first object states. */
+	publisherPriority: number;
 	/** The fetch stream's send order. */
 	sendOrder: number;
 	/** The subscription ranking the fetch stream joins, if any. */
@@ -2780,21 +2792,25 @@ class FetchWriter {
 	readonly stream: Writer;
 	readonly #version: IetfVersion;
 	readonly #timescale: Timescale | undefined;
+	/** The track's Publisher Priority on the wire, which the first object states for all. */
+	readonly #priority: number;
 	#written = false;
 
 	constructor({
 		stream,
 		version,
 		timescale,
-	}: { stream: Writer; version: IetfVersion; timescale: Timescale | undefined }) {
+		priority,
+	}: { stream: Writer; version: IetfVersion; timescale: Timescale | undefined; priority: number }) {
 		this.stream = stream;
 		this.#version = version;
 		this.#timescale = timescale;
+		this.#priority = priority;
 	}
 
 	/** Write `frame` of group `sequence`, following the prior object of that group, if any. */
 	async object(sequence: bigint, frame: { sequence: number } & group.Frame, stop: AbortSignal): Promise<void> {
-		const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp });
+		const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp, priority: this.#priority });
 		const position = {
 			group: sequence,
 			object: frame.sequence,
