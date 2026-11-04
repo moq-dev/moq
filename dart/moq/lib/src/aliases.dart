@@ -128,7 +128,7 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
-/// A datagram-delivered frame, tagged with a per-track sequence number.
+/// A datagram payload with its own sequence and optional timestamp.
 typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.

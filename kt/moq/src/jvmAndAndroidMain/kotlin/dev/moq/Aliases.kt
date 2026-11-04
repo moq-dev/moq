@@ -159,7 +159,7 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Data types.
-/** A datagram-delivered frame, tagged with a per-track sequence number. */
+/** A datagram payload with its own sequence and optional timestamp. */
 typealias Datagram = uniffi.moq.MoqDatagram
 
 /** A payload plus the timestamp it should be presented at. */

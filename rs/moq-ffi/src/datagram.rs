@@ -7,7 +7,7 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::ffi::{Background, Polled};
 use crate::media::{MoqDatagram, MoqTimestamp};
-use crate::producer::{Child, Children, MoqBroadcastProducer, MoqBroadcastRequests};
+use crate::producer::{Child, Children, MoqBroadcastProducer};
 
 /// Publisher properties of a datagram track, fixed at creation.
 #[derive(Clone, Default, uniffi::Record)]
@@ -246,19 +246,12 @@ pub struct MoqDatagramRequests {
 	children: Children,
 }
 
-#[uniffi::export]
-impl MoqBroadcastRequests {
-	/// Create an on-demand handler for datagram tracks.
-	pub fn datagrams(&self) -> Result<Arc<MoqDatagramRequests>, MoqError> {
-		let _guard = crate::ffi::enter();
-		let requests = self
-			.reads
-			.peek(|inner| inner.requests.datagrams())
-			.ok_or(MoqError::Closed)?;
-		Ok(Arc::new(MoqDatagramRequests {
-			inner: Polled::new(requests).supervised(self.driver.clone()),
-			children: self.children.clone(),
-		}))
+impl MoqDatagramRequests {
+	pub(crate) fn new(requests: moq_net::broadcast::DatagramRequests, children: Children, driver: Background) -> Self {
+		Self {
+			inner: Polled::new(requests).supervised(driver),
+			children,
+		}
 	}
 }
 

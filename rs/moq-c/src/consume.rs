@@ -241,7 +241,7 @@ pub struct Consume {
 	/// Buffered raw frames ready for consumption.
 	raw_frame: NonZeroSlab<Timed<bytes::Bytes>>,
 
-	/// Raw track datagram consumer tasks (best-effort, parallel to `raw_task`).
+	/// Live datagram consumer tasks, independent of stream-track readers.
 	datagram_task: NonZeroSlab<DatagramTaskEntry>,
 
 	/// Buffered datagrams ready for consumption.

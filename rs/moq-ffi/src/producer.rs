@@ -181,7 +181,7 @@ impl Children {
 	}
 
 	/// The broadcast, while a handle keeping it open still holds it.
-	pub(crate) fn broadcast(&self) -> Option<Arc<moq_net::broadcast::Producer>> {
+	fn broadcast(&self) -> Option<Arc<moq_net::broadcast::Producer>> {
 		self.broadcast.upgrade()
 	}
 
@@ -250,13 +250,13 @@ pub struct MoqBroadcastProducer {
 /// A handler for requests for tracks in a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastRequests {
-	pub(crate) reads: Polled<RequestsInner>,
-	pub(crate) children: Children,
-	pub(crate) driver: Background,
+	reads: Polled<RequestsInner>,
+	children: Children,
+	driver: Background,
 }
 
-pub(crate) struct RequestsInner {
-	pub(crate) requests: moq_net::broadcast::Requests,
+struct RequestsInner {
+	requests: moq_net::broadcast::Requests,
 	/// Holds the broadcast for [`Children::broadcast`] as long as `requests` keeps it open, so a
 	/// request can still be accepted after the broadcast handle dropped.
 	_broadcast: Arc<moq_net::broadcast::Producer>,
@@ -425,6 +425,20 @@ impl MoqBroadcastRequests {
 			.wait(|inner, waiter| Poll::Ready(Ok(ready!(inner.requests.poll_requested_track(waiter))?)))
 			.await?;
 		Ok(Arc::new(MoqTrackRequest::new(request, self.children.clone())))
+	}
+
+	/// Create an on-demand handler for datagram tracks.
+	pub fn datagrams(&self) -> Result<Arc<crate::datagram::MoqDatagramRequests>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let requests = self
+			.reads
+			.peek(|inner| inner.requests.datagrams())
+			.ok_or(MoqError::Closed)?;
+		Ok(Arc::new(crate::datagram::MoqDatagramRequests::new(
+			requests,
+			self.children.clone(),
+			self.driver.clone(),
+		)))
 	}
 
 	/// Cancel all current and future `requested_track()` calls.

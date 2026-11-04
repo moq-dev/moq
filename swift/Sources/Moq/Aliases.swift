@@ -49,7 +49,7 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 /// Which encoder implementation to use: automatic, hardware, software, or one
 /// named backend.
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
-/// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
+/// A datagram payload with its own sequence and optional timestamp.
 public typealias Datagram = MoqFFI.MoqDatagram
 /// How a broadcast advertises its exact path: its static production `cost`,
 /// lower wins, an optional stable `instance` (`nil` keeps the one the broadcast

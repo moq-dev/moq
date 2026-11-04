@@ -112,8 +112,7 @@ bool same_time(const moq::Timestamp &a, const moq::Timestamp &b)
 	return a.value * b.scale == b.value * a.scale;
 }
 
-// Timestamps are exact records: a 90 kHz tick and a present zero read back as written, an
-// untimed frame reads back untimed, and a record past the bounds is refused.
+// A datagram-only request reaches its own handler and demand.
 void datagram_tracks()
 {
 	auto broadcast = ok(moq::BroadcastProducer::init(), "datagram broadcast");
@@ -138,6 +137,8 @@ void datagram_tracks()
 	ok(broadcast->close(), "close datagram broadcast");
 }
 
+// Timestamps are exact records: a 90 kHz tick and a present zero read back as written, an
+// untimed frame reads back untimed, and a record past the bounds is refused.
 void timestamp_roundtrip()
 {
 	auto broadcast = ok(moq::BroadcastProducer::init(), "timestamp broadcast");

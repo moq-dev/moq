@@ -624,10 +624,10 @@ pub struct moq_media_read {
 	pub end: moq_timestamp,
 }
 
-/// A best-effort raw track datagram delivered via [moq_consume_datagrams].
+/// A live datagram delivered via [moq_consume_datagrams].
 #[repr(C)]
 pub struct moq_datagram {
-	/// The payload of the datagram, or NULL/0 if the track has ended.
+	/// The datagram payload, valid until [moq_consume_datagram_free].
 	pub payload: *const u8,
 	/// The length in bytes of `payload`.
 	pub payload_size: usize,
@@ -636,7 +636,7 @@ pub struct moq_datagram {
 	/// long as `payload`.
 	pub timestamp: *const moq_timestamp,
 
-	/// The datagram's sequence number, counted apart from the track's groups.
+	/// The datagram track's own sequence number.
 	pub sequence: u64,
 }
 

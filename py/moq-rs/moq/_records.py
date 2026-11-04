@@ -118,7 +118,7 @@ class Frame:
 
 @dataclass(frozen=True)
 class Datagram:
-    """A best-effort track datagram as received: sequence number, timestamp, and payload.
+    """A datagram payload with its own sequence and optional timestamp.
 
     ``timestamp`` is ``None`` on a datagram read from an untimed track.
     """
