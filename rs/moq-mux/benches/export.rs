@@ -261,7 +261,7 @@ async fn prepare_video(
 			"pyramid" | "step-back" => {
 				let pts = ((index / 9 * 9 + [0, 4, 2, 1, 3, 8, 6, 5, 7][index % 9]) * 3_600) as u64;
 				if pattern == "step-back" && index >= count / 2 {
-					// A 300 ms rewind within a group, followed by more groups to recover on.
+					// Keep the 300 ms rewind in the one group every subscription reads.
 					pts - 300 * 90
 				} else {
 					pts
@@ -271,16 +271,15 @@ async fn prepare_video(
 			"backward" => 90_000 - index as u64,
 			_ => unreachable!(),
 		};
-		let keyframe = index == 0 || (pattern == "step-back" && index.is_multiple_of(9));
 		let mut payload = vec![0; size];
 		payload[..4].copy_from_slice(&((size - 4) as u32).to_be_bytes());
-		payload[4] = if keyframe { 0x65 } else { 0x41 };
+		payload[4] = if index == 0 { 0x65 } else { 0x41 };
 		video
 			.write(Frame {
 				timestamp: Timestamp::from_scale(pts, 90_000).unwrap(),
 				duration: None,
 				payload: payload.into(),
-				keyframe,
+				keyframe: index == 0,
 			})
 			.unwrap();
 	}
@@ -329,8 +328,14 @@ fn video_reorder(c: &mut Criterion) {
 						|(source, stream, fixture)| {
 							let refused = runtime.block_on(async {
 								if format == "ts" {
-									let opened = moq_mux::container::ts::Export::new(source, stream);
-									assert!(export(Export::Ts(Box::new(opened))).await > 0);
+									let mut opened = moq_mux::container::ts::Export::new(source, stream);
+									let mut chunks = 0;
+									while let Some(frame) = opened.next().await.unwrap() {
+										std::hint::black_box(frame);
+										chunks += 1;
+									}
+									assert!(chunks > 0);
+									assert_eq!(opened.discontinuity(), u64::from(pattern == "step-back"));
 									return false;
 								}
 								let mut export = moq_mux::container::mkv::Export::new(source, stream)
