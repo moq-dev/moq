@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Socket sessions
 
-dev.moq.socket now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change. Like broadcasts, endpoint `end()` forces shutdown while AutoCloseable `close()` releases the handle.
+dev.moq.socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change. Like broadcasts, endpoint `end()` forces shutdown while AutoCloseable `close()` releases the handle.
 
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 

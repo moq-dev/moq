@@ -4,7 +4,7 @@
 
 ### Socket sessions
 
-the generated SocketEndpoint, SocketIncomingTcp, SocketIncomingTrack, SocketTcpStream, and SocketTrackStream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+The generated SocketEndpoint, SocketIncomingTcp, SocketIncomingTrack, SocketTcpStream, and SocketTrackStream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 

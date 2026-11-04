@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Socket sessions
 
-the generated socket endpoint, incoming dial, and stream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
+The generated socket endpoint, incoming dial, and stream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 

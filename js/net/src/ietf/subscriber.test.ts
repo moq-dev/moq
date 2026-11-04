@@ -1144,7 +1144,11 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 		if (!peer) throw new Error("missing SUBSCRIBE stream");
 		try {
 			expect(await peer.reader.u53()).toBe(Subscribe.id);
-			expect((await Subscribe.decode(peer.reader, version)).filter).toEqual({ kind: "unfiltered" });
+			expect((await Subscribe.decode(peer.reader, version)).filter).toEqual(
+				version === Version.DRAFT_18
+					? { kind: "absolute", startGroup: 0n, startObject: 0n }
+					: { kind: "unfiltered" },
+			);
 			const arrivals = [0n, 1n, 2n].map((groupId) =>
 				subscriber.handleGroup(
 					new GroupMessage({
