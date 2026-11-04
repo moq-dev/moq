@@ -1770,6 +1770,8 @@ export class Publisher {
 			}
 		} finally {
 			if (!finished) unsubscribe();
+			// An update's re-offers are reads of their own, which closing the track leaves open.
+			for (const group of reoffered.splice(0)) group.close();
 			priority.close();
 		}
 	}
