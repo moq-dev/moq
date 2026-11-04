@@ -8898,7 +8898,9 @@ struct TrackServeRun {
 /// Lite-05/06: the datagram track of a stream track's name, which the session adds to the
 /// source once the track's TRACK_INFO arrives and routes the datagrams of the track's
 /// subscription to. It adds no demand of its own, so a reader of either kind shares the
-/// one upstream SUBSCRIBE. It finishes with the track's serve.
+/// one upstream SUBSCRIBE. It ends as the track's serve does: finished with a finished
+/// track, and otherwise with the error, or `Cancel` once nobody reads the stream track, so a
+/// datagram reader left behind asks for the track again.
 struct SharedDatagrams {
 	subscriber: Subscriber,
 	key: (Path, String),
@@ -8937,8 +8939,9 @@ impl SharedDatagrams {
 	}
 }
 
-impl Drop for SharedDatagrams {
-	fn drop(&mut self) {
+impl SharedDatagrams {
+	/// Stop routing to the track and end it with `end`.
+	fn end(&mut self, end: Result<(), Error>) {
 		let Some(producer) = self.producer.take() else {
 			return;
 		};
@@ -8950,7 +8953,18 @@ impl Drop for SharedDatagrams {
 			shared.remove(&self.key);
 		}
 		drop(shared);
-		producer.finish();
+		match end {
+			Ok(()) => producer.finish(),
+			Err(err) => producer.abort(err),
+		}
+	}
+}
+
+impl Drop for SharedDatagrams {
+	fn drop(&mut self) {
+		// Dropped with its serve when the session dies.
+		let err = self.subscriber.end_reason();
+		self.end(Err(err));
 	}
 }
 
@@ -9019,6 +9033,9 @@ impl TrackServeRun {
 	/// The session no longer allows the broadcast: end the track and cancel the
 	/// upstream subscription and fetches, leaving the rest of the session alone.
 	fn revoke(&mut self) {
+		if let Some(datagrams) = &mut self.datagrams {
+			datagrams.end(Err(Error::Unauthorized));
+		}
 		tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "subscription no longer authorized");
 		match std::mem::replace(&mut self.state, TrackRunState::Done) {
 			TrackRunState::Info {
@@ -9219,11 +9236,21 @@ impl kio::Task for TrackServeRun {
 						},
 						ServeEnd::Finished => {
 							let _ = serve_loop.serving.finish();
+							if let Some(datagrams) = &mut self.datagrams {
+								datagrams.end(Ok(()));
+							}
 						}
 						ServeEnd::GiveBack(err) => {
 							let err = lite::error::control(&mut self.serve.subscriber.session.clone(), err);
+							if let Some(datagrams) = &mut self.datagrams {
+								datagrams.end(Err(err.clone()));
+							}
 							let _ = serve_loop.serving.abort(err);
 						}
+					}
+					// Nobody reads the stream track: a datagram reader left behind asks again.
+					if let Some(datagrams) = &mut self.datagrams {
+						datagrams.end(Err(Error::Cancel));
 					}
 
 					if let Sub::Active(mut active) = serve_loop.sub {

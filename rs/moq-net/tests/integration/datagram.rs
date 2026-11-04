@@ -346,6 +346,35 @@ async fn lite05_and_lite06_carry_both_kinds_of_a_name() {
 	}
 }
 
+/// On lite-05/06 the datagrams a stream track's subscription carries end as it does: a
+/// stream track that aborts ends its datagram reader with the error, not a finish.
+#[kio::test]
+async fn lite06_shared_datagrams_end_with_their_subscription() {
+	let chain = Chain::new(&["moq-lite-06"]).await;
+	let track = chain
+		.publication
+		.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
+		.unwrap();
+	let producer = chain.publication.create_datagrams(TRACK, timed()).unwrap();
+	let remote = chain.remote().await;
+	let _subscriber = kio::clock::timeout(TIMEOUT, remote.track(TRACK).unwrap().subscribe(None))
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe");
+	kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(0)))
+		.await
+		.expect("the subscription never carried the datagrams");
+	let mut consumer = remote.datagrams(TRACK).unwrap();
+	kio::clock::timeout(TIMEOUT, consumer.info())
+		.await
+		.expect("info timeout")
+		.expect("info");
+
+	track.abort(Error::App(7)).unwrap();
+	let end = recv(&mut consumer).await;
+	assert!(end.is_err(), "{end:?}");
+}
+
 /// A lite-05/06 subscriber reads a name as a stream track, as one predating datagram tracks
 /// does, so the datagram fallback ends with SUBSCRIBE_FINISH ahead of its FIN: a FIN alone
 /// is a protocol violation there.
