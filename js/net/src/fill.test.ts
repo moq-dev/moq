@@ -4,7 +4,7 @@ import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { hooks } from "./internal.ts";
+import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -706,6 +706,27 @@ test("fill: a group the track gives up elsewhere answers the fill", async () => 
 	await expect(fetching).rejects.toBe(cut);
 
 	fill.close();
+	requests.close();
+	broadcast.close();
+});
+
+// A received stale run that does not settle a reader is unknown to it, so its fill is still asked:
+// here the upstream judged it under an open range, while the reader is capped. Mirrors the Rust
+// `Misses::unclaimed`.
+test("fill: a stale run that does not settle the reader is still asked for", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		delay: { max: Milli(500) },
+	});
+	void drain(reader);
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
+
+	fill?.close();
+	reader.close();
 	requests.close();
 	broadcast.close();
 });

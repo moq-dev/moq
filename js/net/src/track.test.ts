@@ -4913,6 +4913,21 @@ test("a late local group reaches a reader, since creating out of order skips not
 	expect(got).toEqual([0n, 1n, 2n]);
 });
 
+// Declared skips up to the end settle it, as written groups would: an open-range reader ends after
+// the groups below, and the track's outcome resolves. Mirrors the Rust `TrackState::reaches`.
+test("declared skips up to the end settle the track", async () => {
+	const producer = new TrackProducer("test");
+	producer.accept({});
+	const reader = producer.subscribe({ delay: { max: null }, order: "ascending" });
+	producer.createGroup(0n).finish();
+	producer.finishAt({ group: 3n, frame: 0 });
+	producer.skipGroups(1n, 3n);
+	expect((await reader.recvGroup())?.sequence).toBe(0n);
+	expect(await reader.recvGroup()).toBeUndefined();
+	expect(await producer.closed).toBeNull();
+	reader.close();
+});
+
 // A skip is final: creating at a sequence an append or skipGroups skipped throws, while a dropped
 // sequence may be created again. skipGroups leaves cached sequences and final drops alone, and
 // replaces a stale drop, which new terms would otherwise supersede. Mirrors Rust.

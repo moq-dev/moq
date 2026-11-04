@@ -790,6 +790,14 @@ type Coverage = { start: bigint; end?: bigint } | undefined;
  * where the upstream's range ended: its own successor and edge are then no older than those the
  * verdict was judged against. Mirrors the Rust `settles`.
  */
+/**
+ * Whether the live edge `received` reached `final`: no sequence below it is left that was neither
+ * written nor given up, as a declared skip or a drop. Mirrors the Rust `TrackState::reaches`.
+ */
+function reaches(received: bigint, drops: readonly Run[], final: bigint): boolean {
+	return received >= final || runGaps(drops, received, final).length === 0;
+}
+
 function settles(run: DropRun, budget: number, coverage: Coverage, judgedEnd: bigint | undefined): boolean {
 	if (run.stale === undefined) return true;
 	if (budget > run.stale || coverage === undefined || coverage.start > run.start) return false;
@@ -2029,7 +2037,7 @@ export class Producer {
 		this.#settle();
 		if (this.#state.largestEnded.peek() || this.#largestOpen) return;
 		const end = this.#state.end.peek();
-		if (end === undefined || this.#received < finalSequence(end)) return;
+		if (end === undefined || !reaches(this.#received, this.#state.drops.peek(), finalSequence(end))) return;
 		for (const state of [this.#state, ...this.#sinks]) state.largestEnded.set(true);
 	}
 
@@ -2109,7 +2117,7 @@ export class Producer {
 		const end = this.#state.end.peek();
 		if (end === undefined) return false;
 		const final = finalSequence(end);
-		if (this.#received < final || this.#owes(final)) return false;
+		if (!reaches(this.#received, this.#state.drops.peek(), final) || this.#owes(final)) return false;
 		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
 	}
 
@@ -2777,9 +2785,22 @@ export class Subscriber {
 			// A datagram the track still holds took its sequence, so no group is missed there, as
 			// the Rust judge skips its track's datagram buffer; the Rust fetch names it
 			// `NotFetchable`.
-			const gone = [...this.#state.drops.peek()];
-			for (const sequence of heldDatagrams(producer)) insertRun(gone, sequence, sequence + 1n);
+			const datagrams: Run[] = [];
+			for (const sequence of heldDatagrams(producer)) insertRun(datagrams, sequence, sequence + 1n);
+			// A received stale run that does not settle this reader is unknown to it, so it is
+			// still asked for, as the Rust `Misses::unclaimed` judges it.
+			const budget = drift.budget;
+			const coverage = this.#coverage();
+			const drops = this.#state.drops.peek();
 			for (const run of this.#wants(start, min(end, this.#state.received.peek()))) {
+				const gone = [...datagrams];
+				for (const dropped of drops) {
+					if (dropped.end <= run.start || run.end <= dropped.start) continue;
+					// Judged from where it meets the asked run, as the reader would read it.
+					const clipped = { ...dropped, start: max(dropped.start, run.start) };
+					if (settles(clipped, budget, coverage, this.#state.judgedEnd))
+						insertRun(gone, clipped.start, dropped.end);
+				}
 				for (const open of runGaps(gone, run.start, run.end)) {
 					let next = open.start;
 					for (let i = timelineIndex(timeline, open.start); i < timeline.length; i++) {
@@ -3584,7 +3605,11 @@ export class Subscriber {
 	// accounted for by the wire layer, and an abort still wins on the next read.
 	#complete(): boolean {
 		const end = this.#state.end.peek();
-		return end !== undefined && this.#state.received.peek() >= finalSequence(end) && !this.#state.owed.peek();
+		return (
+			end !== undefined &&
+			reaches(this.#state.received.peek(), this.#state.drops.peek(), finalSequence(end)) &&
+			!this.#state.owed.peek()
+		);
 	}
 
 	// Package-internal readiness half of recvGroup. Each registration fires at most once, and
