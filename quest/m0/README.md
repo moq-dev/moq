@@ -26,7 +26,6 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [moq-video shares moq-mux's bounded H.265 SPS walk](/quest/m0/video-sps-walk.md) - a hostile publisher's H.265 SPS can't panic a subscriber's decoder
-- [Subscriber-side CMAF parsing is bounded](/quest/m0/cmaf-receive-bounds.md) - a received `moof` or init over `MAX_METADATA_BYTES` is refused before mp4-atom parses it, so one frame can't cost a subscriber hundreds of megabytes
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Python `moq-rs` 0.5.2 and Dart `moq` 0.1.1 reach PyPI and pub.dev from `release`
 - [Backport audio groupDuration](/quest/m0/backport-audio-group-duration.md) - `@moq/publish` 0.5.4 on `release` can pack several Opus frames per group, making Cloudflare's relay drop audio less often
 - [Backport the SETUP-path and iroh-key fixes](/quest/m0/backport-security-fixes.md) - `release` refuses a conflicting SETUP Path and keeps persisted iroh keys private, in one patch release
