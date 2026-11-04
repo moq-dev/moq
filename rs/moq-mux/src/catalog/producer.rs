@@ -975,7 +975,7 @@ impl<E: CatalogExt> Producer<E> {
 				if guard.media.join.is_some() {
 					return;
 				}
-				guard.media.join = Some(hang::catalog::Join::new(interval));
+				guard.media.join = hang::catalog::Join::new(interval);
 				if let Err(err) = guard.commit() {
 					tracing::error!(%err, "failed to publish the join interval");
 				}
@@ -1229,8 +1229,8 @@ impl<E: CatalogExt> DerefMut for Guard<'_, E> {
 impl Guard<'_, Extra> {
 	/// Set (or replace) a top-level application catalog section, republished on drop.
 	///
-	/// Errors if `name` is a HANG root (`video`, `audio`, `text`, `archive`, `clock`, `json`,
-	/// `binary`, or retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`,
+	/// Errors if `name` is a HANG root (`video`, `audio`, `media`, `text`, `archive`, `clock`,
+	/// `json`, `binary`, or retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`,
 	/// `tracks`, or `initDataList`).
 	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
 		self.state.catalog.ext.set(name, value)?;
@@ -2069,7 +2069,7 @@ mod test {
 	fn a_seeded_interval_stands() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut seeded = Catalog::<()>::default();
-		seeded.media.join = Some(hang::catalog::Join::new(std::time::Duration::from_secs(6)));
+		seeded.media.join = hang::catalog::Join::new(std::time::Duration::from_secs(6));
 		let catalog = Producer::new(&mut broadcast, Config::default().with_catalog(seeded)).unwrap();
 		let _video = video0(&mut broadcast, &catalog, &[0, 2_000, 4_000]);
 		assert_eq!(

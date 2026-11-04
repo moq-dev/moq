@@ -616,7 +616,7 @@ mod tests {
 			// A join interval declared up front lists every rendition before any media, so each
 			// is recorded from its first segment.
 			let mut seeded = moq_mux::catalog::hang::Catalog::<()>::default();
-			seeded.media.join = Some(hang::catalog::Join::new(Duration::from_secs(2)));
+			seeded.media.join = hang::catalog::Join::new(Duration::from_secs(2));
 			let config = moq_mux::catalog::Config::default().with_catalog(seeded);
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 			let reserved = catalog.reserve();

@@ -215,7 +215,15 @@ test("a malformed clock fails the catalog", () => {
 	for (const clock of [{ wall: -1 }, { wall: 0, timescale: 0 }, "now", null]) {
 		expect(RootSchema.safeParse({ media: { clock } }).success).toBe(false);
 	}
-	expect(RootSchema.safeParse({ media: "clock" }).success).toBe(false);
+});
+
+test("a media value that isn't an object is someone else's", () => {
+	const video = { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+	for (const media of ["clock", 7, null, [], [{ join: { interval: 2000 } }]]) {
+		const parsed = RootSchema.parse({ video, media });
+		expect(parsed.media).toBeUndefined();
+		expect(parsed.video?.renditions.video).toBeDefined();
+	}
 });
 
 test("a malformed join leaves the media playable", () => {

@@ -228,6 +228,9 @@ export class Encoder {
 
 	// The last valid group duration, which #runConfig validates.
 	#groupDuration = Micro(20_000);
+	// How far apart groups start under the resolved config, which the broadcast may declare as the
+	// catalog's join interval (see groupSpacing).
+	#joinInterval = new Signal<Milli | undefined>(undefined);
 
 	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
 	// config is coming until one reruns.
@@ -414,9 +417,9 @@ export class Encoder {
 
 		const rendition = broadcast.audio(this.name);
 		effect.cleanup(() => rendition.close());
-		// The group duration, which the broadcast declares as the catalog's join interval when nothing
-		// longer, such as a video GOP, sits beside it.
-		effect.proxy(rendition.joinInterval, this.groupDuration);
+		// How far apart groups start, which the broadcast declares as the catalog's join interval when
+		// nothing longer, such as a video GOP, sits beside it.
+		effect.proxy(rendition.joinInterval, this.#joinInterval);
 		effect.proxy(this.#slot, rendition.slot);
 		effect.cleanup(() => this.#slot.set(undefined));
 
@@ -527,6 +530,8 @@ export class Encoder {
 		}
 
 		const resolved = resolve(captured, effect.get(this.codec));
+		// Set before the config is listed, so the catalog's first listing declares it.
+		this.#joinInterval.set(groupSpacing(groupDuration, resolved));
 		const source = capture ? effect.get(capture.in.source) : undefined;
 		const kind = source ? sourceKind(source) : "auto";
 		const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
@@ -976,6 +981,18 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 		},
 		frameDuration: Micro.fromMilli(frameDuration),
 	};
+}
+
+/**
+ * How far apart audio groups start: a frame opens one once it is at least `groupDuration` past the
+ * open group's start, so groups are a whole number of frames apart, and at least one, since a zero
+ * duration opens a group per frame.
+ * @internal
+ */
+export function groupSpacing(groupDuration: Milli, resolved: Resolved): Milli {
+	const frame = resolved.frameDuration ?? (AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate;
+	const frames = Math.max(1, Math.ceil(Micro.fromMilli(groupDuration) / frame));
+	return Milli.fromMicro(Micro(frames * frame));
 }
 
 // The resolved config with the encoder settings and the probed decoder description, if the codec emitted one.

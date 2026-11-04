@@ -1161,7 +1161,7 @@ mod test {
 			crate::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
 		let mut catalog = Catalog::<()>::default();
 		catalog.media.clock = Some(clock);
-		catalog.media.join = Some(crate::catalog::Join::new(std::time::Duration::from_secs(2)));
+		catalog.media.join = crate::catalog::Join::new(std::time::Duration::from_secs(2));
 
 		let json = catalog.to_json().expect("failed to encode");
 		assert_eq!(

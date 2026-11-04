@@ -39,9 +39,10 @@ impl CatalogExt for () {}
 /// cross. Publish/consume a [`hang::Catalog<Extra>`] and use [`set`](Self::set)/[`get`](Self::get).
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
-/// `version`, `video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, `stats`, `echo`, and
-/// the retired `timeline` key are reserved, so decoding and [`set`](Self::set) reject them to keep the wire JSON free of
-/// duplicate or retired keys.
+/// `version`, `video`, `audio`, `media`, `text`, `archive`, `clock`, `json`, `binary`, `stats`,
+/// `echo`, and the retired `timeline` key are reserved, so decoding and [`set`](Self::set) reject
+/// them to keep the wire JSON free of duplicate or retired keys. The exception is a root `clock`,
+/// which moved under `media`: an older publisher's is dropped on decode, so its media still plays.
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
 #[serde(transparent)]
 pub struct Extra(serde_json::Map<String, serde_json::Value>);
@@ -50,7 +51,8 @@ impl CatalogExt for Extra {}
 
 impl<'de> Deserialize<'de> for Extra {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		let sections = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+		let mut sections = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+		sections.remove("clock");
 		if let Some(name) = sections.keys().find(|name| reserved(name)) {
 			return Err(serde::de::Error::custom(format!("reserved catalog section: {name}")));
 		}
@@ -63,7 +65,8 @@ fn reserved(name: &str) -> bool {
 		name,
 		"version"
 			| "video" | "audio"
-			| "text" | "archive"
+			| "media" | "text"
+			| "archive"
 			| "clock" | "json"
 			| "binary"
 			| "stats" | "echo"
@@ -94,7 +97,7 @@ impl Extra {
 
 	/// Set (or replace) a section. Errors if `name` collides with a reserved member of either
 	/// catalog: hang's root `version` and base sections
-	/// (`video`/`audio`/`text`/`archive`/`clock`/`json`/`binary`/`stats`/`echo`),
+	/// (`video`/`audio`/`media`/`text`/`archive`/`clock`/`json`/`binary`/`stats`/`echo`),
 	/// the retired `timeline` key that the wire format forbids beside `archive`, or a root member
 	/// MSF defines ([`moq_msf::reserved_root`]).
 	///
@@ -155,6 +158,17 @@ mod test {
 		// Republishing drops the empty media sections the old payload carried.
 		let output = serde_json::to_string(&catalog).expect("failed to encode");
 		assert_eq!(output, r#"{"scte35":{"spliceId":7}}"#);
+	}
+
+	/// A publisher from before `media` writes its clock at the root: that key is dropped rather than
+	/// refusing the catalog, and is never written back.
+	#[test]
+	fn an_older_root_clock_is_dropped() {
+		let json = r#"{"clock":{"wall":1000,"timescale":1000000},"audio":{"renditions":{}},"scte35":{"spliceId":7}}"#;
+		let catalog = serde_json::from_str::<Catalog<Extra>>(json).expect("an older root clock refused the catalog");
+		assert_eq!(catalog.ext.get("clock"), None);
+		assert_eq!(catalog.media.clock, None, "the root clock is not read as media's");
+		assert_eq!(serde_json::to_string(&catalog).unwrap(), r#"{"scte35":{"spliceId":7}}"#);
 	}
 
 	#[test]
@@ -221,7 +235,7 @@ mod test {
 				.set_section("timeline", serde_json::json!({})),
 			Err(crate::Error::ReservedSection(_))
 		));
-		for name in ["clock", "stats", "echo"] {
+		for name in ["media", "clock", "stats", "echo"] {
 			assert!(
 				matches!(
 					producer.modify().unwrap().set_section(name, serde_json::json!({})),
@@ -258,3 +272,4 @@ mod test {
 		assert_eq!(catalog.ext.iter().count(), 1);
 	}
 }
+

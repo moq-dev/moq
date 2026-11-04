@@ -527,7 +527,7 @@ mod tests {
 	/// An empty catalog declaring a two-second join interval.
 	fn joined() -> moq_mux::catalog::hang::Catalog {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.media.join = Some(hang::catalog::Join::new(INTERVAL));
+		catalog.media.join = hang::catalog::Join::new(INTERVAL);
 		catalog
 	}
 
@@ -766,7 +766,7 @@ mod tests {
 		assert!(renditions.get(Kind::Audio, "audio0").is_none());
 		assert!(next_event(&mut cursor).await.is_none(), "nothing is announced early");
 
-		catalog.media.join = Some(hang::catalog::Join::new(INTERVAL));
+		catalog.media.join = hang::catalog::Join::new(INTERVAL);
 		renditions.sync(&upstream, &catalog);
 		let mut added = 0;
 		while let Some(event) = next_event(&mut cursor).await {
@@ -776,6 +776,54 @@ mod tests {
 		assert_eq!(renditions.get(Kind::Video, "video0").unwrap().interval(), INTERVAL);
 
 		drop(broadcast);
+	}
+
+	// Until the interval is declared, each listed media track is held subscribed, so an on-demand
+	// publisher produces the media its interval is measured from. A rendition that moves to another
+	// track moves its hold with it.
+	#[tokio::test]
+	async fn a_held_track_follows_its_rendition() {
+		let origin = produce_origin();
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		let first = broadcast.create_track("first", timed()).unwrap();
+		let second = broadcast.create_track("second", timed()).unwrap();
+		settle().await;
+		let upstream = crate::resolved(&origin, "live").await;
+
+		let renditions = renditions::Producer::spawned(Config::default().window);
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.track = Some("first".to_string());
+		catalog.video.renditions.insert("video".to_string(), config.clone());
+		renditions.sync(&upstream, &catalog);
+		settle().await;
+		assert!(first.demand().wanted().is_some(), "the listed track is held");
+		assert!(second.demand().wanted().is_none());
+
+		config.track = Some("second".to_string());
+		catalog.video.renditions.insert("video".to_string(), config);
+		renditions.sync(&upstream, &catalog);
+		settle().await;
+		assert!(first.demand().wanted().is_none(), "the old track is released");
+		assert!(second.demand().wanted().is_some(), "the new track is held");
+	}
+
+	// A container this export can't read is no rendition: the hang catalog skips one it doesn't
+	// know, rather than serving a playlist that never lists anything.
+	#[tokio::test]
+	async fn an_unknown_container_is_not_served() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
+		let config: hang::catalog::VideoConfig =
+			serde_json::from_value(serde_json::json!({"codec": "vp8", "container": {"kind": "future"}})).unwrap();
+		let mut catalog = joined();
+		catalog.video.renditions.insert("video".to_string(), config);
+		catalog.video.renditions.insert("known".to_string(), video_config());
+		let renditions = renditions::Producer::spawned(Config::default().window);
+		renditions.sync(&source, &catalog);
+		assert!(renditions.get(Kind::Video, "video").is_none());
+		assert!(renditions.get(Kind::Video, "known").is_some());
 	}
 
 	// A publisher's estimator republishes the catalog every time its measured bitrate or jitter
@@ -1038,7 +1086,7 @@ mod tests {
 		let all: Vec<_> = refused.into_iter().chain([(Kind::Video, "video0")]).collect();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = Some(hang::catalog::Join::new(INTERVAL));
+				catalog.media.join = hang::catalog::Join::new(INTERVAL);
 				for &(kind, name) in &all {
 					match kind {
 						Kind::Video => {
@@ -1241,7 +1289,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = Some(hang::catalog::Join::new(INTERVAL));
+				catalog.media.join = hang::catalog::Join::new(INTERVAL);
 				for name in ["video0", "video1"] {
 					let config = if name == inline { inline_vp8() } else { video_config() };
 					catalog.video.renditions.insert(name.into(), config);
@@ -1383,7 +1431,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = Some(hang::catalog::Join::new(INTERVAL));
+				catalog.media.join = hang::catalog::Join::new(INTERVAL);
 				for name in ["video0", "video1"] {
 					let config = if name == "video1" { inline_vp8() } else { video_config() };
 					catalog.video.renditions.insert(name.into(), config);
@@ -3275,6 +3323,19 @@ mod tests {
 			self.at(sequence, sequence * INTERVAL.as_millis() as u64);
 		}
 
+		/// Start group `sequence` at `pts_ms` with a keyframe, leaving it open for more frames.
+		fn open(&mut self, sequence: u64, pts_ms: u64) -> moq_net::group::Producer {
+			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			let frame = vp8_frame(pts_ms * 1_000, true);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(&mut group)
+			.unwrap();
+			group
+		}
+
 		/// The publisher loses its session: the track fails.
 		fn cut(self) {
 			self.track
@@ -3520,7 +3581,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = Some(hang::catalog::Join::new(INTERVAL));
+				catalog.media.join = hang::catalog::Join::new(INTERVAL);
 				for name in ["video0", "video1"] {
 					catalog.video.renditions.insert(name.into(), video_config());
 				}
@@ -4027,6 +4088,85 @@ mod tests {
 		assert_eq!(breaks, [false, false, false, false, true, false]);
 	}
 
+	// A segment holding both groups the retired instance had read and groups past them is listed
+	// by the retired instance, ending where the replacement's first group starts: the replacement
+	// can't list that number again, so otherwise up to an interval of media would reach neither.
+	#[tokio::test(start_paused = true)]
+	async fn a_retire_mid_segment_lists_the_predecessors_part() {
+		let mut test = Groups::with(&["video0"], &[]);
+		let mut media = test.publish("video0");
+		// Four groups to a two-second slot: 0-3 are segment 0, and 4 and 5 open segment 1.
+		for sequence in 0..6 {
+			media.at(sequence, sequence * 500);
+		}
+		test.listed("video0", 0).await;
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		let old = test.rendition("video0");
+		test.catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(1280);
+		test.sync();
+		let new = test.rendition("video0");
+		// 6 and 7 finish segment 1 past the retire; 8 to 11 are segment 2, which 12 completes.
+		for sequence in 6..13 {
+			media.at(sequence, sequence * 500);
+		}
+		let snapshot = test.listed("video0", 2).await;
+		assert_eq!(numbers(&snapshot), [0, 1, 2], "no segment is lost to the hand-over");
+		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
+		assert_eq!(tags, [old.tag(), old.tag(), new.tag()]);
+		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
+		assert_eq!(durations, [2_000, 1_000, 2_000], "the predecessor's part ends at group 6");
+		let id = segments::Id {
+			generation: None,
+			tag: old.tag().to_string(),
+			at: segments::At::Sequence(1),
+		};
+		assert!(new.segment(&id).await.unwrap().is_some(), "the predecessor's part serves");
+	}
+
+	// A segment spanning more groups than one request fetches is listed as a gap, never as a
+	// segment that every request refuses.
+	#[tokio::test(start_paused = true)]
+	async fn a_segment_too_many_groups_long_is_a_gap() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut media = test.publish("video0");
+		let cap = test.rendition("video0").max_groups();
+		assert_eq!(cap, INTERVAL.as_millis() as u64, "one group per millisecond of the interval");
+		for sequence in 0..=cap {
+			media.at(sequence, 0);
+		}
+		media.at(cap + 1, 2_000);
+		media.at(cap + 2, 4_000);
+		let snapshot = test.listed("video0", 1).await;
+		assert_eq!(numbers(&snapshot), [0, 1]);
+		assert_eq!(gaps(&snapshot), [0]);
+	}
+
+	// A track ending while its last group failed fails the rendition: that group's segment would
+	// otherwise be listed complete but truncated, under an ENDLIST.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_last_group_fails_the_rendition() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut media = test.publish("video0");
+		media.gop(0);
+		let last = media.open(1, 2_000);
+		media.finish();
+		// The track has ended, so the watcher reads the last group for its content's end.
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		last.abort(moq_net::Error::Transport("stream reset".into())).unwrap();
+		let rendition = test.rendition("video0");
+		let failed = kio::clock::timeout(Duration::from_secs(5), async {
+			loop {
+				if let Err(err) = rendition.media_playlist(None) {
+					return err;
+				}
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the rendition fails");
+		assert!(matches!(failed, crate::Error::MediaFailed { .. }), "{failed:?}");
+	}
+
 	// EXT-X-TARGETDURATION is twice the interval, rounded up, however long the segments in the
 	// window are. A segment past it once rounded to the nearest second, as only a final overrunning
 	// group can be, is listed anyway, and counted for the warning.
@@ -4060,7 +4200,7 @@ mod tests {
 		// The interval is fixed for a broadcast instance; should it change anyway, every rendition
 		// is rebuilt on the new grid, keeping its playlist URI's target.
 		let original = test.rendition("video0");
-		test.catalog.media.join = Some(hang::catalog::Join::new(Duration::from_secs(3)));
+		test.catalog.media.join = hang::catalog::Join::new(Duration::from_secs(3));
 		test.sync();
 		let replacement = test.rendition("video0");
 		assert!(!Arc::ptr_eq(&original, &replacement), "a new interval rebuilds");

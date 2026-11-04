@@ -125,10 +125,14 @@ struct State {
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
 	audio: Vec<Weak<Rendition>>,
-	/// Each media track a catalog without a join interval yet lists, held subscribed so an
-	/// on-demand publisher produces the media its interval is measured from (see [`hold`]).
-	waiting: BTreeMap<Key, Owner>,
+	/// Each media track a catalog without a join interval yet lists, by the reference it was held
+	/// on, held subscribed so an on-demand publisher produces the media its interval is measured
+	/// from (see [`hold`]).
+	waiting: BTreeMap<Key, (Held, Owner)>,
 }
+
+/// Where a rendition's media track is: its broadcast, instance, and track name.
+type Held = (Option<moq_net::path::Relative>, Option<moq_net::Instance>, String);
 
 /// Hold `track` on `binding` subscribed until dropped, as demand for its media.
 ///
@@ -573,7 +577,7 @@ impl Producer {
 	/// the router agree on what is served.
 	/// Hold every video and audio track `catalog` lists subscribed in `waiting`, releasing those
 	/// it no longer lists.
-	fn wait(&self, source: &moq_mux::Source, catalog: &Catalog, waiting: &mut BTreeMap<Key, Owner>) {
+	fn wait(&self, source: &moq_mux::Source, catalog: &Catalog, waiting: &mut BTreeMap<Key, (Held, Owner)>) {
 		use hang::catalog::Reference;
 		let video = catalog.video.renditions.iter().map(|(name, config)| {
 			let reference = (
@@ -591,16 +595,19 @@ impl Producer {
 			);
 			((Kind::Audio, name.clone()), reference)
 		});
-		let listed: BTreeMap<Key, _> = video.chain(audio).collect();
-		waiting.retain(|key, _| listed.contains_key(key));
-		for (key, (broadcast, instance, track)) in listed {
+		let listed: BTreeMap<Key, Held> = video.chain(audio).collect();
+		// A rendition that now names another track drops the old hold for a new one.
+		waiting.retain(|key, (held, _)| listed.get(key) == Some(held));
+		for (key, held) in listed {
 			if waiting.contains_key(&key) {
 				continue;
 			}
+			let (broadcast, instance, track) = &held;
 			let Ok(binding) = source.bind(broadcast.as_ref(), instance.as_ref()) else {
 				continue;
 			};
-			waiting.insert(key, self.fanout.spawn(hold(binding, track)));
+			let owner = self.fanout.spawn(hold(binding, track.clone()));
+			waiting.insert(key, (held, owner));
 		}
 	}
 

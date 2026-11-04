@@ -49,8 +49,8 @@ pub(crate) enum Slot {
 		/// The next segment's start.
 		end: Timestamp,
 	},
-	/// A group went back past the open segment's slot, as a publisher restarting its timeline on
-	/// the same track does: what came before can't be numbered beside it.
+	/// A group started before the one before it, as a publisher restarting its timeline on the
+	/// same track does: what came before can't be numbered or muxed beside it.
 	Reset,
 }
 
@@ -67,6 +67,19 @@ struct Open {
 	segment: u64,
 	groups: std::ops::Range<u64>,
 	pts: Timestamp,
+	/// Where a discontinuity marker after its last group stopped the content, if one did.
+	stop: Option<Timestamp>,
+}
+
+impl Open {
+	fn new(segment: u64, group: Group) -> Self {
+		Self {
+			segment,
+			groups: group.sequence..group.sequence + 1,
+			pts: group.pts,
+			stop: None,
+		}
+	}
 }
 
 /// Places one rendition's groups, fed in sequence order, into segments on a grid of `interval`.
@@ -76,6 +89,8 @@ pub(crate) struct Grid {
 	/// The newest group, until the next one bounds it.
 	pending: Option<Group>,
 	open: Option<Open>,
+	/// The newest group's pts, which the next must not precede.
+	last: Option<Timestamp>,
 	/// The most gaps listed for one skip: older ones would slide out of every playlist window.
 	max_gaps: u64,
 }
@@ -97,6 +112,7 @@ impl Grid {
 			interval: interval.as_nanos().max(1),
 			pending: None,
 			open: None,
+			last: None,
 			max_gaps: max_gaps as u64,
 		}
 	}
@@ -150,6 +166,13 @@ impl Grid {
 	/// completes.
 	pub fn group(&mut self, sequence: u64, pts: Timestamp) -> Vec<Slot> {
 		let mut out = Vec::new();
+		// A group starting before the one before it, even within one slot, can't share a segment
+		// or a numbering with what came before, since its media would run backwards.
+		if self.last.replace(pts).is_some_and(|last| pts < last) {
+			self.pending = None;
+			self.open = None;
+			out.push(Slot::Reset);
+		}
 		if let Some(pending) = self.pending.take() {
 			let segment = self.segment(pending.pts, Some(pts)).expect("bounded");
 			self.place(pending, segment, &mut out);
@@ -163,8 +186,22 @@ impl Grid {
 		out
 	}
 
+	/// A discontinuity marker at `at` stopped the content: the newest group ends there rather than
+	/// where the next group starts. Returns the segments it completes.
+	pub fn stop(&mut self, at: Timestamp) -> Vec<Slot> {
+		let mut out = Vec::new();
+		if let Some(pending) = self.pending.take() {
+			let segment = self.segment(pending.pts, Some(at)).expect("bounded");
+			self.place(pending, segment, &mut out);
+		}
+		if let Some(open) = self.open.as_mut() {
+			open.stop = Some(at);
+		}
+		out
+	}
+
 	/// The track ended, its last group's last frame starting at `reach` and its content ending at
-	/// `end`, when known. Returns the segments left.
+	/// `end`, when known, unless a marker stopped it first. Returns the segments left.
 	pub fn finish(&mut self, reach: Option<Timestamp>, end: Option<Timestamp>) -> Vec<Slot> {
 		let mut out = Vec::new();
 		if let Some(pending) = self.pending.take() {
@@ -175,7 +212,7 @@ impl Grid {
 			self.place(pending, segment, &mut out);
 		}
 		if let Some(open) = self.open.take() {
-			let end = [end, reach]
+			let end = [open.stop, end, reach]
 				.into_iter()
 				.flatten()
 				.find(|end| end.as_nanos() > open.pts.as_nanos())
@@ -195,24 +232,18 @@ impl Grid {
 	/// later one.
 	fn place(&mut self, group: Group, segment: u64, out: &mut Vec<Slot>) {
 		let Some(open) = self.open.as_mut() else {
-			self.open = Some(Open {
-				segment,
-				groups: group.sequence..group.sequence + 1,
-				pts: group.pts,
-			});
+			self.open = Some(Open::new(segment, group));
 			return;
 		};
 		if segment == open.segment {
 			open.groups.end = group.sequence + 1;
+			// The content resumed within the segment, so it runs to whatever ends this group.
+			open.stop = None;
 			return;
 		}
 		if segment < open.segment {
 			out.push(Slot::Reset);
-			self.open = Some(Open {
-				segment,
-				groups: group.sequence..group.sequence + 1,
-				pts: group.pts,
-			});
+			self.open = Some(Open::new(segment, group));
 			return;
 		}
 		let open = self.open.take().expect("checked above");
@@ -225,7 +256,7 @@ impl Grid {
 			groups: open.groups,
 			pts: open.pts,
 			end: start(open.segment + 1),
-			content: Some(group.pts),
+			content: Some(open.stop.unwrap_or(group.pts)),
 		});
 		let first = (open.segment + 1).max(segment.saturating_sub(self.max_gaps));
 		for gap in first..segment {
@@ -235,11 +266,7 @@ impl Grid {
 				end: start(gap + 1),
 			});
 		}
-		self.open = Some(Open {
-			segment,
-			groups: group.sequence..group.sequence + 1,
-			pts: group.pts,
-		});
+		self.open = Some(Open::new(segment, group));
 	}
 }
 
@@ -420,6 +447,52 @@ mod test {
 		assert_eq!(slots[0], (0, 0..1, 0, 2000));
 		assert_eq!(slots[1].0, 1797);
 		assert_eq!(slots[3], (1799, 0..0, 3_598_000, 3_600_000));
+	}
+
+	/// A group going back within the open slot resets too: its media can't follow what it precedes.
+	#[test]
+	fn a_rewind_within_a_slot_resets() {
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		assert!(grid.group(0, ms(10_500)).is_empty());
+		assert_eq!(grid.group(1, ms(10_200)), [Slot::Reset]);
+		assert_eq!(
+			listed(grid.finish(Some(ms(10_400)), Some(ms(10_400)))),
+			[(5, 1..2, 10_200, 10_400)],
+			"only what follows the rewind is listed"
+		);
+	}
+
+	/// A marker ends the content before it, so the last group's samples stop there rather than
+	/// running through the pause to the group that resumes.
+	#[test]
+	fn a_marker_stops_the_content() {
+		let content = |slots: Vec<Slot>| -> Vec<Option<u64>> {
+			slots
+				.into_iter()
+				.filter_map(|slot| match slot {
+					Slot::Media { content, .. } => Some(content.map(|at| at.as_millis() as u64)),
+					_ => None,
+				})
+				.collect()
+		};
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		grid.group(0, ms(0));
+		grid.group(1, ms(1000));
+		assert!(content(grid.stop(ms(1500))).is_empty(), "the slot is still open");
+		assert_eq!(content(grid.group(2, ms(8000))), [Some(1500)]);
+
+		// The track ending after a marker ends at the marker.
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		grid.group(0, ms(0));
+		grid.stop(ms(700));
+		assert_eq!(listed(grid.finish(None, None)), [(0, 0..1, 0, 700)]);
+
+		// Content resuming within the slot runs on to whatever ends it.
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		grid.group(0, ms(0));
+		grid.stop(ms(300));
+		grid.group(1, ms(1000));
+		assert_eq!(content(grid.group(2, ms(2000))), [Some(2000)]);
 	}
 
 	/// A group going back past the open slot resets the numbering.

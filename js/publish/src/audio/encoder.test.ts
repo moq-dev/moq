@@ -8,7 +8,7 @@ import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { Estimator, Order } from "../order";
 import type { AudioFrame, Format } from "./capture";
-import { type Codec, Encoder, resolve, toEncoderConfig } from "./encoder";
+import { type Codec, Encoder, groupSpacing, resolve, toEncoderConfig } from "./encoder";
 
 /** Install a Manual clock reading `ms`, set forward the way a mocked `performance.now()` was. */
 function manualAt(ms: number) {
@@ -57,6 +57,27 @@ describe("resolve", () => {
 		for (const millis of [2.5005, 15, 0, -20]) {
 			expect(() => resolve(captured, { mime: "opus", frameDuration: Milli(millis) })).toThrow();
 		}
+	});
+
+	// A frame opens a group once it is at least the group duration past the open one's start, so
+	// groups start a whole number of frames apart: that, not the duration, is the join interval.
+	test("groups start a whole number of frames apart", () => {
+		const opus = (frame: number) => resolve(captured, { mime: "opus", frameDuration: Milli(frame) });
+		for (const [frame, duration, spacing] of [
+			[20, 20, 20],
+			[20, 30, 40],
+			[60, 20, 60],
+			[2.5, 20, 20],
+			// A zero duration opens a group per frame.
+			[20, 0, 20],
+		] as const) {
+			expect(groupSpacing(Milli(duration), opus(frame))).toBe(Milli(spacing));
+		}
+		// AAC-LC's 1024 samples at the captured rate.
+		const aac = resolve(captured, "aac");
+		const frame = (1024 * 1000) / Number(aac.catalog.sampleRate);
+		expect(groupSpacing(Milli(20), aac)).toBeCloseTo(frame, 9);
+		expect(groupSpacing(Milli(frame * 3), aac)).toBeCloseTo(frame * 3, 9);
 	});
 
 	// AAC-LC has a fixed 1024-sample frame, so there is no duration to configure.
@@ -1032,14 +1053,15 @@ test.each([undefined, false, true])(
 	},
 );
 
-// An HLS export of an audio-only broadcast cuts segments on the audio group duration and reads the
+// An HLS export of an audio-only broadcast cuts segments on the audio group spacing and reads the
 // media directly, so the catalog declares it before anything is encoded and advertises no records.
-test("an audio-only broadcast declares its group duration as the join interval", async () => {
+test("an audio-only broadcast declares its group spacing as the join interval", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("join.hang") });
 	const feed = new Feed();
 	const configuring = configured();
-	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never, groupDuration: Milli(40) });
+	// 20 ms Opus frames start a group every two frames for a 30 ms duration.
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never, groupDuration: Milli(30) });
 	let catalog: Moq.Track.Subscriber | undefined;
 	try {
 		await configuring;

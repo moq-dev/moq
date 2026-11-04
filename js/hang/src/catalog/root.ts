@@ -11,7 +11,7 @@ import { JsonSchema } from "./json";
 import { MediaSchema } from "./media";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { named, renditions, section } from "./section";
+import { named, object, renditions, section } from "./section";
 import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
 import { track } from "./track";
@@ -67,9 +67,11 @@ export const RootSchema = z.looseObject({
 	version: z.optional(VersionSchema),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// What applies to every audio and video track, omitted when it holds nothing. A new key, so a
-	// malformed value fails the catalog, the same as Rust; see `MediaSchema` for its lenient `join`.
-	media: z.optional(MediaSchema),
+	// What applies to every audio and video track, omitted when it holds nothing. `media` is a
+	// generic key an application may already carry, so a value that isn't an object decodes as
+	// absent; an object with a malformed clock fails the catalog, the same as Rust. See `MediaSchema`
+	// for its lenient `join`.
+	media: object(MediaSchema),
 	// Decoded leniently like `text` below: a value without a string `track` or `path` is someone
 	// else's and decodes as absent. See `named`.
 	stats: named(StatsSchema, "track"),

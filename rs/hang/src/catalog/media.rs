@@ -73,17 +73,15 @@ impl TryFrom<JoinWire> for Join {
 	type Error = &'static str;
 
 	fn try_from(wire: JoinWire) -> Result<Self, Self::Error> {
-		match wire.interval.is_zero() {
-			true => Err("a join interval must be positive"),
-			false => Ok(Self::new(wire.interval)),
-		}
+		Self::new(wire.interval).ok_or("a join interval must be positive")
 	}
 }
 
 impl Join {
-	/// Promise a group at least every `interval`.
-	pub fn new(interval: Duration) -> Self {
-		Self { interval }
+	/// Promise a group at least every `interval`, or `None` for zero, which readers decode as no
+	/// promise at all.
+	pub fn new(interval: Duration) -> Option<Self> {
+		(!interval.is_zero()).then_some(Self { interval })
 	}
 }
 
@@ -94,7 +92,7 @@ mod test {
 	#[test]
 	fn roundtrips_in_milliseconds() {
 		let media = Media {
-			join: Some(Join::new(Duration::from_micros(2_000_500))),
+			join: Join::new(Duration::from_micros(2_000_500)),
 			..Default::default()
 		};
 		let json = serde_json::to_string(&media).unwrap();
@@ -103,6 +101,20 @@ mod test {
 			serde_json::from_str::<Media>(&json).unwrap().interval(),
 			Some(Duration::from_millis(2001))
 		);
+	}
+
+	#[test]
+	fn a_zero_interval_is_no_promise() {
+		assert_eq!(Join::new(Duration::ZERO), None);
+		// Anything above zero rounds up to a whole millisecond on the wire, which reads back.
+		let join = Join::new(Duration::from_nanos(1)).unwrap();
+		let media: Media = serde_json::from_str(&serde_json::to_string(&Media {
+			join: Some(join),
+			..Default::default()
+		})
+		.unwrap())
+		.unwrap();
+		assert_eq!(media.interval(), Some(Duration::from_millis(1)));
 	}
 
 	#[test]

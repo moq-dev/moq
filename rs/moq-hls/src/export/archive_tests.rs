@@ -205,7 +205,7 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Bytes {
 /// configs, so no init needs media.
 fn catalog() -> hang::Catalog {
 	let mut catalog = hang::Catalog::default();
-	catalog.media.join = Some(hang::catalog::Join::new(Duration::from_secs(2)));
+	catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
 	for (name, width, height) in [("360p", 640, 360), ("1080p", 1920, 1080)] {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(width);

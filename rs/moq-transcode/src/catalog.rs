@@ -1011,7 +1011,7 @@ mod tests {
 	/// tracks already declared one; one listing only its rungs declares its own.
 	#[test]
 	fn populate_carries_the_source_interval_with_its_renditions() {
-		let interval = |secs| Some(hang::catalog::Join::new(std::time::Duration::from_secs(secs)));
+		let interval = |secs| hang::catalog::Join::new(std::time::Duration::from_secs(secs));
 		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
 		child.media.join = interval(4);
 		let rel = Relative::new(".").unwrap();
