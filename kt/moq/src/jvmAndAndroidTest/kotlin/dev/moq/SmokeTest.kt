@@ -66,6 +66,30 @@ private fun opusHead(): ByteArray =
 
 class SmokeTest {
     @Test
+    fun `datagram-only requests have independent priority demand`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val stream = broadcast.publishTrack("events", null)
+            val requests = broadcast.requests().datagrams()
+            val consumer = broadcast.consume().datagrams("events")
+            consumer.setPriority(12)
+            val request = requests.requested()
+            assertEquals("events", request.name())
+            assertEquals(12.toByte(), request.priority())
+            val producer = request.accept(null)
+            assertEquals(12.toByte(), producer.priority())
+            assertNull(stream.demand().wanted())
+            producer.insert(Datagram(7uL, null, "seven".encodeToByteArray()))
+            val datagram = assertNotNull(consumer.recv())
+            assertEquals(7uL, datagram.sequence)
+            assertEquals("seven", datagram.payload.decodeToString())
+            consumer.cancel()
+            assertNull(producer.priorityChanged(12))
+            producer.finish()
+            requests.cancel()
+        }
+    }
+
+    @Test
     fun `destroyed object arguments are refused before native calls`() {
         val broadcast = BroadcastProducer()
         broadcast.destroy()
