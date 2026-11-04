@@ -6946,10 +6946,12 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 	}
 }
 
-/// A whole burst arrives without polling between writes. Both subscriptions must keep
-/// later revisions while holding the first, under an explicit budget longer than the burst.
-/// Controls below the burst's span expose both freshness bounds: the export delay and the
-/// publisher's max age. Neither an unlimited publisher nor a generous reader overrides the other.
+/// A whole burst arrives without polling between writes. The contract: every clock revision
+/// that stays within the export's delay and the publisher's max age reaches its stamped slot,
+/// and a superseded revision outside either bound may be skipped. With a budget longer than
+/// the burst, both subscriptions keep later revisions while holding the first. Controls below
+/// the burst's span pin which superseded revisions each bound skips today: neither an
+/// unlimited publisher nor a generous reader overrides the other, and the newest always lands.
 #[tokio::test(start_paused = true)]
 async fn queued_clock_revisions_follow_the_exporters_freshness_budgets() {
 	for table_id in [0x70, 0x73] {
