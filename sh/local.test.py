@@ -106,7 +106,7 @@ class LocalGate(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(result.returncode, 7, result.stderr)
-            self.assertEqual(result.stderr.strip(), "pinned build failed")
+            self.assertEqual(result.stderr.splitlines(), [f"Dev-shell quest: {quest}", "pinned build failed"])
 
     def test_outside_shell_resolves_the_checkout_pin(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,6 +128,16 @@ class LocalGate(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 7, result.stderr)
             self.assertEqual(result.stderr.strip(), "pinned input failed")
+            nix.unlink()
+            result = subprocess.run(
+                [BASH, str(ROOT / "sh/quest.sh"), "review"],
+                env=self.env(PATH=directory),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 127, result.stderr)
+            self.assertIn("run nix develop", result.stderr)
+            self.assertIn("ALLOW_HOST_TOOLCHAIN=1", result.stderr)
 
     def test_explicit_host_toolchain_reports_its_unverified_build(self):
         with tempfile.TemporaryDirectory() as directory:
