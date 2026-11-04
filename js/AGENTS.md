@@ -17,7 +17,7 @@ The `/js` Bun workspace, published as `@moq/<package>`. Run recipes via `just js
 
 # Components
 
-- `watch`/`publish` components expose read-only `in` dependencies, `out = readonlys(...)` derived state, and writable `Signal` knobs (typed `T | Signal<T>` in props). Positional identity is a plain constructor arg. The `Effect` is private; `close()` is the handle.
+- `watch`/`publish` components expose read-only `in` dependencies, `out = readonlys(...)` derived state, and writable `Signal` knobs (typed `T | Signal<T>` in props). Positional identity is a plain constructor arg. The `Effect` is private; `close()` is the handle. The `<moq-watch>`/`<moq-publish>` elements are the exception and expose `signals`.
 - Custom elements use no framework; attributes are the public API. An invalid attribute value throws instead of falling back to a default. Attributes with a unit require one (`delay="100ms"`).
 - Entrypoints re-export deps under namespaces (`Net`, `Signals`, `Hang`); re-export only public API. The `./element`, `./ui`, `./support` subpaths are side-effectful and stay out of the main entry.
 

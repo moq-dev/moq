@@ -31,7 +31,8 @@ jobs:
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is a safety net against a hung relay/client plus a cold first build.
-    timeout-minutes: 60
+    # A full run takes 40 to 60 minutes, so 60 cancelled a run that never hung.
+    timeout-minutes: 90
     outputs:
       report: ${{ steps.report.outcome }}
 

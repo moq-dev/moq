@@ -170,7 +170,7 @@ fn burst(pair: &mut Pair, mode: Mode, streams: usize, packets: usize) -> isize {
 						}
 					}
 					pair.server.received.finished += 1;
-					let _ = chunks.finalize();
+					chunks.finalize();
 				}
 			}
 			pair.server.busy += start.elapsed();

@@ -21,13 +21,19 @@ start, consumers.md swaps the first-frame pts for the group start.
 
 - **Catalog.** A `media` section holds what applies to every audio and video
   track. `media.join.interval` promises that each one starts a group at least
-  that often outside a pause, and is the export's grid, so every rendition
+  that often outside a pause: it reports only the longest GOP (maintainer,
+  2026-11-03), never a segment duration. It is the export's grid, so every rendition
   shares segment numbers. It is fixed for the broadcast instance, since the
   numbering depends on it. Nested so a later join mechanism that is not a
   fixed grid can sit beside it. moq-mux declares it from its GOP hint, moq-c
   from `group_duration_us` ([moq-dev/moq#7068](https://github.com/moq-dev/moq/pull/7068)),
   which declares the `hls` duration today, and `@moq/publish` from its GOP
-  setting. A broadcast without an interval is not HLS-renderable.
+  setting. `@moq/publish` caps a live keyframe interval change at the
+  declared interval, as it caps one at the `hls` duration since
+  [moq-dev/moq#7731](https://github.com/moq-dev/moq/pull/7731). The browser
+  publisher's interop cell asserts the declared interval (moved here
+  2026-11-03, since the `hls` field it would have asserted is deleted). A
+  broadcast without an interval is not HLS-renderable.
 - **Clean break (maintainer, 2026-11-02).** No record fallback in the export,
   and no records emitted for old exports. `hang::hls`, the `hls` field in Rust
   and the JS zod schema, `<track>.hls` tracks, and A/V segment alignment are
@@ -50,12 +56,15 @@ start, consumers.md swaps the first-frame pts for the group start.
     first line, so its `EXTINF` understates the media; document the deviation
     beside the fixed target duration's overrun rule in
     `rs/moq-hls/src/export/rendition.rs`.
-  - The target duration is the interval (2026-10-28). A segment can run up to
-    twice the interval even without an overrun, since the group containing a
-    line can start up to one interval before it; regular GOPs never do. One
-    whose rounded `EXTINF` exceeds the target is listed under the overrun
-    rule. Rejected: twice the interval, which doubles every player's
-    hold-back.
+  - The target duration is twice the interval, rounded up to whole seconds
+    (maintainer, 2026-11-03, replacing 2026-10-28's target of the interval).
+    The group containing a line can start up to one interval before it, so a
+    segment of GOPs within the interval stays under twice it, even when a
+    join, cut, resize or live interval change shifts the GOP phase. No
+    keyframe is forced at a grid line. Only an overrun, a group longer than
+    the interval, can exceed the target; one whose rounded `EXTINF` does is
+    listed under the overrun rule. Rejected: the interval itself, which any
+    phase shift overruns, and forcing keyframes at grid lines.
   - DASH lists the same segments by `$Time$`.
 - Pin the segmentation with table-driven tests over pauses that end between
   lines or past the next one, unequal GOPs, and overruns.

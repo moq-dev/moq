@@ -22,7 +22,7 @@ Trust this checkout's source over published API references, which may describe a
 
 The API is the most important thing to get right: a bad shape costs a breaking change in every language.
 
-- Feature PRs add migration notes under `## Unreleased` in `MIGRATE.md`; only the release cut writes version sections.
+- Feature PRs add migration notes under `## Unreleased` in the package's `MIGRATE.md`; only the release cut writes version sections.
 - Replace a callback parameter with a handle, an event, or a Producer/Consumer split.
 - Nest related API, configuration, and output fields under their shared role.
 - Propose alternatives when a name or shape feels awkward.
@@ -50,4 +50,6 @@ The `quest` binary and its skills come from the moq-dev/quest flake input; chang
 # Cross-Package Sync
 
 `moq-ffi` powers every SDK except Rust and JS. Keep all languages and wrappers at the same functionality.
+A Rust change with a JS counterpart updates both in the same PR: `moq-net` and `js/net`, `hang` and `js/hang`, `moq-auth` and `js/auth`.
 A wire-format change updates its matching draft in the same PR: framing, fields, enum values, and version negotiation.
+Wire, `moq-ffi`, or gateway changes also run `just test interop --all`; plain `interop` is Rust-only.
