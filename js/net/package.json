@@ -25,7 +25,7 @@
 		"@moq/pattern": "workspace:^",
 		"@moq/qmux": "workspace:^",
 		"@moq/signals": "workspace:*",
-		"pako": "^3.0.2",
+		"pako": "^3.0.3",
 		"sorted-btree": "^2.1.0"
 	},
 	"peerDependencies": {
@@ -33,7 +33,7 @@
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.4",
-		"@types/node": "^26.6.4",
+		"@types/node": "^26.6.6",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
 		"fast-check": "^4.10.2",
 		"typescript": "7.0.2"

@@ -98,6 +98,15 @@ performance suite, GPU/platform codecs, or every generated wrapper. Those
 remain with their existing owners. The recurring audit is not completed by
 this source survey.
 
+UDP socket queues closed as a measured no-win: the 8 MiB request stays,
+with no new setting. `benchmark_socket_queues` (moq-uring, nightly) showed
+loss follows the kernel queue against worker stalls, while pool depth, flows
+and the receive path did not change it. A bigger queue costs delay only
+while a worker is overloaded and the queue sits full. Relay shard sweeps at
+up to 256 connections saw no socket drops, with the sampled peak queue under
+1% of the granted 16 MiB. The relay sampler now records per-socket drops,
+granted buffers and queued bytes (`udp_*`).
+
 An operation-count probe imported the actual JS `bandwidth.allocate`, counted
 `Want.priority` getter reads, and called it for every reservation, as
 `Allocator.#publish` does. With one tier, 16/64/256 reservations caused
@@ -173,8 +182,12 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 - The 2026-10-22 release audit bounded the media
   reorder queues in [moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)
   and fixed QMux copying in
-  [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
-  fragmentation below concerns parser replay before those queues.
+  [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). The MKV
+  importer's replay of accumulated input before those queues was removed by
+  [moq-dev/moq#6908](https://github.com/moq-dev/moq/pull/6908) and
+  [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234); the
+  measured no-win is in [moq-dev/moq#7515](https://github.com/moq-dev/moq/pull/7515),
+  and the nightly `mkv-chunks` and `mkv-payloads` series cover the slope.
 - [Binding bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md),
   [foreign polling](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
   [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md),
@@ -194,13 +207,9 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 ## Required
 
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - memory a task set keeps after peak occupancy subsides
+- [QUIC send-group capacity](/quest/m2/performance-survey/send-groups.md) - memory the scheduler's send-group slab keeps after subscription churn
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
-- [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
-- [Fragmented MKV import](/quest/m2/performance-survey/mkv-fragments.md) - accumulated-buffer copies and parser replay
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
-- [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
-- [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
-- [UDP socket queues](/quest/m2/performance-survey/socket-queues.md) - drop attribution and queue-size tradeoffs across workers and load
 - [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md) - HTTP polling cost versus result size and unrelated routes
 - [Selective session operations](/quest/m2/performance-survey/session-selection.md) - exact-ID lookups and registry lock hold time
 - [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md) - CMAF sample and LOC framing copies versus retention

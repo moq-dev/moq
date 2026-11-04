@@ -144,6 +144,13 @@ impl Applied {
 		self.preset.map(|_| 0).or(parsed)
 	}
 
+	// A confirmed preset neither reorders nor queues frames, so a frame trails the others by no more
+	// than its own encode, which the player's frame term already covers: the catalog `delay` is a
+	// known zero rather than one to measure. An unconfirmed one leaves it to measurement.
+	fn delay(&self) -> Option<std::time::Duration> {
+		self.preset.map(|_| std::time::Duration::ZERO)
+	}
+
 	/// A report that `preset` took effect through `controls`.
 	#[cfg_attr(
 		not(any(
@@ -320,6 +327,7 @@ impl Config {
 		rendition.bitrate.get_or_insert(self.resolved_bitrate().as_bps());
 		rendition.framerate.get_or_insert(self.framerate.as_f64());
 		rendition.reorder = sink.applied().reorder(rendition.reorder);
+		rendition.delay = sink.applied().delay();
 		Ok((rendition, sink))
 	}
 
@@ -616,6 +624,18 @@ mod tests {
 		let unconfirmed = Applied::default();
 		assert_eq!(unconfirmed.reorder(None), None);
 		assert_eq!(unconfirmed.reorder(Some(3)), Some(3));
+	}
+
+	#[test]
+	fn delay_is_a_known_zero_only_for_confirmed_controls() {
+		for preset in [Preset::LowLatency, Preset::Balanced, Preset::Quality] {
+			let applied = Applied {
+				preset: Some(preset),
+				..Applied::default()
+			};
+			assert_eq!(applied.delay(), Some(std::time::Duration::ZERO));
+		}
+		assert_eq!(Applied::default().delay(), None);
 	}
 
 	/// A mid-gray RGBA buffer: encodable without a camera.

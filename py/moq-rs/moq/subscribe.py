@@ -15,7 +15,6 @@ from moq_ffi import (
 from ._records import _subscription
 from ._stream import _Stream
 from .types import (
-    Datagram,
     FetchGroupOptions,
     Frame,
     Subscription,
@@ -23,6 +22,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from .datagram import DatagramConsumer
     from .media import Audio, Video
 
 
@@ -116,15 +116,6 @@ class TrackConsumer(_Stream[GroupConsumer]):
         """
         return _frame(await self._inner.read_frame())
 
-    async def recv_datagram(self) -> Datagram | None:
-        """Receive the next best-effort datagram in arrival order.
-
-        Returns ``None`` when the track ends. Datagrams are unavailable over stream-only
-        transports and older wire versions.
-        """
-        datagram = await self._inner.recv_datagram()
-        return None if datagram is None else Datagram._from_ffi(datagram)
-
     def info(self) -> TrackInfo:
         """Return the publisher-side track properties."""
         return TrackInfo._from_ffi(self._inner.info())
@@ -150,6 +141,12 @@ class BroadcastConsumer:
 
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
+
+    def datagrams(self, name: str) -> DatagramConsumer:
+        """Subscribe to a live datagram track from now on, without a stream subscription."""
+        from .datagram import DatagramConsumer
+
+        return DatagramConsumer(self._inner.datagrams(name))
 
     async def closed(self) -> None:
         """Wait until the broadcast ends: its publisher closed it, or every producer left."""

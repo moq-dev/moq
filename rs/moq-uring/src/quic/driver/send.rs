@@ -1,12 +1,13 @@
 //! Outgoing streams and datagrams: their handles, scheduling, and errors.
 //!
 //! Single-threaded sans-IO means a write goes straight into moq-quic's send queue (no staging
-//! copy); the handles just kick the driver so egress reaches the wire and park on the
-//! per-stream waiter lists the driver wakes.
+//! copy), which wakes the driver's transmit wait itself, and the handles wait through
+//! moq-quic's poll forms, which wake them.
 
-use std::future::poll_fn;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use bytes::Buf;
 use moq_quic::send::End;
@@ -67,7 +68,7 @@ impl Stream {
 	///
 	/// Cancel-safe: if this does not resolve, no bytes were written.
 	pub async fn write(&mut self, buf: &mut impl Buf) -> Result<usize, Error> {
-		poll_fn(|cx| self.poll_write(cx, buf)).await
+		kio::wait(|waiter| self.poll_write_buf(waiter, buf)).await
 	}
 
 	/// Write all of `buf` into this stream.
@@ -81,32 +82,25 @@ impl Stream {
 	}
 
 	/// [`Self::write`], as a poll.
-	pub(crate) fn poll_write(&mut self, cx: &Context<'_>, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
-		let waiter = self.0.park.hold(cx);
+	pub(crate) fn poll_write_buf(&mut self, waiter: &kio::Waiter, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
 		let id = self.0.id;
 		let shared = &self.0.shared;
 		if let Some(err) = shared.closed() {
 			return Poll::Ready(Err(Error::Connection(err)));
 		}
-		let written = shared.conn.borrow_mut().send_stream(id).write(buf);
-		match written {
-			Ok(written) => {
-				shared.kick();
-				Poll::Ready(Ok(written))
-			}
-			// The driver wakes us when moq-quic reports the stream writable, or stopped.
-			Err(moq_quic::send::Error::Blocked) => {
-				shared.park_writable(id, waiter);
-				Poll::Pending
-			}
+		// moq-quic wakes us once the stream is writable again, or stopped.
+		let written = shared.conn.borrow_mut().send_stream(id).poll_write(waiter, buf);
+		match ready!(written) {
+			Ok(written) => Poll::Ready(Ok(written)),
 			Err(moq_quic::send::Error::Stopped(code)) => Poll::Ready(Err(Error::Stopped(code))),
+			Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
 			Err(err) => unreachable!("an open stream failed to write: {err:?}"),
 		}
 	}
 
 	/// Notify the peer that no more data will ever be written to this stream.
 	///
-	/// [`Finished::stopped()`] waits for the peer to receive all of it, or learns that it stopped
+	/// [`Finished::closed()`] waits for the peer to receive all of it, or learns that it stopped
 	/// the stream first.
 	pub fn finish(mut self) -> Finished {
 		self.0.finish();
@@ -141,14 +135,6 @@ impl Stream {
 		self.0.state = HalfState::Open(offset, code);
 	}
 
-	/// The peer's STOP_SENDING code, if it already stopped the stream.
-	pub(crate) fn stop_code(&self) -> Option<VarInt> {
-		match self.0.shared.conn.borrow_mut().send_stream(self.0.id).end() {
-			Ok(Some(End::Stopped(code))) => Some(code),
-			_ => None,
-		}
-	}
-
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
 	///
 	/// Higher goes first.
@@ -170,14 +156,14 @@ impl Stream {
 		self.0.set_group(group);
 	}
 
-	/// Completes when the peer stops the stream. See [`Finished::stopped()`].
-	pub async fn stopped(&self) -> Result<Option<VarInt>, Error> {
-		kio::wait(|waiter| poll_stopped(&self.0.shared, self.0.id, waiter)).await
+	/// Completes when the peer stops the stream. See [`Finished::closed()`].
+	pub async fn closed(&self) -> Result<Option<VarInt>, Error> {
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// [`Self::stopped`], as a poll.
-	pub(crate) fn poll_stopped(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
-		poll_stopped(&self.0.shared, self.0.id, self.0.park.hold(cx))
+	/// Wait for the stream to end, retaining the peer's stop code; see [`Self::closed`].
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		poll_closed(&self.0.shared, self.0.id, waiter)
 	}
 
 	/// The identity of this stream.
@@ -224,13 +210,13 @@ impl Finished {
 	/// peer acknowledges receipt of all stream data (although not necessarily the processing of
 	/// it). Fails only when the connection ends first, since then the caller cannot read success
 	/// as "every byte arrived".
-	pub async fn stopped(&self) -> Result<Option<VarInt>, Error> {
-		kio::wait(|waiter| poll_stopped(&self.0.shared, self.0.id, waiter)).await
+	pub async fn closed(&self) -> Result<Option<VarInt>, Error> {
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// [`Self::stopped`], as a poll.
-	pub(crate) fn poll_stopped(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
-		poll_stopped(&self.0.shared, self.0.id, self.0.park.hold(cx))
+	/// Wait for the stream to end, retaining the peer's stop code; see [`Self::closed`].
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+		poll_closed(&self.0.shared, self.0.id, waiter)
 	}
 
 	/// The identity of this stream.
@@ -239,12 +225,19 @@ impl Finished {
 	}
 }
 
+impl Future for Finished {
+	type Output = Result<Option<VarInt>, Error>;
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		let this = self.get_mut();
+		poll_closed(&this.0.shared, this.0.id, this.0.park.hold(cx))
+	}
+}
+
 impl Half {
 	fn finish(&mut self) {
-		// A STOP_SENDING may have beaten us here, which `stopped` reports.
-		if self.shared.conn.borrow_mut().send_stream(self.id).finish().is_ok() {
-			self.shared.kick();
-		}
+		// A STOP_SENDING may have beaten us here, which `closed` reports.
+		let _ = self.shared.conn.borrow_mut().send_stream(self.id).finish();
 		self.state = HalfState::Finished;
 	}
 
@@ -253,14 +246,10 @@ impl Half {
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut stream = conn.send_stream(self.id);
 		// Fails harmlessly once the connection is gone.
-		let reset = match offset {
+		let _ = match offset {
 			Some(offset) => stream.reset_at(offset, code),
 			None => stream.reset(code),
 		};
-		drop(conn);
-		if reset.is_ok() {
-			self.shared.kick();
-		}
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -288,46 +277,39 @@ impl Half {
 }
 
 /// Wait for send stream `id` to end: moq-quic keeps how it ended until its handle releases it.
-fn poll_stopped(shared: &Shared, id: stream::Id, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
-	let end = shared.conn.borrow_mut().send_stream(id).end();
-	match end {
-		Ok(Some(End::Stopped(code))) => Poll::Ready(Ok(Some(code))),
-		Ok(Some(_)) => Poll::Ready(Ok(None)),
-		Ok(None) | Err(_) => match shared.closed() {
-			Some(err) => Poll::Ready(Err(Error::Connection(err))),
-			None => {
-				shared.park_finishing(id, waiter);
-				Poll::Pending
-			}
-		},
+fn poll_closed(shared: &Shared, id: stream::Id, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
+	let end = shared.conn.borrow_mut().send_stream(id).poll_end(waiter);
+	match ready!(end) {
+		Ok(End::Stopped(code)) => Poll::Ready(Ok(Some(code))),
+		Ok(_) => Poll::Ready(Ok(None)),
+		Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
+		// Only a released ID has no end, and the handle releases it only on drop.
+		Err(err) => unreachable!("a held send stream has no end: {err:?}"),
 	}
 }
 
 impl Drop for Half {
 	fn drop(&mut self) {
-		self.shared.forget_send(self.id);
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut stream = conn.send_stream(self.id);
 		let stopped = match stream.end() {
 			Ok(Some(End::Stopped(code))) => Some(code),
 			_ => None,
 		};
-		let reset = match (&self.state, stopped) {
-			(HalfState::Reset, _) => None,
+		// A reset fails harmlessly once the connection is gone.
+		let _ = match (&self.state, stopped) {
+			(HalfState::Reset, _) => Ok(()),
 			// Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
 			// nothing more, so retransmitting the rest is wasted.
-			(_, Some(code)) => Some(stream.reset(code)),
-			(HalfState::Finished, None) => None,
-			(HalfState::Open(offset, code), None) => Some(match offset {
+			(_, Some(code)) => stream.reset(code),
+			(HalfState::Finished, None) => Ok(()),
+			(HalfState::Open(offset, code), None) => match offset {
 				Some(offset) => stream.reset_at(*offset, *code),
 				None => stream.reset(*code),
-			}),
+			},
 		};
 		stream.release();
 		drop(conn);
-		if reset.is_some_and(|reset| reset.is_ok()) {
-			self.shared.kick();
-		}
 		self.shared.release();
 	}
 }
@@ -456,7 +438,7 @@ impl From<Error> for std::io::Error {
 	}
 }
 
-/// What the `web_transport_trait` impls report, which have one error type per session.
+/// Preserve a stream failure when a connection-level operation, such as framing, reports it.
 impl From<Error> for ConnectionError {
 	fn from(err: Error) -> Self {
 		match err {

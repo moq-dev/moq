@@ -26,6 +26,7 @@ _manual = ["kio/manual"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytes = "1"
+futures = "0.3"
 http = "1"
 io-uring = { workspace = true }
 # The worker is a kio clock backend: its turn's instant is the ambient clock.
@@ -47,7 +48,6 @@ thiserror = "2"
 tracing = "0.1"
 url = "2"
 web-transport-proto = { workspace = true }
-web-transport-trait = { workspace = true }
 
 [dev-dependencies]
 anyhow = "1"
@@ -56,12 +56,13 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 moq-net = { path = "../moq-net" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
-web-transport-trait = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
 libc = { workspace = true }
+# The socket-queue benchmark's rate-limited path.
+moq-shaper = { path = "../moq-shaper" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
 # Tests run workers on a manual clock.
 moq-uring = { path = ".", features = ["_manual"] }
@@ -103,6 +104,11 @@ required-features = ["quic"]
 [[bench]]
 name = "timers"
 harness = false
+
+[[bench]]
+name = "web_headers"
+harness = false
+required-features = ["quic"]
 
 [lints]
 workspace = true

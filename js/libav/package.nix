@@ -18,6 +18,7 @@
   fetchurl,
   fetchFromGitHub,
   importNpmLock,
+  linkFarm,
   emscripten,
   nodejs,
   python3,
@@ -143,7 +144,18 @@ stdenvNoCC.mkDerivation {
     runHook postInstall
   '';
 
-  passthru = { inherit wasm; };
+  passthru = {
+    inherit wasm;
+    # Everything the wasm build downloads, which sh/gh/cache.sh publishes so a
+    # rebuild never waits on ffmpeg.org, xiph.org, GitHub or npm.
+    sources = linkFarm "moq-libav-sources" (
+      sources
+      // {
+        "libav.js" = wasm.src;
+        "npm-deps" = wasm.npmDeps;
+      }
+    );
+  };
 
   meta = {
     description = "libav.js decoding Opus and AAC for the @moq/hang WebCodecs polyfill";

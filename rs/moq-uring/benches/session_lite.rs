@@ -38,7 +38,9 @@ mod linux {
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_max_age(None)
+			.with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	struct Ablation {
@@ -145,10 +147,7 @@ mod linux {
 					.with_publisher(&pub_origin)
 					.accept(
 						moq_net::time::Instant::now(),
-						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-							quic::web::Session::raw(conn),
-							moq_net::transport::Address::Setup,
-						)),
+						moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 					)
 					.await
 					.expect("accept");
@@ -166,10 +165,7 @@ mod linux {
 						.with_subscriber(sub_origin.clone())
 						.connect(
 							moq_net::time::Instant::now(),
-							moq_uring::transport::Local::new(moq_uring::transport::Session::new(
-								quic::web::Session::raw(conn),
-								moq_net::transport::Address::Setup,
-							)),
+							moq_uring::transport::Local::new(quic::web::Session::raw(conn)),
 						)
 						.await
 						.expect("connect");

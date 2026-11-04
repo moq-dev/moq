@@ -4,6 +4,39 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive operations wake transmission themselves ([#7707](https://github.com/moq-dev/moq/pull/7707))
+
+`ShouldTransmit` is removed. `recv::Stream::lease` returns `Result<Lease, Error>` and
+`poll_lease` returns `Poll<Result<Lease, Error>>`; remove the transmit hint from tuple
+destructuring. `restore`, `release`, and `Chunks::finalize` return `()`; call them
+directly. Each operation wakes the connection's transmit waiter when needed.
+
+### Waits replace stream and connection events
+
+Every wait is a `poll_*` taking the caller's `&kio::Waiter`, which moq-quic registers and wakes itself, so a driver keeps no waiter tables.
+`StreamEvent` is gone, and so are the `Event` variants a handle waited on; `Event` keeps only `PathUpdated`, and `mux::Event` and `mux::Connection::poll` are gone.
+
+| Before | After |
+| --- | --- |
+| `Event::HandshakeDataReady` | `Connection::poll_handshake_data` |
+| `Event::Connected` | `Connection::poll_connected` |
+| `Event::HandshakeConfirmed` | `Connection::poll_handshake_confirmed` |
+| `Event::ConnectionLost { reason }` | `Connection::poll_closed`, or `Connection::error` |
+| `Event::DatagramReceived` | `Datagrams::poll_recv` |
+| `StreamEvent::Opened { dir }` | `Streams::poll_accept` |
+| `StreamEvent::Available { dir }` | `Streams::poll_open` |
+| `StreamEvent::Readable { id }` | `recv::Chunks::poll_next`, `recv::Stream::poll_lease`, or `recv::Stream::poll_received_reset` |
+| `StreamEvent::Writable { id }` | `send::Stream::poll_write` |
+| `StreamEvent::Finished { id }`, `StreamEvent::Stopped { id, .. }` | `send::Stream::poll_end` |
+| `StreamEvent::Acked { id, .. }` | `send::Stream::poll_acked` |
+
+`poll_transmit` is the driver's wait, so a handle no longer kicks its driver after a call.
+`Connection::poll_transmit(now, max_datagrams, buf) -> Option<Transmit>` becomes `poll_transmit(waiter, now, max_datagrams, buf) -> Poll<Transmit>`, and `mux::Connection::poll_transmit(now) -> Option<Bytes>` becomes `poll_transmit(waiter, now) -> Poll<Bytes>`.
+With nothing to send it registers `waiter`, which the next call that queues something wakes; keep waiting on `poll_timeout` for pacing and loss recovery.
+
+A wake only schedules: moq-quic wakes under whatever lock guards the connection, so the woken task polls again under it.
+Stream waits fail with `send::Error::ConnectionLost` or `recv::Error::ConnectionLost` once the connection is lost, after accepted streams, readable bytes, and received datagrams drain.
+
 ### Crypto is sealed to rustls ([#7028](https://github.com/moq-dev/moq/pull/7028))
 
 Build configs with `client::Config::new(Arc::new(rustls_client))` and `server::Config::new(Arc::new(rustls_server))`; both are infallible.
@@ -24,7 +57,7 @@ Treat it as a failed read and stop the stream: a reader that watches for a reset
 
 ### Early data is removed
 
-Wait for `Event::Connected` before opening streams or sending application data.
+Wait for `Connection::poll_connected` before opening streams or sending application data.
 `Connection::has_0rtt`, `accepted_0rtt`, and the `crypto::Session::early_crypto` and `early_data_accepted` hooks are gone.
 Custom crypto sessions no longer implement those hooks.
 Rustls configs disable early data, including caller-supplied configs, while session tickets still resume 1-RTT handshakes.

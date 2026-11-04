@@ -257,8 +257,6 @@ impl<T: Transport> Run<T> {
 		}
 		let now = kio::clock::now();
 		let mut state = self.inner.lock();
-		// Register first: a handle mutating the connection after this re-polls us.
-		waiter.register(&mut state.driver);
 		for record in self.inbound.drain(..) {
 			if let Ok(record) = &record {
 				self.received_bytes += record.len() as u64;
@@ -266,25 +264,30 @@ impl<T: Transport> Run<T> {
 			deliver(&mut state, record, now);
 			// Publish what this record did before the next one: a close followed by the
 			// transport ending must report the close.
-			state.sweep();
+			state.check_lost();
 		}
 		if state.conn.poll_timeout().is_some_and(|at| now >= at) {
 			state.conn.handle_timeout(now);
 		}
 
 		// Take a batch from the connection only while the transport has room for it, so a
-		// stalled transport leaves unreliable datagrams in the connection to be shed.
+		// stalled transport leaves unreliable datagrams in the connection to be shed. With
+		// nothing to send, `poll_transmit` parks us until a handle queues something.
 		let mut gathered = 0;
 		if self.room && self.outbound.is_empty() {
 			while gathered < BATCH_BYTES {
-				let Some(record) = state.conn.poll_transmit(now) else {
+				let Poll::Ready(record) = state.conn.poll_transmit(waiter, now) else {
 					break;
 				};
 				gathered += record.len();
 				self.outbound.push_back(record);
 			}
 		}
-		state.sweep();
+		// A close, local or not, starts the close bound, even while the transport holds this
+		// batch or an earlier one back. `poll_transmit` would take records the transport has no
+		// room for, so wait for the close with `poll_closed`; the transport wakes us for room.
+		let _ = state.conn.poll_closed(waiter);
+		state.check_lost();
 		if state.conn.is_closed() && self.timer.closing.is_none() {
 			self.timer.closing = Some(now + CLOSE_TIMEOUT);
 		}
@@ -400,6 +403,7 @@ fn deliver(state: &mut State, record: Result<Bytes, Error>, now: Instant) {
 /// The transport is done: publish a local close, or the failure that ended it.
 fn finish(inner: &Inner, result: Result<(), Error>) {
 	let mut state = inner.lock();
+	state.check_lost();
 	if let Some(err) = state.local_close.take() {
 		state.fail(err);
 	}
@@ -407,7 +411,7 @@ fn finish(inner: &Inner, result: Result<(), Error>) {
 		state.fail(err);
 	}
 	state.conn.transport_closed();
-	state.sweep();
+	state.check_lost();
 	// A drained connection ended with a close from either side, already published; this only
 	// lands when the transport died under a live one.
 	state.fail(Error::Closed);

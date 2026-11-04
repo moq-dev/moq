@@ -41,7 +41,7 @@ throws `NotSupportedError`.
 ### Servers
 
 `Session.accept` runs the other role, over a WebSocket your server has already accepted. The host
-performs the upgrade, so it — not this library — chooses the subprotocol; `selectSubprotocol` picks
+performs the upgrade, so it - not this library - chooses the subprotocol; `selectSubprotocol` picks
 the value to accept from what the client offered, and the session reads the wire-format version back
 off the socket.
 
@@ -62,7 +62,7 @@ Deno.serve((req) => {
 })
 ```
 
-Any already-accepted `WebSocket` works — `Deno.upgradeWebSocket`, Node's `ws`, or a
+Any already-accepted `WebSocket` works - `Deno.upgradeWebSocket`, Node's `ws`, or a
 `WebSocketStream`. The session refuses missing or unsupported subprotocols. Reject the upgrade
 when `selectSubprotocol` returns `undefined`. If your host doesn't expose the
 negotiated value on the socket, pass it explicitly as `{ protocol }`.
@@ -76,8 +76,8 @@ the stream-id space each side owns.
 
 - **Fulfills** with `{ closeCode, reason }` on a graceful end: either side called `close()`, which
   puts an `APPLICATION_CLOSE` (`0x1d`) on the wire.
-- **Rejects** on an abnormal end: a `CONNECTION_CLOSE` (`0x1c`) arrived — the transport variant a
-  peer sends when *it* caught a protocol violation — or no close frame arrived at all, because the
+- **Rejects** on an abnormal end: a `CONNECTION_CLOSE` (`0x1c`) arrived - the transport variant a
+  peer sends when *it* caught a protocol violation - or no close frame arrived at all, because the
   socket dropped or the peer went idle. This endpoint rejects the same way when it catches the peer
   violating the protocol, and sends a `CONNECTION_CLOSE` so the peer rejects too.
 
@@ -91,7 +91,7 @@ try {
 }
 ```
 
-Don't reach for `closeCode` to tell the two apart — close codes are application-defined, so a
+Don't reach for `closeCode` to tell the two apart - close codes are application-defined, so a
 graceful close may carry any value, including one that looks like a violation, and an app closing
 with `1006` is indistinguishable from a dropped socket. Which frame arrived is the signal, and the
 settled state is how you read it.

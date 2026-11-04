@@ -350,6 +350,138 @@ class InventoryTest(unittest.TestCase):
         self.write("js/net/package.json", '{"scripts": {"manual-test": "bun test src"}}')
         self.assertIn("script js/net/src/codec.test.ts", self.orphans())
 
+    def test_bun_file_paths_are_exact_in_every_scripted_caller(self):
+        self.write(
+            "justfile",
+            JUSTFILE
+            + """
+    files := '''
+        test/compat.test.ts
+        test/view.test.tsx
+        ./test/exact.test.ts
+    '''
+
+    local:
+        cd test && bash ../sh/local.sh bun test {{ replace(files, "\\n", " ") }}
+""",
+        )
+        self.write("sh/local.sh", '"$@"\n')
+        self.write(
+            "sh/run.sh",
+            'bun test \\\n    "test/codec.test.ts" test/a.test.jsx test/b.test.cjs '
+            "./test/exact.test.ts # bun test commented.test.ts\n",
+        )
+        self.write("package.json", '{"scripts": {"test": "bun test test/codec.spec.ts test/codec.test.cts"}}')
+        workflow = self.root / ".github/workflows/ci.yml"
+        self.write(str(workflow.relative_to(self.root)), WORKFLOW + "          - run: bun test test/frame.test.ts\n")
+        _, errors = module.inventory(self.root)
+        self.assertEqual(
+            errors,
+            [
+                ".github/workflows/ci.yml (fuzz): bun test test/frame.test.ts is a substring filter;"
+                " prefix the file path with ./",
+                "justfile:17: bun test test/compat.test.ts is a substring filter; prefix the file path with ./",
+                "justfile:17: bun test test/view.test.tsx is a substring filter; prefix the file path with ./",
+                "package.json scripts.test: bun test test/codec.spec.ts is a substring filter;"
+                " prefix the file path with ./",
+                "package.json scripts.test: bun test test/codec.test.cts is a substring filter;"
+                " prefix the file path with ./",
+                "sh/run.sh: bun test test/a.test.jsx is a substring filter; prefix the file path with ./",
+                "sh/run.sh: bun test test/b.test.cjs is a substring filter; prefix the file path with ./",
+                "sh/run.sh: bun test test/codec.test.ts is a substring filter; prefix the file path with ./",
+            ],
+        )
+        self.write(
+            "sh/run.sh",
+            'bun test ./test/codec.test.ts /source/test/exact.test.ts src -t "codec.test.ts" --preload setup.ts\n'
+            "# bun test commented.test.ts\n",
+        )
+        self.assertFalse(any("sh/run.sh:" in error for error in module.inventory(self.root)[1]))
+
+    def test_bun_guard_reads_the_working_tree_after_unstaged_deletions(self):
+        files = {"sh/run.sh": "bun test ./codec.test.ts\n", "web/package.json": '{"scripts": {"test": "bun test"}}'}
+        for name, text in files.items():
+            self.write(name, text)
+        subprocess.run(["git", "add", *files], cwd=self.root, check=True)
+        for name, text in files.items():
+            with self.subTest(name=name):
+                (self.root / name).unlink()
+                try:
+                    self.orphans()
+                finally:
+                    self.write(name, text)
+
+    def test_a_js_bench_entry_point_needs_a_caller(self):
+        # Nightly's shape: a loop's literal names reach a recipe parameter through a helper's "$@".
+        self.write(
+            "sh/nightly.sh",
+            """
+            #!/usr/bin/env bash
+            javascript() {
+                local label=$1
+                shift
+                "$@" | tee "$label.csv"
+            }
+            for benchmark in fills; do
+                javascript "$benchmark" just js bench "$benchmark"
+            done
+            javascript page just js page-bench
+        """,
+        )
+        self.write(
+            "js/justfile",
+            """
+            bench name:
+                bun net/bench/{{ name }}.ts
+
+            page-bench:
+                bun watch/bench/page.ts
+
+            gc-bench:
+                bun net/bench/gc.ts
+        """,
+        )
+        self.write("justfile", JUSTFILE.replace("    mod rs\n", "    mod js\n    mod rs\n") + "        sh/nightly.sh\n")
+        # A module, imported with or without its extension, and a page a bench bundles are not
+        # entry points; a doc comment naming its loader, a commented-out import, or a test
+        # importing it changes nothing.
+        self.write(
+            "js/net/bench/fills.ts",
+            'import { sweep } from "./sweep";\nimport "./shared.ts"; // import "./forward";\n// import "./gc";\n',
+        )
+        self.write("js/net/bench/sweep.ts", "/** Shared by `fills.ts` and `forward.ts`. */\n")
+        self.write("js/net/bench/shared.ts", "")
+        self.write("js/net/bench/forward.ts", 'import { sweep } from "./sweep.ts";\n')
+        self.write("js/net/bench/forward.test.ts", 'await import("./forward");\n')
+        self.write("js/net/bench/gc.ts", "")
+        self.write(
+            "js/watch/bench/page.ts",
+            'import { chromium } from "playwright";\n'
+            "await Bun.build({ entrypoints: [`${import.meta.dir}/page-entry.ts`] });\n",
+        )
+        self.write("js/watch/bench/page-entry.ts", "")
+        orphans = self.orphans()
+        self.assertIn("script js/net/bench/forward.ts", orphans)
+        self.assertIn("script js/net/bench/gc.ts", orphans)
+        self.assertIn("recipe js::gc-bench", orphans)
+        for reached in ("fills", "sweep", "shared"):
+            self.assertNotIn(f"script js/net/bench/{reached}.ts", orphans)
+        self.assertNotIn("script js/watch/bench/page.ts", orphans)
+        self.assertNotIn("script js/watch/bench/page-entry.ts", orphans)
+
+        # Dropping a name from the loop, or the browser bench's call, orphans its script.
+        nightly = (self.root / "sh/nightly.sh").read_text()
+        self.write(
+            "sh/nightly.sh",
+            nightly.replace("in fills;", "in forward;").replace("javascript page just js page-bench\n", ""),
+        )
+        orphans = self.orphans()
+        self.assertIn("script js/net/bench/fills.ts", orphans)
+        self.assertNotIn("script js/net/bench/forward.ts", orphans)
+        self.assertIn("script js/watch/bench/page.ts", orphans)
+        self.assertIn("recipe js::page-bench", orphans)
+        self.assertNotIn("script js/watch/bench/page-entry.ts", orphans)
+
     def test_a_selection_outside_the_ignored_set_covers_nothing(self):
         # Same filter, but without --run-ignored nextest skips the ignored tests.
         self.write("justfile", JUSTFILE.replace("--run-ignored only ", ""))

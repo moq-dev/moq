@@ -347,20 +347,36 @@ constant offset between tracks cancels out of `measured`: a video encoder that
 flushes 200 ms behind the audio encoder produces the same video target as one
 that does not, and its frames would all arrive 200 ms late for the shared clock.
 
-The catalog `delay` field carries that offset: how far a rendition's
-timestamps trail those the broadcast's other renditions already wrote, measured
-by the publisher and never lowered. It is an addend, not a floor, because nothing on
-this page contains it. The shared playout is the largest requirement among the
-renditions actually subscribed:
+The catalog `delay` field carries that offset. It is an addend, not a floor,
+because nothing on this page contains it, and it is never lowered.
+
+A publisher that knows the offset states it, and it is used as given. The
+receiver already adds a frame duration on top, so an encoder configured not to
+reorder or queue frames, whose frames trail by no more than their own duration,
+states zero. moq-video does so for a backend that confirmed its preset, and
+moq-audio for Opus and PCM captured at the codec's rate, since a resampler
+holds input. Anything else is measured: the least a rendition's
+timestamps trailed those the broadcast's other renditions already wrote, over a
+window of a second or a group of its media, whichever is longer, keeping the
+largest of those windows. A measured value is reported only once a window
+closes.
+
+Lateness only some frames have is left out, since `measured` already contains
+it. A B-frame written after a later reference picture trails that picture and
+another rendition's, and the audio written beside it trails them too. The
+reference pictures do not, and every window holds one.
+
+The shared playout is the largest requirement among the renditions actually
+subscribed:
 
 ```
 playout = max over subscribed renditions of (delay + target)
 ```
 
 A receiver **must not** subtract one rendition's `delay` from another's. Each is
-a lifetime maximum taken against whichever rendition was ahead, so two values need not
-share an origin: if the earliest rendition later drifts behind another, their
-difference understates the real spread. The maximum never under-buffers,
+taken against whichever rendition was ahead and only ever rises, so two values
+need not share an origin: if the earliest rendition later drifts behind another,
+their difference understates the real spread. The maximum never under-buffers,
 because the subscribed renditions' spread is measured from an earliest baseline
 no earlier than the broadcast's, so it never exceeds the largest `delay` among
 them. The cost is over-buffering by the smallest subscribed `delay` when the
@@ -429,7 +445,7 @@ the declared number, so the browser decodes at most 500 ms of any target and
 holds the rest as the encoded frames it actually received.
 
 Policy limits sit above the algorithm. A receiver's own configured maximum and
-the track's retention window both cap what it may hold, and neither is the
+the track's max age both cap what it may hold, and neither is the
 estimator's business.
 
 ## Idle intervals
@@ -468,7 +484,7 @@ target = delay
 ```
 
 An impossible fixed target is refused, not silently adjusted. A negative delay,
-or one beyond the track's retention window, is an error at configuration time.
+or one beyond the track's max age, is an error at configuration time.
 Supported or refused, not warned about and continued.
 
 In the browser this is the numeric `delay` setting; natively it is
@@ -567,3 +583,125 @@ longer match it, which is what stops a file being edited by hand to make a
 failing implementation pass. It compares rather than rewrites; regenerating is
 the `bun doc/concept/audio-jitter/corpus.ts` command above. It runs in
 `just check`.
+
+## Received-audio time stretch
+
+Native playback adapts received PCM to the target with WebRTC NetEq's
+accelerate and preemptive expand. It never generates replacement audio for a
+missing packet. The estimator above is unchanged. The browser implementation
+must conform to this same algorithm and [PCM corpus](audio-jitter/stretch/corpus.json)
+when it adopts stretching; the browser does not yet stretch on this revision.
+
+The source is WebRTC's
+[`TimeStretch`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/time_stretch.cc),
+[`Accelerate`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/accelerate.cc),
+[`PreemptiveExpand`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/preemptive_expand.cc),
+[`DspHelper`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/dsp_helper.cc),
+and [`DecisionLogic`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/decision_logic.cc),
+read on 2026-11-04. The native port retains the BSD license and patent grant in
+`rs/moq-audio/WEBRTC-LICENSE` and `WEBRTC-PATENTS`.
+
+### PCM and decision state
+
+PCM is interleaved `f32` in \[-1, 1]; analysis uses `f64`, and each output sample
+rounds once to `f32`. A frame is one sample across all channels. All counts
+below are frames at the output device's rate `R`. Duration-to-frame conversion
+uses `floor(R * milliseconds / 1000)`, except a measured pitch rounds to the
+nearest frame, with half rounded upward. A processing window is 30 ms of
+**newly received PCM**. A short window passes unchanged. Startup padding is
+never analysed, and finish drains the remaining input without stretching.
+
+`buffered` counts unread frames in the ring plus staged output. `target` is
+the current playout target. The state is `cooldown`, initially 60 ms
+(NetEq's six startup ticks), reduced
+by each frame rendered, saturating at zero. At a window boundary, with
+`high = target + 20 ms`, choose in this order:
+
+1. `buffered >= 4 * high`: fast accelerate, even during cooldown.
+2. `cooldown > 0`: hold.
+3. `buffered >= high`: accelerate.
+4. `buffered < target`: preemptive expand.
+5. Otherwise: hold.
+
+A successful stretch sets cooldown to 50 ms (NetEq's five 10 ms ticks).
+A rejected seam leaves it unchanged. This preserves NetEq's 20 ms adjustment
+granularity, 4x fast threshold, and minimum interval. NetEq's extra
+packet-history maximum-delay term is not added again: this controller sees the
+already decoded PCM queue and its jitter target rather than an RTP playout
+timestamp and packet-arrival history. There is no concealment state.
+
+### Pitch search and admission
+
+Use channel zero as NetEq does. All channels share the selected seam and lag,
+including a silent first channel. For analysis only, linearly sample the first
+channel at a virtual 48 kHz clock and apply NetEq's 48 kHz FIR coefficients
+`[1019, 390, 427, 440, 427, 390, 1019] / 4096`. For downsampled index `i`
+in `[0, 110)`, sum taps `j` in ascending order, at input-frame position
+`(10 + 12*i - j) * R / 48000`. Interpolate between adjacent input frames;
+clamp either endpoint to the window. This retains NetEq's filter and delay
+compensation while admitting native 44.1 kHz and 96 kHz devices too.
+
+For integer lag `l` in `[10, 60)`, sum `down[t] * down[t-l]` for
+`t` in `[60, 110)`. Thus each candidate correlates 50 samples at 4 kHz,
+covering 2.5 to just under 15 ms. Choose the largest sum, smallest lag on a
+tie. At the first candidate, use offset zero. Otherwise use a parabolic
+peak offset `clamp(0.5*(left-right)/(left-2*center+right), -0.5, 0.5)`;
+a zero denominator gives zero, and the last candidate's right neighbour is
+zero, as in NetEq's single-peak search. Convert `(lag+offset)*R/4000`
+to the nearest frame, clamped to `[1, floor(15 ms * R)]`. Rates too low to
+contain that interval hold unchanged.
+
+With `M = floor(15 ms * R)` and pitch `L`, measure the original channel-zero
+vectors `input[M-L .. M]` and `input[M .. M+L]`. Let `E1`, `E2` be their
+squared energies and `C` their dot product. The signal is passive if
+`(E1+E2)/(2*L) <= 8*75000/(32768*32768)`, NetEq's VAD before a background
+noise model is initialised. No background synthesis or noise model is added.
+Otherwise admit the seam only when `C > threshold * sqrt(E1*E2)`, with
+threshold **14746/16384** normally and **8192/16384** for fast accelerate.
+These are NetEq's original thresholds; none was tuned. Active uncorrelated
+PCM holds unchanged, so zero underruns are not guaranteed for arbitrary input
+or outages. Passive PCM may stretch without correlation.
+
+This is a floating-point adaptation, not bit-identical int16 NetEq: FIR and
+correlation sums avoid Q-format rounding, peak refinement uses a parabola
+instead of its fixed-point lookup, and fade weights are computed directly.
+The corpus defines parity between our languages. These arithmetic choices
+are separate from the unchanged admission thresholds; perceptual acceptance
+still needs the listening proof required by the quest.
+
+### Seam and boundaries
+
+In fast mode replace `L` by `floor(M/L)*L` after admission. For a crossfade of
+`L` frames, frame `i` uses `w=(i+1)/(L+1)` and
+`f32(a*(1-w)+b*w)` independently for every channel.
+
+- Accelerate: copy `[0, M-L)`, fade `[M-L, M)` into `[M, M+L)`, then copy
+  `[M+L, 30 ms)`. Output loses `L` frames.
+- Preemptive expand: copy `[0, M)`, fade `[M, M+L)` into `[M-L, M)`, then
+  copy `[M, 30 ms)`. Output gains `L` frames. All 30 ms is fresh input, so
+  NetEq's requirement for at least 15 ms of new active speech is satisfied.
+
+A window consumes its input once. Never reanalyse staged output or repeat
+history after the input ends. Allocate input and 45 ms of output per sink at
+setup; callback processing has no allocation, lock, or host-clock read.
+`buffered()` includes staged output, and finishing accounts for it before
+completing the sink.
+
+After a real underrun, emergency recovery emits silence directly until the
+ring and staged output hold the target again. Padding never enters the pitch
+search. Finishing bypasses that wait so a short tail can drain. Trimming is
+emergency recovery at the ring's capacity watermark. The
+CLI's incoming-media trim is reserved for a distance at the fast threshold,
+not ordinary 20 ms drift. These bounds do not promise concealment of missing
+media or convergence of a signal whose seams continually fail admission.
+
+### Stretch corpus
+
+`audio-jitter/stretch/corpus.json` holds literal interleaved input and expected
+output PCM, device rate and channels, buffered and target frame counts,
+incoming cooldown, requested decision, and admitted lag (zero means hold).
+Compare output within 1e-6 absolute sample amplitude. It includes hold,
+cooldown, fast-mode bypass, linked stereo, passive noise, rejected active
+noise, and 8/44.1/48 kHz seams. Both implementations consume these exact
+vectors; generating expected output from the implementation under test is
+not conformance.

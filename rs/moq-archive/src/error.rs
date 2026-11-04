@@ -44,6 +44,11 @@ pub enum Error {
 	#[error("empty object")]
 	Empty,
 
+	/// A version 2 or 3 object entry is not a group: the datagram form, which an archive
+	/// does not replay, or an unknown one.
+	#[error("unsupported entry form {0}")]
+	Form(u64),
+
 	/// Group sequences are not strictly ascending.
 	#[error("group sequences are not strictly ascending")]
 	Sequence,

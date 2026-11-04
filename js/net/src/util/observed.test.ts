@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Derived, Effect, type Getter, Signal } from "@moq/signals";
 import { Follow, Observed } from "./observed";
 
 const flush = async () => {
@@ -25,6 +25,28 @@ test("reactive one-shot observers preserve demand across a value update", async 
 	const stop = value.wanted.subscribe((wanted) => demand.push(wanted));
 	const effect = new Effect((effect) => {
 		effect.get(value);
+	});
+	await flush();
+	value.set(2);
+	await flush();
+	expect(demand).toEqual([true]);
+	effect.close();
+	await flush();
+	expect(demand).toEqual([true, false]);
+	stop();
+});
+
+// A reload's viewers read the session's PROBE estimate through a Follow and a Derived; a
+// gap in demand there would close and reopen the PROBE stream on every report.
+test("a reactive reader through a Derived preserves demand across a value update", async () => {
+	const value = new Observed(1);
+	const demand: boolean[] = [];
+	const stop = value.wanted.subscribe((wanted) => demand.push(wanted));
+	const derived = new Derived([new Follow(new Signal<Getter<number> | undefined>(value))], (value) =>
+		value === undefined ? undefined : value * 2,
+	);
+	const effect = new Effect((effect) => {
+		effect.get(derived);
 	});
 	await flush();
 	value.set(2);

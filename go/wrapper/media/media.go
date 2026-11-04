@@ -23,10 +23,6 @@ type (
 	Audio = ffi.MoqAudio
 	// Catalog is a broadcast's manifest: its video and audio renditions plus display metadata.
 	Catalog = ffi.MoqCatalog
-	// Delay is how far behind the live edge a decoder plays: Min is the playout delay and where a
-	// cold join starts, and Max, nil for no limit, is how far a stalled group may fall behind before
-	// it is skipped. The subscription carries both; a Min past Max starts at Max.
-	Delay = ffi.MoqDelay
 	// Dimensions is a width and height in pixels.
 	Dimensions = ffi.MoqDimensions
 	// DecodeStart is where an audio or video decoder starts on a track that already holds groups.
@@ -73,15 +69,25 @@ type VideoInit struct {
 	Label *string
 	// Hint carries catalog fields the stream cannot reveal itself.
 	Hint *VideoHint
-	// Lower is the next lower rendition of the same source: this track then sits one
-	// priority below it, so a bandwidth allocator funds that one first.
-	Lower *TrackProducer
+	// Lower is the next lower rendition of the same source, a *TrackProducer or a
+	// *TrackStreamProducer: this track then sits one priority below it, so a bandwidth
+	// allocator funds that one first.
+	Lower Producer
+}
+
+// Producer is a single-track producer of either kind, *TrackProducer or
+// *TrackStreamProducer, such as a video rendition's Lower.
+type Producer interface {
+	// producer is nil for a nil pointer, which means no producer, as a nil Lower does.
+	producer() ffi.MoqMediaProducer
 }
 
 func (init VideoInit) ffi() ffi.MoqVideoInit {
-	var lower **ffi.MoqMediaTrackProducer
+	var lower *ffi.MoqMediaProducer
 	if init.Lower != nil {
-		lower = &init.Lower.inner
+		if producer := init.Lower.producer(); producer != nil {
+			lower = &producer
+		}
 	}
 	return ffi.MoqVideoInit{Format: init.Format, Data: init.Data, Label: init.Label, Hint: init.Hint, Lower: lower}
 }
@@ -299,7 +305,7 @@ func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config Gr
 //
 // Pair it with moq.TrackConsumer.RecvGroup to read media in arrival order: frame timestamps are
 // container media time, not the transport's. Which groups arrive, and how long a stalled one
-// stays readable, is the subscription's MaxDelay. Takes over group, whose handle is closed
+// stays readable, is the subscription's Delay.Max. Takes over group, whose handle is closed
 // afterward; errors if it has already read a frame.
 func NewGroupConsumer(group *moq.GroupConsumer, container Container) (*GroupConsumer, error) {
 	inner, err := ffi.NewMoqMediaGroupConsumer(bridge.GroupConsumer(group), container)
@@ -443,6 +449,13 @@ func (m *TrackProducer) Finish() error {
 	return m.inner.Finish()
 }
 
+func (m *TrackProducer) producer() ffi.MoqMediaProducer {
+	if m == nil {
+		return nil
+	}
+	return ffi.MoqMediaProducerTrack{Producer: m.inner}
+}
+
 // ContainerProducer publishes a container, which demuxes and publishes its own
 // tracks. Unlike TrackProducer there is no per-frame timestamp: a container
 // carries its tracks' timing itself.
@@ -492,9 +505,25 @@ func (m *TrackStreamProducer) Write(payload []byte) error {
 	return m.inner.Write(payload)
 }
 
+// SetEnabled stops or resumes publishing this rendition, advertised as its catalog
+// enabled flag. Disable it when its sender stops for lack of bandwidth: this marks a
+// discontinuity and drops everything written until it is enabled again, so the stream
+// may keep flowing. Enabled again, it resumes, and advertises itself enabled, at the
+// next keyframe in the stream.
+func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
+	return m.inner.SetEnabled(enabled)
+}
+
 // Finish closes the stream.
 func (m *TrackStreamProducer) Finish() error {
 	return m.inner.Finish()
+}
+
+func (m *TrackStreamProducer) producer() ffi.MoqMediaProducer {
+	if m == nil {
+		return nil
+	}
+	return ffi.MoqMediaProducerStream{Producer: m.inner}
 }
 
 // Read is one encoded frame, a ReadGap, or a ReadEnd, in delivery order.

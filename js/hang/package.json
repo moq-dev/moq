@@ -15,7 +15,6 @@
 		"./cmaf": "./src/cmaf/index.ts",
 		"./catalog": "./src/catalog/index.ts",
 		"./container": "./src/container/index.ts",
-		"./hls": "./src/hls.ts",
 		"./util": "./src/util/index.ts"
 	},
 	"scripts": {

@@ -82,6 +82,10 @@ pub const MOQ_ERROR_UNRESOLVABLE_BROADCAST: i32 = -41;
 pub const MOQ_ERROR_EXPIRED: i32 = -42;
 /// The catalog requires a newer moq-hang version than this build supports.
 pub const MOQ_ERROR_UNSUPPORTED_CATALOG: i32 = -43;
+/// The rendition's codec, layout, or description was refused during setup; another rendition may work.
+pub const MOQ_ERROR_UNSUPPORTED_CONFIG: i32 = -44;
+/// A number is outside the range the call accepts.
+pub const MOQ_ERROR_OUT_OF_RANGE: i32 = -45;
 
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
@@ -193,6 +197,10 @@ pub type Status = i32;
 #[derive(Debug, thiserror::Error, Clone)]
 #[non_exhaustive]
 pub enum Error {
+	/// The rendition's codec, layout, or description was refused before decoding started.
+	#[error("unsupported configuration: {0}")]
+	UnsupportedConfig(String),
+
 	/// Error from the underlying MoQ protocol layer.
 	#[error("moq error: {0}")]
 	Moq(#[from] moq_net::Error),
@@ -341,6 +349,11 @@ pub enum Error {
 	/// resolved through an origin, so there is nothing to resolve the reference against.
 	#[error("unresolvable broadcast reference: {0}")]
 	UnresolvableBroadcast(String),
+
+	/// A number was outside the range the call accepts, such as viewer ceilings summing
+	/// above what a PROBE target carries.
+	#[error("out of range: {0}")]
+	OutOfRange(String),
 }
 
 impl From<moq_json::Error> for Error {
@@ -374,13 +387,19 @@ impl From<url::ParseError> for Error {
 
 impl From<moq_audio::Error> for Error {
 	fn from(err: moq_audio::Error) -> Self {
-		Error::Audio(Arc::new(err))
+		match err {
+			moq_audio::Error::UnsupportedConfig(reason) => Error::UnsupportedConfig(reason),
+			err => Error::Audio(Arc::new(err)),
+		}
 	}
 }
 
 impl From<moq_video::Error> for Error {
 	fn from(err: moq_video::Error) -> Self {
-		Error::Video(Arc::new(err))
+		match err {
+			moq_video::Error::UnsupportedConfig(reason) => Error::UnsupportedConfig(reason),
+			err => Error::Video(Arc::new(err)),
+		}
 	}
 }
 
@@ -460,8 +479,7 @@ fn stream_kind(err: &moq_net::StreamError) -> moq_protocol_kind {
 		moq_net::StreamError::GoingAway => MOQ_PROTOCOL_KIND_GOING_AWAY,
 		moq_net::StreamError::TooFarBehind => MOQ_PROTOCOL_KIND_TOO_FAR_BEHIND,
 		moq_net::StreamError::MalformedTrack => MOQ_PROTOCOL_KIND_MALFORMED_TRACK,
-		// A datagram reached by a FETCH is, to a binding, a miss like any other.
-		moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable => MOQ_PROTOCOL_KIND_NOT_FOUND,
+		moq_net::StreamError::NotFound => MOQ_PROTOCOL_KIND_NOT_FOUND,
 		moq_net::StreamError::Unroutable => MOQ_PROTOCOL_KIND_UNROUTABLE,
 		moq_net::StreamError::Old => MOQ_PROTOCOL_KIND_OLD,
 		moq_net::StreamError::Evicted => MOQ_PROTOCOL_KIND_EVICTED,
@@ -514,6 +532,7 @@ impl ffi::ReturnCode for Error {
 			Error::FrameNotFound => MOQ_ERROR_FRAME_NOT_FOUND,
 			Error::Mux(_) => MOQ_ERROR_MUX,
 			Error::Audio(_) => MOQ_ERROR_AUDIO,
+			Error::UnsupportedConfig(_) => MOQ_ERROR_UNSUPPORTED_CONFIG,
 			Error::BufferNotConsumed => MOQ_ERROR_BUFFER_NOT_CONSUMED,
 			Error::GroupNotFound => MOQ_ERROR_GROUP_NOT_FOUND,
 			Error::Native(moq_tokio::Error::Panic) => MOQ_ERROR_PANIC,
@@ -525,12 +544,28 @@ impl ffi::ReturnCode for Error {
 			Error::JsonTrack(_) => MOQ_ERROR_JSON_TRACK,
 			Error::InvalidConfig(_) => MOQ_ERROR_INVALID_CONFIG,
 			Error::UnresolvableBroadcast(_) => MOQ_ERROR_UNRESOLVABLE_BROADCAST,
+			Error::OutOfRange(_) => MOQ_ERROR_OUT_OF_RANGE,
 		}
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn setup_refusals_are_distinct_from_later_codec_failures() {
+		use crate::ffi::ReturnCode;
+		let setup = super::Error::from(moq_audio::Error::UnsupportedConfig("layout".into()));
+		assert_eq!(setup.code(), super::MOQ_ERROR_UNSUPPORTED_CONFIG);
+		let later = super::Error::from(moq_audio::Error::Unsupported("duration".into()));
+		assert_eq!(later.code(), super::MOQ_ERROR_AUDIO);
+		let decode = super::Error::from(moq_audio::Error::Decode("packet".into()));
+		assert_eq!(decode.code(), super::MOQ_ERROR_AUDIO);
+		let setup = super::Error::from(moq_video::Error::UnsupportedConfig("description".into()));
+		assert_eq!(setup.code(), super::MOQ_ERROR_UNSUPPORTED_CONFIG);
+		let gone = super::Error::from(moq_video::Error::CodecGone("worker".into()));
+		assert_eq!(gone.code(), super::MOQ_ERROR_VIDEO);
+	}
+
 	#[test]
 	fn unsupported_catalog_has_its_own_code() {
 		use crate::ffi::ReturnCode;
