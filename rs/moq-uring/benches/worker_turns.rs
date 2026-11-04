@@ -41,11 +41,11 @@ fn request_reply(c: &mut criterion::Criterion) {
 						.expect("socket")
 				};
 				let server = quic::Endpoint::new(
-					socket(),
 					quic::endpoint::Config::default().with_server(quic::server::Config::new(tls.clone())),
+					socket(),
 				)
 				.expect("server");
-				let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client");
+				let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket()).expect("client");
 				let mut dial = quic::client::Config::default();
 				dial.alpn = vec![ALPN.to_owned()];
 				dial.verify = false;

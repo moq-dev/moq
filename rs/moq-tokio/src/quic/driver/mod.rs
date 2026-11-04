@@ -44,6 +44,10 @@
 //! with a domain name--then as with TLS, self-signed certificates can be used to provide
 //! encryption alone.
 #![warn(missing_docs)]
+//!
+//! Session waits take `&self` and a caller-owned `&kio::Waiter`; stream reads and writes
+//! take `&mut self`. Dropping the waiter cancels its registrations. Async helpers own their
+//! waiter, while `Future` and runtime I/O traits bridge their `Context` through `kio::Park`.
 
 pub mod connection;
 pub mod endpoint;

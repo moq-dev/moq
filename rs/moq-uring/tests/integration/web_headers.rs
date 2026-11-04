@@ -30,7 +30,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint =
-		quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+		quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), socket).expect("endpoint");
 	let address = endpoint.local_addr();
 	let (start_tx, mut start_rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
 	let (acked, acknowledgement) = tokio::sync::oneshot::channel();

@@ -109,7 +109,7 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
 		.await
 		.expect("write");
 
-	kio::clock::timeout(Duration::from_secs(10), send.stopped())
+	kio::clock::timeout(Duration::from_secs(10), send.closed())
 		.await
 		.expect("the stream was not stopped")
 		.expect("stopped")

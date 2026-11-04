@@ -276,7 +276,7 @@ impl Session {
 				opening.uni = Some((send, self.header_uni.clone()));
 			}
 			let (send, header) = opening.uni.as_mut().unwrap();
-			let result = std::task::ready!(poll_header(send, cx, header));
+			let result = std::task::ready!(poll_header(send, opening.park.hold(cx), header));
 			let (mut send, _) = opening.uni.take().unwrap();
 			result.map_err(|e| self.map_error(e))?;
 			send.set_priority(options.priority);
@@ -333,7 +333,7 @@ impl Session {
 				*slot = Some((send, recv, self.header_bi.clone()));
 			}
 			let (send, _, header) = slot.as_mut().unwrap();
-			let result = std::task::ready!(poll_header(send, cx, header));
+			let result = std::task::ready!(poll_header(send, opening.park.hold(cx), header));
 			let (mut send, recv, _) = slot.take().unwrap();
 			result.map_err(|e| self.map_error(e))?;
 			send.set_priority(options.priority);
@@ -347,7 +347,7 @@ impl Session {
 	}
 
 	/// Receive the next datagram with its WebTransport session header removed.
-	pub async fn read_datagram(&self) -> Result<Bytes, SessionError> {
+	pub async fn recv_datagram(&self) -> Result<Bytes, SessionError> {
 		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
@@ -629,9 +629,9 @@ struct Opening {
 	request: Option<(send::Stream, crate::quic::driver::recv::Stream, Bytes)>,
 }
 
-fn poll_header(send: &mut send::Stream, cx: &mut Context<'_>, header: &mut Bytes) -> Poll<Result<(), SessionError>> {
+fn poll_header(send: &mut send::Stream, waiter: &Waiter, header: &mut Bytes) -> Poll<Result<(), SessionError>> {
 	while header.has_remaining() {
-		std::task::ready!(send.poll_write_buf(cx, header)).map_err(|err| match err {
+		std::task::ready!(send.poll_write_buf(waiter, header)).map_err(|err| match err {
 			crate::quic::driver::send::Error::Connection(err) => SessionError::from(err),
 			err => WebTransportError::WriteError(err).into(),
 		})?;
@@ -1385,8 +1385,8 @@ mod tests {
 			// The FIN is acknowledged, so it has arrived and only the lease holds the end off.
 			assert!(finished.await.unwrap().is_none());
 
-			let mut cx = Context::from_waker(std::task::Waker::noop());
-			let Poll::Ready(lease) = recv.poll_lease(&mut cx, 6) else {
+			let waiter = Waiter::noop();
+			let Poll::Ready(lease) = recv.poll_lease(&waiter, 6) else {
 				panic!("acknowledged bytes are leasable");
 			};
 			let lease = lease.unwrap();
@@ -1394,7 +1394,7 @@ mod tests {
 			drop(lease);
 			assert!(recv.poll_closed(&Waiter::noop()).is_pending());
 
-			let Poll::Ready(lease) = recv.poll_lease(&mut cx, 6) else {
+			let Poll::Ready(lease) = recv.poll_lease(&waiter, 6) else {
 				panic!("restored bytes are leasable");
 			};
 			let mut lease = lease.unwrap();
@@ -1414,7 +1414,7 @@ mod tests {
 			client.connection().send_datagram(stray, Default::default()).unwrap();
 		}
 		client.send_datagram(&b"ok"[..], Default::default()).unwrap();
-		let datagram = kio::clock::timeout(Duration::from_secs(10), server.read_datagram())
+		let datagram = kio::clock::timeout(Duration::from_secs(10), server.recv_datagram())
 			.await
 			.expect("no datagram arrived")
 			.unwrap();
@@ -1610,7 +1610,7 @@ mod tests {
 			.await
 			.unwrap();
 		let send = send.finish();
-		assert!(send.stopped().await.unwrap().is_none());
+		assert!(send.closed().await.unwrap().is_none());
 		client.close(0u32.into(), "done");
 		server.closed().await;
 		let mut accept = SessionAccept::new(server, SESSION, Arc::new(CloseReason::new(false)), Vec::new());

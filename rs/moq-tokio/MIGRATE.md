@@ -14,6 +14,16 @@ Direct calls to the infallible crypto helpers panic with that feature; call `rin
 `tls::Error::NoCryptoProvider` is removed. The `net` and `driver` features include certificate support, so an RTMPS-only embedder can use `net` without selecting a provider.
 Self-signed certificates and mDNS/QUIC-LB authentication use rind. Wire formats are unchanged.
 
+### QUIC method names and polls match the transport layer
+
+On `quic::driver::connection::Connection` and `quic::web::Session`, rename `read_datagram()` to `recv_datagram()`.
+On both layers' `send::Stream` and `send::Finished`, rename `stopped()` to `closed()`; results and acknowledgement semantics are unchanged.
+The driver's close future still owns its stream observation and may outlive the handle.
+
+Both layers' `recv::Stream::poll_lease`, and `quic::web::recv::Stream::poll_reset`, take `&kio::Waiter` instead of `&mut Context`.
+Use `kio::wait(|waiter| stream.poll_lease(waiter, want).map_ok(...))` for a lease operation, or retain a `kio::Park` in a `Future` implementation and pass `park.hold(cx)`.
+Dropping the caller's waiter cancels its registrations while the stream stays alive.
+
 ### Native WebTransport implements moq-net's poll traits ([#7771](https://github.com/moq-dev/moq/pull/7771))
 
 `quic::web` is supported as a WebTransport library without running MoQ.

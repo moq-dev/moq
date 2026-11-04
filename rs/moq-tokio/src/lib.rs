@@ -8,8 +8,8 @@
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
 //! - A WebRTC data channel with a browser peer, signaled by the caller (qmux; requires `webrtc` feature)
 //!
-//! See [`Client`] for connecting to relays and [`Server`] for accepting
-//! connections. The `mdns` feature finds peers to connect to on the local network.
+//! With `net`, `client::Client` connects to relays; transport features enable
+//! `server::Server` for accepting connections. The `mdns` feature finds peers on the local network.
 //!
 //! Cryptography always comes from rind. TLS setup checks CPU support and returns
 //! an error naming a missing feature. Older x86_64 CPUs and aarch64 boards without
