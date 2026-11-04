@@ -883,15 +883,10 @@ export class Subscriber {
 		});
 		let stream: Stream | undefined;
 		try {
-			const opening = Stream.open(this.#quic, { version: this.version });
 			const cut = valid ? AbortSignal.any([stop, valid]) : stop;
-			void opening.then(
-				(late) => {
-					if (cut.aborted) late.abort(error(cut.reason));
-				},
-				() => {},
-			);
-			stream = await untilAborted(opening, cut);
+			stream = await Stream.tryOpen(this.#quic, { version: this.version, signal: cut });
+			// Gave up, perhaps handed a stream as it did: the catch below hands back any stream.
+			if (!stream || cut.aborted) throw cut.reason;
 			await stream.writer.u53(StreamId.Tracks);
 			await new TracksMessage(broadcast, consumed.instance).encode(stream.writer, this.version);
 			let synced = false;
@@ -1464,17 +1459,12 @@ export class Subscriber {
 	): Promise<T> {
 		const closed = signal ? AbortSignal.any([this.#closed.signal, signal]) : this.#closed.signal;
 		closed.throwIfAborted();
-		const opening = deadline.open(Stream.open(this.#quic, { ...options }));
-		let stream: Stream;
-		try {
-			stream = await untilAborted(opening, closed);
-		} catch (err) {
-			void opening.then(
-				(late) => late.abort(error(err)),
-				() => {},
-			);
-			throw err;
-		}
+		// Giving up leaves the line, so the next open takes the stream this one was waiting for.
+		const opening = Stream.tryOpen(this.#quic, { ...options, signal: closed }).then((opened) => {
+			if (!opened) throw closed.reason;
+			return opened;
+		});
+		const stream = await deadline.open(opening);
 		const abort = () => stream.abort(error(closed.reason));
 		closed.addEventListener("abort", abort);
 		try {
@@ -2341,11 +2331,11 @@ export class Subscriber {
 				increase = level >= ProbeLevel.Increase;
 			}
 			if (this.#goingAway() || abort.aborted) return;
-			const opening = Stream.open(this.#quic, { version: this.version });
-			const stream = await scope.race(opening);
-			if (!stream) {
-				// A queued transport open cannot be cancelled; give its slot back unused.
-				void opening.then((stream) => stream.close()).catch(() => {});
+			const stream = await Stream.tryOpen(this.#quic, { version: this.version, signal: abort });
+			if (!stream) return;
+			if (abort.aborted) {
+				// Handed a stream as it gave up: give the slot back unused.
+				stream.close();
 				return;
 			}
 			scope.cleanup(() => stream.close());

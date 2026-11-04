@@ -52,15 +52,18 @@ class Line<T> {
 
 	/**
 	 * Wait for a stream at `rank`, read again whenever a stream is handed out, or undefined once
-	 * `cancel` settles first.
+	 * `cancel` settles or aborts first.
 	 */
 	open(rank: Rank): Promise<T>;
-	open(rank: Rank, cancel: Promise<unknown>): Promise<T | undefined>;
-	async open(rank: Rank, cancel?: Promise<unknown>): Promise<T | undefined> {
+	open(rank: Rank, cancel: Promise<unknown> | AbortSignal): Promise<T | undefined>;
+	async open(rank: Rank, cancel?: Promise<unknown> | AbortSignal): Promise<T | undefined> {
 		const current = typeof rank === "number" ? () => rank : rank;
-		// A caller already cancelled takes nothing, not even a stream that is free now. A fresh
-		// settled promise, observed after `cancel`, loses only to a cancel already settled.
-		if (cancel && (await race([cancel, Promise.resolve(live)])) !== live) return undefined;
+		// A caller already cancelled takes nothing, not even a stream that is free now. A signal
+		// says so at once, so the open keeps its place in call order. A fresh settled promise,
+		// observed after `cancel`, loses only to a cancel already settled.
+		if (cancel instanceof AbortSignal) {
+			if (cancel.aborted) return undefined;
+		} else if (cancel && (await race([cancel, Promise.resolve(live)])) !== live) return undefined;
 		if (this.#waiting.length === 0) {
 			const spare = this.#spare.pop();
 			if (spare) return this.#handed(spare, current());
@@ -90,13 +93,16 @@ class Line<T> {
 		}
 
 		if (!cancel) return ticket;
+		const signalled = cancel instanceof AbortSignal ? aborted(cancel) : undefined;
 		// `race`, so a cancel shared across many opens gains no reaction per open.
 		let opened: T | undefined;
 		try {
-			opened = (await race([ticket, cancel])) as T | undefined;
+			opened = (await race([ticket, signalled?.promise ?? cancel])) as T | undefined;
 		} catch (err: unknown) {
 			if (this.#leave(waiting)) throw err;
 			return ticket;
+		} finally {
+			signalled?.done();
 		}
 		if (opened !== undefined || !this.#leave(waiting)) return opened ?? ticket;
 		return undefined;
@@ -138,6 +144,14 @@ class Line<T> {
 		if (admitted.order !== sendOrder) this.#rank(admitted.stream, sendOrder);
 		return admitted.stream;
 	}
+}
+
+/** Resolve once `signal` aborts, until `done` stops listening, so a long-lived signal gathers no listeners. */
+function aborted(signal: AbortSignal): { promise: Promise<void>; done: () => void } {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const onAbort = () => resolve();
+	signal.addEventListener("abort", onAbort, { once: true });
+	return { promise, done: () => signal.removeEventListener("abort", onAbort) };
 }
 
 type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };

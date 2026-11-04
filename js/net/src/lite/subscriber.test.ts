@@ -1160,7 +1160,8 @@ function expectCut(err: unknown, cause: Error | undefined) {
 }
 
 // Lite has no FETCH_OK, so a publisher that never answers holds each setup stage until the
-// subscriber closes. The stream that stage opened is reset, even one opening after the close.
+// subscriber closes. The stream that stage opened is reset; one still waiting to open leaves
+// the line, so the stream admitted for it later goes unused to the next open.
 test.each([
 	["the TRACK_INFO", "track", undefined],
 	["the FETCH", "fetch", undefined],
@@ -1197,6 +1198,11 @@ test.each([
 
 	const stuck = streams[stage === "track" ? 0 : 1];
 	stuck.release();
+	if (stage === "open") {
+		await drainReactions();
+		expect(stuck.written).toEqual([]);
+		return;
+	}
 	await stuck.aborted;
 });
 
@@ -1986,7 +1992,16 @@ test.each(["track", "fetch", "open"] as const)(
 		retired.abort(cause);
 		expect(await first).toBe(cause);
 		expect(await second).toBe(cause);
-		if (stage === "open") streams[1].release();
+		if (stage === "open") {
+			// The FETCH open left the line: the next open takes its stream rather than resetting it.
+			streams[1].release();
+			await drainReactions();
+			const next = subscriber.fetchGroup(path, "video", 1n).catch((err: unknown) => err);
+			await streams[1].writing;
+			subscriber.close();
+			await next;
+			return;
+		}
 		const active = streams[stage === "track" ? 0 : 1];
 		expect(await active.aborted).toBeDefined();
 		subscriber.close();
@@ -2173,7 +2188,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	},
 );
 
-test("a cancelled queued PROBE open sends no request and releases its slot", async () => {
+test("a cancelled queued PROBE open sends no request and leaves its slot to the next open", async () => {
 	const { quic, streams, opened } = fakeSession([0]);
 	const signal = new Signal<ProbeStats>({});
 	const subscriber = new Subscriber(quic, Version.DRAFT_03, HopSchema.parse(1n), signal);
@@ -2184,8 +2199,16 @@ test("a cancelled queued PROBE open sends no request and releases its slot", asy
 	await probing;
 	expect(streams[0].written).toEqual([]);
 	streams[0].release();
-	await streams[0].finished;
+	await drainReactions();
 	expect(streams[0].written).toEqual([]);
+
+	// The next open takes the stream the cancelled one left, rather than another create.
+	const again = new AbortController();
+	const reprobing = subscriber.runProbe(again.signal);
+	await streams[0].writing;
+	expect(streams).toHaveLength(1);
+	again.abort();
+	await reprobing;
 	subscriber.close();
 });
 

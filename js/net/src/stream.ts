@@ -209,6 +209,19 @@ export class Stream {
 		return new Stream({ readable: opened.readable, writable: opened.writable, version: options.version });
 	}
 
+	/**
+	 * Like {@link Stream.open}, but leaves the line once `signal` aborts, returning undefined so
+	 * the caller can drop its request. The stream its create admits later goes to the next open
+	 * in line. A transport failure still throws.
+	 */
+	static async tryOpen(
+		quic: WebTransport,
+		options: OpenOptions & { signal: AbortSignal },
+	): Promise<Stream | undefined> {
+		const opened = await lines(quic).bi.open(options.sendOrder ?? 0, options.signal);
+		return opened && new Stream({ readable: opened.readable, writable: opened.writable, version: options.version });
+	}
+
 	close() {
 		this.writer.close();
 		// A routine unsubscribe, so send CANCELLED. A bare Error would put 0 on the wire,

@@ -759,6 +759,24 @@ test("tryOpen gives up when cancelled, handing a stream that opens afterwards to
 	expect(created).toHaveLength(2);
 });
 
+// A request abandoned while the peer withholds credit leaves the line, so the credit that
+// returns serves a live request instead of one that resets its stream at once.
+test("cancelled bidi opens leave the line to the next open", async () => {
+	const { quic, grant, created } = creditTransport();
+	for (let i = 0; i < 3; i++) {
+		const cancelled = new AbortController();
+		const opening = Stream.tryOpen(quic, { signal: cancelled.signal, version: QUIC });
+		cancelled.abort();
+		expect(await opening).toBeUndefined();
+	}
+	// One already aborted never joins the line.
+	expect(await Stream.tryOpen(quic, { signal: AbortSignal.abort(), version: QUIC })).toBeUndefined();
+	const live = Stream.open(quic, { version: QUIC });
+	await grant();
+	expect(await live).toBeInstanceOf(Stream);
+	expect(created).toHaveLength(1);
+});
+
 test("tryOpen rethrows a rejected cancel", async () => {
 	const { quic } = creditTransport();
 	const cancelled = Promise.withResolvers<void>();
