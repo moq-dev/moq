@@ -1,5 +1,7 @@
 import { Milli, Nano } from "@moq/clock";
 import { controlTimeout, error, NoStreamCredit } from "../error.ts";
+import { SOCKET } from "../internal.ts";
+import * as Path from "../path.ts";
 import type { OpenOptions, Stream } from "../stream.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
 
@@ -21,12 +23,20 @@ export interface Abortable {
 	abort(err: Error): void;
 }
 
-/** One fatal deadline for a request, including every stream its setup creates. @internal */
+/** Own request setup streams, bounding ordinary requests and leaving socket acceptance cancellable. @internal */
 export class Deadline {
 	/** Creates still waiting on credit: a fetch opens its TRACK stream alongside. */
 	#opening = 0;
 	#owners: Abortable[] = [];
 	#failure?: Error;
+	#bounded: boolean;
+
+	constructor(broadcast?: Path.Valid) {
+		// Socket acceptance is an application decision. Its existing reserved namespace
+		// identifies those requests at both adapters, without adding a wire option.
+		// Demand, cancellation and session closure bound their lifetime instead.
+		this.#bounded = broadcast === undefined || Path.parts(broadcast).at(-2) !== SOCKET;
+	}
 
 	/**
 	 * Record a create so deadline failures reset its stream even if it opens late. `own` wraps
@@ -64,9 +74,10 @@ export class Deadline {
 		await write();
 	}
 
-	/** Wait for the first answer under the request's single deadline. */
+	/** Wait for the first answer, using the ordinary budget outside the socket namespace. */
 	async wait<T>(answer: Promise<T>): Promise<T> {
 		try {
+			if (!this.#bounded) return await answer;
 			return await withTimeout(
 				answer,
 				Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)),

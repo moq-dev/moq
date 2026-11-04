@@ -115,6 +115,9 @@ connection.close();
 ```
 
 A server takes `await endpoint.acceptTcp()`, then accepts or rejects that incoming dial.
+The incoming peer and session are unverified claims; `accept()` can fail if the original
+dial has closed. Pending socket acceptance waits until cancellation or closure, without
+an application acceptance timeout.
 TCP and track dials have independent accept queues. For independent messages, use
 `dialTrack` / `acceptTrack`: the stream exposes a track producer and an already subscribed
 consumer, reliable and ascending until updated. Both stream types expose `peer` and

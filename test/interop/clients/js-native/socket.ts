@@ -17,8 +17,7 @@ assert(
 );
 const origin = new Moq.Origin.Producer();
 const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from(prefix), role === "dial" ? "dialer" : "acceptor");
-let next: Promise<Moq.socket.Incoming<Moq.socket.TcpStream> | Moq.socket.Incoming<Moq.socket.TrackStream>> | undefined =
-	role === "accept" ? (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack()) : undefined;
+const next = role === "accept" ? (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack()) : undefined;
 const connection = await Moq.Connection.connect({
 	url: new URL(address),
 	versions: [version],
@@ -28,18 +27,31 @@ const connection = await Moq.Connection.connect({
 });
 const lines = createInterface({ input: process.stdin });
 const commands = lines[Symbol.asyncIterator]();
+// Every Incoming is a claim: a pipelined request can outlive its refused metadata.
+// Verify each new incoming once; a failed caller's dial still fails the harness.
+async function accepted(): Promise<Moq.socket.TcpStream | Moq.socket.TrackStream> {
+	for (;;) {
+		const incoming: Moq.socket.Incoming<Moq.socket.TcpStream> | Moq.socket.Incoming<Moq.socket.TrackStream> =
+			await (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack());
+		try {
+			return await incoming.accept();
+		} catch {
+			/* The claimed original dial was canceled or no longer answers. */
+		}
+	}
+}
+
 try {
 	if (role === "accept") process.stdout.write("socket ready\n");
 	// Refuse before opening data sessions, so the probe is independent of late
 	// unverified queries for a completed half.
 	if (next) {
 		(await next).reject();
-		next = protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack();
 	} else {
 		await assert.rejects(protocol === "tcp" ? endpoint.dialTcp("acceptor") : endpoint.dialTrack("acceptor"));
 	}
 	const stream = next
-		? await (await next).accept()
+		? await accepted()
 		: protocol === "tcp"
 			? await endpoint.dialTcp("acceptor")
 			: await endpoint.dialTrack("acceptor");
@@ -68,7 +80,7 @@ try {
 		assert.equal(await reader.readFrame(), undefined);
 	}
 	const second = next
-		? await (await (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack())).accept()
+		? await accepted()
 		: protocol === "tcp"
 			? await endpoint.dialTcp("acceptor")
 			: await endpoint.dialTrack("acceptor");

@@ -10,7 +10,7 @@
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { NotFound, ProtocolViolation, StreamCode, StreamError } from "./error.ts";
 import * as Group from "./group.ts";
-import { hooks } from "./internal.ts";
+import { hooks, SOCKET } from "./internal.ts";
 import type * as Origin from "./origin.ts";
 import * as Path from "./path.ts";
 import type * as Track from "./track.ts";
@@ -37,7 +37,7 @@ function segment(id: string): void {
 
 function endpointPath(prefix: Path.Valid, id: string): Path.Valid {
 	segment(id);
-	return Path.encode(Path.from(prefix, ".socket", id));
+	return Path.encode(Path.from(prefix, SOCKET, id));
 }
 
 function parse(name: string): { protocol: string; dialer: string; acceptor: string; session: string } | undefined {

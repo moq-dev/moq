@@ -601,3 +601,53 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 		});
 	}
 }
+
+for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
+	for (const protocol of ["tcp", "track"] as const) {
+		test(`pending socket ${protocol} acceptance over ${alpn} has no arbitrary deadline`, async () => {
+			const clock = time();
+			const ao = new Origin.Producer();
+			const bo = new Origin.Producer();
+			origins.add(ao);
+			origins.add(bo);
+			const a = new socket.Endpoint(ao, Path.from("room"), "alice");
+			const b = new socket.Endpoint(bo, Path.from("room"), "bob");
+			const pair = createMockTransportPair(alpn);
+			const url = new URL("https://localhost/socket");
+			const [client, server] = await Promise.all([
+				connect({ url, transport: pair.client, publish: ao.consume(), consume: ao }),
+				acceptConnection({ url, transport: pair.server, publish: bo.consume(), consume: bo }),
+			]);
+			const next = protocol === "tcp" ? b.acceptTcp() : b.acceptTrack();
+			let outcome: unknown;
+			const dialing = protocol === "tcp" ? a.dialTcp("bob") : a.dialTrack("bob");
+			const settled = dialing.then(
+				(value) => {
+					outcome = value;
+				},
+				(error) => {
+					outcome = error;
+				},
+			);
+			try {
+				const incoming = await next;
+				await clock.advance(Nano.fromSecond(Second(3600)));
+				expect(outcome).toBeUndefined();
+				const remote = await incoming.accept();
+				const local = await dialing;
+				local.producer.writeFrame(bytes(7));
+				const frame =
+					remote instanceof socket.TcpStream
+						? await remote.consumer.readFrame()
+						: await remote.consumer.ordered().readFrame();
+				expect(frame?.payload).toEqual(bytes(7).payload);
+			} finally {
+				a.close();
+				b.close();
+				client.abort();
+				server.abort();
+				await settled;
+			}
+		});
+	}
+}

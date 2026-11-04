@@ -33,6 +33,9 @@ import * as Varint from "./varint.ts";
 import type { Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
+/** The hidden broadcast segment reserved for socket endpoints. */
+export const SOCKET = ".socket";
+
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
 export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
 

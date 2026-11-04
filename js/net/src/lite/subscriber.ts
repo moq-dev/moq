@@ -1020,7 +1020,7 @@ export class Subscriber {
 		const retire = this.#retirer(state, valid);
 		valid?.addEventListener("abort", retire);
 		if (valid?.aborted) retire();
-		const deadline = new Deadline();
+		const deadline = new Deadline(broadcast);
 		const setup = this.#openSubscribe(state, msg, ranges, request, id, deadline);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
@@ -1092,7 +1092,7 @@ export class Subscriber {
 					framing,
 					state,
 				);
-				const deadline = new Deadline();
+				const deadline = new Deadline(broadcast);
 				sent = this.#sendSubscribe(state, msg, deadline);
 				stream = await deadline.wait(untilAborted(untilAborted(sent, valid), left.signal));
 				current = { id, msg };
@@ -1513,7 +1513,7 @@ export class Subscriber {
 		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
-		const deadline = new Deadline();
+		const deadline = new Deadline(broadcast);
 		const { info, stream } = await deadline.wait(this.#trackInfo(broadcast, instance, track, hold, deadline));
 		if (hold && !hold.aborted) hold.addEventListener("abort", () => stream.close(), { once: true });
 		else stream.close();
@@ -1613,7 +1613,7 @@ export class Subscriber {
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
 			// the streams the setup opened.
-			const deadline = new Deadline();
+			const deadline = new Deadline(broadcast);
 			const setup = deadline.wait(
 				this.#fetchSetup(broadcast, consumed, track, sequence, priority, group, deadline, maxDelay),
 			);

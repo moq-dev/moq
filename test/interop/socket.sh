@@ -7,7 +7,7 @@ run_socket_client() {
     local runtime="$1"
     shift
     case "$runtime" in
-        rust) timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-socket" "$@" ;;
+        rust) timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-socket-js" "$@" ;;
         js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" node --import tsx socket.ts "$@") ;;
         js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" bun socket.ts "$@") ;;
     esac
@@ -82,11 +82,11 @@ plan_socket_pair() {
     record "not run" case="socket $3" publisher="$1" subscriber="$2" version="$4"
 }
 
-plan_sockets() {
+plan_js_sockets() {
     socket_pairs plan_socket_pair
 }
 
-run_sockets() {
+run_js_sockets() {
     echo '=== sockets ==='
     socket_pairs run_socket_pair
 }

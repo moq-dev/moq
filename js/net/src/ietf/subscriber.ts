@@ -789,7 +789,7 @@ export class Subscriber {
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
 		const state: SubscribeSetupState = {};
-		const deadline = new Deadline();
+		const deadline = new Deadline(broadcast);
 		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, known?.producer);
 
 		// The publisher can be serving before it answers, so waiting only on the response
@@ -1013,7 +1013,7 @@ export class Subscriber {
 		let stream: RequestStream | undefined;
 		let producer: track.Producer | undefined;
 		let fills: Promise<void> | undefined;
-		const deadline = new Deadline();
+		const deadline = new Deadline(broadcast);
 		try {
 			const setup = async () => {
 				const id = await this.#session.nextRequestId(signal);

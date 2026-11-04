@@ -41,7 +41,15 @@ Incoming requests carry claimed names; accepting checks that the original dial
 still answers before publishing a new half. Controlled late-query cases for both
 protocols verify that a closed session cannot be accepted again or receive the
 fresh session's content. The relay refusal probe runs before data sessions, so it
-uses one rejection independently of late requests for completed halves.
+uses one rejection independently of late requests for completed halves. Each
+subsequent incoming is verified once; canceled claims are declined before the
+next valid dial, as required by the unverified Incoming contract.
+
+Socket request budgets now use the established `.socket/<id>` namespace to wait
+until caller cancellation or session closure. Controlled one-hour virtual waits
+cover both protocols on lite-07 and IETF18/20/22. Ordinary request budgets are
+unchanged. The independent JS IETF subscriber deadline constructors overlap one
+file owned by the shared adapter PR; its absolute-start correction stays there.
 
 ## Waiting
 

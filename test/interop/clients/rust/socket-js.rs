@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		args.len() == 6,
-		"usage: interop-socket dial|accept URL PREFIX tcp|track VERSION"
+		"usage: interop-socket-js dial|accept URL PREFIX tcp|track VERSION"
 	);
 	let dial = match args[1].as_str() {
 		"dial" => true,
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 		let mut stream = if dial {
 			endpoint.dial_tcp("acceptor")?.await?
 		} else {
-			endpoint.accept_tcp().await?.accept().await?
+			accepted_tcp(&endpoint).await?
 		};
 		ensure!(stream.peer() == if dial { "acceptor" } else { "dialer" });
 		ensure!(stream.session().len() == 32);
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 		let mut stream = if dial {
 			endpoint.dial_track("acceptor", None)?.await?
 		} else {
-			endpoint.accept_track().await?.accept(None).await?
+			accepted_track(&endpoint).await?
 		};
 		ensure!(stream.peer() == if dial { "acceptor" } else { "dialer" });
 		ensure!(stream.session().len() == 32);
@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
 		let mut reset = if dial {
 			endpoint.dial_tcp("acceptor")?.await?
 		} else {
-			endpoint.accept_tcp().await?.accept().await?
+			accepted_tcp(&endpoint).await?
 		};
 		if dial {
 			reset.producer.write_frame(None, vec![48])?;
@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
 		let mut reset = if dial {
 			endpoint.dial_track("acceptor", None)?.await?
 		} else {
-			endpoint.accept_track().await?.accept(None).await?
+			accepted_track(&endpoint).await?
 		};
 		let mut reader = reset.consumer.ordered();
 		if dial {
@@ -164,4 +164,23 @@ async fn main() -> anyhow::Result<()> {
 	let _ = connection.close().await;
 	client.close().await;
 	Ok(())
+}
+
+// An Incoming's claimed original dial can disappear before verification.
+async fn accepted_tcp(endpoint: &moq_net::socket::Endpoint) -> anyhow::Result<moq_net::socket::TcpStream> {
+	loop {
+		let incoming = endpoint.accept_tcp().await?;
+		if let Ok(stream) = incoming.accept().await {
+			return Ok(stream);
+		}
+	}
+}
+
+async fn accepted_track(endpoint: &moq_net::socket::Endpoint) -> anyhow::Result<moq_net::socket::TrackStream> {
+	loop {
+		let incoming = endpoint.accept_track().await?;
+		if let Ok(stream) = incoming.accept(None).await {
+			return Ok(stream);
+		}
+	}
 }
