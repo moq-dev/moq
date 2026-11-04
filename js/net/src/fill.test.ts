@@ -401,6 +401,9 @@ test("fill: an arrival-order reader stops waiting on an unanswered fill once its
 		// The fill never answers; the holes go past the budget, and the finished track ends the read.
 		await clock.advance(Nano.fromMilli(Milli(1001)));
 		expect(await next).toBeUndefined();
+		// The reader gave the stale holes up, so the handler hears it no longer waits on them.
+		expect(fill?.wanted()).toBeUndefined();
+		expect(fill?.isWanted(0n)).toBe(false);
 
 		fill?.close();
 		requests.close();
@@ -616,6 +619,53 @@ test("fill: a reader changing only its order wakes the handler", async () => {
 	expect(fill.order).toBe("descending");
 
 	fill.close();
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a reader parked on a miss asks once a handler opens", async () => {
+	const { broadcast, track } = resumed(5n);
+	const reader = track.subscribe(history);
+	// It reads the live group and parks for the next; nobody could take its miss below.
+	expect((await reader.recvGroup())?.sequence).toBe(5n);
+	const next = reader.recvGroup();
+	await yieldNow();
+
+	// A handler opening wakes it to ask.
+	const requests = track.requests();
+	const fill = await requests.requestedFill();
+	expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
+	if (fill) serve(fill, new Map([[0n, ["old 0"]]]));
+	expect((await next)?.sequence).toBe(0n);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a sequence the track's datagram took is never asked, even once a reader read it", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	// Subscribed first: a datagram is not replayed to a later reader.
+	const reader = track.subscribe(history);
+	track.insertDatagram(2n, undefined, enc.encode("datagram 2"));
+	const group = track.createGroup(5n);
+	group.writeFrame({ payload: enc.encode("live 5") });
+	group.finish();
+	// The reader takes the datagram out of its own buffer; the track still holds it.
+	expect((await reader.recvDatagram())?.sequence).toBe(2n);
+
+	const requests = track.requests();
+	const ordered = reader.ordered();
+	void ordered.nextGroup();
+	const fills = [await requests.requestedFill(), await requests.requestedFill()];
+	expect(fills.map((fill) => [fill?.start, fill?.end])).toEqual([
+		[0n, 2n],
+		[3n, 5n],
+	]);
+
+	for (const fill of fills) fill?.close();
 	reader.close();
 	requests.close();
 	broadcast.close();

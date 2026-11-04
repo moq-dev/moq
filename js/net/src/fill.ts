@@ -11,7 +11,7 @@
  * @module
  */
 import { Milli } from "@moq/clock";
-import { type GetPromise, Signal } from "@moq/signals";
+import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { insertRun, NO_MAX_DELAY, runGaps } from "./internal.ts";
@@ -127,6 +127,8 @@ export class FillState {
 	#queue: Pending[] = [];
 	readonly #queued = new Signal(0);
 	readonly #pending = new Set<Pending>();
+	// Bumped as each handler opens, so readers parked on a miss nobody could take ask again.
+	readonly #opened = new Signal(0);
 
 	constructor(track: FillTrack) {
 		this.#track = track;
@@ -217,9 +219,15 @@ export class FillState {
 		for (const pending of this.#pending) this.#resolve(pending, start, end);
 	}
 
-	/** Open a handler. */
+	/** Bumped as each handler opens: a reader parked on a miss watches it to ask again. */
+	get opened(): Getter<number> {
+		return this.#opened;
+	}
+
+	/** Open a handler, waking the readers parked on a miss to ask it. */
 	addHandler(): void {
 		this.#handlers++;
+		this.#opened.update((opened) => opened + 1);
 	}
 
 	/** Close a handler. The last one leaving names every queued miss dropped, as with none open. */

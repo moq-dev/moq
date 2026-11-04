@@ -772,6 +772,8 @@ let goneAt: (producer: Producer, sequence: bigint) => bigint | undefined;
 let objectLargest: (producer: Producer) => Position | undefined;
 // The fills serving the producer's misses; assigned in its static block.
 let fillsOf: (producer: Producer) => FillState;
+// The sequences of the newest datagrams the producer holds; assigned in its static block.
+let heldDatagrams: (producer: Producer) => readonly bigint[];
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -922,6 +924,10 @@ export class Producer {
 	#subscribed = false;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
+	// The sequences of the newest datagrams, as many as a reader buffers: the track's own record
+	// that a datagram took them, like the Rust track's datagram buffer, which a reader reading its
+	// copy does not empty. A fill never asks for one.
+	#datagramSequences: bigint[] = [];
 	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
@@ -981,6 +987,7 @@ export class Producer {
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		fillsOf = (producer) => producer.#fills;
+		heldDatagrams = (producer) => producer.#datagramSequences;
 		cachedHolds = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
@@ -1691,6 +1698,8 @@ export class Producer {
 		this.#advance(sequence, false);
 		this.#arrive(sequence);
 		this.#finishLargest(sequence);
+		if (this.#datagramSequences.length === MAX_DATAGRAMS) this.#datagramSequences.shift();
+		this.#datagramSequences.push(sequence);
 		for (const sink of this.#sinks) {
 			sink.received.set(this.#received);
 			const queued = slice ? Object.assign(sliceView(timestamp, slice), { sequence }) : datagram;
@@ -2087,6 +2096,9 @@ export class Subscriber {
 	// refills cannot evict each other without bound. Mirrors the Rust `Misses`.
 	#asked: Run[] = [];
 	#refilled: Run[] = [];
+	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
+	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
+	#givenUp: Run[] = [];
 	// The last read waited on a fill, so the staleness deadline it armed wakes the next one: a
 	// fill that never answers cannot pin a reader in either order.
 	#fillWait = false;
@@ -2337,6 +2349,7 @@ export class Subscriber {
 	// window is never asked again, so these stay within the live span. A window moving back over a
 	// clipped group asks it once more, as in Rust.
 	#clipAsked(): void {
+		if (this.#givenUp.length > 0) this.#givenUp = this.#givenUp.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
 		if (this.#refilled.length > 0) {
 			this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
@@ -2522,12 +2535,19 @@ export class Subscriber {
 
 	// The parts of `[start, end)` this reader still reads: inside its cursor and window, not
 	// handed out, and not passed by the sequence cursor, which never goes back.
-	#wants(start: bigint, end: bigint): Run[] {
+	#reads(start: bigint, end: bigint): Run[] {
 		if (this.#closed || this.#state.closed.peek() !== undefined) return [];
 		const cursor = this.#cursor.peek();
 		const from = max(max(start, cursor.start), this.#nextSequence);
 		const to = cursor.end === undefined ? end : min(end, cursor.end);
 		return this.#window.runs(from, to).flatMap((run) => this.#delivered.gaps(run.start, run.end));
+	}
+
+	// What this reader still wants from a fill: what it reads, less what it gave up as stale.
+	#wants(start: bigint, end: bigint): Run[] {
+		const reads = this.#reads(start, end);
+		if (this.#givenUp.length === 0) return reads;
+		return reads.flatMap((run) => runGaps(this.#givenUp, run.start, run.end));
 	}
 
 	// This reader as the producer's fills know it.
@@ -2557,11 +2577,11 @@ export class Subscriber {
 			const asker = this.#askerOf();
 			this.#clipAsked();
 			const timeline = this.#state.timeline;
-			// A datagram still buffered took its sequence, so no group is missed there; the Rust
-			// fetch names it `NotFetchable`.
+			// A datagram the track still holds took its sequence, so no group is missed there, as
+			// the Rust judge skips its track's datagram buffer; the Rust fetch names it
+			// `NotFetchable`.
 			const gone = [...this.#state.drops.peek()];
-			for (const datagram of this.#state.datagrams.peek())
-				insertRun(gone, datagram.sequence, datagram.sequence + 1n);
+			for (const sequence of heldDatagrams(producer)) insertRun(gone, sequence, sequence + 1n);
 			for (const run of this.#wants(start, min(end, this.#state.received.peek()))) {
 				for (const open of runGaps(gone, run.start, run.end)) {
 					let next = open.start;
@@ -2580,14 +2600,24 @@ export class Subscriber {
 		const asker = this.#state.asker;
 		if (!asker) return undefined;
 		// Every group of an owed run waits on the same successor, so its newest judges the run;
-		// a stale run gives way to a later one the budget still wants.
+		// a stale run is given up, and gives way to a later one the budget still wants.
+		let owed: bigint | undefined;
+		const stale: Run[] = [];
 		for (const run of fills.covered(start, end, asker)) {
 			drift ??= this.#drift();
-			if (this.#staleAt(run.end - 1n, drift, true)) continue;
+			if (this.#staleAt(run.end - 1n, drift, true)) {
+				stale.push(run);
+				continue;
+			}
 			this.#fillWait = true;
-			return run.start;
+			owed = run.start;
+			break;
 		}
-		return undefined;
+		if (stale.length > 0) {
+			for (const run of stale) insertRun(this.#givenUp, run.start, run.end);
+			this.#fillsMoved();
+		}
+		return owed;
 	}
 
 	// Ask a fill for a fetch's group at once, written yet or not, as the Rust `fetch_group` queues
@@ -2598,7 +2628,7 @@ export class Subscriber {
 		if (!producer) return false;
 		if (this.#state.info.peek() === undefined && this.#state.closed.peek() === undefined) return "pending";
 		if (cachedHolds(producer, sequence)) return true;
-		if (this.#state.datagrams.peek().some((datagram) => datagram.sequence === sequence)) return false;
+		if (heldDatagrams(producer).includes(sequence)) return false;
 		// Joins a fill already bringing it, handler or not; asks a new one only while one is open.
 		const asked = fillsOf(producer).ask(sequence, sequence + 1n, this.#askerOf());
 		if (asked.length === 0) return false;
@@ -3306,10 +3336,13 @@ export class Subscriber {
 				for (const close of resumed) close();
 			};
 		}
+		const producer = this.#state.producer;
 		const dispose = [
 			this.#state.groups.changed(fn),
 			this.#state.drops.changed(fn),
 			this.#fillMoves.changed(fn),
+			// A handler opening takes a miss nobody could ask before.
+			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
 			this.#state.startChanged.changed(fn),
 			// A group starting may settle a time end, or move the cap it holds reads back with.
 			...(this.#window.settled ? [] : [this.#state.timelineChanged.changed(fn)]),
