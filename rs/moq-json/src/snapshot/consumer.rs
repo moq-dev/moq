@@ -186,7 +186,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 /// The consumer's own subscription, resolved by the first read.
 enum Track {
 	Subscribing(moq_net::track::Subscribing),
-	Ordered(moq_net::track::Ordered),
+	// Boxed: the reader dwarfs the pending subscription.
+	Ordered(Box<moq_net::track::Ordered>),
 }
 
 impl Track {
@@ -195,13 +196,13 @@ impl Track {
 		if let Self::Subscribing(pending) = self
 			&& let Poll::Ready(Ok(subscriber)) = pending.poll_ok(waiter)
 		{
-			*self = Self::Ordered(subscriber.ordered());
+			*self = Self::Ordered(Box::new(subscriber.ordered()));
 		}
 	}
 
 	fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
 		if let Self::Subscribing(pending) = self {
-			*self = Self::Ordered(std::task::ready!(pending.poll_ok(waiter))?.ordered());
+			*self = Self::Ordered(Box::new(std::task::ready!(pending.poll_ok(waiter))?.ordered()));
 		}
 		match self {
 			Self::Ordered(track) => track.poll_next_group(waiter),

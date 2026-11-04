@@ -100,8 +100,8 @@ inline fun <reified T> WindowEventPush.decode(): T =
 /**
  * Stream of each JSON state from a snapshot track, in order.
  *
- * Skips every group a newer one supersedes, at the zero `delay.max` the consumer subscribes with. Call
- * [SnapshotConsumer.latest] to skip to the newest state.
+ * Skips every group a newer one supersedes, at the zero `delay.max` the consumer subscribes with.
+ * Call [SnapshotConsumer.latest] to skip to the newest state.
  */
 fun SnapshotConsumer.values(): Flow<Value> = pull({ cancel() }) { next() }
 
