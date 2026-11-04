@@ -13,8 +13,8 @@ important ones flowing first.
 ## Plan
 
 Decided 2026-11-04 (maintainer, planning from Kixel's T3 host, which hit
-~100-stream caps: `@moq/qmux`'s default, fixed in m0 by
-[qmux stream limits](/quest/m0/qmux-stream-limits.md), and browsers' own,
+~100-stream caps: `@moq/qmux`'s default, which `@moq/net` and `@moq/p2p`
+now raise to 10,000, and browsers' own,
 which JS cannot raise; Chrome stalled at 103, Firefox at 100):
 
 - ✅ Rust and JS, mirrored: the Rust relay is the side that refuses a
