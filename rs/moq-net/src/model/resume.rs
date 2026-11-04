@@ -2164,9 +2164,10 @@ impl Recover {
 			_ => {}
 		}
 
-		// Finished history may still continue the group above. Otherwise a terminal
-		// track verdict ends this wait even while a fetch is still unanswered.
-		if serving.poll_closed(waiter).is_ready()
+		// Finished history may still continue the group above. A subscribed group otherwise
+		// follows its track's verdict; an independent fetch judges its own outcome.
+		if self.reader.is_some()
+			&& serving.poll_closed(waiter).is_ready()
 			&& let Poll::Ready(Err(err)) = serving.poll_complete(&kio::Waiter::noop())
 			&& !route_failed(&err)
 		{
@@ -3355,8 +3356,13 @@ mod test {
 		routes.serve(b.consume());
 		b.drop_groups(0..1, StreamError::Old);
 		assert!(fetched.read_frame().now_or_never().is_none());
-		let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
+		let pending = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert!(fetched.read_frame().now_or_never().is_none());
+		let mut rest = pending.accept(None).unwrap();
+		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+		rest.finish().unwrap();
+		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
+		assert_eq!(read(&mut fetched), None);
 	}
 
 	/// A session's copy whose info is still in flight, and its fetch handler.
