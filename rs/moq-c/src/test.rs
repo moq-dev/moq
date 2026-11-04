@@ -853,6 +853,70 @@ fn publish_video_config_replaces_its_own_rendition() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// The `ftyp` and `moov` of an encrypted (ClearKey `cenc`) fMP4 file, ahead of its first fragment.
+fn encrypted_init() -> &'static [u8] {
+	const FILE: &[u8] = include_bytes!("../../moq-mux/src/container/fmp4/test_data/cenc-clearkey.mp4");
+	let mut end = 0;
+	while &FILE[end + 4..end + 8] != b"moof" {
+		end += u32::from_be_bytes(FILE[end..end + 4].try_into().unwrap()) as usize;
+	}
+	&FILE[..end]
+}
+
+/// A protected rendition (here a CMAF one whose init is encrypted) is absent from the catalog the
+/// bindings see: they cannot decrypt it, so they treat it as one they cannot decode.
+#[test]
+fn consume_catalog_hides_protected_renditions() {
+	let origin = id(moq_origin_create());
+	let path = b"catalog-protected";
+	let broadcast = publish_broadcast(origin, path);
+
+	let video = |name: &'static str, codec: &'static str, container: moq_container| moq_video_config {
+		preference: 0,
+		name: name.as_ptr().cast(),
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr().cast(),
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 640,
+		coded_height: 360,
+		container,
+	};
+	let init = encrypted_init();
+	let protected = video(
+		"protected",
+		"avc1.64001f",
+		moq_container {
+			kind: moq_container_kind::MOQ_CONTAINER_KIND_CMAF as u32,
+			init: init.as_ptr(),
+			init_len: init.len(),
+		},
+	);
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &protected) }, 0);
+	let clear = video("clear", "vp8", moq_container::default());
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &clear) }, 0);
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog = id(catalog_cb.recv());
+
+	let mut config = video("", "", moq_container::default());
+	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut config) }, 0);
+	assert_eq!(borrowed_string(config.name, config.name_len).as_deref(), Some("clear"));
+	assert!(unsafe { moq_consume_video_config(catalog, 1, &mut config) } < 0);
+
+	assert_eq!(moq_consume_catalog_free(catalog), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// Manual catalog metadata cannot redefine the decoder identity of an existing raw track.
 #[test]
 fn manual_video_identity_change_is_refused() {

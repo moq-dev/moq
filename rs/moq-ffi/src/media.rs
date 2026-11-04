@@ -596,11 +596,17 @@ impl MoqVideoInit {
 	}
 }
 
+/// Convert a catalog snapshot for the bindings, leaving out the protected renditions.
+///
+/// A protected rendition (see [`moq_mux::catalog::hang::protected`]) carries encrypted samples, and
+/// nothing here decrypts them or exposes the `drm` section, so the bindings treat it as one they
+/// cannot decode.
 pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> MoqCatalog {
 	let video = catalog
 		.video
 		.renditions
 		.iter()
+		.filter(|(_, config)| !moq_mux::catalog::hang::protected(&config.drm, &config.container))
 		.filter_map(|(name, config)| {
 			Some((
 				name.clone(),
@@ -633,6 +639,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 		.audio
 		.renditions
 		.iter()
+		.filter(|(_, config)| !moq_mux::catalog::hang::protected(&config.drm, &config.container))
 		.filter_map(|(name, config)| {
 			Some((
 				name.clone(),
@@ -740,6 +747,27 @@ mod test {
 		// The instance crosses in the same canonical form `resolve` parses back.
 		assert_eq!(converted.video["video"].instance, Some(instance.to_string()));
 		assert_eq!(converted.video["local"].instance, None);
+	}
+
+	/// A protected rendition is absent from the bindings' catalog: they cannot decrypt it, so they
+	/// treat it as one they cannot decode.
+	#[test]
+	fn catalog_hides_protected_renditions() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.video.renditions.insert(
+			"clear".to_string(),
+			hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8),
+		);
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.drm = vec!["1".to_string()];
+		catalog.video.renditions.insert("protected".to_string(), video);
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.drm = vec!["1".to_string()];
+		catalog.audio.renditions.insert("protected".to_string(), audio);
+
+		let converted = convert_catalog(&catalog);
+		assert_eq!(converted.video.keys().collect::<Vec<_>>(), ["clear"]);
+		assert!(converted.audio.is_empty());
 	}
 
 	#[test]

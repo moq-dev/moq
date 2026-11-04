@@ -269,8 +269,10 @@ media, so the publisher supplies them per DRM system, with `--drm-license` and
 WebCodecs cannot decrypt, so `@moq/watch` treats a protected rendition as
 unplayable and never selects it. Playback through MSE and EME is not built yet.
 Nothing in the Rust tools decrypts either: `moq play`, `moq export`, the HLS
-gateway, recordings, and transcoding leave a protected rendition out, as they
-would a codec they cannot decode.
+gateway, recordings, transcoding, and the C and UniFFI bindings leave a
+protected rendition out, as they would a codec they cannot decode, and `moq
+export` fails when nothing else is left. They also count a CMAF rendition whose
+`init` holds an encrypted sample entry as protected when it lists no `drm`.
 Key rotation and a clear lead are refused on import, as is anything else the
 republished media could not decrypt.
 

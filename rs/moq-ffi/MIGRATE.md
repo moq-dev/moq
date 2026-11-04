@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Protected renditions are hidden
+
+`MoqMediaCatalogConsumer::next` leaves out every protected video and audio rendition: one listing `drm` entries, or a CMAF one whose init holds an encrypted (`encv`/`enca`) sample entry. Its samples are encrypted and nothing here decrypts them, so a binding no longer subscribes to it and reads ciphertext that has lost its IVs. The API is unchanged.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `MoqError::OutOfRange` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `MoqViewers::watch` and `set_target` and `MoqViewer::update` return a `Result`. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.

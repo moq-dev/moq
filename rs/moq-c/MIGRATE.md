@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Protected renditions are hidden
+
+A catalog snapshot leaves out every protected video and audio rendition: one listing `drm` entries, or a CMAF one whose init holds an encrypted (`encv`/`enca`) sample entry. Its samples are encrypted and nothing here decrypts them, so `moq_consume_video_config`, `moq_consume_audio_config`, and the media readers no longer reach it, rather than handing out ciphertext that has lost its IVs. The C ABI is unchanged; renditions after a hidden one move down an index.
+
 ### Datagrams are a track of their own
 
 A raw track's datagrams travel on a separate datagram track of the same name, so the C ABI is unchanged but some results differ:
