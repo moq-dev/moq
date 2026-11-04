@@ -133,8 +133,22 @@ impl Layered {
 		self.fixed.contains(sequence) || self.layer.contains(sequence)
 	}
 
+	/// The one set holding runs, when the other holds none: its runs are the union's, each
+	/// already whole, so a read needs no growing across the two.
+	fn only(&self) -> Option<&Runs> {
+		match (self.fixed.0.is_empty(), self.layer.0.is_empty()) {
+			(_, true) => Some(&self.fixed),
+			(true, false) => Some(&self.layer),
+			(false, false) => None,
+		}
+	}
+
 	/// The lowest whole run of the union reaching into `lo..=hi`, its start clipped to `lo`.
 	pub fn first(&self, lo: u64, hi: u64) -> Option<RangeInclusive<u64>> {
+		// Most windows have no layer: their fixed runs are already the union's.
+		if let Some(only) = self.only() {
+			return only.first(lo, hi).map(|run| (*run.start()).max(lo)..=*run.end());
+		}
 		let starts = [self.fixed.first(lo, hi), self.layer.first(lo, hi)];
 		let start = starts.into_iter().flatten().map(|run| (*run.start()).max(lo)).min()?;
 		// Grow the end through whatever either set holds next to it: each step crosses into
@@ -159,6 +173,9 @@ impl Layered {
 
 	/// The highest whole run of the union reaching into `lo..=hi`, its end clipped to `hi`.
 	pub fn last(&self, lo: u64, hi: u64) -> Option<RangeInclusive<u64>> {
+		if let Some(only) = self.only() {
+			return only.last(lo, hi).map(|run| *run.start()..=(*run.end()).min(hi));
+		}
 		let ends = [self.fixed.last(lo, hi), self.layer.last(lo, hi)];
 		let end = ends.into_iter().flatten().map(|run| (*run.end()).min(hi)).max()?;
 		let mut start = end;

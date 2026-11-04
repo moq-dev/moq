@@ -500,11 +500,11 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 	}
 });
 
-// A lite-07 publisher ends a bounded subscription once it covered the range, releasing its
-// demand, and the subscriber keeps the copy: the read ends with its window, the same range reads
-// again from the cache, and a wider one subscribes again for the rest. Mirrors the Rust
-// `a_covered_bounded_subscription_ends_on_lite07`; reads end as Rust's do since moq-dev/moq#7545.
-test("integration: lite-07 keeps a covered bounded subscription's copy", async () => {
+// A lite-07 publisher keeps a covered bounded subscription open for an update: the read ends
+// with its window, the same range reads again from the cache, and a wider one reaches upstream
+// for the rest, past a group that never existed. The demand goes with the readers. Mirrors the
+// Rust `a_covered_bounded_subscription_stays_open`.
+test("integration: lite-07 keeps a covered bounded subscription open", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -532,19 +532,20 @@ test("integration: lite-07 keeps a covered bounded subscription's copy", async (
 	try {
 		const reader = bounded(3n);
 		expect(await read(reader, 2)).toEqual([1n, 2n]);
-		// The publisher's demand ends with the covered subscription, and the read with its window.
-		while (producer.subscription.peek() !== undefined) await producer.subscription.changed();
+		// The read ends with its window, while the covered subscription stays open.
 		expect(await reader.recvGroup()).toBeUndefined();
+		expect(producer.subscription.peek()).toBeDefined();
 
 		const again = bounded(3n);
 		expect(await read(again, 2)).toEqual([1n, 2n]);
-		expect(producer.subscription.peek()).toBeUndefined();
 
 		const wider = bounded(6n);
 		expect(await read(wider, 4)).toEqual([1n, 2n, 4n, 5n]);
 		reader.close();
 		again.close();
 		wider.close();
+		// The demand goes with the readers.
+		while (producer.subscription.peek() !== undefined) await producer.subscription.changed();
 	} finally {
 		remote.close();
 		broadcast.close();
@@ -2520,6 +2521,38 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 	}
 }
 
+// As Rust's lazy discovery tests: a request owns its discovery, so nothing watches first.
+test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"%s: a request on an unwatched path resolves it, or fails Unroutable once the peer syncs",
+	async (alpn) => {
+		const pair = createMockTransportPair(alpn);
+		const serverOrigin = new OriginProducer();
+		const clientOrigin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: clientOrigin }),
+			accept(pair.server, url, { publish: serverOrigin.consume() }),
+		]);
+		const broadcast = publish(serverOrigin, Path.from("room/cam"));
+
+		const reader = clientOrigin.consume();
+		const found = reader.request(Path.from("room/cam"));
+		const missing = reader.request(Path.from("room/missing"));
+		await until(() => found.active.peek() !== undefined && missing.closed.peek() !== undefined);
+		expect(found.closed.peek()).toBeUndefined();
+		const err = missing.closed.peek();
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+
+		found.close();
+		missing.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+		serverOrigin.close();
+		clientOrigin.close();
+	},
+);
+
 test.each([Ietf.ALPN.DRAFT_18])(
 	"%s: closing an announce consumer before the namespace answer ends the peer's stream",
 	async (alpn) => {
@@ -2770,42 +2803,75 @@ test("create then announce is discoverable on the wire", async () => {
 	origin.close();
 });
 
-test("a handle serves a request under live/** over the wire", async () => {
-	const pair = createMockTransportPair(Lite.ALPN_06);
-	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+	"a held answer's first subscribe succeeds on %s without an exact route",
+	async (protocol) => {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const consumer = new OriginProducer();
+		const handle = origin.requests(Path.empty());
+		const held = new BroadcastProducer();
+		held.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
+		const serving = (async () => {
+			for await (const request of handle.requested()) request.serve(held.consume());
+		})();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: consumer }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const requested = consumer.request(Path.from("live/cam"));
+		const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
+		if (!remote) throw new Error("request did not resolve");
+		const track = remote.track("chat").subscribe().ordered();
+		expect(await track.readString()).toBe("hello");
+		expect(wireOf(origin.consume()).advertised.peek()?.has(Path.from("live/cam"))).toBe(false);
+		track.close();
+		requested.close();
+		handle.close();
+		await serving;
+		held.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		consumer.close();
+	},
+);
 
-	const serving = (async () => {
-		for await (const request of handle.requested()) {
-			const produced = new BroadcastProducer();
-			produced.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
-			hooks.acceptRequest(request, produced);
-		}
-	})();
-
-	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
-		accept(pair.server, url, { publish: origin.consume() }),
-	]);
-
-	const announced = client.announced();
-	const entry = await announced.next();
-	expect(entry?.prefix).toBe("live" as Path.Valid);
-	expect(entry?.kind).toBe("start");
-
-	const remote = wireOf(client).consume(Path.from("live/cam"));
-	const track = remote.track("chat").subscribe().ordered();
-	expect(await track.readString()).toBe("hello");
-
-	track.close();
-	remote.close();
-	announced.close();
-	handle.close();
-	await serving;
-	client.abort();
-	server.abort();
-	origin.close();
-});
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+	"publishing a job still resets its first subscribe on %s",
+	async (protocol) => {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const consumer = new OriginProducer();
+		const handle = origin.requests(Path.empty());
+		const serving = (async () => {
+			const requests = handle.requested();
+			const request = (await requests.next()).value;
+			if (!request) throw new Error("missing job request");
+			const prepared = request.prepare();
+			prepared.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
+			return prepared.publish();
+		})();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: consumer }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const requested = consumer.request(Path.from("live/cam"));
+		const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
+		if (!remote) throw new Error("request did not resolve");
+		const track = remote.track("chat").subscribe().ordered();
+		await expect(track.readString()).rejects.toBeInstanceOf(Error);
+		const publication = await serving;
+		track.close();
+		requested.close();
+		handle.close();
+		publication.broadcast.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		consumer.close();
+	},
+);
 
 // The peer's close code a killed session carries.
 const DEATH = SessionCode(71);

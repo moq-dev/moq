@@ -2738,7 +2738,7 @@ impl Subscriber {
 			// The handler exists before the requester sees the source, so a track it asks
 			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
 			let dynamic = source.requests();
-			request.accept(&*source);
+			request.serve(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
 			// retracted since the accept, close it here as that retraction would have,
@@ -15273,6 +15273,60 @@ mod stitch_tests {
 		assert!(res.is_ok(), "{res:?}");
 		assert!(matches!(fetch.await, Err(Error::NotFetchable)));
 		assert!(run.track.consume().peek_group(SEQUENCE).is_none(), "nothing is cached");
+	}
+
+	/// A refused multi-group FETCH names every owed group dropped, without retrying
+	/// each group or ending the live track. This exercises the wire refusal decoder.
+	#[kio::test]
+	async fn a_refused_range_fetch_reports_every_owed_group_dropped() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let mut refusal = Vec::new();
+			let mut writer = Encoder::new(&mut refusal, version.into());
+			writer.varint(ietf::RequestError::ID).unwrap();
+			ietf::RequestError {
+				error_code: request::NOT_SUPPORTED,
+				reason_phrase: "FETCH spans more than one group".into(),
+				retry_interval: 0,
+			}
+			.encode(&mut writer, version)
+			.unwrap();
+			let session = ScriptedSession::per_stream_eof(vec![vec![], refusal]);
+			let mut run = GroupFetchRun::with_session(version, session.clone()).await;
+			let now = kio::clock::now();
+			run.track.broadcast().pool.poll(now, &kio::Waiter::noop());
+			run.track.received();
+			run.track.start_at(3).unwrap();
+			run.track.create_group(3u64.into()).unwrap().finish().unwrap();
+			let requests = run.track.requests();
+			let mut reader = run.track.subscribe(
+				track::Subscription::default()
+					.with_range(1..3)
+					.with_delay(track::Delay::default().with_max(None)),
+			);
+			let waiter = kio::Waiter::noop();
+			assert!(reader.poll_drop(&waiter).is_pending());
+			assert!(reader.poll_recv_group(&waiter).is_pending());
+			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+				panic!("{version}: missing history was not requested");
+			};
+			assert_eq!((fill.start().group, fill.end()), (1, 3));
+			run.subscriber
+				.clone()
+				.run_group_fetch(Path::from_static("broadcast"), "video".into(), fill, None)
+				.await;
+			// The peer may still deliver a late subgroup stream during the arrival grace.
+			run.track.broadcast().pool.poll(now + crate::ledger::GRACE, &waiter);
+			assert_eq!(
+				reader.poll_drop(&waiter),
+				Poll::Ready((1..3, crate::StreamError::NotFound)),
+				"{version}"
+			);
+			assert!(reader.poll_drop(&waiter).is_pending(), "each drop is reported once");
+			assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+			assert!(!run.track.is_closed(), "the live track survives");
+			// The harness opened its unused data stream, then the one range FETCH.
+			assert_eq!(session.log.bi_opens(), 2, "no per-group fallback");
+		}
 	}
 
 	/// A third-party publisher may answer a range even though ours refuses it. The subscriber

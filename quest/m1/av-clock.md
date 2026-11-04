@@ -69,5 +69,5 @@ whose remaining manual browser proof does not gate reshaping the clock.
 
 ## Related
 
-- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - stretching needs a clock to converge toward
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - time-stretches the audio ring toward the clock this produces
 - [Watch worker](/quest/m2/watch-worker.md) - moves `Sync` into a worker afterwards; keep the handles free of main-thread assumptions

@@ -204,9 +204,7 @@ impl Clock {
 				let kind = (bytes[0] >> 1) & 63;
 				match kind {
 					33 => {
-						let sps = scuffle_h265::SpsNALUnit::parse(&bytes[..])
-							.map_err(|err| err.to_string())?
-							.rbsp;
+						let sps = crate::codec::h265::parse_full_sps(&bytes).map_err(|err| err.to_string())?;
 						Arc::make_mut(&mut ctx)
 							.sets
 							.insert(sps.sps_seq_parameter_set_id, Arc::new(sps));
