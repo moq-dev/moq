@@ -4989,8 +4989,12 @@ mod session_tests {
 			.expect("the refusal held the session")
 			.unwrap()
 			.expect_err("the refusal did not fail the session");
+		// The catalog consumer subscribes itself, so the refusal surfaces from its first read.
 		assert!(
-			matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::NotFound)),
+			matches!(
+				err.downcast_ref::<moq_mux::Error>(),
+				Some(moq_mux::Error::Moq(moq_net::Error::NotFound))
+			),
 			"{err:?}"
 		);
 	}
