@@ -96,15 +96,16 @@ install:
 # Lints, compiles, and tests only the packages the branch changed plus
 # everything depending on them; `check --all` is the unscoped suite. BASE
 # defaults to the PR base, then a main/release upstream, then origin/main.
-# Rust compiles once: its test build doubles
-# as the clippy gate (see `rs check-test`).
+# Rust's test build doubles as the clippy gate, with a targeted default-media
+# lint for cfgs hidden by the device features (see sh/rs/select.sh).
 
 # Lint, compile, and test what the branch changed since BASE, plus its dependents.
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 
 # The landing worker runs this gate in one job. The test build also enforces
-# default-feature clippy; the feature matrix and optimized bindings run
+# clippy; a separate lint covers media tests with default features. The
+# feature matrix and optimized bindings run
 # nightly and on release PRs. Missing tools fail under CI_STRICT. The host
 # land gate also sets CHECK_FAIL_FAST=1, so a failing batch stops at its first
 # failed module.
