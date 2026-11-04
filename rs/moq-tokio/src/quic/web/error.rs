@@ -217,7 +217,7 @@ pub enum ServerError {
 	#[error("io error: {0}")]
 	IoError(Arc<std::io::Error>),
 
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	#[cfg(feature = "_certs")]
 	/// The TLS configuration was invalid.
 	#[error("rustls error: {0}")]
 	Rustls(#[from] rustls::Error),
