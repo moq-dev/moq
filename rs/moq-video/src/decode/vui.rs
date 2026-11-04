@@ -218,6 +218,20 @@ mod tests {
 		assert_eq!(signalled(Codec::H265, &Bytes::from(unit)), Some(None));
 	}
 
+	/// Hostile SPS fields must clear the label without reaching scuffle_h265's overflows.
+	#[test]
+	fn overflowing_h265_sps_clear_the_label() {
+		for input in [
+			&include_bytes!("../../../moq-mux/fuzz/regressions/annexb/scuffle-h265-transform-depth")[..],
+			&include_bytes!("../../../moq-mux/fuzz/regressions/annexb/hevc-sps-exp-golomb-64-zeros")[..],
+			&include_bytes!("../../../moq-mux/fuzz/regressions/annexb/scuffle-expgolomb")[..],
+		] {
+			// The corpus's first byte selects the codec and write size, ahead of the Annex-B data.
+			let unit = Bytes::copy_from_slice(&input[1..]);
+			assert_eq!(signalled(Codec::H265, &unit), Some(None));
+		}
+	}
+
 	/// An H.265 VUI's colour description labels the pictures over the size guess
 	/// (moq-mux's `SPS_HDR10`, a 64x64 x265 encode signalling BT.2020 and PQ,
 	/// where the guess would be BT.601). Without one, the guess stands (moq-mux's
