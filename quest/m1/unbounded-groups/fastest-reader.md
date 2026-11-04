@@ -226,17 +226,34 @@ Evidence added in the follow-up attempt (2026-11-02):
   windows and stream limits must reach all advertised receive parameters.
   No new public inspection API is needed.
 
-What remains:
+Decided 2026-11-04 (maintainer): no test host is quiet, so the comparison
+against the base of [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388)
+accepts noisy numbers from the quietest host available, recording its load
+for each run. Replaces the 2026-11-03 wait for a host without concurrent
+workloads.
 
-- A quiet-host comparison against the base of
-  [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) for
-  `group_read_frames`, `group_contended`, and `group_relay_frames`, plus
-  `group_paced` (a writer parked at the window, over 1, 8, and 64 readers).
-  The cursor's report is one relaxed load per frame or batch, and a
-  `fetch_max` only for the fastest reader. This attempt shares the host with
-  concurrent CI/Nix work, so its throughput measurements are descriptive,
-  not this comparison. The first implementation's busy-host repeats swung
-  by up to 50% either way.
+Comparison recorded 2026-11-04 on `nixos` (Ryzen 9 5900XT, 16 cores),
+in [moq-dev/moq#7664](https://github.com/moq-dev/moq/pull/7664). Six
+alternating rounds compared pre-pacing
+[e7a5c10](https://github.com/moq-dev/moq/commit/e7a5c10913b02e21ef851a0250b594fe837d1425),
+`main` at [f37d964](https://github.com/moq-dev/moq/commit/f37d964dd3), and
+the transport-sized window merged onto that `main`. The 1-minute load was
+3-65. Six quieter rounds (load 2-17) then paired the #7388 merge
+[7ad8d42](https://github.com/moq-dev/moq/commit/7ad8d426e072a4b1f03483204ec2c9ae8d3d3ffb)
+with its parent [b51eb8c](https://github.com/moq-dev/moq/commit/b51eb8cdec):
+
+- The transport-sized window costs nothing measurable over `main`: geomeans
+  of medians 0.93x `group_read_frames`, 0.99x `group_relay_frames`, 1.04x
+  `group_paced`, and 1.08x `group_contended`, whose 16-thread cases swing
+  by two orders of magnitude between rounds.
+- Pacing leaves `group_read_frames` unchanged (0.98x) but costs
+  `group_relay_frames` 4.6-8.1% in every case of 512 or 8,192 frames, across
+  1, 8, and 64 subscribers. Its 4-frame cases are unchanged. These frames
+  carry 64-byte payloads, so this is the per-frame cost at its largest
+  share.
+- In the noisy rounds `main` reads `group_relay_frames` about 15% slower
+  than e7a5c10. Pacing explains about 4% of that, so most of it comes from
+  other commits.
 
 Decided 2026-11-03 (maintainer, /quest-unblock): ✅ keep the decided
 transport-sized cache window, and change ingest and its tests so the cache
@@ -262,12 +279,12 @@ cut does not wait on browsers.
 
 ## Waiting
 
-- Maintainer: provide a host without concurrent workloads, then an agent runs
-  the paired group benchmarks above against the pre-pacing base
-  [e7a5c10](https://github.com/moq-dev/moq/commit/e7a5c10913b02e21ef851a0250b594fe837d1425)
-  with repeated alternating runs, then against this head. Keep this quest and
-  its PR draft until that comparison is recorded. No test host was quiet on
-  2026-11-03: `nixos2` (12 cores) ran at load 3.5 with a `rustc` build and three
-  Claude sessions, `nixos` (32 cores) at load 20 with clippy and Nix builds,
-  and `kixtop` (10 cores) at load 15.6. An agent cannot free a host other
-  sessions are using; check `uptime` and `ps` on each before running.
+- Maintainer: decide whether to accept pacing's cost on relay fan-out reads,
+  4.6-8.1% on `group_relay_frames` for groups of 512 or more 64-byte frames
+  (recorded above). This is a performance trade-off on a decided feature, so
+  an agent cannot settle it. Options:
+  - Accept it and finish this quest, planning a follow-up quest that trims
+    the per-frame progress report on the batch read path (recommended: real
+    media frames dilute a per-frame cost, and pacing bounds relay memory).
+  - Keep this quest open and trim the report here before it finishes.
+  - Accept it with no follow-up.
