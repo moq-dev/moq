@@ -860,6 +860,11 @@ impl Subscriber {
 		self.reader().window().starts(from)
 	}
 
+	/// Each of the reader's ranges resolved; see [`track::Subscriber::resolved`].
+	pub(super) fn resolved(&self) -> Vec<Option<Resolved>> {
+		self.reader().window().resolved()
+	}
+
 	/// The lowest group at or above `from` the reader's ranges cover; see
 	/// [`track::Subscriber::next_in_range`].
 	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {

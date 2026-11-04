@@ -501,7 +501,7 @@ An advertiser signals capacity through its route alone, withdrawing or re-pricin
 A subscriber opens Subscribe Streams to request a Track.
 
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
-The publisher replies with a SUBSCRIBE_OK message once each Range's start is resolved, and a SUBSCRIBE_FINISH message once the Track's final group is known.
+The publisher replies with a SUBSCRIBE_OK message once each Range's start is resolved, a SUBSCRIBE_STARTED message for each Range an update adds once its start is resolved, and a SUBSCRIBE_FINISH message once the Track's final group is known.
 For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start, and withholds the SUBSCRIBE_DROP messages for groups it gives up meanwhile until it sends SUBSCRIBE_OK.
 It MUST NOT withhold it past the point where no group can resolve it: once every Group in a subscription whose every Range has an `End` other than None has been given up, or once the Track has finished, the publisher sends SUBSCRIBE_OK and then the SUBSCRIBE_DROP messages it withheld.
 A Track that finished before producing any Group is the one case with nothing to resolve: SUBSCRIBE_FINISH with a Group of 0 needs no SUBSCRIBE_OK.
@@ -515,7 +515,7 @@ The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret
 
 The publisher sends SUBSCRIBE_OK once the start is resolved, and SUBSCRIBE_FINISH as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_FINISH](#subscribe-finish)).
 Neither closes the stream: the publisher keeps reading SUBSCRIBE_UPDATE messages, so an update can still widen the Ranges, including into an ended Track's history, and the publisher serves or drops what it newly covers.
-The subscriber judges a Range complete from what it observed: the Groups it received, the SUBSCRIBE_DROP messages, the Range Starts in SUBSCRIBE_OK, and SUBSCRIBE_FINISH.
+The subscriber judges a Range complete from what it observed: the Groups it received, the SUBSCRIBE_DROP messages, the Range Starts in SUBSCRIBE_OK and SUBSCRIBE_STARTED, and SUBSCRIBE_FINISH.
 Drops and Groups name absolute sequences, so the subscriber judges them against its latest Ranges, and an update still in flight changes nothing it has counted.
 The publisher never closes its side first: a subscription whose every Range has an `End` other than None and whose every Group has been delivered or dropped stays open for an update to widen it.
 
@@ -1308,6 +1308,7 @@ A value of 0 is a PROTOCOL_VIOLATION, since a subscription that asks for nothing
 **Range**:
 A span of the Track to deliver, from its `Start` up to its `End`.
 The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, in `Group Order` across all of them, and accounts with SUBSCRIBE_DROP for every Group it will not deliver.
+Each Range implicitly takes the next Range ID on the stream, starting at 0, which a [SUBSCRIBE_UPDATE](#subscribe-update) uses to retire it.
 
 **Anchor Type**:
 Which fields follow, and what the Anchor names:
@@ -1319,6 +1320,7 @@ Which fields follow, and what the Anchor names:
 
 Any other value is a PROTOCOL_VIOLATION.
 The publisher resolves a Relative or Time Anchor against the Track as it holds it.
+A Range resolves once: an update that leaves it live does not resolve it again.
 
 A `Start` is a floor, not a request; `Subscriber Max Age` is the only thing that asks for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
@@ -1331,10 +1333,11 @@ An Absolute `Start` past frame 0 delivers its group from that frame; a start res
 A subscriber MAY name any start frame, as described in [Positions](#positions).
 An Absolute `End` past frame 0 delivers its group up to that frame.
 
-## SUBSCRIBE_UPDATE
+## SUBSCRIBE_UPDATE {#subscribe-update}
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
-Its Ranges replace the previous ones, growing or shrinking the subscription.
+Every field but the Ranges restates the subscription, and the latest one applies.
+The Ranges are an edit, growing or shrinking the subscription: the update retires the live Ranges it names by Range ID, then adds its own, each taking the next Range ID.
 Lowering a `Start` covers the groups below the old one that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
 
 ~~~
@@ -1344,6 +1347,8 @@ SUBSCRIBE_UPDATE Message {
   Group Order (8)
   Subscriber Max Age (i)
   Subscriber Min Age (i)
+  Remove Count (i)
+  Range ID (i) ...
   Range Count (i)
   Range (..) ...
   Wanted Group (i)
@@ -1353,6 +1358,14 @@ SUBSCRIBE_UPDATE Message {
 See [SUBSCRIBE](#subscribe) for information about each field.
 Moving a `Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; it only bounds what the publisher sends from here on.
 
+**Remove Count** and **Range ID**:
+The live Ranges to retire.
+A Range ID that was never assigned, or is already retired, including earlier in the same list, is a PROTOCOL_VIOLATION.
+
+**Range Count** and **Range**:
+The Ranges to add, which may be none.
+The live Ranges after the edit MUST NOT be empty, and MUST fit in one SUBSCRIBE: once encoded they take at most 65,535 bytes.
+A publisher closes the session with a PROTOCOL_VIOLATION otherwise.
 
 **Wanted Group**:
 The newest group the subscriber's live-edge joins want, encoded as the sequence plus one; `0` means none.
@@ -1572,11 +1585,12 @@ The largest position the publisher knows of for the track when it answers: the l
 A subscriber takes it as where the live feed is: a relay holding groups from an earlier subscription serves them from cache only once this says they are current, which a publisher answering promptly lets it do without waiting for a frame.
 
 **Range Start**:
-One per Range the publisher is serving, in order: the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
-0 means the Range has no Group to deliver.
+One per Range of the SUBSCRIBE, in Range ID order: the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
+0 means the Range has no Group to deliver, including one an update retired before the answer.
 The Range's Groups from this one are owed as described in [SUBSCRIBE_DROP](#subscribe-drop); an earlier one is not, though it MAY still arrive.
 A Range whose `Range Start` is its requested start Group begins at the requested frame, and otherwise at frame 0 (see [Positions](#positions)).
-The Ranges are those of the SUBSCRIBE unless the publisher applied a SUBSCRIBE_UPDATE before answering; a subscriber that sent none MUST treat a count other than its number of Ranges as a PROTOCOL_VIOLATION.
+A subscriber MUST treat a `Range Start Count` other than the SUBSCRIBE's `Range Count` as a PROTOCOL_VIOLATION.
+A Range an update adds has its start reported by [SUBSCRIBE_STARTED](#subscribe-started) instead, even one added before SUBSCRIBE_OK.
 
 ## SUBSCRIBE_FINISH {#subscribe-finish}
 A SUBSCRIBE_FINISH message is sent by the publisher to signal that no group at or after a given sequence will be produced.
@@ -1604,6 +1618,32 @@ The subscriber MUST NOT wait for any group at or after this sequence.
 Groups below the end stay deliverable either way; a subscriber reaching the end surfaces the error instead of a clean end, and a relay forwards it with the end.
 
 The publisher SHOULD send SUBSCRIBE_FINISH as soon as the exclusive final group is known, even while lower groups are still in flight.
+
+## SUBSCRIBE_STARTED {#subscribe-started}
+A SUBSCRIBE_STARTED message resolves where a Range that a [SUBSCRIBE_UPDATE](#subscribe-update) added starts.
+
+~~~
+SUBSCRIBE_STARTED Message {
+  Type (i) = 0x3
+  Message Length (i)
+  Range ID (i)
+  Range Start (i)
+}
+~~~
+
+**Type**:
+Set to 0x3 to indicate a SUBSCRIBE_STARTED message.
+
+**Range ID**:
+The Range it resolves.
+A Range ID the subscription never assigned, one of the SUBSCRIBE's Ranges, or one already resolved is a PROTOCOL_VIOLATION.
+A Range the subscriber has since retired is ignored.
+
+**Range Start**:
+As in [SUBSCRIBE_OK](#subscribe-ok), and the Range's Groups from it are owed the same way.
+
+The publisher sends it after SUBSCRIBE_OK, once the Range's start is resolved, and MUST NOT withhold it past the point where no group can resolve it, as for SUBSCRIBE_OK.
+A Range retired before its start resolved gets none.
 
 ## SUBSCRIBE_DROP {#subscribe-drop}
 
@@ -1947,6 +1987,8 @@ The `Message Length` describes the payload size on the wire.
 - SUBSCRIBE may start at any frame, including when the subscriber no longer holds the prefix.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
+- Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.
+- SUBSCRIBE_OK's Range Starts answer the SUBSCRIBE's Ranges, and added SUBSCRIBE_STARTED (type 0x3) resolving where each Range an update adds starts.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it.
 - Renamed SUBSCRIBE_END to SUBSCRIBE_FINISH, matching TRACKS_FINISH: it ends the Track, not the subscription.
 - Added `Error Code` to SUBSCRIBE_FINISH: a track can end with an error while keeping the groups below its end.

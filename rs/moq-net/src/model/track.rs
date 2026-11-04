@@ -8482,6 +8482,22 @@ impl Subscriber {
 		}
 	}
 
+	/// Each of this subscriber's ranges as resolved here, by index: its first group and
+	/// exclusive end, `None` while open, or `None` for one whose start still waits on the
+	/// live feed or a lookup. One empty as given, or that only resolves empty, ends at or
+	/// below its start.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn resolved(&mut self) -> Vec<Option<(u64, Option<u64>)>> {
+		let resolved = match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.resolved()
+			}
+			Inner::Resume(resume, _) => resume.resolved(),
+		};
+		resolved.into_iter().map(|r| r.map(|r| (r.start, r.end))).collect()
+	}
+
 	/// The lowest group at or above `from` this subscriber's ranges and
 	/// [`Self::with_range`] floor cover, `None` when none does: the groups between are
 	/// never read, so a reader waiting on each group in sequence need not wait for them.

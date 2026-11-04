@@ -855,12 +855,20 @@ impl Window {
 		}
 	}
 
-	/// Each range resolved, in the order given: `None` for one empty as given, whose start
-	/// still waits, or still looking up its start. One that only resolves empty keeps its
-	/// span, ending at or below its start. An unsettled time end is reported open, never at
-	/// its cap.
+	/// Each range resolved, in the order given: `None` for one whose start still waits, or
+	/// still looking up its start. One empty as given, or that only resolves empty, ends at
+	/// or below its start. An unsettled time end is reported open, never at its cap.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
-		let mut resolved = vec![None; self.ranges.len()];
+		let mut resolved: Vec<_> = self
+			.ranges
+			.iter()
+			.map(|range| match (range.start, range.end) {
+				(Anchor::Absolute(start), Some(Anchor::Absolute(end))) if range.is_empty() => {
+					Some(Resolved { start, end: Some(end) })
+				}
+				_ => None,
+			})
+			.collect();
 		for span in self.spans.iter().filter(|span| span.looking.is_none() && !span.waiting) {
 			resolved[span.index] = Some(Resolved {
 				start: span.start,

@@ -2907,15 +2907,14 @@ mod tests {
 			start: None,
 			priority: 0,
 			requested: None,
-			ranges: vec![lite::Range::OLDEST],
+			live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::OLDEST]),
 			tail: tail.clone(),
 			served: None,
 			started: false,
-			starts: Vec::new(),
+			starts: Default::default(),
 			end: None,
 			wanted: None,
 			unanswered: None,
-			updated: false,
 			_working: crate::session::Work::default().start(),
 		})
 	}
@@ -2961,21 +2960,24 @@ mod tests {
 			unreachable!("feed_sub is active")
 		};
 		let largest = Some(Position::group(10));
-		active.ranges = vec![lite::Range::span(Some(0), 0, Some(10), None)];
+		let live = |ranges: &[lite::Range]| lite::LiveRanges::new(Version::Lite07, ranges);
+		active.live = live(&[lite::Range::span(Some(0), 0, Some(10), None)]);
 		active.served = Some(0);
-		active.starts = vec![Some(0)];
+		active.starts = [(0, Some(0))].into();
 		assert_eq!(active.never_serves(largest), None, "group 10 is in 0..11");
 
-		active.ranges = vec![lite::Range::span(Some(0), 0, Some(3), None)];
+		active.live = live(&[lite::Range::span(Some(0), 0, Some(3), None)]);
 		assert_eq!(active.never_serves(largest), largest, "0..4 never reaches group 10");
 
-		active.ranges.push(lite::Range::span(Some(10), 0, Some(12), None));
-		active.starts = vec![Some(0), Some(10)];
+		let later = lite::Range::span(Some(10), 0, Some(12), None);
+		active.live = live(&[lite::Range::span(Some(0), 0, Some(3), None), later]);
+		active.starts = [(0, Some(0)), (1, Some(10))].into();
 		assert_eq!(active.never_serves(largest), None, "a later range serves it");
-		active.starts[1] = None;
+		active.starts.insert(1, None);
 		assert_eq!(active.never_serves(largest), largest, "that range served nothing");
 
-		active.ranges[1].end = None;
+		let open = lite::Range { end: None, ..later };
+		active.live = live(&[lite::Range::span(Some(0), 0, Some(3), None), open]);
 		assert_eq!(active.never_serves(largest), None, "an open feed reaches it");
 		assert_eq!(active.never_serves(None), None, "nothing to go live at");
 	}
@@ -3056,15 +3058,14 @@ mod tests {
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
-				ranges: vec![lite::Range::span(Some(floor), 0, None, None)],
+				live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::span(Some(floor), 0, None, None)]),
 				tail: Default::default(),
 				served: None,
 				started: false,
-				starts: Vec::new(),
+				starts: Default::default(),
 				end: None,
 				wanted: None,
 				unanswered: None,
-				updated: false,
 				_working: crate::session::Work::default().start(),
 			});
 			if update {
@@ -3517,15 +3518,14 @@ mod tests {
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
-			ranges: vec![lite::Range::span(Some(2), 0, None, None)],
+			live: lite::LiveRanges::new(VERSION, &[lite::Range::span(Some(2), 0, None, None)]),
 			tail: Default::default(),
 			served: None,
 			started: false,
-			starts: Vec::new(),
+			starts: Default::default(),
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
 			unanswered: None,
-			updated: false,
 			_working: crate::session::Work::default().start(),
 		};
 		assert_eq!(
@@ -3534,12 +3534,10 @@ mod tests {
 			"without SUBSCRIBE_START nothing was served"
 		);
 
-		// An update moves the floor, the ranges, and `updated` together, as
-		// `begin_subscription` does.
+		// An update moves the floor and the ranges together, as `begin_subscription` does.
 		let update = |sub: &mut SubStream, start: Option<u64>, ranges: Vec<lite::Range>| {
 			sub.start = start;
-			sub.ranges = ranges;
-			sub.updated = true;
+			sub.edit(&ranges).unwrap();
 		};
 		sub.started = true;
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
@@ -3550,10 +3548,11 @@ mod tests {
 		);
 
 		sub.start = Some(2);
-		sub.ranges = vec![
+		sub.edit(&[
 			lite::Range::span(Some(2), 0, Some(3), None),
 			lite::Range::span(Some(6), 0, None, None),
-		];
+		])
+		.unwrap();
 		assert_eq!(
 			sub.owed(None),
 			Some(vec![2..4, 6..10]),
@@ -3561,9 +3560,10 @@ mod tests {
 		);
 
 		update(&mut sub, Some(2), vec![lite::Range::span(Some(2), 0, None, None)]);
-		sub.updated = false;
+		// A START for the range now live.
 		sub.served = Some(4);
-		sub.starts = vec![Some(4)];
+		let (id, _) = sub.live.iter().next().unwrap();
+		sub.starts = [(id, Some(4))].into();
 		assert_eq!(
 			sub.owed(None),
 			Some(vec![4..10]),
@@ -7906,11 +7906,6 @@ fn wire_ranges(subscription: &Subscription, timescale: Option<Timescale>) -> Res
 	Ok((!ranges.is_empty()).then_some(ranges))
 }
 
-/// Whether every range has an end.
-fn bounded(ranges: &[lite::Range]) -> bool {
-	ranges.iter().all(|range| range.end.is_some())
-}
-
 /// `subscription` narrowed to the one span a wire without ranges carries, which the
 /// subscribers' own reads narrow again.
 ///
@@ -7945,8 +7940,8 @@ struct SubStream {
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
 	start: Option<u64>,
-	/// The ranges on the wire, never empty.
-	ranges: Vec<lite::Range>,
+	/// The ranges on the wire by Range ID, never empty.
+	live: lite::LiveRanges,
 	priority: i8,
 	order: crate::track::Order,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
@@ -7961,9 +7956,9 @@ struct SubStream {
 	served: Option<u64>,
 	/// Whether SUBSCRIBE_START arrived, which `served` alone cannot say when no range starts.
 	started: bool,
-	/// Where SUBSCRIBE_START says each range's delivery starts, `None` for one with nothing
-	/// to deliver. It matches `ranges` until an update changes them.
-	starts: Vec<Option<u64>>,
+	/// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range's delivery starts, by
+	/// Range ID, `None` for one with nothing to deliver.
+	starts: std::collections::BTreeMap<u64, Option<u64>>,
 	/// The track's exclusive end (SUBSCRIBE_FINISH), once declared.
 	end: Option<lite::SubscribeFinish>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
@@ -7972,9 +7967,6 @@ struct SubStream {
 	/// without an instance resolves whichever one wins the path when it arrives, so one
 	/// still unanswered once another instance takes the path may be answered by it.
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
-	/// Whether an update changed the ranges since the SUBSCRIBE, which the publisher may
-	/// have read before its SUBSCRIBE_START, so the starts need not match the SUBSCRIBE.
-	updated: bool,
 	/// Holds the session busy for as long as the subscription is open.
 	_working: crate::session::Working,
 }
@@ -7992,36 +7984,45 @@ impl SubStream {
 	/// serves Largest waits for it, so an old cache is judged against that edge.
 	fn never_serves(&self, largest: Option<Position>) -> Option<Position> {
 		largest.filter(|largest| {
-			bounded(&self.ranges)
+			self.live.iter().all(|(_, range)| range.end.is_some())
 				&& self
 					.spans()
 					.is_none_or(|spans| !spans.iter().any(|span| span.contains(&largest.group)))
 		})
 	}
 
-	/// Where each bounded range delivers, as SUBSCRIBE_START resolved it: from its absolute
-	/// start, or else from where SUBSCRIBE_START resolved delivery, up to its end. `None` when
-	/// a range is open, or the ranges changed with nothing served, so nothing says where.
+	/// Where the live range `id` delivers from, `None` while nothing says yet, and `Some(None)`
+	/// for a range with no group to deliver.
+	///
+	/// Lite-07 reports every range's start: SUBSCRIBE_START the SUBSCRIBE's, and
+	/// SUBSCRIBE_STARTED each one an update added. Before it, the one start describes the
+	/// SUBSCRIBE's range, so a range an update replaced it with delivers from its absolute
+	/// start, or else from where delivery started.
+	fn range_start(&self, id: u64, range: &lite::Range) -> Option<Option<u64>> {
+		if let Some(start) = self.starts.get(&id) {
+			return Some(*start);
+		}
+		if self.live.reports_starts() {
+			return None;
+		}
+		match range.start {
+			Some(lite::Anchor::Absolute(start)) => Some(Some(start.group)),
+			_ => self.served.or(self.start).map(Some),
+		}
+	}
+
+	/// Where each bounded range delivers, as its reported start resolved it, up to its end.
+	/// `None` when a range is open, or nothing says yet where one starts.
 	fn spans(&self) -> Option<Vec<std::ops::Range<u64>>> {
-		let Some(served) = self.served else {
-			return (!self.updated).then(Vec::new);
-		};
-		self.ranges
+		self.live
 			.iter()
-			.enumerate()
-			.map(|(index, range)| {
+			.map(|(id, range)| {
 				// Our absolute ends name a group's first frame (see `wire_ranges`).
 				let Some(lite::Anchor::Absolute(end)) = range.end else {
 					return None;
 				};
-				let start = match self.starts.get(index) {
-					// Each range's own start accounts for its skipped prefix.
-					Some(start) if !self.updated => start.unwrap_or(end.group),
-					_ => match range.start {
-						Some(lite::Anchor::Absolute(start)) => start.group,
-						_ => served,
-					},
-				};
+				// Each range's own start accounts for its skipped prefix.
+				let start = self.range_start(id, range)?.unwrap_or(end.group);
 				Some(start..end.group)
 			})
 			.collect()
@@ -8030,30 +8031,22 @@ impl SubStream {
 	/// The groups the publisher still owes once it has ended the subscription, one run per
 	/// range: the publisher accounts for nothing between disjoint ranges.
 	///
-	/// `None` when nothing says which: drafts before SUBSCRIBE_FINISH only have the FIN.
-	/// Without a SUBSCRIBE_START the publisher served no group at all, unless an update since
-	/// moved the floor the demand asks from. Each range is owed from where SUBSCRIBE_START
-	/// said it starts while the ranges are still the SUBSCRIBE's, which accounts for a skipped
-	/// prefix and resolves a relative or time start; after an update, from its absolute start,
-	/// or else from the first group served. The groups the SUBSCRIBE asked for below its
-	/// SUBSCRIBE_START are accounted for as unavailable when it arrives.
+	/// `None` when nothing says which: drafts before SUBSCRIBE_FINISH only have the FIN, and a
+	/// lite-07 range an update added owes nothing known until SUBSCRIBE_STARTED says where it
+	/// starts. Without a SUBSCRIBE_START the publisher served no group at all. Each range is
+	/// owed from its reported start (see [`Self::range_start`]), which accounts for a skipped
+	/// prefix and resolves a relative or time start. The groups the SUBSCRIBE asked for below
+	/// its SUBSCRIBE_START are accounted for as unavailable when it arrives.
 	fn owed(&self, requested_end: Option<u64>) -> Option<Vec<std::ops::Range<u64>>> {
 		let end = self.end.as_ref()?.group;
 		let end = requested_end.map_or(end, |requested| requested.min(end));
-		// A SUBSCRIBE_START that started no range owes nothing, unless an update since asked
-		// for more, which the open stream still serves.
-		if self.served.is_none() && !(self.started && self.updated) {
+		if !self.started {
 			return Some(Vec::new());
 		}
-		let fallback = self.served.or(self.start);
-		let owed = self.ranges.iter().enumerate().filter_map(|(index, range)| {
-			let start = match (self.updated, self.starts.get(index)) {
-				(false, Some(start)) => (*start)?,
-				_ => match range.start {
-					Some(lite::Anchor::Absolute(start)) => start.group,
-					// A start counted back from the latest group resolves where delivery did.
-					_ => fallback?,
-				},
+		let mut owed = Vec::new();
+		for (id, range) in self.live.iter() {
+			let Some(start) = self.range_start(id, range)? else {
+				continue;
 			};
 			// Our absolute ends name a group's first frame (see `wire_ranges`), and the rest
 			// go upstream open.
@@ -8061,9 +8054,22 @@ impl SubStream {
 				Some(lite::Anchor::Absolute(stop)) => stop.group.min(end),
 				_ => end,
 			};
-			(start < stop).then_some(start..stop)
-		});
-		Some(owed.collect())
+			if start < stop {
+				owed.push(start..stop);
+			}
+		}
+		Some(owed)
+	}
+
+	/// Edit the live ranges into `ranges`, forgetting the starts of those retired. Returns the
+	/// edit, and whether it changed anything.
+	fn edit(&mut self, ranges: &[lite::Range]) -> Result<(lite::RangeEdit, bool), Error> {
+		let before: Vec<_> = self.live.iter().map(|(id, _)| id).collect();
+		let edit = self.live.edit(ranges)?;
+		let changed = !self.live.iter().map(|(id, _)| id).eq(before);
+		let live = &self.live;
+		self.starts.retain(|id, _| live.get(*id).is_some());
+		Ok((edit, changed))
 	}
 }
 
@@ -8489,8 +8495,8 @@ impl TrackServe {
 						// So do changed ranges that keep the floor, such as a widening that joins
 						// two: each gap they reach waits a fresh grace, which only delays giving up
 						// on one still owed.
-						let widened = (active.ranges != ranges)
-							.then(|| subscription.start().or(active.served).unwrap_or(0)..u64::MAX);
+						let (edit, changed) = active.edit(&ranges)?;
+						let widened = changed.then(|| subscription.start().or(active.served).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(producer.tail_grace(subscription.budget()));
 							let now = self.subscriber.runtime.now();
@@ -8499,8 +8505,6 @@ impl TrackServe {
 							}
 						}
 						active.start = subscription.start();
-						active.updated |= active.ranges != ranges;
-						active.ranges = ranges;
 						if supports_update {
 							// The floor follows the requested start, in both directions:
 							// moving below a declared SUBSCRIBE_START reopens those groups
@@ -8513,7 +8517,7 @@ impl TrackServe {
 							if start_moved {
 								let _ = producer.start_at(active.start);
 							}
-							buffer_update(active)?;
+							buffer_update(active, edit)?;
 						}
 						Ok(Begin::None)
 					}
@@ -8767,14 +8771,15 @@ fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration
 	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
 }
 
-/// Buffer the current SUBSCRIBE parameters. The caller flushes.
-fn buffer_update(active: &mut SubStream) -> Result<(), Error> {
+/// Buffer the current SUBSCRIBE parameters, with `ranges` the change to the live ranges.
+/// The caller flushes.
+fn buffer_update(active: &mut SubStream, ranges: lite::RangeEdit) -> Result<(), Error> {
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,
 		max_delay: active.max_delay,
 		min_delay: active.min_delay,
-		ranges: active.ranges.clone(),
+		ranges,
 		order: active.order,
 	})
 }
@@ -8862,17 +8867,16 @@ impl Establish {
 			max_delay: wire_max_delay(self.subscription.delay.max),
 			min_delay: self.subscription.delay.min,
 			start: self.subscription.start(),
-			ranges: self.ranges.clone(),
+			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
 			priority: self.subscription.priority,
 			order: self.subscription.order,
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			served: None,
 			started: false,
-			starts: Vec::new(),
+			starts: Default::default(),
 			end: None,
 			wanted: None,
-			updated: false,
 			_working: self.session.work().start(),
 		}
 	}
@@ -9921,17 +9925,24 @@ impl ServeLoop {
 			// so a reader waiting on a skipped group fails over
 			// instead of stalling on a live route.
 			lite::SubscribeResponse::Start(start) => {
-				// One resolved start per range the SUBSCRIBE carried, unless an
-				// update the publisher read first replaced them.
-				if serve.subscriber.version.has_ranges() && !active.updated && start.starts.len() != active.ranges.len()
-				{
-					tracing::warn!(track = %serve.name, starts = start.starts.len(), ranges = active.ranges.len(), "subscribe start resolves other ranges");
+				if active.started && serve.subscriber.version.has_ranges() {
+					tracing::warn!(track = %serve.name, "duplicate subscribe start");
+					return Err(Error::ProtocolViolation);
+				}
+				// One resolved start per range the SUBSCRIBE carried, by Range ID.
+				if start.starts.len() as u64 != active.live.initial_count() {
+					tracing::warn!(track = %serve.name, starts = start.starts.len(), ranges = active.live.initial_count(), "subscribe start resolves other ranges");
 					return Err(Error::ProtocolViolation);
 				}
 				// No range starting anywhere leaves nothing owed.
 				let served = start.starts.iter().flatten().min().copied();
 				active.served = served;
-				active.starts = start.starts.clone();
+				// An update may have retired some already, whose starts say nothing now.
+				for (id, start) in (0..).zip(&start.starts) {
+					if active.live.get(id).is_some() {
+						active.starts.insert(id, *start);
+					}
+				}
 				// Where the live feed is, on versions whose answer says.
 				if serve.subscriber.version.has_largest() {
 					// A bounded feed that never delivers Largest goes live at the
@@ -9967,6 +9978,26 @@ impl ServeLoop {
 					&& let Ok(mut tail) = active.tail.write()
 				{
 					tail.account(requested..served, serve.subscriber.runtime.now());
+				}
+			}
+			// Where a range an update added starts, from which its groups are owed.
+			lite::SubscribeResponse::Started(started) => {
+				let id = started.id;
+				if !active.started
+					|| !active.live.assigned(id)
+					|| active.live.initial(id)
+					|| active.starts.contains_key(&id)
+				{
+					tracing::warn!(track = %serve.name, id, "unexpected subscribe started");
+					return Err(Error::ProtocolViolation);
+				}
+				// One retired since is owed nothing.
+				if active.live.get(id).is_some() {
+					active.starts.insert(id, started.start);
+					// The tail judges what is owed again.
+					if let Ok(mut tail) = active.tail.write() {
+						tail.expire(serve.subscriber.runtime.now());
+					}
 				}
 			}
 			// The publisher will never send these groups, so they
@@ -10206,7 +10237,8 @@ impl ServeLoop {
 							&& active.wanted != Some(wanted)
 						{
 							active.wanted = Some(wanted);
-							if let Err(err) = buffer_update(active) {
+							let ranges = active.live.unchanged();
+							if let Err(err) = buffer_update(active, ranges) {
 								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 							continue;
