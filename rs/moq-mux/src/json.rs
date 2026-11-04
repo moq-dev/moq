@@ -551,14 +551,14 @@ mod test {
 			.unwrap();
 		let mut subscribers = [status.consume(), chat.consume()];
 
-		let published = catalog.snapshot().clock;
+		let published = catalog.snapshot().media.clock;
 		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
 		let first = catalog
 			.timebase()
 			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
 			.unwrap();
-		assert_eq!(catalog.snapshot().clock, published, "the clock never moves");
+		assert_eq!(catalog.snapshot().media.clock, published, "the clock never moves");
 		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
 		status.update(&json!({ "live": true }), catalog.clock().now()).unwrap();
 		chat.append(&json!({ "n": 1 }), catalog.clock().now()).unwrap();

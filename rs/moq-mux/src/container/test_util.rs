@@ -286,7 +286,7 @@ impl Clocks {
 		let mut clocks = Vec::new();
 		while let std::task::Poll::Ready(catalog) = self.0.poll_next(&waiter) {
 			let Some(catalog) = catalog.unwrap() else { break };
-			clocks.push(catalog.clock);
+			clocks.push(catalog.media.clock);
 		}
 		clocks
 	}

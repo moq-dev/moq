@@ -19,11 +19,8 @@
 //! - `ranges_time_gaps`: time ranges each ending between two groups of a sparsely numbered
 //!   history, so each end waits on the missing sequences of a gap of its own, beside one time
 //!   end past the live edge whose cap moves twice per group, as in `ranges_time_cap`.
-//! - `ranges_datagram`: timed ranges none of which admits the datagram that lands, so the
-//!   reader judges it against all of them.
 //! - `ranges_frames`: a lite-07 publisher's frame bounds, each range starting and ending
-//!   partway through its own group, looked up for one group as a served group or datagram
-//!   does.
+//!   partway through its own group, looked up for one group as a served group does.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench ranges`.
 
@@ -300,52 +297,6 @@ impl TimeGaps {
 	}
 }
 
-/// One reader judging datagrams no range admits; see `ranges_datagram`.
-pub(crate) struct Datagrams {
-	_broadcast: broadcast::Producer,
-	track: track::Producer,
-	reader: track::Subscriber,
-	at: u64,
-}
-
-impl Datagrams {
-	pub(crate) fn new(ranges: u64) -> Self {
-		let broadcast = broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("bench", timed()).unwrap();
-		// Each range presents from a time of its own through group 0, which every datagram
-		// after the first passes.
-		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(BUDGET))
-			.with_ranges((0..ranges).map(|i| track::Range {
-				start: track::Anchor::Time(millis(i)),
-				end: Some(track::Anchor::Absolute(1)),
-			}));
-		let mut reader = track.subscribe(subscription);
-		// Group 0 is in every range, so only the first datagram is admitted.
-		track.append_datagram(millis(LIVE), Bytes::from_static(b"x")).unwrap();
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(reader.poll_recv_datagram(&waiter), Poll::Ready(Ok(Some(_)))));
-		Self {
-			_broadcast: broadcast,
-			track,
-			reader,
-			at: LIVE + 1,
-		}
-	}
-
-	pub(crate) fn step(&mut self) {
-		self.track
-			.append_datagram(millis(self.at), Bytes::from_static(b"x"))
-			.unwrap();
-		self.at += 1;
-		let waiter = kio::Waiter::noop();
-		assert!(
-			self.reader.poll_recv_datagram(&waiter).is_pending(),
-			"no range admits the datagram"
-		);
-	}
-}
-
 /// A lite-07 publisher's frame bounds; see `ranges_frames`.
 pub(crate) struct Frames {
 	bounds: moq_net::fuzz::FrameBounds,
@@ -401,10 +352,6 @@ fn bench_time_gaps(c: &mut Criterion) {
 	sweep(c, "ranges_time_gaps", TimeGaps::new, TimeGaps::step);
 }
 
-fn bench_datagram(c: &mut Criterion) {
-	sweep(c, "ranges_datagram", Datagrams::new, Datagrams::step);
-}
-
 fn bench_frames(c: &mut Criterion) {
 	sweep(c, "ranges_frames", Frames::new, Frames::step);
 }
@@ -416,7 +363,6 @@ criterion_group!(
 	bench_fills_out,
 	bench_sparse,
 	bench_time_gaps,
-	bench_datagram,
 	bench_frames
 );
 criterion_main!(benches);

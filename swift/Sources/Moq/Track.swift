@@ -195,7 +195,7 @@ public final class TrackProducer: Sendable {
         try ffi.insertDatagram(sequence: sequence, frame: Frame(payload: payload, timestamp: timestamp))
     }
 
-    /// The newest group or datagram written, at its newest frame, or `nil` before any.
+    /// The newest group written, at its newest frame, or `nil` before any. Datagrams never move it.
     public func largest() throws -> Position? {
         try ffi.largest()
     }

@@ -1,8 +1,7 @@
-import { expect, spyOn, test } from "bun:test";
-import { Manual, Micro, Milli, Nano } from "@moq/clock";
+import { expect, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
-import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import { Origin, Path, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -41,8 +40,8 @@ test("sibling broadcasts on one page advertise the same capture clock", async ()
 		camera.video("video").config.set(videoConfig);
 		screen.video("video").config.set(videoConfig);
 		await settle();
-		const cameraClock = (await readCatalog(camera))?.clock;
-		const screenClock = (await readCatalog(screen))?.clock;
+		const cameraClock = (await readCatalog(camera))?.media?.clock;
+		const screenClock = (await readCatalog(screen))?.media?.clock;
 		if (!cameraClock || !screenClock) throw new Error("siblings must advertise their page clock");
 		expect(cameraClock).toEqual(screenClock);
 		const captured = 1_000_000;
@@ -869,164 +868,100 @@ test("echo solicits feedback in the catalog unless it walks above the root", asy
 	}
 });
 
-test("each video and audio track publishes HLS records and advertises them once declared", async () => {
-	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("hls.hang") });
+test("the catalog declares the longest group as the join interval once it lists media", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("join.hang") });
 	const video = broadcast.video("video/hd");
-	video.config.set(videoConfig);
+	video.joinInterval.set(Milli(2000));
 	const audio = broadcast.audio("audio/data");
-	audio.config.set(audioConfig);
-	const text = broadcast.text("captions/en");
+	audio.joinInterval.set(Milli(20));
+	broadcast.text("captions/en").config.set({ format: "vtt", container: { kind: "legacy" } } as Catalog.TextConfig);
 	await settle();
 
-	const track = video.track.peek();
-	if (!track) throw new Error("expected the video track");
-	const recorder = video.hls(track);
-	expect(recorder?.track.name).toBe("video/hd.hls");
-	const audioTrack = audio.track.peek();
-	expect(audioTrack && audio.hls(audioTrack)?.track.name).toBe("audio/data.hls");
-	const textTrack = text.track.peek();
-	expect(textTrack && text.hls(textTrack)).toBeUndefined();
+	// Nothing but text is listed, so no interval is declared yet, while the clock already is.
+	const before = await readCatalog(broadcast);
+	expect(before?.media?.join).toBeUndefined();
+	expect(before?.media?.clock).toBeDefined();
 
-	// Nothing declared a duration yet, so the catalog doesn't advertise one.
-	expect((await readCatalog(broadcast))?.video?.renditions["video/hd"]?.hls).toBeUndefined();
-
-	const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"), recorder);
-	for (let ms = 0; ms <= 4000; ms += 2000) producer.encode(new Uint8Array([1]), Micro(ms * 1000), true);
+	// Audio lists first, yet the video registered beside it has the longer group, which wins.
+	audio.config.set(audioConfig);
 	await settle();
 	const catalog = await readCatalog(broadcast);
-	expect(catalog?.video?.renditions["video/hd"]?.hls).toEqual({ track: "video/hd.hls", duration: Catalog.u53(4000) });
-	expect(catalog?.audio?.renditions["audio/data"]?.hls).toBeUndefined();
+	expect(catalog?.media?.join).toEqual({ interval: Catalog.u53(2000) });
+	expect(catalog?.media?.clock).toEqual(before?.media?.clock);
+	expect(catalog?.audio?.renditions["audio/data"]).not.toHaveProperty("hls");
 
+	// No record tracks reserve a name any more.
+	expect(() => broadcast.audio("video/hd.hls")).not.toThrow();
 	broadcast.close();
-	// Closing the broadcast finishes the records with their media.
-	expect(recorder?.track.closed.peek()).toBeNull();
 });
 
-test("records end with their media however it closes", async () => {
-	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("ended.hang") });
+test("the join interval stays fixed for the network broadcast", async () => {
+	const name = new Signal(Path.from("fixed.hang"));
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name });
 	const video = broadcast.video("video");
+	video.joinInterval.set(Milli(2000));
 	video.config.set(videoConfig);
 	await settle();
+	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
 
-	const track = video.track.peek();
-	if (!track) throw new Error("expected the video track");
-	const recorder = video.hls(track);
-	if (!recorder) throw new Error("expected HLS records");
-
-	// An application aborting the media directly, not through an encoder, still ends the records.
-	const cause = new Error("media failed");
-	track.abort(cause);
+	// A longer GOP, from a config change or a later rendition, leaves the declared grid alone.
+	video.joinInterval.set(Milli(4000));
+	const later = broadcast.video("video/later");
+	later.joinInterval.set(Milli(6000.5));
+	later.config.set(videoConfig);
 	await settle();
-	expect(recorder.track.closed.peek()).toBe(cause);
+	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
 
+	// A new network broadcast declares again, rounding up to whole milliseconds.
+	name.set(Path.from("renamed.hang"));
+	await settle();
+	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(6001));
 	broadcast.close();
 });
 
-test("hls: false publishes no records", async () => {
-	const broadcast = new Broadcast({
-		enabled: true,
-		origin: new Origin.Producer(),
-		name: Path.from("nohls.hang"),
-		hls: false,
-	});
-	const video = broadcast.video("video");
+test("an audio-only broadcast declares its group duration, and no duration declares nothing", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("audio.hang") });
+	const audio = broadcast.audio("audio");
+	audio.joinInterval.set(Milli(0));
+	audio.config.set(audioConfig);
 	await settle();
-	const track = video.track.peek();
-	if (!track) throw new Error("expected the video track");
-	expect(video.hls(track)).toBeUndefined();
+	// Every frame its own group: the spacing is a frame, unknown up front, so nothing is promised.
+	expect((await readCatalog(broadcast))?.media?.join).toBeUndefined();
+
+	// A later listing tries again once a duration is known.
+	audio.joinInterval.set(Milli(20));
+	await settle();
+	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(20));
 	broadcast.close();
 });
 
-test("on demand, a record subscriber wants the media too", async () => {
+// An HLS export reads the media tracks directly, so on demand it needs the interval before anything
+// is encoded, and its subscription to the media is what starts the encode.
+test("an on-demand rendition declares the interval before encoding, and a media subscriber starts it", async () => {
 	const broadcast = new Broadcast({
 		enabled: true,
 		origin: new Origin.Producer(),
-		name: Path.from("lend.hang"),
+		name: Path.from("ondemand.hang"),
 		onDemand: true,
 	});
+	const video = broadcast.video("video");
+	video.joinInterval.set(Milli(2000));
+	video.config.set(videoConfig);
 	await settle();
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer");
 
-	const rendition = broadcast.video("video");
-	await settle();
-	expect(rendition.track.peek()).toBeUndefined();
-
-	// An HLS export reads only the records, yet the media they describe has to be produced.
-	const records = net.track("video.hls").subscribe();
-	await settle();
-	expect(rendition.track.peek()).toBeDefined();
-
-	records.close();
-	await settle();
-	expect(rendition.track.peek()).toBeUndefined();
-	broadcast.close();
-});
-
-test("a hinted rendition advertises its records before encoding, so an on-demand export finds them", async () => {
-	const broadcast = new Broadcast({
-		enabled: true,
-		origin: new Origin.Producer(),
-		name: Path.from("hinted.hang"),
-		onDemand: true,
-	});
-	const video = broadcast.video("video");
-	video.hlsHint.set(Micro(2_000_000));
-	video.config.set(videoConfig);
-	await settle();
-
 	expect(video.track.peek()).toBeUndefined();
 	const catalog = await readCatalog(broadcast);
-	expect(catalog?.video?.renditions.video?.hls).toEqual({ track: "video.hls", duration: Catalog.u53(4000) });
-	broadcast.close();
-});
+	expect(catalog?.media?.join?.interval).toBe(Catalog.u53(2000));
+	expect(catalog?.video?.renditions.video).not.toHaveProperty("hls");
 
-test("registering a name another rendition's HLS records hold throws", async () => {
-	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("taken.hang") });
-	broadcast.video("video");
-	expect(() => broadcast.audio("video.hls")).toThrow("HLS record track");
+	const media = net.track("video").subscribe();
 	await settle();
-	expect(() => broadcast.audio("video.hls")).toThrow("HLS record track");
-	// A text rendition publishes no records, so its sidecar name stays free.
-	broadcast.text("captions");
-	expect(() => broadcast.audio("captions.hls")).not.toThrow();
-	broadcast.close();
-});
-
-test("with hls off, a name ending in the record suffix is free", async () => {
-	const broadcast = new Broadcast({
-		enabled: true,
-		origin: new Origin.Producer(),
-		name: Path.from("free.hang"),
-		hls: false,
-	});
-	broadcast.video("video");
-	expect(() => broadcast.audio("video.hls")).not.toThrow();
-	broadcast.close();
-});
-
-test("turning hls on leaves a rendition holding a record name its media", async () => {
-	const hls = new Signal(false);
-	const broadcast = new Broadcast({
-		enabled: true,
-		origin: new Origin.Producer(),
-		name: Path.from("flip.hang"),
-		hls,
-	});
-	const video = broadcast.video("video");
-	const audio = broadcast.audio("video.hls");
-	const later = broadcast.audio("audio");
+	expect(video.track.peek()).toBeDefined();
+	media.close();
 	await settle();
-	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	hls.set(true);
-	await settle();
-	warn.mockRestore();
-
-	const videoTrack = video.track.peek();
-	expect(videoTrack && video.hls(videoTrack)).toBeUndefined();
-	expect(audio.track.peek()?.name).toBe("video.hls");
-	const laterTrack = later.track.peek();
-	expect(laterTrack && later.hls(laterTrack)?.track.name).toBe("audio.hls");
+	expect(video.track.peek()).toBeUndefined();
 	broadcast.close();
 });
 

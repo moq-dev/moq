@@ -9,6 +9,16 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 `MoqJsonSnapshotConsumer::new(broadcast, name)` takes a `MoqBroadcastConsumer` and the track name instead of a `MoqTrackConsumer`, and subscribes to the track itself at a zero `delay.max`. Drop the `subscribe_track` call; a refused subscription now fails the first read. `next()` skips every group a newer one supersedes, and `latest()` no longer waits for a lower group the track still owes.
 
+### Datagrams are a track of their own
+
+A raw track's datagrams travel on a separate datagram track of the same name, so the API is unchanged but some results differ:
+
+- `append_datagram` numbers datagrams on their own, apart from groups, and `MoqDatagram.sequence` is that number. Don't compare it with group sequences.
+- `MoqTrackProducer::largest` reports groups only: a datagram never moves it.
+- `insert_datagram` ignores a `finish_at` boundary.
+- A `MoqTrackConsumer` from `subscribe_track` subscribes to datagrams on its first `recv_datagram` and receives only those sent from then on, so start reading before the datagrams you need are sent. One from `MoqTrackProducer::consume` receives those sent after it was created.
+- `recv_datagram` fails with `NotFound` on a track with no datagram track, such as a media or JSON track, and over moq-transport, which carries no datagrams. Every raw track has one.
+
 ### `MoqVideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
 
 `MoqVideoInit.lower` is `Option<MoqMediaProducer>` instead of `Option<MoqMediaTrackProducer>`. Wrap a frame producer as `MoqMediaProducer::Track { producer }`; a `MoqMediaTrackStreamProducer` goes in as `MoqMediaProducer::Stream { producer }`.
