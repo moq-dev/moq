@@ -4214,7 +4214,11 @@ mod tests {
 		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
 		assert_eq!(tags, [old.tag(), old.tag(), new.tag()]);
 		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
-		assert_eq!(durations, [2_000, 1_000, 2_000], "the predecessor's part ends at group 6");
+		assert_eq!(
+			durations,
+			[2_000, 1_000, 2_000],
+			"the predecessor's part ends at group 6"
+		);
 	}
 
 	// A segment spanning more groups than one request fetches is listed as a gap, never as a

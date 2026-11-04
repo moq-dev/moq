@@ -1581,10 +1581,15 @@ async fn retired(retiring: &mut tokio::sync::watch::Receiver<bool>, rendition: &
 /// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
 /// lists that segment whole, and the same URL must name the same bytes everywhere.
 async fn watch_media(rendition: Weak<Rendition>, mut retiring: tokio::sync::watch::Receiver<bool>) {
-	let Some((track, interval, segment, container, mut probe)) = rendition
-		.upgrade()
-		.map(|r| (r.track().to_string(), r.interval, r.segment, r.container.clone(), r.muxer().ok()))
-	else {
+	let Some((track, interval, segment, container, mut probe)) = rendition.upgrade().map(|r| {
+		(
+			r.track().to_string(),
+			r.interval,
+			r.segment,
+			r.container.clone(),
+			r.muxer().ok(),
+		)
+	}) else {
 		return;
 	};
 	let result: Result<()> = async {
