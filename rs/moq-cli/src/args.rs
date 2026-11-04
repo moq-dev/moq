@@ -328,6 +328,11 @@ impl Invocation {
 				capture.validate()?;
 			}
 			if let Command::Import(import) = command
+				&& let ImportSource::Fmp4(fmp4) = &import.source
+			{
+				fmp4.drm()?;
+			}
+			if let Command::Import(import) = command
 				&& import.report
 				&& let Some(reason) = import.source.catalog_refusal()
 			{
@@ -887,7 +892,8 @@ impl ImportSource {
 			Self::Avc3 => PublishFormat::Avc3,
 			Self::Fmp4(args) => PublishFormat::Fmp4 {
 				passthrough: args.passthrough,
-				drm: args.drm(),
+				// `Invocation::validate` refuses a system named twice.
+				drm: args.drm().unwrap_or_default(),
 			},
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
@@ -951,37 +957,51 @@ pub struct Fmp4Import {
 	#[usage(long = "cmaf")]
 	pub passthrough: bool,
 
-	/// The license server of a DRM system the media is encrypted for, as `SYSTEM=URL`. SYSTEM is
-	/// `widevine`, `playready`, `fairplay`, `clearkey`, or a system ID. Repeat for each system;
-	/// a system the media carries no `pssh` for is refused.
-	#[usage(long = "drm-license", value_name = "SYSTEM=URL", requires = "--cmaf")]
+	/// The license server of a DRM system the media is encrypted for, as `SYSTEM[:TYPE]=URL`.
+	/// SYSTEM is `widevine`, `playready`, `fairplay`, `clearkey`, or a system ID; TYPE is the
+	/// protocol the server speaks, such as `EME-1.0`. Once per system; a system the media carries
+	/// no `pssh` for is refused.
+	#[usage(long = "drm-license", value_name = "SYSTEM[:TYPE]=URL", requires = "--cmaf")]
 	pub drm_license: Vec<DrmServer>,
 
-	/// The certificate server of a DRM system, such as FairPlay's, as `SYSTEM=URL`.
-	#[usage(long = "drm-certificate", value_name = "SYSTEM=URL", requires = "--cmaf")]
+	/// The certificate server of a DRM system, such as FairPlay's, as `SYSTEM[:TYPE]=URL`, where
+	/// TYPE is the certificate's MIME type. Once per system.
+	#[usage(long = "drm-certificate", value_name = "SYSTEM[:TYPE]=URL", requires = "--cmaf")]
 	pub drm_certificate: Vec<DrmServer>,
 }
 
 impl Fmp4Import {
-	/// The servers of each DRM system the flags name.
-	fn drm(&self) -> std::collections::BTreeMap<hang::catalog::drm::Uuid, hang::catalog::drm::Servers> {
+	/// The servers of each DRM system the flags name, refusing a system named twice by one flag.
+	fn drm(&self) -> anyhow::Result<std::collections::BTreeMap<hang::catalog::drm::Uuid, hang::catalog::drm::Servers>> {
 		let mut drm = std::collections::BTreeMap::<_, hang::catalog::drm::Servers>::new();
-		for server in &self.drm_license {
-			drm.entry(server.system).or_default().license = Some(hang::catalog::drm::Server::new(server.url.clone()));
+		for (flag, servers) in [
+			("--drm-license", &self.drm_license),
+			("--drm-certificate", &self.drm_certificate),
+		] {
+			for server in servers {
+				let entry = drm.entry(server.system).or_default();
+				let slot = match flag {
+					"--drm-license" => &mut entry.license,
+					_ => &mut entry.certificate,
+				};
+				anyhow::ensure!(slot.is_none(), "{flag} names DRM system {} twice", server.system);
+				let mut value = hang::catalog::drm::Server::new(server.url.clone());
+				value.kind = server.kind.clone();
+				*slot = Some(value);
+			}
 		}
-		for server in &self.drm_certificate {
-			drm.entry(server.system).or_default().certificate =
-				Some(hang::catalog::drm::Server::new(server.url.clone()));
-		}
-		drm
+		Ok(drm)
 	}
 }
 
-/// An `import fmp4 --drm-license` or `--drm-certificate` value: a DRM system and a server URL.
+/// An `import fmp4 --drm-license` or `--drm-certificate` value: a DRM system, optionally the
+/// server's type, and its URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrmServer {
 	/// The DRM system ID.
 	pub system: hang::catalog::drm::Uuid,
+	/// The server's protocol, or the certificate's MIME type.
+	pub kind: Option<String>,
 	/// The server's URL.
 	pub url: url::Url,
 }
@@ -992,7 +1012,13 @@ impl std::str::FromStr for DrmServer {
 	fn from_str(arg: &str) -> Result<Self, Self::Err> {
 		let (system, url) = arg
 			.split_once('=')
-			.ok_or_else(|| format!("expected SYSTEM=URL, got `{arg}`"))?;
+			.ok_or_else(|| format!("expected SYSTEM[:TYPE]=URL, got `{arg}`"))?;
+		// No system ID or name holds a colon, so the first one starts the type.
+		let (system, kind) = match system.split_once(':') {
+			Some((_, "")) => return Err(format!("empty TYPE in `{arg}`")),
+			Some((system, kind)) => (system, Some(kind.to_string())),
+			None => (system, None),
+		};
 		let system = hang::catalog::drm::system::named(system)
 			.or_else(|| hang::catalog::drm::Uuid::try_parse(system).ok())
 			.ok_or_else(|| {
@@ -1001,7 +1027,7 @@ impl std::str::FromStr for DrmServer {
 				)
 			})?;
 		let url = url.parse().map_err(|err| format!("invalid URL `{url}`: {err}"))?;
-		Ok(Self { system, url })
+		Ok(Self { system, kind, url })
 	}
 }
 
@@ -2052,6 +2078,7 @@ mod tests {
 		let format = |args: &[&str]| {
 			let argv = ["moq", "import", "fmp4"].into_iter().chain(args.iter().copied());
 			let cli = Invocation::try_parse_from(argv).ok()?;
+			cli.validate().ok()?;
 			let Command::Import(import) = &cli.stages[0] else {
 				panic!("an import stage");
 			};
@@ -2064,7 +2091,9 @@ mod tests {
 			"--drm-license",
 			"edef8ba9-79d6-4ace-a3c8-27dcd51d21ed=https://wv.example.com/",
 			"--drm-certificate",
-			"FairPlay=https://fps.example.com/cert",
+			"FairPlay:application/pkcs7-mime=https://fps.example.com/cert",
+			"--drm-license",
+			"fairplay=https://fps.example.com/license",
 		]) else {
 			panic!("an fmp4 import");
 		};
@@ -2074,8 +2103,25 @@ mod tests {
 			"https://license.example.com/clearkey"
 		);
 		assert!(drm[&drm::system::WIDEVINE].certificate.is_none());
-		assert!(drm[&drm::system::FAIRPLAY].license.is_none());
-		assert!(drm[&drm::system::FAIRPLAY].certificate.is_some());
+		assert!(drm[&drm::system::FAIRPLAY].license.is_some());
+		let certificate = drm[&drm::system::FAIRPLAY].certificate.as_ref().unwrap();
+		assert_eq!(certificate.kind.as_deref(), Some("application/pkcs7-mime"));
+		assert_eq!(certificate.url.as_str(), "https://fps.example.com/cert");
+		assert!(drm[&drm::system::CLEARKEY].license.as_ref().unwrap().kind.is_none());
+
+		// One server per system and role: a repeat is refused rather than replacing the first.
+		assert!(
+			format(&[
+				"--cmaf",
+				"--drm-license",
+				"clearkey=https://a.example/",
+				"--drm-license",
+				"ClearKey:EME-1.0=https://b.example/",
+			])
+			.is_none(),
+			"a repeated system"
+		);
+		assert!(format(&["--cmaf", "--drm-license", "clearkey:=https://a.example/"]).is_none());
 
 		assert!(
 			format(&["--drm-license", "clearkey=https://a.example/"]).is_none(),
