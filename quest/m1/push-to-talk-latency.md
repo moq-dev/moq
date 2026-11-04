@@ -14,9 +14,9 @@ Measured 2026-11-04 by
 push-to-talk ([#7101](https://github.com/moq-dev/moq/issues/7101)). The setup
 was `just test push-to-talk` on a direct local relay with no shaping or loss,
 60 ms Opus at 128 kbit/s, and a fixed 300 ms `delay`. Chromium 156 ran
-headless on Linux. There were five runs of 75 separated presses. `summary.json`
-`path` splits each press at page-clock boundaries that sum exactly to press →
-projected output.
+headless on Linux. There were five runs of 22 presses each, 15 of them
+separated, so 75 separated presses in all. `summary.json` `path` splits each
+press at page-clock boundaries that sum exactly to press → projected output.
 
 | Part | Boundaries | Median ms | Max ms |
 | --- | --- | --- | --- |

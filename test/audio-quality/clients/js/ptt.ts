@@ -58,6 +58,7 @@ try {
 	});
 	const initial = await page.evaluate(() => globalThis.ptt.state());
 	if (initial.publisher !== "webtransport" || initial.viewer !== "webtransport") throw new Error("not WebTransport");
+	if (!initial.separate) throw new Error("the watcher shares the publisher's origin, bypassing the relay");
 	await page.waitForTimeout(3000);
 	await page.evaluate(() => globalThis.ptt.press(false));
 	await page.waitForTimeout(5000);

@@ -111,7 +111,12 @@ publish.source = "camera";
 document.body.append(publish);
 
 const watch = document.createElement("moq-watch") as MoqWatch;
-watch.url = publish.url;
+// Connections pool by URL, and a pooled origin resolves a same-page publication locally. A
+// listener-only query, which the relay ignores, gives the watcher its own session, so the media
+// crosses the relay.
+const listener = new URL(required("relay"));
+listener.searchParams.set("role", "listener");
+watch.url = listener.toString();
 watch.name = publish.name;
 watch.setAttribute("delay", "300ms");
 watch.setAttribute("visible", "always");
@@ -197,6 +202,8 @@ export const measurement = {
 		return {
 			publisher: publish.connection.transport.peek() as string | undefined,
 			viewer: watch.connection.transport.peek() as string | undefined,
+			// Distinct origins: the watcher can only reach the publication through the relay.
+			separate: watch.connection.origin.peek() !== publish.connection.origin.peek(),
 			config: publish.audio.out.catalog.peek(),
 			selected: audio.source.out.track.peek(),
 			tapped: tapped !== undefined && tapped === audio.out.root.peek(),

@@ -57,14 +57,16 @@ const presses = result.presses
 			const write = sent.get(first.timestamp);
 			const arrival = arrivals.get(first.timestamp);
 			const output = decoded.get(first.timestamp);
-			// The utterance's newest PCM decoded before the render onset: the one that filled the delay.
-			const filled = input
-				.flatMap((frame) => decoded.get(frame.timestamp) ?? [])
-				.filter((frame) => frame.at <= audible.rendered)
-				.reduce<(typeof result.decoded)[number] | undefined>(
-					(newest, frame) => (newest && newest.at >= frame.at ? newest : frame),
-					undefined,
-				);
+			// The first PCM that reached the delay from the head: the ring leaves its stall on it, and a
+			// later frame decoded before the onset only adds to a ring already playing.
+			const delay = result.state?.delay;
+			const filled =
+				delay === undefined
+					? undefined
+					: input
+							.flatMap((frame) => decoded.get(frame.timestamp) ?? [])
+							.toSorted((a, b) => a.at - b.at)
+							.find((frame) => frame.timestamp + (frame.duration ?? 0) - first.timestamp >= delay * 1000);
 			if (!write || !arrival || !output || !filled) return null;
 			const pressed = press.capture.end / 1000 + (press.at - press.capture.at);
 			const packetization = (first.timestamp + (first.duration ?? 0)) / 1000 - pressed;
@@ -120,12 +122,14 @@ const summary = {
 	subscriptions: result.subscriptions,
 	unencoded: result.submitted.filter((frame) => !encoded.has(frame.timestamp)).length,
 	unsent: result.encoded.filter((frame) => !sent.has(frame.timestamp)).length,
+	// An ideal path loses nothing, so every written frame must reach the listener.
+	unreceived: result.sent.filter((frame) => !arrivals.has(frame.timestamp)).length,
 };
 await Bun.write(join(directory, "summary.json"), JSON.stringify(summary, null, 2));
 // The report: the latency and its parts, and the completeness the run gates on. Per-press detail
 // stays in summary.json.
-const { latency, path, delay, unencoded, unsent } = summary;
-console.log(JSON.stringify({ latency, path, delay, unencoded, unsent }, null, 2));
+const { latency, path, delay, unencoded, unsent, unreceived } = summary;
+console.log(JSON.stringify({ latency, path, delay, unencoded, unsent, unreceived }, null, 2));
 
 const failures: string[] = [];
 if (presses.some((press, i) => (i === 0 || i >= 8) && press.audible === null)) {
@@ -136,6 +140,8 @@ if (result.encoders.length) failures.push("an encoder was created again");
 if (result.subscriptions.length) failures.push("subscription reopened");
 if (presses.some((press) => !press.submitted || !press.firstEncoded)) failures.push("utterance head was not encoded");
 if (summary.unencoded || summary.unsent) failures.push("submitted audio was not encoded and sent completely");
+if (presses.some((press) => !press.firstReceived)) failures.push("utterance head was not received");
+if (summary.unreceived) failures.push("written audio did not all reach the listener");
 if (failures.length) {
 	console.error(failures.join("; "));
 	process.exitCode = 1;

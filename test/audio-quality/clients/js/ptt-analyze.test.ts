@@ -85,6 +85,28 @@ test("a complete run passes, reports its latency, and splits each press exactly"
 	expect(parts).toBe(press.audible);
 });
 
+test("the delay is filled by the first frame to reach it, not the newest before the onset", async () => {
+	// The sixth frame decodes just before the onset, adding to a ring already leaving its stall.
+	const result = trace();
+	const sixth = (result.presses[0].at - 20 + 5 * FRAME) * 1000;
+	const late = result.decoded.find((frame) => frame.timestamp === sixth);
+	if (!late) throw new Error("no sixth frame");
+	late.at = result.audible[0].rendered - 1;
+	const { exitCode, summary } = await analyze(result);
+	expect(exitCode).toBe(0);
+	expect(summary.presses[0].path.jitter_buffer).toBe(4 * FRAME);
+	expect(summary.presses[0].path.render).toBe(10);
+});
+
+test("a head that never reaches the listener fails the run", async () => {
+	const result = trace();
+	const head = result.submitted.find((frame) => frame.at >= result.presses[2].at);
+	result.arrivals = result.arrivals.filter((arrival) => arrival[1] * 1000 !== head?.timestamp);
+	const { exitCode, stderr } = await analyze(result);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("utterance head was not received");
+});
+
 test("a new encoder fails as a probe, but the live encoder's release flush does not", async () => {
 	// A flush leaves no trace in the page's records, so the passing run above is the release flush.
 	const result = trace();
