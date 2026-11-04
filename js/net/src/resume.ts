@@ -300,13 +300,15 @@ class Reader implements ResumeSource {
 	#shell: ResumeShell;
 	/** The route generation last read. */
 	#generation?: number;
+	/** The reader's preferences as last mirrored into its copies; see {@link #follow}. */
+	#mirrored?: track.Subscription;
 	/**
 	 * Oldest first, except that a backfill goes before the copy of the route it backfills: the last
 	 * one is the serving route's own, when it is subscribed.
 	 */
 	#copies: Copy[] = [];
-	/** The cursor start the copies were last bounded at: a lower one asks for a backfill. */
-	#start: bigint;
+	/** The reader's cursor the copies were last bounded at: a lower start asks for a backfill. */
+	#bounded: { start: bigint; end?: bigint };
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: bigint;
 	/**
@@ -358,19 +360,12 @@ class Reader implements ResumeSource {
 		this.route = route;
 		this.#shell = shell;
 		this.#record = record;
-		this.#start = shell.cursor.peek().start;
+		this.#mirrored = shell.subscription.peek();
+		this.#bounded = shell.cursor.peek();
 		route.readers.add(this);
 		this.#dispose.push(
-			shell.subscription.subscribe(() => {
-				for (const copy of this.#copies) this.#update(copy);
-			}),
-			shell.cursor.subscribe(() => {
-				for (const copy of this.#copies) this.#bound(copy);
-				const passed = this.#start;
-				this.#start = shell.cursor.peek().start;
-				if (this.#start < passed) this.#backfill(this.#start, passed);
-				if (this.#ended) this.#letGo(this.#delivered);
-			}),
+			shell.subscription.subscribe(() => this.#follow()),
+			shell.cursor.subscribe(() => this.#follow()),
 		);
 		// A fork starts on its parent's newest copy, at that copy's generation: the copy keeps its
 		// retained groups even where no route serves the track, between routes or once the front
@@ -390,9 +385,14 @@ class Reader implements ResumeSource {
 		this.sync();
 	}
 
-	/** Follow the route: subscribe to a new copy and mark the ones it replaced. */
+	/**
+	 * Follow the route: apply the reader's preferences and cursor to its copies, subscribe to a
+	 * new copy, and mark the ones it replaced.
+	 */
 	sync(): void {
-		if (this.#closed || this.#ended) return;
+		if (this.#closed) return;
+		this.#follow();
+		if (this.#ended) return;
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
@@ -495,6 +495,27 @@ class Reader implements ResumeSource {
 
 	#update(copy: Copy): void {
 		if (copy.sub.closed.peek() === undefined) copy.sub.update(this.#wire(copy));
+	}
+
+	/**
+	 * Apply the reader's preferences and cursor to every copy once they changed. Their signals
+	 * notify a microtask after a change, so every read applies them first too: a copy then picks
+	 * and judges its groups by what the reader holds now, such as a just-lowered `delay.max` or
+	 * replaced ranges, not its last ones. Mirrors the Rust `Reader::sync`.
+	 */
+	#follow(): void {
+		const subscription = this.#shell.subscription.peek();
+		if (subscription !== this.#mirrored) {
+			this.#mirrored = subscription;
+			for (const copy of this.#copies) this.#update(copy);
+		}
+		const cursor = this.#shell.cursor.peek();
+		if (cursor === this.#bounded) return;
+		const passed = this.#bounded.start;
+		this.#bounded = cursor;
+		for (const copy of this.#copies) this.#bound(copy);
+		if (cursor.start < passed) this.#backfill(cursor.start, passed);
+		if (this.#ended) this.#letGo(this.#delivered);
 	}
 
 	/**
