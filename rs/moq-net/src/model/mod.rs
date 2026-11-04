@@ -4,6 +4,7 @@ pub mod cache;
 pub mod datagram;
 pub mod frame;
 pub mod group;
+pub mod socket;
 pub mod track;
 
 // The origin + announce subsystem shares one implementation (a route table).
@@ -52,6 +53,9 @@ pub use timed::Timed;
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
 	pub use super::follow::Following;
+	pub(crate) use super::origin_impl::HiddenWithheld;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::HiddenWithholding;
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;

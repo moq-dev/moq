@@ -84,8 +84,9 @@ buffer it plays into 128-frame quanta at the device rate and classifies each by 
 supplied (`moq_audio::playback::Observer`). The meanings are the browser's, with three differences
 in what the native player does:
 
-- Its ring never stalls to refill. A dry ring underruns until the player pads it back to the target
-  with silence, which `silence` counts, so native `stalled` is only a sink with nothing written yet.
+- Its ring stretches received PCM toward the target. A ring that still runs dry
+  emits emergency silence while received PCM refills it; `silence` counts that padding.
+  Native `stalled` is only a sink with nothing written yet.
 - The playhead is projected from the player's last write at the wall rate and held at its end.
 - `device` is the host's reported output latency, with no `baseLatency`, and `render_load` is
   unmeasured.
@@ -162,8 +163,11 @@ it: `capture` (worklet delivery and framing, after the media the frame still nee
 press), `encode` (codec and container write), `network` (write to arrival, through the relay),
 `decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the first PCM that fills the
 playout delay), `render` (that PCM to the render onset: the worklet hand-off and the context's
-render callback), and `device`, as the stages below name them. `latency` and `path` give each one's
-min, median and max.
+render callback), and `device`, as the stages below name them. `spread` is how far an utterance's frames
+stray from a steady arrival: the latest arrival relative to its media timestamp minus the earliest,
+which on this ideal path is the capture graph's cadence and what `"auto"`'s jitter estimate measures.
+The release's flushed lookahead chunk is not one of the utterance's frames and is left out. `latency`
+and `path` give each one's min, median and max.
 
 The command prints `latency`, `path`, and the completeness counts, and keeps its run directory
 even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence

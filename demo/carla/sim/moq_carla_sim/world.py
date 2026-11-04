@@ -451,7 +451,8 @@ class Truck:
         deliberately different, because they are not equally urgent:
 
         - E-stop is the one hard latch: full brake, autonomy off, and it stays
-          that way until an explicit reset.
+          that way until an explicit reset, or until the stuck watchdog
+          respawns a truck nobody is driving.
         - No driver means autonomy resumes, once the truck is somewhere Traffic
           Manager can take it (see `release`). A lapsed lease or a closed tab
           is a truck nobody is steering, not an emergency.

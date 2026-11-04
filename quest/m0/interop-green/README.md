@@ -1,4 +1,4 @@
-# Interop and Video pass on main
+# [XS] Interop and Video pass on main
 
 ## Goal
 
@@ -8,9 +8,7 @@ means a new break. Interop has failed every scheduled run since
 
 ## Waiting
 
-- moq-dev/moq: a scheduled Interop run on `main` passes, once this quest's
-  fixture fixes, wire-compat remeasure, and 90-minute job budget have
-  landed. Check with
+- moq-dev/moq: a scheduled Interop run on `main` passes. Check with
   `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`.
   Triage any red run, then delete this quest once one passes.
 
@@ -29,8 +27,7 @@ port-reservation lines are negative self-tests in
 `interop/relay-log.test.sh` and `lib/harness.test.sh` that pass.
 Already owned: the intermittent media-matrix timestamp-gap cells
 (`cpp -> js-native-node`, `go -> c`, browser `rust -> js` timeouts) belong to
-[test flakes](/quest/m0/test-flakes-2/README.md), with
-[moq-dev/moq#6990](https://github.com/moq-dev/moq/pull/6990) open. So does
+[test flakes](/quest/m0/test-flakes-2/README.md). So does
 the fallback audio stall, which hit on
 `moq-lite-07-wip` in
 [41495461904](https://github.com/moq-dev/moq/actions/runs/41495461904) and
@@ -64,8 +61,11 @@ showed more causes, fixed in this quest's own PR:
 The P2P data-channel test timed out once, in 41668668824, and passes
 locally; triage it if it recurs.
 
+Scheduled run
+[41863118968](https://github.com/moq-dev/moq/actions/runs/41863118968)
+(2026-11-04, after every fix above landed) passed the open-GOP recovery
+case, P2P, and wire-compat. Its only failure was the fallback audio stall
+above, on `moq-lite-07-wip` in Chromium, which the IETF22 fallback quest
+owns.
+
 Public API: none. Wire: none.
-
-## Required
-
-- [Confirm scheduled open-GOP recovery passes](/quest/m0/interop-green/open-gop-fixture.md) - a scheduled Interop run passes the open-GOP case with the typed fixture and direct effect/page error reporting

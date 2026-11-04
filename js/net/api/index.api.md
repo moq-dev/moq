@@ -229,6 +229,7 @@ export namespace Connection {
 	export interface WebSocketProps {
 		delay?: Milli;
 		enabled?: boolean;
+		maxStreams?: number;
 		url?: URL;
 	}
 	export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
@@ -608,7 +609,7 @@ export namespace Track {
 		time?: never;
 	} | {
 		absolute?: never;
-		relative: number;
+		relative: bigint;
 		time?: never;
 	} | {
 		absolute?: never;

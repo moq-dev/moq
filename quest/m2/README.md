@@ -117,7 +117,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [A moq-transport group head fills its hole in place](/quest/m2/ietf-fill-refill.md) - fills and joining FETCHes write into the tail's group, deleting the `Fill` handoff
 - [moq-transport hole markers](/quest/m2/ietf-hole-marker.md) - a negotiated extension names a SUBSCRIBE's holes, so our publishers answer multi-group FETCH from caches that know every group; built when an IETF client wants it
 - [Announce interest streams share one route table](/quest/m2/announce-interest-memory.md) - per-stream announce cost follows what is in flight, not every route
-- [One relay serve path for every runtime](/quest/m2/relay-serve-path.md) - io_uring serves through the shared `Connection::serve` and config mapping
 - [A parked read of a resumed group reads its budget without re-syncing](/quest/m2/recover-budget.md) - measure, then drop the per-frame reader sync
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
@@ -128,6 +127,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
+- [WebCodecs audio priming](/quest/m2/webcodecs-priming.md) - `@moq/publish` measures each browser's `AudioEncoder` priming and corrects AAC timestamps and Opus pre-skip, so audio decodes at its capture timestamp
+- [macOS browser lane](/quest/m2/macos-browser-lane.md) - nightly CI runs the priming browser test in Chrome and Safari, which have the AAC encoders Linux lacks
 - [fMP4 ambisonic layout](/quest/m2/mux-vr-ambisonic-fmp4.md) - fMP4 Opus import fills `ambisonic` from the `dOps` mapping table
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
@@ -271,6 +272,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Open-GOP MPEG-2 export trims leading B-pictures in zero-stuffed CBR streams](/quest/m2/pes-hold-open-gop.md) - A TS export starting or resuming inside an open GOP of MPEG-2 video drops the orphaned leading B-pictures even when their PES ends on zero stuffing, as CBR encoders emit, without ever trimming part of a reference picture whose start code straddles two PES packets
 - [The lite publisher tells transport faults from cancels](/quest/m2/publish-cancel-classify.md) - `rs/moq-net`'s lite publisher no longer counts every `Error::Transport` as a clean cancel
 - [moq-publish hides previews that show nothing](/quest/m2/publish-empty-previews.md) - `<moq-publish>` hides a preview that renders nothing
+- [A loading video preview takes no space](/quest/m2/publish-video-loading.md) - a `<video>` preview stays hidden until it reports its media size, so the empty publish player never keeps the 300x150 placeholder ratio
 - [moq-quic's sim pair fails a test that sends an oversized packet](/quest/m2/quic-sim-mtu.md) - A moq-quic test whose endpoint sends a datagram larger than the simulated path MTU fails, instead of the `Pair` silently dropping it
 - [A stalled reader within budget gets no Old resets through a relay](/quest/m2/relay-capped-credit-test.md) - A test proves that a subscriber which stalls before its first read, behind a relay over a transport with capped stream credit, receives no `Old` stream resets for groups still within its max-delay budget, and reads them in order once it resumes
 - [In-memory transports refuse a request without stream credit](/quest/m2/sim-credit-open.md) - moq-net's in-memory test transports model the peer's bidirectional stream credit, and `poll_open_request` returns `Ok(None)`
@@ -298,3 +300,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [The dev shell builds Kotlin with Gradle 9](/quest/m2/kt-gradle-9.md) - `gradle_9` in the dev shell, so the Android target builds there
 - [The publish support panel lists only codecs publishing accepts](/quest/m2/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe
 - [A hung Python test fails instead of hanging the suite](/quest/m2/py-test-timeouts.md) - one pytest-timeout bound covers every `py/` test
+- [Chromium's Opus encoder stamps chunks from their input](/quest/m2/chromium-opus-timestamps.md) - waiting on Chromium; unlocks native `usedtx` for push-to-talk
