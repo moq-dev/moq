@@ -6,17 +6,17 @@ set -euo pipefail
 if [[ -n "${NEXTEST_NO_FAIL_FAST:-}" ]]; then
     case "${1:-} ${2:-} ${3:-}" in
         'cargo nextest run' | 'cargo llvm-cov nextest')
-            fail_fast=(--no-fail-fast)
+            no_fail_fast=1
             for arg in "${@:4}"; do
                 case "$arg" in
                     --) break ;;
                     --fail-fast | --ff | --no-fail-fast | --nff | --max-fail | --max-fail=* | --no-run)
-                        fail_fast=()
+                        no_fail_fast=
                         break
                         ;;
                 esac
             done
-            set -- "${@:1:3}" "${fail_fast[@]}" "${@:4}"
+            if [[ -n "$no_fail_fast" ]]; then set -- "${@:1:3}" --no-fail-fast "${@:4}"; fi
             ;;
     esac
 fi

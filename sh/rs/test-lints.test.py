@@ -30,7 +30,13 @@ class TestLints(unittest.TestCase):
             (root / "src" / "lib.rs").write_text(
                 '#[test]\nfn first() { panic!("first failure"); }\n#[test]\nfn second() { panic!("second failure"); }\n'
             )
-            env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"), NEXTEST_PROFILE="default")
+            toolchain = Path(shutil.which("clippy-driver")).parent
+            env = dict(
+                os.environ,
+                CARGO_TARGET_DIR=str(root / "target"),
+                NEXTEST_PROFILE="default",
+                PATH=f"{toolchain}:{os.environ['PATH']}",
+            )
             env.pop("NEXTEST_NO_FAIL_FAST", None)
             subprocess.run(
                 ["cargo", "generate-lockfile", "--offline"], cwd=root, env=env, check=True, capture_output=True
