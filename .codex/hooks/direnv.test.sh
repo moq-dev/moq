@@ -47,7 +47,7 @@ done
 # A fallback capture replaces partial Nix output as well as its environment.
 FAIL_NIX=1 bash "$hook"
 [[ $(bash -c 'source "$1"; printf "%s" "$TOOLCHAIN"' -- "$snapshot") == fallback ]]
-[[ $(wc -l <"$snapshot") == 2 ]]
+[[ $(wc -l <"$snapshot") -eq 2 ]]
 
 # A failed capture preserves both the last snapshot and its warning marker.
 cp "$snapshot" "$fixture/captured"
