@@ -44,3 +44,40 @@ the two missing consumers get the warmup.
 
 Public API: moq-mux's container consumer setup changes (breaking). The
 bindings' subscribe surface is unchanged. Wire: none.
+
+Implementation evidence, 2026-11-04:
+
+- `MoqAudio` and `MoqVideo` in `rs/moq-ffi/src/media.rs` do not contain
+  `warmup`. `convert_catalog` discards it before a rendition reaches
+  `MoqMediaTrackConsumer::subscribe`. Consumer adoption alone cannot recover
+  the catalog value. The subscribe method can stay unchanged, but carrying
+  the value through its rendition requires a public catalog-record change.
+- A temporary paused-time regression on unchanged implementation code
+  converted native audio and video catalogs with 300 ms warmup, then passed
+  those renditions to the public raw FFI subscribe method with a 200 ms
+  delay. Both producer-side subscription maxima were 200 ms, rather than
+  the required 500 ms. Command: `quest gate just rs test -p moq-ffi -E
+  'test(raw_media_catalog_warmup_reaches_the_subscription)'`. The temporary
+  regression was removed after reproduction; no production code changed.
+- `moqsrc` also discards warmup while constructing its private `Shape` and
+  subscribes using only `Session::max_delay`. Carrying the value privately
+  would not require a GStreamer property change.
+- moq-video's second lane adds warmup to both delay bounds and keeps it as
+  steady-state lateness tolerance, with a one-group lookback for `Latest`.
+  Its container warmup must remain zero if it adopts the shared setup;
+  subtracting the catalog warmup would change that lane's skip behavior.
+
+## Waiting
+
+- Maintainer: choose how catalog warmup reaches the raw FFI consumer before
+  implementation resumes. Option 1 (recommended): add optional `warmup`
+  duration fields, defaulting to absent, to `MoqAudio` and `MoqVideo`, carry
+  them through catalog conversions and every language wrapper, and document
+  the public record change while keeping the subscribe method unchanged.
+  This mirrors the existing audio `jitter` field and makes standalone
+  rendition subscriptions work. Option 2: keep the records unchanged and
+  resolve warmup from the broadcast catalog inside the raw subscriber;
+  this adds a catalog lookup/subscription and needs a policy for standalone
+  caller-supplied renditions and missing catalogs. The AFK brief requires a
+  maintainer decision on new public API/scope choices, so an agent cannot
+  select between these designs. A recorded choice clears this wait.
