@@ -131,7 +131,9 @@ export type EncoderOutput = {
 	// while there's no capture.
 	catalog: Signal<Catalog.AudioConfig | undefined>;
 	// The head of the capture graph, so callers can tap the raw capture. Volume is applied to the
-	// PCM rather than in the graph, so this is pre-gain. Undefined for a source that isn't a track.
+	// PCM rather than in the graph, so this is pre-gain. Its context renders to no device where the
+	// browser supports `sinkId`, so nothing connected to its destination is heard. Undefined for a
+	// source that isn't a track.
 	root: Signal<AudioNode | undefined>;
 	// True while encoding capture: enabled with a captured format and a track, which also takes a
 	// subscriber unless the broadcast's `onDemand` is false. Retained audio encoded for a subscriber

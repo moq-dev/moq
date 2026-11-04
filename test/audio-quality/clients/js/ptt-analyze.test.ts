@@ -85,6 +85,18 @@ test("a complete run passes, reports its latency, and splits each press exactly"
 	expect(parts).toBe(press.audible);
 });
 
+test("a frame held back by a capture burst widens its press's spread", async () => {
+	const result = trace();
+	const press = result.presses[4].at;
+	const held = result.arrivals.find((arrival) => arrival[0] > press + 3 * FRAME);
+	if (!held) throw new Error("no frame to hold");
+	held[0] += 30;
+	const { exitCode, summary } = await analyze(result);
+	expect(exitCode).toBe(0);
+	expect(summary.presses[2].spread).toBeCloseTo(30);
+	expect(summary.latency.spread).toEqual({ min: 0, median: 0, max: expect.closeTo(30) });
+});
+
 test("the delay is filled by the first frame to reach it, not the newest before the onset", async () => {
 	// The sixth frame decodes just before the onset, adding to a ring already leaving its stall.
 	const result = trace();
