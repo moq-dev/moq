@@ -67,7 +67,9 @@ related upstream fixes. Upstream's parser, JNI backend, mutable bytes, and
 library-mode removal are redesigns outside this sync. Before changing Dart
 fork CI, read its [coverage record](https://github.com/kixelated/uniffi-dart/blob/moq-0.32/README.md#fork-ci-coverage).
 Until the exporter switch, mirror any generator fixes into rust2's maintenance
-fork too. Drop the UniFFI child once
+fork too and add them to the exporter quest's carried-over list, so the new
+generators retain them. rust2's fork is maintenance-only since 2026-11-02.
+Drop the UniFFI child once
 [the exporter switch](/quest/m2/ffi-exporter.md) lands.
 
 Out of scope: forks moq no longer consumes (moq-dev/quiche, moq-dev/noq,

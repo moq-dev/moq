@@ -100,6 +100,16 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   cancelled as the call completed, and completes a future cancelled while
   pending as `context.Canceled`. The exporter's Go bindings must do both, tested
   like the fork's `destroy` fixture, which counts live handles.
+- Python running-loop preference and Dart buffer ownership (2026-10-31, from
+  [moq-dev/moq#7461](https://github.com/moq-dev/moq/pull/7461)):
+  [kixelated/uniffi-rs#1](https://github.com/kixelated/uniffi-rs/pull/1)
+  carries Python's running-loop preference (`f903c36c`), and
+  [kixelated/uniffi-dart#7](https://github.com/kixelated/uniffi-dart/pull/7)
+  carries Dart's nested input-scratch cleanup (`71dc9f8b`) and disposal status
+  reservation (`a2751c4c`).
+  [moq-dev/rust2#364](https://github.com/moq-dev/rust2/pull/364) mirrors them
+  into the maintenance fork. The exporter's generators must retain these
+  behaviors too, rechecking each against their design before the switch.
 - Update the quests that name a `kixelated/uniffi-*` fork
   ([Generated C bindings](/quest/m2/c/README.md)) to point at rust2, then
   archive the three forks.
