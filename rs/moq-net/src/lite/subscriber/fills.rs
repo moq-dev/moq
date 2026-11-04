@@ -474,3 +474,31 @@ impl Drop for Recovery {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A stale drop of groups a fill asked for is recovered once; a second one stands, and a
+	/// drop of groups no fill asked for refuses nothing.
+	#[test]
+	fn a_stale_drop_is_recovered_once() {
+		let mut fills = RangeFills::default();
+		fills.ask.groups.insert(2..6);
+		fills.refuse(3..5, StreamError::Old);
+		assert_eq!(fills.recover.iter().cloned().collect::<Vec<_>>(), [3..5]);
+		assert!(fills.refused.is_empty(), "recovered, not refused");
+
+		// Once recovered, the same groups dropped stale again stay dropped.
+		fills.recovered.insert(3..5);
+		fills.recover = Default::default();
+		fills.refuse(2..5, StreamError::Old);
+		assert_eq!(fills.recover.iter().cloned().collect::<Vec<_>>(), [2..3]);
+		assert_eq!(fills.refused.get(&3), Some(&StreamError::Old));
+
+		fills.refuse(7..9, StreamError::NotFound);
+		assert_eq!(fills.refused.get(&7), None, "no fill asked for it");
+		fills.refuse(5..6, StreamError::NotFound);
+		assert_eq!(fills.refused.get(&5), Some(&StreamError::NotFound));
+	}
+}

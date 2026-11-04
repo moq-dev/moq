@@ -29,15 +29,12 @@ on lite-07 (`track.Consumer.fetchGroup` in JS).
   SUBSCRIBE may start at any frame. A read starting partway through a group goes
   through FETCH instead.
 - Rust and JS send FETCH on lite-07 only for one group or a slice of one
-  group; a fill of more than one group goes through
-  [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)' subscription fill.
+  group; a fill of more than one group goes through the subscription, as the
+  Rust copy does since
+  [moq-dev/moq#7872](https://github.com/moq-dev/moq/pull/7872).
 - `drafts/draft-lcurley-moq-lite.md` states the split in its Fetch and
   Subscribe sections. Run `just drafts check`.
 - Run `just test interop --all`.
 
 Public API: none expected. Wire: lite-07 (unpublished) SUBSCRIBE anchors lose
 their frame.
-
-## Required
-
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - Rust fills multi-group ranges through the subscription

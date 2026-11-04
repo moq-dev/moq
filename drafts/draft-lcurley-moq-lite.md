@@ -519,6 +519,10 @@ The subscriber judges a Range complete from what it observed: the Groups it rece
 Drops and Groups name absolute sequences, so the subscriber judges them against its latest Ranges, and an update still in flight changes nothing it has counted.
 The publisher never closes its side first: a subscription whose every Range has an `End` other than None and whose every Group has been delivered or dropped stays open for an update to widen it.
 
+A subscriber fills Groups it misses by asking for them as Ranges, adding them to an open subscription with SUBSCRIBE_UPDATE or opening a bounded SUBSCRIBE when none is open, rather than with a FETCH of each Group; FETCH remains for one Group, or a slice of one.
+A publisher never sends a Group twice on one subscription, so a Group the subscription already delivered or named in SUBSCRIBE_DROP is asked for with a SUBSCRIBE of its own.
+The subscriber asks that way, once, for a Group a subscription dropped with OLD that it still wants, with a `Subscriber Max Age` its age does not reach, and never for a Group that may still arrive on the existing subscription.
+
 The subscriber closes its side (FIN) once it wants nothing more from the subscription, and the publisher then closes its side (FIN), cancelling any Group Stream still open.
 After SUBSCRIBE_FINISH, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every sequence in range has arrived, been named by SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
 A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
@@ -1989,6 +1993,7 @@ The `Message Length` describes the payload size on the wire.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.
 - SUBSCRIBE_OK's Range Starts answer the SUBSCRIBE's Ranges, and added SUBSCRIBE_STARTED (type 0x4) resolving where each Range an update adds starts.
+- A subscriber fills missing Groups through Ranges on a subscription instead of a FETCH per Group, and asks for a Group a subscription already delivered or dropped, including one dropped with OLD, with a SUBSCRIBE of its own.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it.
 - Renamed SUBSCRIBE_END to SUBSCRIBE_FINISH, matching TRACKS_FINISH: it ends the Track, not the subscription.
 - Added `Error Code` to SUBSCRIBE_FINISH: a track can end with an error while keeping the groups below its end.
