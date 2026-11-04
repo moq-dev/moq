@@ -32,3 +32,7 @@ benchmark at #7597's parent and at #7597.
   its cases runnable.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [A group a subscriber gives up on is always reported](/quest/m1/group-drops.md) - overcommitted cells need the subscriber to report groups it abandons, or the paced writer stalls
