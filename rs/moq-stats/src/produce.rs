@@ -2422,15 +2422,15 @@ mod tests {
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
 		// Let the request reach the stats broadcast's queue before the drain.
-		let mut track = Reader::new(
-			broadcast
-				.track(&presence_track(moq_net::Path::from_static("")))
-				.expect("track"),
-		);
+		let handle = broadcast
+			.track(&presence_track(moq_net::Path::from_static("")))
+			.expect("track");
+		let mut track = Reader::new(handle.clone());
 		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}
 		assert_eq!(tick(), 1, "held");
+		handle.info().await.expect("held");
 		assert_eq!(try_presence(&mut track), Some(PresenceFrame::new()), "held at zero");
 
 		// The label records while held: the same subscription carries it.
@@ -2677,15 +2677,15 @@ mod tests {
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
 
-		let mut track = Reader::new(
-			broadcast
-				.track(&prefix_track(moq_net::Path::from_static("acme")))
-				.expect("track"),
-		);
+		let handle = broadcast
+			.track(&prefix_track(moq_net::Path::from_static("acme")))
+			.expect("track");
+		let mut track = Reader::new(handle.clone());
 		for _ in 0..8 {
 			tokio::task::yield_now().await;
 		}
 		assert_eq!(tick(), 1, "held");
+		handle.info().await.expect("held");
 		assert_eq!(last_prefix(&mut track), Some(PrefixFrame::new()), "held at zero");
 
 		let _feed = feed(&registry, Tier::default(), "acme/live", true, 1, 7).await;
