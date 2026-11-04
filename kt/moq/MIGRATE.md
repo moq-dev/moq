@@ -8,6 +8,8 @@ How to update your code for each breaking change, newest first.
 
 dev.moq.socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change. Like broadcasts, endpoint `end()` forces shutdown while AutoCloseable `close()` releases the handle.
 
+`GroupProducer.ready(size)` is a new suspending call that waits until a frame of `size` bytes fits a window ahead of the fastest reader. Call it before each `writeFrame` so a slow reader slows the writer instead of being evicted; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### Separate datagram tracks
 
 Replace stream-track `appendDatagram` / `insertDatagram` / `recvDatagram` with `BroadcastProducer.createDatagrams(name, info)` and `BroadcastConsumer.datagrams(name)`. The separate `DatagramProducer` has `append(timestamp, payload)` and `insert(Datagram)`; `DatagramConsumer` has `recv()` and the `datagrams()` flow. Use `priority()` / `priorityChanged(last)` for aggregate demand, and `BroadcastRequests.datagrams()` / `DatagramRequests.requested()` for on-demand tracks. `DatagramInfo` has only publisher priority and optional timescale.

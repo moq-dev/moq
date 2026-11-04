@@ -14544,6 +14544,7 @@ abstract class MoqGroupProducerInterface {
   void abort({required int errorCode});
   MoqGroupConsumer consume();
   void finish();
+  UniffiRustFuture<void> ready({required int size});
   int sequence();
   void writeFrame({required MoqFrame frame});
 }
@@ -14613,6 +14614,21 @@ class MoqGroupProducer implements MoqGroupProducerInterface {
         status,
       );
     }, moqExceptionErrorHandler);
+  }
+
+  UniffiRustFuture<void> ready({required int size}) {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqgroupproducer_ready(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(size),
+      ),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_cancel_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
+    );
   }
 
   int sequence() {
@@ -22077,6 +22093,12 @@ external void uniffi_moq_ffi_fn_method_moqgroupproducer_finish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Pointer<Void> Function(Pointer<Void>, Uint64)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqgroupproducer_ready(
+  Pointer<Void> ptr,
+  int size,
+);
+
 @Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -23961,6 +23983,9 @@ external int uniffi_moq_ffi_checksum_method_moqgroupproducer_consume();
 external int uniffi_moq_ffi_checksum_method_moqgroupproducer_finish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqgroupproducer_ready();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqgroupproducer_sequence();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -24845,6 +24870,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgroupproducer_finish() != 61241) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqgroupproducer_ready() != 47951) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgroupproducer_sequence() != 21067) {

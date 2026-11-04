@@ -9352,3 +9352,123 @@ async fn datagram_cancel_releases_demand_and_wakes_reads() {
 	assert!(matches!(pending.await.unwrap(), Err(MoqError::Cancelled)));
 	assert_eq!(producer.priority_changed(Some(0)).await.unwrap(), None);
 }
+
+/// One MiB of frame, so a few dozen run past a group's 32 MiB cache.
+const MIB: usize = 1024 * 1024;
+
+/// Write `frames` MiB frames into a fresh group behind a reader that took only the first,
+/// waiting on `ready` before each later one when `paced`. Returns the writer's progress, its task, and
+/// the reader.
+async fn write_ahead_of_a_slow_reader(
+	frames: usize,
+	paced: bool,
+) -> (
+	Arc<std::sync::atomic::AtomicUsize>,
+	tokio::task::JoinHandle<Result<(), MoqError>>,
+	Arc<MoqGroupConsumer>,
+	Arc<MoqBroadcastProducer>,
+	Arc<MoqTrackProducer>,
+) {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("tcp".into(), None).unwrap();
+	let group = track.append_group().unwrap();
+	let reader = group.consume().unwrap();
+	let frame = || MoqFrame {
+		payload: vec![7; MIB],
+		timestamp: None,
+	};
+
+	// The reader holds the group and takes the first frame, then stalls.
+	group.write_frame(frame()).unwrap();
+	let first = kio::clock::timeout(TIMEOUT, reader.read_frame())
+		.await
+		.expect("no first frame")
+		.unwrap();
+	assert_eq!(first.map(|frame| frame.payload.len()), Some(MIB));
+
+	let written = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+	let writer = {
+		let group = group.clone();
+		let written = written.clone();
+		tokio::spawn(async move {
+			for _ in 1..frames {
+				if paced {
+					group.ready(MIB as u64).await?;
+				}
+				group.write_frame(frame())?;
+				written.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			}
+			group.finish()
+		})
+	};
+	(written, writer, reader, broadcast, track)
+}
+
+/// A writer awaiting `ready` stops a window ahead of a stalled reader instead of running
+/// past the cache, and the reader then takes every frame, as TCP backpressure would.
+#[tokio::test]
+async fn ready_paces_a_writer_behind_a_slow_reader() {
+	const FRAMES: usize = 48;
+	let (written, writer, reader, _broadcast, _track) = write_ahead_of_a_slow_reader(FRAMES, true).await;
+
+	// Let the writer run as far as it can while the reader stalls.
+	for _ in 0..50 {
+		ffi_caught_up().await;
+		tokio::time::sleep(Duration::from_millis(2)).await;
+	}
+	let ahead = written.load(std::sync::atomic::Ordering::SeqCst);
+	assert!(!writer.is_finished(), "the writer never waited");
+	assert!(
+		ahead > 1 && ahead < 32,
+		"{ahead} MiB written past a reader one frame in"
+	);
+
+	let mut read = 1;
+	while let Some(frame) = kio::clock::timeout(TIMEOUT, reader.read_frame())
+		.await
+		.expect("the read stalled")
+		.expect("a paced reader is never evicted")
+	{
+		assert_eq!(frame.payload.len(), MIB);
+		read += 1;
+	}
+	assert_eq!(read, FRAMES);
+	kio::clock::timeout(TIMEOUT, writer)
+		.await
+		.expect("the writer stalled")
+		.unwrap()
+		.unwrap();
+}
+
+/// Without `ready`, the same writer runs past the cache and the stalled reader is evicted.
+#[tokio::test]
+async fn an_unpaced_writer_evicts_a_slow_reader() {
+	let (_written, writer, reader, _broadcast, _track) = write_ahead_of_a_slow_reader(48, false).await;
+	kio::clock::timeout(TIMEOUT, writer)
+		.await
+		.expect("the writer stalled")
+		.unwrap()
+		.unwrap();
+	let failed = kio::clock::timeout(TIMEOUT, async {
+		loop {
+			match reader.read_frame().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => return None,
+				Err(err) => return Some(err),
+			}
+		}
+	})
+	.await
+	.expect("the read stalled");
+	assert!(failed.is_some(), "the stalled reader kept every frame");
+}
+
+/// `ready` fails once the group is aborted through its handle.
+#[tokio::test]
+async fn ready_after_abort_is_closed() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("tcp".into(), None).unwrap();
+	let group = track.append_group().unwrap();
+	group.abort(1).unwrap();
+	assert!(matches!(group.ready(1).await, Err(MoqError::Closed)));
+}

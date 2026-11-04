@@ -934,6 +934,27 @@ impl MoqGroupProducer {
 		Ok(())
 	}
 
+	/// Wait until a frame of `size` bytes fits, so a writer runs no further ahead of its
+	/// fastest reader than the group's window.
+	///
+	/// Await this before each [`write_frame`](Self::write_frame) for backpressure: a slow
+	/// reader slows the writer instead of the group shedding frames the reader has not taken,
+	/// which fails that reader with `Evicted`. Writing without waiting never fails; the group
+	/// sheds its front instead. Resolves once a reader holds the group and the frame fits, at
+	/// once while a reader has taken every frame, and once the group is closed, so the next
+	/// write reports why. Fails with `Closed` after [`abort`](Self::abort).
+	pub async fn ready(&self, size: u64) -> Result<(), MoqError> {
+		let frame = moq_net::frame::Info { size, timestamp: None };
+		crate::ffi::run(kio::wait(|waiter| {
+			let guard = self.inner.lock().unwrap();
+			match guard.as_ref() {
+				Some(group) => group.poll_ready(waiter, &frame).map(Ok),
+				None => Poll::Ready(Err(MoqError::Closed)),
+			}
+		}))
+		.await
+	}
+
 	/// Mark the group as complete. No more frames can be written.
 	///
 	/// The handle remains so a later [`abort`](Self::abort) can still run.

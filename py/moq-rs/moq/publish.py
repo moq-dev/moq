@@ -50,8 +50,23 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
+    async def ready(self, size: int) -> None:
+        """Wait until a frame of ``size`` bytes fits a window ahead of the fastest reader.
+
+        Await it before each :meth:`write_frame` so a slow reader slows the writer,
+        as TCP backpressure does, instead of the group shedding frames the reader
+        has not taken, which fails that reader with ``moq.Error.Evicted``. It also
+        waits until a reader holds the group, and resolves once the group is closed
+        so the next write raises why. Raises ``moq.Error.Closed`` after :meth:`abort`.
+        """
+        await self._inner.ready(size)
+
     def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
-        """Write a frame with its presentation timestamp."""
+        """Write a frame with its presentation timestamp.
+
+        Never blocks: without :meth:`ready`, a writer that outpaces its readers
+        sheds the front of the group instead.
+        """
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
     def finish(self) -> None:

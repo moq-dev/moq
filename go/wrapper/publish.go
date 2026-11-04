@@ -265,7 +265,18 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// WriteFrame appends frame to the group.
+// Ready blocks until a frame of size bytes fits a window ahead of the fastest
+// reader. Call it before each WriteFrame so a slow reader slows the writer, as
+// TCP backpressure does, instead of the group shedding frames the reader has not
+// taken, which fails that reader with Evicted. It also waits until a reader holds
+// the group, and returns once the group is closed so the next write reports why.
+// It fails with Closed after Abort.
+func (g *GroupProducer) Ready(ctx context.Context, size uint64) error {
+	return g.inner.Ready(ctx, size)
+}
+
+// WriteFrame appends frame to the group. It never blocks: without Ready, a writer
+// that outpaces its readers sheds the front of the group instead.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
 	return g.inner.WriteFrame(frame)
 }

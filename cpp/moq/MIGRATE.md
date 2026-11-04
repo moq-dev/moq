@@ -6,6 +6,8 @@
 
 The generated SocketEndpoint, SocketIncomingTcp, SocketIncomingTrack, SocketTcpStream, and SocketTrackStream handles now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
+`moq::GroupProducer::ready(size)` is a new async call that completes once a frame of `size` bytes fits a window ahead of the fastest reader. `co_await` it before each `write_frame` so a slow reader slows the writer instead of being evicted; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### Separate datagram tracks
 
 Replace stream-track datagram methods with `BroadcastProducer::create_datagrams(name, info)` and `BroadcastConsumer::datagrams(name)`. The generated `DatagramProducer` exposes `append(timestamp, payload)` and `insert(Datagram)`; `DatagramConsumer::recv()` returns an optional datagram through a future. `DatagramInfo` has only priority and optional timescale. Demand is aggregate subscriber `priority()` / `priority_changed(last)`; on-demand datagram requests come from `BroadcastRequests::datagrams()` / `DatagramRequests::requested()`. Stream tracks of the same name are independent.

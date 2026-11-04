@@ -129,7 +129,7 @@ budget, no order, since the newest group is never stale.
 
 A session can last indefinitely: a group has no size cap, and each copy keeps
 only a bounded tail of it. A writer that waits for room before each write (in
-Rust, `group::Producer::ready`) runs at most a window ahead of the reader on
+Rust, `group::Producer::ready`; in the bindings, `GroupProducer.ready(size)`) runs at most a window ahead of the reader on
 every hop, so a slow reader slows the writer, as TCP backpressure does, and
 nothing is lost. A writer that doesn't wait sheds the front of its half, and a
 reader that falls behind it fails with an eviction error instead of skipping

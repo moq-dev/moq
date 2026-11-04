@@ -9,6 +9,8 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 MoqSocketEndpoint, MoqSocketIncomingTcp, MoqSocketIncomingTrack, MoqSocketTcpStream, and MoqSocketTrackStream now expose TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change. Dropping an unfinished group producer now resets it with `Unroutable` instead of leaking Rust's programming-error `Dropped`; finished groups still end cleanly.
 
+`MoqGroupProducer::ready(size)` is a new async call that waits until a frame of `size` bytes fits a window ahead of the group's fastest reader. Await it before each `write_frame` so a slow reader slows the writer instead of being evicted; a TCP socket session needs it to behave like TCP. Existing writers are unchanged and still shed the group's front when they outpace their readers.
+
 ### Separate datagram tracks
 
 `MoqTrackProducer::{append_datagram, insert_datagram}` and `MoqTrackConsumer::recv_datagram` are removed. Use `MoqBroadcastProducer::create_datagrams(name, info)` and `MoqBroadcastConsumer::datagrams(name)` for separate `MoqDatagramProducer`/`MoqDatagramConsumer` handles. `append(timestamp, payload)` assigns a sequence; `insert(MoqDatagram)` preserves one; `recv()` reads it. `MoqDatagramInfo` has only priority and optional timescale. Watch aggregate subscriber priority with `priority()` / `priority_changed(last)`, and handle dynamic tracks with `MoqBroadcastRequests::datagrams()` / `MoqDatagramRequests::requested()`. Stream and datagram tracks of the same name have independent demand and lifetimes.

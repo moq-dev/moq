@@ -8,6 +8,8 @@ How to update your code for each breaking change, newest first.
 
 moq.dev/moq/socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
+`GroupProducer.Ready(ctx, size)` is new: it blocks until a frame of `size` bytes fits a window ahead of the fastest reader. Call it before each `WriteFrame` so a slow reader slows the writer instead of being evicted; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### Separate datagram tracks
 
 Replace stream-track `AppendDatagram` / `InsertDatagram` / `RecvDatagram` with `BroadcastProducer.CreateDatagrams(name, info)` and `BroadcastConsumer.Datagrams(name)`. `DatagramProducer.Append(timestamp, payload)` assigns a sequence and `Insert(Datagram)` preserves one. `DatagramConsumer.Recv(ctx)` and `All(ctx)` read its independent cursor. `DatagramInfo` carries priority and optional timescale. Watch `Priority()` / `PriorityChanged(ctx, last)` and serve on-demand tracks through `BroadcastRequests.Datagrams()` / `DatagramRequests.Requested(ctx)`.

@@ -220,3 +220,33 @@ if __name__ == "__main__":
     from moq.testing import Clock
 
     asyncio.run(late_peer(Clock()))
+
+
+async def test_tcp_ready_paces_a_writer_behind_a_slow_reader():
+    a, b = endpoints()
+    client, server = await tcp(a, b)
+    mib, frames = 1024 * 1024, 48
+    written = 0
+
+    async def write() -> None:
+        nonlocal written
+        for _ in range(frames):
+            await client.producer.ready(mib)
+            client.producer.write_frame(bytes(mib))
+            written += 1
+        client.producer.finish()
+
+    writer = await start(write())
+    first = await server.consumer.read_frame()
+    assert first is not None and len(first.payload) == mib
+    # Stalled after one frame, the reader holds the writer a window behind, well short of the
+    # 32 MiB cache. Unpaced, the same writer would shed frames and the reader would be evicted.
+    done, _ = await asyncio.wait({writer}, timeout=0.2)
+    assert not done
+    assert 1 < written < 32
+    remaining = [len(frame.payload) async for frame in server.consumer]
+    assert remaining == [mib] * (frames - 1)
+    await writer
+    server.producer.finish()
+    a.close()
+    b.close()

@@ -8,6 +8,8 @@ How to update your code for each breaking change, newest first.
 
 package:moq/socket.dart now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
+`GroupProducer.ready(size)` is a new `Future` that completes once a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each `writeFrame` so a slow reader slows the writer instead of being evicted; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### Separate datagram tracks
 
 Use `BroadcastProducer.createDatagrams(name: ..., info: ...)` and `BroadcastConsumer.datagrams(name: ...)` instead of stream-track datagram methods. `DatagramProducer.append(timestamp: ..., payload: ...)` assigns a sequence and `insert(datagram: ...)` preserves one; `DatagramConsumer.recv()` reads its own live cursor. `DatagramInfo` contains priority and optional timescale. Watch `priority()` / `priorityChanged(last: ...)` and serve on-demand tracks through `BroadcastRequests.datagrams()` / `DatagramRequests.requested()`.

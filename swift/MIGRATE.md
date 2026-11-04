@@ -8,6 +8,8 @@ How to update your code for each breaking change, newest first.
 
 Socket now exposes TCP group halves and reliably subscribed track halves beside origin. Regenerate bindings and rebuild the matching native library together. Existing callers need no migration. Socket endpoints require lite-07 or moq-transport on every hop; there is no wire change.
 
+`GroupProducer.ready(size:)` is a new `async throws` call that waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each `writeFrame` so a slow reader slows the writer instead of being evicted; a TCP socket stream's producer needs it to behave like TCP. Existing writers are unchanged.
+
 ### Separate datagram tracks
 
 Replace stream-track `appendDatagram` / `insertDatagram` / `recvDatagram` with `BroadcastProducer.createDatagrams(name:info:)` and `BroadcastConsumer.datagrams(name:)`. `DatagramProducer.append(_:timestamp:)` assigns a sequence; `insert(_:)` takes a `Datagram`. `DatagramConsumer.recv()` and `AsyncSequence` read its independent cursor. Use `priority()` / `priorityChanged(last:)` for demand, and `BroadcastRequests.datagrams()` / `DatagramRequests.requested()` for on-demand tracks. `DatagramInfo` has priority and optional timescale, without stream ranges or cache settings.
