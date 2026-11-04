@@ -64,8 +64,9 @@ every run; the 256-stream cell sometimes does.
   reports what a cursor gives up; it doesn't change how a cursor judges a
   missing group.
 
-Public API: additive (a public drop read in Rust; `@moq/net` and the bindings
-only with a named consumer).
+Public API: additive for a separate read; breaking if folded into `recv_group`
+(its `Result<Option<group::Consumer>>` return changes for every caller), with
+MIGRATE notes. `@moq/net` and the bindings mirror it only with a named consumer.
 Wire: possibly lite-07 (SUBSCRIBE_DROP for a stopped group), decided here.
 
 ## Related
