@@ -357,6 +357,7 @@ class InventoryTest(unittest.TestCase):
             + """
     files := '''
         test/compat.test.ts
+        test/view.test.tsx
         ./test/exact.test.ts
     '''
 
@@ -367,9 +368,9 @@ class InventoryTest(unittest.TestCase):
         self.write("sh/local.sh", '"$@"\n')
         self.write(
             "sh/run.sh",
-            'bun test \\\n    "test/codec.test.ts" ./test/exact.test.ts # bun test commented.test.ts\n',
+            'bun test \\\n    "test/codec.test.ts" test/a.test.jsx test/b.test.cjs ./test/exact.test.ts # bun test commented.test.ts\n',
         )
-        self.write("package.json", '{"scripts": {"test": "bun test test/codec.spec.ts"}}')
+        self.write("package.json", '{"scripts": {"test": "bun test test/codec.spec.ts test/codec.test.cts"}}')
         workflow = self.root / ".github/workflows/ci.yml"
         self.write(str(workflow.relative_to(self.root)), WORKFLOW + "          - run: bun test test/frame.test.ts\n")
         _, errors = module.inventory(self.root)
@@ -378,9 +379,14 @@ class InventoryTest(unittest.TestCase):
             [
                 ".github/workflows/ci.yml (fuzz): bun test test/frame.test.ts is a substring filter;"
                 " prefix the file path with ./",
-                "justfile:16: bun test test/compat.test.ts is a substring filter; prefix the file path with ./",
+                "justfile:17: bun test test/compat.test.ts is a substring filter; prefix the file path with ./",
+                "justfile:17: bun test test/view.test.tsx is a substring filter; prefix the file path with ./",
                 "package.json scripts.test: bun test test/codec.spec.ts is a substring filter;"
                 " prefix the file path with ./",
+                "package.json scripts.test: bun test test/codec.test.cts is a substring filter;"
+                " prefix the file path with ./",
+                "sh/run.sh: bun test test/a.test.jsx is a substring filter; prefix the file path with ./",
+                "sh/run.sh: bun test test/b.test.cjs is a substring filter; prefix the file path with ./",
                 "sh/run.sh: bun test test/codec.test.ts is a substring filter; prefix the file path with ./",
             ],
         )

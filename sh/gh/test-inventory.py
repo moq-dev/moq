@@ -43,6 +43,8 @@ import yaml
 
 SCRIPT = re.compile(r"[\w.$/{}-]*[\w-]\.(?:sh|py|ts|mts|js|mjs)\b")
 JS = (".ts", ".mts", ".js", ".mjs")
+# Every extension Bun discovers as a test file (`*.test.{js,jsx,ts,tsx,mjs,cjs,mts,cts}`).
+BUN_TEST = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts")
 # A relative module specifier in a static or dynamic import, or a re-export.
 IMPORT = re.compile(r"""\b(?:from|import)\s*\(?\s*["'](\.\.?/[^"']+)["']""")
 # Commands that run a test suite. Python sources spell them as argument lists,
@@ -1059,7 +1061,7 @@ def bun_test_paths(root: Path, recipes: list[Recipe]) -> list[str]:
                         continue
                     if word in ("-t", "--test-name-pattern", "--preload", "--reporter-outfile", "--coverage-dir"):
                         value = True
-                    elif word.endswith(JS) and literal(word) and not word.startswith(("./", "/", "-")):
+                    elif word.endswith(BUN_TEST) and literal(word) and not word.startswith(("./", "/", "-")):
                         errors.add(f"{where}: bun test {word} is a substring filter; prefix the file path with ./")
     return sorted(errors)
 
