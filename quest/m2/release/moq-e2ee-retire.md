@@ -33,4 +33,5 @@ Public API: none. Wire: none.
 
 ## Related
 
+- [moq-crypto replaces moq-sign and moq-e2ee](https://github.com/moq-dev/moq/pull/7702) - makes the stub
 - [Retire libmoq](/quest/m2/release/libmoq-retire.md) - the same retirement for libmoq
