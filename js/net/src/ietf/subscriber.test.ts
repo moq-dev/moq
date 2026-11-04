@@ -1126,6 +1126,63 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	track.close();
 });
 
+test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
+	"an absolute prefix survives an answer behind its first burst (%s)",
+	async (version) => {
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
+		const subscriber = new Subscriber({ session: new NativeSession(pair.server, version, true) });
+		const consumer = subscriber
+			.consume(Path.from("room"))
+			.track("video")
+			.subscribe({
+				...track.Subscription.default(),
+				ranges: [{ start: { absolute: 0n } }],
+				order: "ascending",
+				delay: { max: null },
+			});
+		const peer = await nextStream(pair.client, version);
+		if (!peer) throw new Error("missing SUBSCRIBE stream");
+		try {
+			expect(await peer.reader.u53()).toBe(Subscribe.id);
+			expect((await Subscribe.decode(peer.reader, version)).filter).toEqual({ kind: "unfiltered" });
+			const arrivals = [0n, 1n, 2n].map((groupId) =>
+				subscriber.handleGroup(
+					new GroupMessage({
+						trackAlias: ALIAS,
+						groupId,
+						subGroupId: 0n,
+						publisherPriority: 0,
+						flags: groupFlags(true),
+					}),
+					new Reader(undefined, encodeObjects([0, 0]), version),
+				),
+			);
+			await peer.writer.u53(SubscribeOk.id);
+			await new SubscribeOk({ trackAlias: ALIAS, largest: { groupId: 2n, objectId: 1n } }).encode(
+				peer.writer,
+				version,
+			);
+			await Promise.all(arrivals);
+			const ordered = consumer.ordered();
+			try {
+				for (const sequence of [0n, 1n, 2n]) {
+					const group = await ordered.nextGroup();
+					expect(group?.sequence).toBe(sequence);
+					if (!group) throw new Error("missing prefix group");
+					expect(await group.readString()).toBe("object 0");
+					expect(await group.readString()).toBe("object 0");
+					expect(await group.readString()).toBeUndefined();
+				}
+			} finally {
+				ordered.close();
+			}
+		} finally {
+			peer.close();
+			consumer.close();
+		}
+	},
+);
+
 /**
  * A group is the unit an application resyncs on, so one served from partway through is
  * unusable: the objects on the stream do not decode without the head the filter excluded,
