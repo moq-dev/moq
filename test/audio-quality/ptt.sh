@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measure push-to-talk behind bufferbloat; --reproduction is diagnostic only.
+# Measure push-to-talk on an ideal local path: no shaping, loss, or queueing.
 set -euo pipefail
 
 if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
@@ -12,26 +12,16 @@ cd "$ROOT"
 source test/lib/harness.sh
 harness_begin push-to-talk "just test push-to-talk$(harness_argv "$@")"
 
-case "${1:-}" in
-    "") shape=(--delay 50ms --rate 64000 --queue 1s) ;;
-    --reproduction) shape=(--delay 50ms --loss 0.02) ;;
-    *)
-        echo 'usage: just test push-to-talk [--reproduction]' >&2
-        exit 2
-        ;;
-esac
-[[ $# -le 1 ]] || {
-    echo 'too many arguments' >&2
+[[ $# -eq 0 ]] || {
+    echo 'usage: just test push-to-talk' >&2
     exit 2
 }
 
 bun install --frozen-lockfile
-cargo build --locked -p moq-relay -p moq-shaper
+cargo build --locked -p moq-relay
 TARGET_BASE="${CARGO_TARGET_DIR:-$ROOT/target}"
 harness_port relay
 relay_port=$HARNESS_PORT
-harness_port shaper
-shaper_port=$HARNESS_PORT
 sed "s/4443/$relay_port/g" test/audio-quality/relay.toml >"$HARNESS_RUN/relay.toml"
 harness_spawn relay "$HARNESS_RUN/relay.log" "$TARGET_BASE/debug/moq-relay" "$HARNESS_RUN/relay.toml"
 harness_ready "http://127.0.0.1:$relay_port/certificate.sha256" 30 "$HARNESS_PID"
@@ -42,37 +32,12 @@ if ! lsof -nP -a -p "$HARNESS_PID" -iTCP:"$relay_port" -sTCP:LISTEN >/dev/null 2
     echo 'relay does not own both listeners' >&2
     exit 1
 fi
-harness_spawn shaper "$HARNESS_RUN/shaper.log" "$TARGET_BASE/debug/moq-shaper" \
-    --listen "127.0.0.1:$shaper_port" --target "127.0.0.1:$relay_port" --seed 7 \
-    --report "$HARNESS_RUN/shaper.json" "${shape[@]}"
-shaper_pid=$HARNESS_PID
-until grep -q '^shaper:' "$HARNESS_RUN/shaper.log" 2>/dev/null; do
-    if harness_exited "$shaper_pid"; then
-        cat "$HARNESS_RUN/shaper.log" >&2
-        echo 'shaper exited before binding' >&2
-        exit 1
-    fi
-    sleep 0.05
-done
 harness_spawn driver "$HARNESS_RUN/driver.log" bun test/audio-quality/clients/js/ptt.ts \
-    --publisher "http://127.0.0.1:$relay_port" --viewer "http://127.0.0.1:$shaper_port" --out "$HARNESS_RUN"
+    --relay "http://127.0.0.1:$relay_port" --out "$HARNESS_RUN"
 driver_status=0
 harness_wait "$HARNESS_PID" || driver_status=$?
 if [[ $driver_status -ne 0 ]]; then
     cat "$HARNESS_RUN/driver.log" >&2
+    exit "$driver_status"
 fi
-kill -TERM -- -"$shaper_pid" 2>/dev/null || true
-shaper_status=0
-harness_wait "$shaper_pid" || shaper_status=$?
-printf '%s\n' "$shaper_status" >"$HARNESS_RUN/shaper.status"
-if [[ $shaper_status -ne 0 ]]; then
-    cat "$HARNESS_RUN/shaper.log" >&2
-fi
-status=$driver_status
-[[ $shaper_status -eq 0 ]] || status=$shaper_status
-analysis=()
-[[ "${1:-}" != --reproduction ]] || analysis=(--diagnostic)
-if [[ $driver_status -eq 0 ]]; then
-    bun test/audio-quality/clients/js/ptt-analyze.ts "$HARNESS_RUN" "${analysis[@]}" >"$HARNESS_RUN/summary.log" || status=$?
-fi
-exit "$status"
+bun test/audio-quality/clients/js/ptt-analyze.ts "$HARNESS_RUN" >"$HARNESS_RUN/summary.log"

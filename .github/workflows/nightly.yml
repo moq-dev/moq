@@ -496,7 +496,7 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           # A passing run is kept too: budgets.json is measured from these nights.
           HARNESS_KEEP: 1
-      - name: Push-to-talk behind bufferbloat
+      - name: Push-to-talk
         if: ${{ !cancelled() }}
         run: nix develop --command just test push-to-talk
         shell: bash -leo pipefail {0}

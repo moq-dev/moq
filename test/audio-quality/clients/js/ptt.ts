@@ -8,17 +8,12 @@ import type { measurement } from "./src/ptt";
 
 const { values } = parseArgs({
 	options: {
-		publisher: { type: "string" },
-		viewer: { type: "string" },
+		relay: { type: "string" },
 		out: { type: "string" },
 	},
 });
-const { publisher, viewer, out } = values;
-if (!publisher || !viewer || !out) throw new Error("usage: ptt.ts --publisher URL --viewer URL --out DIR");
-const hash = await fetch(`${publisher}/certificate.sha256`).then(async (r) => {
-	if (!r.ok) throw new Error(`certificate: ${r.status}`);
-	return r.text();
-});
+const { relay, out } = values;
+if (!relay || !out) throw new Error("usage: ptt.ts --relay URL --out DIR");
 
 // Chromium loops this constant tone as its microphone. Its default fake device has silent
 // intervals of its own, which would make an audible onset ambiguous.
@@ -57,10 +52,7 @@ try {
 	const page = await browser.newPage();
 	const pageErrors: string[] = [];
 	page.on("pageerror", (error) => pageErrors.push(String(error)));
-	await page.route(`${viewer}/certificate.sha256`, (route) =>
-		route.fulfill({ body: hash, headers: { "access-control-allow-origin": "*" } }),
-	);
-	await page.goto(`${server.resolvedUrls?.local[0]}ptt.html?${new URLSearchParams({ publisher, viewer })}`);
+	await page.goto(`${server.resolvedUrls?.local[0]}ptt.html?${new URLSearchParams({ relay })}`);
 	await page.waitForFunction(() => globalThis.ptt?.state().selected && globalThis.ptt.state().tapped, undefined, {
 		timeout: 30_000,
 	});
@@ -73,8 +65,8 @@ try {
 	if (held.active || held.config?.enabled !== false || held.selected !== initial.selected) {
 		throw new Error("the muted listener did not hold its rendition");
 	}
-	// Tune-in can consume retained audio and fill the impaired queue. Validate the tap on
-	// a fresh press only after the muted listener holds its subscription and the queue drains.
+	// Tune-in can consume retained audio. Validate the tap on a fresh press only after the muted
+	// listener holds its subscription.
 	await page.evaluate(() => globalThis.ptt.press(true));
 	await page.waitForTimeout(3000);
 	await page.evaluate(() => globalThis.ptt.press(false));

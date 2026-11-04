@@ -17,19 +17,23 @@ const records = {
 	submitted: [] as Frame[],
 	encoded: [] as Frame[],
 	sent: [] as Frame[],
+	decoding: [] as Frame[],
+	decoded: [] as Frame[],
 	subscriptions: [] as { at: number; name: string }[],
 	audible: [] as { at: number; rendered: number; received: number }[],
-	presses: [] as { at: number; on: boolean }[],
+	// The newest captured chunk delivered before a press, mapping the press onto the media clock.
+	presses: [] as { at: number; on: boolean; capture?: { at: number; end: number } }[],
 	captures: [] as { at: number; audio: boolean }[],
-	probes: [] as number[],
+	encoders: [] as number[],
 	errors: [] as string[],
 };
 
-// Observe WebCodecs without changing its input, output, or scheduling. The probe's flush is
-// separate from the live encoder, so a probe repeated on unmute is visible too.
+// Observe WebCodecs without changing its input, output, or scheduling. A probe or a rebuilt codec
+// constructs a new encoder; the live one flushes at each release, so a flush alone is no probe.
 const NativeEncoder = globalThis.AudioEncoder;
 globalThis.AudioEncoder = class extends NativeEncoder {
 	constructor(init: AudioEncoderInit) {
+		records.encoders.push(performance.now());
 		super({
 			...init,
 			output: (chunk, metadata) => {
@@ -42,9 +46,37 @@ globalThis.AudioEncoder = class extends NativeEncoder {
 		records.submitted.push({ at: performance.now(), timestamp: data.timestamp, duration: data.duration });
 		super.encode(data);
 	}
-	override flush(): Promise<void> {
-		records.probes.push(performance.now());
-		return super.flush();
+};
+const NativeDecoder = globalThis.AudioDecoder;
+globalThis.AudioDecoder = class extends NativeDecoder {
+	constructor(init: AudioDecoderInit) {
+		super({
+			...init,
+			output: (data) => {
+				records.decoded.push({ at: performance.now(), timestamp: data.timestamp, duration: data.duration });
+				init.output(data);
+			},
+		});
+	}
+	override decode(chunk: EncodedAudioChunk): void {
+		records.decoding.push({ at: performance.now(), timestamp: chunk.timestamp });
+		super.decode(chunk);
+	}
+};
+// Note each captured chunk as the publisher's graph delivers it, without consuming it.
+let captured: { at: number; end: number } | undefined;
+const NativeNode = globalThis.AudioWorkletNode;
+globalThis.AudioWorkletNode = class extends NativeNode {
+	constructor(context: BaseAudioContext, name: string, options?: AudioWorkletNodeOptions) {
+		super(context, name, options);
+		if (name !== "capture") return;
+		this.port.addEventListener(
+			"message",
+			({ data }: MessageEvent<{ timestamp: number; channels: Float32Array[] }>) => {
+				const frames = data.channels[0]?.length ?? 0;
+				captured = { at: performance.now(), end: data.timestamp + (frames / context.sampleRate) * 1_000_000 };
+			},
+		);
 	}
 };
 const encode = Container.Legacy.Producer.prototype.encode;
@@ -71,7 +103,7 @@ const required = (name: string) => {
 	return value;
 };
 const publish = document.createElement("moq-publish") as MoqPublish;
-publish.url = required("publisher");
+publish.url = required("relay");
 publish.name = "ptt.hang";
 publish.invisible = true;
 publish.audio.codec.set({ mime: "opus", frameDuration: Milli(60), bitrate: 128_000 });
@@ -79,7 +111,7 @@ publish.source = "camera";
 document.body.append(publish);
 
 const watch = document.createElement("moq-watch") as MoqWatch;
-watch.url = required("viewer");
+watch.url = publish.url;
 watch.name = publish.name;
 watch.setAttribute("delay", "300ms");
 watch.setAttribute("visible", "always");
@@ -158,7 +190,7 @@ audio.out.root.subscribe(() => void attach().catch((error) => records.errors.pus
 export const measurement = {
 	press(on: boolean) {
 		const at = performance.now();
-		records.presses.push({ at, on });
+		records.presses.push(on && captured ? { at, on, capture: { ...captured } } : { at, on });
 		publish.muted = !on;
 	},
 	state() {
@@ -172,6 +204,7 @@ export const measurement = {
 			context: audio.out.context.peek()?.state,
 			stalled: audio.out.stalled.peek(),
 			timestamp: audio.out.timestamp.peek(),
+			delay: watch.player.sync.out.delay.peek(),
 			error: String(publish.audio.out.error.peek() ?? audio.out.error.peek() ?? ""),
 		};
 	},

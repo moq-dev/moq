@@ -162,10 +162,9 @@ native-play:
 audio-quality *args:
     ./audio-quality/run.sh "$@"
 
-# Measure 22 push-to-talk presses at 300 ms behind a finite bufferbloated bottleneck.
-[positional-arguments]
-push-to-talk *args:
-    ./audio-quality/ptt.sh "$@"
+# Measure 22 push-to-talk presses at 300 ms on an ideal local path.
+push-to-talk:
+    ./audio-quality/ptt.sh
 
 # Records the arrival traces under audio-quality/traces/ that the replay rows grade: the
 # public relay's bbb.hang, a local relay's AAC tone, and a browser microphone through the

@@ -124,45 +124,47 @@ transport already discarded.
 ## Push-to-talk
 
 ```bash
-just test push-to-talk                  # bufferbloat: 64 kbit/s, finite 1 s queue, 50 ms each way
-just test push-to-talk --reproduction   # diagnostic: 100 ms RTT, 2% random loss
+just test push-to-talk
 ```
 
-This separate, roughly nine-minute run drives the shipped publish and watch elements in one
-Chromium page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with
-60 ms frames. The listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22
-presses, alternating two and three seconds: the first after the warmup's five-second mute,
-seven with no intervening wait, seven after five seconds, and seven after sixty seconds. The
-publisher reaches the relay directly; the listener uses WebTransport through the UDP shaper. No TCP service exists on the shaper port.
+This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
+page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
+frames. The listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
+alternating two and three seconds: the first after the warmup's five-second mute, seven with no
+intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
+local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
+measured belongs to the media pipeline rather than the path.
 
-`presses.json` records WebCodecs inputs and outputs, container writes, frame arrivals before
-reordering, and audible output onsets. Publisher, receiver, and worklet observations share the
-page's monotonic clock. A listening worklet detects each nonzero output onset and maps its render
-time through `getOutputTimestamp`; the port-message arrival time is kept separately. This measures
-the browser's projected device output, not acoustic output from a physical speaker. Zero-gap
-presses can remain continuously audible, and a later onset can belong to the preceding utterance.
-Their audible latency is always null. Only separated presses have an identifiable onset.
+`presses.json` records captured chunks at each press, WebCodecs encoder and decoder inputs and
+outputs, container writes, frame arrivals before reordering, and audible output onsets. Publisher,
+receiver, and worklet observations share the page's monotonic clock. A listening worklet detects
+each nonzero output onset. Its render time is mapped through the context's render clock, read with
+the page clock when the port message lands, so a late message moves neither boundary; its projected
+output comes from `getOutputTimestamp`. This measures the browser's projected device output, not
+acoustic output from a physical speaker. Zero-gap presses can remain continuously audible, and a
+later onset can belong to the preceding utterance. Their audible latency is always null. Only
+separated presses have an identifiable onset.
 
 `summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
 is still attributed to its utterance. The command checks pipeline completeness, not the epic's
-latency verdict. It refuses missing encoder inputs, missing heads,
-submitted frames that never encode or reach the container, reopened capture, repeated probes or
-subscriptions, and separated utterances with no audible output. The shaper must report throttling
-and queue overflow without random loss. Lost receiver frames are reported separately; aggregate
-queue drops alone cannot attribute every missing frame to a particular packet. The reproduction
-reports these checks without using random loss to gate acceptance. Both modes still fail on a
-broken driver, invalid capture, or shaper startup/verification failure.
+latency verdict. It refuses missing encoder inputs, missing heads, submitted frames that never
+encode or reach the container, reopened capture, a new encoder (a probe or a rebuilt codec) or
+subscription, and separated utterances with no audible output. It also fails on a broken driver or
+invalid capture.
 
-The latency goal is at most 300 ms of playout added on top of one-way delivery, so queueing on the
-path is not charged to the player. For each separated press, `delivery` is the slowest of the
-utterance's frames that arrived before its onset, measured from that frame's first sample (its media
-offset after the press): it covers packetization, transport, queueing and retransmission. `playout`
-is what remains of the render onset after the press and that delivery. The render onset maps the
-worklet's render time through the context's render clock, read with the page clock when the port
-message lands, so a late message moves neither boundary. `output` is the projected device output
-after that onset, reported apart from the player. `latency` gives each one's min, median and max.
+The latency goal is at most 300 ms of playout added on top of one-way delivery. For each separated
+press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
+from that frame's first sample (its media offset after the press). `playout` is what remains of the
+render onset after the press and that delivery, and `output` is the projected device output after
+that onset. `path` follows the head frame from the press to projected output in parts that sum to
+it: `capture` (worklet delivery and framing, after the media the frame still needed),
+`packetization` (that media, placed on the media clock by the newest chunk captured before the
+press), `encode` (codec and container write), `network` (write to arrival, through the relay),
+`decode` (arrival to decoded PCM), `jitter_buffer` (decoded PCM to the render onset: the playout
+delay filling, with the ring's render quantum), and `device`, as the stages below name them.
+`latency` and `path` give each one's min, median and max.
 
-Nightly runs the bufferbloated arm and keeps the raw evidence alongside the audio quality rows.
+Nightly runs it and keeps the raw evidence alongside the audio quality rows.
 
 ## Traces
 

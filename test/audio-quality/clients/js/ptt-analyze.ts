@@ -2,10 +2,10 @@
 import { join } from "node:path";
 import type { measurement } from "./src/ptt";
 
-type Result = ReturnType<typeof measurement.result>;
-const [directory, diagnostic] = process.argv.slice(2);
-if (!directory || (diagnostic !== undefined && diagnostic !== "--diagnostic"))
-	throw new Error("usage: ptt-analyze.ts RUN_DIR [--diagnostic]");
+// The driver's final write adds the page's state to the result.
+type Result = ReturnType<typeof measurement.result> & { state?: ReturnType<typeof measurement.state> };
+const [directory, ...rest] = process.argv.slice(2);
+if (!directory || rest.length) throw new Error("usage: ptt-analyze.ts RUN_DIR");
 const result: Result = await Bun.file(join(directory, "presses.json")).json();
 if (result.presses.length !== 44 || result.presses.some((press, i) => press.on !== (i % 2 === 0))) {
 	throw new Error("expected 22 complete presses");
@@ -14,6 +14,9 @@ if (result.captureError || result.errors.length) throw new Error("invalid captur
 const encoded = new Map(result.encoded.map((frame) => [frame.timestamp, frame]));
 const sent = new Map(result.sent.map((frame) => [frame.timestamp, frame]));
 const arrivals = new Map(result.arrivals.map((frame) => [Math.round(frame[1] * 1000), frame]));
+// The first decode of each timestamp; a later one would be a re-decode, not the frame's first.
+const decoded = new Map<number, (typeof result.decoded)[number]>();
+for (const frame of result.decoded) if (!decoded.has(frame.timestamp)) decoded.set(frame.timestamp, frame);
 const presses = result.presses
 	.filter((press) => press.on)
 	.map((press, i) => {
@@ -26,7 +29,7 @@ const presses = result.presses
 			const received = arrivals.get(frame.timestamp);
 			return received ? [received] : [];
 		});
-		const first = received.toSorted((a, b) => a[0] - b[0])[0];
+		const earliest = received.toSorted((a, b) => a[0] - b[0])[0];
 		// An onset during a zero-gap press may belong to its still-playing predecessor.
 		// A constant tone has no utterance ID, so only separated presses have identifiable onsets.
 		const separated = i === 0 || i >= 8;
@@ -45,6 +48,28 @@ const presses = result.presses
 			return [arrival[0] - press.at - (frame.timestamp - head) / 1000];
 		});
 		const delivery = waited.length ? Math.max(...waited) : null;
+		// The head frame's path from the press to projected output, one boundary after another, so
+		// the parts sum to `audible`. Capture and packetization split at the head frame's end on the
+		// media clock, placed against the newest captured chunk delivered before the press.
+		const first = input[0];
+		const path = (() => {
+			if (!audible || !first || !press.capture) return null;
+			const write = sent.get(first.timestamp);
+			const arrival = arrivals.get(first.timestamp);
+			const output = decoded.get(first.timestamp);
+			if (!write || !arrival || !output) return null;
+			const pressed = press.capture.end / 1000 + (press.at - press.capture.at);
+			const packetization = (first.timestamp + (first.duration ?? 0)) / 1000 - pressed;
+			return {
+				capture: first.at - press.at - packetization,
+				packetization,
+				encode: write.at - first.at,
+				network: arrival[0] - write.at,
+				decode: output.at - arrival[0],
+				jitter_buffer: audible.rendered - output.at,
+				device: audible.at - audible.rendered,
+			};
+		})();
 		return {
 			press: i + 1,
 			gap: result.presses[i * 2 - 1] ? press.at - result.presses[i * 2 - 1].at : null,
@@ -55,15 +80,14 @@ const presses = result.presses
 			received: received.length,
 			firstEncoded: input[0] ? encoded.has(input[0].timestamp) : false,
 			firstReceived: input[0] ? arrivals.has(input[0].timestamp) : false,
-			arrival: first ? first[0] - press.at : null,
+			arrival: earliest ? earliest[0] - press.at : null,
 			audible: audible ? audible.at - press.at : null,
 			delivery,
 			playout: audible && delivery !== null ? audible.rendered - press.at - delivery : null,
 			output: audible ? audible.at - audible.rendered : null,
+			path,
 		};
 	});
-const activeDuration = presses.reduce((total, press) => total + press.duration, 0);
-const offered = result.sent.reduce((total, frame) => total + (frame.bytes ?? 0) * 8, 0) / (activeDuration / 1000);
 const spread = (values: (number | null)[]) => {
 	const sorted = values.flatMap((value) => (value === null ? [] : [value])).toSorted((a, b) => a - b);
 	if (!sorted.length) return null;
@@ -71,17 +95,19 @@ const spread = (values: (number | null)[]) => {
 	const median = sorted.length % 2 ? sorted[Math.floor(middle)] : (sorted[middle - 1] + sorted[middle]) / 2;
 	return { min: sorted[0], median, max: sorted[sorted.length - 1] };
 };
+const parts = ["capture", "packetization", "encode", "network", "decode", "jitter_buffer", "device"] as const;
 const summary = {
-	offered,
 	// The goal: at most 300 ms of playout added on top of one-way delivery.
 	latency: {
 		delivery: spread(presses.map((press) => press.delivery)),
 		playout: spread(presses.map((press) => press.playout)),
 		output: spread(presses.map((press) => press.output)),
 	},
+	path: Object.fromEntries(parts.map((part) => [part, spread(presses.map((press) => press.path?.[part] ?? null))])),
+	delay: result.state?.delay,
 	presses,
 	captures: result.captures,
-	probes: result.probes,
+	encoders: result.encoders,
 	subscriptions: result.subscriptions,
 	unencoded: result.submitted.filter((frame) => !encoded.has(frame.timestamp)).length,
 	unsent: result.encoded.filter((frame) => !sent.has(frame.timestamp)).length,
@@ -94,16 +120,11 @@ if (presses.some((press, i) => (i === 0 || i >= 8) && press.audible === null)) {
 	failures.push("a separated utterance never reached the output");
 }
 if (result.captures.length) failures.push("capture reopened");
-if (result.probes.length) failures.push("encoder probed again");
+if (result.encoders.length) failures.push("an encoder was created again");
 if (result.subscriptions.length) failures.push("subscription reopened");
 if (presses.some((press) => !press.submitted || !press.firstEncoded)) failures.push("utterance head was not encoded");
 if (summary.unencoded || summary.unsent) failures.push("submitted audio was not encoded and sent completely");
-const shaper = await Bun.file(join(directory, "shaper.json")).json();
-if (!diagnostic && offered <= 64_000) failures.push("the bottleneck was not below the media bitrate");
-if (!diagnostic && (!shaper.down.throttled || !shaper.down.overflowed || shaper.down.lost)) {
-	failures.push("bufferbloat did not act with queue overflow and no random loss");
-}
 if (failures.length) {
 	console.error(failures.join("; "));
-	if (!diagnostic) process.exitCode = 1;
+	process.exitCode = 1;
 }
