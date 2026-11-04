@@ -2,6 +2,7 @@
 """Compare suite fanout across isolated checkouts, separating admission from work."""
 
 import argparse
+import ctypes
 import json
 import os
 import signal
@@ -12,6 +13,15 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+PR_SET_PDEATHSIG = 1
+
+
+def die_with(parent):
+    """Have this child get SIGTERM when parent dies, even by SIGKILL. Linux only."""
+    if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGTERM) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG)")
+    if os.getppid() != parent:
+        os._exit(1)
 
 
 def main():
@@ -45,6 +55,7 @@ def main():
     def cancel(number, _frame):
         raise SystemExit(128 + number)
 
+    coordinator = os.getpid()
     for number in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, cancel)
     # Alternating the order spreads drift in host load or thermals over solo and concurrent runs.
@@ -83,6 +94,10 @@ def main():
                                 env=env,
                                 stdout=log,
                                 stderr=log,
+                                # quest gate closes the lock's descriptor, so workers can't hold
+                                # it: they stop with this process, even when it is killed outright,
+                                # rather than measure after the lock is gone.
+                                preexec_fn=(lambda: die_with(coordinator)) if sys.platform == "linux" else None,
                             )
                             processes.append((process, began, stamp))
                     results = []
