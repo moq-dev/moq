@@ -139,6 +139,7 @@ case "$1" in
         ;;
     # Keep added coverage out of the rust-bench and rust-shared legs.
     rust-extra)
+        criterion qmux --manifest-path rs/qmux/Cargo.toml --bench receive
         # The allocation/window/play-buffer/batch/receive-bursts tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
