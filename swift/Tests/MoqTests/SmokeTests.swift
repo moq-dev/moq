@@ -87,7 +87,8 @@ final class SmokeTests: XCTestCase {
 
     func testAscendingSubscriptionReadsACachedBacklogOldestFirst() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "backlog", info: TrackInfo(timescale: 1_000_000))
+        let info = TrackInfo(maxAgeUnlimited: true, timescale: 1_000_000)
+        let track = try broadcast.publishTrack(name: "backlog", info: info)
         for ms: UInt64 in 0..<3 {
             let group = try track.appendGroup()
             try group.writeFrame(Data("x".utf8), timestamp: micros(ms * 1_000))
@@ -582,6 +583,17 @@ final class SmokeTests: XCTestCase {
         XCTAssertNil(frame.timestamp)
         XCTAssertNil(consumer.info().timescale)
         try track.finish()
+        try broadcast.close()
+    }
+
+    func testTrackInfoMaxAge() throws {
+        let broadcast = try BroadcastProducer()
+        let omitted = try broadcast.publishTrack(name: "omitted").consume().info()
+        XCTAssertEqual(omitted.maxAge, 0)
+        let info = TrackInfo(maxAgeUnlimited: true)
+        let unlimited = try broadcast.publishTrack(name: "unlimited", info: info).consume().info()
+        XCTAssertNil(unlimited.maxAge)
+        XCTAssertTrue(unlimited.maxAgeUnlimited)
         try broadcast.close()
     }
 

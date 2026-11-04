@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 Use `BroadcastProducer.createDatagrams(name: ..., info: ...)` and `BroadcastConsumer.datagrams(name: ...)` instead of stream-track datagram methods. `DatagramProducer.append(timestamp: ..., payload: ...)` assigns a sequence and `insert(datagram: ...)` preserves one; `DatagramConsumer.recv()` reads its own live cursor. `DatagramInfo` contains priority and optional timescale. Watch `priority()` / `priorityChanged(last: ...)` and serve on-demand tracks through `BroadcastRequests.datagrams()` / `DatagramRequests.requested()`.
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A null `TrackInfo.maxAge`, the default, and a null info now advertise a zero max age, serving only the live edge, instead of no publisher limit. Pass `maxAgeUnlimited: true`, which ignores `maxAge`, where you relied on null meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
+
 ### Viewer targets are bounded ([#7090](https://github.com/moq-dev/moq/pull/7090))
 
 Viewer ceilings and PROBE target overrides are refused with the new `OutOfRangeMoqException` once they would sum above 2^53 - 1 bps, the most a PROBE target carries; nothing changes on a refusal. `Viewers.watch` and `setTarget` and `Viewer.update` throw it. Handle the new variant wherever you match the error exhaustively. Regenerate bindings and rebuild the matching native library together.

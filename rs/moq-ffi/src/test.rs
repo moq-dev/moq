@@ -47,9 +47,18 @@ fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
 		priority: 0,
 		max_age: None,
+		max_age_unlimited: false,
 		refresh: None,
 		timescale: Some(1_000_000),
 		compress: false,
+	}
+}
+
+/// [`timed_info`] with no publisher age limit, for a test that reads superseded groups.
+fn unlimited_info() -> MoqTrackInfo {
+	MoqTrackInfo {
+		max_age_unlimited: true,
+		..timed_info()
 	}
 }
 
@@ -794,7 +803,7 @@ async fn audio_raw_publish_from_many_threads() {
 		"tone".into(),
 		snapshot.audio["tone"].clone(),
 		MoqAudioDecoderOutput {
-			// The track's whole retention: reading starts only after finish, and the budget
+			// The track's whole max age: reading starts only after finish, and the budget
 			// ages groups by wall clock, so a stalled host would otherwise skip the start.
 			delay: Some(MoqDelay {
 				min: Some(Duration::ZERO),
@@ -1261,6 +1270,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		max_age: Some(Duration::from_millis(2_500)),
+		max_age_unlimited: false,
 		refresh: Some(2),
 		timescale: Some(90_000),
 		compress: true,
@@ -1271,6 +1281,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info();
 	assert_eq!(got.priority, 7);
 	assert_eq!(got.max_age, Some(Duration::from_millis(2_500)));
+	assert!(!got.max_age_unlimited);
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
 	assert!(got.compress);
@@ -1345,6 +1356,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 				Some(MoqTrackInfo {
 					priority: 0,
 					max_age: None,
+					max_age_unlimited: false,
 					refresh: None,
 					timescale: Some(timestamp.scale),
 					compress: false,
@@ -1448,6 +1460,7 @@ async fn json_snapshot_roundtrip() {
 	let info = MoqTrackInfo {
 		priority: 0,
 		max_age: None,
+		max_age_unlimited: false,
 		timescale: Some(1_000_000),
 		refresh: None,
 		compress: true,
@@ -1521,6 +1534,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compress: false,
@@ -1748,6 +1762,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: None,
+				max_age_unlimited: false,
 				refresh: Some(1),
 				timescale: Some(1_000_000),
 				compress: false,
@@ -4368,7 +4383,7 @@ async fn video_decode_start() {
 			rendition.clone(),
 			MoqVideoDecoderOutput {
 				start,
-				// The track's whole retention, so a slow host does not skip the first group.
+				// The track's whole max age, so a slow host does not skip the first group.
 				delay: Some(MoqDelay {
 					min: Some(Duration::ZERO),
 					max: Some(Duration::from_secs(30)),
@@ -8409,7 +8424,9 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 #[tokio::test]
 async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
 		let group = track.append_group().unwrap();
 		group
@@ -8621,7 +8638,9 @@ async fn auth_tokens_join_and_leave_the_union() {
 #[tokio::test]
 async fn time_anchors_start_at_the_containing_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
 		let group = track.append_group().unwrap();
 		group
@@ -8852,7 +8871,9 @@ fn raw_group_read_frame_cancelled_unfreed_does_not_block_the_next() {
 #[tokio::test]
 async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	let consumer = track
 		.consume(Some(MoqSubscription {
 			delay: MoqDelay {
@@ -8963,7 +8984,9 @@ async fn raw_next_group_wakes_read_frame_after_unlocking() {
 async fn raw_track_concurrent_reads_take_every_group_once() {
 	const GROUPS: u64 = 200;
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	// No age limit, so a group nobody has read yet is never skipped for a newer one.
 	let consumer = track
 		.consume(Some(MoqSubscription {
@@ -9193,6 +9216,7 @@ async fn audio_subscribe_configuration_boundary() {
 			Some(MoqTrackInfo {
 				priority: 0,
 				max_age: Some(Duration::from_millis(10)),
+				max_age_unlimited: false,
 				refresh: None,
 				timescale: None,
 				compress: false,

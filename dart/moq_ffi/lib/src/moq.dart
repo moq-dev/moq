@@ -3206,12 +3206,14 @@ class FfiConverterMoqPosition {
 class MoqTrackInfo {
   final int priority;
   final Duration? maxAge;
+  final bool maxAgeUnlimited;
   final int? refresh;
   final int? timescale;
   final bool compress;
   MoqTrackInfo({
     this.priority = 0,
     this.maxAge = null,
+    this.maxAgeUnlimited = false,
     this.refresh = null,
     this.timescale = null,
     this.compress = false,
@@ -3235,6 +3237,11 @@ class FfiConverterMoqTrackInfo {
     );
     final maxAge = maxAge_lifted.value;
     new_offset += maxAge_lifted.bytesRead;
+    final maxAgeUnlimited_lifted = FfiConverterBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final maxAgeUnlimited = maxAgeUnlimited_lifted.value;
+    new_offset += maxAgeUnlimited_lifted.bytesRead;
     final refresh_lifted = FfiConverterOptionalUInt32.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -3254,6 +3261,7 @@ class FfiConverterMoqTrackInfo {
       MoqTrackInfo(
         priority: priority,
         maxAge: maxAge,
+        maxAgeUnlimited: maxAgeUnlimited,
         refresh: refresh,
         timescale: timescale,
         compress: compress,
@@ -3266,6 +3274,7 @@ class FfiConverterMoqTrackInfo {
     final total_length =
         FfiConverterInt8.allocationSize(value.priority) +
         FfiConverterOptionalDuration.allocationSize(value.maxAge) +
+        FfiConverterBool.allocationSize(value.maxAgeUnlimited) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
         FfiConverterBool.allocationSize(value.compress) +
@@ -3283,6 +3292,10 @@ class FfiConverterMoqTrackInfo {
     );
     new_offset += FfiConverterOptionalDuration.write(
       value.maxAge,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterBool.write(
+      value.maxAgeUnlimited,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalUInt32.write(
@@ -3303,6 +3316,7 @@ class FfiConverterMoqTrackInfo {
   static int allocationSize(MoqTrackInfo value) {
     return FfiConverterInt8.allocationSize(value.priority) +
         FfiConverterOptionalDuration.allocationSize(value.maxAge) +
+        FfiConverterBool.allocationSize(value.maxAgeUnlimited) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
         FfiConverterBool.allocationSize(value.compress) +

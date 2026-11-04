@@ -6,6 +6,14 @@ How to update your code for each breaking change, newest first.
 
 ### Separate datagram tracks
 
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit.
+`max_age_present` is gone and `max_age_us` always applies: drop the assignment where you set it to true, and set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on it being false for no limit.
+Recompile against the new header, since an old binary's `max_age_present` byte now reads as `max_age_unlimited`, and zero-initialize the struct (`moq_track_info info = {0};`) or assign every member, since an indeterminate member is undefined behavior.
+
+### Datagrams are a track of their own
+
 Create a separate producer with `moq_publish_datagrams` and `moq_datagram_info`; replace `moq_publish_track_datagram` with `moq_publish_datagrams_append` on that handle, or `moq_publish_datagrams_insert` for an explicit sequence. `moq_consume_datagrams` now takes a subscriber priority before its callback and never subscribes to a stream track. Use `moq_publish_datagrams_demand` and `moq_datagram_demand_priority` for aggregate priority, and `moq_publish_datagrams_requests` / `moq_datagram_request_accept` for on-demand publishing. Finish or abort datagram producers separately. A zeroed datagram info is untimed, unlike the microsecond default of stream-track info.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))

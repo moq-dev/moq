@@ -6465,6 +6465,24 @@ mod tests {
 
 	use super::*;
 
+	/// A publisher that sends no MAX_CACHE_DURATION sets no publisher limit, never the zero an
+	/// authored track defaults to; one that sends it keeps that value.
+	#[test]
+	fn a_received_track_keeps_its_max_cache_duration() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let absent = accepted_info(&ietf::Properties::default(), version);
+			assert_eq!(absent.max_age, None, "{version}");
+			let present = accepted_info(
+				&ietf::Properties {
+					max_cache_duration: Some(std::time::Duration::from_secs(7)),
+					..Default::default()
+				},
+				version,
+			);
+			assert_eq!(present.max_age, Some(std::time::Duration::from_secs(7)), "{version}");
+		}
+	}
+
 	/// What keeps a SUBSCRIBE_NAMESPACE open until the peer ends it, while the first lives.
 	fn live() -> (kio::Producer<()>, kio::Consumer<()>) {
 		let live = kio::Producer::new(());
@@ -15231,7 +15249,7 @@ mod stitch_tests {
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
-				track::Info::default().with_timescale(None),
+				track::Info::default().with_timescale(None).with_max_age(None),
 			);
 
 			Self {
