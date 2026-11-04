@@ -32,20 +32,21 @@ impl From<moq_net::track::Position> for MoqPosition {
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, a 30 s max age, untimed).
+/// (priority 0, a zero max age, untimed).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
 	/// Higher is more urgent; the default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// How long a superseded group stays fresh, or null for the 30 s default. This is the
-	/// publisher-side half of [`MoqDelay::max`](crate::consumer::MoqDelay::max). Ignored when
-	/// `max_age_unlimited` is set.
+	/// How long a superseded group stays fresh, or null for the default, zero: only the live
+	/// edge is served. The publisher-side half of
+	/// [`MoqDelay::max`](crate::consumer::MoqDelay::max). Ignored when `max_age_unlimited` is
+	/// set. Uniffi can't default a duration, hence null rather than zero.
 	#[uniffi(default = None)]
 	pub max_age: Option<std::time::Duration>,
-	/// Set no publisher age limit, leaving only the cache to bound how long a superseded group
-	/// is served. A received track that advertised none reports this.
+	/// Set no publisher age limit, ignoring `max_age` and leaving only the cache to bound how
+	/// long a superseded group is served. A received track that advertised none reports this.
 	#[uniffi(default = false)]
 	pub max_age_unlimited: bool,
 	/// How many times its first frame a group's later bytes may grow before a joining
@@ -971,14 +972,15 @@ mod metadata_tests {
 			timescale: None,
 			compress: false,
 		};
-		let default = Some(moq_net::track::Info::DEFAULT_MAX_AGE);
-		assert_eq!(raw_track_info(None).unwrap().max_age, default);
+		let zero = Some(std::time::Duration::ZERO);
+		let five = Some(std::time::Duration::from_secs(5));
+		assert_eq!(raw_track_info(None).unwrap().max_age, zero);
 		for (max_age, unlimited, want) in [
-			(None, false, default),
+			(None, false, zero),
+			(five, false, five),
 			(None, true, None),
 			// The flag wins over a stated age.
-			(Some(std::time::Duration::from_secs(5)), true, None),
-			(Some(std::time::Duration::ZERO), false, Some(std::time::Duration::ZERO)),
+			(five, true, None),
 		] {
 			let model = moq_net::track::Info::try_from(info(max_age, unlimited)).unwrap();
 			assert_eq!(model.max_age, want);

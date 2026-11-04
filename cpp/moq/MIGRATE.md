@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-An unset `moq::TrackInfo::max_age`, and a `std::nullopt` info, now advertise a 30 s max age instead of no publisher limit. Set the new `max_age_unlimited`, which overrides `max_age`, where you relied on `std::nullopt` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
+An unset `moq::TrackInfo::max_age`, and a `std::nullopt` info, now advertise a zero max age, serving only the live edge, instead of no publisher limit. Set the new `max_age_unlimited`, which ignores `max_age`, where you relied on `std::nullopt` meaning no limit. A received track's `info()` sets it when its publisher advertised no limit.
 
 ### Media setup refusals are typed
 

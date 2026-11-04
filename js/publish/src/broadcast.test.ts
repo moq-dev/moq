@@ -420,10 +420,10 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	expect(after).not.toBe(before);
 	expect((await after?.track("video").info())?.maxAge).toBe(Milli(2000));
 
-	// Omitted is the authored default, and null is no publisher limit.
+	// Omitted is the media max age, and null is no publisher limit.
 	maxAge.set(undefined);
 	await settle();
-	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBe(Track.DEFAULT_MAX_AGE);
+	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBe(Container.MAX_AGE);
 	maxAge.set(null);
 	await settle();
 	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBeUndefined();
@@ -431,11 +431,11 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	broadcast.close();
 });
 
-test("the catalog track takes the authored default max age", async () => {
+test("the catalog track takes the zero default max age", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	await settle();
 	const info = await broadcast.net.peek()?.track(Broadcast.CATALOG_TRACK).info();
-	expect(info?.maxAge).toBe(Track.DEFAULT_MAX_AGE);
+	expect(info?.maxAge).toBe(Milli.zero);
 	broadcast.close();
 });
 

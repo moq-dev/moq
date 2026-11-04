@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import * as Moq from "@moq/net";
+import type * as Moq from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -434,8 +434,8 @@ export class Encoder {
 			const resolved = effect.get(this.#config);
 			if (!enabled || !format || fatal || !resolved) return;
 
-			// Raw history needs a finite bound, so an unlimited max age keeps the default's worth.
-			const maxAge = effect.get(broadcast.in.maxAge) ?? Moq.Track.DEFAULT_MAX_AGE;
+			// Raw history needs a finite bound, so an unlimited max age keeps the media default's worth.
+			const maxAge = effect.get(broadcast.in.maxAge) ?? Container.MAX_AGE;
 			this.#encode(broadcast.order, format, Micro.fromMilli(maxAge), effect);
 		});
 

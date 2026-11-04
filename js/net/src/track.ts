@@ -156,8 +156,9 @@ export interface Info {
 	 * The newest group is never stale, and an untimed track is judged by the wall clock alone.
 	 * Reported in TRACK_INFO (Lite05+) so relays re-serve with the same bound. Absence sets
 	 * no publisher limit, as on a track received without one; zero serves only the live edge.
-	 * This clamps each subscriber budget. An authored track gets {@link DEFAULT_MAX_AGE} unless
-	 * its {@link InfoInit.maxAge} says otherwise. Rounded up to a whole millisecond by
+	 * This clamps each subscriber budget. An authored track gets zero unless its
+	 * {@link InfoInit.maxAge} asks for more. A freshness bound, not retention: a hop's cache
+	 * bounds the bytes it keeps with its own window. Rounded up to a whole millisecond by
 	 * {@link infoDefaults}, which refuses a negative or non-finite value and a result past
 	 * `Number.MAX_SAFE_INTEGER`.
 	 */
@@ -183,16 +184,6 @@ export interface Info {
 }
 
 /**
- * The {@link Info.maxAge} an authored track advertises unless its author sets one: 30 seconds.
- *
- * Long enough for a reader to fetch superseded groups for catch-up, a segmented egress (HLS/DASH)
- * to serve its playlist window, and a recorder to absorb reordering, without delaying a live
- * reader, whose own {@link Delay.max} defaults to zero. Mirrors the Rust
- * `track::Info::DEFAULT_MAX_AGE`.
- */
-export const DEFAULT_MAX_AGE = Milli(30_000);
-
-/**
  * What an author supplies to create a track: any {@link Info} field, each defaulting as
  * {@link infoDefaults} does, except {@link maxAge}.
  *
@@ -201,9 +192,9 @@ export const DEFAULT_MAX_AGE = Milli(30_000);
  */
 export interface InfoInit extends Partial<Omit<Info, "maxAge">> {
 	/**
-	 * The publisher max age; see {@link Info.maxAge}. Omitted or `undefined` is
-	 * {@link DEFAULT_MAX_AGE}, `null` sets no publisher limit (the wire omits it), and a number
-	 * is that bound.
+	 * The publisher max age; see {@link Info.maxAge}. Omitted or `undefined` is zero, so readers
+	 * get only the live edge; `null` sets no publisher limit (the wire omits it), and a number
+	 * is that bound. A track whose readers reach back for superseded groups sets it explicitly.
 	 */
 	maxAge?: Milli | null;
 }
@@ -214,7 +205,7 @@ export interface InfoInit extends Partial<Omit<Info, "maxAge">> {
  */
 export function authoredInfo(init: InfoInit = {}): Info {
 	const { maxAge, ...rest } = init;
-	return infoDefaults({ ...rest, maxAge: maxAge === undefined ? DEFAULT_MAX_AGE : (maxAge ?? undefined) });
+	return infoDefaults({ ...rest, maxAge: maxAge === undefined ? Milli.zero : (maxAge ?? undefined) });
 }
 
 export { rescale };
@@ -246,7 +237,7 @@ function priorityValue(value: number): number {
 /**
  * Fill in any unset {@link Info} fields with their defaults, as for received metadata: an absent
  * `maxAge` stays absent, meaning no publisher limit. An authored track resolves its
- * {@link InfoInit} at {@link Producer.accept} instead, which applies {@link DEFAULT_MAX_AGE}.
+ * {@link InfoInit} at {@link Producer.accept} instead, where an omitted `maxAge` is zero.
  */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	if (info.compress !== undefined && typeof info.compress !== "boolean")
@@ -1133,7 +1124,7 @@ export class Producer {
 
 	/**
 	 * Commit the immutable publisher properties, resolving {@link info}. An omitted `maxAge` is
-	 * {@link DEFAULT_MAX_AGE}; see {@link InfoInit.maxAge}. Returns `this`.
+	 * zero, the live edge only; see {@link InfoInit.maxAge}. Returns `this`.
 	 */
 	accept(info: InfoInit = {}): this {
 		if (this.#state.closed.peek() !== undefined) return this;

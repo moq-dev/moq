@@ -308,8 +308,8 @@ export class Segmenter {
  */
 export class Recorder {
 	/**
-	 * The properties a record track is created with. It keeps the authored default max age: its
-	 * newest group restates the window, and the newest group is never stale.
+	 * The properties a record track is created with. It takes `@moq/net`'s zero default max age,
+	 * so a reader gets only the newest group, which restates the whole window and never goes stale.
 	 */
 	static readonly INFO: Moq.Track.InfoInit = {
 		timescale: Moq.Time.Timescale.MILLI,

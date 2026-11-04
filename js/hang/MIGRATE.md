@@ -6,9 +6,8 @@ How to update your code for each breaking change, newest first.
 
 ### `Container.trackInfo` takes `maxAge: null` ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-`TrackInfoOptions.maxAge` accepts `null` for no publisher limit, and `trackInfo` returns a `@moq/net` `Track.InfoInit`. An omitted `maxAge` is still 30 seconds, now `@moq/net`'s shared `Track.DEFAULT_MAX_AGE`.
-`Hls.Recorder.INFO` is a `Track.InfoInit` and, following `@moq/net`, record tracks now advertise that 30-second default instead of no limit.
-A media publisher relying on unlimited history passes `maxAge: null`.
+`TrackInfoOptions.maxAge` accepts `null` for no publisher limit, and `trackInfo` returns a `@moq/net` `Track.InfoInit`. An omitted `maxAge` is still 30 seconds for media, now exported as `Container.MAX_AGE`.
+`Hls.Recorder.INFO` is a `Track.InfoInit`. Following `@moq/net`, record tracks and report tracks now advertise a zero max age instead of no limit: a reader gets their newest group, which restates the whole state.
 
 ### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
 

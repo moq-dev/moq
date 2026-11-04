@@ -4,11 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `maxAge: null` is unlimited, and the catalog takes the default ([#7729](https://github.com/moq-dev/moq/pull/7729))
+### `maxAge: null` is unlimited, and the catalog takes the zero default ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-`Broadcast`'s `maxAge` input accepts `null` for no publisher limit on its media tracks; omitted is still 30 seconds. With `null`, on-demand audio keeps 30 seconds of raw PCM, since raw history needs a finite bound.
-The catalog track now advertises the 30-second default instead of `Number.MAX_SAFE_INTEGER`, as Rust's catalog does. A late viewer still reads an unchanged catalog, since only a superseded group goes stale.
-Tracks an application creates on `broadcast.net` follow `@moq/net` and default to 30 seconds; pass `maxAge: null` to keep unlimited history.
+`Broadcast`'s `maxAge` input accepts `null` for no publisher limit on its media tracks; omitted is still 30 seconds (`Container.MAX_AGE` from `@moq/hang`). With `null`, on-demand audio keeps 30 seconds of raw PCM, since raw history needs a finite bound.
+The catalog track now advertises `@moq/net`'s zero default instead of `Number.MAX_SAFE_INTEGER`, as Rust's catalog does. A late viewer still reads an unchanged catalog, since only a superseded group goes stale.
+Tracks an application creates on `broadcast.net` follow `@moq/net` and default to a zero max age; pass `maxAge: null` (or a window) where readers reach back for history.
 
 ### `muted` and `invisible` keep capture open
 

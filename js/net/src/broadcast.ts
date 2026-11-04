@@ -331,7 +331,7 @@ export class Producer {
 	 * An append on the track throws if it would reuse a sequence an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
 	 * open track or a live request already holds the name. `info` resolves as
-	 * {@link track.Producer.accept} does, so an omitted `maxAge` is {@link track.DEFAULT_MAX_AGE}.
+	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
 	 */
 	createTrack(name: string, info: track.InfoInit = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {

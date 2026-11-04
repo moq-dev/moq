@@ -316,7 +316,7 @@ class SmokeTest {
     @Test
     fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            val track = broadcast.publishTrack("backlog", TrackInfo(maxAgeUnlimited = true, timescale = 1_000_000uL))
             for (ms in 0uL until 3uL) {
                 val group = track.appendGroup()
                 group.writeFrame(
@@ -375,10 +375,10 @@ class SmokeTest {
     }
 
     @Test
-    fun `an omitted max age is 30 s and the unlimited flag sets none`() {
+    fun `an omitted max age is zero and the unlimited flag sets none`() {
         BroadcastProducer().use { broadcast ->
             val omitted = broadcast.publishTrack("omitted", null).consume(null).info()
-            assertEquals(java.time.Duration.ofSeconds(30), omitted.maxAge)
+            assertEquals(java.time.Duration.ZERO, omitted.maxAge)
             val unlimited =
                 broadcast
                     .publishTrack("unlimited", TrackInfo(maxAgeUnlimited = true))

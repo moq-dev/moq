@@ -642,7 +642,7 @@ pub struct moq_datagram {
 
 /// Publisher-side raw track properties.
 ///
-/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, including a 30 s max
+/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, including a zero max
 /// age, and so does a zero-initialized struct.
 #[repr(C)]
 pub struct moq_track_info {
@@ -650,14 +650,12 @@ pub struct moq_track_info {
 	/// Higher is more urgent; the default 0 is the midpoint.
 	pub priority: i8,
 
-	/// How long a superseded group stays fresh, in microseconds. The publisher-side half of
-	/// `moq_subscription.delay.max_us`.
+	/// How long a superseded group stays fresh, in microseconds. Zero, the default, serves only
+	/// the live edge. The publisher-side half of `moq_subscription.delay.max_us`. Ignored when
+	/// `max_age_unlimited` is set.
 	pub max_age_us: u64,
-	/// Whether `max_age_us` is set. When false, the track gets the 30 s default, or no limit
-	/// with `max_age_unlimited`.
-	pub max_age_present: bool,
 	/// No publisher age limit, leaving only the cache to bound how long a superseded group is
-	/// served. Ignored when `max_age_present` is set, so a stated age always holds.
+	/// served.
 	pub max_age_unlimited: bool,
 
 	/// Per-frame timescale in ticks per second.
@@ -683,13 +681,8 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		// Raw tracks default to a microsecond timescale; an explicit one below overrides it.
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
-			.with_priority(info.priority);
-		// A stated age wins, so a caller that states one never loses it to the flag.
-		if info.max_age_present {
-			out = out.with_max_age(std::time::Duration::from_micros(info.max_age_us));
-		} else if info.max_age_unlimited {
-			out = out.with_max_age(None);
-		}
+			.with_priority(info.priority)
+			.with_max_age((!info.max_age_unlimited).then(|| std::time::Duration::from_micros(info.max_age_us)));
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}

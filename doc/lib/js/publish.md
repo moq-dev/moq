@@ -75,9 +75,11 @@ a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes that
 history ahead of live audio when a subscriber arrives. Raw audio keeps up to
-`maxAge`, which defaults to 30 seconds (about 11.5 MB for 48 kHz stereo f32).
-With `maxAge: null`, which sets no publisher limit on the media, raw audio still
-keeps 30 seconds, since raw history needs a bound. Capture stays open.
+`maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
+stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
+audio still keeps 30 seconds, since raw history needs a bound. The catalog and
+HLS record tracks keep `@moq/net`'s zero default, since a viewer needs only
+their newest group. Capture stays open.
 
 Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: true` also gates video, which then loses its unsubscribed past.

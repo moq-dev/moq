@@ -611,7 +611,6 @@ export namespace Track {
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
-	export const DEFAULT_MAX_AGE: Milli;
 	export interface Datagram {
 		payload: Uint8Array;
 		sequence: bigint;

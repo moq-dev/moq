@@ -1760,7 +1760,6 @@ fn publish_track_invalid_broadcast() {
 	let info = moq_track_info {
 		priority: 1,
 		max_age_us: 0,
-		max_age_present: false,
 		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
@@ -1796,7 +1795,6 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
 		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: true,
@@ -1809,13 +1807,13 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
-/// A zeroed struct gets the 30 s default, and the unlimited flag wins over a stated age.
+/// A zeroed struct serves only the live edge, and the unlimited flag wins over a stated age,
+/// like `moq_delay.max_unlimited`.
 #[test]
 fn track_info_max_age() {
 	let zeroed = || moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
 		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
@@ -1825,26 +1823,23 @@ fn track_info_max_age() {
 	};
 	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
 
-	assert_eq!(max_age(zeroed()), Some(moq_net::track::Info::DEFAULT_MAX_AGE));
-	let zero = moq_track_info {
-		max_age_present: true,
+	assert_eq!(max_age(zeroed()), Some(Duration::ZERO));
+	let stated = moq_track_info {
+		max_age_us: 5_000_000,
 		..zeroed()
 	};
-	assert_eq!(max_age(zero), Some(Duration::ZERO));
+	assert_eq!(max_age(stated), Some(Duration::from_secs(5)));
 	let unlimited = moq_track_info {
 		max_age_unlimited: true,
 		..zeroed()
 	};
 	assert_eq!(max_age(unlimited), None);
-	// A stated age survives a set flag, so a caller written before the flag existed keeps its
-	// finite age however that byte was left.
-	let stated = moq_track_info {
+	let both = moq_track_info {
 		max_age_us: 5_000_000,
-		max_age_present: true,
 		max_age_unlimited: true,
 		..zeroed()
 	};
-	assert_eq!(max_age(stated), Some(Duration::from_secs(5)));
+	assert_eq!(max_age(both), None);
 }
 
 /// Raw frames, datagrams, and JSON values read back exactly the timestamp written: a 90 kHz
@@ -2225,7 +2220,6 @@ fn raw_track_subscription_options_and_update() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
 		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
@@ -2361,7 +2355,6 @@ fn raw_track_time_anchor() {
 	let info = moq_track_info {
 		priority: 3,
 		max_age_us: 1_000_000,
-		max_age_present: true,
 		max_age_unlimited: false,
 		timescale: 1_000_000,
 		timescale_present: true,
@@ -3306,7 +3299,6 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
 		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
@@ -4055,7 +4047,6 @@ fn track_demand_reports_the_wanted_group() {
 	let info = moq_track_info {
 		priority: 0,
 		max_age_us: 0,
-		max_age_present: false,
 		max_age_unlimited: false,
 		timescale: 0,
 		timescale_present: false,
@@ -4464,8 +4455,18 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"track-dynamic-narrowed");
 	let name = b"data";
-	let track =
-		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	// No publisher age limit, so the requested groups behind the live one stay fresh.
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: true,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let group_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 

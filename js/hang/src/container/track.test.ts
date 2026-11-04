@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Time, Track } from "@moq/net";
-import { trackInfo } from "./track";
+import { MAX_AGE, trackInfo } from "./track";
 
-test("trackInfo keeps the authored default max age, null is unlimited, and a value is kept", async () => {
+test("trackInfo declares the media max age, null is unlimited, and a value is kept", async () => {
+	expect(MAX_AGE).toBe(Milli(30_000));
 	const omitted = trackInfo({ priority: 1 });
-	expect(omitted).toEqual({ timescale: Time.Timescale.MICRO, maxAge: Track.DEFAULT_MAX_AGE, priority: 1 });
-	expect(trackInfo({ priority: 1, maxAge: undefined }).maxAge).toBe(Track.DEFAULT_MAX_AGE);
+	expect(omitted).toEqual({ timescale: Time.Timescale.MICRO, maxAge: MAX_AGE, priority: 1 });
+	expect(trackInfo({ priority: 1, maxAge: undefined }).maxAge).toBe(MAX_AGE);
 	expect(trackInfo({ priority: 1, maxAge: null }).maxAge).toBeNull();
 	expect(trackInfo({ priority: 1, maxAge: Milli(5000) }).maxAge).toBe(Milli(5000));
 

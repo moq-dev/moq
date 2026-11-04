@@ -53,9 +53,9 @@ export type BroadcastInput = {
 	/**
 	 * How long, in milliseconds, a superseded group of this broadcast's media tracks stays fresh,
 	 * so a fetch can still reach it. Declared on every media track we accept; see
-	 * {@link Container.trackInfo}. Omitted (`undefined`) is `Moq.Track.DEFAULT_MAX_AGE`, 30 seconds,
+	 * {@link Container.trackInfo}. Omitted (`undefined`) is `Container.MAX_AGE`, 30 seconds,
 	 * sized so a segmented egress (HLS/DASH) can serve a full playlist window; `null` sets no
-	 * publisher limit.
+	 * publisher limit. The catalog and HLS record tracks keep `@moq/net`'s zero default.
 	 *
 	 * A freshness bound, not a delivery budget, so lowering it does not reduce latency: it only
 	 * shortens how far back a fetch can reach. A track's max age is fixed when it is created,
@@ -491,10 +491,10 @@ export class Broadcast {
 			// is whatever the catalog holds at announce time.
 			if (!serving) {
 				serving = true;
-				// The authored default max age, as Rust's catalog track takes. A catalog may publish once
-				// and stay unchanged for the broadcast's whole life, and a viewer arriving long after
-				// still bootstraps from it: max age only stales a superseded group, and the cache never
-				// ages out an open track's newest group.
+				// The zero default max age, as Rust's catalog track takes: a viewer needs only the newest
+				// snapshot. A catalog may publish once and stay unchanged for the broadcast's whole life,
+				// and a viewer arriving long after still bootstraps from it: max age only stales a
+				// superseded group, and the cache never ages out an open track's newest group.
 				const track = broadcast.createTrack(Broadcast.CATALOG_TRACK, {
 					// Each catalog snapshot is stamped when written.
 					timescale: Moq.Time.Timescale.MILLI,

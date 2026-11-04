@@ -74,6 +74,8 @@ export namespace Legacy {
 
 export * as Loc from "@moq/loc";
 
+export const MAX_AGE: Milli;
+
 export type Read = {
 	frame: ReceivedFrame;
 	group: bigint;

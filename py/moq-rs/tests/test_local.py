@@ -486,16 +486,19 @@ def test_track_info_keeps_native_default_priority():
 
 
 def test_track_info_max_age():
-    """An omitted max age is 30 s, and the unlimited flag sets no limit and reads back."""
+    """An omitted max age is zero, ``None`` sets no limit, and a received info republishes unchanged."""
     broadcast = moq.BroadcastProducer()
     cases = [
-        (None, timedelta(seconds=30), False),
-        (moq.TrackInfo(max_age=timedelta(seconds=2)), timedelta(seconds=2), False),
-        (moq.TrackInfo(max_age=timedelta(seconds=2), max_age_unlimited=True), None, True),
+        (None, timedelta(0)),
+        (moq.TrackInfo(), timedelta(0)),
+        (moq.TrackInfo(max_age=timedelta(seconds=2)), timedelta(seconds=2)),
+        (moq.TrackInfo(max_age=None), None),
     ]
-    for i, (info, max_age, unlimited) in enumerate(cases):
+    for i, (info, max_age) in enumerate(cases):
         got = broadcast.publish_track(f"t{i}", info).consume().info()
-        assert (got.max_age, got.max_age_unlimited) == (max_age, unlimited)
+        assert got.max_age == max_age
+        again = broadcast.publish_track(f"again{i}", got).consume().info()
+        assert again.max_age == max_age
     broadcast.close()
 
 
@@ -1042,7 +1045,7 @@ async def test_raw_publish_consume():
 async def test_raw_multiple_frames():
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "robot/io")
-    raw = broadcast.publish_track("commands")
+    raw = broadcast.publish_track("commands", moq.TrackInfo(max_age=None))
 
     consumer = origin.consume()
 
@@ -1073,7 +1076,7 @@ async def test_raw_multiple_frames():
 async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("direct")
+    track = broadcast.publish_track("direct", moq.TrackInfo(max_age=None))
     consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     track.write_frame(b"hello")
@@ -1092,7 +1095,7 @@ async def test_raw_producer_consume_direct():
 async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
     """An ascending subscription reaching back over a cached backlog reads it oldest first."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("backlog", moq.TrackInfo(timescale=1_000_000))
+    track = broadcast.publish_track("backlog", moq.TrackInfo(max_age=None, timescale=1_000_000))
     for ms in range(3):
         group = track.append_group()
         group.write_frame(b"x", moq.Timestamp(ms, 1_000))
@@ -1116,7 +1119,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
 async def test_time_anchor_starts_at_the_group_containing_it():
     """A time anchor takes a wrapper Timestamp and starts at the group containing that time."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("timed", moq.TrackInfo(timescale=1_000))
+    track = broadcast.publish_track("timed", moq.TrackInfo(max_age=None, timescale=1_000))
     for second in range(3):
         group = track.append_group()
         group.write_frame(b"x", moq.Timestamp(second, 1))
@@ -1171,7 +1174,7 @@ async def test_raw_group_sequence():
     """Consumer sees the same sequence numbers the producer assigned."""
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "track/seq")
-    raw = broadcast.publish_track("seq", moq.TrackInfo(timescale=1_000_000))
+    raw = broadcast.publish_track("seq", moq.TrackInfo(max_age=None, timescale=1_000_000))
 
     consumer = origin.consume()
 
@@ -1208,7 +1211,7 @@ async def test_default_iteration_is_sequence_order():
     """
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "track/ordering")
-    raw = broadcast.publish_track("ordering")
+    raw = broadcast.publish_track("ordering", moq.TrackInfo(max_age=None))
 
     subscription = moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0)
     seq_consumer = raw.consume(subscription)
@@ -1358,7 +1361,7 @@ async def test_raw_multi_frame_group():
 async def test_read_frame_one_per_group():
     """read_frame() returns the first frame of each successive group."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status")
+    track = broadcast.publish_track("status", moq.TrackInfo(max_age=None))
     consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     track.write_frame(b"ready")
@@ -1402,7 +1405,7 @@ async def test_raw_read_frame_preserves_timestamp():
 async def test_read_frame_skips_remaining_frames_in_group():
     """read_frame() only returns the first frame of a multi-frame group."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("mixed")
+    track = broadcast.publish_track("mixed", moq.TrackInfo(max_age=None))
     consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
     group = track.append_group()

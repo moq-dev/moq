@@ -67,13 +67,13 @@ void main() {
     broadcast.close();
   });
 
-  test('an omitted max age is 30 s and the unlimited flag sets none', () {
+  test('an omitted max age is zero and the unlimited flag sets none', () {
     final broadcast = BroadcastProducer();
     final omitted = broadcast
         .publishTrack(name: 'omitted', info: null)
         .consume(subscription: null)
         .info();
-    expect(omitted.maxAge, const Duration(seconds: 30));
+    expect(omitted.maxAge, Duration.zero);
     final unlimited = broadcast
         .publishTrack(name: 'unlimited', info: TrackInfo(maxAgeUnlimited: true))
         .consume(subscription: null)
@@ -113,7 +113,7 @@ void main() {
       final broadcast = BroadcastProducer();
       final track = broadcast.publishTrack(
         name: 'backlog',
-        info: TrackInfo(timescale: 1000000),
+        info: TrackInfo(maxAgeUnlimited: true, timescale: 1000000),
       );
       for (var ms = 0; ms < 3; ms++) {
         final group = track.appendGroup();

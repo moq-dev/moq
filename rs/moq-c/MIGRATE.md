@@ -4,11 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-A NULL or zeroed `moq_track_info`, or one with `max_age_present` false, now advertises a 30 s max age instead of no publisher limit.
-Set the new `max_age_unlimited`, with `max_age_present` false, where you relied on `max_age_present` false meaning no limit; a set `max_age_present` wins over it.
-It sits in the padding after `max_age_present`, so the struct keeps its layout, but recompiling does not initialize it: zero-initialize the struct (`moq_track_info info = {0};`) or assign `max_age_unlimited` explicitly, since an indeterminate byte is undefined behavior.
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit.
+`max_age_present` is gone and `max_age_us` always applies: drop the assignment where you set it to true, and set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on it being false for no limit.
+Recompile against the new header, since an old binary's `max_age_present` byte now reads as `max_age_unlimited`, and zero-initialize the struct (`moq_track_info info = {0};`) or assign every member, since an indeterminate member is undefined behavior.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

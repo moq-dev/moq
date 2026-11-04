@@ -438,7 +438,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 
 test("two subscribers to one inserted track each get a full copy", async () => {
 	const broadcast = new BroadcastProducer();
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 
 	const a = broadcast
 		.track("video")
@@ -475,7 +475,7 @@ test("a late subscriber replays the cached window", async () => {
 
 test("a read throws Evicted at a shed front, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const sub = broadcast
 		.track("video")
 		.subscribe({ delay: { max: Milli(5000) } })

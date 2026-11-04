@@ -60,7 +60,8 @@ window.runRecovery = async (packets) => {
 		}
 	};
 	const producer = new Moq.Broadcast.Producer();
-	const track = producer.createTrack("video", { timescale: Moq.Time.Timescale.MICRO });
+	// Every group is written before the decoder reads from the first, so none may go stale.
+	const track = producer.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
 		if (group?.sequence !== BigInt(packet.group)) {

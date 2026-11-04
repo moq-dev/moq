@@ -12,9 +12,9 @@ Audio and video subscribe setup now reports `MOQ_ERROR_UNSUPPORTED_CONFIG` when 
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
 
-### Authored tracks default to a 30 s max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
+### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
 
-A NULL or zeroed `moq_track_info`, or one with `max_age_present` false, now advertises a 30 s max age instead of no publisher limit. Set the new `max_age_unlimited`, with `max_age_present` false (a set `max_age_present` wins), where you relied on no limit. It sits in the padding after `max_age_present`, and recompiling does not initialize it: zero-initialize the struct (`moq_track_info info = {0};`) or assign it explicitly. In the generated API, an unset `moq_track_info.max_age` is likewise 30 s, and `max_age_unlimited` sets no limit.
+A NULL or zeroed `moq_track_info` now advertises a zero max age, serving only the live edge, instead of no publisher limit. `max_age_present` is gone and `max_age_us` always applies; set the new `max_age_unlimited`, which ignores `max_age_us`, where you relied on `max_age_present` false meaning no limit. Zero-initialize the struct (`moq_track_info info = {0};`) or assign every member. In the generated API, an unset `moq_track_info.max_age` is likewise zero, and `max_age_unlimited` sets no limit.
 
 ### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
 

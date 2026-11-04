@@ -53,6 +53,14 @@ fn timed_info() -> MoqTrackInfo {
 	}
 }
 
+/// [`timed_info`] with no publisher age limit, for a test that reads superseded groups.
+fn unlimited_info() -> MoqTrackInfo {
+	MoqTrackInfo {
+		max_age_unlimited: true,
+		..timed_info()
+	}
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wait until the FFI runtime has polled work spawned ahead of this call.
@@ -8512,7 +8520,9 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 #[tokio::test]
 async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
 		let group = track.append_group().unwrap();
 		group
@@ -8724,7 +8734,9 @@ async fn auth_tokens_join_and_leave_the_union() {
 #[tokio::test]
 async fn time_anchors_start_at_the_containing_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
 		let group = track.append_group().unwrap();
 		group
@@ -8955,7 +8967,9 @@ fn raw_group_read_frame_cancelled_unfreed_does_not_block_the_next() {
 #[tokio::test]
 async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	let consumer = track
 		.consume(Some(MoqSubscription {
 			delay: MoqDelay {
@@ -9066,7 +9080,9 @@ async fn raw_next_group_wakes_read_frame_after_unlocking() {
 async fn raw_track_concurrent_reads_take_every_group_once() {
 	const GROUPS: u64 = 200;
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let track = broadcast
+		.publish_track("events".into(), Some(unlimited_info()))
+		.unwrap();
 	// No age limit, so a group nobody has read yet is never skipped for a newer one.
 	let consumer = track
 		.consume(Some(MoqSubscription {
