@@ -33,7 +33,7 @@
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.4",
-		"@types/node": "^26.6.4",
+		"@types/node": "^26.6.6",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
 		"fast-check": "^4.10.2",
 		"typescript": "7.0.2"
