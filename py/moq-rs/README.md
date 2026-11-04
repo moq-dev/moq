@@ -302,3 +302,7 @@ reads with `await recv()` or async iteration. Demand is aggregate subscriber `pr
 `await priority_changed(last)`; `broadcast.requests().datagrams()` handles on-demand tracks.
 Keep payloads below the path MTU. Delivery needs a datagram-capable transport and lite-05 or
 newer, without a stream fallback. Stream tracks of the same name are independent.
+
+On lite-05/06, an on-demand datagram name reaches its handler only after the stream
+lookup reports not-found. Keeping a stream handler alive without rejecting that name
+leaves the datagram request pending; lite-07 uses independent requests.

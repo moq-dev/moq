@@ -176,6 +176,10 @@ serve on-demand datagram tracks with `BroadcastRequests.Datagrams()`.
 Keep payloads well below the path MTU. Delivery requires a datagram-capable transport and
 lite-05 or newer; there is no stream fallback.
 
+On lite-05/06, an on-demand datagram name reaches its handler only after the stream
+lookup reports not-found. Keeping a stream handler alive without rejecting that name
+leaves the datagram request pending; lite-07 uses independent requests.
+
 ## Versioning
 
 `VERSION` holds the human-owned `MAJOR.MINOR` line (the wrapper API version). Bump it in a PR only for a breaking change to the wrapper's own API. The patch number is derived by CI from the existing mirror tags, so every release (whether triggered by a wrapper change or by a new `moq.dev/moq-ffi`) just takes the next patch on that line.

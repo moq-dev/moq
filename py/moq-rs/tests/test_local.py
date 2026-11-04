@@ -1841,7 +1841,9 @@ async def test_datagram_only_request_reaches_its_handler():
     track = request.accept()
     assert (await consumer.info()).timescale is None
     track.append(b"payload")
-    assert (await consumer.recv()).payload == b"payload"
+    datagram = await consumer.recv()
+    assert datagram is not None
+    assert datagram.payload == b"payload"
     track.finish()
     assert await consumer.recv() is None
     requests.cancel()
