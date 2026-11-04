@@ -1,4 +1,4 @@
-"""Fail when an opt-in test target has no CI caller.
+"""Fail when an opt-in test target has no CI caller or a Bun file filter is ambiguous.
 
 nextest, `bun test`, and pytest discover ordinary tests by themselves; these
 targets run only when something names them:
@@ -19,6 +19,9 @@ dispatch is followed explicitly. A call's literal arguments bind the recipe's
 parameters, and a script's top-level `case "$1"` runs only the branch its
 callers' first argument selects. A local-only target needs an entry in
 test-inventory.allow naming the quest that owns it.
+
+Scripted Bun test files need `./` or `/`: bare paths are substring filters
+that also run same-named tests in generated trees.
 
 `--root DIR` checks another tree, for the tests.
 """
@@ -1033,6 +1036,34 @@ def discovered(root: Path, graph: Graph) -> set[Path]:
     return found
 
 
+def bun_test_paths(root: Path, recipes: list[Recipe]) -> list[str]:
+    """Reject bare Bun test-file filters in recipes, shell scripts, workflows, and npm scripts."""
+    texts = [(recipe.text, recipe_line(root, recipe)) for recipe in recipes]
+    texts += [(text, where) for text, where, _ in workflow_steps(root)]
+    texts += [(path.read_text(), str(path.relative_to(root))) for path in tracked(root, "*.sh")]
+    for manifest in tracked(root, "package.json", "*/package.json"):
+        texts += [
+            (script, f"{manifest.relative_to(root)} scripts.{name}")
+            for name, script in json.loads(manifest.read_text()).get("scripts", {}).items()
+        ]
+    errors = set()
+    for text, where in texts:
+        for words in commands(text):
+            for index in range(len(words) - 1):
+                if words[index : index + 2] != ["bun", "test"]:
+                    continue
+                value = False
+                for word in words[index + 2 :]:
+                    if value:
+                        value = False
+                        continue
+                    if word in ("-t", "--test-name-pattern", "--preload", "--reporter-outfile", "--coverage-dir"):
+                        value = True
+                    elif word.endswith(JS) and literal(word) and not word.startswith(("./", "/", "-")):
+                        errors.add(f"{where}: bun test {word} is a substring filter; prefix the file path with ./")
+    return sorted(errors)
+
+
 def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
     """Every orphaned target as (key, where), and errors in the inputs."""
     justfiles = load_recipes(root)
@@ -1044,7 +1075,8 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
         manifests[package.directory.resolve()] = package.name
 
     orphans: list[tuple[str, str]] = []
-    errors: list[str] = []
+    recipes = {recipe.path: recipe for module in justfiles.values() for recipe in module.recipes.values()}
+    errors = bun_test_paths(root, list(recipes.values()))
     selections = []
     for run in graph.runs:
         if any(
@@ -1102,7 +1134,6 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
     benches = bench_entries(root, graph)
 
     # Recipes that run tests.
-    recipes = {recipe.path: recipe for module in justfiles.values() for recipe in module.recipes.values()}
     for _, recipe in sorted(recipes.items()):
         if recipe.path not in graph.reached and runs_tests(graph, recipe, found, benches):
             orphans.append((f"recipe {recipe.path}", recipe_line(root, recipe)))
@@ -1175,8 +1206,8 @@ def main(argv: list[str]) -> int:
             errors.append(f"{where}: {key} is not an orphan; drop the entry")
     if errors:
         print(
-            "Every opt-in test target needs a CI caller, or an entry in sh/gh/test-inventory.allow"
-            " naming the quest that owns it:",
+            "Test inventory failed (opt-in targets need a CI caller or a quest in sh/gh/test-inventory.allow;"
+            " Bun test files need exact paths):",
             file=sys.stderr,
         )
         for error in errors:

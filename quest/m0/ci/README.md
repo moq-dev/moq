@@ -167,4 +167,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [A release merge opens no stale release PR](/quest/m0/ci/release-pr-after-release.md) - `just rs release` publishes before it proposes, so a merged release isn't re-proposed
 - [Dependabot leaves the workspace-hack to hakari](/quest/m0/ci/dependabot-workspace-hack.md) - cargo group PRs stop hand-editing `rs/workspace-hack/Cargo.toml`
 - [mbx's free-space GC never removes a live target](/quest/m0/ci/mbx-gc.md) - the cargo shim stops deleting targets other sessions use when the host disk runs low
-- [Bun runs only the test files we name](/quest/m0/ci/bun-test-paths.md) - scripted `bun test` calls pass exact paths, so generated copies never run
