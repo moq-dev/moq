@@ -268,6 +268,9 @@ pub struct Init {
     pub rtt: Duration,
     /// The most bytes per second to pace at, whatever the controller computes.
     pub max_pacing_rate: Option<u64>,
+    /// Seeds whatever the controller randomizes, such as BBR3's probe phases, so a seeded
+    /// connection replays it.
+    pub seed: u64,
 }
 
 /// Constructs controllers on demand
@@ -301,6 +304,7 @@ mod tests {
             mtu,
             rtt: Duration::from_millis(100),
             max_pacing_rate: None,
+            seed: 0,
         }
     }
 

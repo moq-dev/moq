@@ -58,8 +58,6 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 kio = { path = "../kio", features = ["runtime", "sim"] }
-# The tests seed BBR3's probe phases.
-moq-congestion = { workspace = true, features = ["testing"] }
 # The mux module's tests run in the default merge gate.
 moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }

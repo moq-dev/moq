@@ -127,8 +127,8 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 # be driven with synthetic daemon events.
 flume = "0.12"
 kio = { path = "../kio", features = ["sim"] }
-# The simulator tests seed BBR3's probe phases.
-moq-congestion = { path = "../moq-congestion", features = ["testing"] }
+# The integration tests build congestion controllers directly.
+moq-congestion = { path = "../moq-congestion" }
 # A bufferbloated path for the receive-credit tests and benchmark.
 moq-shaper = { path = "../moq-shaper" }
 # The tests run QUIC sessions on the simulator. Only `sim`, so a test build keeps the

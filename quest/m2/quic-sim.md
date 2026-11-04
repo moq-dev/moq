@@ -15,7 +15,8 @@ hidden `sim` feature. `quic::driver::sim::Network` binds a socket per address
 and carries datagrams across moq-quic's seeded `Link` (now
 `moq_quic::sim`), so one seed replays a run.
 `rs/moq-tokio/tests/integration/sim.rs` builds both endpoints on the raw
-driver and seeds their `rng_seed` and BBR3's probe phases.
+driver and seeds their `rng_seed`, which also seeds each connection's
+congestion controller.
 
 What remains:
 

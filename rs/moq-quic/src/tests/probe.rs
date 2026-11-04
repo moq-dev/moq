@@ -284,7 +284,7 @@ fn run(scenario: &Scenario) -> Outcome {
 		Congestion::Bbr3 => {}
 		Congestion::DelayBound => {
 			let mut bbr = bbr3::Config::default();
-			bbr.delay_bound(true).probe_rng_seed(entropy::rng().random());
+			bbr.delay_bound(true);
 			transport.congestion = Arc::new(bbr);
 			transport.receive_timestamps = NonZeroU32::new(32);
 		}
