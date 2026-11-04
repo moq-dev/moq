@@ -67,8 +67,8 @@ fn echo_tokio_peer() {
 	let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 
 	let client = std::thread::spawn(move || {
-		// Enabling `ring` beside `aws-lc-rs` (as `--all-features` does) leaves rustls no implicit
-		// default, and the builder would panic on this thread while the server waits forever.
+		// rustls has no implicit default provider; without one the client builder would panic on
+		// this thread while the server waits forever.
 		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()

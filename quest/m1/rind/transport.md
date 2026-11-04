@@ -17,22 +17,25 @@ supports older x86_64 CPUs without crypto extensions, aarch64 with NEON
 The epic owns the final workspace crypto graph guard; WebRTC consolidation
 and signing remain in their separate areas.
 
-Complete the PR's local validation and cross-vendor review, and settle the
-public error contract below before marking it ready. Keep every existing
-test in CI, at least nightly; do not disable a flaky test to satisfy checks.
-This follows the user's explicit requirement over the repository's
-immediate-disable instruction.
+Public error contract, decided by the maintainer on 2026-11-04:
 
-## Waiting
+- ✅ Introduce a shared typed crypto error, and make `crypto::provider()` and
+  `crypto::install_default()` fallible, with MIGRATE notes for the broader
+  API migration. This replaces `moq_quic::ConfigError::Crypto(String)` and
+  `moq_tokio::tls::Error::Crypto(String)`.
+- Not chosen: keeping `Crypto(String)` with the existing infallible
+  provider-helper signatures.
 
-- Maintainer: choose the new public initialization-error names. Recommended:
-  keep `moq_quic::ConfigError::Crypto(String)` and
-  `moq_tokio::tls::Error::Crypto(String)` as implemented, preserving the
-  infallible provider-helper signatures and reporting rind's feature name at
-  fallible setup. Alternative: introduce a shared typed crypto error and make
-  `crypto::provider()` and `install_default()` fallible, expanding the public
-  migration. The existing Plan settles CPU refusal but not these new names
-  or helper signatures.
+Open: where the shared type lives. moq-tokio's `crypto` and `tls` modules
+compile without moq-quic (the `net`-only build), so a type defined in
+moq-quic cannot be shared with them as the dependency graph stands. The
+options are in the PR's `## Decisions needed`.
+
+Complete the PR's local validation and cross-vendor review, and settle that
+placement before marking it ready. Keep every existing test in CI, at least
+nightly; do not disable a flaky test to satisfy checks. This follows the
+user's explicit requirement over the repository's immediate-disable
+instruction.
 
 ## Related
 
