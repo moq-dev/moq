@@ -3,12 +3,15 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoConfig};
+use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 
 use crate::catalog::hang::Container as HangContainer;
+use crate::codec::av1;
 use crate::container::Frame;
-use crate::container::source::{VideoTransform, build_video_transform, catalog_dimensions, codec_dimensions};
+use crate::container::source::{
+	VideoTransform, build_video_transform, catalog_dimensions, codec_dimensions, in_band_dimensions,
+};
 
 use super::export::{
 	Run, apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init,
@@ -214,8 +217,10 @@ impl Muxer {
 		Ok(out)
 	}
 
-	/// The picture size `keyframe` decodes to: from its in-band parameter sets or frame header,
-	/// else the catalog `description`, or `None` for audio or a codec that declares neither.
+	/// The picture size `keyframe` decodes to: from its in-band parameter sets (Annex-B, or
+	/// length-prefixed beside an avc3/hev1 record) or its frame header (VP8, VP9, and AV1, whose
+	/// frame may override its sequence maximum), else the catalog `description`, or `None` for audio
+	/// or a codec that declares neither.
 	///
 	/// Pass a group's first frame: the picture size of a track may change at any keyframe, which
 	/// only the media says, so reading this per group tells which config muxes it. It leaves the
@@ -224,14 +229,26 @@ impl Muxer {
 		let Kind::Video(config) = &self.kind else {
 			return Ok(None);
 		};
+		let payload = &keyframe.payload;
 		let description = match self.transform.as_mut() {
 			Some(transform) => {
-				transform.transform(keyframe.payload.clone(), true)?;
+				transform.transform(payload.clone(), true)?;
 				transform.codec_private().cloned()
 			}
-			None => self.description.clone(),
+			None => {
+				let description = self.description.as_deref().unwrap_or_default();
+				let size = match &config.codec {
+					VideoCodec::AV1(_) => av1::frame_size(payload, description.get(4..).unwrap_or_default())?,
+					codec if !description.is_empty() => in_band_dimensions(codec, description, payload)?,
+					_ => None,
+				};
+				if size.is_some() {
+					return Ok(size);
+				}
+				self.description.clone()
+			}
 		};
-		codec_dimensions(&config.codec, description.as_deref(), &keyframe.payload)
+		codec_dimensions(&config.codec, description.as_deref(), payload)
 	}
 
 	fn resolve_video_dimensions(&mut self, payload: &[u8]) -> crate::Result<()> {
@@ -552,6 +569,58 @@ mod tests {
 		.map(|keyframe| muxer.picture_size(&keyframe).unwrap());
 		assert_eq!(sizes, [Some((1440, 1080)), Some((64, 48)), Some((64, 48))]);
 		assert!(muxer.init().unwrap().is_none(), "probing builds no init");
+
+		// avc3 and hev1 keep their sets in band beside a record, which fixes only the NAL length
+		// size: a keyframe's own SPS wins, and one without keeps the record's.
+		let length_prefixed = |nals: &[&[u8]]| {
+			let payload: Vec<u8> = nals
+				.iter()
+				.flat_map(|nal| [&(nal.len() as u32).to_be_bytes()[..], nal].concat())
+				.collect();
+			Frame {
+				payload: payload.into(),
+				..frame(0, true)
+			}
+		};
+		let mut avc3 = config.clone();
+		avc3.description = Some(
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_ANAMORPHIC)], &[Bytes::from_static(PPS)]).unwrap(),
+		);
+		let mut muxer = Muxer::video(&avc3).unwrap();
+		let sizes = [length_prefixed(&[SPS_EXTENDED_SAR, PPS, idr]), length_prefixed(&[idr])]
+			.map(|keyframe| muxer.picture_size(&keyframe).unwrap());
+		assert_eq!(sizes, [Some((64, 48)), Some((1440, 1080))]);
+
+		use crate::codec::h265::fixtures as h265;
+		let mut hev1 = crate::codec::h265::config_from_hvcc(&h265::hvcc()).unwrap();
+		let VideoCodec::H265(codec) = &mut hev1.codec else {
+			unreachable!("an hvcC describes H.265")
+		};
+		codec.in_band = true;
+		hev1.framerate = Some(25.0);
+		let mut muxer = Muxer::video(&hev1).unwrap();
+		let slice = &[0x26, 0x01, 0xaf][..];
+		let sizes = [
+			length_prefixed(&[h265::VPS, h265::SPS_ANAMORPHIC, h265::PPS, slice]),
+			length_prefixed(&[slice]),
+		]
+		.map(|keyframe| muxer.picture_size(&keyframe).unwrap());
+		assert_eq!(sizes, [Some((1440, 1080)), Some((1280, 720))]);
+
+		// An AV1 key frame's own size, not its sequence maximum, read against the av1C's sequence
+		// header when the unit carries none.
+		use crate::codec::av1::fixtures::RESIZED_KEY;
+		let (sequence, unit) = RESIZED_KEY[2..].split_at(13);
+		let av1 = crate::codec::av1::config_from_av1c(&[&[0x81, 0x00, 0x0c, 0x00], sequence].concat()).unwrap();
+		let mut muxer = Muxer::video(&av1).unwrap();
+		let sizes = [RESIZED_KEY, unit].map(|payload| {
+			let keyframe = Frame {
+				payload: Bytes::copy_from_slice(payload),
+				..frame(0, true)
+			};
+			muxer.picture_size(&keyframe).unwrap()
+		});
+		assert_eq!(sizes, [Some((320, 240)), Some((320, 240))]);
 
 		// VP8 declares its size in every keyframe header, whatever the catalog says.
 		let keyframe = Frame {
