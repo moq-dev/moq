@@ -6016,33 +6016,6 @@ async fn datagram_connection(
 	(broadcast, remote, session, (server, server_origin, server_session))
 }
 
-/// Append `payload` until `consumer` receives one: a datagram is best-effort, so a send
-/// may be dropped rather than queued, and one append is not guaranteed to arrive.
-async fn recv_datagram(
-	producer: &Arc<MoqDatagramProducer>,
-	consumer: &MoqDatagramConsumer,
-	timestamp: Option<MoqTimestamp>,
-	payload: &[u8],
-) -> MoqDatagram {
-	let resend = Arc::clone(producer);
-	let payload = payload.to_vec();
-	let sending = tokio::spawn(async move {
-		loop {
-			if resend.append(timestamp, payload.clone()).is_err() {
-				return;
-			}
-			kio::clock::sleep(Duration::from_millis(20)).await;
-		}
-	});
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
-		.await
-		.expect("timed out waiting for a datagram")
-		.unwrap()
-		.expect("the datagram track ended");
-	sending.abort();
-	datagram
-}
-
 /// A native datagram-only reader reaches a publisher on the default lite-06 path.
 #[tokio::test]
 async fn datagrams_cross_a_default_connection() {
@@ -6059,16 +6032,20 @@ async fn datagrams_cross_a_default_connection() {
 	let consumer = remote.datagrams("events".into()).unwrap();
 	assert_eq!(consumer.info().await.unwrap().timescale, Some(90_000));
 	producer.priority_changed(None).await.unwrap();
-	let datagram = recv_datagram(
-		&producer,
-		&consumer,
-		Some(MoqTimestamp {
-			value: 1,
-			scale: 90_000,
-		}),
-		b"tick",
-	)
-	.await;
+	producer
+		.append(
+			Some(MoqTimestamp {
+				value: 1,
+				scale: 90_000,
+			}),
+			b"tick".to_vec(),
+		)
+		.unwrap();
+	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
 	assert_eq!(datagram.payload, b"tick");
 	assert_eq!(
 		datagram.timestamp,
@@ -6105,7 +6082,12 @@ async fn requested_datagrams_cross(versions: Vec<String>, negotiated: &str) {
 		.unwrap();
 	let producer = request.accept(None).unwrap();
 	consumer.info().await.unwrap();
-	let datagram = recv_datagram(&producer, &consumer, None, b"only").await;
+	producer.append(None, b"only".to_vec()).unwrap();
+	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
 	assert_eq!(datagram.payload, b"only");
 	assert_eq!(session.state().version.as_deref(), Some(negotiated));
 }
