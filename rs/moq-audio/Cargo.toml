@@ -77,7 +77,7 @@ bytes = { workspace = true }
 # without either pulls no new dependency.
 cpal = { version = "0.18", optional = true }
 hang = { workspace = true }
-kio = { workspace = true, features = ["runtime"] }
+kio = { workspace = true, features = ["async", "runtime"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 rand = { workspace = true }

@@ -35,7 +35,7 @@ v4l2 = ["moq-video/v4l2"]
 [dependencies]
 bytes = { workspace = true }
 hang = { workspace = true }
-kio = { workspace = true }
+kio = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-video = { workspace = true }

@@ -30,7 +30,7 @@ futures = "0.3"
 http = "1"
 io-uring = { workspace = true }
 # The worker is a kio clock backend: its turn's instant is the ambient clock.
-kio = { workspace = true, features = ["runtime"] }
+kio = { workspace = true, features = ["async", "runtime"] }
 libc = { workspace = true }
 moq-congestion = { workspace = true, optional = true }
 moq-net = { workspace = true }

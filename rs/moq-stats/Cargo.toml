@@ -12,7 +12,13 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "stats", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[package.metadata.docs.rs]
+features = ["async"]
+
 [features]
+default = []
+# Generated async wrappers for the poll methods, and `Publisher::run`. Enable where you `.await` them.
+async = ["kio/async"]
 # Exposes one producer tick to the producer_tick bench, through the hidden
 # `produce::bench` module, and moq-net's hidden counter bump. Off by default
 # and hidden from the docs. Not a supported API.
@@ -20,7 +26,7 @@ bench = ["moq-net/fuzz"]
 
 [dependencies]
 kio = { workspace = true, features = ["runtime"] }
-moq-json = { workspace = true, features = ["async"] }
+moq-json = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -33,6 +39,9 @@ uuid = { workspace = true }
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
+# Compile the generated wrappers used by the tests and benches.
+moq-json = { path = "../moq-json", features = ["async"] }
+moq-stats = { path = ".", features = ["async"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 workspace-hack = { path = "../workspace-hack" }
 

@@ -226,11 +226,12 @@ impl Consumer {
 		&self.name
 	}
 
-	/// Poll for the next protected group in arrival order.
+	/// The next protected group in arrival order, or `None` once the track finished.
 	///
 	/// # Errors
 	///
 	/// [`Error::Authentication`](crate::e2ee::Error::Authentication) once a grouped frame has failed to open, or a net error.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let terminal = Arc::clone(&self.terminal);
 		let key = Arc::clone(&self.key);
@@ -244,15 +245,6 @@ impl Consumer {
 				Arc::clone(&terminal),
 			))))
 		})
-	}
-
-	/// Receive the next protected group in arrival order.
-	///
-	/// # Errors
-	///
-	/// Same as [`Self::poll_recv_group`].
-	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
-		kio::wait(|waiter| self.poll_recv_group(waiter)).await
 	}
 }
 

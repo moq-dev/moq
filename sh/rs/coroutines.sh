@@ -3,7 +3,8 @@
 # `async` block, or `async` closure in the crate's own MIR. A library's `async`
 # feature carries its wrappers, so a build without it should have none. Each
 # `--allow NAME` excuses the `async fn NAME` bodies still waiting on a poll
-# conversion, and fails once none is left, so the list only shrinks.
+# conversion, and fails once none is left, so the list only shrinks. Name a
+# PACKAGE by its `Cargo.toml` path when another dependency shares its name.
 #
 # usage: coroutines.sh PACKAGE [--allow NAME]... [-- CARGO_ARGS...]
 set -euo pipefail
@@ -46,7 +47,12 @@ mir=$(mktemp)
 trap 'rm -f "$mir"' EXIT
 
 # Only the final crate gets `--emit`, so its dependencies build as usual.
-cargo rustc --locked -p "$package" --lib "$@" -- --emit "mir=$mir"
+if [[ $package == */Cargo.toml ]]; then
+    select=(--manifest-path "$package")
+else
+    select=(-p "$package")
+fi
+cargo rustc --locked "${select[@]}" --lib "$@" -- --emit "mir=$mir"
 
 # rustc names each coroutine by its body, as `{async fn body of queue::Queue<T>::pop()}`,
 # sometimes without the module path, so an allowed name matches as the last segment.
