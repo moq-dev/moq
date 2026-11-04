@@ -23,7 +23,7 @@ class Lock(unittest.TestCase):
         keeper = subprocess.Popen(["cat"], stdin=subprocess.PIPE, pass_fds=[fd])
         os.close(fd)
         waiter = subprocess.Popen(
-            ["bash", "-c", 'exec 9<>"$0"; exec "$1" "$2" 9 $$ waiter', path, sys.executable, LOCK],
+            ["bash", "-c", 'exec 9<>"$0"; exec "$1" "$2" "$0" 9 $$ waiter', path, sys.executable, LOCK],
             stderr=subprocess.PIPE,
             text=True,
         )
@@ -51,6 +51,24 @@ class Lock(unittest.TestCase):
     def test_unreadable_record(self):
         self.assertEqual(lock.describe(b""), "an unrecorded holder")
         self.assertEqual(lock.describe(b'{"pid": 1}'), "an unrecorded holder")
+        record = {"pid": os.getpid(), "started": "now", "cwd": "/", "command": None}
+        self.assertEqual(lock.describe(json.dumps(record).encode()), "an unrecorded holder")
+
+    def test_refuses_a_link_in_place_of_the_lock(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        target = Path(directory.name) / "target"
+        target.write_text("keep")
+        link = Path(directory.name) / "lock"
+        link.symlink_to(target)
+        result = subprocess.run(
+            ["bash", "-c", 'exec 9<>"$0"; exec "$1" "$2" "$0" 9 $$ waiter', link, sys.executable, LOCK],
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a regular file of its own", result.stderr)
+        self.assertEqual(target.read_text(), "keep")
 
 
 if __name__ == "__main__":

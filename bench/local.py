@@ -84,7 +84,7 @@ def main():
     checkouts = [checkout.resolve() for checkout in args.checkout]
     if not all(checkout.is_dir() for checkout in checkouts) or len(set(checkouts)) != len(checkouts):
         parser.error("each checkout must be a distinct existing directory")
-    if "BENCH_LOCK_HELD" not in os.environ:
+    if not os.environ.get("BENCH_LOCK_HELD"):
         command = [sys.executable, str(ROOT / "bench/local.py"), *sys.argv[1:]]
         os.execvp("bash", ["bash", str(ROOT / "bench/lock.sh"), *command])
     # Every checkout runs solo, so a concurrent run is compared against its own baseline.

@@ -20,7 +20,9 @@ directory, and command; the file holds that record. `lock.sh COMMAND` holds it
 for any other measurement. The kernel releases it once the session and every
 process it started exit. It serializes benchmarks only: builds and tests from
 other agents still run, so pick a quiet host and check the load each run
-records.
+records. Bench a host as one Unix user: Linux's `fs.protected_regular` keeps a
+second user from opening a lock file the first one created, whatever its mode,
+and `lock.py` refuses a link in the lock file's place.
 
 ## Commands
 

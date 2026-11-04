@@ -14,8 +14,9 @@ bench_lock() {
     # A nested session runs inside its caller's.
     [[ -z ${BENCH_LOCK_HELD:-} ]] || return 0
     # A fixed path rather than $TMPDIR, so every checkout, agent, and shell on the host shares it.
-    exec 9<>/tmp/moq-bench.lock
-    python3 "$(dirname "${BASH_SOURCE[0]}")/lock.py" 9 "$$" "$@"
+    local path=/tmp/moq-bench.lock
+    exec 9<>"$path" || return
+    python3 "$(dirname "${BASH_SOURCE[0]}")/lock.py" "$path" 9 "$$" "$@" || return
     export BENCH_LOCK_HELD=1
 }
 
