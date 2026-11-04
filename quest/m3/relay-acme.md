@@ -2,9 +2,9 @@
 
 ## Goal
 
-moq-relay's default `acme` feature issues and renews certificates through
+moq-relay's `acme` feature returns: it issues and renews certificates through
 instant-acme on `rind-instant-acme`, with no rustls-acme, and its graph holds
-no aws-lc-rs. Existing config and the on-disk cache keep working.
+no aws-lc-rs.
 
 ## Plan
 
@@ -18,12 +18,14 @@ so moq-relay moves to instant-acme 0.9, which takes its crypto through its own
 - the TLS-ALPN-01 challenge resolver in its rustls config,
 - key and CSR generation through `rind-rcgen`.
 
-The cache's file naming (SHA-256 today) moves to rind and stays compatible, so
-an upgraded relay reuses its cached account and certificate. Test against a
-local ACME server such as Pebble.
+Its cache's file naming moves to rind. m1 removed the feature, its config, and
+its cache because nobody used ACME yet (maintainer, 2026-11-03), so the cache
+needs no compatibility with the rustls-acme layout. Test against a local ACME
+server such as Pebble.
 
-Public API: none; config unchanged. Wire: none.
+Public API: moq-relay regains the `acme` feature and an ACME config section.
+Wire: none.
 
 ## Required
 
-- [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - the adapter this uses, waiting on instant-acme 0.9
+- [rind-instant-acme is on crates.io](/quest/m3/rind-instant-acme.md) - the adapter this uses, waiting on instant-acme 0.9

@@ -64,8 +64,9 @@ const PMT_PID: u16 = 0x1000;
 const FIRST_ES_PID: u16 = 0x1001;
 /// Re-emit PAT/PMT at least this often (wall-clock of the media) for tune-in.
 const PSI_INTERVAL: Duration = Duration::from_millis(500);
-/// The floor between emissions of a *changed* SI snapshot, bounding how fast a
-/// revising publisher can make the mux re-emit its tables. The import side
+/// The cadence of changed SI snapshots, bounding how fast a revising publisher
+/// can make the mux re-emit its tables. Clock revisions use an absolute grid;
+/// ordinary SI measures from the last emission. The import side
 /// debounces its own snapshot cuts (`si::DEBOUNCE`), but export consumes any
 /// catalog-named snapshot track, so the bound cannot live only there; this one is
 /// enforced on the media timeline. Clamped to the entry's own interval, so a
@@ -1261,8 +1262,9 @@ impl Pack {
 }
 
 /// One SI entry's subscription: resolves the snapshot track named by the catalog,
-/// reduces its newest complete group into the current section set, and remembers
-/// when it last hit the wire so it re-emits on its own cadence.
+/// reduces complete groups into the current section set and repeats it on its cadence.
+/// Clock tables hold one future snapshot on the media grid, leaving later groups on the
+/// subscription rather than collecting revisions ahead of the media.
 struct SiTrack {
 	source: crate::Source,
 	/// The catalog's track name for this entry, so a catalog update that repoints
@@ -1270,12 +1272,17 @@ struct SiTrack {
 	/// subscription rebuilt rather than left repeating the old track's sections.
 	track: String,
 	interval: Option<Duration>,
+	clock: bool,
 	state: SiState,
 	/// The reduced newest *complete* group: what emission re-transmits.
 	active: super::si::Snapshot,
-	/// A group still being read; swapped into `active` when it ends, so a torn
-	/// half-received snapshot is never emitted.
-	pending: Option<(moq_net::group::Consumer, super::si::Snapshot)>,
+	/// A group still being read; only a complete snapshot may become active or staged,
+	/// so a torn half-received snapshot is never emitted.
+	pending: Option<(moq_net::group::Consumer, super::si::Snapshot, Timestamp)>,
+	/// One complete clock revision waiting for its stamped position.
+	future: Option<SiRevision>,
+	/// Furthest media position already muxed, so a late revision waits for the next slot.
+	position: Option<Timestamp>,
 	/// A promoted snapshot changed `active` and has not hit the wire yet: emit on
 	/// the revision floor ([`SI_REVISION_INTERVAL`]) instead of waiting out the
 	/// repetition interval. For a clock table (TDT/TOT) the cadence is the content,
@@ -1289,6 +1296,14 @@ struct SiTrack {
 	/// TS importer publishes takes moq-net's zero default, so the export reads its
 	/// newest snapshot, which restates the table.
 	max_age: Duration,
+}
+
+/// A complete clock snapshot and its placement, kept separate from the last emitted value.
+struct SiRevision {
+	snapshot: super::si::Snapshot,
+	timestamp: Timestamp,
+	/// Media already muxed when this snapshot completed. A late value cannot occupy that slot.
+	after: Option<Timestamp>,
 }
 
 /// The SI subscription's lifecycle, mirroring `ExportSource`'s but reading raw
@@ -1305,13 +1320,12 @@ enum SiState {
 		track: Box<moq_net::track::Ordered>,
 		_priority: crate::source::Priority,
 	},
-	/// The track ended or failed; the last complete snapshot keeps re-emitting,
-	/// mirroring how a real mux repeats its tables between (absent) revisions.
+	/// The track ended or failed; retain the last complete snapshot on its cadence.
 	Done,
 }
 
 impl SiTrack {
-	fn new(source: &crate::Source, entry: &catalog::SiEntry, max_age: Duration) -> Self {
+	fn new(source: &crate::Source, (table_id, entry): (u8, &catalog::SiEntry), max_age: Duration) -> Self {
 		// An entry read from the inline catalog form has its sections in hand and
 		// no track to subscribe to: it starts (and stays) where an ended track ends
 		// up, re-emitting a fixed snapshot on its interval.
@@ -1327,12 +1341,15 @@ impl SiTrack {
 			source: source.clone(),
 			track: entry.track.clone(),
 			interval: entry.interval,
+			clock: is_clock_table(table_id),
 			state,
 			// Inline sections are a snapshot that has not hit the wire yet, which a
 			// clock table only sends as a revision.
 			dirty: !active.is_empty(),
 			active,
 			pending: None,
+			future: None,
+			position: None,
 			last_emit: None,
 			max_age,
 		}
@@ -1347,10 +1364,13 @@ impl SiTrack {
 		snapshot
 	}
 
-	/// Drive the subscription and fold arrived groups into `active`. Never returns
+	/// Read ordinary SI into `active`, or stage one clock revision. Never returns
 	/// an error: SI is auxiliary, so a failed or ended track logs and keeps the last
 	/// snapshot rather than killing the mux.
 	fn poll(&mut self, waiter: &kio::Waiter) {
+		if self.future.is_some() {
+			return;
+		}
 		if matches!(self.state, SiState::Requesting(..)) {
 			// Scope the borrow of `self.state` so the transitions below can assign it.
 			let resolved = {
@@ -1412,12 +1432,12 @@ impl SiTrack {
 
 		let mut ended = false;
 		if let SiState::Active { track, .. } = &mut self.state {
-			loop {
-				// Drain to the newest group first: a snapshot obsoletes every older
-				// one, including a partially-read pending group.
+			while !self.clock || self.pending.is_none() {
+				// Ordinary SI uses the latest snapshot. A clock revision must stay in
+				// order until media reaches its stamp, including an incomplete group.
 				match track.poll_next_group(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
-						self.pending = Some((group, Default::default()));
+						self.pending = Some((group, Default::default(), Timestamp::ZERO));
 					}
 					Poll::Ready(Ok(None)) => {
 						ended = true;
@@ -1439,10 +1459,11 @@ impl SiTrack {
 		// Read the pending group to its end, then promote it wholesale: emitting a
 		// half-received snapshot would re-introduce the torn state the group
 		// boundary exists to prevent.
-		while let Some((group, snapshot)) = &mut self.pending {
+		while let Some((group, snapshot, timestamp)) = &mut self.pending {
 			let (promote, drop_pending) = match group.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
 					snapshot.apply(&frame.payload);
+					*timestamp = (*timestamp).max(frame.timestamp.unwrap_or(Timestamp::ZERO));
 					(false, false)
 				}
 				Poll::Ready(Ok(None)) => (true, false),
@@ -1453,7 +1474,15 @@ impl SiTrack {
 				Poll::Pending => break,
 			};
 			if promote {
-				let (_, snapshot) = self.pending.take().unwrap();
+				let (_, snapshot, timestamp) = self.pending.take().unwrap();
+				if self.clock {
+					self.future = Some(SiRevision {
+						snapshot,
+						timestamp,
+						after: self.position,
+					});
+					break;
+				}
 				// A repeated group (the same section set re-published) is not a change:
 				// treating it as one would turn the source's snapshot cadence into extra
 				// wire repetitions.
@@ -1463,6 +1492,58 @@ impl SiTrack {
 				self.pending = None;
 			}
 		}
+	}
+
+	/// Promote clock revisions whose grid slot media has reached. Reading stops at one
+	/// future snapshot, so replay preserves revisions without an exporter-owned queue.
+	fn advance(&mut self, timestamp: Timestamp) {
+		if !self.clock {
+			return;
+		}
+		let interval = SI_REVISION_INTERVAL.min(self.interval.unwrap_or(PSI_INTERVAL));
+		loop {
+			self.poll(&kio::Waiter::noop());
+			let Some(revision) = &self.future else { break };
+			if !interval.is_zero() {
+				let stamped = Duration::from(revision.timestamp)
+					.as_nanos()
+					.div_ceil(interval.as_nanos());
+				let at = revision
+					.after
+					.map_or(stamped, |after| stamped.max(slot(after, interval) + 1));
+				if slot(timestamp, interval) < at {
+					break;
+				}
+			} else if timestamp < revision.timestamp {
+				break;
+			}
+			let SiRevision { snapshot, .. } = self.future.take().unwrap();
+			self.dirty |= snapshot != self.active;
+			self.active = snapshot;
+		}
+		self.position = Some(self.position.map_or(timestamp, |position| position.max(timestamp)));
+	}
+
+	/// Take a due snapshot, keeping revisions and repeats on their respective cadence.
+	fn emit(&mut self, timestamp: Timestamp) -> Option<Vec<Bytes>> {
+		self.advance(timestamp);
+		let interval = self.interval.unwrap_or(PSI_INTERVAL);
+		let floor = SI_REVISION_INTERVAL.min(interval);
+		let revision = self.dirty
+			&& if self.clock {
+				due(timestamp, self.last_emit, floor)
+			} else {
+				si_due(timestamp, self.last_emit, floor)
+			};
+		let repeat = !self.clock && due(timestamp, self.last_emit, interval);
+		if self.active.is_empty() || !(revision || repeat) {
+			return None;
+		}
+		self.dirty = false;
+		// A zero interval can emit on a reordered PTS. Keep the anchor ahead of it,
+		// or raising the interval later could credit that reorder span as elapsed time.
+		self.last_emit = Some(self.last_emit.map_or(timestamp, |last| last.max(timestamp)));
+		Some(self.active.sections().cloned().collect())
 	}
 }
 
@@ -1923,24 +2004,31 @@ where
 		Some(out)
 	}
 
-	/// The trailing SI frame for end of stream: every entry's current sections,
-	/// re-emitted once. Duplicates of already-emitted sections are harmless
-	/// repetitions; `None` when there are no tables or no program was ever built.
+	/// The trailing SI frame for end of stream. Ordinary tables repeat once; clock
+	/// values keep their stamped placement and never re-assert an already emitted time.
 	fn write_si_tail(&mut self) -> anyhow::Result<Option<Frame>> {
 		if self.program.psi.is_none() {
 			return Ok(None);
 		}
+		let timestamp = self.program.last_timestamp.unwrap_or(Timestamp::ZERO);
 		let pending: Vec<(u16, Vec<Bytes>)> = self
 			.program
 			.si
-			.iter()
-			.filter(|(_, si)| !si.active.is_empty())
-			.map(|((pid, _), si)| (*pid, si.active.sections().cloned().collect()))
+			.iter_mut()
+			.filter_map(|((pid, _), si)| {
+				let sections = if si.clock {
+					si.emit(timestamp)?
+				} else if !si.active.is_empty() {
+					si.active.sections().cloned().collect()
+				} else {
+					return None;
+				};
+				Some((*pid, sections))
+			})
 			.collect();
 		if pending.is_empty() {
 			return Ok(None);
 		}
-		let timestamp = self.program.last_timestamp.unwrap_or(Timestamp::ZERO);
 		let mut out = Vec::new();
 		for (pid, sections) in pending {
 			for section in &sections {
@@ -1994,8 +2082,8 @@ where
 			}
 		}
 
-		// 1b. Drive the SI subscriptions, folding arrived snapshots into each
-		// entry's active set (emission happens on cadence in `mux`).
+		// 1b. Drive the SI subscriptions. Ordinary SI updates its active set; clock
+		// revisions wait for their stamped media position in `mux`.
 		//
 		// Deliberately not part of the first-frame gate below: nothing in SI is
 		// something a TS stream cannot begin without (the PAT/PMT are built locally,
@@ -2260,7 +2348,8 @@ where
 					// staying attached would repeat its stale sections forever. The last
 					// snapshot carries across so emission never goes dark mid-swap.
 					Some(existing) if existing.track != entry.track => {
-						let mut replacement = SiTrack::new(&self.program.source, entry, self.program.delay);
+						let mut replacement =
+							SiTrack::new(&self.program.source, (*table_id, entry), self.program.delay);
 						// An inline entry already holds its snapshot; only a track entry
 						// has nothing to emit until its first group lands.
 						if replacement.active.is_empty() {
@@ -2270,6 +2359,7 @@ where
 							replacement.dirty = replacement.active != existing.active;
 						}
 						replacement.last_emit = existing.last_emit;
+						replacement.position = existing.position;
 						*existing = replacement;
 					}
 					Some(existing) => {
@@ -2287,7 +2377,7 @@ where
 					None => {
 						self.program.si.insert(
 							(*pid, *table_id),
-							SiTrack::new(&self.program.source, entry, self.program.delay),
+							SiTrack::new(&self.program.source, (*table_id, entry), self.program.delay),
 						);
 					}
 				}
@@ -2914,6 +3004,10 @@ where
 		self.program.last_psi = None;
 		for si in self.program.si.values_mut() {
 			si.last_emit = None;
+			si.position = None;
+			if let Some(revision) = &mut si.future {
+				revision.after = None;
+			}
 		}
 		self.program.video_start = None;
 		self.program.pcr_discontinuity = true;
@@ -3444,43 +3538,14 @@ where
 			self.program.last_psi = Some(frame.timestamp);
 		}
 
-		// Emit each SI entry's sections verbatim. A changed snapshot (`dirty`) goes
-		// out once the revision floor has elapsed since the entry last hit the wire,
-		// rather than waiting for a slot: a TDT/TOT revision held to a 30s grid would
-		// deliver the clock up to a whole slot late (#2934). Unchanged repeats ride
-		// the absolute media-time grid [`due`] gives the PSI, so two exporters of
-		// one broadcast repeat them at the same instants whatever their start
-		// (#3948): an SDT every 2s where the PSI wants 500ms. Clock tables never
-		// repeat unchanged, since a repeat re-asserts an already-sent time and steps
-		// a receiver backwards; every value they carry is a revision. Unknown tables
-		// have no declared interval and fall back to the PSI cadence. `Bytes` clones
-		// are refcount bumps, and only a due entry is collected at all.
+		// Clock revisions wait for their stamped position on the revision grid, independent
+		// of arrival or join time. Ordinary SI keeps its revision floor and absolute repeat
+		// cadence. Clock values never repeat unchanged: that would re-assert an old time.
 		let pending: Vec<(u16, Vec<Bytes>)> = self
 			.program
 			.si
 			.iter_mut()
-			.filter(|(_, si)| !si.active.is_empty())
-			.filter(|((_, table_id), si)| {
-				let interval = si.interval.unwrap_or(PSI_INTERVAL);
-				// A deferred revision stays dirty and carries whatever `active`
-				// holds when it finally rides.
-				let revision = si.dirty && si_due(frame.timestamp, si.last_emit, SI_REVISION_INTERVAL.min(interval));
-				let repeat = !is_clock_table(*table_id) && due(frame.timestamp, si.last_emit, interval);
-				revision || repeat
-			})
-			.map(|((pid, _), si)| {
-				si.dirty = false;
-				// The anchor never moves backwards. A non-zero interval cannot regress
-				// it on its own (`si_due` and `due` admit only timestamps past it), but
-				// a zero-interval entry emits on every frame including reordered
-				// (B-frame) timestamps below the anchor, and a catalog update can raise
-				// the interval later; a regressed anchor would then fall in an earlier
-				// slot or credit the reorder span against the floor, emitting early.
-				if si.last_emit.is_none_or(|last| frame.timestamp > last) {
-					si.last_emit = Some(frame.timestamp);
-				}
-				(*pid, si.active.sections().cloned().collect())
-			})
+			.filter_map(|((pid, _), si)| si.emit(frame.timestamp).map(|sections| (*pid, sections)))
 			.collect();
 		for (pid, sections) in pending {
 			self.program.schedule.set_buffer(pid, Buffer::SYSTEM);
@@ -5636,8 +5701,7 @@ mod tests {
 
 	/// Drive a run of timestamps through the slot cadence, advancing the stored emission
 	/// only when one fires, and return how many tables it emitted. PSI additionally emits
-	/// (and re-anchors) at every video keyframe; SI does not use the grid at all
-	/// ([`si_due`] floors unchanged repeats from the last emission instead).
+	/// (and re-anchors) at every video keyframe; SI repeats use the same grid.
 	fn run_cadence(stamps: &[Timestamp], interval: Duration) -> usize {
 		let mut last = None;
 		let mut emissions = 0;
