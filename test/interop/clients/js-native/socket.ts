@@ -75,7 +75,8 @@ try {
 		await assert.rejects(protocol === "tcp" ? endpoint.dialTcp("acceptor") : endpoint.dialTrack("acceptor"));
 	} else {
 		for (;;) {
-			const incoming = await (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack());
+			const incoming: Moq.socket.Incoming<Moq.socket.TcpStream> | Moq.socket.Incoming<Moq.socket.TrackStream> =
+				await (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack());
 			assert.equal(incoming.peer, "dialer");
 			incoming.reject();
 			// Incoming names are unverified. A late FETCH for a reset/finished half can
