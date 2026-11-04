@@ -136,7 +136,18 @@ impl Producer {
 				for entry in state.entries.values() {
 					let ready = entry.current.poll_ref(waiter, |current| {
 						if let Current::Online(instance) = &**current {
-							return instance.renditions.poll_advertised(waiter);
+							// The set's changes wake this; each rendition's binding wakes it as it resolves.
+							if instance.renditions.poll_advertised(waiter).is_pending() {
+								return Poll::Pending;
+							}
+							let listable = instance.renditions.snapshot().iter().any(|rendition| {
+								rendition.is_enabled()
+									&& rendition.poll_resolved(waiter).is_ready()
+									&& rendition.poll_refused(waiter).is_pending()
+							});
+							if listable {
+								return Poll::Ready(());
+							}
 						}
 						Poll::Pending
 					});
@@ -161,7 +172,12 @@ impl Producer {
 			let current = entry.current.read();
 			let Current::Online(instance) = &*current else { continue };
 			for rendition in instance.renditions.snapshot() {
-				if !rendition.is_enabled() || rendition.poll_refused(&kio::Waiter::noop()).is_ready() {
+				// A rendition whose binding is still resolving may yet be denied, so it waits.
+				let noop = kio::Waiter::noop();
+				if !rendition.is_enabled()
+					|| rendition.poll_resolved(&noop).is_pending()
+					|| rendition.poll_refused(&noop).is_ready()
+				{
 					continue;
 				}
 				let uri = master::contribution_uri(parent, id, &instance.id, &rendition, query);

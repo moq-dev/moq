@@ -21,7 +21,7 @@ server = ["dep:axum", "dep:http-body"]
 axum = { workspace = true, optional = true }
 bytes = { workspace = true }
 hang = { workspace = true }
-http-body = { version = "1", optional = true }
+http-body = { workspace = true, optional = true }
 humantime = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 m3u8-rs = "6"

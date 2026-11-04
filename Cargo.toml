@@ -108,6 +108,7 @@ hashlink = "0.12.2"
 hex = "0.4"
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
+http-body = "1.0.1"
 humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper = "1.11"

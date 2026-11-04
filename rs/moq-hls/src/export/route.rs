@@ -19,6 +19,13 @@ pub struct Route {
 }
 
 /// The contribution catalog and stream named inside a broadcast's instance URL.
+///
+/// A contribution's resource nests under the served broadcast as
+/// `{broadcast}/@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/`
+/// followed by the [`Resource`] file (`media.m3u8`, `init.{hash}.mp4`, or `seg/{segment}.m4s`).
+/// The broadcast's own `@{instance}` comes first, so [`Route::broadcast`] stays the parent's
+/// path and a path-based policy check covers its contributions. A denied contribution answers
+/// `403`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Contribution {

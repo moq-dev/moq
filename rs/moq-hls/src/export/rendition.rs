@@ -448,12 +448,14 @@ impl Drop for Demand {
 				let mut claim = rendition.claim.lock().expect("claim lock poisoned");
 				let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
 				if watcher.requests == 0 {
-					rendition.media.handle.lock().expect("media lock poisoned").track.take();
 					// A finished window keeps listing what it listed, inherited predecessor rows
-					// included. Its finished watcher stays, so no request follows the ended track again.
+					// included, and keeps its track pin: reads of its retained groups go through
+					// it, since a closed sibling refuses any later lookup. Its finished watcher
+					// stays too, so no request follows the ended track again.
 					if rendition.live.finished() {
 						return;
 					}
+					rendition.media.handle.lock().expect("media lock poisoned").track.take();
 					watcher.media.take();
 					// A resumed watcher never rewrites already-addressed segments or lists a
 					// partial segment it had open when the last player left.
@@ -1136,6 +1138,22 @@ impl Rendition {
 	/// its siblings stay available.
 	pub(crate) fn failed_alone(&self) -> bool {
 		self.fanout.failure().is_none() && self.check().is_err()
+	}
+
+	/// Whether a track query pins this rendition's media instance.
+	#[cfg(all(test, feature = "server"))]
+	pub(crate) fn pinned(&self) -> bool {
+		self.media.handle.lock().expect("media lock poisoned").track.is_some()
+	}
+
+	/// Poll until the broadcast serving this rendition's media resolves or is refused, so a
+	/// listing never advertises a rendition whose authorization is still pending.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub(crate) fn poll_resolved(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.poll_media(waiter).poll_broadcast(waiter).map(|_| ())
 	}
 
 	/// Poll until listings of this rendition refuse (see [`check`](Self::check)), waking when its

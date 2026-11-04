@@ -65,14 +65,14 @@ What that means for you:
 - **URLs name the stream.** Every URL the multivariant playlist and DASH manifest list sits under `@<instance>`, the stream's instance, so every edge and every reload derive the same URLs and a CDN in front of export caches them. A restarted publisher gets URLs of its own, whose numbering starts over. The multivariant playlist and manifest switch to it at once, while the old stream's playlists end at the segments they listed before the switch, even if its publisher keeps sending; a player already on it plays those out and then has to reload the multivariant playlist. A stream that reached export over moq-lite-06 or older, or moq-transport, has an instance its session minted, so only that export serves its URLs.
 - **Only a clean finish ends a playlist.** `EXT-X-ENDLIST` and a `static` DASH manifest mean the media tracks finished, or, on a replaced stream's media playlists, that another publisher took the broadcast over. A rendition whose media track fails instead, such as a publisher dropping its session, answers HTTP 500 with `Cache-Control: no-store`, so a truncated recording never looks complete, and leaves the multivariant playlist and DASH manifest so players switch to a sibling. With none left, the DASH manifest answers the error too.
 
-Contribution URLs nest under the served broadcast:
-`/{broadcast}/@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/...`.
-They follow contribution restarts unless the entry pins an `instance`; an unavailable
-contribution leaves the multivariant playlist until it returns. Access middleware
-checks the parent broadcast's path, while the server resolves the contribution through
-its scoped origin. A denied contribution is omitted and its URLs answer 403.
-DASH and `--output` include only the broadcast's own renditions; record a contribution
-as its own broadcast.
+Contribution URLs nest under the served broadcast's (see
+[`Contribution`](https://docs.rs/moq-hls/latest/moq_hls/export/struct.Contribution.html)), so
+access middleware sees the parent broadcast's path, while the server resolves each
+[contribution](/draft/moq-hang#contributions) through its own scoped origin and leaves out
+one it may not read. They follow contribution restarts unless the entry pins an `instance`;
+an unavailable contribution leaves the multivariant playlist until it returns. DASH and
+`--output` include only the broadcast's own renditions; record a contribution as its own
+broadcast.
 
 A [broadcast archive](/concept/archives) is served the same
 way, with no second stored copy: record a broadcast, republish it, and export

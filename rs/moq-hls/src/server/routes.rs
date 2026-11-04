@@ -112,6 +112,10 @@ async fn media(server: &Server, at: At<'_>, query: Option<&str>) -> Response {
 	};
 	let demand = rendition.demand();
 	if rendition.is_lazy() {
+		// Unbounded on purpose: this request's demand is what starts an on-demand encode, whose
+		// first segment can take longer than `READY_TIMEOUT`, and a 404 then would tell the player
+		// the rendition is missing while it is still starting. The wait ends with the client's
+		// connection, which drops the demand with it.
 		let response = match rendition.playlist(query).await {
 			Ok(Some(playlist)) => m3u8(playlist),
 			Ok(None) => not_found(),

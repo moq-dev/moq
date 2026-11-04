@@ -311,6 +311,46 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	let (status, after) = request(&server, &uri).await;
 	assert_eq!(status, StatusCode::OK);
 	assert_eq!(after, ended);
+	// The finished window keeps the track pin its retained groups are read through.
+	let broadcaster = server.broadcaster("room/live").await.unwrap();
+	let at = crate::export::Contribution {
+		id: "rung/a".into(),
+		instance: child.to_string(),
+	};
+	let rendition = broadcaster
+		.contribution(&at, crate::export::Kind::Video, "same")
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(rendition.pinned());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_contribution_rendition_is_listed_once_its_broadcast_resolves() {
+	let origin = moq_tokio::origin::spawn();
+	let root = Instance::random();
+	let parent = publish(&origin, "room/live", &root, &parent_catalog());
+	frames(&parent.video, 0);
+	frames(&parent.audio, 0);
+	// The contribution's only rendition reads a sibling whose route has not answered yet.
+	let other = origin.requests("room/other").unwrap();
+	let child = Instance::random();
+	let mut value = catalog();
+	value.audio.renditions.clear();
+	value.video.renditions.get_mut("same").unwrap().broadcast = Some(moq_net::path::Relative::new("./other").unwrap());
+	let _contribution = publish(&origin, "room/ladder", &child, &value);
+	let server = Server::new(origin.consume(), Default::default()).unwrap();
+	let listed = master(&server, &format!("@{root}/video/same"), true).await;
+	assert!(
+		!listed.contains("contribution/"),
+		"a pending binding may yet be denied: {listed}"
+	);
+	let request = kio::clock::timeout(Duration::from_secs(5), other.requested_broadcast())
+		.await
+		.expect("the binding never asked")
+		.unwrap();
+	request.serve(moq_net::broadcast::Info::new().produce());
+	master(&server, &format!("contribution/rung%2Fa/video/same/@{child}"), true).await;
 }
 
 #[tokio::test(start_paused = true)]
