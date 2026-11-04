@@ -29,8 +29,10 @@ This README's own work, after the children:
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
   macOS `receive_credit` timeout has no owner since its quest was deleted in
   [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
-  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, and the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md).
+  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, the paired bench
+  threshold to [bench CI](/quest/m1/bench-ci.md), and the moq-net bench
+  panics in "Rust bench targets" to
+  [moq-net's benches run to completion](/quest/m1/bench-test-mode.md).
 
 Public API: none. Wire: none.
 
