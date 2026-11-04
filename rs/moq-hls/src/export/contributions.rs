@@ -45,7 +45,13 @@ enum Current {
 	Pending,
 	Offline,
 	Online(Arc<Instance>),
-	Failed(crate::Error),
+	Failed(
+		#[cfg_attr(
+			not(feature = "server"),
+			allow(dead_code, reason = "only the `server` feature answers a lookup")
+		)]
+		crate::Error,
+	),
 }
 
 struct Instance {

@@ -173,7 +173,7 @@ impl Broadcaster {
 		let watcher = driver.lead(watch_catalog(
 			source,
 			renditions.clone(),
-			Role::Root(contributions.clone()),
+			Role::Root(contributions.clone().map(Box::new)),
 		));
 		let broadcaster = Self {
 			broadcast,
@@ -521,7 +521,7 @@ impl Broadcaster {
 /// What a catalog watcher reconciles besides its own rendition set.
 enum Role {
 	/// A root broadcast, following its catalog's contributions when an HTTP server serves it.
-	Root(Option<contributions::Producer>),
+	Root(Option<Box<contributions::Producer>>),
 	/// A contribution included in a root broadcast. Its renditions take the root catalog's
 	/// `media`, so they share the root's timeline and grid whatever the contribution declares.
 	Contribution(kio::Consumer<hang::catalog::Media>),
