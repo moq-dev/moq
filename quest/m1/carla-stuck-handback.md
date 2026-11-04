@@ -43,5 +43,4 @@ clock, not wall time.
 
 ## Related
 
-- [Taking control of a CARLA truck starts from neutral pedals](/quest/m1/carla-takeover-neutral.md) - the takeover that sent the observed truck off the road
 - [CARLA on sockets](/quest/m1/socket/carla.md) - moves the lease and handback; the stuck rule must survive the move
