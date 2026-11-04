@@ -40,7 +40,7 @@ async fn peer() -> (SocketAddr, mpsc::UnboundedReceiver<(SocketAddr, moq_net::Se
 	(addr, recv)
 }
 
-/// The first source is always dropped; other sources get independent upstream sockets,
+/// The first source starts blocked; other sources get independent upstream sockets,
 /// as in the relay's cluster_fresh_port test. Report each source only once.
 struct Proxy {
 	addr: SocketAddr,
@@ -184,6 +184,65 @@ async fn a_successful_dial_resets_the_failure_count() {
 	);
 	assert_eq!(reconnect.connects(), 2);
 	socket_step(client.close()).await;
+}
+
+/// Exhaust descriptors in a child so the limit never affects another test or runner.
+#[cfg(unix)]
+#[test]
+fn a_failed_socket_allocation_keeps_the_old_port_available_for_redial() {
+	const CHILD: &str = "MOQ_FRESH_PORT_FD_CHILD";
+	if std::env::var_os(CHILD).is_none() {
+		let output = std::process::Command::new(std::env::current_exe().unwrap())
+			.args([
+				"--exact",
+				"fresh_port::a_failed_socket_allocation_keeps_the_old_port_available_for_redial",
+				"--nocapture",
+			])
+			.env(CHILD, "1")
+			.output()
+			.unwrap();
+		assert!(
+			output.status.success(),
+			"descriptor-limited child failed:\n{}\n{}",
+			String::from_utf8_lossy(&output.stdout),
+			String::from_utf8_lossy(&output.stderr),
+		);
+		return;
+	}
+
+	tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap()
+		.block_on(async {
+			tokio::time::pause();
+			let (peer, mut sessions) = peer().await;
+			let client = client("127.0.0.1:0".parse().unwrap());
+			let mut proxy = proxy(peer).await;
+			let reconnect = connect(&client, proxy.addr);
+			let first = socket_step(proxy.sources.recv()).await.unwrap();
+
+			let mut limit = libc::rlimit {
+				rlim_cur: 0,
+				rlim_max: 0,
+			};
+			// SAFETY: these pointers address initialized limits in this isolated child.
+			assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+			let exhausted = libc::rlimit { rlim_cur: 0, ..limit };
+			// SAFETY: only the soft limit changes, so restoring it needs no privileges.
+			assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &exhausted) }, 0);
+			fail(&reconnect).await;
+			fail(&reconnect).await;
+			// SAFETY: restore the limits read above before the peer allocates its flow socket.
+			assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+
+			proxy.blocked.lock().unwrap().remove(&first);
+			let reconnect = socket_step(reconnect.established()).await.unwrap();
+			let (_, _session) = socket_step(sessions.recv()).await.unwrap();
+			assert!(proxy.sources.try_recv().is_err(), "the old socket was replaced");
+			assert_eq!(reconnect.connects(), 1);
+			socket_step(client.close()).await;
+		});
 }
 
 #[tokio::test(start_paused = true)]

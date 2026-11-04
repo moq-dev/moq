@@ -1145,17 +1145,23 @@ impl Connection {
 			if let Poll::Ready(Err(err)) = shared.auth.grant().poll_changed(&kio::Waiter::noop()) {
 				return Err(err.into());
 			}
-			#[cfg(feature = "quic")]
-			if failed_dials == 2 {
-				// Retry one transient failure on the same socket. Two failed walks
-				// are enough to try another flow, even with an unlimited retry window.
-				client.fresh_port()?;
-				failed_dials = 0;
-			}
 
 			// What the last dial presented, so a refusal is judged against it.
 			let mut presented = None;
-			match Self::dial_any(shared, &client, &addrs, &mut draining, &mut presented).await {
+			let dialed = async {
+				#[cfg(feature = "quic")]
+				if failed_dials == 2 {
+					// Retry one transient failure on the same socket. Two failed walks
+					// are enough to try another flow, even with an unlimited retry window.
+					failed_dials = 0;
+					// A failed allocation spends this attempt through the normal backoff.
+					// The next dial can still use the existing endpoint.
+					client.fresh_port()?;
+				}
+				Self::dial_any(shared, &client, &addrs, &mut draining, &mut presented).await
+			}
+			.await;
+			match dialed {
 				Ok((addr, dialed)) => {
 					#[cfg(feature = "quic")]
 					{
