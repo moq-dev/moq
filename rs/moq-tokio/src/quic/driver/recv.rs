@@ -89,6 +89,16 @@ impl Stream {
 		kio::wait(|waiter| self.reader.poll_read_buf(waiter, buf)).await
 	}
 
+	/// Poll a read without retaining the destination buffer.
+	#[cfg(feature = "quic")]
+	pub(crate) fn poll_read_buf(
+		&mut self,
+		waiter: &kio::Waiter,
+		buf: &mut impl BufMut,
+	) -> Poll<Result<Option<usize>, Error>> {
+		self.reader.poll_read_buf(waiter, buf)
+	}
+
 	/// Fill `buf` with data from the stream
 	///
 	/// Fails with [`Error::FinishedEarly`] if the stream ends first. This operation is *not*
@@ -202,7 +212,7 @@ impl Stream {
 	///
 	/// Yields `Some` with the reset error code when the stream is reset by the peer. Yields `None`
 	/// when the stream was [`finish()`](crate::quic::driver::send::Stream::finish)ed by the peer
-	/// and all data has been received, after which it is no longer meaningful for the stream to
+	/// and all data has been read, after which it is no longer meaningful for the stream to
 	/// be reset. Fails with [`Error::Evicted`] once the stream was evicted to free a stuck receive
 	/// window, until it is stopped.
 	///
@@ -217,6 +227,28 @@ impl Stream {
 	pub(crate) fn poll_received_reset(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
 		let waiter = self.park.hold(cx);
 		self.reader.poll_received_reset(waiter)
+	}
+	/// Observe FIN without consuming application bytes, including an empty stream's end.
+	#[cfg(feature = "quic")]
+	pub(crate) fn poll_closed(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+		// A read that met the reset marks every byte read, so only the cached code still says how it ended.
+		if let Some(code) = self.reader.reset {
+			return Poll::Ready(Ok(Some(code)));
+		}
+		let waiter = self.park.hold(cx);
+		let read = self
+			.reader
+			.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, 0) {
+				Poll::Ready(Ok(Some(_))) => ReadStatus::Readable(()),
+				Poll::Ready(res) => (None, res.err()).into(),
+				Poll::Pending => ReadStatus::Failed(None, moq_quic::recv::Error::Blocked),
+			});
+		match ready!(read) {
+			Ok(Some(())) => self.reader.poll_received_reset(waiter),
+			Ok(None) => Poll::Ready(Ok(None)),
+			Err(Error::Reset(code)) => Poll::Ready(Ok(Some(code))),
+			Err(err) => Poll::Ready(Err(err)),
+		}
 	}
 }
 
