@@ -35,7 +35,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 	let (start_tx, mut start_rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
 	let (acked, acknowledgement) = tokio::sync::oneshot::channel();
 	let client = std::thread::spawn(move || {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()

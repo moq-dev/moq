@@ -548,7 +548,7 @@ fn is_status_failure(code: &str) -> bool {
 /// handshake read can also carry the first RTMP chunks, so those `remaining_bytes`
 /// must be fed to the session or chunk parsing desyncs.
 async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Client);
+	let mut handshake = Handshake::new(PeerType::Client)?;
 	let p0_p1 = handshake
 		.generate_outbound_p0_and_p1()
 		.map_err(|e| anyhow::anyhow!("rtmp handshake p0/p1: {e:?}"))?;

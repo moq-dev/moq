@@ -10,12 +10,24 @@ pub struct Certs {
 }
 
 pub fn certs() -> anyhow::Result<Certs> {
-	let signed = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])?;
+	let signed = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()?;
 	let dir = tempfile::tempdir()?;
 	let cert = dir.path().join("cert.pem");
 	let key = dir.path().join("key.pem");
 	std::fs::write(&cert, signed.cert.pem())?;
-	std::fs::write(&key, signed.signing_key.serialize_pem())?;
+	std::fs::write(
+		&key,
+		pem::encode(&pem::Pem::new(
+			"PRIVATE KEY",
+			signed.signing_key.to_pkcs8().secret_pkcs8_der(),
+		)),
+	)?;
 	Ok(Certs { dir, cert, key })
 }
 
@@ -32,9 +44,12 @@ pub struct Bundle {
 /// Build one, for a test that a root file is loaded whole rather than to its
 /// first certificate.
 pub fn bundle() -> anyhow::Result<Bundle> {
-	let ca = |name: &str| -> anyhow::Result<rcgen::CertifiedIssuer<'static, rcgen::KeyPair>> {
-		let key = rcgen::KeyPair::generate()?;
-		let mut params = rcgen::CertificateParams::new(Vec::new())?;
+	let ca = |name: &str| -> anyhow::Result<rcgen::CertifiedIssuer<'static, rind_rcgen::KeyPair>> {
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(Vec::new()).map(|mut params| {
+			params.serial_number = Some(1u64.into());
+			params
+		})?;
 		params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
 		params.distinguished_name.push(rcgen::DnType::CommonName, name);
@@ -43,8 +58,11 @@ pub fn bundle() -> anyhow::Result<Bundle> {
 	let unrelated = ca("moq unrelated ca")?;
 	let signer = ca("moq signing ca")?;
 
-	let key = rcgen::KeyPair::generate()?;
-	let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
+	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+	let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).map(|mut params| {
+		params.serial_number = Some(1u64.into());
+		params
+	})?;
 	params.use_authority_key_identifier_extension = true;
 	let cert = params.signed_by(&key, &signer)?;
 
@@ -53,7 +71,10 @@ pub fn bundle() -> anyhow::Result<Bundle> {
 	let key_path = dir.path().join("key.pem");
 	let roots_path = dir.path().join("roots.pem");
 	std::fs::write(&cert_path, cert.pem())?;
-	std::fs::write(&key_path, key.serialize_pem())?;
+	std::fs::write(
+		&key_path,
+		pem::encode(&pem::Pem::new("PRIVATE KEY", key.to_pkcs8().secret_pkcs8_der())),
+	)?;
 	// The signer is second on purpose: reading only the first certificate
 	// leaves the store unable to verify anything this server presents.
 	std::fs::write(&roots_path, format!("{}{}", unrelated.pem(), signer.pem()))?;

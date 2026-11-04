@@ -36,7 +36,7 @@ struct Relay {
 }
 
 async fn relay() -> Relay {
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let fixture = moq_relay::test_relay().await.expect("test relay");
 	let ready = fixture.relay.ready();
 	tokio::spawn(fixture.relay.run());

@@ -1,6 +1,6 @@
 [package]
 name = "moq-crypto"
-description = "Content signing and end-to-end encryption for MoQ broadcasts."
+description = "Cryptography for MoQ: content signing, end-to-end encryption, and the rind provider the transports share."
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -23,6 +23,9 @@ default = ["sign", "e2ee"]
 sign = ["dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:zeroize"]
 # End-to-end encryption: the `e2ee` module.
 e2ee = ["dep:base64", "dep:bytes", "dep:kio", "dep:moq-net", "dep:rind", "dep:uuid", "dep:zeroize"]
+# rind's rustls provider and CPU check, with the `UnsupportedCpu` error the transport crates
+# share. Needs neither `moq-net` nor the other features, so moq-quic and moq-tokio can use it.
+provider = ["dep:rind", "dep:rind-rustls", "dep:rustls"]
 # `sign::PublicKey` serializes as its canonical z-base-32 text.
 serde = ["dep:serde"]
 
@@ -33,6 +36,8 @@ data-encoding = { workspace = true }
 kio = { workspace = true, optional = true }
 moq-net = { workspace = true, optional = true }
 rind = { workspace = true, optional = true }
+rind-rustls = { workspace = true, optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
 serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
 uuid = { workspace = true, optional = true }

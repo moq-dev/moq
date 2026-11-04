@@ -485,9 +485,9 @@ impl Config {
 		let tcp_tls = self.tcp.tls == Some(true);
 		#[cfg(not(feature = "tcp"))]
 		let tcp_tls = false;
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		#[cfg(feature = "_certs")]
 		let identity = self.tls.identity.is_some();
-		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+		#[cfg(not(feature = "_certs"))]
 		let identity = false;
 
 		let refused = [

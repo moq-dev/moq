@@ -26,7 +26,7 @@ use moq_relay::cluster;
 #[tokio::test]
 #[ignore = "needs multicast on the host network; run by just rs multicast"]
 async fn moq_import_cluster_lan_beside_a_relay() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let mut listen = moq_tokio::listen::Config::default();
 	listen.bind = Some("127.0.0.1:0".parse().unwrap());

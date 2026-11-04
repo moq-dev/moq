@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### TLS cryptography uses rind
+
+Default WSS connections build an explicit rind rustls configuration and use native roots, without relying on a process-wide provider.
+Build caller-supplied TLS configurations and WSS connectors on `moq_crypto::provider::provider()?` or `moq_tokio::crypto::provider()?`.
+A CPU missing a feature rind needs fails TLS connects and default WSS connects with `Error::UnsupportedCpu`, wrapping `moq_crypto::provider::UnsupportedCpu`, which names the feature; it used to arrive as `Error::Io`.
+No QMux or WebSocket wire format changes.
+
 ### `RecvStream` leases its credit ([#7624](https://github.com/moq-dev/moq/pull/7624))
 
 `RecvStream` keeps leased bytes' connection credit until `Lease::release`, rather than returning it as it reads through `poll::Buffered`, so `receive_window` bounds what incomplete messages hold together. When they fill it and no reader can progress, the lowest priority stream is evicted and its next lease fails with `Error::Evicted`. Its lease type is now `RecvLease`.

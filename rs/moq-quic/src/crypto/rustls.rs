@@ -1,10 +1,7 @@
 use std::{io, str, sync::Arc};
 
-#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-use aws_lc_rs::aead;
 use bytes::BytesMut;
-#[cfg(feature = "ring")]
-use ring::aead;
+use rind::aead;
 use rustls::{
 	self,
 	client::danger::ServerCertVerifier,
@@ -160,10 +157,10 @@ impl crypto::Session for TlsSession {
 		};
 
 		let nonce = aead::Nonce::assume_unique_for_key(nonce);
-		let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &key).unwrap());
+		let key = aead::Key::new(&aead::AES_128_GCM, &key).unwrap();
 
 		let (aad, tag) = pseudo_packet.split_at_mut(tag_start);
-		key.open_in_place(nonce, aead::Aad::from(aad), tag).is_ok()
+		key.open_in_place(nonce, aad, tag).is_ok()
 	}
 
 	fn export_keying_material(
@@ -231,9 +228,12 @@ impl QuicClientConfig {
 		Self { inner, initial }
 	}
 
-	/// A TLS 1.3 config on this crate's provider that verifies the server with `verifier`.
-	pub(crate) fn inner(verifier: Arc<dyn ServerCertVerifier>) -> rustls::ClientConfig {
-		rustls::ClientConfig::builder_with_provider(configured_provider())
+	/// A TLS 1.3 config on `provider` that verifies the server with `verifier`.
+	pub(crate) fn inner(
+		provider: Arc<rustls::crypto::CryptoProvider>,
+		verifier: Arc<dyn ServerCertVerifier>,
+	) -> rustls::ClientConfig {
+		rustls::ClientConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.unwrap() // The default providers support TLS 1.3
 			.dangerous()
@@ -288,7 +288,7 @@ impl QuicServerConfig {
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,
 	) -> Result<rustls::ServerConfig, rustls::Error> {
-		rustls::ServerConfig::builder_with_provider(configured_provider())
+		rustls::ServerConfig::builder_with_provider(provider()?)
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.unwrap() // The default providers support TLS 1.3
 			.with_no_client_auth()
@@ -344,11 +344,9 @@ impl crypto::ServerConfig for QuicServerConfig {
 		pseudo_packet.extend_from_slice(packet);
 
 		let nonce = aead::Nonce::assume_unique_for_key(nonce);
-		let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &key).unwrap());
+		let key = aead::Key::new(&aead::AES_128_GCM, &key).unwrap();
 
-		let tag = key
-			.seal_in_place_separate_tag(nonce, aead::Aad::from(pseudo_packet), &mut [])
-			.unwrap();
+		let tag = key.seal_in_place_separate_tag(nonce, &pseudo_packet, &mut []).unwrap();
 		let mut result = [0; 16];
 		result.copy_from_slice(tag.as_ref());
 		result
@@ -373,12 +371,13 @@ fn no_initial_suite() -> rustls::Error {
 	rustls::Error::General("the provider lacks TLS13_AES_128_GCM_SHA256, which QUIC Initial packets need".into())
 }
 
-pub(crate) fn configured_provider() -> Arc<rustls::crypto::CryptoProvider> {
-	#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-	let provider = rustls::crypto::aws_lc_rs::default_provider();
-	#[cfg(feature = "ring")]
-	let provider = rustls::crypto::ring::default_provider();
-	Arc::new(provider)
+/// rind's provider, with a CPU it cannot run on reported as a rustls error.
+///
+/// The convenience constructors return rustls errors already; the refusal stays typed inside
+/// [`rustls::Error::Other`], so a caller can downcast it to
+/// [`UnsupportedCpu`](moq_crypto::provider::UnsupportedCpu).
+pub(crate) fn provider() -> Result<Arc<rustls::crypto::CryptoProvider>, rustls::Error> {
+	moq_crypto::provider::provider().map_err(|err| rustls::Error::Other(rustls::OtherError(Arc::new(err))))
 }
 
 fn to_vec(params: &TransportParameters) -> Vec<u8> {
@@ -482,11 +481,18 @@ mod tests {
 	/// caller's shared configs retain their original policy.
 	#[test]
 	fn supplied_configs_reject_early_data_and_keep_resumption() {
-		let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+		let identity = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 		let cert = identity.cert.der().clone();
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(cert.clone()).unwrap();
-		let mut client = rustls::ClientConfig::builder_with_provider(configured_provider())
+		let mut client = rustls::ClientConfig::builder_with_provider(provider().unwrap())
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.unwrap()
 			.with_root_certificates(roots)
@@ -494,7 +500,7 @@ mod tests {
 		client.enable_early_data = true;
 		let mut server = QuicServerConfig::inner(
 			vec![cert],
-			PrivateKeyDer::Pkcs8(identity.signing_key.serialize_der().into()),
+			PrivateKeyDer::Pkcs8(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 		)
 		.unwrap();
 		server.max_early_data_size = u32::MAX;
@@ -523,12 +529,19 @@ mod tests {
 	/// another provider's suite.
 	#[test]
 	fn provider_without_initial_suite_fails_connections() {
-		let mut provider = (*configured_provider()).clone();
+		let mut provider = (*super::provider().unwrap()).clone();
 		provider
 			.cipher_suites
 			.retain(|suite| suite.suite() != rustls::CipherSuite::TLS13_AES_128_GCM_SHA256);
 		let provider = Arc::new(provider);
-		let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+		let identity = (|| -> std::result::Result<_, rcgen::Error> {
+			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
+			params.serial_number = Some(1u64.into());
+			let cert = params.self_signed(&signing_key)?;
+			Ok(rcgen::CertifiedKey { cert, signing_key })
+		})()
+		.unwrap();
 
 		let client = rustls::ClientConfig::builder_with_provider(provider.clone())
 			.with_protocol_versions(&[&rustls::version::TLS13])
@@ -546,7 +559,7 @@ mod tests {
 			.with_no_client_auth()
 			.with_single_cert(
 				vec![identity.cert.der().clone()],
-				PrivateKeyDer::Pkcs8(identity.signing_key.serialize_der().into()),
+				PrivateKeyDer::Pkcs8(identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec().into()),
 			)
 			.unwrap();
 		let server = QuicServerConfig::new(Arc::new(server));

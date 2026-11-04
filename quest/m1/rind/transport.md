@@ -1,42 +1,47 @@
-# [L] Transport on rind
+# [S] Finish transport on rind
 
 ## Goal
 
 moq-quic, moq-tokio, moq-uring, moq-rtmp, qmux, and moq-relay's own HTTP and
-TLS take all their crypto from
-rind and `rind-rustls`, their graphs hold no aws-lc-sys or ring, and moq-tokio's
-and moq-quic's `aws-lc-rs` and `ring` features are gone. Every binary built on
-moq-tokio checks rind's CPU support at startup.
+TLS use rind, without selecting aws-lc or ring. Remove moq-tokio's and
+moq-quic's provider features and report unsupported CPU features at setup.
+No wire format changes.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-26; see the
-[epic](/quest/m1/rind/README.md).
+The settled migration is implemented in
+[moq-dev/moq#7873](https://github.com/moq-dev/moq/pull/7873), with migration
+notes and certificate/provider test sites updated together. rind 0.1.12
+supports older x86_64 CPUs without crypto extensions, aarch64 with NEON
+(including Pi 4, CM4, and Zero 2 W without crypto extensions), and armv7.
+The epic owns the final workspace crypto graph guard; WebRTC consolidation
+and signing remain in their separate areas.
 
-- moq-quic's direct calls move to rind's API: stateless reset HMAC-SHA256 and
-  its HKDF-SHA256 key derivation, address-validation tokens (HKDF to
-  AES-256-GCM), and Retry integrity (AES-128-GCM). Packet keys and header
-  protection come through rustls's QUIC traits from `rind-rustls`. The
-  provider is no longer picked per feature.
-- moq-tokio installs `rind-rustls`, generates self-signed certificates through
-  `rind-rcgen`, drops rustls's default features and rustls-webpki's `aws-lc-rs`,
-  and moves mDNS's HMAC-SHA256 from RustCrypto to rind.
-- moq-uring builds its configs from `rind-rustls` instead of hardcoding
-  aws-lc's provider.
-- moq-rtmp's handshake HMAC-SHA256 moves to rind, and its rustls stops forcing
-  aws-lc. qmux's TLS takes `rind-rustls`; tungstenite's own `sha1` stays.
-- reqwest and axum-server switch to their no-provider features wherever these
-  crates enable them. Decided 2026-10-31 (maintainer): this includes
-  moq-relay's own reqwest, axum-server, and rustls `aws-lc-rs` features, which
-  no other area owns. Built-in ACME and rustls-acme were removed separately.
-- The roughly 100 test call sites that install aws-lc's provider install
-  rind's.
-- The startup check runs where moq-tokio's crypto is first configured, and its
-  error names the missing CPU feature. Every binary inherits it, including
-  moq-ffi.
-- Docs: the CPU requirement goes into the relay, CLI, and library docs, and
-  the removed features leave `doc/lib`.
+Public error contract, decided by the maintainer on 2026-11-04:
 
-Public API: moq-tokio's and moq-quic's `aws-lc-rs` and `ring` features are
-removed (breaking; migrate by dropping them, since rind is always on).
-Unsupported CPUs now fail at startup. Wire: none.
+- ✅ Introduce a shared typed crypto error, and make `crypto::provider()` and
+  `crypto::install_default()` fallible, with MIGRATE notes for the broader
+  API migration. This replaces `moq_quic::ConfigError::Crypto(String)` and
+  `moq_tokio::tls::Error::Crypto(String)`.
+- Not chosen: keeping `Crypto(String)` with the existing infallible
+  provider-helper signatures.
+
+Placement of the shared error, decided by the maintainer on 2026-11-04:
+
+- ✅ In `moq-crypto`, behind a new `provider` feature holding
+  `UnsupportedCpu`, `check()`, `provider()` and `install_default()`. It
+  depends only on rind and rustls, never on moq-net, so moq-quic, moq-tokio,
+  qmux and moq-uring use it without a cycle, and net-only builds gain only
+  that feature's dependencies. rind stays private: the error wraps rind's
+  `MissingFeature` instead of re-exporting it.
+- Not chosen: re-exporting rind's `MissingFeature`; defining the error in
+  moq-quic and requiring moq-quic from moq-tokio; a brand-new crate.
+
+Complete the PR's local validation and cross-vendor review before marking
+it ready. Keep every existing test in CI, at least nightly; do not disable a
+flaky test to satisfy checks. This follows the user's explicit requirement
+over the repository's immediate-disable instruction.
+
+## Related
+
+- [MoQ on rind](/quest/m1/rind/README.md) - the settled provider and CPU support decisions

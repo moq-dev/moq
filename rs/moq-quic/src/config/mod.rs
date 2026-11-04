@@ -23,4 +23,7 @@ pub enum ConfigError {
 	/// The maximum UDP payload size is outside 1200 to 65527 bytes
 	#[error("max UDP payload size out of range")]
 	MaxUdpPayloadSize,
+	/// This CPU lacks a feature that rind, the transport's cryptography, requires
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::provider::UnsupportedCpu),
 }

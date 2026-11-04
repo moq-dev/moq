@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Transport cryptography uses rind
+
+TLS configuration uses rind's rustls provider, and QUIC reset and token keys use rind through moq-quic.
+A CPU missing a feature rind needs fails configuration with `quic::Error::UnsupportedCpu`, wrapping `moq_crypto::provider::UnsupportedCpu`, which names the feature; it used to arrive as `quic::Error::Tls`.
+Build caller-supplied rustls configurations on `moq_crypto::provider::provider()?` or `moq_tokio::crypto::provider()?`.
+No wire format changes.
+
 ### QUIC method names and signatures match the core and Tokio driver
 
 Construct an endpoint with `quic::Endpoint::new(config, socket)` instead of `new(socket, config)`.

@@ -129,7 +129,7 @@ impl Fixture {
 	}
 
 	async fn spawn(auth: moq_relay::auth::Auth, websocket: bool) -> Self {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let sessions = moq_relay::session::Registry::new();
 		let mut internal_config = internal::Config::default();
 		internal_config.listen = Some("127.0.0.1:0".parse().unwrap());

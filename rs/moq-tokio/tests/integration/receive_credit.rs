@@ -77,7 +77,7 @@ async fn setup_through(
 	transport: driver::transport::Config,
 	profile: Option<moq_shaper::Profile>,
 ) -> Setup {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 
 	let publisher = moq_tokio::origin::spawn();
@@ -415,13 +415,19 @@ struct Reversed {
 }
 
 async fn reversed(version: &str) -> Reversed {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 	let alpn = version.alpn().as_bytes().to_vec();
 
-	let rcgen::CertifiedKey { cert, signing_key } =
-		rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");
-	let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+	let rcgen::CertifiedKey { cert, signing_key } = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(["localhost".to_string()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.expect("certificate");
+	let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
 	let mut tls = rustls::ServerConfig::builder()
 		.with_no_client_auth()
 		.with_single_cert(vec![cert.der().clone()], key.into())
@@ -781,16 +787,22 @@ async fn javascript_exhausts(
 /// declared twice that size. The receiver evicts it, a high-priority frame completes, and a
 /// later low group arrives.
 async fn javascript_partial_frame_gives_way(version: &str) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 
 	// The sender pins this certificate, so it needs no name or CA.
-	let rcgen::CertifiedKey { cert, signing_key } =
-		rcgen::generate_simple_self_signed(["localhost".to_string()]).expect("certificate");
+	let rcgen::CertifiedKey { cert, signing_key } = (|| -> std::result::Result<_, rcgen::Error> {
+		let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+		let mut params = rcgen::CertificateParams::new(["localhost".to_string()])?;
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key)?;
+		Ok(rcgen::CertifiedKey { cert, signing_key })
+	})()
+	.expect("certificate");
 	let dir = tempfile::tempdir().expect("tempdir");
 	let pem = dir.path().join("cert.pem");
 	std::fs::write(&pem, cert.pem()).expect("write certificate");
-	let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+	let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.to_pkcs8().secret_pkcs8_der().to_vec());
 	let mut tls = rustls::ServerConfig::builder()
 		.with_no_client_auth()
 		.with_single_cert(vec![cert.der().clone()], key.into())
@@ -1210,7 +1222,8 @@ impl rustls::client::danger::ServerCertVerifier for AnyCert {
 	}
 
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-		rustls::crypto::aws_lc_rs::default_provider()
+		rind_rustls::default_provider()
+			.unwrap()
 			.signature_verification_algorithms
 			.supported_schemes()
 	}

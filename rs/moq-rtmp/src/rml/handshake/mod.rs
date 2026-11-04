@@ -28,9 +28,8 @@ mod errors;
 
 pub use self::errors::HandshakeError;
 
-use hmac::{Hmac, KeyInit, Mac};
 use rand::RngExt;
-use sha2::Sha256;
+use rind::hmac;
 
 const RTMP_PACKET_SIZE: usize = 1536;
 const SHA256_DIGEST_LENGTH: usize = 32;
@@ -108,8 +107,8 @@ enum Stage {
 /// ```ignore
 /// use rml_rtmp::handshake::{Handshake, PeerType, HandshakeProcessResult};
 ///
-/// let mut client = Handshake::new(PeerType::Client);
-/// let mut server = Handshake::new(PeerType::Server);
+/// let mut client = Handshake::new(PeerType::Client).unwrap();
+/// let mut server = Handshake::new(PeerType::Server).unwrap();
 ///
 /// let c0_and_c1 = client.generate_outbound_p0_and_p1().unwrap();
 /// let s0_s1_and_s2 = match server.process_bytes(&c0_and_c1[..]) {
@@ -149,15 +148,16 @@ impl Handshake {
 	/// The Flash Player 9 handshake requires generating a different packet 1 depending if you
 	/// are the client or the server, and thus this must be specified when creating a new
 	/// `Handshake` instance.
-	pub fn new(peer_type: PeerType) -> Handshake {
-		Handshake {
+	pub fn new(peer_type: PeerType) -> Result<Handshake, HandshakeError> {
+		rind::cpu::check().map_err(std::io::Error::other)?;
+		Ok(Handshake {
 			current_stage: Stage::NeedToSendP0AndP1,
 			command_byte: 0_u8,
 			input_buffer: Vec::with_capacity(RTMP_PACKET_SIZE),
 			sent_p1: [0_u8; RTMP_PACKET_SIZE],
 			peer_type,
 			sent_digest: [0_u8; SHA256_DIGEST_LENGTH],
-		}
+		})
 	}
 
 	/// Creates the packets 0 and 1 that should get sent to the peer.  This is only strictly
@@ -465,38 +465,16 @@ fn get_message_parts(handshake: &[u8; RTMP_PACKET_SIZE], digest_offset: u32) -> 
 }
 
 fn calc_hmac_from_parts(part1: &[u8], part2: &[u8], key: &[u8]) -> [u8; SHA256_DIGEST_LENGTH] {
-	let mut inputs = Vec::with_capacity(part1.len() + part2.len());
-	for index in 0..part1.len() {
-		inputs.push(part1[index]);
-	}
-
-	for index in 0..part2.len() {
-		inputs.push(part2[index]);
-	}
-
-	calc_hmac(&inputs, &key)
+	let key = hmac::Key::new(&hmac::HMAC_SHA256, key);
+	let mut mac = hmac::Context::with_key(&key);
+	mac.update(part1);
+	mac.update(part2);
+	mac.sign().as_ref().try_into().unwrap()
 }
 
 fn calc_hmac(input: &[u8], key: &[u8]) -> [u8; SHA256_DIGEST_LENGTH] {
-	let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
-	mac.update(input);
-
-	let result = mac.finalize();
-	let array = result.into_bytes();
-
-	if array.len() != 32 {
-		panic!(
-			"Expected hmac signature to be 32 byte array, instead it was a {} byte array",
-			array.len()
-		);
-	}
-
-	let mut output = [0_u8; 32];
-	for index in 0..32 {
-		output[index] = array[index];
-	}
-
-	output
+	let key = hmac::Key::new(&hmac::HMAC_SHA256, key);
+	hmac::sign(&key, input).as_ref().try_into().unwrap()
 }
 
 fn fill_with_random_data(buffer: &mut [u8]) {
@@ -646,7 +624,7 @@ mod tests {
 
 	#[test]
 	fn bad_version_if_first_byte_is_not_a_3() {
-		let mut handshake = Handshake::new(PeerType::Server);
+		let mut handshake = Handshake::new(PeerType::Server).unwrap();
 		let input = [4_u8];
 
 		match handshake.process_bytes(&input) {
@@ -658,7 +636,7 @@ mod tests {
 
 	#[test]
 	fn can_accept_jw_player_example_p0_and_p1() {
-		let mut handshake = Handshake::new(PeerType::Server);
+		let mut handshake = Handshake::new(PeerType::Server).unwrap();
 		let s0_and_s1 = match handshake.generate_outbound_p0_and_p1() {
 			Err(x) => panic!("Unexpected error: {:?}", x),
 			Ok(x) => x,
@@ -706,7 +684,7 @@ mod tests {
 		c0_and_c1[0] = 3;
 		fill_with_random_data(&mut c0_and_c1[9..RTMP_PACKET_SIZE + 1]);
 
-		let mut handshake = Handshake::new(PeerType::Server);
+		let mut handshake = Handshake::new(PeerType::Server).unwrap();
 		let s0_and_s1 = match handshake.generate_outbound_p0_and_p1() {
 			Err(x) => panic!("Unexpected error: {:?}", x),
 			Ok(x) => x,
@@ -739,8 +717,8 @@ mod tests {
 		// This is the best way to verify we can handle the fp9 handshake method
 		// without reimplementing the exact algorithims for the test.
 
-		let mut client = Handshake::new(PeerType::Client);
-		let mut server = Handshake::new(PeerType::Server);
+		let mut client = Handshake::new(PeerType::Client).unwrap();
+		let mut server = Handshake::new(PeerType::Server).unwrap();
 
 		let c0_and_c1 = match client.generate_outbound_p0_and_p1() {
 			Ok(bytes) => bytes,
@@ -779,7 +757,7 @@ mod tests {
 
 	#[test]
 	fn sends_outbound_p0_p1_if_p0_received_and_outbound_p0_and_p1_not_yet_sent() {
-		let mut handshake = Handshake::new(PeerType::Server);
+		let mut handshake = Handshake::new(PeerType::Server).unwrap();
 		let input = [3_u8];
 
 		let response = match handshake.process_bytes(&input) {

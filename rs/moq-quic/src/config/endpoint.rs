@@ -112,35 +112,23 @@ impl Config {
 
 	/// The settings an endpoint runs on, with every default filled in, and its connection ID
 	/// generator
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 	pub(crate) fn resolve(&self) -> Result<(Resolved, Box<dyn ConnectionIdGenerator>), ConfigError> {
-		#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-		use aws_lc_rs::{hkdf, hmac};
 		use rand::Rng;
-		#[cfg(feature = "ring")]
-		use ring::{hkdf, hmac};
+		use rind::{hkdf, hmac};
 
 		use crate::cid_generator::HashedConnectionIdGenerator;
 
-		struct Len(usize);
-		impl hkdf::KeyType for Len {
-			fn len(&self) -> usize {
-				self.0
-			}
-		}
-
 		self.validate()?;
+		moq_crypto::provider::check()?;
 
 		let (reset_key, cid_key, min_reset_interval): (Arc<dyn HmacKey>, _, _) = match &self.reset_secret {
 			Some(secret) => {
-				let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(secret);
-				let reset_key = prk
-					.expand(&[b"moq-quic reset key"], hmac::HMAC_SHA256)
-					.expect("an HMAC key fits HKDF-SHA256");
+				let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(secret);
+				let reset_key = prk.expand(&[b"moq-quic reset key"], &hmac::HMAC_SHA256);
 
 				let mut cid_key = [0; 8];
-				prk.expand(&[b"moq-quic cid key"], Len(cid_key.len()))
-					.and_then(|okm| okm.fill(&mut cid_key))
+				prk.expand(&[b"moq-quic cid key"], cid_key.len())
+					.fill(&mut cid_key)
 					.expect("8 bytes fit HKDF-SHA256");
 				(
 					Arc::new(hmac::Key::from(reset_key)),
@@ -152,7 +140,7 @@ impl Config {
 				let mut reset_key = [0; 64];
 				crate::entropy::rng().fill_bytes(&mut reset_key);
 				(
-					Arc::new(hmac::Key::new(hmac::HMAC_SHA256, &reset_key)),
+					Arc::new(hmac::Key::new(&hmac::HMAC_SHA256, &reset_key)),
 					None,
 					Duration::from_millis(20),
 				)

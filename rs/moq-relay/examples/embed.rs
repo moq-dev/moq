@@ -20,7 +20,8 @@ use moq_relay::{Config, Relay};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	rustls::crypto::aws_lc_rs::default_provider()
+	rind_rustls::default_provider()
+		.unwrap()
 		.install_default()
 		.expect("failed to install default crypto provider");
 

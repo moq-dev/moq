@@ -70,7 +70,6 @@ impl Endpoint {
 	///
 	/// Errors on a configuration [`Config::validate`] refuses. Panics if the endpoint cannot be
 	/// seeded from the operating system random source.
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 	pub fn new(config: Config, allow_mtud: bool) -> Result<Self, ConfigError> {
 		use rand::SeedableRng;
 

@@ -58,7 +58,7 @@ fn tokio_client(
 ) -> std::thread::JoinHandle<()> {
 	std::thread::spawn(move || {
 		// May already be installed by a sibling test; either way one exists.
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()
@@ -532,7 +532,7 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 /// A client whose CONNECT is expected to fail, reporting how it failed.
 fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web::ClientError> {
 	std::thread::spawn(move || {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()
@@ -872,7 +872,7 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 	let addr = endpoint.local_addr();
 
 	let client = std::thread::spawn(move || {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()

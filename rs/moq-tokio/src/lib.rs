@@ -11,23 +11,15 @@
 //! With `net`, `client::Client` connects to relays; transport features enable
 //! `server::Server` for accepting connections. The `mdns` feature finds peers on the local network.
 //!
-//! With `default-features = false`, the `quic` backend must be paired
-//! with the `aws-lc-rs` or `ring` crypto-provider feature. Every other subset
-//! compiles, including no transport at all: such a build cannot connect to
-//! anything, though a crypto provider on its own is still enough to configure TLS
-//! and to build a plain-TLS listener's `rustls::ServerConfig` from
-//! [`tls::Listen::server_config`].
+//! Cryptography always comes from rind. TLS setup checks CPU support and returns
+//! an error naming a missing feature. Older x86_64 CPUs and aarch64 boards without
+//! crypto extensions use rind's software paths; aarch64 requires NEON. Armv7 is supported.
 //!
 //! MoQ sessions need the `net` feature, which every transport turns on. Without
-//! it, `driver` and a crypto provider build [`quic::driver`] alone: an async
+//! it, `driver` builds [`quic::driver`] alone: an async
 //! QUIC stack for any application, MoQ or not.
 
 #![warn(missing_docs)]
-
-// The protocol crates need a compiled provider for reset and retry-token keys. A rustls provider
-// installed at runtime cannot supply constructors removed by their compile-time feature gates.
-#[cfg(all(feature = "driver", not(any(feature = "aws-lc-rs", feature = "ring"))))]
-compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
 
 #[cfg(any(feature = "net", all(feature = "watch", feature = "_certs")))]
 mod abort;
