@@ -39,8 +39,8 @@ measured daily step, record the causing commits, before/after byte counts, and
 reason in the implementation PR, and let the next scheduled run compare against
 the retained point. Keep the thresholds unchanged. If the thirty-day comparison
 still fails, reduction or further acceptance work remains; daily advancement
-alone does not resolve it. Confirm both comparisons, the measured revision, and
-their baselines before declaring the regression resolved.
+alone does not resolve it. Confirm every applicable comparison, the measured
+revision, and its baselines before declaring the regression resolved.
 
 A report refused for invalid input or missing artifacts writes no history, so
 Nightly keeps loading the retained one. Only a reviewed restart of **all**

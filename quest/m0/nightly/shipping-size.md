@@ -60,7 +60,8 @@ Public API: none. Wire: none.
   `cargo bloat` estimates. macOS and aarch64 Linux attribution also remains work.
 - moq-dev/moq: after the change lands, inspect the next scheduled Nightly
   shipping-size job on main, its measured revision and retained baseline, for
-  passing daily and thirty-day comparisons. If a thirty-day comparison still
+  passing daily comparisons and, when an anchor exists, thirty-day comparisons.
+  If a thirty-day comparison still
   fails, reduction or further acceptance work remains, potentially until the
   post-jump point is thirty days old. No manual Nightly dispatch; retain this
   quest until that evidence and the remaining attribution/acceptance work are
