@@ -8,7 +8,7 @@ import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { Estimator, Order } from "../order";
 import { Slot } from "../publication";
-import { Encoder } from "./encoder";
+import { type Config, Encoder } from "./encoder";
 
 // How long a fake hardware probe takes on the installed clock.
 const PROBE = Nano.fromMilli(Milli(5));
@@ -715,7 +715,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		]);
 		expect(encoder.out.active.peek()).toBe(false);
 		// The black keyframe is written during teardown, which must not seat the stopped rendition again.
-		expect(new Estimator().write(0, order)).toBe(false);
+		expect(new Estimator().write(0, order, true)).toBe(false);
 
 		// Muting releases the capture; the rendition keeps advertising what it last published.
 		source.set(undefined);
@@ -1255,6 +1255,53 @@ test("an on-demand all-keyframe rendition advertises its records, whose subscrib
 		encoder.close();
 		broadcast.close();
 	}
+});
+
+// The catalog's `hls` duration is the track's longest GOP: a 2000ms interval declares 4000ms, and
+// a live change at 2500ms, after keyframes at 0 and 2000ms, is held to it.
+async function liveInterval(raised: Milli): Promise<{ keys: number[]; hls?: Catalog.Hls }> {
+	using recording = await installRecording();
+	const broadcast = new Broadcast({
+		enabled: true,
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("interval.hang"),
+	});
+	const config = new Signal<Config | undefined>({ keyframeInterval: Milli(2000) });
+	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never, config });
+	const subscribers: Moq.Track.Subscriber[] = [];
+	try {
+		await settle();
+		for (let ms = 0; ms < 16000; ms += 100) {
+			if (ms === 2500) config.set({ keyframeInterval: raised });
+			await recording.send(ms);
+		}
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		const catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		subscribers.push(catalogSubscriber);
+		const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber }).latest();
+		return { keys: [...recording.keys], hls: catalog?.value.video?.renditions.video?.hls };
+	} finally {
+		for (const subscriber of subscribers) subscriber.close();
+		encoder.close();
+		broadcast.close();
+	}
+}
+
+test("a live keyframe interval raise is capped at the declared duration", async () => {
+	const declared = { track: "video.hls", duration: Catalog.u53(4000) };
+	expect(await liveInterval(Milli(6000))).toEqual({ keys: [0, 2000, 6000, 10000, 14000], hls: declared });
+	// Infinite is not a valid Milli, but a config is not checked.
+	expect(await liveInterval(Number.POSITIVE_INFINITY as Milli)).toEqual({
+		keys: [0, 2000, 6000, 10000, 14000],
+		hls: declared,
+	});
+	// Within the declaration, a raise or a cut applies as asked.
+	expect(await liveInterval(Milli(3000))).toEqual({ keys: [0, 2000, 5000, 8000, 11000, 14000], hls: declared });
+	expect(await liveInterval(Milli(1000))).toEqual({
+		keys: [0, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000, 14000, 15000],
+		hls: declared,
+	});
 });
 
 test("an unwatched rendition reserves nothing and encodes at its configured bitrate", async () => {
