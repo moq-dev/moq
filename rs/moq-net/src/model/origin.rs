@@ -3318,9 +3318,14 @@ impl AnnounceProducer {
 	/// Hide the entries from everyone, local and remote alike: cursors see a
 	/// retraction and requests stop resolving through them. The entries stay,
 	/// so announcing again restores the same route. What [`Route::withdraw`] does.
+	///
+	/// A prefix route's pending requests, queued or handed to a handler, are released
+	/// under the table lock, so an answer prepared for one, such as a hidden job route,
+	/// can no longer land once the route is withdrawn.
 	fn withdraw(&self) {
 		*self.guard.lock() = None;
 		let mut shared = self.shared.lock();
+		let mut released = Vec::new();
 		for (prefix, id) in &self.entries {
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				continue;
@@ -3329,8 +3334,19 @@ impl AnnounceProducer {
 				continue;
 			}
 			entry.advertised = false;
+			if let Some(server) = &entry.server {
+				released.extend(server.lock().renew());
+			}
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim);
+		}
+		drop(shared);
+		// Refused once the table lock is gone: the refusal wakes their fronts, which read
+		// the table.
+		for producer in released {
+			if let Ok(mut request) = producer.write() {
+				request.resolved.get_or_insert(Err(Error::Unroutable));
+			}
 		}
 	}
 
@@ -11759,6 +11775,32 @@ mod tests {
 		announced.assert_next_ended("room");
 		assert!(matches!(prepared.announce(), Err(Error::Unroutable)));
 		announced.assert_next_wait();
+	}
+
+	/// Withdrawing a prefix route releases its pending requests, so a hidden job route
+	/// prepared for one is refused rather than announced, and the requester is refused.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_job_route_for_a_withdrawn_prefix_is_never_announced() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		announced.assert_next_active("room");
+		let pending = producer.consume().request("room/alice", None);
+		let job = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
+
+		claim.withdraw();
+		announced.assert_next_ended("room");
+		assert!(matches!(job.announce(), Err(Error::Unroutable)));
+		assert!(!job.is_announced());
+		assert!(matches!(pending.await, Err(Error::Unroutable)));
+		announced.assert_next_wait();
+
+		// The prefix route itself comes back and answers new requests.
+		claim.announce().unwrap();
+		announced.assert_next_active("room");
+		let _again = producer.consume().request("room/bob", None);
+		assert_eq!(queued(&claim).await.path().as_str(), "room/bob");
 	}
 
 	/// An answer prepared before the claim changed instance is refused, never announced.
