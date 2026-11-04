@@ -460,6 +460,15 @@ impl Producer {
 		}))
 	}
 
+	/// [`Self::reserve_track`] for a track no listing ever names, so only a reader who
+	/// already knows the name finds it, as a socket session's track.
+	pub(super) fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+		let mut state = self.state.lock();
+		let request = track::Request::new(self.info.clone(), name.into()).with_stats(self.stats.clone());
+		state.insert_track(request.weak())?;
+		Ok(request)
+	}
+
 	/// Create a track with a unique name using the given suffix.
 	///
 	/// Uses [`Self::unique_name`]; minted names are never reused, even after closure.
@@ -532,6 +541,11 @@ impl Producer {
 	/// Dropping the last producer does the same. Closing twice is a no-op.
 	pub fn close(&self) {
 		self.alive.close();
+	}
+
+	/// `Ready` once the broadcast ended, by [`Self::close`] or the last producer dropping.
+	pub(super) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.alive.token.poll_closed(waiter)
 	}
 
 	/// Whether any [`Consumer`] handle exists, which is not itself demand for a track.
@@ -859,6 +873,10 @@ impl Requests {
 		// Cache the served track so concurrent lookups coalesce onto it. If a live track already
 		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
 		let _ = state.cache_track(pending.weak());
+		// Claimed after the lock is released, since claiming wakes the track's subscribers
+		// and an inline executor can re-enter the broadcast from that wake. A close landing
+		// in between rejects the request, as it would one still queued.
+		drop(state);
 		// Attribute the served track to this broadcast's ingress scope (no-op untagged).
 		Poll::Ready(Ok(pending.claim().with_stats(self.stats.clone())))
 	}
