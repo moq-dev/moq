@@ -1392,8 +1392,8 @@ async fn trimmed_leading_pictures_keep_their_slots() {
 	assert_eq!(joined.iter().collect::<Vec<_>>(), shared);
 }
 
-/// A declared depth of zero decodes every frame at its presentation, and refuses a frame that
-/// reorders, rather than inferring a decode delay.
+/// A declared depth of zero decodes every frame at its presentation. A regression proves a
+/// timeline step and starts a new clock period instead of inferring a decode delay.
 #[tokio::test(start_paused = true)]
 async fn export_declared_zero_reorder_decodes_at_presentation() {
 	let (mut export, _keep) = export_declared(0, &[&[0, 40, 80, 120]]).await;
@@ -1406,15 +1406,12 @@ async fn export_declared_zero_reorder_decodes_at_presentation() {
 	assert_eq!(timing.len(), 4);
 	assert!(timing.iter().all(|(pts, dts)| pts == dts), "{timing:?}");
 
-	let (mut export, _keep) = export_declared(0, &[&[0, 80, 40, 120]]).await;
-	let err = loop {
-		match kio::clock::timeout(DRAIN, export.next()).await {
-			Ok(Ok(Some(_))) => {}
-			Ok(Ok(None)) | Err(_) => panic!("a frame reordered past the declared depth was exported"),
-			Ok(Err(err)) => break err,
-		}
-	};
-	assert!(err.to_string().contains("declared depth"), "{err}");
+	let (mut export, _keep) = export_declared(0, &[&[0, 80, 40, 120], &[160, 200]]).await;
+	let frames = drain_frames(&mut export).await;
+	let bytes: Vec<u8> = frames.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
+	let timing = video_pes_timing(&bytes);
+	assert_eq!(timing, [0, 80, 40, 120, 160, 200].map(|ms| (ms * 90, ms * 90)));
+	assert_eq!(count_discontinuity(&frames), 1, "the step opens one clock period");
 }
 
 /// #2937: the PCR must be a uniform bounded-interval ramp, not a sample of the

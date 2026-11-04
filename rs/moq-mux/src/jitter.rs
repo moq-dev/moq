@@ -815,10 +815,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			.acquire
 			.as_ref()
 			.is_some_and(|acquire| acquire.tracks.contains_key(&key));
-		let Some(clock) = self
-			.clock
-			.filter(|_| !held && !(self.released.is_some() && self.jumps(&key, &arrival)))
-		else {
+		let Some(clock) = self.clock.filter(|_| !held && !self.jumps(&key, &arrival)) else {
 			self.hold(key, arrival);
 			return Ok(Push::Queued);
 		};
@@ -890,17 +887,19 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 	/// draining nor a track whose frames are sparse does. Back, a frame decodes before its
 	/// track's last and is late: a stall only delays what comes next. It is a step on the
 	/// clock's own generation, since a track still on an earlier one is on that timeline.
-	/// Held for the next generation, the frame never steers the old clock. Without a delay
-	/// nothing is held or late, so a step costs nothing there.
+	/// Held for the next generation, the frame never steers the old clock. A marker before the
+	/// first release keeps the clock unless it regresses behind frames already queued. Without
+	/// a delay nothing is held or late, so an unmarked step costs nothing there.
 	fn jumps(&self, key: &K, arrival: &Arrival<T>) -> bool {
 		let (Some(clock), Some(track)) = (self.clock, self.tracks.get(key)) else {
 			return false;
 		};
 		let deadline = self.deadline(&clock, arrival.decode);
 		let restarted = track.restart != arrival.restart
+			&& (self.released.is_some() || arrival.decode < track.decode)
 			&& (track.generation == clock.generation || !self.lands(key, deadline, arrival.arrived));
 		let held = deadline.is_some_and(|deadline| deadline > self.bound(key, arrival.arrived));
-		let unmarked = !self.delay.is_zero() && track.generation == clock.generation;
+		let unmarked = self.released.is_some() && !self.delay.is_zero() && track.generation == clock.generation;
 		let elapsed = arrival.decode.as_nanos() - track.decode.as_nanos();
 		let ahead = elapsed - since(track.arrived, arrival.arrived);
 		let drift = (elapsed.abs() as f64 * MAX_DRIFT) as i128;
@@ -2166,7 +2165,7 @@ mod tests {
 		assert_eq!(due(&mut buffer), ["v200", "v280", "v320", "v360"]);
 	}
 
-	/// A restart before anything went out keeps the clock, so the tracks stay on one.
+	/// A forward restart before anything went out keeps the clock, so the tracks stay on one.
 	#[tokio::test(start_paused = true)]
 	async fn a_skip_before_the_first_release_keeps_one_clock() {
 		let start = kio::clock::now();
@@ -2191,6 +2190,18 @@ mod tests {
 			released(&mut buffer),
 			[("v0", 0), ("v900", 0), ("a900", 0), ("v940", 0), ("a940", 0)]
 		);
+	}
+
+	/// A marked regression is a new timeline even while every frame is still queued: the
+	/// frames before and after it cannot decode in order on one clock.
+	#[tokio::test(start_paused = true)]
+	async fn a_marked_regression_before_the_first_release_opens_a_clock() {
+		let start = kio::clock::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		buffer.push(1, arrival(start, 80, "before")).unwrap();
+		buffer.push(1, after(1, arrival(start, 40, "after"))).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("before", 0), ("after", 1)]);
 	}
 
 	/// A restart after frames went out opens a new generation, and every track's next frame
