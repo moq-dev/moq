@@ -2940,7 +2940,7 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		&broadcast,
 		named("high"),
 		MoqVideoInit {
-			lower: Some(low.clone()),
+			lower: Some(MoqMediaProducer::Track { producer: low.clone() }),
 			..video_init(MoqVideoFormat::Avc3, h264_init())
 		},
 	)
@@ -2966,6 +2966,99 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		}
 	};
 	assert!(disabled.video["low"].enabled);
+}
+
+/// A byte-stream rung above another sits one priority below it, so a grant short of both funds
+/// the lower one first. Disabled, it drops what is written to it, and enabled again it resumes at
+/// the next keyframe in the stream.
+#[tokio::test]
+async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
+	let estimate = moq_net::bandwidth::Producer::new();
+	let bandwidth = crate::bandwidth::MoqAllocator::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+
+	let named = |name: &str| MoqMediaTarget::Named {
+		name: Some(name.into()),
+	};
+	let low =
+		MoqMediaTrackStreamProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::Avc3, h264_init()))
+			.unwrap();
+	let high = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		named("high"),
+		MoqVideoInit {
+			lower: Some(MoqMediaProducer::Stream { producer: low.clone() }),
+			..video_init(MoqVideoFormat::Avc3, h264_init())
+		},
+	)
+	.unwrap();
+
+	let low_track = consumer.subscribe_track("low".into(), None).await.unwrap();
+	let high_track = consumer.subscribe_track("high".into(), None).await.unwrap();
+	assert_eq!(low_track.info().priority, hang::catalog::PRIORITY.video);
+	assert_eq!(high_track.info().priority, hang::catalog::PRIORITY.video - 1);
+
+	// The higher rung asks for more, but strict priority fills the lower one first.
+	let low_reservation = bandwidth.reserve(&low.demand().unwrap(), 2_000_000);
+	let high_reservation = bandwidth.reserve(&high.demand().unwrap(), 4_000_000);
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(low_reservation.rate(), Some(2_000_000));
+	assert_eq!(high_reservation.rate(), Some(1_000_000));
+
+	// Each keyframe ends in its own slice bytes, to tell which one went out.
+	let keyframe = |last: u8| {
+		let mut bytes = h264_init();
+		bytes.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, last]);
+		bytes
+	};
+	let delta = [0, 0, 0, 1, 0x41, 0x9a, 0x21, 0x22];
+	// The splitter emits an access unit once the next one starts, hence the trailing deltas.
+	let write = |bytes: &[&[u8]]| {
+		for bytes in bytes {
+			high.write(bytes.to_vec()).unwrap();
+		}
+	};
+	let next_frame = async || {
+		loop {
+			let frame = kio::clock::timeout(TIMEOUT, high_track.read_frame())
+				.await
+				.expect("timed out waiting for a frame")
+				.unwrap()
+				.expect("the track ended");
+			// The discontinuity marker is empty.
+			if !frame.payload.is_empty() {
+				return frame.payload;
+			}
+		}
+	};
+	let high_enabled = async |enabled: bool| loop {
+		let catalog = kio::clock::timeout(TIMEOUT, catalog_consumer.next())
+			.await
+			.expect("timed out waiting for catalog")
+			.unwrap()
+			.expect("expected a catalog");
+		if catalog.video.get("high").is_some_and(|high| high.enabled == enabled) {
+			assert!(catalog.video["low"].enabled);
+			break;
+		}
+	};
+
+	write(&[&keyframe(0x21), &delta, &delta]);
+	assert!(next_frame().await.ends_with(&[0x21]));
+
+	high.set_enabled(false).unwrap();
+	high_enabled(false).await;
+	// The stream keeps flowing, but none of it goes out, the keyframe included.
+	write(&[&delta, &keyframe(0x23), &delta, &delta]);
+
+	high.set_enabled(true).unwrap();
+	write(&[&delta, &keyframe(0x24), &delta, &delta]);
+	high_enabled(true).await;
+	assert!(next_frame().await.ends_with(&[0x24]), "resumed on another keyframe");
 }
 
 /// A keyframe whose SPS names another level is a new decoder identity, so the track producer moves
