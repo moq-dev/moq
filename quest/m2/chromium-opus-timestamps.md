@@ -14,7 +14,7 @@ silence](/quest/m1/push-to-talk/dtx-route.md)'s successor that native
 
 ## Plan
 
-Waiting on Chromium. Measured 2026-11-04: Chrome 156 ends 14 s of DTX input
+Measured 2026-11-04: Chrome 156 ends 14 s of DTX input
 at 8.92 s and ignores input timestamp jumps. In
 `media/audio/audio_opus_encoder.cc`, the timestamp tracker is seeded once from
 the first input and advances only when a packet is emitted, so DTX's
@@ -27,8 +27,15 @@ Decided 2026-11-04 (maintainer): file the Chromium bug
 ([chromium#581458361](https://issues.chromium.org/issues/581458361), Blink>Media>WebCodecs,
 submitted by the maintainer) and no spec issue; track it here in m2, since
 push-to-talk works around it by gating silence before the encoder and stamping
-chunks from its own inputs, so nothing depends on this. Advance it by pinging
-the Chromium bug when a release passes the repro or a fix lands.
+chunks from its own inputs, so nothing depends on this.
+
+## Waiting
+
+- Chromium: fix [chromium#581458361](https://issues.chromium.org/issues/581458361)
+  so Opus chunks carry their input's timestamp across `usedtx` silence and
+  input jumps. Check by running the attached repro in the latest stable Chrome
+  (scenario A ends near 13.98 s, scenario C follows the +1 s jump); advance it
+  by commenting on the bug with each stable release that still fails.
 
 ## Related
 
