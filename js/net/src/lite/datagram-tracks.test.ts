@@ -3,6 +3,7 @@ import { accept, connect } from "../connection/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
+import { sendOrder } from "../priority.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP } from "./version.ts";
@@ -101,12 +102,13 @@ test("lite-04 refuses datagram tracks at setup", async () => {
 	}
 });
 
-test("lite-07 bounds datagram bodies with createWritable, independently of stream compression", async () => {
+test("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
 	const source = new Origin();
 	const publication = source.createBroadcast(path);
 	const datagrams = publication.broadcast.createDatagrams("audio");
 	publication.broadcast.createTrack("audio", { compress: true });
 	publication.announce();
+	const other = publication.broadcast.createDatagrams("other", { priority: 7 });
 	const pair = createMockTransportPair(ALPN_07_WIP, { datagramWritable: "createWritable" });
 	Object.defineProperty(pair.server.datagrams, "maxDatagramSize", { value: 900 });
 	const [client, server] = await Promise.all([
@@ -115,15 +117,28 @@ test("lite-07 bounds datagram bodies with createWritable, independently of strea
 	]);
 	const remote = wireOf(client).consume(path);
 	const reader = remote.datagrams("audio");
+	const second = remote.datagrams("other");
 	reader.setPriority(19);
+	second.setPriority(31);
 	try {
 		await reader.info();
 		while (datagrams.priority.peek() !== 19) await datagrams.priority.changed();
+		await second.info();
+		other.append(undefined, new Uint8Array([1]));
+		await second.recv();
+		expect(pair.server.sendStreams.datagrams).toHaveLength(2);
+		const queue = pair.server.sendStreams.datagrams[0];
+		expect(queue.sendOrder).toBe(sendOrder({ priority: 19 }));
+		reader.setPriority(-11);
+		while (datagrams.priority.peek() !== -11) await datagrams.priority.changed();
+		expect(queue.sendOrder).toBe(sendOrder({ priority: -11 }));
+		expect(pair.server.sendStreams.datagrams[1].sendOrder).toBe(sendOrder({ priority: 31, publisher: 7 }));
 		// Type, Subscribe ID, and Sequence each occupy one byte on this untimed track.
 		datagrams.append(undefined, new Uint8Array(898));
 		datagrams.append(undefined, new Uint8Array(897));
 		expect((await reader.recv())?.sequence).toBe(1n);
 	} finally {
+		second.close();
 		reader.close();
 		remote.close();
 		client.abort();

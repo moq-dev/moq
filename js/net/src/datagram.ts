@@ -228,13 +228,13 @@ export class Consumer {
 	#state: State;
 	#cursor: bigint;
 	#closed = new Once<Error | null>();
-	#priority: number;
+	#priority: Signal<number>;
 
 	private constructor(name: string, state: State, cursor?: bigint, value = 0) {
 		this.name = name;
 		this.#state = state;
 		this.#cursor = cursor ?? state.offset + BigInt(state.buffer.length);
-		this.#priority = value;
+		this.#priority = new Signal(value);
 		if (state.closed.peek() === undefined || cursor !== undefined) {
 			state.consumers.set(this, value);
 			state.updatePriority();
@@ -242,6 +242,7 @@ export class Consumer {
 	}
 	static {
 		consume = (name, state, cursor, priority) => new Consumer(name, state, cursor, priority);
+		hooks.datagramPriority = (consumer) => consumer.#priority;
 	}
 
 	/** The track's publisher properties, once accepted. */
@@ -251,12 +252,12 @@ export class Consumer {
 
 	/** This consumer's subscriber priority. */
 	get priority(): number {
-		return this.#priority;
+		return this.#priority.peek();
 	}
 
 	/** Change this consumer's priority, higher first. */
 	setPriority(value: number): void {
-		this.#priority = priority(value);
+		this.#priority.set(priority(value));
 		if (!this.#state.consumers.has(this)) return;
 		this.#state.consumers.set(this, value);
 		this.#state.updatePriority();
@@ -265,7 +266,7 @@ export class Consumer {
 	/** Another consumer at the same position and priority. */
 	clone(): Consumer {
 		if (this.#closed.peek() !== undefined) throw new Error("datagram consumer is closed");
-		return consume(this.name, this.#state, this.#cursor, this.#priority);
+		return consume(this.name, this.#state, this.#cursor, this.#priority.peek());
 	}
 
 	/** Read the next datagram, skipping any dropped by the bounded shared buffer. */

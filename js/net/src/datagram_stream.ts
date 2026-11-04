@@ -1,11 +1,12 @@
 /** Compatibility helpers for browser WebTransport datagram stream shape changes. */
+import type { SendStream } from "./stream.ts";
 
 /** The current standards-track datagram send stream, plus Chrome's legacy writable property. */
 interface DatagramDuplex {
 	readonly readable?: ReadableStream<Uint8Array>;
 	readonly writable?: WritableStream<Uint8Array>;
 	readonly maxDatagramSize?: number;
-	createWritable?: () => WritableStream<Uint8Array>;
+	createWritable?: (options: { sendOrder: number }) => SendStream;
 }
 
 function datagrams(quic: WebTransport): DatagramDuplex | undefined {
@@ -39,21 +40,51 @@ export function datagramReader(quic: WebTransport): ReadableStreamDefaultReader<
 	}
 }
 
-/** Get a datagram writer, or undefined when this browser/transport does not expose one. */
-export function datagramWriter(quic: WebTransport): WritableStreamDefaultWriter<Uint8Array> | undefined {
+/** One subscription's datagram send queue. */
+export interface Sender {
+	writer: WritableStreamDefaultWriter<Uint8Array>;
+	setPriority(order: number): void;
+	close(): Promise<void>;
+}
+
+/** Opens independent prioritized queues on current transports, sharing the legacy writer otherwise. */
+export function datagramWriter(quic: WebTransport):
+	| {
+			open(order: number): Sender;
+			close(): void;
+	  }
+	| undefined {
 	const stream = datagrams(quic);
 	if (!stream || maxDatagramSize(quic) === 0) return undefined;
-
-	try {
-		const writable = typeof stream.createWritable === "function" ? stream.createWritable() : stream.writable;
-		if (!writable) {
-			console.warn("datagram send disabled: WebTransport datagram writable stream is unavailable");
-			return undefined;
-		}
-
-		return writable.getWriter();
-	} catch (err: unknown) {
-		console.warn("datagram send disabled: failed to open WebTransport datagram writer", err);
-		return undefined;
+	const createWritable = stream.createWritable;
+	if (typeof createWritable === "function") {
+		return {
+			open(order) {
+				const writable = createWritable.call(stream, { sendOrder: order });
+				const writer = writable.getWriter();
+				return {
+					writer,
+					setPriority(order) {
+						writable.sendOrder = order;
+					},
+					async close() {
+						try {
+							await writer.close();
+						} finally {
+							writer.releaseLock();
+						}
+					},
+				};
+			},
+			// Each request owns and closes its own current-API queue.
+			close() {},
+		};
 	}
+	if (!stream.writable) return undefined;
+	const writer = stream.writable.getWriter();
+	return {
+		// The legacy API has one session queue and no per-subscription send order.
+		open: () => ({ writer, setPriority() {}, async close() {} }),
+		close: () => writer.releaseLock(),
+	};
 }

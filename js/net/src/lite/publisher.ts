@@ -474,11 +474,8 @@ export class Publisher {
 
 	#quic: WebTransport;
 
-	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
-	// construction when this version + transport carry datagrams, released in close(). Its
-	// presence is the gate: undefined means datagrams aren't served on this connection. All
-	// subscriptions share it, since a second getWriter on the same stream would throw.
-	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
+	// Select the transport's current or legacy datagram send API once at setup.
+	#datagramWriter?: ReturnType<typeof DatagramStream.datagramWriter>;
 
 	// Originated advertisements this session forwards.
 	#advertised: Getter<Advertisements | undefined>;
@@ -1945,31 +1942,42 @@ export class Publisher {
 
 	// Shared by dedicated lite-07 requests and the old SUBSCRIBE carry-both mapping.
 	async #runDatagrams(track: datagram.Consumer, options: { sub: bigint; stamp?: Stamp }): Promise<bigint> {
-		const writer = this.#datagramWriter;
-		if (!writer) throw new Error("transport does not support datagrams");
+		if (!this.#datagramWriter) throw new Error("transport does not support datagrams");
+		const info = await track.info();
+		const rank = () => sendOrder({ priority: track.priority, publisher: info.priority });
+		const sender = this.#datagramWriter.open(rank());
+		const dispose = hooks.datagramPriority(track).subscribe(() => sender.setPriority(rank()));
+		const { writer } = sender;
 		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
 		let end = 0n;
-		for (;;) {
-			const datagram = await track.recv();
-			if (!datagram) return end;
-			end = max(end, datagram.sequence + 1n);
-			const stamp = options.stamp;
-			// An old subscription uses its stream track's timescale for both kinds.
-			const timestamp =
-				stamp === undefined
-					? undefined
-					: datagram.timestamp === undefined
-						? floorAt(Timestamp.now(), stamp.timescale)
-						: floorAt(datagram.timestamp, stamp.timescale);
-			const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
-				this.version,
-			);
-			if (body.byteLength > maxSize) {
-				console.debug(`dropping oversize datagram: sub=${options.sub} size=${body.byteLength} max=${maxSize}`);
-				continue;
+		try {
+			for (;;) {
+				const datagram = await track.recv();
+				if (!datagram) return end;
+				end = max(end, datagram.sequence + 1n);
+				const stamp = options.stamp;
+				// An old subscription uses its stream track's timescale for both kinds.
+				const timestamp =
+					stamp === undefined
+						? undefined
+						: datagram.timestamp === undefined
+							? floorAt(Timestamp.now(), stamp.timescale)
+							: floorAt(datagram.timestamp, stamp.timescale);
+				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
+					this.version,
+				);
+				if (body.byteLength > maxSize) {
+					console.debug(
+						`dropping oversize datagram: sub=${options.sub} size=${body.byteLength} max=${maxSize}`,
+					);
+					continue;
+				}
+				await writer.ready;
+				await writer.write(body);
 			}
-			await writer.ready;
-			await writer.write(body);
+		} finally {
+			dispose();
+			await sender.close();
 		}
 	}
 
@@ -2299,7 +2307,7 @@ export class Publisher {
 		// only drops the borrow. The peer sees the unannounce when the streams die.
 
 		// Release the datagram writer's lock so the stream can be torn down.
-		this.#datagramWriter?.releaseLock();
+		this.#datagramWriter?.close();
 		this.#datagramWriter = undefined;
 	}
 }
