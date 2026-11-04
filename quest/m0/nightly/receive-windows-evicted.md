@@ -34,10 +34,9 @@ Investigated 2026-11-04 in
 - A connection-wide semaphore makes all 16 rows pass, three runs each,
   and Nightly's report parser produces 80 measurements. It also admits
   only 15 tracks' 256 KiB frames, or three tracks' 4 MiB frames, at once
-  with the stock window. Local review rejected this change because it
-  alters the measured pressure and excludes admission wait from frame
-  latency. The implementation was removed; no benchmark or production
-  code changes remain in this PR.
+  with the stock window. A connection-wide admission semaphore is
+  rejected: it changes the measured pressure and leaves admission wait
+  out of frame latency.
 - Retain the stream/frame/window axes and actual offered workload for
   [Receive pool](/quest/m2/receive-pool.md). Resolve the policy below
   before changing either the benchmark's acceptance or production
