@@ -20,7 +20,7 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 - m1
 - ✅ m2, in the release epic beside the libmoq stub
 
-[moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702) turns
+[moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702) (merged) turned
 `rs/moq-e2ee` into a code-free stub that the cut's `just version` lifts
 above 0.0.20, so release-plz publishes it.
 
@@ -33,5 +33,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [moq-crypto replaces moq-sign and moq-e2ee](/quest/m1/moq-crypto.md) - makes the stub
 - [Retire libmoq](/quest/m2/release/libmoq-retire.md) - the same retirement for libmoq

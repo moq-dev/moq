@@ -257,6 +257,23 @@ impl Info {
 		self
 	}
 
+	/// `timestamp` at this track's [`timescale`](Self::timescale).
+	///
+	/// A track is all timed or all untimed, so a frame must match it: a timed frame on an
+	/// untimed track, or an untimed one on a timed track, is [`Error::TimestampMismatch`],
+	/// as is a timestamp the track's scale can't hold. A writer that changes state before
+	/// its frame reaches the track, such as signing or encrypting it, rescales first so a
+	/// refused timestamp changes nothing.
+	pub fn rescale(&self, timestamp: Option<Timestamp>) -> Result<Option<Timestamp>> {
+		match (timestamp, self.timescale) {
+			(Some(timestamp), Some(timescale)) => Ok(Some(
+				timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
+			)),
+			(None, None) => Ok(None),
+			_ => Err(Error::TimestampMismatch),
+		}
+	}
+
 	/// The original moq-transport publisher's draft, whose timestamps may rewind, or
 	/// `None` for a native moq-lite track.
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
@@ -3471,8 +3488,7 @@ impl Producer {
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
-		let timescale = state.info.as_ref().unwrap().timescale;
-		let timestamp = group::on_track(timestamp.into(), timescale)?;
+		let timestamp = state.info.as_ref().unwrap().rescale(timestamp.into())?;
 		let sequence = state.next_sequence()?;
 		if let Some(fin) = state.final_sequence()
 			&& sequence >= fin
@@ -3535,14 +3551,13 @@ impl Producer {
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
 		let info = state.info.as_ref().unwrap();
-		let timescale = info.timescale;
 		let status = datagram.wire.as_ref().and_then(|wire| wire.status);
 		// A datagram is its own group, so it compresses alone. A status has no payload.
 		if info.compress && datagram.deflated.is_none() && status.is_none() {
 			datagram.deflated = Some(super::flate::Encoder::new().frame(&datagram.payload));
 		}
 		if status.is_none_or(|status| status == 0) {
-			datagram.datagram.timestamp = group::on_track(datagram.timestamp, timescale)?;
+			datagram.datagram.timestamp = info.rescale(datagram.timestamp)?;
 		}
 		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
 			return Err(Error::Closed);
@@ -3595,8 +3610,7 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 		// Checked before the group exists, so a refused frame leaves no empty group behind.
-		let timescale = self.modify()?.info.as_ref().unwrap().timescale;
-		let timestamp = group::on_track(timestamp.into(), timescale)?;
+		let timestamp = self.modify()?.info.as_ref().unwrap().rescale(timestamp.into())?;
 		let mut group = self.append_group()?;
 		if let Err(err) = group.write_frame(timestamp, frame) {
 			// A rewind is only known once the group exists; end it rather than leave it open.
@@ -6285,6 +6299,17 @@ impl Admitted {
 }
 
 /// `runs`, lowest first, below the exclusive `cap`.
+/// What a reader asks its fills with: read only once it asks, since every probe that asks
+/// nothing would otherwise take the subscription's lock for it.
+fn asking(subscription: &Preferences) -> miss::Asking {
+	let subscription = subscription.read();
+	miss::Asking {
+		priority: subscription.priority,
+		max_delay: subscription.delay.max,
+		order: subscription.order,
+	}
+}
+
 fn below(runs: impl Iterator<Item = ops::RangeInclusive<u64>>, cap: Option<u64>) -> RangeInclusiveSet<u64> {
 	let mut below = RangeInclusiveSet::new();
 	let last = match cap {
@@ -7517,11 +7542,12 @@ impl Cursor {
 
 	/// Look up each time start the window can't resolve from the cache, once, and take in
 	/// the answers, parking `waiter` on the lookups still out.
-	fn look_up(&mut self, asking: &miss::Asking, waiter: &kio::Waiter) {
+	fn look_up(&mut self, waiter: &kio::Waiter) {
 		let lookups: Vec<(Timestamp, u64)> = self.filter.window.lookups().collect();
 		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
 			return;
 		}
+		let asking = &asking(&self.subscription);
 		let fills = self.state.read().fills.clone();
 		for (pts, reach) in lookups {
 			if self.filter.lookups.iter().any(|lookup| lookup.pts == pts) {
@@ -7585,16 +7611,12 @@ impl Cursor {
 	/// Ask fills for what this cursor misses from `from`, and take in what they answered,
 	/// parking `waiter` on the fills still out. Whatever it gives up goes to the drop cursor.
 	/// `taken` is what its subscriber handed out, which an eviction never makes a miss.
+	///
+	/// A live reader that takes each group as it arrives never misses one, so most probes
+	/// find nothing to ask and hold no fill: those skip the fills, the subscription, and
+	/// the answers entirely, paying only for the judgement that the new groups arrived.
 	fn probe(&mut self, from: u64, drift: &Drift, taken: &Delivered, waiter: &kio::Waiter) {
-		let asking = {
-			let subscription = self.subscription.read();
-			miss::Asking {
-				priority: subscription.priority,
-				max_delay: subscription.delay.max,
-				order: subscription.order,
-			}
-		};
-		self.look_up(&asking, waiter);
+		self.look_up(waiter);
 		let (window, cap, revision) = (&self.filter.window, self.end_sequence, self.filter.revision);
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
@@ -7627,15 +7649,26 @@ impl Cursor {
 				&mut given_up,
 				waiter,
 			);
-			(asks, state.fills.clone())
+			// Only an ask needs the fills.
+			let fills = (!asks.is_empty()).then(|| state.fills.clone());
+			(asks, fills)
 		};
-		misses.ask(&self.state, &fills, &asks, &asking, &mut given_up);
-		loop {
-			let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
-			if retry.is_empty() {
-				break;
+		// Nothing to ask, no fill to hear from, and no gap to time: no answer can arrive.
+		if fills.is_some() || !misses.is_idle() {
+			let asking = asking(&self.subscription);
+			match &fills {
+				Some(fills) => misses.ask(&self.state, fills, &asks, &asking, &mut given_up),
+				// What the reader asks with still reaches the fills it joined.
+				None => misses.update(&asking),
 			}
-			misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
+			loop {
+				let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
+				if retry.is_empty() {
+					break;
+				}
+				let fills = self.state.read().fills.clone();
+				misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
+			}
 		}
 		// Only what a fill still owes can expire.
 		if misses.is_waiting() {
@@ -17442,6 +17475,25 @@ mod test {
 	}
 
 	#[test]
+	fn rescale_matches_the_track_timeline() {
+		let timed = Info::timed();
+		let ms = Timestamp::from_micros(2_400).unwrap();
+		let rescaled = timed.rescale(Some(ms)).unwrap().unwrap();
+		assert_eq!(rescaled, Timestamp::from_millis(2).unwrap());
+		// Halfway rounds down too, as `@moq/net`'s `Track.rescale` does.
+		let half = timed.rescale(Timestamp::from_micros(1_500).ok()).unwrap().unwrap();
+		assert_eq!(half, Timestamp::from_millis(1).unwrap());
+		assert!(matches!(timed.rescale(None), Err(Error::TimestampMismatch)));
+		// (2^61-1) seconds overflows conversion to the milli-scale track.
+		let huge = Timestamp::from_secs((1 << 61) - 1).unwrap();
+		assert!(matches!(timed.rescale(Some(huge)), Err(Error::TimestampMismatch)));
+
+		let untimed = Info::default();
+		assert_eq!(untimed.rescale(None).unwrap(), None);
+		assert!(matches!(untimed.rescale(Some(ms)), Err(Error::TimestampMismatch)));
+	}
+
+	#[test]
 	fn write_frame_rejects_an_oversized_frame_before_appending_its_group() {
 		let mut producer = track_producer("test", Info::timed());
 		let frame = bytes::Bytes::from(vec![0; group::MAX_CACHE_BYTES as usize + 1]);
@@ -21436,9 +21488,57 @@ mod test {
 		assert!(misses.refilled().is_empty(), "a refill handed out is forgotten");
 	}
 
+	/// A live arrival judged on its own keeps the history a resumed copy's live floor sits
+	/// above: a cached group the reader hasn't taken yet, evicted after, is still refilled.
+	#[test]
+	#[cfg(feature = "async")]
+	fn history_below_a_resumed_live_floor_is_refilled_after_a_live_arrival() {
+		let mut producer = track_producer("test", Info::default());
+		let dynamic = producer.requests();
+		producer.received();
+		for sequence in 0..5 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		// The feed resumes at 8, above the cached 0..=4: its live floor is 5.
+		producer.set_live(Some(Position::group(8)), None);
+		framed(&producer, 8, 1).finish().unwrap();
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_range(0..)
+				.with_order(Order::Ascending)
+				.with_delay(Delay::default().with_max(None)),
+		);
+		let waiter = kio::Waiter::noop();
+		let next = |reader: &mut Subscriber| match reader.poll_next_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => Some(group.sequence),
+			_ => None,
+		};
+		assert_eq!(next(&mut reader), Some(0));
+		// The gap the feed may still deliver arrives late, so nothing is deferred after.
+		for sequence in 5..8 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		assert_eq!(next(&mut reader), Some(1));
+		// Only the newest group moves before this read: judged on its own.
+		framed(&producer, 9, 1).finish().unwrap();
+		assert_eq!(next(&mut reader), Some(2));
+		evict(&producer, 3);
+		let _ = next(&mut reader);
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			asked.push((fill.start().group, fill.end()));
+		}
+		assert!(
+			asked.iter().any(|&(start, end)| start <= 3 && 3 < end),
+			"group 3 was evicted before the reader took it: asked {asked:?}"
+		);
+	}
+
 	/// An eviction waits only for a reader that judged the evicted group cached: a reader
 	/// that judged once and stalled holds no more than what was cached then, however many
-	/// groups the feed caches and evicts after, late lower ones included.
+	/// groups the feed caches and evicts after, late lower ones included. A reader that
+	/// took every group up to it holds none, since a group it took is never a miss again.
 	#[test]
 	#[cfg(feature = "async")]
 	fn an_eviction_waits_only_for_readers_that_judged_it_cached() {
@@ -21465,9 +21565,17 @@ mod test {
 		assert_eq!(held(), [vec![], vec![(198, 199)]], "the stalled reader judged none");
 		drain_groups(&mut active);
 		evict(&producer, 1);
-		assert_eq!(held(), [vec![(1, 2)], vec![(1, 2)]], "both judged group 1 cached");
+		assert_eq!(
+			held(),
+			[vec![(1, 2)], vec![]],
+			"the active reader judged after taking every group up to 2; the stalled one judged before it took group 1"
+		);
 		drain_groups(&mut active);
-		assert_eq!(held(), [vec![(1, 2)], vec![]], "the active reader took it in");
+		assert_eq!(
+			held(),
+			[vec![(1, 2)], vec![]],
+			"the active reader has nothing to take in"
+		);
 		drop(stalled);
 		assert_eq!(held(), [vec![]], "a dropped reader holds nothing");
 		write_group(&producer, 3);

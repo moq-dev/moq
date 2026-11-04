@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.
+Catch `TimestampMismatch` where you caught that `RangeError`.
+
+### A timestamp finer than the track's timescale is rounded down ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A timestamp that is fractional at the track's timescale, such as 1500µs on a millisecond track or a fractional `Timestamp.now()`, now goes out rounded down instead of to the nearest unit: 1500µs is 1 ms, not 2. Rust's `Timestamp::convert` and `track::Info::rescale` already round down, and `Track.rescale` does too.
+Write timestamps at the track's own scale where the exact value matters.
+
 ### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
 
 Every group sequence is a `bigint`, so a group ID past 2^53 decodes, relays, and encodes again instead of being refused: `Group.Producer`/`Consumer.sequence`, `Track.Position.group`, `Track.Bound`, an `absolute` `Track.Anchor`, `Track.Datagram.sequence`, `Track.Demand.wanted`, the `group` of `Ordered.readFrame()`, and the `sequence` that `createGroup`, `insertDatagram`, and `fetchGroup` take and `appendDatagram` returns.
@@ -205,10 +215,12 @@ const sub = track.subscribe({ maxDelay: Milli(1000) });
 `Time.Nano`, `Time.Micro`, `Time.Milli`, and `Time.Second` are gone.
 Import them from `@moq/clock`, which throws on negative or non-finite values.
 
-### Announced requests follow restarts, and `broadcasts()` is gone
+### `follow(path)` replaces `request(path, { announced: true })`, and `broadcasts()` is gone ([#7173](https://github.com/moq-dev/moq/pull/7173), [#7476](https://github.com/moq-dev/moq/pull/7476))
 
-An unpinned `request(path, { announced: true })` stays open across publisher instances: its `active` moves to each new instance's broadcast and clears between them, instead of ending with `Unroutable`.
-Read `active` reactively and close the request when done, or pass `instance` to keep the old single-instance behavior.
+`RequestOptions.announced` is removed: replace `request(path, { announced: true })` with `follow(path)`, which returns an `Origin.Following`.
+An unpinned `follow(path)` stays open across publisher instances: its `active` moves to each new instance's broadcast and clears between them, instead of ending with `Unroutable`.
+Read `active` reactively and close the follower when done, or use `request(path)` to stay on one instance.
+A follower needs discovery: a session without it never serves one.
 `Origin.Producer` and `Origin.Consumer` drop `broadcasts(scope)`; iterate `announced(scope)` instead.
 
 ```ts
@@ -219,8 +231,9 @@ for await (const event of origin.announced(scope)) {
 
 ### Discovery follows what something watches, and `discovery` is gone
 
-A `consume` origin stays empty until a reader watches it with `announced(scope)` or `request(path, { announced: true })`; the session then asks the relay about those prefixes only.
-Code that called `request(path)` expecting a route without watching should hold an `announced(scope)` stream.
+A `consume` origin stays empty until a reader watches it with `announced(scope)`, `request(path)`, or `follow(path)`; the session then asks the relay about those prefixes only.
+`request(path)` owns the discovery of its path until closed, so it finds a broadcast the relay serves with nothing else watching first, and retries as the routes covering the path change.
+It fails `Unroutable` once at least one session is attached and every session's discovery has synced without a route for it; with no session attached, such as between reconnects, it waits. Drop any `announced(scope)` stream held only so a request could resolve.
 The `discovery` option on `connect`, `accept`, and `Connection`, and `Established.discovery`, are removed; passing the option throws a `TypeError`.
 Drop the option.
 
@@ -235,7 +248,7 @@ A `"restart"` means another publisher instance now serves the prefix: request th
 
 Every route carries an `Instance`: non-empty text naming one continuous run of group numbers at its path. Every broadcast mints a random one and keeps it across re-announcing, so most publishers set nothing.
 A publisher that continues its group sequences across restarts may name a stable one with `announce({ instance, epoch })`, raising `epoch` on each run.
-Read `Route.instance` and `Broadcast.Consumer.instance`; pin a request or follow to one with `request(path, { instance })`.
+Read `Route.instance` and `Broadcast.Consumer.instance`; pin a request or follower to one with `request(path, { instance })` or `follow(path, { instance })`.
 
 ### Publishing never invents a timestamp (#5070)
 

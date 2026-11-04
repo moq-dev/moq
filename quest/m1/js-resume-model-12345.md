@@ -28,7 +28,3 @@ to `ranges: undefined`, reports done.
   the Rust side; compare the two fixes so the languages agree.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - the Rust model's own seed 12345 failure

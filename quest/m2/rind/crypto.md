@@ -13,7 +13,8 @@ Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-a
 - m1
 - ✅ m2, in this epic
 
-Model it on [moq-dev/moq#7570](https://github.com/moq-dev/moq/pull/7570),
+moq-crypto exists on main since
+[moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702). Model it on [moq-dev/moq#7570](https://github.com/moq-dev/moq/pull/7570),
 which moved moq-auth to rind and implements `mesh::Signer` for
 `rind::signature::Ed25519KeyPair`.
 
@@ -27,7 +28,3 @@ which moved moq-auth to rind and implements `mesh::Signer` for
 
 Public API: none expected, unless a ready-made key type is exposed (as
 `mesh::Signer` names rind's). Wire: none.
-
-## Required
-
-- [moq-crypto replaces moq-sign and moq-e2ee](/quest/m1/moq-crypto.md) - creates the crate (moq-dev/moq#7702)
