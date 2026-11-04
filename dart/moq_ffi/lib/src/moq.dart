@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -14224,8 +14222,8 @@ class FfiConverterMoqBroadcastProducer {
 }
 
 abstract class MoqBroadcastRequestsInterface {
-  MoqDatagramRequests datagrams();
   void cancel();
+  MoqDatagramRequests datagrams();
   UniffiRustFuture<MoqTrackRequest> requestedTrack();
 }
 
@@ -14268,6 +14266,15 @@ class MoqBroadcastRequests implements MoqBroadcastRequestsInterface {
     }
   }
 
+  void cancel() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqbroadcastrequests_cancel(
+        uniffiClonePointer(),
+        status,
+      );
+    }, null);
+  }
+
   MoqDatagramRequests datagrams() {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqbroadcastrequests_datagrams(
@@ -14277,15 +14284,6 @@ class MoqBroadcastRequests implements MoqBroadcastRequestsInterface {
       FfiConverterMoqDatagramRequests.lift,
       moqExceptionErrorHandler,
     );
-  }
-
-  void cancel() {
-    return rustCall((status) {
-      uniffi_moq_ffi_fn_method_moqbroadcastrequests_cancel(
-        uniffiClonePointer(),
-        status,
-      );
-    }, null);
   }
 
   UniffiRustFuture<MoqTrackRequest> requestedTrack() {
@@ -21244,18 +21242,18 @@ external void uniffi_moq_ffi_fn_free_moqbroadcastrequests(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
-external Pointer<Void> uniffi_moq_ffi_fn_method_moqbroadcastrequests_datagrams(
-  Pointer<Void> ptr,
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
 external void uniffi_moq_ffi_fn_method_moqbroadcastrequests_cancel(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqbroadcastrequests_datagrams(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -22976,10 +22974,10 @@ uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_track();
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_requests();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqbroadcastrequests_datagrams();
+external int uniffi_moq_ffi_checksum_method_moqbroadcastrequests_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqbroadcastrequests_cancel();
+external int uniffi_moq_ffi_checksum_method_moqbroadcastrequests_datagrams();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int
@@ -23789,11 +23787,11 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_requests() != 27464) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequests_datagrams() !=
-      19965) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequests_cancel() != 44028) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequests_cancel() != 44028) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequests_datagrams() !=
+      17164) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequests_requested_track() !=
