@@ -228,9 +228,12 @@ impl QuicClientConfig {
 		Self { inner, initial }
 	}
 
-	/// A TLS 1.3 config on this crate's provider that verifies the server with `verifier`.
-	pub(crate) fn inner(verifier: Arc<dyn ServerCertVerifier>) -> rustls::ClientConfig {
-		rustls::ClientConfig::builder_with_provider(configured_provider())
+	/// A TLS 1.3 config on `provider` that verifies the server with `verifier`.
+	pub(crate) fn inner(
+		provider: Arc<rustls::crypto::CryptoProvider>,
+		verifier: Arc<dyn ServerCertVerifier>,
+	) -> rustls::ClientConfig {
+		rustls::ClientConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.unwrap() // The default providers support TLS 1.3
 			.dangerous()
@@ -285,7 +288,7 @@ impl QuicServerConfig {
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,
 	) -> Result<rustls::ServerConfig, rustls::Error> {
-		rustls::ServerConfig::builder_with_provider(configured_provider())
+		rustls::ServerConfig::builder_with_provider(provider()?)
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.unwrap() // The default providers support TLS 1.3
 			.with_no_client_auth()
@@ -368,8 +371,13 @@ fn no_initial_suite() -> rustls::Error {
 	rustls::Error::General("the provider lacks TLS13_AES_128_GCM_SHA256, which QUIC Initial packets need".into())
 }
 
-pub(crate) fn configured_provider() -> Arc<rustls::crypto::CryptoProvider> {
-	Arc::new(rind_rustls::default_provider().unwrap_or_else(|err| panic!("{err}")))
+/// rind's provider, with a CPU it cannot run on reported as a rustls error.
+///
+/// The convenience constructors return rustls errors already; the refusal stays typed inside
+/// [`rustls::Error::Other`], so a caller can downcast it to
+/// [`UnsupportedCpu`](moq_crypto::provider::UnsupportedCpu).
+pub(crate) fn provider() -> Result<Arc<rustls::crypto::CryptoProvider>, rustls::Error> {
+	moq_crypto::provider::provider().map_err(|err| rustls::Error::Other(rustls::OtherError(Arc::new(err))))
 }
 
 fn to_vec(params: &TransportParameters) -> Vec<u8> {
@@ -484,7 +492,7 @@ mod tests {
 		let cert = identity.cert.der().clone();
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(cert.clone()).unwrap();
-		let mut client = rustls::ClientConfig::builder_with_provider(configured_provider())
+		let mut client = rustls::ClientConfig::builder_with_provider(provider().unwrap())
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.unwrap()
 			.with_root_certificates(roots)
@@ -521,7 +529,7 @@ mod tests {
 	/// another provider's suite.
 	#[test]
 	fn provider_without_initial_suite_fails_connections() {
-		let mut provider = (*configured_provider()).clone();
+		let mut provider = (*super::provider().unwrap()).clone();
 		provider
 			.cipher_suites
 			.retain(|suite| suite.suite() != rustls::CipherSuite::TLS13_AES_128_GCM_SHA256);

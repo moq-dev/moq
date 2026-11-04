@@ -7,9 +7,16 @@ How to update your code for each breaking change, newest first.
 ### Transport cryptography uses rind
 
 Remove the `ring`, `aws-lc-rs`, and `rustls-aws-lc-rs` Cargo features. rind is always enabled.
-Build caller-supplied rustls configurations with `rind_rustls::default_provider()?`.
-Endpoint initialization reports unsupported CPU features through `ConfigError::Crypto`.
-The convenience certificate builders remain infallible with respect to CPU support and panic naming the missing feature; check `rind::cpu::check()` before using them directly.
+Build caller-supplied rustls configurations on `moq_crypto::provider::provider()?` (enable moq-crypto's `provider` feature) or `moq_tokio::crypto::provider()?`.
+
+A CPU missing a feature rind needs is reported as `moq_crypto::provider::UnsupportedCpu`, which names the feature:
+
+- Endpoint initialization returns `ConfigError::UnsupportedCpu`.
+- `client::Config::with_root_certificates` now returns `rustls::Error` instead of `VerifierBuilderError`. Both the CPU refusal and a verifier builder failure arrive in `rustls::Error::Other`; downcast its inner error to `UnsupportedCpu` or `rustls::client::VerifierBuilderError`.
+- `server::Config::with_single_cert` keeps its `rustls::Error` and reports the CPU refusal the same way, where it used to panic.
+
+Call `moq_crypto::provider::check()` before calling rind's primitives directly.
+
 QUIC packet protection, Retry integrity, reset tokens, and address-validation tokens keep their wire formats and derivation labels.
 
 ### Receive operations wake transmission themselves ([#7707](https://github.com/moq-dev/moq/pull/7707))

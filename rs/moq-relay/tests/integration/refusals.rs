@@ -458,7 +458,7 @@ async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session
 async fn uri_setup_paths(io_uring: bool) {
 	use moq_tokio::quic::web::{SessionError, WebTransportError};
 
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let versions: Vec<moq_net::Version> = [
 		"moq-lite-05",
 		"moq-lite-06",

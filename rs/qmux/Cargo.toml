@@ -18,17 +18,17 @@ tcp = ["tokio/net"]
 tls = ["tcp", "dep:tokio-rustls", "dep:rustls"]
 uds = ["tokio/net"]
 ws = ["dep:tokio-tungstenite", "dep:futures"]
-wss = ["ws", "dep:rind-rustls", "dep:rustls-native-certs", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
+wss = ["ws", "dep:rustls-native-certs", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
 
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true, optional = true }
 kio = { workspace = true, features = ["runtime"] }
+# rind's rustls provider and the `UnsupportedCpu` error the transport crates share.
+moq-crypto = { workspace = true, features = ["provider"] }
 moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
 moq-quic = { workspace = true, features = ["mux"] }
-rind = { workspace = true }
-rind-rustls = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 thiserror = { workspace = true }

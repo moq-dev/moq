@@ -425,7 +425,7 @@ mod tests {
 		if !test_env::Env::without(&["MOQ_CONNECT"]).isolate() {
 			return;
 		}
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let origin = moq_tokio::origin::spawn();
 		let _alpha = origin.create_broadcast("alpha").expect("alpha");

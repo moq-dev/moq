@@ -1230,7 +1230,7 @@ mod tests {
 		[crate::quic::driver::endpoint::Endpoint; 2],
 		Arc<Gate>,
 	) {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		crate::crypto::install_default().unwrap();
 
 		let CertifiedKey { cert, signing_key } = (|| -> std::result::Result<_, rcgen::Error> {
 			let signing_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256)?;

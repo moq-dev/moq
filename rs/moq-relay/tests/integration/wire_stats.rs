@@ -18,7 +18,7 @@ fn presence(registry: &Registry) -> Presence {
 
 async fn wire_sources(io_uring: bool) {
 	// Process-wide: another test in this binary may have installed it first.
-	let _ = moq_tokio::crypto::install_default();
+	moq_tokio::crypto::install_default().unwrap();
 	let dir = tempfile::tempdir().unwrap();
 	let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 	let cert = rcgen::CertificateParams::new(vec!["localhost".into()])

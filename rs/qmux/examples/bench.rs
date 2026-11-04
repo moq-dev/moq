@@ -142,7 +142,7 @@ impl Tls {
 			identity.signing_key.to_pkcs8().secret_pkcs8_der().to_vec(),
 		));
 		// The relay's provider, so the TLS share matches what it pays.
-		let provider = Arc::new(rind_rustls::default_provider().unwrap());
+		let provider = moq_crypto::provider::provider().unwrap();
 
 		let mut server = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()?

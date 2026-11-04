@@ -72,8 +72,8 @@ pub struct Error(ErrorKind);
 
 #[derive(Debug, thiserror::Error)]
 enum ErrorKind {
-	#[error("{0}")]
-	Crypto(String),
+	#[error(transparent)]
+	UnsupportedCpu(#[from] crate::crypto::UnsupportedCpu),
 	#[error(transparent)]
 	Mdns(#[from] mdns_sd::Error),
 
@@ -338,7 +338,7 @@ impl Config {
 	/// returning, so a caller can treat success as "the mesh is live" and gate
 	/// process readiness on it. Errors if no interface works within 5 seconds.
 	pub async fn advertise(self) -> Result<Discovery> {
-		rind::cpu::check().map_err(|err| Error(ErrorKind::Crypto(err.to_string())))?;
+		crate::crypto::check().map_err(|err| Error(err.into()))?;
 		crate::runtime::scope(Discovery::new(self)).await
 	}
 }

@@ -15,7 +15,7 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 [features]
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.
-quic = ["dep:moq-congestion", "dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
+quic = ["dep:moq-congestion", "dep:moq-crypto", "dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
 # Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
 # qlog crate and its serde_json encoder into moq-quic, which a production build has
 # no use for.
@@ -33,11 +33,11 @@ io-uring = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 libc = { workspace = true }
 moq-congestion = { workspace = true, optional = true }
+# rind's rustls provider and the `UnsupportedCpu` error the transport crates share.
+moq-crypto = { workspace = true, features = ["provider"], optional = true }
 moq-net = { workspace = true }
 moq-quic = { workspace = true, features = [], optional = true }
 moq-sock = { workspace = true }
-rind = { workspace = true }
-rind-rustls = { workspace = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
 # OS-native server-cert verifier for the rustls backends. Version matched to
@@ -72,6 +72,7 @@ moq-uring = { path = ".", features = ["_manual"] }
 nix = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }
+rind-rustls = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 # The qlog test parses every record of a trace, which is what catches a
 # truncated or interleaved write.

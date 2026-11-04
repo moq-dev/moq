@@ -26,16 +26,21 @@ Public error contract, decided by the maintainer on 2026-11-04:
 - Not chosen: keeping `Crypto(String)` with the existing infallible
   provider-helper signatures.
 
-Open: where the shared type lives. moq-tokio's `crypto` and `tls` modules
-compile without moq-quic (the `net`-only build), so a type defined in
-moq-quic cannot be shared with them as the dependency graph stands. The
-options are in the PR's `## Decisions needed`.
+Placement of the shared error, decided by the maintainer on 2026-11-04:
 
-Complete the PR's local validation and cross-vendor review, and settle that
-placement before marking it ready. Keep every existing test in CI, at least
-nightly; do not disable a flaky test to satisfy checks. This follows the
-user's explicit requirement over the repository's immediate-disable
-instruction.
+- ✅ In `moq-crypto`, behind a new `provider` feature holding
+  `UnsupportedCpu`, `check()`, `provider()` and `install_default()`. It
+  depends only on rind and rustls, never on moq-net, so moq-quic, moq-tokio,
+  qmux and moq-uring use it without a cycle, and net-only builds gain only
+  that feature's dependencies. rind stays private: the error wraps rind's
+  `MissingFeature` instead of re-exporting it.
+- Not chosen: re-exporting rind's `MissingFeature`; defining the error in
+  moq-quic and requiring moq-quic from moq-tokio; a brand-new crate.
+
+Complete the PR's local validation and cross-vendor review before marking
+it ready. Keep every existing test in CI, at least nightly; do not disable a
+flaky test to satisfy checks. This follows the user's explicit requirement
+over the repository's immediate-disable instruction.
 
 ## Related
 

@@ -65,7 +65,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn cluster_api_refuses_redirects() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		let server = async move {
@@ -89,7 +89,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn auth_trust_is_independent_from_mesh_verification() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().unwrap();
 		let ca = Authority::new("mesh");
 		let (cert, key) = ca.leaf("127.0.0.1");
@@ -264,7 +264,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn peer_api_trust_is_independent_and_keeps_cluster_identity() {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().unwrap();
 		let mesh = Authority::new("mesh");
 		let api = Authority::new("API");

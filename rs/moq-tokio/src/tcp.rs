@@ -472,7 +472,7 @@ mod tests {
 	/// that does not trust the certificate is refused.
 	#[tokio::test]
 	async fn tls_carries_qmux_and_refuses_an_untrusted_certificate() {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		crate::crypto::install_default().unwrap();
 		let mut listen = crate::listen::Config::default();
 		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		listen.tcp.tls = Some(true);
@@ -489,7 +489,7 @@ mod tests {
 		use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer};
 		use rind_rcgen::KeyPair;
 
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		crate::crypto::install_default().unwrap();
 		let dir = tempfile::tempdir().unwrap();
 		let write = |name: &str, contents: String| {
 			let path = dir.path().join(name);

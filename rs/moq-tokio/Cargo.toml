@@ -67,6 +67,8 @@ if-addrs = { workspace = true, optional = true }
 kio = { workspace = true, features = ["runtime"] }
 mdns-sd = { workspace = true, optional = true }
 moq-congestion = { workspace = true, optional = true }
+# rind's rustls provider and the `UnsupportedCpu` error, re-exported as `crypto`. Needs no moq-net.
+moq-crypto = { workspace = true, features = ["provider"] }
 # The ICE agent behind the `webrtc` module. Private, like str0m: neither appears in this crate's API.
 moq-ice = { workspace = true, optional = true }
 moq-net = { workspace = true, optional = true }
@@ -80,7 +82,6 @@ rcgen = { workspace = true, optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
 rind = { workspace = true }
 rind-rcgen = { workspace = true, optional = true }
-rind-rustls = { workspace = true }
 rustc-hash = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 # OS-native server-cert verifier for the rustls backend.
@@ -139,6 +140,7 @@ rcgen = { workspace = true, features = ["pem"] }
 # `http://` dial's certificate fetch with no process default installed.
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 rind-rcgen = { workspace = true }
+rind-rustls = { workspace = true }
 # Sockets a test holds or inspects: which ones the process still holds, so the
 # worker tests can prove a stopped group closed its own, and port reservations
 # that never listen, so a test needn't release a port another test could take.

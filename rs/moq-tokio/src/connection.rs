@@ -2636,7 +2636,7 @@ mod tests {
 	/// A client that trusts the self-signed [`live`] listener.
 	#[cfg(feature = "tcp")]
 	fn client() -> Client {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		crate::crypto::install_default().unwrap();
 
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);

@@ -1677,7 +1677,7 @@ mod tests {
 	/// Generate a CA + server cert/key on disk and return the temp paths.
 	/// Modeled after `auth.rs::mtls_fixture`.
 	fn make_named_certs(dir: &TempDir, name: &str, hostname: &str) -> (PathBuf, PathBuf, PathBuf) {
-		let _ = moq_tokio::crypto::install_default();
+		moq_tokio::crypto::install_default().unwrap();
 
 		let ca_kp = KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut ca_params = CertificateParams::new(vec![])

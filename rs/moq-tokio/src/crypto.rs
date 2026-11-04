@@ -1,27 +1,10 @@
 //! rind cryptography shared by native MoQ applications.
+//!
+//! [`provider`] and [`install_default`] refuse a CPU that rind cannot run on with
+//! [`UnsupportedCpu`], naming the missing feature. This module re-exports
+//! `moq_crypto::provider`, so moq-quic, qmux, and moq-uring report the same type.
 
-use std::sync::Arc;
-
-/// A shared rustls crypto provider.
-pub type Provider = Arc<rustls::crypto::CryptoProvider>;
-
-/// Return rind's provider, refusing a CPU missing a required feature.
-///
-/// Panics with the missing feature on unsupported CPUs. TLS configuration checks
-/// support first and returns an error instead. The process default is not consulted.
-pub fn provider() -> Provider {
-	static PROVIDER: std::sync::OnceLock<Provider> = std::sync::OnceLock::new();
-	PROVIDER
-		.get_or_init(|| Arc::new(rind_rustls::default_provider().unwrap_or_else(|err| panic!("{err}"))))
-		.clone()
-}
-
-/// Install rind as rustls' process default.
-///
-/// Panics with the missing feature on unsupported CPUs, like [`provider`].
-pub fn install_default() -> Result<(), Provider> {
-	Arc::unwrap_or_clone(provider()).install_default()
-}
+pub use moq_crypto::provider::{Provider, UnsupportedCpu, check, install_default, provider};
 
 /// Hash certificate bytes independently of the configured TLS cipher suites.
 pub(crate) fn sha256(data: &[u8]) -> rind::digest::Digest {

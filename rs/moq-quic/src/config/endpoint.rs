@@ -119,7 +119,7 @@ impl Config {
 		use crate::cid_generator::HashedConnectionIdGenerator;
 
 		self.validate()?;
-		rind::cpu::check().map_err(|err| ConfigError::Crypto(err.to_string()))?;
+		moq_crypto::provider::check()?;
 
 		let (reset_key, cid_key, min_reset_interval): (Arc<dyn HmacKey>, _, _) = match &self.reset_secret {
 			Some(secret) => {

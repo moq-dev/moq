@@ -2,17 +2,36 @@
 
 # moq-crypto
 
-Content signing and end-to-end encryption for [Media over QUIC](https://moq.dev): the `sign`
-module signs every frame so relays cannot forge it, and the `e2ee` module encrypts groups,
-datagrams, and track names so relays cannot read them. Both wrap `moq-net` and check timestamps
-with its `track::Info::rescale`, so a frame either half accepts is one `moq-net` accepts.
+Cryptography for [Media over QUIC](https://moq.dev): the `sign` module signs every frame so
+relays cannot forge it, and the `e2ee` module encrypts groups, datagrams, and track names so
+relays cannot read them. Both wrap `moq-net` and check timestamps with its
+`track::Info::rescale`, so a frame either half accepts is one `moq-net` accepts. The `provider`
+module is the [rind](https://github.com/moq-dev/rind) rustls provider and CPU check that the
+MoQ transport crates share.
 
 ## Features
 
 `sign` and `e2ee`, both default, enable the two modules. With default features off, the crate is
 only `sign::PublicKey`, the endpoint ID, with its canonical z-base-32 text: it builds without
 `moq-net` or aws-lc-rs, for crates such as `moq-auth` that name endpoints but sign nothing.
-`serde` adds the key's string serialization.
+`serde` adds the key's string serialization. `provider`, off by default, enables the `provider`
+module; it depends only on rind and rustls, never on `moq-net`, so the transport crates can
+use it without a dependency cycle.
+
+## Provider
+
+MoQ runs all of its cryptography on rind, which needs certain CPU features (for example AES
+instructions on x86_64). Its primitives panic on a CPU without them, so the `provider` module
+refuses such a CPU up front:
+
+- `provider::check()` returns `UnsupportedCpu`, naming the missing feature.
+- `provider::provider()` returns rind's rustls `CryptoProvider`, or that error. It ignores the
+  process default, so TLS works whether or not one was installed.
+- `provider::install_default()` installs rind as rustls' process default for libraries such as
+  reqwest that read it, leaving a provider the process already installed in place.
+
+moq-quic, moq-tokio, qmux, and moq-uring report the same `UnsupportedCpu`, and
+`moq_tokio::crypto` re-exports this module's API.
 
 ## Signing
 

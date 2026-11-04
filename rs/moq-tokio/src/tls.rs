@@ -164,9 +164,9 @@ pub enum Error {
 	#[error("failed to generate a self-signed certificate: {0}")]
 	Rcgen(String),
 
-	/// The CPU cannot run transport cryptography.
-	#[error("{0}")]
-	Crypto(String),
+	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] crypto::UnsupportedCpu),
 
 	/// The section was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
@@ -301,8 +301,7 @@ impl Identity {
 	/// placeholder name is enough there.
 	pub fn generate(hostnames: impl IntoIterator<Item = impl Into<String>>) -> Result<Self> {
 		let hostnames: Vec<String> = hostnames.into_iter().map(Into::into).collect();
-		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
-		let provider = crypto::provider();
+		let provider = crypto::provider()?;
 		let key = Arc::new(generate(&provider, &hostnames)?);
 		let fingerprint = hex::encode(crypto::sha256(key.leaf().as_ref()));
 		Ok(Self { key, fingerprint })
@@ -991,8 +990,7 @@ impl Connect {
 	/// released `--tls-*` / `--client-tls-*` spellings rather than building one that
 	/// silently ignored them.
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
-		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
-		let provider = crypto::provider();
+		let provider = crypto::provider()?;
 		let verification = self.verification()?;
 		if let Some(name) = &self.host_name {
 			server_name(name)?;
@@ -1155,7 +1153,7 @@ fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<Certifi
 
 	let mut params = rcgen::CertificateParams::new(hostnames)?;
 	let mut serial = [0; 16];
-	rind::rand::fill(&mut serial).map_err(|err| Error::Crypto(err.to_string()))?;
+	rind::rand::fill(&mut serial).map_err(|err| Error::Rcgen(format!("random serial: {err}")))?;
 	params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial));
 	params.not_before = ::time::OffsetDateTime::now_utc() - ::time::Duration::days(1);
 	params.not_after = params.not_before + ::time::Duration::days(14);
@@ -1358,8 +1356,7 @@ impl Listen {
 	#[cfg(feature = "_certs")]
 	pub fn load(&self) -> Result<Serve> {
 		self.refuse_deprecated()?;
-		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
-		let provider = crypto::provider();
+		let provider = crypto::provider()?;
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
 		certs.load_certs(self)?;
 		let verifier = self.client_auth(provider)?;
@@ -1540,8 +1537,7 @@ impl Listen {
 	#[cfg(feature = "_certs")]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 		self.refuse_deprecated()?;
-		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
-		let provider = crypto::provider();
+		let provider = crypto::provider()?;
 
 		let certs = ServeCerts::new(provider.clone());
 		certs.load_certs(self)?;
@@ -1607,8 +1603,7 @@ impl Serve {
 		if !policy.cert.is_empty() || !policy.key.is_empty() || !policy.generate.is_empty() || in_memory {
 			return Err(Error::ConflictingResolver);
 		}
-		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
-		let provider = crypto::provider();
+		let provider = crypto::provider()?;
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
 		let verifier = policy.client_auth(provider)?;
 		#[cfg(feature = "watch")]
@@ -1630,7 +1625,7 @@ impl Serve {
 	/// Build a TLS policy with these ALPNs and the shared identity and client verifier.
 	pub fn config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 		let builder =
-			rustls::ServerConfig::builder_with_provider(crypto::provider()).with_safe_default_protocol_versions()?;
+			rustls::ServerConfig::builder_with_provider(crypto::provider()?).with_safe_default_protocol_versions()?;
 		let verifier = self.0.verifier.as_ref();
 		let mut config = match verifier {
 			Some(verifier) => builder
@@ -1777,8 +1772,9 @@ impl Certificates {
 	/// such a listener fixes its TLS material when it is built, so the
 	/// fingerprints are computed once and never change.
 	pub fn from_pem(chain: &[u8]) -> Result<Self> {
-		rind::cpu::check().map_err(|err| Error::Crypto(err.to_string()))?;
 		use rustls::pki_types::pem::PemObject;
+
+		crypto::check()?;
 
 		let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(chain)
 			.collect::<std::result::Result<_, _>>()
@@ -2236,7 +2232,7 @@ mod tests {
 			key: vec![missing.clone()],
 			..Default::default()
 		};
-		let error = Reload::spawn(Arc::new(ServeCerts::new(crypto::provider())), config).unwrap_err();
+		let error = Reload::spawn(Arc::new(ServeCerts::new(crypto::provider().unwrap())), config).unwrap_err();
 		assert!(matches!(error, Error::Watch(_)));
 		let initial = rustls::server::WebPkiClientVerifier::no_client_auth();
 		let reload = initial.clone();
@@ -2357,7 +2353,7 @@ mod tests {
 
 	#[test]
 	fn fingerprint_verifier_matches_and_rejects() {
-		let provider = crypto::provider();
+		let provider = crypto::provider().unwrap();
 		let cert = self_signed();
 		let fingerprint = crypto::sha256(cert.as_ref()).as_ref().to_vec();
 
@@ -2391,7 +2387,7 @@ mod tests {
 	fn identity_serves_the_fingerprint_it_presents() {
 		let identity = Identity::generate(["mesh.invalid"]).unwrap();
 
-		let certs = ServeCerts::new(crypto::provider());
+		let certs = ServeCerts::new(crypto::provider().unwrap());
 		certs
 			.load_certs(&Listen {
 				identity: Some(identity.clone()),
@@ -2440,7 +2436,7 @@ mod tests {
 			..Default::default()
 		};
 
-		let certs = ServeCerts::new(crypto::provider());
+		let certs = ServeCerts::new(crypto::provider().unwrap());
 		certs.load_certs(&config).unwrap();
 		let before = Certificates::new(certs.info.clone()).fingerprints();
 
@@ -2488,7 +2484,7 @@ mod tests {
 			..Default::default()
 		};
 
-		let certs = Arc::new(ServeCerts::new(crypto::provider()));
+		let certs = Arc::new(ServeCerts::new(crypto::provider().unwrap()));
 		certs.load_certs(&config).unwrap();
 		let weak = Arc::downgrade(&certs);
 
@@ -2544,7 +2540,7 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(
-			config.client_auth(crypto::provider()),
+			config.client_auth(crypto::provider().unwrap()),
 			Err(Error::PeersWithRoots)
 		));
 	}
@@ -2553,7 +2549,7 @@ mod tests {
 	/// `root` only because the two together are already refused.
 	#[test]
 	fn client_auth_is_off_until_configured() {
-		let provider = crypto::provider();
+		let provider = crypto::provider().unwrap();
 		assert!(Listen::default().client_auth(provider.clone()).unwrap().is_none());
 
 		let pinned = Listen {
@@ -2575,7 +2571,7 @@ mod tests {
 	fn peers_are_checked_live() {
 		let identity = Identity::generate(["mesh.invalid"]).unwrap();
 		let peers = Peers::new();
-		let verifier = PeerVerifier::new(crypto::provider(), peers.clone());
+		let verifier = PeerVerifier::new(crypto::provider().unwrap(), peers.clone());
 		let leaf = identity.certified().leaf().clone();
 		let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_700_000_000));
 
@@ -2734,7 +2730,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path().join("root.pem");
 		std::fs::write(&root, ca).unwrap();
-		let provider = crypto::provider();
+		let provider = crypto::provider().unwrap();
 		let key = rustls::sign::CertifiedKey::from_der(vec![server_cert], server_key, &provider).unwrap();
 		#[derive(Debug)]
 		struct Fixed(Arc<rustls::sign::CertifiedKey>);
@@ -2995,7 +2991,7 @@ mod tests {
 		let mut root_file = tempfile::NamedTempFile::new().unwrap();
 		root_file.write_all(ca.as_bytes()).unwrap();
 		let roots = read_roots(&[root_file.path().to_path_buf()]).unwrap();
-		let provider = crypto::provider();
+		let provider = crypto::provider().unwrap();
 
 		let control = rustls::ClientConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()
@@ -3049,7 +3045,7 @@ mod tests {
 		let root_path = dir.path().join("root.pem");
 		std::fs::write(&root_path, ca_a).unwrap();
 		let paths = vec![root_path.clone()];
-		let provider = crypto::provider();
+		let provider = crypto::provider().unwrap();
 
 		let build_client = |cert, key| {
 			rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -3126,7 +3122,7 @@ mod tests {
 		let root_path = dir.path().join("root.pem");
 		std::fs::write(&root_path, ca_a).unwrap();
 		let paths = vec![root_path.clone()];
-		let provider = crypto::provider();
+		let provider = crypto::provider().unwrap();
 
 		let custom = CustomRoots::new(paths.clone()).unwrap();
 		let initial = Connect::build_root_server_verifier(&custom.current(), false, &provider).unwrap();

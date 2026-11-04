@@ -7,12 +7,16 @@ How to update your code for each breaking change, newest first.
 ### Transport cryptography uses rind
 
 Remove the `aws-lc-rs` and `ring` Cargo features. rind is always enabled.
-`crypto::provider()` always returns rind, independently of rustls' process default;
-`crypto::install_default()` installs rind for consumers such as reqwest.
-TLS setup returns `tls::Error::Crypto` naming any unsupported CPU feature before generating keys or opening connections.
-Direct calls to the infallible crypto helpers panic with that feature; call `rind::cpu::check()` first when using them outside TLS setup.
-`tls::Error::NoCryptoProvider` is removed. The `net` and `driver` features include certificate support, so an RTMPS-only embedder can use `net` without selecting a provider.
+The `net` and `driver` features include certificate support, so an RTMPS-only embedder can use `net` without selecting a provider.
 Self-signed certificates and mDNS/QUIC-LB authentication use rind. Wire formats are unchanged.
+
+`crypto` now re-exports moq-crypto's `provider` module, and a CPU missing a feature rind needs is reported as `crypto::UnsupportedCpu` (`moq_crypto::provider::UnsupportedCpu`), which names the feature:
+
+- `crypto::provider()` returns `Result<Provider, UnsupportedCpu>`; add `?`. It always returns rind, independently of rustls' process default.
+- `crypto::install_default()` returns `Result<(), UnsupportedCpu>` instead of `Result<(), Provider>`. A provider the process already installed is kept and is no longer an error, so replace `let _ = crypto::install_default();` with `crypto::install_default()?;`.
+- `crypto::check()` refuses an unsupported CPU without building a provider; call it before using rind's primitives directly.
+- `tls::Error::NoCryptoProvider` is removed. TLS setup returns `tls::Error::UnsupportedCpu` before generating keys or opening connections, and `quic::Error::UnsupportedCpu` reports the same from the QUIC backend.
+- A failure to draw a self-signed certificate's random serial is `tls::Error::Rcgen`.
 
 ### QUIC method names and polls match the transport layer
 

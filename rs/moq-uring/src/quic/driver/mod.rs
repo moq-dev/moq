@@ -89,18 +89,6 @@ impl From<moq_quic::connection::Error> for Error {
 	}
 }
 
-/// The crypto provider every config here is built from.
-///
-/// Built explicitly rather than read from the process-wide default, so a
-/// consumer that never installed one still gets working TLS.
-fn provider() -> Result<Arc<rustls::crypto::CryptoProvider>, Error> {
-	rind::cpu::check().map_err(|err| Error::Tls(err.to_string()))?;
-	static PROVIDER: std::sync::OnceLock<Arc<rustls::crypto::CryptoProvider>> = std::sync::OnceLock::new();
-	Ok(PROVIDER
-		.get_or_init(|| Arc::new(rind_rustls::default_provider().unwrap()))
-		.clone())
-}
-
 /// The endpoint-wide configuration: how connection ids are minted, the reset key, and what to
 /// serve.
 pub(crate) fn endpoint_config(
@@ -129,7 +117,9 @@ pub(crate) fn endpoint_config(
 
 /// Dial as `config` says.
 pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client::Config, Error> {
-	let provider = provider()?;
+	// Built explicitly rather than read from the process-wide default, so a
+	// consumer that never installed one still gets working TLS.
+	let provider = moq_crypto::provider::provider()?;
 	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
 		.map_err(|err| Error::Tls(err.to_string()))?;
@@ -179,7 +169,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::client:
 
 /// Serve as `config` says.
 pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::server::Config, Error> {
-	rind::cpu::check().map_err(|err| Error::Tls(err.to_string()))?;
+	moq_crypto::provider::check()?;
 	let mut server = moq_quic::server::Config::new(config.tls.clone());
 	server.transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
@@ -193,7 +183,9 @@ pub(crate) fn identity_server_config(
 	alpn: Vec<Vec<u8>>,
 	auth: &server::ClientAuth,
 ) -> Result<Arc<rustls::ServerConfig>, Error> {
-	let provider = provider()?;
+	// Built explicitly rather than read from the process-wide default, so a
+	// consumer that never installed one still gets working TLS.
+	let provider = moq_crypto::provider::provider()?;
 	let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
 		.map_err(|err| Error::Tls(err.to_string()))?;

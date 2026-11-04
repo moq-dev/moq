@@ -123,6 +123,9 @@ impl Config {
 	}
 
 	/// Present `cert_chain`, signed for by `key`, with the default settings
+	///
+	/// A CPU that rind cannot run on arrives in [`rustls::Error::Other`]: downcast it to
+	/// [`UnsupportedCpu`](moq_crypto::provider::UnsupportedCpu).
 	pub fn with_single_cert(
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,

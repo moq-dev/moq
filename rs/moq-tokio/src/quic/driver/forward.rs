@@ -165,7 +165,7 @@ impl Forward {
 		key: &[u8; 32],
 		max_udp_payload_size: u16,
 	) -> io::Result<Self> {
-		rind::cpu::check().map_err(io::Error::other)?;
+		crate::crypto::check().map_err(io::Error::other)?;
 		socket.set_nonblocking(true)?;
 		let send = socket.try_clone()?;
 		let socket = {

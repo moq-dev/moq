@@ -983,7 +983,7 @@ mod tests {
 	/// Unsupported listen settings fail before loading TLS or binding a socket.
 	#[test]
 	fn bind_refuses_preferred_addresses() {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		type Set = fn(&mut moq_tokio::listen::Config);
 		let cases: [(&str, Set); 2] = [
 			("listen.preferred_v4", |listen| {
@@ -1011,7 +1011,7 @@ mod tests {
 	/// The workers refuse what the tokio listener refuses, before binding a socket.
 	#[test]
 	fn bind_refuses_an_invalid_listen() {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		let mut server = moq_tokio::server::Config::default();
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
@@ -1121,7 +1121,7 @@ mod tests {
 	/// the workers waiting to serve instead of hanging on their join.
 	#[tokio::test]
 	async fn a_group_stopped_before_serving_joins() {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{
@@ -1148,7 +1148,7 @@ mod tests {
 	/// An auth decision still pending at the drain deadline is abandoned by then.
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_deadline() {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{
@@ -1215,7 +1215,7 @@ mod tests {
 	/// that never comes is abandoned at the handshake deadline.
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_handshake_deadline() {
-		let _ = rind_rustls::default_provider().unwrap().install_default();
+		moq_tokio::crypto::install_default().unwrap();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
 			&& std::env::var_os("CI_STRICT").is_none()
 		{

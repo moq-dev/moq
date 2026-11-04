@@ -7,7 +7,8 @@ How to update your code for each breaking change, newest first.
 ### TLS cryptography uses rind
 
 Default WSS connections build an explicit rind rustls configuration and use native roots, without relying on a process-wide provider.
-Build caller-supplied TLS configurations and WSS connectors with `rind_rustls::default_provider()?`.
+Build caller-supplied TLS configurations and WSS connectors on `moq_crypto::provider::provider()?` or `moq_tokio::crypto::provider()?`.
+A CPU missing a feature rind needs fails TLS connects and default WSS connects with `Error::UnsupportedCpu`, wrapping `moq_crypto::provider::UnsupportedCpu`, which names the feature; it used to arrive as `Error::Io`.
 No QMux or WebSocket wire format changes.
 
 ### `RecvStream` leases its credit ([#7624](https://github.com/moq-dev/moq/pull/7624))
