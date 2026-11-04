@@ -37,14 +37,13 @@ After it lands, merge main and rerun the controlled cases, `just ci`,
 `just test interop --all`, and local cross-vendor review on the resulting head;
 then remove this quest and mark the JS PR ready.
 
-The merged-source all-language run passes every non-socket lane and 27 of 32
-socket lanes. Two draft18 JS-dialer TCP lanes fail during initial data. Three
-Rust-dialer TCP lanes (Node draft18/20 and Bun draft18) pass data, FIN, and RST,
-then stall after JS rejects an incoming request. Check whether late requests for
-a reset session are resurfacing before assuming that incoming request is the
-fresh rejected dial; preserve the refusal assertion. The temporary dependency
-run passed all eight controlled bursts, but still had the draft20 refusal stall.
-It does not establish final-head interoperability.
+The merged-source run exposed a harness assumption: a late FETCH can ask for a
+reset session again, surfacing the same unverified incoming identity before the
+fresh rejected dial. Diagnostics reproduced that identity match. The interop
+acceptor now refuses its two known completed identities before rejecting the
+fresh dial, preserving the refusal assertion. Final-head interop must still be
+rerun after the shared adapter correction. Earlier temporary dependency checks
+passed all eight controlled bursts, but are not final-head proof.
 
 ## Waiting
 

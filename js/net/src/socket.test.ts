@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Manual, Milli, Nano, Second } from "@moq/clock";
-import type { Consumer as BroadcastConsumer } from "./broadcast.ts";
+import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept as acceptConnection } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
 import { NotFound, ProtocolViolation, StreamCode, StreamError } from "./error.ts";
@@ -79,6 +79,65 @@ test("TCP carries ordered frames in both directions, with independent FIN", asyn
 	expect(await local.consumer.readFrame()).toBeUndefined();
 	a.close();
 	b.close();
+});
+
+test("a peer route replaced between metadata and opening cannot inherit a socket session", async () => {
+	const clock = time();
+	const { origin, a } = setup();
+	const peer = new BroadcastProducer();
+	const keep = peer.consume();
+	const routes: { close(): void }[] = [];
+	const tasks: Promise<void>[] = [];
+	const advertise = (front: BroadcastConsumer) => {
+		const route = wireOf(origin).receive(Path.from("room/.socket/remote"));
+		routes.push(route);
+		tasks.push(
+			(async () => {
+				try {
+					for await (const request of route.requested()) request.serve(front.clone());
+				} catch {
+					/* Closing the route ends its request loop. */
+				}
+			})(),
+		);
+		return route;
+	};
+	const first = advertise(keep);
+	const requested = wireOf(peer).requested();
+	let outcome: unknown;
+	const dialing = a.dialTrack("remote").then(
+		(value) => {
+			outcome = value;
+		},
+		(error) => {
+			outcome = error;
+		},
+	);
+	let returning: Track.Subscriber | undefined;
+	const replacement = new BroadcastProducer();
+	const replacementKeep = replacement.consume();
+	try {
+		const request = await requested;
+		if (!request) throw new Error("missing dial");
+		returning = await raw(origin, "alice", request.name);
+		await returning.info();
+		request.accept({ maxAge: null });
+		// Both route changes happen before the info promise's continuation opens the session.
+		first.close();
+		advertise(replacementKeep);
+		await clock.advance(Nano.zero);
+		expect(outcome).toBeInstanceOf(Error);
+	} finally {
+		a.close();
+		for (const route of routes) route.close();
+		returning?.close();
+		keep.close();
+		replacementKeep.close();
+		peer.close();
+		replacement.close();
+		await Promise.all(tasks);
+		await dialing;
+	}
 });
 
 test("track halves start reliable and ascending, preserve old messages and accept independent info", async () => {

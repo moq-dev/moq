@@ -46,7 +46,7 @@ try {
 			assert.deepEqual((await stream.consumer.readFrame())?.payload, new Uint8Array([peer + i]));
 		assert.equal(await stream.consumer.readFrame(), undefined);
 	} else {
-		// Advance one message at a time so IETF's initial live join cannot outrun group zero.
+		// Exchange each independent message as a request and reply.
 		const reader = stream.consumer.ordered();
 		for (let i = 0; i < 3; i++) {
 			if (role === "dial") stream.producer.writeFrame({ payload: new Uint8Array([own + i]) });
@@ -74,7 +74,14 @@ try {
 	if (role === "dial") {
 		await assert.rejects(protocol === "tcp" ? endpoint.dialTcp("acceptor") : endpoint.dialTrack("acceptor"));
 	} else {
-		(await (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack())).reject();
+		for (;;) {
+			const incoming = await (protocol === "tcp" ? endpoint.acceptTcp() : endpoint.acceptTrack());
+			assert.equal(incoming.peer, "dialer");
+			incoming.reject();
+			// Incoming names are unverified. A late FETCH for a reset/finished half can
+			// ask for it again; refuse those known identities before the fresh test dial.
+			if (incoming.session !== stream.session && incoming.session !== second.session) break;
+		}
 	}
 	console.error(`socket verified ${protocol} ${role}`);
 	if (role === "accept") assert.equal((await commands.next()).value, "socket drained");

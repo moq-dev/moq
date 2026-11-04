@@ -315,7 +315,7 @@ export class Endpoint {
 		name: string,
 		signal: AbortSignal,
 		hold: (following: Origin.Following) => void,
-	): Promise<Track.Subscriber> {
+	): Promise<{ consumer: Track.Subscriber; peer: GetPromise<Error | null> }> {
 		const following = this.#origin.follow(endpointPath(this.prefix, peer));
 		hold(following);
 		const abort = new AbortController();
@@ -325,7 +325,7 @@ export class Endpoint {
 		try {
 			const broadcast = await waitFor(following.active, (active) => active !== undefined, pending);
 			if (!broadcast) throw ended();
-			return broadcast.track(name).subscribe(reliable);
+			return { consumer: broadcast.track(name).subscribe(reliable), peer: broadcast.closed };
 		} finally {
 			stop();
 		}
@@ -347,9 +347,10 @@ export class Endpoint {
 		let producer: Track.Producer | undefined;
 		let stop: Dispose = () => {};
 		try {
-			consumer = await this.#remote(peer, name, signal, (value) => {
+			const remote = await this.#remote(peer, name, signal, (value) => {
 				following = value;
 			});
+			consumer = remote.consumer;
 			stop = hooks.watchSubscriberError(consumer, (error) => abort.abort(error));
 			const serving = waitFor(hooks.requestWanted(answer), (wanted) => wanted, signal).then(() => {
 				producer = answer.accept(info);
@@ -357,7 +358,7 @@ export class Endpoint {
 			await untilAborted(Promise.all([serving, consumer.info()]), signal);
 			signal.throwIfAborted();
 			if (!producer || !following) throw cancelled();
-			return this.#open(protocol, { producer, consumer, peer, session }, following);
+			return this.#open(protocol, { producer, consumer, peer, session }, following, remote.peer);
 		} catch (error) {
 			answer.reject(error instanceof Error ? error : cancelled());
 			consumer?.close();
@@ -391,9 +392,10 @@ export class Endpoint {
 		try {
 			check();
 			signal.throwIfAborted();
-			consumer = await this.#remote(name.dialer, request.name, signal, (value) => {
+			const remote = await this.#remote(name.dialer, request.name, signal, (value) => {
 				following = value;
 			});
+			consumer = remote.consumer;
 			stopError = hooks.watchSubscriberError(consumer, (error) => abort.abort(error));
 			await untilAborted(consumer.info(), signal);
 			signal.throwIfAborted();
@@ -403,6 +405,7 @@ export class Endpoint {
 				protocol,
 				{ producer: request.accept(info), consumer, peer: name.dialer, session: name.session },
 				following,
+				remote.peer,
 			);
 		} catch (error) {
 			request.reject(error instanceof Error ? error : cancelled());
@@ -416,9 +419,10 @@ export class Endpoint {
 		}
 	}
 
-	#open(protocol: Protocol, parts: Parts, following: Origin.Following): Stream {
+	#open(protocol: Protocol, parts: Parts, following: Origin.Following, peer: GetPromise<Error | null>): Stream {
 		this.#abort.signal.throwIfAborted();
-		const session = new Session(parts, following, () => this.#sessions.delete(session));
+		if (following.active.peek()?.closed !== peer) throw ended();
+		const session = new Session(parts, following, peer, () => this.#sessions.delete(session));
 		this.#sessions.add(session);
 		try {
 			return protocol === "tcp" ? session.tcp() : session.track();
@@ -448,6 +452,7 @@ export class Endpoint {
 class Session {
 	#parts: Parts;
 	#following: Origin.Following;
+	#peer: GetPromise<Error | null>;
 	#done: Dispose;
 	#abort = new AbortController();
 	#stops: Dispose[] = [];
@@ -455,9 +460,10 @@ class Session {
 	#outgoing?: Group.Producer;
 	#sent = false;
 	#received = false;
-	constructor(parts: Parts, following: Origin.Following, done: Dispose) {
+	constructor(parts: Parts, following: Origin.Following, peer: GetPromise<Error | null>, done: Dispose) {
 		this.#parts = parts;
 		this.#following = following;
+		this.#peer = peer;
 		this.#done = done;
 	}
 
@@ -469,12 +475,11 @@ class Session {
 	#monitor(): void {
 		// A socket reset ends the session even when a generic routed reader would recover.
 		this.#hold(hooks.watchSubscriberError(this.#parts.consumer, (error) => this.reset(error)));
-		const peer = this.#following.active.peek();
-		this.#hold(
-			this.#following.active.subscribe((active) => {
-				if (!active || active.closed !== peer?.closed) this.reset(ended());
-			}),
-		);
+		const check = () => {
+			if (this.#following.active.peek()?.closed !== this.#peer) this.reset(ended());
+		};
+		this.#hold(this.#following.active.subscribe(check));
+		check();
 	}
 
 	#watch(value: GetPromise<Error | null>, done: () => void): void {

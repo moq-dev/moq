@@ -466,6 +466,9 @@ media_publisher() {
     esac
 }
 
+# shellcheck source-path=SCRIPTDIR source=socket.sh
+source "$INTEROP_DIR/socket.sh"
+
 # Record every case this run will reach as `not run`, before any build, so one the run
 # never reaches still shows in the report. Mirrors the dispatch at the end of this file.
 plan_cases() {
@@ -476,6 +479,10 @@ plan_cases() {
     fi
     if [[ "$NEGATIVE" -eq 1 ]]; then
         for sub in "${SUB_LIST[@]}"; do record "not run" case="no publisher" publisher=none subscriber="$sub"; done
+        return
+    fi
+    if [[ "$SOCKET_ONLY" -eq 1 ]]; then
+        plan_sockets
         return
     fi
     for VERSION in "${VERSION_LIST[@]}"; do plan_pass; done
@@ -536,6 +543,7 @@ plan_pass() {
         fi
     done
     [[ "$VERSION" == auto ]] || return 0
+    plan_sockets
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         for version in "${COMPRESS_VERSIONS[@]}"; do
@@ -2472,9 +2480,6 @@ run_hls_grid() {
 }
 
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
-# shellcheck source-path=SCRIPTDIR source=socket.sh
-source "$INTEROP_DIR/socket.sh"
-
 run_tails() {
     local runtime version
     echo "=== CLI FETCH close ==="

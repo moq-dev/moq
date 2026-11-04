@@ -64,16 +64,29 @@ run_socket_pair() {
     rm "$events" "$ack"
 }
 
-run_sockets() {
-    local runtime version protocol
-    echo '=== sockets ==='
+socket_pairs() {
+    local action="$1" runtime version protocol
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         for version in moq-lite-07-wip moq-transport-18 moq-transport-20 moq-transport-22; do
             for protocol in tcp track; do
-                run_socket_pair rust "$runtime" "$protocol" "$version"
-                run_socket_pair "$runtime" rust "$protocol" "$version"
+                "$action" rust "$runtime" "$protocol" "$version"
+                "$action" "$runtime" rust "$protocol" "$version"
             done
         done
     done
+}
+
+# shellcheck disable=SC2329 # called by socket_pairs
+plan_socket_pair() {
+    record "not run" case="socket $3" publisher="$1" subscriber="$2" version="$4"
+}
+
+plan_sockets() {
+    socket_pairs plan_socket_pair
+}
+
+run_sockets() {
+    echo '=== sockets ==='
+    socket_pairs run_socket_pair
 }
