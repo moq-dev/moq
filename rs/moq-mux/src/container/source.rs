@@ -130,7 +130,7 @@ pub(crate) struct ExportSource {
 	after: Option<u64>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
-	/// OpusHead). Some once the codec config is available — from the catalog
+	/// OpusHead). Some once the codec config is available - from the catalog
 	/// `description`, or synthesized by the transform.
 	description: Option<Bytes>,
 	/// Video codec used to derive geometry from its configuration or keyframes.
@@ -758,6 +758,40 @@ pub(crate) fn codec_dimensions(
 	};
 
 	Ok(dimensions.filter(|(width, height)| *width > 0 && *height > 0))
+}
+
+/// The picture size the last SPS in a length-prefixed sample declares, for an H.264 or H.265 track
+/// that keeps its parameter sets in band beside its config record (avc3, hev1): the record fixes the
+/// NAL length size, while any keyframe may redefine the size. `None` for any other track, or a
+/// sample carrying no SPS.
+pub(crate) fn in_band_dimensions(
+	codec: &VideoCodec,
+	description: &[u8],
+	payload: &[u8],
+) -> crate::Result<Option<(u32, u32)>> {
+	let (h265, length_size) = match codec {
+		VideoCodec::H264(h264) if h264.inline => (false, crate::codec::h264::avcc_params(description)?.0),
+		VideoCodec::H265(h265) if h265.in_band => (true, crate::codec::h265::hvcc_params(description)?.0),
+		_ => return Ok(None),
+	};
+	let is_sps = |header: u8| match h265 {
+		false => header & 0x1f == 7,
+		true => (header >> 1) & 0x3f == 33,
+	};
+	let Some(sps) = crate::codec::annexb::length_prefixed_nals(payload, length_size)?
+		.map_while(|nal| nal.ok())
+		.filter(|nal| nal.first().is_some_and(|&header| is_sps(header)))
+		.last()
+	else {
+		return Ok(None);
+	};
+	let size = match h265 {
+		false => crate::codec::h264::Sps::parse(sps)
+			.ok()
+			.map(|sps| (sps.coded_width, sps.coded_height)),
+		true => crate::codec::h265::sps_size(sps),
+	};
+	Ok(size.filter(|(width, height)| *width > 0 && *height > 0))
 }
 
 /// An avcC or hvcC derived from the catalog codec string, when that string and

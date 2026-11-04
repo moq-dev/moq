@@ -135,7 +135,9 @@ pub async fn run(ctx: Connection) {
 		};
 		let track = match broadcast.create_track(
 			TRACK,
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(None),
 		) {
 			Ok(track) => track,
 			Err(err) => {
@@ -766,6 +768,7 @@ mod tests {
 		reason = "the benchmark measures real establishment time"
 	)]
 	fn benchmark_readiness_establishment() {
+		println!("connections,broadcasts_per_connection,elapsed_ns");
 		for connections in [1, 16, 128] {
 			for broadcasts in [1, 16, 128] {
 				let count = connections * broadcasts;
@@ -793,18 +796,18 @@ mod tests {
 					}
 				}
 				assert!(std::hint::black_box(stats.ready()));
-				println!(
-					"readiness connections={connections} broadcasts_per_connection={broadcasts} elapsed_ns={}",
-					start.elapsed().as_nanos()
-				);
+				println!("{connections},{broadcasts},{}", start.elapsed().as_nanos());
 				assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), count);
 			}
 		}
 	}
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track with no publisher max age, for tests that write timestamps and
+	/// rely on the subscription's own delay rather than the authored zero default.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	async fn wait_for(counter: &AtomicU64, value: u64) {

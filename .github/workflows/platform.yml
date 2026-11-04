@@ -89,12 +89,9 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: ./.github/actions/nasm
       - uses: ./.github/actions/just
-      # Bump with the macOS job's copy and .oss-scanner/Dockerfile's NEXTEST_VERSION.
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: nextest@0.9.146
+        uses: ./.github/actions/nextest
       # Nightly writes these platforms; `release` pull requests read.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
@@ -144,9 +141,7 @@ jobs:
       - uses: ./.github/actions/just
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: nextest@0.9.146
+        uses: ./.github/actions/nextest
       - name: Rust cache
         uses: ./.github/actions/rust-cache
         with:

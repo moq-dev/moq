@@ -63,10 +63,10 @@ export function readSize(read: ReadGroupFrame): number {
 export async function sendPayload(
 	chunks: group.FrameConsumer,
 	write: (chunk: Uint8Array) => Promise<unknown>,
-	closed: Promise<unknown>,
+	closed: Promise<void>,
 ): Promise<void> {
 	for (let sent = 0; ; ) {
-		const chunk = await race([chunks.readChunk(), closed]);
+		const chunk = await hooks.readFrameChunk(chunks, closed);
 		if (!(chunk instanceof Uint8Array)) {
 			if (sent < chunks.size) throw new Error("stream closed mid-frame");
 			return;

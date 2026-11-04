@@ -476,8 +476,10 @@ pub(crate) enum Push {
 /// One crossing the same restart joins the new generation when the frame lands on its
 /// clock, neither late nor held more than a delay past everything queued, and opens another
 /// otherwise. Before anything has gone out there is nothing to keep in step with, so a
-/// restart there keeps the clock. Generations go out in turn, so no two tracks are ever on
-/// different clocks at once.
+/// restart there keeps the clock when it moves the timeline forward. One that regresses behind
+/// what its track already holds, queued or still acquiring, opens a generation all the same:
+/// frames decoding out of order cannot share a clock. Generations go out in turn, so no two
+/// tracks are ever on different clocks at once.
 ///
 /// The clock follows the source's: a source clock running slower than ours would make
 /// every frame late in the end, and a faster one would hold more and more. So the clock
@@ -590,13 +592,21 @@ struct Acquire<K, T> {
 	since: Instant,
 	/// Its frames, in arrival order.
 	frames: Vec<(K, Arrival<T>)>,
-	/// Its tracks, and whether each is partway through a group, so its next sync frame
-	/// starts the next one.
-	tracks: BTreeMap<K, bool>,
-	/// What each track holds of its frames.
-	bytes: BTreeMap<K, usize>,
+	/// Its tracks, and what each holds of its frames.
+	tracks: BTreeMap<K, Held>,
 	/// A track crossed a group boundary while these frames were being read.
 	grouped: bool,
+}
+
+/// What one track holds of an acquisition.
+struct Held {
+	/// Whether it is partway through a group, so its next sync frame starts the next one.
+	mid: bool,
+	/// What its frames hold against the byte budget.
+	bytes: usize,
+	/// The source's restart counter at its last frame, and when that frame decodes.
+	restart: u64,
+	decode: Decode,
 }
 
 impl<K: Ord, T> Acquire<K, T> {
@@ -811,14 +821,17 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 	/// Queue a frame, or drop it if it cannot make its deadline. Fails once the source's clock
 	/// runs further off ours than the clock may follow.
 	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> anyhow::Result<Push> {
+		let held = self.acquire.as_ref().and_then(|acquire| acquire.tracks.get(&key));
+		// A restart behind what the track already holds cannot decode in order on the clock the
+		// acquisition would anchor, so the acquisition ends at it and the frame opens the next.
+		if held.is_some_and(|held| held.restart != arrival.restart && arrival.decode < held.decode) {
+			self.acquired();
+		}
 		let held = self
 			.acquire
 			.as_ref()
 			.is_some_and(|acquire| acquire.tracks.contains_key(&key));
-		let Some(clock) = self
-			.clock
-			.filter(|_| !held && !(self.released.is_some() && self.jumps(&key, &arrival)))
-		else {
+		let Some(clock) = self.clock.filter(|_| !held && !self.jumps(&key, &arrival)) else {
 			self.hold(key, arrival);
 			return Ok(Push::Queued);
 		};
@@ -890,17 +903,20 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 	/// draining nor a track whose frames are sparse does. Back, a frame decodes before its
 	/// track's last and is late: a stall only delays what comes next. It is a step on the
 	/// clock's own generation, since a track still on an earlier one is on that timeline.
-	/// Held for the next generation, the frame never steers the old clock. Without a delay
-	/// nothing is held or late, so a step costs nothing there.
+	/// Held for the next generation, the frame never steers the old clock. A marker before the
+	/// first release keeps the clock unless it regresses behind frames already queued; one that
+	/// regresses behind frames still acquiring ends that acquisition first ([`Self::push`]). Without
+	/// a delay nothing is held or late, so an unmarked step costs nothing there.
 	fn jumps(&self, key: &K, arrival: &Arrival<T>) -> bool {
 		let (Some(clock), Some(track)) = (self.clock, self.tracks.get(key)) else {
 			return false;
 		};
 		let deadline = self.deadline(&clock, arrival.decode);
 		let restarted = track.restart != arrival.restart
+			&& (self.released.is_some() || arrival.decode < track.decode)
 			&& (track.generation == clock.generation || !self.lands(key, deadline, arrival.arrived));
 		let held = deadline.is_some_and(|deadline| deadline > self.bound(key, arrival.arrived));
-		let unmarked = !self.delay.is_zero() && track.generation == clock.generation;
+		let unmarked = self.released.is_some() && !self.delay.is_zero() && track.generation == clock.generation;
 		let elapsed = arrival.decode.as_nanos() - track.decode.as_nanos();
 		let ahead = elapsed - since(track.arrived, arrival.arrived);
 		let drift = (elapsed.abs() as f64 * MAX_DRIFT) as i128;
@@ -919,13 +935,19 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			since: arrival.read,
 			frames: Vec::new(),
 			tracks: BTreeMap::new(),
-			bytes: BTreeMap::new(),
 			grouped: false,
 		});
-		let mid = acquire.tracks.entry(key.clone()).or_default();
-		acquire.grouped |= arrival.sync && *mid;
-		*mid |= !arrival.sync;
-		*acquire.bytes.entry(key.clone()).or_default() += arrival.cost();
+		let held = acquire.tracks.entry(key.clone()).or_insert(Held {
+			mid: false,
+			bytes: 0,
+			restart: arrival.restart,
+			decode: arrival.decode,
+		});
+		acquire.grouped |= arrival.sync && held.mid;
+		held.mid |= !arrival.sync;
+		held.bytes += arrival.cost();
+		held.restart = arrival.restart;
+		held.decode = arrival.decode;
 		acquire.frames.push((key, arrival));
 		// A live fill must read every track's available frames before choosing the clock.
 		// Otherwise the first track crossing a group boundary anchors on a partial backlog.
@@ -1458,9 +1480,8 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		let acquiring = self
 			.acquire
 			.as_ref()
-			.and_then(|acquire| acquire.bytes.get(key))
-			.copied()
-			.unwrap_or(0);
+			.and_then(|acquire| acquire.tracks.get(key))
+			.map_or(0, |held| held.bytes);
 		if acquiring >= self.max_bytes {
 			return true;
 		}
@@ -2166,7 +2187,7 @@ mod tests {
 		assert_eq!(due(&mut buffer), ["v200", "v280", "v320", "v360"]);
 	}
 
-	/// A restart before anything went out keeps the clock, so the tracks stay on one.
+	/// A forward restart before anything went out keeps the clock, so the tracks stay on one.
 	#[tokio::test(start_paused = true)]
 	async fn a_skip_before_the_first_release_keeps_one_clock() {
 		let start = kio::clock::now();
@@ -2191,6 +2212,64 @@ mod tests {
 			released(&mut buffer),
 			[("v0", 0), ("v900", 0), ("a900", 0), ("v940", 0), ("a940", 0)]
 		);
+	}
+
+	/// A marked regression is a new timeline even while every frame is still queued: the
+	/// frames before and after it cannot decode in order on one clock.
+	#[tokio::test(start_paused = true)]
+	async fn a_marked_regression_before_the_first_release_opens_a_clock() {
+		let start = kio::clock::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		buffer.push(1, arrival(start, 80, "before")).unwrap();
+		buffer.push(1, after(1, arrival(start, 40, "after"))).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("before", 0), ("after", 1)]);
+	}
+
+	/// So it is while the first clock is still being acquired: the frames before the regression
+	/// anchor one clock and the frames after it the next, rather than share one.
+	#[tokio::test(start_paused = true)]
+	async fn a_marked_regression_while_acquiring_opens_a_clock() {
+		let start = kio::clock::now();
+		let mut buffer = Buffer::new(DELAY);
+		assert_eq!(buffer.push(1, arrival(start, 80, "before")).unwrap(), Push::Queued);
+		assert_eq!(
+			buffer.push(1, after(1, arrival(start, 40, "after"))).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, after(1, arrival(start, 60, "next"))).unwrap(),
+			Push::Queued
+		);
+		tokio::time::advance(4 * DELAY).await;
+		assert_eq!(released(&mut buffer), [("before", 0), ("after", 1), ("next", 1)]);
+		assert_eq!(buffer.dropped() + buffer.trimmed(), 0);
+	}
+
+	/// A forward restart while the first clock is acquired keeps it, as before a release.
+	#[tokio::test(start_paused = true)]
+	async fn a_forward_restart_while_acquiring_keeps_one_clock() {
+		let start = kio::clock::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 0, "v0")).unwrap();
+		buffer.push(1, after(1, arrival(start, 40, "v40"))).unwrap();
+		tokio::time::advance(4 * DELAY).await;
+		assert_eq!(released(&mut buffer), [("v0", 0), ("v40", 0)]);
+	}
+
+	/// A regression while a later generation's clock is acquired opens the one after it, too.
+	#[tokio::test(start_paused = true)]
+	async fn a_marked_regression_while_reacquiring_opens_a_clock() {
+		let start = kio::clock::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 0, "v0")).unwrap();
+		tokio::time::advance(4 * DELAY).await;
+		assert_eq!(released(&mut buffer), [("v0", 0)]);
+		let now = kio::clock::now();
+		buffer.push(1, after(1, arrival(now, 5_000, "v5000"))).unwrap();
+		buffer.push(1, after(2, arrival(now, 4_000, "v4000"))).unwrap();
+		tokio::time::advance(4 * DELAY).await;
+		assert_eq!(released(&mut buffer), [("v5000", 1), ("v4000", 2)]);
 	}
 
 	/// A restart after frames went out opens a new generation, and every track's next frame

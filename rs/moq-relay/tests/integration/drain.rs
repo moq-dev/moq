@@ -1,4 +1,4 @@
-//! The shutdown drain over moq-net's in-memory transport, on Tokio's paused clock.
+//! The shutdown drain over moq-net's in-memory transport, on kio's simulator.
 //!
 //! The deadline closes every established session the drain still holds, however
 //! its GOAWAY is faring, and the drain returns only once each has recorded its end.
@@ -38,7 +38,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 	let (client_link, relay_link) = memory::pair(config);
 
 	let observer = observer.clone();
-	tokio::spawn(async move {
+	drop(kio::clock::sim::spawn(async move {
 		let server = moq_net::Server::new().with_versions(version.into());
 		let handshake = server
 			.accept_request(moq_net::time::Instant::now(), relay_link)
@@ -49,13 +49,13 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 			.with_shutdown(observer)
 			.run()
 			.await;
-	});
+	}));
 
 	let all = moq_auth::Pattern::all;
 	let (lease, consumer) = lease::Producer::new(moq_auth::Grant::new(all(), all()));
-	tokio::spawn(async move {
+	drop(kio::clock::sim::spawn(async move {
 		admissions.next().await.expect("an admission").grant(consumer);
-	});
+	}));
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.connect(moq_net::time::Instant::now(), client_link)
@@ -65,7 +65,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 	// Polled only while `reading`, and never dropped: a dropped driver would close
 	// the transport rather than leave it open and unread.
 	let reading = Arc::new(AtomicBool::new(true));
-	tokio::spawn({
+	drop(kio::clock::sim::spawn({
 		let reading = reading.clone();
 		async move {
 			let mut driver = std::pin::pin!(moq_net::time::run(driver));
@@ -75,9 +75,9 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 			})
 			.await
 		}
-	});
+	}));
 
-	// Paused time advances only once every task is idle, so the relay is
+	// Simulated time advances only once every task is idle, so the relay is
 	// supervising the session by the time this returns.
 	kio::clock::sleep(Duration::from_millis(1)).await;
 	assert!(
@@ -89,15 +89,15 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 }
 
 /// Start the drain and return its end, which [`shutdown::Observer::drained`] reports.
-fn drain(trigger: &shutdown::Trigger, observer: &shutdown::Observer) -> tokio::task::JoinHandle<()> {
+fn drain(trigger: &shutdown::Trigger, observer: &shutdown::Observer) -> kio::clock::sim::JoinHandle<()> {
 	trigger.start();
 	let observer = observer.clone();
-	tokio::spawn(async move { observer.drained().await })
+	kio::clock::sim::spawn(async move { observer.drained().await })
 }
 
 /// A peer that ignores the GOAWAY is closed at the deadline, and the drain returns
 /// only after its lease recorded the shutdown.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn a_session_ignoring_the_goaway_is_closed_at_the_deadline() {
 	for alpn in ["moq-lite-06", "moq-lite-03", "moq-transport-18"] {
 		let (trigger, observer) = shutdown::Observer::new(WINDOW);
@@ -129,7 +129,7 @@ async fn a_session_ignoring_the_goaway_is_closed_at_the_deadline() {
 /// A peer that stops reading leaves the relay's GOAWAY stuck on its stream, so the
 /// driver never arms its own timer. The drain deadline still closes the session and
 /// waits for its end.
-#[tokio::test(start_paused = true)]
+#[kio::test]
 async fn a_stalled_goaway_write_is_still_closed_at_the_deadline() {
 	let (trigger, observer) = shutdown::Observer::new(WINDOW);
 	let session = admit(&observer, "moq-lite-06".parse().unwrap(), true).await;

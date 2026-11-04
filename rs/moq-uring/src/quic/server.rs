@@ -65,6 +65,6 @@ impl Config {
 /// socket keep reaching the accepted connection, but nothing else is ever
 /// accepted. Keep the endpoint itself for a listener.
 pub async fn accept(socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
-	let endpoint = super::Endpoint::new(socket, super::endpoint::Config::default().with_server(config.clone()))?;
+	let endpoint = super::Endpoint::new(super::endpoint::Config::default().with_server(config.clone()), socket)?;
 	endpoint.accept().await
 }

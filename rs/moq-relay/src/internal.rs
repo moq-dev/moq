@@ -18,7 +18,7 @@
 //!   crossing it, so they have no place on the `moq-stats` wire.
 //! - `/health` - a liveness mirror of the public probe, for internal checks
 //!   that don't want to hit the customer port.
-//! - `/nodes` - the cluster peers this relay dialed and holds a session with.
+//! - `/nodes` - configured outbound cluster peers, live transports, and connect history.
 //! - `/sessions` and `/sessions/revalidate` - list or nudge live sessions on
 //!   this node. A push only causes a re-check, so a caller on this trusted
 //!   plane gains nothing a scheduled cadence would not do.
@@ -475,7 +475,7 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 		.into_response()
 }
 
-/// Cluster peers this relay dialed and currently holds a session with. Accepted
+/// Configured outbound cluster peers, their live sessions and connection history. Accepted
 /// peer sessions are omitted, since a peer declares no URL to list it under.
 async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::Snapshot> {
 	Json(state.nodes.map(|nodes| nodes.snapshot()).unwrap_or_default())
@@ -729,7 +729,7 @@ impl Scrape {
 			("moq_relay_groups", "Media groups transferred.", |c| c.groups),
 			(
 				"moq_relay_datagrams",
-				"Single-frame groups carried over unreliable QUIC datagrams; a subset of groups.",
+				"Datagrams of datagram tracks transferred, disjoint from groups.",
 				|c| c.datagrams,
 			),
 			(
@@ -751,11 +751,6 @@ impl Scrape {
 				"moq_relay_stale_groups",
 				"Media groups skipped after drifting beyond a subscriber's latency budget.",
 				|c| c.stale.groups,
-			),
-			(
-				"moq_relay_stale_datagrams",
-				"Media datagrams skipped after drifting beyond a subscriber's latency budget.",
-				|c| c.stale.datagrams,
 			),
 			("moq_relay_fetches", "One-shot group fetches requested.", |c| c.fetches),
 			("moq_relay_announces_started", "Broadcast announces started.", |c| {
@@ -1664,7 +1659,7 @@ mod tests {
 	#[tokio::test]
 	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
 		let nodes = crate::nodes::Nodes::default();
-		let _connection = nodes.connect_outbound(0, "https://relay-b.example/");
+		let _connection = nodes.dial("https://relay-b.example/");
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),
@@ -1907,10 +1902,6 @@ mod tests {
 			"stale egress groups:\n{body}"
 		);
 		assert!(
-			body.contains("moq_relay_stale_datagrams_total{tier=\"\",role=\"publisher\"} 0"),
-			"stale egress datagrams:\n{body}"
-		);
-		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),
 			"session presence:\n{body}"
 		);
@@ -2092,7 +2083,6 @@ mod tests {
 # TYPE moq_relay_sessions_opened_total counter
 # TYPE moq_relay_sessions_refused_total counter
 # TYPE moq_relay_stale_bytes_total counter
-# TYPE moq_relay_stale_datagrams_total counter
 # TYPE moq_relay_stale_frames_total counter
 # TYPE moq_relay_stale_groups_total counter
 # TYPE moq_relay_stun_dropped_total counter
@@ -2138,8 +2128,6 @@ counter moq_relay_sessions_refused_total{reason="request"} 0
 counter moq_relay_sessions_refused_total{reason="unavailable"} 1
 counter moq_relay_stale_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_bytes_total{role="subscriber",tier="edge"} 0
-counter moq_relay_stale_datagrams_total{role="publisher",tier="edge"} 0
-counter moq_relay_stale_datagrams_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stale_frames_total{role="publisher",tier="edge"} 0
 counter moq_relay_stale_frames_total{role="subscriber",tier="edge"} 0
 counter moq_relay_stale_groups_total{role="publisher",tier="edge"} 0

@@ -110,9 +110,8 @@ Check first:
   completed-but-unaccepted connection cases are distinct. Keep them without
   adding a timeout knob. [moq-dev/moq#7593](https://github.com/moq-dev/moq/pull/7593)
   owns ring grouping and fixture startup diagnostics, not test deletion.
-- Macro UI compile failures, ACME issuance/cache/rate-limit cases, and
-  GStreamer reconnects have distinct compiler, TLS, persistence and real
-  socket boundaries. Their elapsed cost alone is not evidence of redundancy.
+- Macro UI compile failures and GStreamer reconnects have distinct compiler
+  and real socket boundaries. Their elapsed cost alone is not evidence of redundancy.
 - Classify failures before calling them flakes. October 30 and 31's feature
   jobs stopped on an unused `moq-tokio::connect::Config::with_url` method;
   November 1's gate and all-features run aborted on the relay stack, since

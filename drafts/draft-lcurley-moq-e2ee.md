@@ -74,7 +74,7 @@ It differs where the models diverge:
 - The nonce is the identity counter itself, not a salt XOR. The derived key is already unique per credential, epoch, physical name, and domain.
 - The payload is ciphertext concatenated with the 16-byte tag, with no inner length prefix, encrypted properties, or padding.
 - moq-lite frame indices are implied by position in the group ({{moql}} Section "Frame"), not an on-wire object ID. This profile still uses that index as the 32-bit nonce half, because it is the only canonical end-to-end frame identity on both moq-lite and MoQ Transport.
-- moq-lite datagrams share the group sequence namespace of the same track ({{moql}} Section "Datagrams"). A grouped frame 0 and a datagram with that sequence would collide under one AES-GCM key, so datagrams use a separate key domain with frame ID zero.
+- A datagram belongs to a datagram track, which numbers its datagrams with its own sequence and may share its name with a stream track ({{moql}} Section "Datagrams"). A grouped frame 0 and a datagram at that sequence would collide under one AES-GCM key, so datagrams use a separate key domain with frame ID zero.
 
 SFrame {{sframe}} is the cryptographic ancestor of {{secure}}.
 This profile is not SFrame: it has no SFrame header, no CTR field on the wire, and no per-object KID.
@@ -224,6 +224,7 @@ key      = HKDF-Expand(prk, key_info, 16)
 ~~~
 
 `domain` is a single byte: `0x00` for grouped frames, `0x01` for datagrams.
+A stream track and a datagram track of one semantic name share its physical name and differ only in `domain`.
 
 A given `(generation, semantic_name, domain)` tuple has one key and one physical name.
 A subscriber derives both from the semantic name it wants; a publisher derives them from the semantic name it creates or recovers from a request.
@@ -240,8 +241,8 @@ Publishers supporting both transports MUST assign contiguous Object IDs from zer
 An Object ID above `2^32-1` MUST be refused as `identity` before encryption or decryption.
 
 ## Datagrams
-A datagram uses `domain = 0x01`, its 64-bit sequence as `group`, and `frame = 0`.
-On MoQ Transport, a datagram is an Object at ID 0 in an OBJECT_DATAGRAM whose Group ID is the sequence.
+A datagram uses `domain = 0x01`, its datagram track's sequence as `group`, and `frame = 0`.
+That sequence is the Sequence of a moq-lite-07 datagram, the Group Sequence of a moq-lite-05 or -06 Group Datagram, and the Group ID of a MoQ Transport OBJECT_DATAGRAM at Object ID 0.
 Shared vectors cover grouped tracks on both transports and datagrams on moq-lite only.
 
 ## Nonce
@@ -264,7 +265,7 @@ AES-128-GCM encrypts the application bytes with `key`, `nonce`, and empty AAD.
 The bytes placed in the MoQ frame or datagram payload are ciphertext concatenated with the 16-byte tag, in the {{RFC5116}} convention.
 There is no inner header.
 
-Within a generation a publisher MUST allocate group and datagram sequences monotonically and frame indices in write order, so an identity is encrypted at most once.
+Within a generation a publisher MUST allocate each semantic name's group sequences, and separately its datagram sequences, monotonically, and frame indices in write order, so an identity is encrypted at most once.
 Encrypting at an identity the same instance already used is `reuse` and MUST be refused.
 Relays and caches forward ciphertext unchanged, so replay from a cache never re-encrypts.
 
@@ -273,8 +274,8 @@ Protected payload length is plaintext length plus `Nt`.
 A publisher MUST refuse plaintext that would make the protected payload exceed the transport payload limit for that object (`oversize`), before it touches the network.
 
 The interoperable grouped-frame payload cap matching current moq-net implementations is 32 MiB, so grouped plaintext MUST be at most `32 MiB - 16` bytes.
-moq-lite datagram bodies MUST remain at most 1200 bytes including Type, Subscribe ID, Group Sequence, and Timestamp ({{moql}} Section "Datagrams").
-The Type is one byte and each of those three varints at most 9 bytes, so datagram plaintext MUST be at most `1200 - 28 - 16 = 1156` bytes; a publisher cannot observe the Subscribe ID each hop will encode and MUST NOT budget for a smaller header.
+moq-lite datagram bodies MUST remain at most 1200 bytes including Type, Subscribe ID, Sequence, and Timestamp ({{moql}} Section "Datagrams").
+The moq-lite-07 Type is one byte and each of those three varints at most 9 bytes, the widest header of any moq-lite version, so datagram plaintext MUST be at most `1200 - 28 - 16 = 1156` bytes; a publisher cannot observe the Subscribe ID each hop will encode and MUST NOT budget for a smaller header.
 
 ## Catalogs
 A catalog is a track like any other: published under the physical name derived from its semantic name, with each snapshot or delta protected at its own group and frame identity.
@@ -392,6 +393,7 @@ This document requests no registrations.
 - Forbid applications from relying on group completeness, which is unauthenticated.
 - Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.
 - Drop a datagram that fails to open with its own `identity`, `oversize`, or `authentication` code; an `exhausted` open still fails the read.
+- A datagram belongs to a datagram track with its own sequence, independent of a stream track of the same name; the datagram domain keeps the two apart.
 
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}

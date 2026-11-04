@@ -309,7 +309,7 @@ export function hasRanges(version: Version): boolean {
 }
 
 /** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
- * fetch is bounded by the publisher's retention alone. */
+ * fetch is bounded by the publisher's max age alone. */
 export function hasFetchMaxDelay(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
@@ -368,6 +368,16 @@ export function resolvesStart(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether a copy's fills stop at the start its publisher resolved from the budget. Lite-06
+ * resolves the start, but drops media time and sends FETCH without a max delay, so nothing
+ * judges a group below that start against a reader's budget: a widened budget reaches lower
+ * groups through the feed's re-offer instead. Mirrors the Rust `Version::fills_from_start`.
+ */
+export function fillsFromStart(version: Version): boolean {
+	return resolvesStart(version) && !hasMediaTime(version) && !hasFetchMaxDelay(version);
+}
+
 /** Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07. */
 export function hasHidden(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
@@ -392,6 +402,16 @@ export function hasHidden(version: Version): boolean {
  */
 export function waitsForSubscriberFin(version: Version): boolean {
 	return hasTrackStream(version);
+}
+
+/**
+ * Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH (SUBSCRIBE_END before lite-07)
+ * and past a covered bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's
+ * history. The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
+ * Added in lite-07; before it the publisher FINs once the track ends.
+ */
+export function keepsSubscribeOpen(version: Version): boolean {
+	return hasRanges(version);
 }
 
 /** Whether the announce stream has ANNOUNCE_RESTART: another publisher instance replacing an

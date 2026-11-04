@@ -59,6 +59,58 @@ public final class Reservation: Sendable {
     }
 }
 
+/// Divides one connection's receive estimate among the broadcasts watched over it.
+///
+/// Minted by `Session.viewers`. Handles from the same session share one registry.
+public final class Viewers: Sendable {
+    let ffi: MoqViewers
+
+    init(_ ffi: MoqViewers) {
+        self.ffi = ffi
+    }
+
+    /// Watch a broadcast receiving at most `maxBps`, returning its viewer.
+    ///
+    /// `maxBps` is a ceiling: what the largest rendition the player would switch to
+    /// needs, not what it is receiving. Drop the viewer once the broadcast stops being
+    /// watched. Holding one requests the receive estimate, like `Session.recvBandwidth()`.
+    /// Throws `MoqError.OutOfRange`, watching nothing, when the ceilings would sum above
+    /// `2^53 - 1`.
+    public func watch(maxBps: UInt64) throws -> Viewer {
+        Viewer(try ffi.watch(maxBps: maxBps))
+    }
+
+    /// Send `targetBps` as the PROBE target instead of the viewers' sum, or `nil` to
+    /// follow them again. `0` sends no target. Throws `MoqError.OutOfRange`, keeping the
+    /// previous override, above `2^53 - 1`.
+    public func setTarget(targetBps: UInt64?) throws {
+        try ffi.setTarget(targetBps: targetBps)
+    }
+}
+
+/// One watched broadcast's standing claim on `Viewers`.
+///
+/// `rate()` is a snapshot: `nil` means no receive estimate, so hold the current
+/// selection, and `0` is a real zero rate.
+public final class Viewer: Sendable {
+    let ffi: MoqViewer
+
+    init(_ ffi: MoqViewer) {
+        self.ffi = ffi
+    }
+
+    /// This viewer's slice of the receive estimate right now, in bits per second.
+    public func rate() -> UInt64? {
+        ffi.rate()
+    }
+
+    /// Change the ceiling, keeping the same claim. Throws `MoqError.OutOfRange`, keeping
+    /// the previous ceiling, when the ceilings would sum above `2^53 - 1`.
+    public func update(maxBps: UInt64) throws {
+        try ffi.update(maxBps: maxBps)
+    }
+}
+
 /// What a sender following a ``RateControl`` should be doing.
 public typealias RateTarget = MoqRateTarget
 

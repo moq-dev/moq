@@ -412,7 +412,11 @@ mod tests {
 		let url = Url::from_directory_path(dir.path()).unwrap();
 
 		let source = moq_net::broadcast::Info::new().produce();
-		let info = track::Info::default().with_timescale(Timescale::MILLI);
+		// Both groups are written before the recorder reads them, so the superseded one must
+		// stay fresh.
+		let info = track::Info::default()
+			.with_timescale(Timescale::MILLI)
+			.with_max_age(None);
 		let video = source.create_track("video", info).unwrap();
 		for sequence in 0..2 {
 			let mut group = video.create_group(group::Info { sequence }).unwrap();
@@ -503,8 +507,28 @@ mod tests {
 			key(&Path::from("rec"), &pinned).unwrap().as_ref(),
 			format!("rec/live/a/@{instance}")
 		);
-		let slashed = (moq_net::Path::from_static("live/a"), "a/b".parse().unwrap());
-		assert_eq!(key(&Path::from("rec"), &slashed).unwrap().parts().count(), 4);
+		for instance in ["a/b?%23#", "音声\"\n&", "~0123"] {
+			let pinned = (moq_net::Path::from_static("live/a"), instance.parse().unwrap());
+			let key = key(&Path::from("rec"), &pinned).unwrap();
+			assert_eq!(key.parts().count(), 4);
+			let part = key.parts().next_back().unwrap();
+			let decoded = percent_encoding::percent_decode_str(part.as_ref().strip_prefix('@').unwrap())
+				.decode_utf8()
+				.unwrap();
+			assert_eq!(decoded, instance);
+
+			// The store key is itself URL-encoded when naming the recording to import.
+			for base in ["file:///", "s3://bucket/", "gs://bucket/", "az://container/"] {
+				let mut url = Url::parse(base).unwrap();
+				url.path_segments_mut()
+					.unwrap()
+					.extend(key.parts().map(|part| part.as_ref().to_owned()));
+				assert_eq!(url.query(), None);
+				assert_eq!(url.fragment(), None);
+				let (_, reopened) = ObjectStoreScheme::parse(&url).unwrap();
+				assert_eq!(reopened, key);
+			}
+		}
 	}
 
 	/// A path segment's key never starts with `@`, so a path that spells out another instance's

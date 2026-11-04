@@ -51,6 +51,11 @@ def run():
         "DISPLAY": "",
         "WAYLAND_DISPLAY": "",
     }
+    # The daemon claims org.PulseAudio1 even without a D-Bus module. With no
+    # session address (and no DISPLAY to autolaunch one), it uses only our socket.
+    # Keep the wrapped command's session bus available for its other services.
+    daemon_env = env.copy()
+    daemon_env.pop("DBUS_SESSION_BUS_ADDRESS", None)
 
     # By default the null sink renders 2 s ahead and sleeps through it, and a new stream does not
     # rewind that, so a stream's first callback waits up to 2 s: Firefox reports its AudioContext
@@ -68,7 +73,7 @@ def run():
             f"--load=module-native-protocol-unix socket={socket} auth-anonymous=1",
             "--load=module-null-sink sink_name=moq-null rate=48000 channels=2 norewinds=1",
         ],
-        env=env,
+        env=daemon_env,
         stderr=subprocess.PIPE,
     )
     try:

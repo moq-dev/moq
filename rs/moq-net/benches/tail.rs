@@ -32,7 +32,9 @@ impl Held {
 		let mut readers = Vec::with_capacity(tracks);
 		let tracks = (0..tracks)
 			.map(|i| {
-				let mut track = broadcast.create_track(format!("bench{i}"), None).unwrap();
+				let mut track = broadcast
+					.create_track(format!("bench{i}"), moq_net::track::Info::default().with_max_age(None))
+					.unwrap();
 				// A budget wide enough that no cached group is skipped as stale.
 				let mut reader = track.subscribe(
 					track::Subscription::default()

@@ -693,7 +693,7 @@ impl Video {
 		let reserved = target
 			.catalog
 			.reserve()
-			.with_hls_hint(config.gop.duration(config.framerate));
+			.with_interval(config.gop.duration(config.framerate));
 		let ceiling = video_ceiling(config, &rendition);
 		let (lower, priority) = match lower {
 			Some(lower) => {
@@ -1159,8 +1159,9 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 /// CPU pixel format and size (see [`moq_video_decoder_output`]).
 ///
 /// The catalog `index` selects which video rendition to subscribe to, matching
-/// the existing `moq_consume_video` selection model. Only H.264 is
-/// supported; a non-H.264 rendition fails on the terminal callback.
+/// the existing `moq_consume_video` selection model. A codec or description the native
+/// decoders cannot open reports [`MOQ_ERROR_UNSUPPORTED_CONFIG`](crate::MOQ_ERROR_UNSUPPORTED_CONFIG)
+/// on the terminal callback, before any decoded reads.
 ///
 /// An unknown `output->format` or an invalid `output->width`/`height` fails
 /// here, before subscribing. Each frame is produced in the requested layout by
@@ -1313,7 +1314,7 @@ mod tests {
 		// Probed rather than hand-built, so the test track carries what a real one would.
 		let encode = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 		let rendition = encode.probe().await.unwrap();
-		let reserved = catalog.reserve().with_hls_hint(encode.gop.duration(encode.framerate));
+		let reserved = catalog.reserve().with_interval(encode.gop.duration(encode.framerate));
 		let producer = moq_video::encode::Producer::new(broadcast, reserved, rendition).unwrap();
 
 		let name = producer.demand().name().to_string();

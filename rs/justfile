@@ -158,6 +158,10 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
+# Lint media tests without the device features the gate's test build enables.
+media-defaults:
+    bash sh/local.sh cargo clippy --locked -p moq-audio -p moq-video --tests -- -D warnings
+
 # The capture and playback tests drive synthetic devices, so they need no hardware.
 
 # Test the capture and playback features, which the default test pass skips.
@@ -236,6 +240,7 @@ features:
     just rs net-features --all
     just rs coroutines
     just rs quic-features --all
+    just rs crypto-key
     just rs tokio-features --all
     just rs media-features --all
     bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
@@ -265,6 +270,19 @@ coroutines:
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
     bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
 
+# Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport and aws-lc-rs, then lint and test it alone; a workspace build unifies the default features back in.
+crypto-key:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    graph=$(cargo tree --locked -p moq-crypto --no-default-features --features serde -e normal --prefix none)
+    if grep -E '^(aws-lc-rs|moq-net) ' <<<"$graph"; then
+        echo "moq-crypto without sign or e2ee must not depend on moq-net or aws-lc-rs" >&2
+        exit 1
+    fi
+    bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --all-targets -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --features serde --all-targets -- -D warnings
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-crypto --no-default-features --features serde
+
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
 quic-features *args:
@@ -293,9 +311,11 @@ media-features *args:
 # nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
 # skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
 # wrapper enforces lint findings from the same compile. `--tests` builds library,
-# binary, and integration-test targets, including binary-only crates; benches and
-# examples compile and lint in Nightly's `features`. `build.warnings` denies
-# warnings without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
+# binary, and integration-test targets, including binary-only crates. The gate
+# (sh/rs/select.sh's `test`) adds `--benches --examples` and the features those
+# targets require, so their lints fail the PR rather than Nightly; nextest's
+# default filter leaves the benches unrun. `build.warnings` denies warnings
+# without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
 
 # Run library, binary, and integration tests, enforcing clippy from the same compile.
 [positional-arguments]
@@ -321,7 +341,7 @@ play *args:
 doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
-# Needs nightly with the miri component; executes only in Nightly. See sh/rs/miri.sh
+# Needs nightly with miri and rust-src; executes only in Nightly. See sh/rs/miri.sh
 # for what runs and why it splits in two.
 
 # Run kio's and moq-net's hand-written in-memory unsafe under Miri.
@@ -329,7 +349,7 @@ doctest *args:
 miri *args:
     bash sh/rs/miri.sh "$@"
 
-# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite and the receive-timestamps comparison.
+# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
 quic-sim:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -341,9 +361,14 @@ quic-sim:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib -E 'test(/^tests::sim::/)'
     # The bandwidth probe's acceptance suite, over fixed seeds: the merge gate runs only its short cases.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only -E 'test(/^tests::probe::/)'
+    # SCReAMv2's queue, throughput and reaction on the cellular presets: on the sim beside BBR3, then over real sockets through moq-shaper, one preset at a time.
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::scream::/)'
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^scream::/)'
     # Forward delay against RTT as a queue-growth signal: deterministic in the simulation, then over real sockets through each cellular moq-shaper preset, one at a time so they do not add to each other's noise.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::receive_ts::/)'
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^receive_ts::/)'
+    # Each realtime congestion controller against BBR3 over sim replicas of the cellular presets: queueing delay, throughput, reaction to the drop, and share beside CUBIC.
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::realtime::/)'
 
 # Prove the FFI simulcast publisher disables and resumes over a shaped BBR3 uplink.
 rung-disable:
@@ -446,10 +471,10 @@ bench-echo *args:
 bench-session *args:
     bash sh/local.sh cargo bench -p moq-uring --bench session_lite -- "$@"
 
-# Create release PRs and publish crates via release-plz.
+# Publish crates before proposing the next release, so merged versions aren't proposed again.
 release:
-    release-plz release-pr --git-token "$GITHUB_TOKEN"
     release-plz release --git-token "$GITHUB_TOKEN"
+    release-plz release-pr --git-token "$GITHUB_TOKEN"
 
 # Build a .deb or .rpm locally: `just rs package moq-relay deb`.
 package crate packager:
@@ -497,15 +522,19 @@ gst-smoke *args:
 # rind is built to skip that one startup check, or it refuses the simulated CPU.
 codspeed:
     VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation \
-        -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
+        -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
         --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
         --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
-        --bench parameter_sets --bench ts_programs --bench ts_schedule --bench ts_video \
+        --bench parameter_sets --bench timeline --bench ts_programs --bench ts_schedule --bench ts_video \
         --bench announce --bench auth --bench bandwidth --bench canonical --bench frame --bench interests \
         --bench priority --bench retirement --bench schedule --bench stats --bench synced --bench tail \
         --bench tracks --bench varint --bench viewers --bench matching \
         --bench endpoint --bench receive --bench sent_packets --bench streams --bench chunk_interleaving
+    # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous and
+    # cargo-codspeed takes no `--manifest-path`: build it from its own directory. Each build
+    # replaces only its own packages' benches, so `cargo codspeed run` runs both.
+    cd rs/moq-auth && VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation --bench jwt
 
 # Held feed FETCH readiness across independent request and track counts.
 [positional-arguments]

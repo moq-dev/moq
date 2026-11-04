@@ -9,7 +9,9 @@
 
 #![cfg(feature = "_quic")]
 
-use std::net::{SocketAddr, TcpListener};
+#[cfg(not(target_os = "linux"))]
+use std::net::SocketAddr;
+use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
@@ -47,14 +49,14 @@ fn client() -> moq_tokio::Client {
 		.with_reconnect(false)
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 	assert!(
 		tokio::net::TcpStream::connect(http).await.is_err(),
 		"HTTP still accepted after the owner stopped"
 	);
-	// A closed UDP port never answers, so this only ends at the timeout. A live
-	// listener answers a loopback handshake well inside it, and on Linux the
-	// socket check before this is what proves the port closed.
+	// Without the Linux socket-inode proof, probe the listeners. A closed UDP
+	// port never answers, so this only ends at the timeout.
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
 	let after = kio::clock::timeout(
 		Duration::from_millis(500),
@@ -334,6 +336,9 @@ async fn embed_and_stop(mut config: Config) {
 	// owner's sockets are still open.
 	#[cfg(target_os = "linux")]
 	assert!(owned.is_disjoint(&open_sockets()), "the owner's sockets outlived `run`");
+	// A freed port can already belong to another test. Linux checks the owner's
+	// socket identities instead; probe only where that proof is unavailable.
+	#[cfg(not(target_os = "linux"))]
 	assert_owner_stopped(quic, http).await;
 }
 

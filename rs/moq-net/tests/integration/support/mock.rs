@@ -3,7 +3,7 @@
 //! [`MockSession`] wraps one end of a [`memory`] pair, so stream payloads cross
 //! zero-copy and flow-controlled exactly as between two in-process peers. The knobs
 //! bend delivery the ways a real network may: link latency, streams held back or
-//! reordered, a first write split from the rest, lost datagrams, and FINs that are
+//! reordered, a first write split from the rest, no datagram support, and FINs that are
 //! never sent or never acknowledged.
 //!
 //! The transport hands streams to the acceptor in the order they were opened, so each
@@ -446,8 +446,8 @@ struct Side {
 	inc: Arc<Link>,
 	/// Whether the peer has withheld uni stream credit, parking every open.
 	withheld: AtomicBool,
-	/// Whether the datagrams this side sends are lost.
-	lossy: AtomicBool,
+	/// Whether this side reports no datagram support, as a stream-only transport does.
+	no_datagrams: AtomicBool,
 	/// Whether this side drops the FIN of the bidi streams it opens.
 	withhold_bidi_fins: Arc<AtomicBool>,
 	/// The first byte of each bidi stream this side opened.
@@ -462,6 +462,10 @@ struct Side {
 	panic_on_stats: AtomicBool,
 	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
 	wire: moq_net::transport::Wire,
+	/// Whether [`poll::Session::probe`] reports a sender; see [`MockSession::set_probe`].
+	probing: AtomicBool,
+	/// The sender's target, which the session sets.
+	probe: moq_net::transport::Probe,
 	/// What [`poll::Session::receive_window`] reports instead of the memory transport's, if set.
 	receive_window: Mutex<Option<Option<moq_net::transport::ReceiveWindow>>>,
 }
@@ -611,7 +615,7 @@ impl poll::Session for MockSession {
 		payload: Bytes,
 		options: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Result<(), Self::Error> {
-		if self.side.lossy.load(Ordering::Relaxed) {
+		if self.side.no_datagrams.load(Ordering::Relaxed) {
 			return Ok(());
 		}
 		self.inner.send_datagram(payload, options)
@@ -622,6 +626,9 @@ impl poll::Session for MockSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
+		if self.side.no_datagrams.load(Ordering::Relaxed) {
+			return 0;
+		}
 		self.inner.max_datagram_size()
 	}
 
@@ -652,6 +659,13 @@ impl poll::Session for MockSession {
 
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(self.side.wire.clone())
+	}
+
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		self.side
+			.probing
+			.load(Ordering::Relaxed)
+			.then(|| self.side.probe.clone())
 	}
 
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
@@ -691,6 +705,16 @@ impl MockSession {
 	/// Report `stats` from now on.
 	pub fn set_stats(&self, stats: MockStats) {
 		*self.side.stats.lock().unwrap() = stats;
+	}
+
+	/// Report a sender from now on, which a session reads once as it starts.
+	pub fn set_probe(&self, probing: bool) {
+		self.side.probing.store(probing, Ordering::Relaxed);
+	}
+
+	/// The target the session hands this side's sender, or zero without one.
+	pub fn probe_target(&self) -> moq_net::bandwidth::Rate {
+		self.side.probe.target()
 	}
 
 	/// Report `window` as the receive windows in force, as a transport whose limits changed.
@@ -858,9 +882,9 @@ impl MockSession {
 			*gate.lock() = true;
 		}
 	}
-	/// Lose every datagram this side sends from now on.
-	pub fn lose_datagrams(&self) {
-		self.side.lossy.store(true, Ordering::Relaxed);
+	/// Report no datagram support from now on, as qmux or WebSocket does.
+	pub fn disable_datagrams(&self) {
+		self.side.no_datagrams.store(true, Ordering::Relaxed);
 	}
 
 	/// Delay stream data and STOP_SENDING sent from now on by `latency` in each direction,
@@ -928,7 +952,7 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			out: out.clone(),
 			inc: inc.clone(),
 			withheld: Default::default(),
-			lossy: Default::default(),
+			no_datagrams: Default::default(),
 			withhold_bidi_fins: Default::default(),
 			bidi_types: Default::default(),
 			resets: Default::default(),
@@ -937,6 +961,8 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			panic_on_stats: Default::default(),
 			receive_window: Default::default(),
 			wire: Default::default(),
+			probing: Default::default(),
+			probe: Default::default(),
 		}),
 	};
 

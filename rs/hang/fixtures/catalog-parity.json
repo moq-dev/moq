@@ -3375,7 +3375,7 @@
 		"refused": true
 	},
 	{
-		"name": "rendition IDs are any string",
+		"name": "video rendition IDs are any string",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3384,11 +3384,47 @@
 					},
 					"__proto__": {
 						"codec": "avc1.64001f"
+					},
+					"constructor": {
+						"codec": "avc1.64001f"
+					},
+					"toString": {
+						"codec": "avc1.64001f"
 					}
 				}
 			}
 		},
-		"video": ["", "__proto__"]
+		"video": ["", "__proto__", "constructor", "toString"]
+	},
+	{
+		"name": "audio rendition IDs are any string",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2
+					},
+					"__proto__": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2
+					},
+					"constructor": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2
+					},
+					"toString": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2
+					}
+				}
+			}
+		},
+		"audio": ["", "__proto__", "constructor", "toString"]
 	},
 	{
 		"name": "empty catalog",
@@ -3526,6 +3562,200 @@
 						"codec": "avc1.64001f"
 					}
 				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "text IDs are any string",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"": {
+						"format": "vtt"
+					},
+					"__proto__": {
+						"format": "vtt"
+					},
+					"constructor": {
+						"format": "vtt"
+					},
+					"toString": {
+						"format": "vtt"
+					}
+				}
+			}
+		},
+		"text": ["", "__proto__", "constructor", "toString"]
+	},
+	{
+		"name": "text malformed __proto__ refuses the catalog",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"ok": {
+						"format": "vtt"
+					},
+					"__proto__": {}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "text malformed bad refuses the catalog",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"__proto__": {
+						"format": "vtt"
+					},
+					"bad": {}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "json IDs are any string",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"": {
+						"mode": "snapshot"
+					},
+					"__proto__": {
+						"mode": "snapshot"
+					},
+					"constructor": {
+						"mode": "snapshot"
+					},
+					"toString": {
+						"mode": "snapshot"
+					}
+				}
+			}
+		},
+		"json": ["", "__proto__", "constructor", "toString"]
+	},
+	{
+		"name": "json malformed __proto__ refuses the catalog",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"ok": {
+						"mode": "snapshot"
+					},
+					"__proto__": {}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "json malformed bad refuses the catalog",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"__proto__": {
+						"mode": "snapshot"
+					},
+					"bad": {}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "binary IDs are any string",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"": {
+						"mode": "stream"
+					},
+					"__proto__": {
+						"mode": "stream"
+					},
+					"constructor": {
+						"mode": "stream"
+					},
+					"toString": {
+						"mode": "stream"
+					}
+				}
+			}
+		},
+		"binary": ["", "__proto__", "constructor", "toString"]
+	},
+	{
+		"name": "binary malformed __proto__ refuses the catalog",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"ok": {
+						"mode": "stream"
+					},
+					"__proto__": {}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "binary malformed bad refuses the catalog",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"__proto__": {
+						"mode": "stream"
+					},
+					"bad": {}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "contribution IDs are any string",
+		"catalog": {
+			"contributions": {
+				"": {
+					"broadcast": "./a.hang"
+				},
+				"__proto__": {
+					"broadcast": "./a.hang"
+				},
+				"constructor": {
+					"broadcast": "./a.hang"
+				},
+				"toString": {
+					"broadcast": "./a.hang"
+				}
+			}
+		},
+		"contributions": ["", "__proto__", "constructor", "toString"]
+	},
+	{
+		"name": "contribution malformed __proto__ refuses the catalog",
+		"catalog": {
+			"contributions": {
+				"ok": {
+					"broadcast": "./a.hang"
+				},
+				"__proto__": {}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "contribution malformed bad refuses the catalog",
+		"catalog": {
+			"contributions": {
+				"__proto__": {
+					"broadcast": "./a.hang"
+				},
+				"bad": {}
 			}
 		},
 		"refused": true
