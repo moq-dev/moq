@@ -46,7 +46,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Generated C bindings](/quest/m2/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written crate
 - [A C origin can discover eagerly, like a relay](/quest/m2/c-origin-relay.md) - the C API puts an origin in relay mode, so forwarding a client session's routes needs no local announce watcher
 - [A runtime-free QUIC driver](/quest/m2/quic-sansio-driver.md) - a caller's own loop moves UDP datagrams and polls moq sessions over moq-quic, for rust2's bindings
-- [MoQ on rind](/quest/m2/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
 - [QoS](/quest/m2/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
 - [HLS and DASH browser playback](/quest/m2/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly
@@ -192,6 +191,10 @@ lite-07; bitrate enforcement is not part of this release.
 - [Drop moq-auth's iroh transport](/quest/m2/auth-drop-iroh.md) - the next breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
+- [An Absolute join never races an older-history FETCH](/quest/m2/ietf-absolute-join-race.md) - reproduce #7680's suspected collision on main, then fix it or keep the test and delete
+- [Relays and moq-tokio offer versioned qmux-02 first](/quest/m2/qmux-02-subprotocols.md) - one shared qmux version list prefers 02, so JS clients negotiate it
+- [A passing interop run stops publishers cleanly](/quest/m2/interop-shutdown-warnings.md) - no lingering publisher or unfinished-producer warning in a green interop run
+- [Smoke tests make their certificates without a system OpenSSL config](/quest/m2/smoke-libressl.md) - moxygen and Cloudflare smoke pass `-config`, as the conformance runner does
 - [ashpd uses maintained D-Bus crates](/quest/m2/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
 - [Askama uses a maintained TOML parser](/quest/m2/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - every dependency earns its weight, preferring fewer, and the rest are current, deduplicated, and the best maintained option
@@ -249,7 +252,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [A kept draft-18 join pins its head group](/quest/m2/ietf-join-pin-head.md) - on draft 18, a joining FETCH that our publisher keeps open after a quick finish is answered even if the publisher drops its `track::Producer` right after `finish()`
 - [The JS player keeps a track's start when decoding from its first packet](/quest/m2/js-warmup-trim.md) - `@moq/watch` trims an audio track's catalog `warmup` only on a mid-stream join, as moq-audio does
 - [kio::Tasks tolerates a removed task's waker firing into its reused slot](/quest/m2/kio-tasks-waker-test.md) - A unit test in `rs/kio/src/task.rs` shows that when a task taken out with `Tasks::remove` wakes after another task was `insert`ed into its slot, the new occupant is polled at most once spuriously, still finishes on its own wake (handed back through `poll_each`), and its `TaskKey` still removes it
-- [Nightly's Miri job stays inside its time budget](/quest/m2/miri-nightly-budget.md) - Nightly's Miri job stays inside its 60-minute job and 15-minute-per-test budgets
 - [moqsrc reconnects correctly whatever order events arrive in](/quest/m2/moqsrc-reconnect-order.md) - A moq-gst test reconnects `moqsrc` while a rendition pad is blocked downstream, delivering the reconnect's events
 - [A library recorder gets the takeover cut](/quest/m2/mux-source-cut.md) - A recorder built directly with `moq_hls::export::Broadcaster::new` ends a replaced instance's recording at what it listed when another publisher takes the broadcast over, exactly as one built through `Server::broadcaster` does
 - [The relay NixOS module's peer list is tested](/quest/m2/nix-relay-peers-test.md) - `nix flake check` evaluates the moq-relay NixOS module with no, one, and several `cluster.rootUrl` peers and refuses an empty list, asserting the `MOQ_CLUSTER_CONNECT` value each produces
@@ -279,3 +281,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [fMP4 import at 1-byte chunks is no slower than before](/quest/m2/fmp4-byte-chunk-perf.md) - bisect and fix or accept the ~19% slowdown at 1-byte chunks
 - [The relay bench reports io_uring pool size and RSS](/quest/m2/bench-uring-pool.md) - pool growth regressions show up in normal bench runs
 - [MKV imports ffmpeg's multichannel FLAC](/quest/m2/mkv-flac-channel-mask.md) - a channel-mask-only Vorbis comment is accepted, so default ffmpeg multichannel FLAC needs no remux
+- [The bindings' TrackInfo docs list its real fields](/quest/m2/track-info-docs.md) - Swift, Kotlin and Dart stop naming ordering and latency budget on `TrackInfo`
+- [Kotlin dependencies live in a Gradle version catalog](/quest/m2/kt-version-catalog.md) - one catalog entry per library, so a Dependabot bump can't drag another along
+- [The dev shell builds Kotlin with Gradle 9](/quest/m2/kt-gradle-9.md) - `gradle_9` in the dev shell, so the Android target builds there
+- [The publish support panel lists only codecs publishing accepts](/quest/m2/publish-support-probe.md) - the settings panel runs the publisher's Annex B encoder probe

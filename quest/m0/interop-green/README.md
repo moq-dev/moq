@@ -1,4 +1,4 @@
-# [XS] Interop and Video pass on main
+# Interop and Video pass on main
 
 ## Goal
 
@@ -65,3 +65,7 @@ The P2P data-channel test timed out once, in 41668668824, and passes
 locally; triage it if it recurs.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [The open-GOP recovery fixture provides the broadcast name](/quest/m0/interop-green/open-gop-fixture.md) - the open-GOP browser fixture stubs `in.name`, and an exception in an effect fails the test at once instead of timing out
