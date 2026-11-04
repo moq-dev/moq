@@ -1587,8 +1587,9 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 /// source (padding, another track's runs), so each rewritten `data_offset` is the sizes before it.
 ///
 /// An encrypted track's fragment keeps its `senc`, `saiz`, and `saio`, with `saio` pointed at the
-/// rebuilt `senc`. One whose keys rotate, whose encryption information is outside `senc`, or whose
-/// edit list drops samples is refused.
+/// rebuilt `senc`, and samples dropped by an edit list or a mid-GOP start have their entries
+/// restated for the kept ones. One whose keys rotate, that lacks a `senc` its samples need, or
+/// whose encryption information is outside `senc` is refused.
 fn fragment(
 	traf: &mp4_atom::Traf,
 	moof: &Moof,
@@ -1596,8 +1597,9 @@ fn fragment(
 	defaults: &sample::Defaults,
 	protected: Option<super::cenc::Aux>,
 ) -> Result<Bytes> {
-	if protected.is_some() {
+	if let Some(aux) = protected {
 		super::cenc::check_moof(moof, traf)?;
+		aux.check(traf)?;
 	}
 
 	// Build a per-track moof containing only this traf, and a per-track mdat

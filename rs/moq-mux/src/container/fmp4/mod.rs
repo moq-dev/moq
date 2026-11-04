@@ -196,10 +196,14 @@ pub enum Error {
 	#[error("key rotation is not supported")]
 	KeyRotation,
 
-	/// An edit list drops samples of an encrypted track, whose kept samples' encryption
-	/// information would not be restated.
-	#[error("an edit list drops samples from an encrypted track")]
-	ProtectedEdit,
+	/// An encrypted track's `senc` or `saiz` has no entry for a sample its fragment holds.
+	#[error("{aux} lacks the encryption information of sample {sample}")]
+	ProtectionLacksSample {
+		/// The box lacking the entry, `senc` or `saiz`.
+		aux: &'static str,
+		/// The sample's position among its fragment's.
+		sample: usize,
+	},
 
 	/// A license or certificate server for a DRM system no encrypted track carries a `pssh` for.
 	#[error("DRM system {0} protects no track")]

@@ -20,7 +20,7 @@ pub(crate) struct Protection {
 	/// The moov's `pssh` boxes that apply to this track, in their order there.
 	pub pssh: Vec<mp4_atom::Pssh>,
 	/// How each fragment's encryption information is laid out.
-	pub aux: Aux,
+	aux: Aux,
 }
 
 /// How an encrypted track's `senc` lays out each sample's encryption information.
@@ -28,6 +28,9 @@ pub(crate) struct Protection {
 pub(crate) struct Aux {
 	/// The size of each sample's IV, 0 under a constant IV.
 	iv_size: u8,
+	/// Every fragment must carry a `senc`: the samples have per-sample IVs, or they are video,
+	/// which Common Encryption only protects with subsample maps.
+	senc: bool,
 }
 
 impl Protection {
@@ -81,8 +84,12 @@ impl Protection {
 			return Err(Error::MissingPssh.into());
 		}
 
+		let iv_size = tenc.default_per_sample_iv_size;
+		let video = matches!(codecs[..], [mp4_atom::Codec::Encv(_)]);
 		let aux = Aux {
-			iv_size: tenc.default_per_sample_iv_size,
+			iv_size,
+			// A clear-by-default track (no seig, refused above) has no encryption information.
+			senc: tenc.default_is_protected && (iv_size > 0 || video),
 		};
 		Ok(Some(Self { scheme, kid, pssh, aux }))
 	}
@@ -111,11 +118,23 @@ impl Protection {
 }
 
 impl Aux {
+	/// Refuse a fragment that lacks the `senc` its samples need to be decrypted.
+	///
+	/// mp4-atom reads only the ISO `senc`, so this also refuses one that carries its information
+	/// only in PIFF's `uuid` box, which the rebuilt fragment would drop.
+	pub fn check(&self, traf: &mp4_atom::Traf) -> Result<()> {
+		if self.senc && traf.senc.is_none() {
+			return Err(Error::InvalidProtection("encrypted fragment without senc").into());
+		}
+		Ok(())
+	}
+
 	/// Restate `source`'s encryption information in `kept`, the same fragment holding only the
 	/// samples at `indices`, ascending positions among `source`'s samples.
 	///
-	/// The edit list drops samples a packager kept for decoding, such as AAC's priming frame,
-	/// and the samples that remain still need their IVs and subsample maps.
+	/// The importer drops samples an edit list skips, such as AAC's priming frame, and those before
+	/// the first sync sample of a stream joined mid-GOP; the samples that remain still need their
+	/// IVs and subsample maps.
 	pub fn restate(&self, source: &mp4_atom::Traf, kept: &mut mp4_atom::Traf, indices: &[usize]) -> Result<()> {
 		let Some(senc) = &source.senc else {
 			// Nothing per sample to keep: a constant IV over whole samples. Information elsewhere
@@ -136,9 +155,10 @@ impl Aux {
 		let mut data = Vec::with_capacity(senc.data.len());
 		data.extend_from_slice(&(indices.len() as u32).to_be_bytes());
 		for &index in indices {
-			let entry = entries
-				.get(index)
-				.ok_or(Error::InvalidProtection("senc lacks a sample"))?;
+			let entry = entries.get(index).ok_or(Error::ProtectionLacksSample {
+				aux: "senc",
+				sample: index,
+			})?;
 			data.extend_from_slice(entry);
 		}
 		kept.senc = Some(mp4_atom::Senc {
@@ -149,11 +169,18 @@ impl Aux {
 
 		let mut saiz = source.saiz.iter().filter(|saiz| is_cenc(saiz.aux_info.as_ref()));
 		if let Some(saiz) = saiz.next() {
+			if saiz.sample_count as u64 != super::sample::count(source) {
+				return Err(Error::InvalidProtection("saiz and trun disagree on the sample count").into());
+			}
 			if saiz.default_sample_info_size == 0 {
 				let sizes = (indices.iter())
-					.map(|&index| saiz.sample_info_size.get(index).copied())
-					.collect::<Option<Vec<_>>>()
-					.ok_or(Error::InvalidProtection("saiz lacks a sample"))?;
+					.map(|&index| {
+						(saiz.sample_info_size.get(index).copied()).ok_or(Error::ProtectionLacksSample {
+							aux: "saiz",
+							sample: index,
+						})
+					})
+					.collect::<std::result::Result<Vec<_>, _>>()?;
 				kept.saiz.push(mp4_atom::Saiz {
 					aux_info: saiz.aux_info.clone(),
 					default_sample_info_size: 0,

@@ -4306,3 +4306,144 @@ fn a_clear_lead_is_refused() {
 	let err = protected_error(&[&data], |fmp4| fmp4);
 	assert!(matches!(err, super::Error::MultipleCodecs), "{err:?}");
 }
+
+/// A fragment of an encrypted track without the `senc` its per-sample IVs (or, for video, its
+/// subsample maps) need is refused, rather than republished undecryptable.
+#[test]
+fn an_encrypted_fragment_without_senc_is_refused() {
+	for data in [CENC, CBCS_VIDEO] {
+		let data = rewrite(data, |atom| {
+			if let mp4_atom::Any::Moof(moof) = atom {
+				for traf in &mut moof.traf {
+					traf.senc = None;
+					traf.saio.clear();
+					traf.saiz.clear();
+				}
+			}
+		});
+		let err = protected_error(&[&data], |fmp4| fmp4);
+		assert!(
+			matches!(err, super::Error::InvalidProtection("encrypted fragment without senc")),
+			"{err:?}"
+		);
+	}
+}
+
+/// Only `cenc` and `cbcs` are carried, the two schemes CMSF allows.
+#[test]
+fn another_scheme_is_refused() {
+	let data = rewrite(CBCS_VIDEO, |atom| {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			let mp4_atom::Codec::Encv(encv) = &mut moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+				unreachable!()
+			};
+			encv.sinf.schm.as_mut().unwrap().scheme_type = b"cens".into();
+		}
+	});
+	let err = protected_error(&[&data], |fmp4| fmp4);
+	assert!(
+		matches!(err, super::Error::UnsupportedScheme(scheme) if scheme == b"cens".into()),
+		"{err:?}"
+	);
+}
+
+/// The video track's ID and its `tenc`'s per-sample IV size.
+fn protected_video(data: &[u8]) -> (u32, u8) {
+	use mp4_atom::DecodeMaybe;
+
+	let mut cursor = std::io::Cursor::new(data);
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			let trak = (moov.trak.iter())
+				.find(|trak| trak.mdia.hdlr.handler == b"vide".into())
+				.unwrap();
+			let mp4_atom::Codec::Encv(encv) = &trak.mdia.minf.stbl.stsd.codecs[0] else {
+				panic!("expected encv");
+			};
+			let tenc = encv.sinf.schi.as_ref().unwrap().tenc.as_ref().unwrap();
+			return (trak.tkhd.track_id, tenc.default_per_sample_iv_size);
+		}
+	}
+	panic!("no moov");
+}
+
+/// Each sample's entry in `senc`: its IV, then its subsample map.
+fn senc_entries(senc: &mp4_atom::Senc, iv_size: usize) -> Vec<Vec<u8>> {
+	let data = &senc.data[..];
+	let count = u32::from_be_bytes(data[..4].try_into().unwrap());
+	let mut position = 4;
+	let mut entries = Vec::new();
+	for _ in 0..count {
+		let start = position;
+		position += iv_size;
+		if senc.use_subsamples {
+			let subsamples = u16::from_be_bytes(data[position..position + 2].try_into().unwrap()) as usize;
+			position += 2 + 6 * subsamples;
+		}
+		entries.push(data[start..position].to_vec());
+	}
+	assert_eq!(position, data.len());
+	entries
+}
+
+/// A stream joined mid-GOP drops the samples before its first sync sample, the same as an edit
+/// list does: the kept samples' IVs, subsample maps, and `saiz` sizes are restated, with the
+/// per-sample IVs of the `cenc` file and the constant IV of Shaka's `cbcs` video alike.
+#[tokio::test]
+async fn a_mid_gop_start_restates_the_kept_samples_encryption() {
+	const NON_SYNC: u32 = 0x0101_0000;
+	const SYNC: u32 = 0x0200_0000;
+	const SKIPPED: usize = 2;
+
+	for source in [CENC, CBCS_VIDEO] {
+		let (video, iv_size) = protected_video(source);
+		// The first fragment's first two video samples become non-sync and its third a sync sample.
+		let mut first = true;
+		let data = rewrite(source, |atom| {
+			let mp4_atom::Any::Moof(moof) = atom else {
+				return;
+			};
+			if !std::mem::take(&mut first) {
+				return;
+			}
+			let traf = moof.traf.iter_mut().find(|traf| traf.tfhd.track_id == video).unwrap();
+			let mut index = 0;
+			for trun in &mut traf.trun {
+				let mut entries: Vec<_> = trun.samples.iter().collect();
+				for entry in &mut entries {
+					entry.flags = Some(if index == SKIPPED { SYNC } else { NON_SYNC });
+					index += 1;
+				}
+				trun.samples = mp4_atom::TrunSamples::Explicit(entries);
+			}
+		});
+
+		let (result, catalog, consumer, _importers) = import_protected(&[&data], |fmp4| fmp4);
+		result.unwrap();
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		let published = fragments(&consumer, &name).await;
+
+		let source = first_moof(&data);
+		let source = source.traf.iter().find(|traf| traf.tfhd.track_id == video).unwrap();
+		let total = super::sample::count(source) as usize;
+		let moof = mp4_atom::Moof::decode(&mut &published[0][..]).unwrap();
+		assert_eq!(super::sample::count(&moof.traf[0]) as usize, total - SKIPPED);
+
+		let senc = checked_senc(&published[0]);
+		let source_senc = source.senc.as_ref().unwrap();
+		assert!(source_senc.use_subsamples, "encrypted video carries subsample maps");
+		let kept = senc_entries(&senc, iv_size as usize);
+		assert_eq!(kept, senc_entries(source_senc, iv_size as usize)[SKIPPED..]);
+
+		let saiz = &moof.traf[0].saiz[0];
+		assert_eq!(saiz.sample_count as usize, total - SKIPPED);
+		let sizes: Vec<_> = kept.iter().map(|entry| entry.len()).collect();
+		match saiz.default_sample_info_size {
+			0 => assert_eq!(
+				saiz.sample_info_size.iter().map(|&size| size as usize).collect::<Vec<_>>(),
+				sizes
+			),
+			size => assert!(sizes.iter().all(|&entry| entry == size as usize)),
+		}
+	}
+}
