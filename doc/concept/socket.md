@@ -92,7 +92,8 @@ setting a delay budget on its subscription.
 
 Finishing a half closes the session that way, like a FIN. Resetting it is an
 error. An endpoint closing, or its broadcast ending, resets every session it
-holds.
+holds, and stops reading them. A side that sees the peer's half reset treats
+the session as closed and resets its own half, so both halves end.
 
 There is no multiplexing within a session: another channel is another session.
 Several sessions between the same two endpoints are independent, and a

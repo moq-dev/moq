@@ -76,7 +76,8 @@ fn reliable() -> Subscription {
 /// first, with no delay budget); update its subscription to make it lossy.
 ///
 /// Finishing [`Self::producer`] closes the session for the peer, and aborting it is an
-/// error. The endpoint closing aborts it too.
+/// error. The endpoint closing aborts it too. When the peer's half ends with an error,
+/// abort this side's half as well, and drop the stream, so both halves end.
 pub struct Stream {
 	/// This side's half: the session's track in this endpoint's broadcast.
 	pub producer: track::Producer,
@@ -204,7 +205,9 @@ impl Shared {
 /// It accepts dials from its first [`Self::accept`] on, like a TCP listener: before that, a
 /// dial to it is reset, and after it, dials queue until accepted. Dropping it, or
 /// [`Self::close`], retracts the broadcast, resets the dials waiting to be accepted, and
-/// aborts every session it handed out.
+/// aborts this side's half of every session it handed out. The peer's half is read
+/// through each [`Stream::consumer`], which the application owns: drop the streams too,
+/// which releases the subscriptions.
 pub struct Endpoint {
 	shared: Arc<Shared>,
 }
