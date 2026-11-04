@@ -12,16 +12,16 @@ announced: broadcast=moqtail/ch07 active=true
 announced: broadcast=moqtail/ch01 active=true
 announced: broadcast=moqtail/ch04 active=true
 announced: broadcast=moqtail/ch05 active=true
-announced: broadcast=smoke-rust-4856-19690.hang active=true
-subscribe start: id=2 broadcast=smoke-rust-4856-19690.hang track=catalog.json
+announced: broadcast=smoke-rust-4938-13196.hang active=true
+subscribe start: id=2 broadcast=smoke-rust-4938-13196.hang track=catalog.json
 announced: broadcast=moqtail/ch02 active=true
-subscribe written: id=2 broadcast=smoke-rust-4856-19690.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-rust-4856-19690.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-rust-4856-19690.hang track=0.avc3
-subscribe written: id=4 broadcast=smoke-rust-4856-19690.hang track=0.avc3
-subscribe ok: id=4 broadcast=smoke-rust-4856-19690.hang track=0.avc3
+subscribe written: id=2 broadcast=smoke-rust-4938-13196.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-rust-4938-13196.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-rust-4938-13196.hang track=0.avc3
+subscribe written: id=4 broadcast=smoke-rust-4938-13196.hang track=0.avc3
+subscribe ok: id=4 broadcast=smoke-rust-4938-13196.hang track=0.avc3
 dropping a group with no head: alias=1 group=2
-received 394 bytes from smoke-rust-4856-19690.hang
+received 398 bytes from smoke-rust-4938-13196.hang
 subscribe_namespace error: connection error: closed (source=session)
 announced: broadcast=moqtail/ch07_all active=false
 announced: broadcast=moqtail/ch06 active=false
@@ -33,7 +33,7 @@ announced: broadcast=moqtail/ch07 active=false
 announced: broadcast=moqtail/ch01 active=false
 announced: broadcast=moqtail/ch04 active=false
 announced: broadcast=moqtail/ch05 active=false
-announced: broadcast=smoke-rust-4856-19690.hang active=false
+announced: broadcast=smoke-rust-4938-13196.hang active=false
 announced: broadcast=moqtail/ch02 active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
@@ -68,5 +68,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=4 broadcast=smoke-rust-4856-19690.hang track=0.avc3 error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-rust-4856-19690.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-rust-4938-13196.hang track=0.avc3 error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-rust-4938-13196.hang track=catalog.json error=remote error: 0 (connection error: closed)
