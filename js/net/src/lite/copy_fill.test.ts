@@ -248,7 +248,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		// A live reader keeps the copy up. It reads in order, so it lets go of what it passes.
-		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0 } }] });
+		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
 		const live = reader.ordered();
 		expect((await live.nextGroup())?.sequence).toBe(1n);
 		const history = remote
